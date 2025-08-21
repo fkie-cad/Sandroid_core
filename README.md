@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="https://raw.githubusercontent.com/fkie-cad/Sandroid_core/refs/heads/main/assets/logo.png" alt="Sandroid Logo" width="400"/>
+    <img src="https://github.com/fkie-cad/Sandroid_core/blob/main/assets/sandroid_logo.png" alt="Sandroid Logo" width="400"/>
     <p></p><strong>Android Sandbox for Automated Forensic, Malware, and Security Analysis</strong></div></p>
 </div>
 
