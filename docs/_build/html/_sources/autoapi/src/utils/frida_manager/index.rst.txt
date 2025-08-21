@@ -1,0 +1,139 @@
+src.utils.frida_manager
+=======================
+
+.. py:module:: src.utils.frida_manager
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.frida_manager.FridaManager
+
+
+Module Contents
+---------------
+
+.. py:class:: FridaManager(logger=None, is_remote=False, socket='', verbose=False, frida_install_dst='/data/local/tmp/')
+
+   .. py:attribute:: is_remote
+
+
+   .. py:attribute:: device_socket
+
+
+   .. py:attribute:: verbose
+
+
+   .. py:attribute:: is_magisk_mode
+      :value: False
+
+
+
+   .. py:attribute:: frida_install_dst
+
+
+   .. py:attribute:: frida_started_properly
+      :value: False
+
+
+
+   .. py:attribute:: logger
+
+
+   .. py:method:: run_frida_server(frida_server_path='/data/local/tmp/')
+
+      This function is used to run the frida server on the connected device.
+
+      :param frida_server_path: The path where the frida server is located. 
+                                Default is "/data/local/tmp/".
+      :type frida_server_path: str
+
+      :return: True if the frida server started successfully, False otherwise.
+      :rtype: bool
+
+
+
+   .. py:method:: is_frida_server_running()
+
+      Checks if on the connected device a frida server is running.
+      The test is done by the Android system command pidof and is looking for the string frida-server.
+
+      :return: True if a frida-server is running otherwise False.
+      :rtype: bool
+
+
+
+   .. py:method:: stop_frida_server()
+
+
+   .. py:method:: remove_frida_server(frida_server_path='/data/local/tmp/')
+
+
+   .. py:method:: install_frida_server(dst_dir='/data/local/tmp/', version='latest')
+
+      Install the frida server binary on the Android device.
+      This includes downloading the frida-server, decompress it and pushing it to the Android device.
+      By default it is pushed into the /data/local/tmp/ directory.
+      Further the binary will be set to executable in order to run it.
+
+      :param dst_dir: The destination folder where the frida-server binary should be installed (pushed).
+      :type number: string
+      :param version: The version. By default the latest version will be used.
+      :type number: string
+
+
+
+
+   .. py:method:: download_frida_server(path, version='latest')
+
+      Downloads a frida server. By default the latest version is used.
+      If you want to download a specific version you have to provide it trough the version parameter.
+
+      :param path: The path where the compressed frida-server should be downloded.
+      :type number: string
+      :param version: The version. By default the latest version will be used.
+      :type number: string
+
+      :return: The location of the downloaded frida server in its compressed form.
+      :rtype: string
+
+
+
+   .. py:method:: extract_frida_server_comp(file_path)
+
+
+   .. py:method:: get_frida_server_for_android_url(version)
+
+
+   .. py:method:: _get_frida_server_donwload_url(arch, version)
+
+
+   .. py:method:: make_frida_server_executable(frida_server_path='/data/tmp/local/tmp/')
+
+
+   .. py:method:: run_adb_command_as_root(command)
+
+
+   .. py:method:: _adb_push_file(file, dst)
+
+
+   .. py:method:: _adb_pull_file(src_file, dst)
+
+
+   .. py:method:: _get_android_device_arch()
+
+
+   .. py:method:: _adb_make_binary_executable(path)
+
+
+   .. py:method:: _adb_does_file_exist(path)
+
+
+   .. py:method:: adb_check_root()
+
+
+   .. py:method:: _adb_remove_file_if_exist(path='/data/local/tmp/frida-server')
+
+

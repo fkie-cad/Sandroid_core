@@ -1,0 +1,119 @@
+src.utils.adb
+=============
+
+.. py:module:: src.utils.adb
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.adb.Adb
+
+
+Module Contents
+---------------
+
+.. py:class:: Adb
+
+   .. py:attribute:: ADB_PATH
+      :value: None
+
+
+
+   .. py:attribute:: logger
+      :value: None
+
+
+
+   .. py:method:: init()
+      :classmethod:
+
+
+
+   .. py:method:: send_adb_command(command)
+      :classmethod:
+
+
+      Sends an ADB command and returns the output.
+
+      Args:
+          command (str): The ADB command to be executed.
+
+      Returns:
+          tuple: A tuple containing the stdout and stderr of the command.
+
+
+
+
+   .. py:method:: send_adb_command_popen(command)
+      :classmethod:
+
+
+      Executes an ADB command using subprocess.Popen.
+
+      Args:
+          command (str): The ADB command to be executed.
+
+      Returns:
+          subprocess.Popen: The Popen object representing the running process.
+
+
+
+   .. py:method:: install_apk(apk_path)
+      :classmethod:
+
+
+      Installs an APK file on the device.
+
+      Args:
+          apk_path (str): The path to the APK file.
+
+      Returns:
+          None
+
+
+
+   .. py:method:: send_telnet_command(command)
+      :classmethod:
+
+
+
+   .. py:method:: get_focussed_app()
+      :classmethod:
+
+
+      Retrieves the package name and activity name of the currently focused app.
+
+      Returns:
+          package_name (str): The package name of the focused app.
+          activity_name (str): The activity name of the focused app.
+
+
+
+   .. py:method:: get_pid_for_package_name(package_name)
+      :classmethod:
+
+
+      Get the process ID (PID) for a given package name.
+
+      Args:
+          package_name (str): The name of the package.
+
+      Returns:
+          int or None: The process ID if found, None otherwise.
+
+
+
+   .. py:method:: get_network_info()
+      :classmethod:
+
+
+      Get network information.
+
+      Returns:
+          list of tuple: A list of tuples where each tuple contains the interface name and its corresponding IPv4 address.
+
+
+

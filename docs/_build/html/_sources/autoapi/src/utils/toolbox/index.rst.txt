@@ -1,0 +1,284 @@
+src.utils.toolbox
+=================
+
+.. py:module:: src.utils.toolbox
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.toolbox.Toolbox
+
+
+Module Contents
+---------------
+
+.. py:class:: Toolbox
+
+   .. py:attribute:: action_time
+      :value: 0
+
+
+
+   .. py:attribute:: already_looked_at_filesystem_for_this_action_time
+      :value: False
+
+
+
+   .. py:attribute:: action_duration
+      :value: 0
+
+
+
+   .. py:attribute:: changed_files_cache
+
+
+   .. py:attribute:: _timestamps_shadow_dict_list
+      :value: []
+
+
+
+   .. py:attribute:: noise_files
+
+
+   .. py:attribute:: baseline
+
+
+   .. py:attribute:: noise_processes
+      :value: []
+
+
+
+   .. py:attribute:: other_output_data_collector
+
+
+   .. py:attribute:: file_paths_whitelist
+      :value: None
+
+
+
+   .. py:attribute:: _is_dry_run
+      :value: False
+
+
+
+   .. py:attribute:: _run_counter
+      :value: 0
+
+
+
+   .. py:attribute:: _spotlight_application
+      :value: None
+
+
+
+   .. py:attribute:: _spotlight_application_pid
+      :value: None
+
+
+
+   .. py:attribute:: logger
+      :value: None
+
+
+
+   .. py:attribute:: args
+      :value: None
+
+
+
+   .. py:attribute:: frida_manager
+      :value: None
+
+
+
+   .. py:attribute:: _frida_job_manager
+      :value: None
+
+
+
+   .. py:attribute:: malware_monitor_running
+      :value: False
+
+
+
+   .. py:attribute:: device_name
+      :value: 'Pixel_6_API_33'
+
+
+
+   .. py:attribute:: android_emulator_path
+      :value: '~/Android/Sdk/emulator/emulator'
+
+
+
+   .. py:method:: init()
+      :classmethod:
+
+
+
+   .. py:method:: check_setup()
+      :classmethod:
+
+
+
+   .. py:method:: logger_factory(name)
+      :classmethod:
+
+
+
+   .. py:method:: create_snapshot(name)
+      :classmethod:
+
+
+
+   .. py:method:: load_snapshot(name)
+      :classmethod:
+
+
+
+   .. py:method:: fetch_changed_files(fetch_all=False)
+      :classmethod:
+
+
+      returns a dictionary of file path and change time of all files that were changed between action_time and action_time + action_duration
+
+
+
+   .. py:method:: print_emulator_information()
+      :classmethod:
+
+
+
+   .. py:method:: _fetch_changed_files(fetch_all=False)
+      :classmethod:
+
+
+
+   .. py:method:: add_to_shadow_ts_list(currentDir, filename, secondsTimestamp, fetch_all)
+      :classmethod:
+
+
+
+   .. py:method:: set_action_time()
+      :classmethod:
+
+
+
+   .. py:method:: set_action_duration(seconds)
+      :classmethod:
+
+
+
+   .. py:method:: get_action_time()
+      :classmethod:
+
+
+
+   .. py:method:: get_action_duration()
+      :classmethod:
+
+
+
+   .. py:method:: started_dry_run()
+      :classmethod:
+
+
+
+   .. py:method:: is_dry_run()
+      :classmethod:
+
+
+
+   .. py:method:: get_run_counter()
+      :classmethod:
+
+
+
+   .. py:method:: increase_run_counter()
+      :classmethod:
+
+
+
+   .. py:method:: get_spotlight_application()
+      :classmethod:
+
+
+
+   .. py:method:: set_spotlight_application(spotlight_application)
+      :classmethod:
+
+
+
+   .. py:method:: get_spotlight_application_pid()
+      :classmethod:
+
+
+
+   .. py:method:: set_spotlight_application_pid(spotlight_application_pid)
+      :classmethod:
+
+
+
+   .. py:method:: pull_file(number, file_to_pull)
+      :classmethod:
+
+
+
+   .. py:method:: highlight_timestamps(s, restColor)
+      :classmethod:
+
+
+
+   .. py:method:: truncate(input_string)
+      :classmethod:
+
+
+
+   .. py:method:: restart_emulator()
+      :classmethod:
+
+
+
+   .. py:method:: print_interactive_menu()
+      :classmethod:
+
+
+
+   .. py:method:: _create_ascii_box(text: str, title: str) -> str
+      :classmethod:
+
+
+
+   .. py:method:: wrap_up()
+      :classmethod:
+
+
+
+   .. py:method:: calculate_hashes()
+      :classmethod:
+
+
+
+   .. py:method:: pull_and_hash_apks()
+      :classmethod:
+
+
+
+   .. py:method:: exclude_whitelist(file_paths)
+      :classmethod:
+
+
+
+   .. py:method:: submit_other_data(identifier, data)
+      :classmethod:
+
+
+
+   .. py:method:: get_frida_job_manager()
+      :classmethod:
+
+
+

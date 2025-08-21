@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="../../../../">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>src.utils.ccl_abx &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=d1102ebc" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/basic.css?v=c058f7c8" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/alabaster.css?v=27fed22d" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=fd3f3429" />
+    <script src="../../../../_static/documentation_options.js?v=c87aa342"></script>
+    <script src="../../../../_static/doctools.js?v=9a2dae69"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="../../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../../search.html" />
+    <link rel="next" title="src.utils.file_diff" href="../file_diff/index.html" />
+    <link rel="prev" title="src.utils.apk_downloader" href="../apk_downloader/index.html" />
+   
+  <link rel="stylesheet" href="../../../../_static/custom.css" type="text/css" />
+  
+
+  
+  
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <section id="module-src.utils.ccl_abx">
+<span id="src-utils-ccl-abx"></span><h1>src.utils.ccl_abx<a class="headerlink" href="#module-src.utils.ccl_abx" title="Link to this heading">¶</a></h1>
+<p>Copyright 2021-2022, CCL Forensics
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</p>
+<section id="attributes">
+<h2>Attributes<a class="headerlink" href="#attributes" title="Link to this heading">¶</a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.__version__" title="src.utils.ccl_abx.__version__"><code class="xref py py-obj docutils literal notranslate"><span class="pre">__version__</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#src.utils.ccl_abx.__description__" title="src.utils.ccl_abx.__description__"><code class="xref py py-obj docutils literal notranslate"><span class="pre">__description__</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.__contact__" title="src.utils.ccl_abx.__contact__"><code class="xref py py-obj docutils literal notranslate"><span class="pre">__contact__</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="exceptions">
+<h2>Exceptions<a class="headerlink" href="#exceptions" title="Link to this heading">¶</a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.AbxDecodeError" title="src.utils.ccl_abx.AbxDecodeError"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AbxDecodeError</span></code></a></p></td>
+<td><p>Common base class for all non-exit exceptions.</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="classes">
+<h2>Classes<a class="headerlink" href="#classes" title="Link to this heading">¶</a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.XmlType" title="src.utils.ccl_abx.XmlType"><code class="xref py py-obj docutils literal notranslate"><span class="pre">XmlType</span></code></a></p></td>
+<td><p>Enum where members are also (and must be) ints</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#src.utils.ccl_abx.DataType" title="src.utils.ccl_abx.DataType"><code class="xref py py-obj docutils literal notranslate"><span class="pre">DataType</span></code></a></p></td>
+<td><p>Enum where members are also (and must be) ints</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.AbxReader" title="src.utils.ccl_abx.AbxReader"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AbxReader</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="functions">
+<h2>Functions<a class="headerlink" href="#functions" title="Link to this heading">¶</a></h2>
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#src.utils.ccl_abx.main" title="src.utils.ccl_abx.main"><code class="xref py py-obj docutils literal notranslate"><span class="pre">main</span></code></a>(args)</p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="module-contents">
+<h2>Module Contents<a class="headerlink" href="#module-contents" title="Link to this heading">¶</a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.__version__">
+<span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">__version__</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'0.2.0'</span></em><a class="headerlink" href="#src.utils.ccl_abx.__version__" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.__description__">
+<span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">__description__</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Python</span> <span class="pre">module</span> <span class="pre">to</span> <span class="pre">convert</span> <span class="pre">Android</span> <span class="pre">ABX</span> <span class="pre">binary</span> <span class="pre">XML</span> <span class="pre">files'</span></em><a class="headerlink" href="#src.utils.ccl_abx.__description__" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.__contact__">
+<span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">__contact__</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Alex</span> <span class="pre">Caithness'</span></em><a class="headerlink" href="#src.utils.ccl_abx.__contact__" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py exception">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxDecodeError">
+<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">AbxDecodeError</span></span><a class="headerlink" href="#src.utils.ccl_abx.AbxDecodeError" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-obj docutils literal notranslate"><span class="pre">Exception</span></code></p>
+<p>Common base class for all non-exit exceptions.</p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">XmlType</span></span><a class="headerlink" href="#src.utils.ccl_abx.XmlType" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-obj docutils literal notranslate"><span class="pre">enum.IntEnum</span></code></p>
+<p>Enum where members are also (and must be) ints</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.START_DOCUMENT">
+<span class="sig-name descname"><span class="pre">START_DOCUMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.START_DOCUMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.END_DOCUMENT">
+<span class="sig-name descname"><span class="pre">END_DOCUMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.END_DOCUMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.START_TAG">
+<span class="sig-name descname"><span class="pre">START_TAG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.START_TAG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.END_TAG">
+<span class="sig-name descname"><span class="pre">END_TAG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">3</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.END_TAG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.TEXT">
+<span class="sig-name descname"><span class="pre">TEXT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">4</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.TEXT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.CDSECT">
+<span class="sig-name descname"><span class="pre">CDSECT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">5</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.CDSECT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.ENTITY_REF">
+<span class="sig-name descname"><span class="pre">ENTITY_REF</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">6</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.ENTITY_REF" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.IGNORABLE_WHITESPACE">
+<span class="sig-name descname"><span class="pre">IGNORABLE_WHITESPACE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">7</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.IGNORABLE_WHITESPACE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.PROCESSING_INSTRUCTION">
+<span class="sig-name descname"><span class="pre">PROCESSING_INSTRUCTION</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">8</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.PROCESSING_INSTRUCTION" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.COMMENT">
+<span class="sig-name descname"><span class="pre">COMMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">9</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.COMMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.DOCDECL">
+<span class="sig-name descname"><span class="pre">DOCDECL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">10</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.DOCDECL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.ATTRIBUTE">
+<span class="sig-name descname"><span class="pre">ATTRIBUTE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">15</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.ATTRIBUTE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">DataType</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-obj docutils literal notranslate"><span class="pre">enum.IntEnum</span></code></p>
+<p>Enum where members are also (and must be) ints</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_NULL">
+<span class="sig-name descname"><span class="pre">TYPE_NULL</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_NULL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_STRING">
+<span class="sig-name descname"><span class="pre">TYPE_STRING</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_STRING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_STRING_INTERNED">
+<span class="sig-name descname"><span class="pre">TYPE_STRING_INTERNED</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_STRING_INTERNED" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BYTES_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_BYTES_HEX</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BYTES_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BYTES_BASE64">
+<span class="sig-name descname"><span class="pre">TYPE_BYTES_BASE64</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BYTES_BASE64" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_INT">
+<span class="sig-name descname"><span class="pre">TYPE_INT</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_INT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_INT_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_INT_HEX</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_INT_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_LONG">
+<span class="sig-name descname"><span class="pre">TYPE_LONG</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_LONG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_LONG_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_LONG_HEX</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_LONG_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_FLOAT">
+<span class="sig-name descname"><span class="pre">TYPE_FLOAT</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_FLOAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_DOUBLE">
+<span class="sig-name descname"><span class="pre">TYPE_DOUBLE</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_DOUBLE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BOOLEAN_TRUE">
+<span class="sig-name descname"><span class="pre">TYPE_BOOLEAN_TRUE</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BOOLEAN_TRUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BOOLEAN_FALSE">
+<span class="sig-name descname"><span class="pre">TYPE_BOOLEAN_FALSE</span></span><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BOOLEAN_FALSE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">AbxReader</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stream</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">BinaryIO</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader" title="Link to this definition">¶</a></dt>
+<dd><dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader.MAGIC">
+<span class="sig-name descname"><span class="pre">MAGIC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">b'ABX\x00'</span></em><a class="headerlink" href="#src.utils.ccl_abx.AbxReader.MAGIC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_raw">
+<span class="sig-name descname"><span class="pre">_read_raw</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">length</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_raw" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_byte">
+<span class="sig-name descname"><span class="pre">_read_byte</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_byte" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_short">
+<span class="sig-name descname"><span class="pre">_read_short</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_short" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_int">
+<span class="sig-name descname"><span class="pre">_read_int</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_int" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_long">
+<span class="sig-name descname"><span class="pre">_read_long</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_long" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_float">
+<span class="sig-name descname"><span class="pre">_read_float</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_float" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_double">
+<span class="sig-name descname"><span class="pre">_read_double</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_double" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_string_raw">
+<span class="sig-name descname"><span class="pre">_read_string_raw</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_string_raw" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._read_interned_string">
+<span class="sig-name descname"><span class="pre">_read_interned_string</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._read_interned_string" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._interned_strings">
+<span class="sig-name descname"><span class="pre">_interned_strings</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._interned_strings" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader._stream">
+<span class="sig-name descname"><span class="pre">_stream</span></span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader._stream" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader.read">
+<span class="sig-name descname"><span class="pre">read</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_multi_root</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader.read" title="Link to this definition">¶</a></dt>
+<dd><p>Read the ABX file
+:param is_multi_root: some xml files on Android contain multiple root elements making reading them using a
+document model problematic. For these files, set is_multi_root to True and the output ElementTree will wrap
+the elements in a single “root” element.
+:return: ElementTree representation of the data.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.main">
+<span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">args</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.main" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</section>
+</section>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="Main">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="../../../../index.html">Sandroid</a></h1>
+
+
+
+
+
+
+
+
+
+<search id="searchbox" style="display: none" role="search">
+    <div class="searchformwrapper">
+    <form class="search" action="../../../../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Search"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</search>
+<script>document.getElementById('searchbox').style.display = "block"</script><h3>Navigation</h3>
+<p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../../src.datagather.html">src.datagather package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../src.functionality.html">src.functionality package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../src.utils.html">src.utils package</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../../../index.html">API Reference</a><ul class="current">
+<li class="toctree-l2 current"><a class="reference internal" href="../../index.html">src</a></li>
+</ul>
+</li>
+</ul>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="../../../../index.html">Documentation overview</a><ul>
+  <li><a href="../../../index.html">API Reference</a><ul>
+  <li><a href="../../index.html">src</a><ul>
+  <li><a href="../index.html">src.utils</a><ul>
+      <li>Previous: <a href="../apk_downloader/index.html" title="previous chapter">src.utils.apk_downloader</a></li>
+      <li>Next: <a href="../file_diff/index.html" title="next chapter">src.utils.file_diff</a></li>
+  </ul></li>
+  </ul></li>
+  </ul></li>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &#169;2024, Erik Nathrath.
+      
+      |
+      Powered by <a href="https://www.sphinx-doc.org/">Sphinx 8.0.2</a>
+      &amp; <a href="https://alabaster.readthedocs.io">Alabaster 1.0.0</a>
+      
+      |
+      <a href="../../../../_sources/autoapi/src/utils/ccl_abx/index.rst.txt"
+          rel="nofollow">Page source</a>
+    </div>
+
+    
+
+    
+  </body>
+</html>

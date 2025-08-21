@@ -1,0 +1,71 @@
+src.utils.actionQ
+=================
+
+.. py:module:: src.utils.actionQ
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.actionQ.ActionQ
+
+
+Module Contents
+---------------
+
+.. py:class:: ActionQ
+
+   .. py:attribute:: index
+      :value: 0
+
+
+
+   .. py:attribute:: q
+      :value: []
+
+
+
+   .. py:attribute:: finished
+      :value: False
+
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: photographer
+      :value: None
+
+
+
+   .. py:attribute:: malwaremonitor
+      :value: None
+
+
+
+   .. py:method:: assembleQ()
+
+
+   .. py:method:: assembleQ_for_runs(action)
+
+
+   .. py:method:: do_next()
+
+
+   .. py:method:: get_pretty_print()
+
+
+   .. py:method:: get_data()
+
+
+   .. py:method:: update_photographer()
+
+
+   .. py:method:: parse_interactive_char(char)
+
+
+   .. py:method:: print_q()
+
+

@@ -1,0 +1,76 @@
+src.utils.CustomLoggerFormatter
+===============================
+
+.. py:module:: src.utils.CustomLoggerFormatter
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.CustomLoggerFormatter.CustomFormatter
+
+
+Module Contents
+---------------
+
+.. py:class:: CustomFormatter(fmt)
+
+   Bases: :py:obj:`logging.Formatter`
+
+
+   Logging colored formatter, adapted from https://stackoverflow.com/a/56944256/3638629
+
+
+   .. py:attribute:: grey
+      :value: '\x1b[38;21m'
+
+
+
+   .. py:attribute:: blue
+      :value: '\x1b[38;5;39m'
+
+
+
+   .. py:attribute:: yellow
+      :value: '\x1b[38;5;226m'
+
+
+
+   .. py:attribute:: red
+      :value: '\x1b[38;5;196m'
+
+
+
+   .. py:attribute:: bold_red
+      :value: '\x1b[31;1m'
+
+
+
+   .. py:attribute:: reset
+      :value: '\x1b[0m'
+
+
+
+   .. py:attribute:: fmt
+
+
+   .. py:attribute:: FORMATS
+
+
+   .. py:method:: format(record)
+
+      Format the specified record as text.
+
+      The record's attribute dictionary is used as the operand to a
+      string formatting operation which yields the returned string.
+      Before formatting the dictionary, a couple of preparatory steps
+      are carried out. The message attribute of the record is computed
+      using LogRecord.getMessage(). If the formatting string uses the
+      time (as determined by a call to usesTime(), formatTime() is
+      called to format the event time. If there is exception information,
+      it is formatted using formatException() and appended to the message.
+
+
+

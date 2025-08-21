@@ -1,0 +1,63 @@
+# Sandroid Default Configuration
+# This file contains default settings for Sandroid analysis framework
+# Copy this file to your config directory and customize as needed
+
+# Core Settings
+log_level = "INFO"
+output_file = "sandroid.json"
+environment = "production"
+# whitelist_file = "/path/to/whitelist.txt"  # Optional: exclude paths from analysis
+
+[emulator]
+device_name = "Pixel_6_Pro_API_31"
+android_emulator_path = "~/Android/Sdk/emulator/emulator"
+# sdk_path = "~/Android/Sdk"  # Optional: auto-detected if not provided
+# adb_path = "~/Android/Sdk/platform-tools/adb"  # Optional: auto-detected if not provided
+
+[frida]
+server_auto_start = true
+server_port = 27042
+spawn_timeout = 30
+
+[network]
+# capture_interface = "eth0"  # Optional: auto-detected if not provided
+pcap_buffer_size = 65536
+connection_timeout = 30
+
+[paths]
+results_path = "./results/"
+raw_results_path = "./results/raw/"
+temp_path = "/tmp/sandroid/"
+cache_path = "~/.cache/sandroid/"
+
+[analysis]
+number_of_runs = 2
+avoid_strong_noise_filter = false
+monitor_processes = true
+monitor_sockets = false
+monitor_network = false
+show_deleted_files = false
+hash_files = false
+list_apks = false
+degrade_network = false
+# screenshot_interval = 5  # Optional: take screenshots every N seconds
+
+[trigdroid]
+enabled = false
+# package_name = "com.example.malware"  # Required when enabled
+# config_mode = "I"  # I for interactive, D for default
+
+[ai]
+enabled = false
+provider = "google-genai"
+# api_key = "your-api-key-here"  # Better to use SANDROID_AI__API_KEY env var
+model = "gemini-pro"
+
+[report]
+generate_pdf = false
+include_screenshots = true
+# template_path = "/path/to/custom/template.html"  # Optional: custom report template
+
+# Custom settings (add your own as needed)
+[custom]
+# my_setting = "value"

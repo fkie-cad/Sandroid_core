@@ -1,0 +1,133 @@
+src.datagather.changedfiles
+===========================
+
+.. py:module:: src.datagather.changedfiles
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.datagather.changedfiles.Bcolors
+   src.datagather.changedfiles.ChangedFiles
+
+
+Module Contents
+---------------
+
+.. py:class:: Bcolors
+
+   .. py:attribute:: HEADER
+      :value: '\x1b[95m'
+
+
+
+   .. py:attribute:: OKBLUE
+      :value: '\x1b[94m'
+
+
+
+   .. py:attribute:: OKCYAN
+      :value: '\x1b[96m'
+
+
+
+   .. py:attribute:: OKGREEN
+      :value: '\x1b[92m'
+
+
+
+   .. py:attribute:: WARNING
+      :value: '\x1b[93m'
+
+
+
+   .. py:attribute:: FAIL
+      :value: '\x1b[91m'
+
+
+
+   .. py:attribute:: ENDC
+      :value: '\x1b[0m'
+
+
+
+   .. py:attribute:: BOLD
+      :value: '\x1b[1m'
+
+
+
+   .. py:attribute:: UNDERLINE
+      :value: '\x1b[4m'
+
+
+
+.. py:class:: ChangedFiles
+
+   Bases: :py:obj:`src.datagather.datagather.DataGather`
+
+
+   A class to gather and process changed files, inheriting from DataGather.
+
+   **Attributes:**
+
+   - **fileListList** (*list*): List of lists containing changed files.
+   - **logger** (*Logger*): Logger instance for logging information.
+
+   **Methods:**
+
+   - **gather()**: Gathers changed files and filters out new files.
+   - **return_data()**: Returns a dictionary with the changed files and their diffs.
+   - **pretty_print()**: Returns a formatted string of the changed files and their diffs.
+   - **process_data()**: Processes the gathered data to filter out noise and whitelist files.
+
+
+   .. py:attribute:: fileListList
+      :value: []
+
+
+
+   .. py:attribute:: logger
+
+
+   .. py:method:: gather()
+
+      Gathers changed files and filters out new files.
+
+      **Raises:**
+
+      - **FileNotFoundError**: If a file is not found during processing.
+
+
+
+   .. py:method:: return_data()
+
+      Returns a dictionary with the changed files and their diffs.
+
+      **Returns:**
+
+      - **dict**: A dictionary with the key "Changed Files" and a list of changed files and their diffs.
+
+
+
+   .. py:method:: pretty_print()
+
+      Returns a formatted string of the changed files and their diffs.
+
+      **Returns:**
+
+      - **str**: A formatted string of the changed files and their diffs.
+
+
+
+   .. py:method:: process_data()
+
+      Processes the gathered data to filter out noise and whitelist files.
+
+      **Returns:**
+
+      - **list**: A list of files that are in all lists and not in the noise list.
+
+
+

@@ -1,0 +1,199 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Sandroid"
+version = "1.0.0"
+description = "A powerful Android sandbox framework designed to extract forensic artifacts from Android Virtual Devices (AVDs) and support common sandboxing functionalities."
+authors = [
+    {name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de"},
+    {name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de"},
+    {name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de"}
+]
+maintainers = [
+    {name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de"},
+    {name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de"},
+    {name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de"}
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["android", "forensics", "security", "malware", "analysis", "frida", "emulator"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Monitoring",
+]
+requires-python = ">=3.10"
+
+# Core dependencies
+dependencies = [
+    "beautifulsoup4>=4.12.2",
+    "bs4>=0.0.1",
+    "certifi>=2023.11.17",
+    "charset-normalizer>=3.3.2",
+    "click>=8.1.7",
+    "colorama>=0.4.6",
+    "frida>=16.1.10",
+    "frida-tools>=12.3.0",
+    "idna>=3.6",
+    "lxml>=4.9.4",
+    "prompt-toolkit>=3.0.43",
+    "Pygments>=2.17.2",
+    "python-dateutil>=2.8.2",
+    "requests>=2.31.0",
+    "scapy>=2.5.0",
+    "six>=1.16.0",
+    "soupsieve>=2.5",
+    "urllib3>=2.1.0",
+    "wcwidth>=0.2.12",
+    "xmldiff>=2.7.0",
+    "tqdm>=4.64.0",
+    "reportlab>=4.0.0",
+    "geopy>=2.3.0",
+    "friTap>=1.3.1.4",
+    "colorlog>=6.7.0",
+    "objection>=1.11.0",
+    "AndroidFridaManager>=0.2.0",
+    "trigdroid[full]>=1.0.0",
+    "dexray-intercept>=1.0.0",
+    "dexray-insight>=1.0.0",
+    "tomli>=2.0.1; python_version<'3.11'",
+    "tomli-w>=1.0.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0.0",
+    "platformdirs>=3.0.0",
+    "rich>=13.0.0",
+]
+
+# Optional dependencies for different use cases
+[project.optional-dependencies]
+ai = [
+    "google-generativeai>=0.3.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.10.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+docs = [
+    "sphinx>=6.0.0",
+    "sphinx-rtd-theme>=1.2.0",
+    "myst-parser>=1.0.0",
+]
+
+# Entry points for CLI commands
+[project.scripts]
+sandroid = "sandroid.cli:main"
+sandroid-config = "sandroid.config.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fkie-cad/Sandroid_core"
+Documentation = "https://https://fkie-cad.github.io/Sandroid_core/"
+Repository = "https://github.com/fkie-cad/Sandroid_core.git"
+"Bug Tracker" = "https://github.com/fkie-cad/Sandroid_core/issues"
+
+# Setuptools configuration
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sandroid*"]
+
+[tool.setuptools.package-data]
+sandroid = ["config/*.yaml", "config/*.toml", "templates/*.html"]
+
+# Development tools configuration
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+    # directories
+    \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+line_length = 88
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "frida.*",
+    "scapy.*",
+    "objection.*",
+    "AndroidFridaManager.*",
+]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src/sandroid"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

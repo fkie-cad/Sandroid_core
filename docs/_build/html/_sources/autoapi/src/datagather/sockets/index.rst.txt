@@ -1,0 +1,111 @@
+src.datagather.sockets
+======================
+
+.. py:module:: src.datagather.sockets
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.datagather.sockets.Bcolors
+   src.datagather.sockets.Sockets
+
+
+Module Contents
+---------------
+
+.. py:class:: Bcolors
+
+   .. py:attribute:: HEADER
+      :value: '\x1b[95m'
+
+
+
+   .. py:attribute:: OKBLUE
+      :value: '\x1b[94m'
+
+
+
+   .. py:attribute:: OKCYAN
+      :value: '\x1b[96m'
+
+
+
+   .. py:attribute:: OKGREEN
+      :value: '\x1b[92m'
+
+
+
+   .. py:attribute:: WARNING
+      :value: '\x1b[93m'
+
+
+
+   .. py:attribute:: FAIL
+      :value: '\x1b[91m'
+
+
+
+   .. py:attribute:: ENDC
+      :value: '\x1b[0m'
+
+
+
+   .. py:attribute:: BOLD
+      :value: '\x1b[1m'
+
+
+
+   .. py:attribute:: UNDERLINE
+      :value: '\x1b[4m'
+
+
+
+.. py:class:: Sockets
+
+   Bases: :py:obj:`src.datagather.datagather.DataGather`
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: run_sockets_lists
+
+
+   .. py:attribute:: final_sockets_list
+      :value: []
+
+
+
+   .. py:attribute:: noise_sockets
+      :value: []
+
+
+
+   .. py:attribute:: run_counter
+      :value: 0
+
+
+
+   .. py:attribute:: performed_diff
+      :value: False
+
+
+
+   .. py:method:: gather()
+
+
+   .. py:method:: return_data()
+
+
+   .. py:method:: pretty_print()
+
+
+   .. py:method:: socket_capture_thread()
+
+
+   .. py:method:: process_sockets()
+
+

@@ -1,0 +1,134 @@
+# # Stage 1: Build stage
+# FROM ubuntu:22.04 AS build
+ 
+# # Install dependencies required for cloning and building
+# RUN apt-get update && apt-get install -y \
+#     git \
+#     python3 \
+#     python3-pip \
+#     cmake && \
+#     rm -rf /var/lib/apt/lists/*
+ 
+# # Inject GitLab token as an argument for private repo access
+# ARG GITLAB_TOKEN
+# RUN git config --global credential.helper store &&\
+#     echo "https://gitlab-ci-token:${GITLAB_TOKEN}@gitlab.fkie.fraunhofer.de" > ~/.git-credentials
+
+
+# # Clone public and private repositories
+# RUN git clone https://github.com/fkie-cad/AndroidFridaManager.git
+# RUN git clone -b sandroid-demo https://gitlab.fkie.fraunhofer.de/def/sandroid/androidmalwaremotionmonitor.git
+# RUN git clone https://gitlab.fkie.fraunhofer.de/def/sandroid/sandroid_apk_static_analysis_monitor.git
+# RUN git clone https://gitlab.fkie.fraunhofer.de/cad/shk/android-sandbox
+ 
+# # Stage 2: Runtime stage
+# FROM debian:bookworm-slim
+
+# ENV DEBIAN_FRONTEND=noninteractive
+# ### This is if you need python3.11
+# #RUN apt-get update && apt-get install -y software-properties-common && \
+# #    add-apt-repository ppa:deadsnakes/ppa && \
+# #    apt-get update
+# #
+# #RUN apt-get update && apt-get install -y \
+# #    python3.11 \
+# #    python3.11-venv \
+# #    python3.11-distutils \
+# #    python3.11-dev \
+# #    python3-pip
+# #RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+# # Install runtime dependencies, including cmake
+# RUN apt-get update && apt-get install -y \
+#     python3 \
+#     python3-pip \
+#     cmake \
+#     tzdata \
+#     sqlite3-tools \
+#     adb \
+#     build-essential && \
+#     rm -rf /var/lib/apt/lists/*
+ 
+# ENV DEBIAN_FRONTEND=dialog
+
+# # Copy cloned repositories from the build stage and install
+# COPY --from=build AndroidFridaManager /AndroidFridaManager
+
+# COPY --from=build androidmalwaremotionmonitor /androidmalwaremotionmonitor
+# WORKDIR /androidmalwaremotionmonitor
+# RUN python3 -m pip install --break-system-packages .
+
+# COPY --from=build sandroid_apk_static_analysis_monitor /sandroid_apk_static_analysis_monitor
+# WORKDIR /sandroid_apk_static_analysis_monitor
+# RUN python3 -m pip install --break-system-packages .
+
+# COPY --from=build android-sandbox /android-sandbox
+# WORKDIR /android-sandbox
+# #RUN python3 -m pip install . (Trigdroid package requires python 3.11, but a dependency of trigdroid (frida-tools) is not compatible with 3.11???)
+
+# # Copy actual sandroid files
+# WORKDIR /sandroid
+# COPY /docker/docker_welcome_message /root/welcome
+# COPY /docs /sandroid/docs
+# COPY README.md /sandroid/README.md
+# COPY /src /sandroid/src
+# COPY ground_truth.apk /sandroid/ground_truth.apk
+# COPY sandroid /sandroid/sandroid
+# COPY /docker/requirements.txt /sandroid/requirements.txt
+
+# COPY /assets/Fraunhofer_Logo.jpg /sandroid/Fraunhofer_Logo.jpg
+# COPY /assets/sandroid_logo.png /sandroid/sandroid_logo.png
+
+# RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
+# RUN rm requirements.txt
+
+# # Set the container's default command
+# CMD ["sh", "-c", "echo -e \"$(cat /root/welcome)\n\n\" && exec bash"]
+
+
+# Modern Dockerfile using PyPI packages
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    adb \
+    tzdata \
+    sqlite3-tools \
+    ca-certificates \
+    cmake \
+    build-essential && \
+    # Clean up apt cache
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install modern PyPI dependencies
+RUN python3 -m pip install --no-cache-dir \
+    AndroidFridaManager \
+    trigdroid[full] \
+    dexray-intercept \
+    dexray-insight
+
+# Copy requirements and install additional dependencies
+COPY docker/requirements.txt /requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /requirements.txt && \
+    rm /requirements.txt
+
+ENV DEBIAN_FRONTEND=dialog
+
+# Copy actual sandroid application files
+WORKDIR /sandroid
+COPY /docker/docker_welcome_message /root/welcome 
+COPY /docs /sandroid/docs      
+COPY README.md /sandroid/README.md 
+COPY /src /sandroid/src 
+COPY ground_truth.apk /sandroid/ground_truth.apk 
+COPY sandroid /sandroid/sandroid
+
+COPY /assets/Fraunhofer_Logo.jpg /sandroid/assets/Fraunhofer_Logo.jpg 
+COPY /assets/sandroid_logo.png /sandroid/assets/sandroid_logo.png
+
+# Set the container's default command
+CMD ["sh", "-c", "echo -e \"$(cat /root/welcome)\n\n\" && exec bash"]

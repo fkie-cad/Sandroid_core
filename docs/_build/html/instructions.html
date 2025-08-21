@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Install Instructions &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="_static/agogo.css?v=ee97e451" />
+    <script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=9a2dae69"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Ground Truth APK" href="groundtruthapk.html" />
+    <link rel="prev" title="Sandroid documentation" href="index.html" /> 
+  </head><body>
+    <div class="header-wrapper" role="banner">
+      <div class="header">
+        <div class="headertitle"><a
+          href="index.html">Sandroid 0.4.1 documentation</a></div>
+        <div class="rel" role="navigation" aria-label="Related">
+          <a href="index.html" title="Sandroid documentation"
+             accesskey="P">previous</a> |
+          <a href="groundtruthapk.html" title="Ground Truth APK"
+             accesskey="N">next</a> |
+          <a href="py-modindex.html" title="Python Module Index"
+             >modules</a> |
+          <a href="genindex.html" title="General Index"
+             accesskey="I">index</a>
+        </div>
+       </div>
+    </div>
+
+    <div class="content-wrapper">
+      <div class="content">
+        <div class="document">
+            
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="install-instructions">
+<h1>Install Instructions<a class="headerlink" href="#install-instructions" title="Link to this heading">¶</a></h1>
+<section id="setup">
+<h2>Setup<a class="headerlink" href="#setup" title="Link to this heading">¶</a></h2>
+<p>You’ll need:</p>
+<ul class="simple">
+<li><p>Python 3.10 or newer</p></li>
+<li><p>sqldiff</p></li>
+<li><p>trigdroid</p></li>
+<li><p>Android Studio</p></li>
+<li><p>Android SDK &amp; ADB (Comes with Studio)</p></li>
+<li><p>A running emulator</p></li>
+</ul>
+<section id="step-by-step-instruction">
+<h3>Step by step instruction:<a class="headerlink" href="#step-by-step-instruction" title="Link to this heading">¶</a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>$<span class="w"> </span>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>python3
+$<span class="w"> </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>sqlite3-tools
+$<span class="w"> </span>git<span class="w"> </span>clone<span class="w"> </span>https://gitlab.fkie.fraunhofer.de/def/afae.git<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>afae
+$<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>-r<span class="w"> </span>requirements.txt
+</pre></div>
+</div>
+<ul class="simple">
+<li><p>Download Android Studio from https://developer.android.com/studio, then create an emulator like this:</p></li>
+<li><p>Open Android Studio</p></li>
+<li><p>Click “more options”</p></li>
+<li><p>from there, open “Virtual device manager”</p></li>
+<li><p>Click “Create device”</p></li>
+<li><p>Choose a phone (Preprogrammed actions are intended for Pixel 5). If you choose a phone with play services, you will need to jailbreak it before you can use the tool.</p></li>
+<li><p>Choose an API</p></li>
+<li><p>Click Finish</p></li>
+<li><p>Start the emulator (little play button in the virtual device manager)</p></li>
+</ul>
+</section>
+</section>
+<section id="dependencies">
+<h2>Dependencies<a class="headerlink" href="#dependencies" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p>sqldiff: https://manpages.debian.org/unstable/sqlite3/sqldiff.1.en.html</p></li>
+</ul>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="sidebar">
+          
+          <h3>Table of Contents</h3>
+          <ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Install Instructions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#setup">Setup</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#dependencies">Dependencies</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="groundtruthapk.html">Ground Truth APK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.datagather.html">datagather package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.functionality.html">functionality package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.utils.html">utils package</a></li>
+</ul>
+
+          <search role="search">
+            <h3 style="margin-top: 1.5em;">Search</h3>
+            <form class="search" action="search.html" method="get">
+                <input type="text" name="q" />
+                <input type="submit" value="Go" />
+            </form>
+          </search>
+
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+    <div class="footer-wrapper">
+      <div class="footer">
+        <div class="left">
+          <div role="navigation" aria-label="Related">
+            <a href="index.html" title="Sandroid documentation"
+              >previous</a> |
+            <a href="groundtruthapk.html" title="Ground Truth APK"
+              >next</a> |
+            <a href="py-modindex.html" title="Python Module Index"
+              >modules</a> |
+            <a href="genindex.html" title="General Index"
+              >index</a>
+          </div>
+          <div role="note" aria-label="source link">
+              <br/>
+              <a href="_sources/instructions.md.txt"
+                rel="nofollow">Show Source</a>
+          </div>
+        </div>
+
+        <div class="right">
+          
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2024, Erik Nathrath.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.0.2.
+    </div>
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>datagather package &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="_static/agogo.css?v=ee97e451" />
+    <script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=9a2dae69"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="functionality package" href="src.functionality.html" />
+    <link rel="prev" title="Ground Truth APK" href="groundtruthapk.html" /> 
+  </head><body>
+    <div class="header-wrapper" role="banner">
+      <div class="header">
+        <div class="headertitle"><a
+          href="index.html">Sandroid 0.4.1 documentation</a></div>
+        <div class="rel" role="navigation" aria-label="Related">
+          <a href="groundtruthapk.html" title="Ground Truth APK"
+             accesskey="P">previous</a> |
+          <a href="src.functionality.html" title="functionality package"
+             accesskey="N">next</a> |
+          <a href="py-modindex.html" title="Python Module Index"
+             >modules</a> |
+          <a href="genindex.html" title="General Index"
+             accesskey="I">index</a>
+        </div>
+       </div>
+    </div>
+
+    <div class="content-wrapper">
+      <div class="content">
+        <div class="document">
+            
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="datagather-package">
+<h1>datagather package<a class="headerlink" href="#datagather-package" title="Link to this heading">¶</a></h1>
+<section id="module-src.datagather.changedfiles">
+<span id="changedfiles-module"></span><h2><strong>changedfiles</strong> module<a class="headerlink" href="#module-src.datagather.changedfiles" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.changedfiles.</span></span><span class="sig-name descname"><span class="pre">Bcolors</span></span><a class="headerlink" href="#src.datagather.changedfiles.Bcolors" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.BOLD">
+<span class="sig-name descname"><span class="pre">BOLD</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[1m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.BOLD" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.ENDC">
+<span class="sig-name descname"><span class="pre">ENDC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.ENDC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.FAIL">
+<span class="sig-name descname"><span class="pre">FAIL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[91m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.FAIL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.HEADER">
+<span class="sig-name descname"><span class="pre">HEADER</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[95m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.HEADER" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.OKBLUE">
+<span class="sig-name descname"><span class="pre">OKBLUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[94m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.OKBLUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.OKCYAN">
+<span class="sig-name descname"><span class="pre">OKCYAN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[96m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.OKCYAN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.OKGREEN">
+<span class="sig-name descname"><span class="pre">OKGREEN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[92m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.OKGREEN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.UNDERLINE">
+<span class="sig-name descname"><span class="pre">UNDERLINE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[4m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.UNDERLINE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.Bcolors.WARNING">
+<span class="sig-name descname"><span class="pre">WARNING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[93m'</span></em><a class="headerlink" href="#src.datagather.changedfiles.Bcolors.WARNING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.changedfiles.</span></span><span class="sig-name descname"><span class="pre">ChangedFiles</span></span><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>A class to gather and process changed files, inheriting from DataGather.</p>
+<p><strong>Attributes:</strong></p>
+<ul class="simple">
+<li><p><strong>fileListList</strong> (<em>list</em>): List of lists containing changed files.</p></li>
+<li><p><strong>logger</strong> (<em>Logger</em>): Logger instance for logging information.</p></li>
+</ul>
+<p><strong>Methods:</strong></p>
+<ul class="simple">
+<li><p><strong>gather()</strong>: Gathers changed files and filters out new files.</p></li>
+<li><p><strong>return_data()</strong>: Returns a dictionary with the changed files and their diffs.</p></li>
+<li><p><strong>pretty_print()</strong>: Returns a formatted string of the changed files and their diffs.</p></li>
+<li><p><strong>process_data()</strong>: Processes the gathered data to filter out noise and whitelist files.</p></li>
+</ul>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.fileListList">
+<span class="sig-name descname"><span class="pre">fileListList</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.fileListList" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.file_diff">
+<span class="sig-name descname"><span class="pre">file_diff</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">&lt;module</span> <span class="pre">'src.utils.file_diff'</span> <span class="pre">from</span> <span class="pre">'/home/sanddroid/afae/src/utils/file_diff.py'&gt;</span></em><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.file_diff" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gathers changed files and filters out new files.</p>
+<p><strong>Raises:</strong></p>
+<ul class="simple">
+<li><p><strong>FileNotFoundError</strong>: If a file is not found during processing.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'changedFiles'</span></em><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a formatted string of the changed files and their diffs.</p>
+<p><strong>Returns:</strong></p>
+<ul class="simple">
+<li><p><strong>str</strong>: A formatted string of the changed files and their diffs.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.process_data">
+<span class="sig-name descname"><span class="pre">process_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.process_data" title="Link to this definition">¶</a></dt>
+<dd><p>Processes the gathered data to filter out noise and whitelist files.</p>
+<p><strong>Returns:</strong></p>
+<ul class="simple">
+<li><p><strong>list</strong>: A list of files that are in all lists and not in the noise list.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.changedfiles.ChangedFiles.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.changedfiles.ChangedFiles.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a dictionary with the changed files and their diffs.</p>
+<p><strong>Returns:</strong></p>
+<ul class="simple">
+<li><p><strong>dict</strong>: A dictionary with the key “Changed Files” and a list of changed files and their diffs.</p></li>
+</ul>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.datagather">
+<span id="datagather-module"></span><h2><strong>datagather</strong> module<a class="headerlink" href="#module-src.datagather.datagather" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.datagather.DataGather">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.datagather.</span></span><span class="sig-name descname"><span class="pre">DataGather</span></span><a class="headerlink" href="#src.datagather.datagather.DataGather" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
+<p>Abstract base class for all modules that perform some data gathering.</p>
+<p><strong>Methods:</strong></p>
+<ul class="simple">
+<li><p><a class="reference internal" href="#src.datagather.datagather.DataGather.gather" title="src.datagather.datagather.DataGather.gather"><code class="xref py py-meth docutils literal notranslate"><span class="pre">gather()</span></code></a>: Abstract method to gather data.</p></li>
+<li><p><a class="reference internal" href="#src.datagather.datagather.DataGather.return_data" title="src.datagather.datagather.DataGather.return_data"><code class="xref py py-meth docutils literal notranslate"><span class="pre">return_data()</span></code></a>: Abstract method to return gathered data.</p></li>
+<li><p><a class="reference internal" href="#src.datagather.datagather.DataGather.pretty_print" title="src.datagather.datagather.DataGather.pretty_print"><code class="xref py py-meth docutils literal notranslate"><span class="pre">pretty_print()</span></code></a>: Abstract method to pretty print the gathered data.</p></li>
+</ul>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.datagather.DataGather.gather">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.datagather.DataGather.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gather data.</p>
+<p><strong>Raises:</strong></p>
+<ul class="simple">
+<li><p><code class="xref py py-class docutils literal notranslate"><span class="pre">NotImplementedError</span></code>: If the method is not implemented in a subclass.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.datagather.DataGather.pretty_print">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.datagather.DataGather.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Pretty print the gathered data.</p>
+<p><strong>Raises:</strong></p>
+<ul class="simple">
+<li><p><code class="xref py py-class docutils literal notranslate"><span class="pre">NotImplementedError</span></code>: If the method is not implemented in a subclass.</p></li>
+</ul>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.datagather.DataGather.return_data">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.datagather.DataGather.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Return gathered data.</p>
+<p><strong>Returns:</strong></p>
+<ul class="simple">
+<li><p><strong>Any</strong>: The gathered data.</p></li>
+</ul>
+<p><strong>Raises:</strong></p>
+<ul class="simple">
+<li><p><code class="xref py py-class docutils literal notranslate"><span class="pre">NotImplementedError</span></code>: If the method is not implemented in a subclass.</p></li>
+</ul>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.deletedfiles">
+<span id="deletedfiles-module"></span><h2><strong>deletedfiles</strong> module<a class="headerlink" href="#module-src.datagather.deletedfiles" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.deletedfiles.</span></span><span class="sig-name descname"><span class="pre">Bcolors</span></span><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.BOLD">
+<span class="sig-name descname"><span class="pre">BOLD</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[1m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.BOLD" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.ENDC">
+<span class="sig-name descname"><span class="pre">ENDC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.ENDC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.FAIL">
+<span class="sig-name descname"><span class="pre">FAIL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[91m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.FAIL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.HEADER">
+<span class="sig-name descname"><span class="pre">HEADER</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[95m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.HEADER" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.OKBLUE">
+<span class="sig-name descname"><span class="pre">OKBLUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[94m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.OKBLUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.OKCYAN">
+<span class="sig-name descname"><span class="pre">OKCYAN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[96m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.OKCYAN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.OKGREEN">
+<span class="sig-name descname"><span class="pre">OKGREEN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[92m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.OKGREEN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.UNDERLINE">
+<span class="sig-name descname"><span class="pre">UNDERLINE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[4m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.UNDERLINE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.Bcolors.WARNING">
+<span class="sig-name descname"><span class="pre">WARNING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[93m'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.Bcolors.WARNING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.deletedfiles.</span></span><span class="sig-name descname"><span class="pre">DeletedFiles</span></span><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Class for gathering and processing information on deleted files.</p>
+<p>Inherits from <code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code> and provides methods to gather, process, and display information about deleted files.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.deletedFileListList">
+<span class="sig-name descname"><span class="pre">deletedFileListList</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.deletedFileListList" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gather information on deleted files.</p>
+<p>This method pulls the entire filesystem and compares it to the baseline to identify deleted files.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'DeletedFiles'</span></em><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Pretty print the list of deleted files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A formatted string with the list of deleted files highlighted.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.process_data">
+<span class="sig-name descname"><span class="pre">process_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.process_data" title="Link to this definition">¶</a></dt>
+<dd><p>Process the gathered data to filter out noise and identify consistently deleted files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A list of files that have been consistently deleted across all pulls.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.deletedfiles.DeletedFiles.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.deletedfiles.DeletedFiles.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Return processed data on deleted files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A dictionary containing the list of deleted files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.malwaremonitor">
+<span id="malwaremonitor-module"></span><h2><strong>malwaremonitor</strong> module<a class="headerlink" href="#module-src.datagather.malwaremonitor" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.malwaremonitor.</span></span><span class="sig-name descname"><span class="pre">MalwareMonitor</span></span><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>This class monitors provides a wrapper for the androidmalwaremotionmonitor package to implement it into Sandroid.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>Inherits from <code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code>.</p>
+</div>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><ul class="simple">
+<li><p><strong>logger</strong> (<em>Logger</em>): Logger instance for the class.</p></li>
+<li><p><strong>last_results</strong> (<em>dict</em>): Stores the last results of the monitoring.</p></li>
+<li><p><strong>job_manager</strong> (<em>JobManager</em>): Manages Frida jobs.</p></li>
+<li><p><strong>process_session</strong> (<em>Session</em>): Current Frida process session.</p></li>
+<li><p><strong>app_package</strong> (<em>str</em>): Package name of the application being monitored.</p></li>
+<li><p><strong>profiler</strong> (<em>AppProfiler</em>): Instance of the AppProfiler class.</p></li>
+<li><p><strong>frida_script_path</strong> (<em>str</em>): Path to the Frida script.</p></li>
+<li><p><strong>running</strong> (<em>bool</em>): Indicates if the monitoring is currently running.</p></li>
+<li><p><strong>last_output</strong> (<em>str</em>): Stores the last output of the profiling.</p></li>
+<li><p><strong>has_new_results</strong> (<em>bool</em>): Indicates if there are new results available.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.app_package">
+<span class="sig-name descname"><span class="pre">app_package</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.app_package" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.frida_script_path">
+<span class="sig-name descname"><span class="pre">frida_script_path</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'/home/sanddroid/.local/lib/python3.11/site-packages/androidmalwaremotionmonitor/profiling.js'</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.frida_script_path" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gather data from the monitored application.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Context dependent behavior: Calling this method acts as a toggle, it starts or stops the monitoring process based on the current state.</p>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.has_new_results">
+<span class="sig-name descname"><span class="pre">has_new_results</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.has_new_results" title="Link to this definition">¶</a></dt>
+<dd><p>Check if there are new results available.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>True if there are new results, False otherwise.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.last_output">
+<span class="sig-name descname"><span class="pre">last_output</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.last_output" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.last_results">
+<span class="sig-name descname"><span class="pre">last_results</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.last_results" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'MalwareMonitor'</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Not implemented</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.profiler">
+<span class="sig-name descname"><span class="pre">profiler</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">&lt;androidmalwaremotionmonitor.appProfiling.AppProfiler</span> <span class="pre">object&gt;</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.profiler" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Return the last profiling data.</p>
+<p>This method returns the last profiling data and resets the new results flag.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The last profiling data in JSON format.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.malwaremonitor.MalwareMonitor.running">
+<span class="sig-name descname"><span class="pre">running</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.datagather.malwaremonitor.MalwareMonitor.running" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.network">
+<span id="network-module"></span><h2><strong>network</strong> module<a class="headerlink" href="#module-src.datagather.network" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.network.Network">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.network.</span></span><span class="sig-name descname"><span class="pre">Network</span></span><a class="headerlink" href="#src.datagather.network.Network" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Handles network traffic measurement and analysis.</p>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><p>internal_run_counter (int): Counter for internal runs.
+connections_made (None): Placeholder for connections made.
+dns_requests (set): Set of DNS requests.
+logger (Logger): Logger instance for the class.
+_path (str): Path for storing network trace files.
+_emulator_path (str): Path on the emulator for storing trace files.
+_trace_file_name (str): Base name for trace files.
+performed_diff (bool): Flag indicating if the diff has been performed.</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.network.Network.connections_made">
+<span class="sig-name descname"><span class="pre">connections_made</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.datagather.network.Network.connections_made" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.count_bytes">
+<span class="sig-name descname"><span class="pre">count_bytes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ip_address</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">port</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">pcap_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.count_bytes" title="Link to this definition">¶</a></dt>
+<dd><p>Internal helper function that counts how many bytes were sent from and to an IP address on a specified port</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>ip_address</strong> (<em>str</em>) – IP address to investigate</p></li>
+<li><p><strong>port</strong> (<em>int</em>) – port to investigate</p></li>
+<li><p><strong>pcap_file</strong> (<em>str</em>) – pcap file to take information from</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Number of bytes sent</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>int</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Number of bytes received</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>int</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.network.Network.dns_requests">
+<span class="sig-name descname"><span class="pre">dns_requests</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.datagather.network.Network.dns_requests" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.extract_dns_requests_for_all_pcaps">
+<span class="sig-name descname"><span class="pre">extract_dns_requests_for_all_pcaps</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.extract_dns_requests_for_all_pcaps" title="Link to this definition">¶</a></dt>
+<dd><p>Extracts DNS requests from a series of PCAP files and compares them
+against a ‘noise’ PCAP file to identify unique DNS requests.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A list of unique DNS requests found in the PCAP files excluding those found in the ‘noise’ PCAP.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.extract_dns_requests_from_pcap">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">extract_dns_requests_from_pcap</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pcap_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.extract_dns_requests_from_pcap" title="Link to this definition">¶</a></dt>
+<dd><p>Extracts all requested domain names from a PCAP file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>pcap_path</strong> – Path to the PCAP file</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A set of domain names.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>set</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.extract_target_ips_and_ports">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">extract_target_ips_and_ports</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pcap_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.extract_target_ips_and_ports" title="Link to this definition">¶</a></dt>
+<dd><p>Extract all target IPs and ports from a pcap file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>pcap_path</strong> (<em>str</em>) – Path to the pcap file.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A set of target IPs and ports in the format “IP:Port”.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>set</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.extract_target_ips_and_ports_for_all_pcaps">
+<span class="sig-name descname"><span class="pre">extract_target_ips_and_ports_for_all_pcaps</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.extract_target_ips_and_ports_for_all_pcaps" title="Link to this definition">¶</a></dt>
+<dd><p>Extracts target IPs and ports from a series of PCAP files and compares them
+against a ‘noise’ PCAP file to identify unique target IPs and ports.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A set of unique target IPs and ports found in the PCAP files excluding those found in the ‘noise’ PCAP.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>set</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Starts a timed thread to measure network traffic.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.get_file_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_file_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.get_file_name" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the base name for trace files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Base name for trace files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.get_path">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_path</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.get_path" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the path for storing network trace files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Path for storing network trace files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.network.Network.internal_run_counter">
+<span class="sig-name descname"><span class="pre">internal_run_counter</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#src.datagather.network.Network.internal_run_counter" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.network.Network.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Network'</span></em><a class="headerlink" href="#src.datagather.network.Network.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.network.Network.performed_diff">
+<span class="sig-name descname"><span class="pre">performed_diff</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.datagather.network.Network.performed_diff" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a formatted string of DNS requests and target IPs and ports.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Formatted string of DNS requests and target IPs and ports.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the gathered DNS requests and target IPs and ports.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary containing DNS requests and target IPs and ports.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.network.Network.tcpdump_thread">
+<span class="sig-name descname"><span class="pre">tcpdump_thread</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.network.Network.tcpdump_thread" title="Link to this definition">¶</a></dt>
+<dd><p>Meant to be run as a Thread to tcpdump on the emulator to capture network traffic.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.newfiles">
+<span id="newfiles-module"></span><h2><strong>newfiles</strong> module<a class="headerlink" href="#module-src.datagather.newfiles" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.newfiles.</span></span><span class="sig-name descname"><span class="pre">Bcolors</span></span><a class="headerlink" href="#src.datagather.newfiles.Bcolors" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.BOLD">
+<span class="sig-name descname"><span class="pre">BOLD</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[1m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.BOLD" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.ENDC">
+<span class="sig-name descname"><span class="pre">ENDC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.ENDC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.FAIL">
+<span class="sig-name descname"><span class="pre">FAIL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[91m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.FAIL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.HEADER">
+<span class="sig-name descname"><span class="pre">HEADER</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[95m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.HEADER" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.OKBLUE">
+<span class="sig-name descname"><span class="pre">OKBLUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[94m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.OKBLUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.OKCYAN">
+<span class="sig-name descname"><span class="pre">OKCYAN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[96m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.OKCYAN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.OKGREEN">
+<span class="sig-name descname"><span class="pre">OKGREEN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[92m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.OKGREEN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.UNDERLINE">
+<span class="sig-name descname"><span class="pre">UNDERLINE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[4m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.UNDERLINE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.Bcolors.WARNING">
+<span class="sig-name descname"><span class="pre">WARNING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[93m'</span></em><a class="headerlink" href="#src.datagather.newfiles.Bcolors.WARNING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.newfiles.</span></span><span class="sig-name descname"><span class="pre">NewFiles</span></span><a class="headerlink" href="#src.datagather.newfiles.NewFiles" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Handles the gathering and processing of new files detected in the system.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.newfiles.NewFiles.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gathers new files by comparing the current file list with the baseline.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'NewFiles'</span></em><a class="headerlink" href="#src.datagather.newfiles.NewFiles.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.newFileListList">
+<span class="sig-name descname"><span class="pre">newFileListList</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.newfiles.NewFiles.newFileListList" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.newfiles.NewFiles.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a formatted string of the new files for display.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Formatted string of new files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.process_data">
+<span class="sig-name descname"><span class="pre">process_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.newfiles.NewFiles.process_data" title="Link to this definition">¶</a></dt>
+<dd><p>Processes the gathered data to filter out noise and identify true new files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List of true new files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.newfiles.NewFiles.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.newfiles.NewFiles.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the processed data of new files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary containing the new files.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.processes">
+<span id="processes-module"></span><h2><strong>processes</strong> module<a class="headerlink" href="#module-src.datagather.processes" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.processes.</span></span><span class="sig-name descname"><span class="pre">Bcolors</span></span><a class="headerlink" href="#src.datagather.processes.Bcolors" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.BOLD">
+<span class="sig-name descname"><span class="pre">BOLD</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[1m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.BOLD" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.ENDC">
+<span class="sig-name descname"><span class="pre">ENDC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.ENDC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.FAIL">
+<span class="sig-name descname"><span class="pre">FAIL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[91m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.FAIL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.HEADER">
+<span class="sig-name descname"><span class="pre">HEADER</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[95m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.HEADER" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.OKBLUE">
+<span class="sig-name descname"><span class="pre">OKBLUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[94m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.OKBLUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.OKCYAN">
+<span class="sig-name descname"><span class="pre">OKCYAN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[96m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.OKCYAN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.OKGREEN">
+<span class="sig-name descname"><span class="pre">OKGREEN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[92m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.OKGREEN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.UNDERLINE">
+<span class="sig-name descname"><span class="pre">UNDERLINE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[4m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.UNDERLINE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Bcolors.WARNING">
+<span class="sig-name descname"><span class="pre">WARNING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[93m'</span></em><a class="headerlink" href="#src.datagather.processes.Bcolors.WARNING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.processes.</span></span><span class="sig-name descname"><span class="pre">Processes</span></span><a class="headerlink" href="#src.datagather.processes.Processes" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Handles the gathering and processing of active processes during an action.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.final_processes_list">
+<span class="sig-name descname"><span class="pre">final_processes_list</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.processes.Processes.final_processes_list" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.processes.Processes.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Starts a new thread to capture process data.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Processes'</span></em><a class="headerlink" href="#src.datagather.processes.Processes.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.performed_diff">
+<span class="sig-name descname"><span class="pre">performed_diff</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.datagather.processes.Processes.performed_diff" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.processes.Processes.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a formatted string of the active processes for display.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Formatted string of active processes.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.process_capture_thread">
+<span class="sig-name descname"><span class="pre">process_capture_thread</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.processes.Processes.process_capture_thread" title="Link to this definition">¶</a></dt>
+<dd><p>Captures the list of active processes over the duration of an action.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.process_processes">
+<span class="sig-name descname"><span class="pre">process_processes</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.processes.Processes.process_processes" title="Link to this definition">¶</a></dt>
+<dd><p>Processes the collected process lists to filter out noise and identify true active processes.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.processes.Processes.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the processed data of active processes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary containing the processes that were active.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.run_counter">
+<span class="sig-name descname"><span class="pre">run_counter</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#src.datagather.processes.Processes.run_counter" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.processes.Processes.run_process_lists">
+<span class="sig-name descname"><span class="pre">run_process_lists</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.datagather.processes.Processes.run_process_lists" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.sockets">
+<span id="sockets-module"></span><h2><strong>sockets</strong> module<a class="headerlink" href="#module-src.datagather.sockets" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.sockets.</span></span><span class="sig-name descname"><span class="pre">Bcolors</span></span><a class="headerlink" href="#src.datagather.sockets.Bcolors" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.BOLD">
+<span class="sig-name descname"><span class="pre">BOLD</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[1m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.BOLD" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.ENDC">
+<span class="sig-name descname"><span class="pre">ENDC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.ENDC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.FAIL">
+<span class="sig-name descname"><span class="pre">FAIL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[91m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.FAIL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.HEADER">
+<span class="sig-name descname"><span class="pre">HEADER</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[95m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.HEADER" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.OKBLUE">
+<span class="sig-name descname"><span class="pre">OKBLUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[94m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.OKBLUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.OKCYAN">
+<span class="sig-name descname"><span class="pre">OKCYAN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[96m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.OKCYAN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.OKGREEN">
+<span class="sig-name descname"><span class="pre">OKGREEN</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[92m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.OKGREEN" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.UNDERLINE">
+<span class="sig-name descname"><span class="pre">UNDERLINE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[4m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.UNDERLINE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Bcolors.WARNING">
+<span class="sig-name descname"><span class="pre">WARNING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[93m'</span></em><a class="headerlink" href="#src.datagather.sockets.Bcolors.WARNING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.sockets.</span></span><span class="sig-name descname"><span class="pre">Sockets</span></span><a class="headerlink" href="#src.datagather.sockets.Sockets" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Handles the gathering and processing of listening sockets during an action.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.final_sockets_list">
+<span class="sig-name descname"><span class="pre">final_sockets_list</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.final_sockets_list" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.sockets.Sockets.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Collects information on listening sockets during an action.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Sockets'</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.noise_sockets">
+<span class="sig-name descname"><span class="pre">noise_sockets</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.noise_sockets" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.performed_diff">
+<span class="sig-name descname"><span class="pre">performed_diff</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.performed_diff" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.sockets.Sockets.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a formatted string of the listening sockets for display.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Formatted string of listening sockets.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.process_sockets">
+<span class="sig-name descname"><span class="pre">process_sockets</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.sockets.Sockets.process_sockets" title="Link to this definition">¶</a></dt>
+<dd><p>Processes the collected socket lists to filter out noise and identify true listening sockets.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.sockets.Sockets.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the processed data of listening sockets.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Dictionary containing the listening sockets.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.run_counter">
+<span class="sig-name descname"><span class="pre">run_counter</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.run_counter" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.run_sockets_lists">
+<span class="sig-name descname"><span class="pre">run_sockets_lists</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.datagather.sockets.Sockets.run_sockets_lists" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.sockets.Sockets.socket_capture_thread">
+<span class="sig-name descname"><span class="pre">socket_capture_thread</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.sockets.Sockets.socket_capture_thread" title="Link to this definition">¶</a></dt>
+<dd><p>Function meant to be used as a thread to create list of listening sockets over the duration of an action.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather.static_analysis">
+<span id="static-analysis-module"></span><h2><strong>static_analysis</strong> module<a class="headerlink" href="#module-src.datagather.static_analysis" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.datagather.static_analysis.</span></span><span class="sig-name descname"><span class="pre">StaticAnalysis</span></span><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.datagather.datagather.DataGather" title="src.datagather.datagather.DataGather"><code class="xref py py-class docutils literal notranslate"><span class="pre">DataGather</span></code></a></p>
+<p>Handles static analysis of APK files using the Apk Static Analysis Monitor (asam).</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.asam">
+<span class="sig-name descname"><span class="pre">asam</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">&lt;module</span> <span class="pre">'apkstaticanalysismonitor.asam'</span> <span class="pre">from</span> <span class="pre">'/home/sanddroid/.local/lib/python3.11/site-packages/apkstaticanalysismonitor/asam.py'&gt;</span></em><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.asam" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Gathers and analyzes the APK file of the spotlight application.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>Exception</strong> – If <cite>asam</cite> returns None or if there is an error during analysis.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.last_results">
+<span class="sig-name descname"><span class="pre">last_results</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{}</span></em><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.last_results" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'StaticAnalysis'</span></em><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.pretty_print">
+<span class="sig-name descname"><span class="pre">pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Pretty prints the results of the last static analysis.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.datagather.static_analysis.StaticAnalysis.return_data">
+<span class="sig-name descname"><span class="pre">return_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.datagather.static_analysis.StaticAnalysis.return_data" title="Link to this definition">¶</a></dt>
+<dd><p>Returns the results of the last static analysis.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The results of the last static analysis.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.datagather">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-src.datagather" title="Link to this heading">¶</a></h2>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="sidebar">
+          
+          <h3>Table of Contents</h3>
+          <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="instructions.html">Install Instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="groundtruthapk.html">Ground Truth APK</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">datagather package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.changedfiles"><strong>changedfiles</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.datagather"><strong>datagather</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.deletedfiles"><strong>deletedfiles</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.malwaremonitor"><strong>malwaremonitor</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.network"><strong>network</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.newfiles"><strong>newfiles</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.processes"><strong>processes</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.sockets"><strong>sockets</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather.static_analysis"><strong>static_analysis</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.datagather">Module contents</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="src.functionality.html">functionality package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.utils.html">utils package</a></li>
+</ul>
+
+          <search role="search">
+            <h3 style="margin-top: 1.5em;">Search</h3>
+            <form class="search" action="search.html" method="get">
+                <input type="text" name="q" />
+                <input type="submit" value="Go" />
+            </form>
+          </search>
+
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+    <div class="footer-wrapper">
+      <div class="footer">
+        <div class="left">
+          <div role="navigation" aria-label="Related">
+            <a href="groundtruthapk.html" title="Ground Truth APK"
+              >previous</a> |
+            <a href="src.functionality.html" title="functionality package"
+              >next</a> |
+            <a href="py-modindex.html" title="Python Module Index"
+              >modules</a> |
+            <a href="genindex.html" title="General Index"
+              >index</a>
+          </div>
+          <div role="note" aria-label="source link">
+              <br/>
+              <a href="_sources/src.datagather.rst.txt"
+                rel="nofollow">Show Source</a>
+          </div>
+        </div>
+
+        <div class="right">
+          
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2024, Erik Nathrath.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.0.2.
+    </div>
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

@@ -1,0 +1,187 @@
+src.utils.pdf_report
+====================
+
+.. py:module:: src.utils.pdf_report
+
+.. autoapi-nested-parse::
+
+   Adapted From https://github.com/jurasec/python-reportlab-example
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.utils.pdf_report.report
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.pdf_report.FooterCanvas
+   src.utils.pdf_report.PDFReport
+
+
+Module Contents
+---------------
+
+.. py:class:: FooterCanvas(*args, **kwargs)
+
+   Bases: :py:obj:`reportlab.pdfgen.canvas.Canvas`
+
+
+   This class is the programmer's interface to the PDF file format.  Methods
+   are (or will be) provided here to do just about everything PDF can do.
+
+   The underlying model to the canvas concept is that of a graphics state machine
+   that at any given point in time has a current font, fill color (for figure
+   interiors), stroke color (for figure borders), line width and geometric transform, among
+   many other characteristics.
+
+   Canvas methods generally either draw something (like canvas.line) using the
+   current state of the canvas or change some component of the canvas
+   state (like canvas.setFont).  The current state can be saved and restored
+   using the saveState/restoreState methods.
+
+   Objects are "painted" in the order they are drawn so if, for example
+   two rectangles overlap the last draw will appear "on top".  PDF form
+   objects (supported here) are used to draw complex drawings only once,
+   for possible repeated use.
+
+   There are other features of canvas which are not visible when printed,
+   such as outlines and bookmarks which are used for navigating a document
+   in a viewer.
+
+   Here is a very silly example usage which generates a Hello World pdf document.
+
+   Example:: 
+
+      from reportlab.pdfgen import canvas
+      c = canvas.Canvas("hello.pdf")
+      from reportlab.lib.units import inch
+      # move the origin up and to the left
+      c.translate(inch,inch)
+      # define a large font
+      c.setFont("Helvetica", 80)
+      # choose some colors
+      c.setStrokeColorRGB(0.2,0.5,0.3)
+      c.setFillColorRGB(1,0,1)
+      # draw a rectangle
+      c.rect(inch,inch,6*inch,9*inch, fill=1)
+      # make text go straight up
+      c.rotate(90)
+      # change color
+      c.setFillColorRGB(0,0,0.77)
+      # say hello (note after rotate the y coord needs to be negative!)
+      c.drawString(3*inch, -3*inch, "Hello World")
+      c.showPage()
+      c.save()
+
+
+
+   .. py:attribute:: pages
+      :value: []
+
+
+
+   .. py:method:: showPage()
+
+      Close the current page and possibly start on a new page.
+
+
+
+   .. py:method:: save()
+
+      Saves and close the PDF document in the file.
+      If there is current data a ShowPage is executed automatically.
+      After this operation the canvas must not be used further.
+
+
+
+   .. py:method:: draw_canvas(page_count)
+
+
+.. py:class:: PDFReport(path)
+
+   .. py:attribute:: data
+      :value: None
+
+
+
+   .. py:attribute:: inputFile
+
+
+   .. py:attribute:: path
+
+
+   .. py:attribute:: styleSheet
+
+
+   .. py:attribute:: elements
+      :value: []
+
+
+
+   .. py:attribute:: header_font_color
+
+
+   .. py:attribute:: highlight_color
+
+
+   .. py:attribute:: small_title_font_color
+
+
+   .. py:attribute:: table_line_color
+
+
+   .. py:attribute:: table_header_background_color
+
+
+   .. py:attribute:: white
+
+
+   .. py:attribute:: doc
+
+
+   .. py:method:: firstPage()
+
+
+   .. py:method:: pageHeader(content)
+
+
+   .. py:method:: generalTableMaker(json_section_to_tableize)
+
+
+   .. py:method:: summaryTableMaker()
+
+
+   .. py:method:: changedFilesTableMaker()
+
+
+   .. py:method:: APKTableMaker()
+
+
+   .. py:method:: image_grid()
+
+
+   .. py:method:: convert_png_to_jpeg(filenames, img_dir)
+
+
+   .. py:method:: newFileHashesTableMaker()
+
+
+   .. py:method:: changedFileHashesTableMaker()
+
+
+   .. py:method:: draw_panel(x, y, width, height, main_number, title, symbol)
+
+
+   .. py:method:: make_header(header_array)
+
+
+.. py:data:: report
+

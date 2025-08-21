@@ -1,0 +1,37 @@
+src.datagather.static_analysis
+==============================
+
+.. py:module:: src.datagather.static_analysis
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.datagather.static_analysis.StaticAnalysis
+
+
+Module Contents
+---------------
+
+.. py:class:: StaticAnalysis
+
+   Bases: :py:obj:`src.datagather.datagather.DataGather`
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: last_results
+
+
+   .. py:method:: gather()
+
+
+   .. py:method:: return_data()
+
+
+   .. py:method:: pretty_print()
+
+

@@ -1,0 +1,35 @@
+beautifulsoup4>=4.12.2
+bs4>=0.0.1
+certifi>=2023.11.17
+charset-normalizer>=3.3.2
+click>=8.1.7
+colorama>=0.4.6
+frida>=16.1.10
+frida-tools>=12.3.0
+idna>=3.6
+lxml>=4.9.4
+prompt-toolkit>=3.0.43
+Pygments>=2.17.2
+python-dateutil>=2.8.2
+requests>=2.31.0
+scapy>=2.5.0
+six>=1.16.0
+soupsieve>=2.5
+urllib3>=2.1.0
+wcwidth>=0.2.12
+xmldiff>=2.7.0
+tqdm
+reportlab
+# Modern PyPI packages - these are now installed directly in Dockerfile
+# AndroidFridaManager>=0.2.0
+# trigdroid[full]>=1.0.0  
+# dexray-intercept>=1.0.0
+# dexray-insight>=1.0.0
+geopy
+certifi
+friTap>=1.3.1.4
+colorlog
+google-genai
+
+# Add objection for interactive mobile application exploration
+objection>=1.11.0

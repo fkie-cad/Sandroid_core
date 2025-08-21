@@ -1,0 +1,77 @@
+src.utils.apk_downloader
+========================
+
+.. py:module:: src.utils.apk_downloader
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.apk_downloader.ApkDownloader
+
+
+Module Contents
+---------------
+
+.. py:class:: ApkDownloader
+
+   .. py:attribute:: base_url
+      :value: 'https://apksfull.com'
+
+
+
+   .. py:attribute:: version_url
+
+
+   .. py:attribute:: download_url
+
+
+   .. py:attribute:: search_url
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: headers
+
+
+   .. py:method:: download_file()
+
+
+   .. py:method:: search_for_name(name)
+      :classmethod:
+
+
+
+   .. py:method:: display_search_results_menu(search_results)
+      :classmethod:
+
+
+
+   .. py:method:: get_versions(result)
+      :classmethod:
+
+
+
+   .. py:method:: display_versions(versions)
+      :classmethod:
+
+
+
+   .. py:method:: get_real_download_url(version_url)
+      :classmethod:
+
+
+
+   .. py:method:: download_version(version, path)
+      :classmethod:
+
+
+
+   .. py:method:: install_version(version)
+      :classmethod:
+
+
+

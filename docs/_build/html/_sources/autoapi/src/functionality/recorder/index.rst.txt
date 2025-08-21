@@ -1,0 +1,64 @@
+src.functionality.recorder
+==========================
+
+.. py:module:: src.functionality.recorder
+
+.. autoapi-nested-parse::
+
+   This code is an excerpt from "adb-event-record" by Tzutalin.
+   (https://github.com/tzutalin/adb-event-record)
+   The excerpt was modified to fit the needs of this project
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.functionality.recorder.logger
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.functionality.recorder.Recorder
+
+
+Module Contents
+---------------
+
+.. py:data:: logger
+
+.. py:class:: Recorder
+
+   Bases: :py:obj:`src.functionality.functionality.Functionality`
+
+
+   Abstract base class for all modules that perform some functionality on the emulator
+
+
+   .. py:attribute:: EVENT_LINE_RE
+
+
+   .. py:attribute:: output_file_name
+      :value: 'recording.txt'
+
+
+
+   .. py:attribute:: output_file
+      :value: None
+
+
+
+   .. py:method:: perform()
+
+
+   .. py:method:: write_event(dev, etype, ecode, data)
+
+
+   .. py:method:: write_dummy_event()
+
+

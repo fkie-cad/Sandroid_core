@@ -1,0 +1,102 @@
+<!-- res/layout/activity_main.xml -->
+
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    tools:context=".MainActivity">
+
+    <!-- Button 1 -->
+    <Button
+        android:id="@+id/button1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 1"
+        android:backgroundTint="#A3D585"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 2 -->
+    <Button
+        android:id="@+id/button2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 2"
+        android:backgroundTint="#348AA7"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 3 -->
+    <Button
+        android:id="@+id/button3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 3"
+        android:backgroundTint="#348AA7"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 4 -->
+    <Button
+        android:id="@+id/button4"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 4"
+        android:backgroundTint="#348AA7"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 5 -->
+    <Button
+        android:id="@+id/button5"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 5"
+        android:backgroundTint="#EB9486"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 6 -->
+    <Button
+        android:id="@+id/button6"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 6"
+        android:backgroundTint="#F3DE8A"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 7 -->
+    <Button
+        android:id="@+id/button7"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 7"
+        android:backgroundTint="#443850"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 8 -->
+    <Button
+        android:id="@+id/button8"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 8"
+        android:backgroundTint="#443850"
+        android:layout_marginBottom="8dp"/>
+
+    <!-- Button 9 -->
+    <Button
+        android:id="@+id/button9"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 9"
+        android:backgroundTint="#443850"
+        android:layout_marginBottom="8dp"/>
+
+    <Button
+        android:id="@+id/button10"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Button 10"
+        android:backgroundTint="#443850"
+        android:layout_marginBottom="8dp"/>
+
+</LinearLayout>

@@ -1,0 +1,30 @@
+src.functionality.functionality
+===============================
+
+.. py:module:: src.functionality.functionality
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.functionality.functionality.Functionality
+
+
+Module Contents
+---------------
+
+.. py:class:: Functionality
+
+   Bases: :py:obj:`abc.ABC`
+
+
+   Abstract base class for all modules that perform some functionality on the emulator
+
+
+   .. py:method:: perform()
+      :abstractmethod:
+
+
+

@@ -1,0 +1,254 @@
+src.utils.ccl_abx
+=================
+
+.. py:module:: src.utils.ccl_abx
+
+.. autoapi-nested-parse::
+
+   Copyright 2021-2022, CCL Forensics
+   Permission is hereby granted, free of charge, to any person obtaining a copy of
+   this software and associated documentation files (the "Software"), to deal in
+   the Software without restriction, including without limitation the rights to
+   use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+   of the Software, and to permit persons to whom the Software is furnished to do
+   so, subject to the following conditions:
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.utils.ccl_abx.__version__
+   src.utils.ccl_abx.__description__
+   src.utils.ccl_abx.__contact__
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   src.utils.ccl_abx.AbxDecodeError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.ccl_abx.XmlType
+   src.utils.ccl_abx.DataType
+   src.utils.ccl_abx.AbxReader
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   src.utils.ccl_abx.main
+
+
+Module Contents
+---------------
+
+.. py:data:: __version__
+   :value: '0.2.0'
+
+
+.. py:data:: __description__
+   :value: 'Python module to convert Android ABX binary XML files'
+
+
+.. py:data:: __contact__
+   :value: 'Alex Caithness'
+
+
+.. py:exception:: AbxDecodeError
+
+   Bases: :py:obj:`Exception`
+
+
+   Common base class for all non-exit exceptions.
+
+
+.. py:class:: XmlType
+
+   Bases: :py:obj:`enum.IntEnum`
+
+
+   Enum where members are also (and must be) ints
+
+
+   .. py:attribute:: START_DOCUMENT
+      :value: 0
+
+
+
+   .. py:attribute:: END_DOCUMENT
+      :value: 1
+
+
+
+   .. py:attribute:: START_TAG
+      :value: 2
+
+
+
+   .. py:attribute:: END_TAG
+      :value: 3
+
+
+
+   .. py:attribute:: TEXT
+      :value: 4
+
+
+
+   .. py:attribute:: CDSECT
+      :value: 5
+
+
+
+   .. py:attribute:: ENTITY_REF
+      :value: 6
+
+
+
+   .. py:attribute:: IGNORABLE_WHITESPACE
+      :value: 7
+
+
+
+   .. py:attribute:: PROCESSING_INSTRUCTION
+      :value: 8
+
+
+
+   .. py:attribute:: COMMENT
+      :value: 9
+
+
+
+   .. py:attribute:: DOCDECL
+      :value: 10
+
+
+
+   .. py:attribute:: ATTRIBUTE
+      :value: 15
+
+
+
+.. py:class:: DataType
+
+   Bases: :py:obj:`enum.IntEnum`
+
+
+   Enum where members are also (and must be) ints
+
+
+   .. py:attribute:: TYPE_NULL
+
+
+   .. py:attribute:: TYPE_STRING
+
+
+   .. py:attribute:: TYPE_STRING_INTERNED
+
+
+   .. py:attribute:: TYPE_BYTES_HEX
+
+
+   .. py:attribute:: TYPE_BYTES_BASE64
+
+
+   .. py:attribute:: TYPE_INT
+
+
+   .. py:attribute:: TYPE_INT_HEX
+
+
+   .. py:attribute:: TYPE_LONG
+
+
+   .. py:attribute:: TYPE_LONG_HEX
+
+
+   .. py:attribute:: TYPE_FLOAT
+
+
+   .. py:attribute:: TYPE_DOUBLE
+
+
+   .. py:attribute:: TYPE_BOOLEAN_TRUE
+
+
+   .. py:attribute:: TYPE_BOOLEAN_FALSE
+
+
+.. py:class:: AbxReader(stream: BinaryIO)
+
+   .. py:attribute:: MAGIC
+      :value: b'ABX\x00'
+
+
+
+   .. py:method:: _read_raw(length)
+
+
+   .. py:method:: _read_byte()
+
+
+   .. py:method:: _read_short()
+
+
+   .. py:method:: _read_int()
+
+
+   .. py:method:: _read_long()
+
+
+   .. py:method:: _read_float()
+
+
+   .. py:method:: _read_double()
+
+
+   .. py:method:: _read_string_raw()
+
+
+   .. py:method:: _read_interned_string()
+
+
+   .. py:attribute:: _interned_strings
+      :value: []
+
+
+
+   .. py:attribute:: _stream
+
+
+   .. py:method:: read(*, is_multi_root=False)
+
+      Read the ABX file
+      :param is_multi_root: some xml files on Android contain multiple root elements making reading them using a
+      document model problematic. For these files, set is_multi_root to True and the output ElementTree will wrap
+      the elements in a single "root" element.
+      :return: ElementTree representation of the data.
+
+
+
+.. py:function:: main(args)
+

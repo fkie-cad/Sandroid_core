@@ -1,0 +1,40 @@
+src.utils.timeline_generator
+============================
+
+.. py:module:: src.utils.timeline_generator
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.utils.timeline_generator.events
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   src.utils.timeline_generator.parse_timeline
+   src.utils.timeline_generator.create_timeline
+
+
+Module Contents
+---------------
+
+.. py:function:: parse_timeline(output_file)
+
+.. py:function:: create_timeline(events, filename, duration)
+
+   Create a timeline plot with custom colors for different event types.
+
+   :param events: A list of tuples where each tuple contains the event type, timestamp, and description.
+   :param filename: The name of the PNG file to save the timeline to.
+
+
+.. py:data:: events
+   :value: [('File Created', 1, '#C80036'), ('File Modified', 2, '#7ABA78'), ('Process Spawned', 6,...
+
+

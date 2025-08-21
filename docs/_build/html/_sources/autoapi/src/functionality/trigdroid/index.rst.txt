@@ -1,0 +1,55 @@
+src.functionality.trigdroid
+===========================
+
+.. py:module:: src.functionality.trigdroid
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.functionality.trigdroid.Trigdroid
+
+
+Module Contents
+---------------
+
+.. py:class:: Trigdroid
+
+   Bases: :py:obj:`src.functionality.functionality.Functionality`
+
+
+   Abstract base class for all modules that perform some functionality on the emulator
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: did_dummy_round
+      :value: True
+
+
+
+   .. py:attribute:: override_package_name
+      :value: ''
+
+
+
+   .. py:attribute:: package_name_overridden
+      :value: False
+
+
+
+   .. py:method:: perform()
+
+
+   .. py:method:: run_ccf()
+
+
+   .. py:method:: run_trigdroid(package_name)
+
+
+   .. py:method:: overide_package(new_name)
+
+

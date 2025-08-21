@@ -1,0 +1,67 @@
+src.utils.fridump
+=================
+
+.. py:module:: src.utils.fridump
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.utils.fridump.Fridump
+
+
+Module Contents
+---------------
+
+.. py:class:: Fridump
+
+   .. py:attribute:: process
+      :value: None
+
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: MAX_SIZE
+      :value: 20971520
+
+
+
+   .. py:attribute:: PERMS
+      :value: 'rw-'
+
+
+
+   .. py:method:: attach_to_app(pid)
+      :classmethod:
+
+
+
+   .. py:method:: dump_memory(pid, process_name)
+      :classmethod:
+
+
+
+   .. py:method:: on_message(message, data)
+      :classmethod:
+
+
+
+   .. py:method:: dump_to_file(agent, base, size, error, directory)
+      :classmethod:
+
+
+
+   .. py:method:: splitter(agent, base, size, max_size, error, directory)
+      :classmethod:
+
+
+
+   .. py:method:: printProgress(times, total, prefix='', suffix='', decimals=2, bar=100)
+      :classmethod:
+
+
+

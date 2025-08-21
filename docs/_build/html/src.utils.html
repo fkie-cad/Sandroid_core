@@ -1,0 +1,1262 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>utils package &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="_static/agogo.css?v=ee97e451" />
+    <script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=9a2dae69"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="functionality package" href="src.functionality.html" /> 
+  </head><body>
+    <div class="header-wrapper" role="banner">
+      <div class="header">
+        <div class="headertitle"><a
+          href="index.html">Sandroid 0.4.1 documentation</a></div>
+        <div class="rel" role="navigation" aria-label="Related">
+          <a href="src.functionality.html" title="functionality package"
+             accesskey="P">previous</a> |
+          <a href="py-modindex.html" title="Python Module Index"
+             >modules</a> |
+          <a href="genindex.html" title="General Index"
+             accesskey="I">index</a>
+        </div>
+       </div>
+    </div>
+
+    <div class="content-wrapper">
+      <div class="content">
+        <div class="document">
+            
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="utils-package">
+<h1>utils package<a class="headerlink" href="#utils-package" title="Link to this heading">¶</a></h1>
+<section id="module-src.utils.CustomLoggerFormatter">
+<span id="customloggerformatter-module"></span><h2><strong>CustomLoggerFormatter</strong> module<a class="headerlink" href="#module-src.utils.CustomLoggerFormatter" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.CustomLoggerFormatter.</span></span><span class="sig-name descname"><span class="pre">CustomFormatter</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fmt</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Formatter</span></code></p>
+<p>Logging colored formatter, adapted from <a class="reference external" href="https://stackoverflow.com/a/56944256/3638629">https://stackoverflow.com/a/56944256/3638629</a></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.blue">
+<span class="sig-name descname"><span class="pre">blue</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[38;5;39m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.blue" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.bold_red">
+<span class="sig-name descname"><span class="pre">bold_red</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[31;1m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.bold_red" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.format">
+<span class="sig-name descname"><span class="pre">format</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">record</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.format" title="Link to this definition">¶</a></dt>
+<dd><p>Format the specified record as text.</p>
+<p>The record’s attribute dictionary is used as the operand to a
+string formatting operation which yields the returned string.
+Before formatting the dictionary, a couple of preparatory steps
+are carried out. The message attribute of the record is computed
+using LogRecord.getMessage(). If the formatting string uses the
+time (as determined by a call to usesTime(), formatTime() is
+called to format the event time. If there is exception information,
+it is formatted using formatException() and appended to the message.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.grey">
+<span class="sig-name descname"><span class="pre">grey</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[38;21m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.grey" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.red">
+<span class="sig-name descname"><span class="pre">red</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[38;5;196m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.red" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.reset">
+<span class="sig-name descname"><span class="pre">reset</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[0m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.reset" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.CustomLoggerFormatter.CustomFormatter.yellow">
+<span class="sig-name descname"><span class="pre">yellow</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'\x1b[38;5;226m'</span></em><a class="headerlink" href="#src.utils.CustomLoggerFormatter.CustomFormatter.yellow" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.actionQ">
+<span id="actionq-module"></span><h2><strong>actionQ</strong> module<a class="headerlink" href="#module-src.utils.actionQ" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.actionQ.</span></span><span class="sig-name descname"><span class="pre">ActionQ</span></span><a class="headerlink" href="#src.utils.actionQ.ActionQ" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Manages the action queue for various tasks and functionalities.</p>
+<p>The idea of the action queue is to assemble the complex list of actions that need to be executed beforehand. 
+This provides a big picture view and a simple main function that simply steps through the queue.</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.assembleQ">
+<span class="sig-name descname"><span class="pre">assembleQ</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.assembleQ" title="Link to this definition">¶</a></dt>
+<dd><p>Assembles the initial action queue based on provided arguments.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.assembleQ_for_runs">
+<span class="sig-name descname"><span class="pre">assembleQ_for_runs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">action</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.assembleQ_for_runs" title="Link to this definition">¶</a></dt>
+<dd><p>Assembles an action queue for a given action.</p>
+<p>The action will be performed multiple times according to the number of runs command line parameter and different attributes on the emulator will be measured
+Usually the action will be a Player object, meaning the recorded inputs of the user are replayed and investigated.</p>
+<p>Those actions will not yet be performed, just queued.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>action</strong> (<a class="reference internal" href="src.functionality.html#src.functionality.functionality.Functionality" title="src.functionality.functionality.Functionality"><em>Functionality</em></a>) – The action to be performed and investigated.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.do_next">
+<span class="sig-name descname"><span class="pre">do_next</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.do_next" title="Link to this definition">¶</a></dt>
+<dd><p>Executes the next action in the queue.</p>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.finished">
+<span class="sig-name descname"><span class="pre">finished</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.finished" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.get_data">
+<span class="sig-name descname"><span class="pre">get_data</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.get_data" title="Link to this definition">¶</a></dt>
+<dd><p>Collects and returns data from the action queue.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Collected data in JSON format.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.get_pretty_print">
+<span class="sig-name descname"><span class="pre">get_pretty_print</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.get_pretty_print" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a pretty-printed string of the results from the data gatherers.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>Pretty-printed results.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.index">
+<span class="sig-name descname"><span class="pre">index</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.index" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'actionQ'</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.malwaremonitor">
+<span class="sig-name descname"><span class="pre">malwaremonitor</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.malwaremonitor" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.parse_interactive_char">
+<span class="sig-name descname"><span class="pre">parse_interactive_char</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">char</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.parse_interactive_char" title="Link to this definition">¶</a></dt>
+<dd><p>Parses and handles interactive character inputf rom the menu.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>char</strong> (<em>str</em>) – The character input from the user.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.photographer">
+<span class="sig-name descname"><span class="pre">photographer</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.photographer" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.print_q">
+<span class="sig-name descname"><span class="pre">print_q</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.print_q" title="Link to this definition">¶</a></dt>
+<dd><p>Returns a string representation of the action queue.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>String representation of the action queue.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.q">
+<span class="sig-name descname"><span class="pre">q</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">[]</span></em><a class="headerlink" href="#src.utils.actionQ.ActionQ.q" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.actionQ.ActionQ.update_photographer">
+<span class="sig-name descname"><span class="pre">update_photographer</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.actionQ.ActionQ.update_photographer" title="Link to this definition">¶</a></dt>
+<dd><p>Updates the screenshot utility with the current action.</p>
+<p>This allows screenshots to be labeled with the current action</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.adb">
+<span id="adb-module"></span><h2><strong>adb</strong> module<a class="headerlink" href="#module-src.utils.adb" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.adb.Adb">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.adb.</span></span><span class="sig-name descname"><span class="pre">Adb</span></span><a class="headerlink" href="#src.utils.adb.Adb" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Represents the Android Debug Bridge (ADB) functionality.</p>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><p>ADB_PATH (str): Path to the ADB executable.
+logger (Logger): Logger instance for ADB operations.</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.ADB_PATH">
+<span class="sig-name descname"><span class="pre">ADB_PATH</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.adb.Adb.ADB_PATH" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.get_focussed_app">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_focussed_app</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.get_focussed_app" title="Link to this definition">¶</a></dt>
+<dd><p>Retrieves the package name and activity name of the currently focused app.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A tuple containing the package name and activity name of the focused app.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.get_network_info">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_network_info</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.get_network_info" title="Link to this definition">¶</a></dt>
+<dd><p>Get network information.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A list of tuples where each tuple contains the interface name and its corresponding IPv4 address.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>list of tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.get_pid_for_package_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_pid_for_package_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">package_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.get_pid_for_package_name" title="Link to this definition">¶</a></dt>
+<dd><p>Get the process ID (PID) for a given package name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>package_name</strong> (<em>str</em>) – The name of the package.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The process ID if found, None otherwise.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>int or None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.init">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">init</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.init" title="Link to this definition">¶</a></dt>
+<dd><p>Initializes the ADB class by setting the ADB path and logger.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This method ensures that the ADB path is correctly set and logs the path.</p>
+</div>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.install_apk">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">install_apk</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">apk_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.install_apk" title="Link to this definition">¶</a></dt>
+<dd><p>Installs an APK file on the device.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>apk_path</strong> (<em>str</em>) – The path to the APK file.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.adb.Adb.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.send_adb_command">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">send_adb_command</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">command</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.send_adb_command" title="Link to this definition">¶</a></dt>
+<dd><p>Sends an ADB command and returns the output.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>command</strong> (<em>str</em>) – The ADB command to be executed.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A tuple containing the stdout and stderr of the command.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.send_adb_command_popen">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">send_adb_command_popen</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">command</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.send_adb_command_popen" title="Link to this definition">¶</a></dt>
+<dd><p>Executes an ADB command using subprocess.Popen.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>command</strong> (<em>str</em>) – The ADB command to be executed.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The Popen object representing the running process.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>subprocess.Popen</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.adb.Adb.send_telnet_command">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">send_telnet_command</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">command</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.adb.Adb.send_telnet_command" title="Link to this definition">¶</a></dt>
+<dd><p>Sends a telnet command to the emulator.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>command</strong> (<em>str</em><em> or </em><em>bytes</em>) – The telnet command to be executed.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A tuple containing the stdout and stderr of the command.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>tuple</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.apk_downloader">
+<span id="apk-downloader-module"></span><h2><strong>apk_downloader</strong> module<a class="headerlink" href="#module-src.utils.apk_downloader" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.apk_downloader.</span></span><span class="sig-name descname"><span class="pre">ApkDownloader</span></span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<p>Handles APK downloading and installation from apksfull.com.</p>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><p>base_url (str): Base URL for the APK site.
+version_url (str): URL for fetching APK versions.
+download_url (str): URL for downloading APKs.
+search_url (str): URL for searching APKs.
+logger (Logger): Logger instance for APKDownloader operations.
+headers (dict): HTTP headers for requests.</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.base_url">
+<span class="sig-name descname"><span class="pre">base_url</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://apksfull.com'</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.base_url" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.display_search_results_menu">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">display_search_results_menu</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">search_results</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.display_search_results_menu" title="Link to this definition">¶</a></dt>
+<dd><p>Displays the search results in a formatted menu.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>search_results</strong> (<em>list</em><em> of </em><em>dict</em>) – List of search results.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.display_versions">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">display_versions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">versions</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.display_versions" title="Link to this definition">¶</a></dt>
+<dd><p>Displays the available versions in a formatted menu.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>versions</strong> (<em>list</em><em> of </em><em>dict</em>) – List of available versions.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.download_file">
+<span class="sig-name descname"><span class="pre">download_file</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.download_file" title="Link to this definition">¶</a></dt>
+<dd><p>Downloads the APK file using wget.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>data</strong> (<em>dict</em>) – Dictionary containing the download link.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.download_url">
+<span class="sig-name descname"><span class="pre">download_url</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://apksfull.com/dl/'</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.download_url" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.download_version">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">download_version</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">version</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.download_version" title="Link to this definition">¶</a></dt>
+<dd><p>Downloads a specific version of an APK to a given path.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>version</strong> (<em>dict</em>) – The version details of the APK.</p></li>
+<li><p><strong>path</strong> (<em>str</em>) – The path to save the downloaded APK.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The file path of the downloaded APK.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str or None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.get_real_download_url">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_real_download_url</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">version_url</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.get_real_download_url" title="Link to this definition">¶</a></dt>
+<dd><p>Retrieves the real download URL for a given APK version.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>version_url</strong> (<em>str</em>) – The URL of the APK version.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The real download URL if available, None otherwise.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str or None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.get_versions">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">get_versions</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">result</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.get_versions" title="Link to this definition">¶</a></dt>
+<dd><p>Retrieves available versions for a given APK.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>result</strong> (<em>dict</em>) – The search result containing the package name.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of available versions.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.headers">
+<span class="sig-name descname"><span class="pre">headers</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">{'Accept':</span> <span class="pre">'application/json,</span> <span class="pre">text/javascript,</span> <span class="pre">*/*;</span> <span class="pre">q=0.01',</span> <span class="pre">'Accept-Language':</span> <span class="pre">'en-US,en;q=0.5',</span> <span class="pre">'Connection':</span> <span class="pre">'keep-alive',</span> <span class="pre">'Content-Type':</span> <span class="pre">'application/x-www-form-urlencoded;</span> <span class="pre">charset=UTF-8',</span> <span class="pre">'Origin':</span> <span class="pre">'https://apksfull.com',</span> <span class="pre">'User-Agent':</span> <span class="pre">'Mozilla/5.0</span> <span class="pre">(Macintosh;</span> <span class="pre">Intel</span> <span class="pre">Mac</span> <span class="pre">OS</span> <span class="pre">X</span> <span class="pre">10_15_7)</span> <span class="pre">AppleWebKit/605.1.15</span> <span class="pre">(KHTML,</span> <span class="pre">like</span> <span class="pre">Gecko)</span> <span class="pre">Version/14.1.1</span> <span class="pre">Safari/605.1.15',</span> <span class="pre">'`Referer':</span> <span class="pre">'https://apksfull.com/search/'}</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.headers" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.install_version">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">install_version</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">version</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.install_version" title="Link to this definition">¶</a></dt>
+<dd><p>Downloads and installs a specific version of an APK.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>version</strong> (<em>dict</em>) – The version details of the APK.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'APKDownloader'</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.search_for_name">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">search_for_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.search_for_name" title="Link to this definition">¶</a></dt>
+<dd><p>Searches for APKs online by name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>name</strong> (<em>str</em>) – The name of the APK to search for.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A list of search results.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>list of dict</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.search_url">
+<span class="sig-name descname"><span class="pre">search_url</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://apksfull.com/search/'</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.search_url" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.apk_downloader.ApkDownloader.version_url">
+<span class="sig-name descname"><span class="pre">version_url</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'https://apksfull.com/version/'</span></em><a class="headerlink" href="#src.utils.apk_downloader.ApkDownloader.version_url" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.ccl_abx">
+<span id="ccl-abx-module"></span><h2><strong>ccl_abx</strong> module<a class="headerlink" href="#module-src.utils.ccl_abx" title="Link to this heading">¶</a></h2>
+<p>Copyright 2021-2022, CCL Forensics
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</p>
+<dl class="py exception">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxDecodeError">
+<em class="property"><span class="pre">exception</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">AbxDecodeError</span></span><a class="headerlink" href="#src.utils.ccl_abx.AbxDecodeError" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Exception</span></code></p>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">AbxReader</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">stream</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">BinaryIO</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader.MAGIC">
+<span class="sig-name descname"><span class="pre">MAGIC</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">b'ABX\x00'</span></em><a class="headerlink" href="#src.utils.ccl_abx.AbxReader.MAGIC" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.AbxReader.read">
+<span class="sig-name descname"><span class="pre">read</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_multi_root</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.AbxReader.read" title="Link to this definition">¶</a></dt>
+<dd><p>Read the ABX file
+:param is_multi_root: some xml files on Android contain multiple root elements making reading them using a
+document model problematic. For these files, set is_multi_root to True and the output ElementTree will wrap
+the elements in a single “root” element.
+:return: ElementTree representation of the data.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">DataType</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">module</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qualname</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">boundary</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.DataType" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">IntEnum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BOOLEAN_FALSE">
+<span class="sig-name descname"><span class="pre">TYPE_BOOLEAN_FALSE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">208</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BOOLEAN_FALSE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BOOLEAN_TRUE">
+<span class="sig-name descname"><span class="pre">TYPE_BOOLEAN_TRUE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">192</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BOOLEAN_TRUE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BYTES_BASE64">
+<span class="sig-name descname"><span class="pre">TYPE_BYTES_BASE64</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">80</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BYTES_BASE64" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_BYTES_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_BYTES_HEX</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">64</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_BYTES_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_DOUBLE">
+<span class="sig-name descname"><span class="pre">TYPE_DOUBLE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">176</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_DOUBLE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_FLOAT">
+<span class="sig-name descname"><span class="pre">TYPE_FLOAT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">160</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_FLOAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_INT">
+<span class="sig-name descname"><span class="pre">TYPE_INT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">96</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_INT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_INT_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_INT_HEX</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">112</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_INT_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_LONG">
+<span class="sig-name descname"><span class="pre">TYPE_LONG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">128</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_LONG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_LONG_HEX">
+<span class="sig-name descname"><span class="pre">TYPE_LONG_HEX</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">144</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_LONG_HEX" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_NULL">
+<span class="sig-name descname"><span class="pre">TYPE_NULL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">16</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_NULL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_STRING">
+<span class="sig-name descname"><span class="pre">TYPE_STRING</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">32</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_STRING" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.DataType.TYPE_STRING_INTERNED">
+<span class="sig-name descname"><span class="pre">TYPE_STRING_INTERNED</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">48</span></em><a class="headerlink" href="#src.utils.ccl_abx.DataType.TYPE_STRING_INTERNED" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">XmlType</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">names</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">module</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">qualname</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">type</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">start</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">boundary</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.XmlType" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">IntEnum</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.ATTRIBUTE">
+<span class="sig-name descname"><span class="pre">ATTRIBUTE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">15</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.ATTRIBUTE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.CDSECT">
+<span class="sig-name descname"><span class="pre">CDSECT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">5</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.CDSECT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.COMMENT">
+<span class="sig-name descname"><span class="pre">COMMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">9</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.COMMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.DOCDECL">
+<span class="sig-name descname"><span class="pre">DOCDECL</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">10</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.DOCDECL" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.END_DOCUMENT">
+<span class="sig-name descname"><span class="pre">END_DOCUMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">1</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.END_DOCUMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.END_TAG">
+<span class="sig-name descname"><span class="pre">END_TAG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">3</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.END_TAG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.ENTITY_REF">
+<span class="sig-name descname"><span class="pre">ENTITY_REF</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">6</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.ENTITY_REF" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.IGNORABLE_WHITESPACE">
+<span class="sig-name descname"><span class="pre">IGNORABLE_WHITESPACE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">7</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.IGNORABLE_WHITESPACE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.PROCESSING_INSTRUCTION">
+<span class="sig-name descname"><span class="pre">PROCESSING_INSTRUCTION</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">8</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.PROCESSING_INSTRUCTION" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.START_DOCUMENT">
+<span class="sig-name descname"><span class="pre">START_DOCUMENT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">0</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.START_DOCUMENT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.START_TAG">
+<span class="sig-name descname"><span class="pre">START_TAG</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">2</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.START_TAG" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.XmlType.TEXT">
+<span class="sig-name descname"><span class="pre">TEXT</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">4</span></em><a class="headerlink" href="#src.utils.ccl_abx.XmlType.TEXT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.ccl_abx.main">
+<span class="sig-prename descclassname"><span class="pre">src.utils.ccl_abx.</span></span><span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">args</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.ccl_abx.main" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</section>
+<section id="module-src.utils.file_diff">
+<span id="file-diff-module"></span><h2><strong>file_diff</strong> module<a class="headerlink" href="#module-src.utils.file_diff" title="Link to this heading">¶</a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.abx_xml_diff">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">abx_xml_diff</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xml_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.abx_xml_diff" title="Link to this definition">¶</a></dt>
+<dd><p>Calculates the differences between two ABX XML files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>xml_file</strong> (<em>str</em>) – The name of the XML file to compare.</p></li>
+<li><p><strong>dir1</strong> (<em>str</em>) – The directory of the first XML version.</p></li>
+<li><p><strong>dir2</strong> (<em>str</em>) – The directory of the second XML version.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.db_diff">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">db_diff</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename_database_of_interest</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.db_diff" title="Link to this definition">¶</a></dt>
+<dd><p>Calculates the differences between two database versions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename_database_of_interest</strong> (<em>str</em>) – The name of the database file whos old and new version will be compared.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed and updated.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.db_diff_helper">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">db_diff_helper</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename_database_of_interest</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.db_diff_helper" title="Link to this definition">¶</a></dt>
+<dd><p>Helper function to calculate the differences between two database versions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>filename_database_of_interest</strong> (<em>str</em>) – The name of the database file to compare.</p></li>
+<li><p><strong>dir1</strong> (<em>str</em>) – The directory of the first database version.</p></li>
+<li><p><strong>dir2</strong> (<em>str</em>) – The directory of the second database version.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed and updated.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.db_wal_helper">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">db_wal_helper</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filename_wal_of_interest</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.db_wal_helper" title="Link to this definition">¶</a></dt>
+<dd><p>Integrates any temporary database files (.db-wal) that may be around.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>filename_wal_of_interest</strong> (<em>str</em>) – The name of the database whos db-wal file to integrate.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.txt_diff">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">txt_diff</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">txt_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.txt_diff" title="Link to this definition">¶</a></dt>
+<dd><p>Calculates the differences between two text files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>txt_file</strong> (<em>str</em>) – The name of the text file to compare.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.txt_xml_diff">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">txt_xml_diff</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xml_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.txt_xml_diff" title="Link to this definition">¶</a></dt>
+<dd><p>Calculates the differences between two text (aka normal) XML files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>xml_file</strong> (<em>str</em>) – The name of the XML file to compare.</p></li>
+<li><p><strong>dir1</strong> (<em>str</em>) – The directory of the first XML version.</p></li>
+<li><p><strong>dir2</strong> (<em>str</em>) – The directory of the second XML version.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.xml_diff">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">xml_diff</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xml_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.xml_diff" title="Link to this definition">¶</a></dt>
+<dd><p>Calculates the differences between two XML files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>xml_file</strong> (<em>str</em>) – The name of the XML file to compare.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed and updated.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.file_diff.xml_diff_helper">
+<span class="sig-prename descclassname"><span class="pre">src.utils.file_diff.</span></span><span class="sig-name descname"><span class="pre">xml_diff_helper</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xml_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dir2</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.file_diff.xml_diff_helper" title="Link to this definition">¶</a></dt>
+<dd><p>Helper function to calculate the differences between two XML files used to differentiate between normal XML and binary XML files.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>xml_file</strong> (<em>str</em>) – The name of the XML file to compare.</p></li>
+<li><p><strong>dir1</strong> (<em>str</em>) – The directory of the first XML version.</p></li>
+<li><p><strong>dir2</strong> (<em>str</em>) – The directory of the second XML version.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>A formatted string naming entries that have been added and removed.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="module-src.utils.frida_manager">
+<span id="frida-manager-module"></span><h2><strong>frida_manager</strong> module<a class="headerlink" href="#module-src.utils.frida_manager" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.frida_manager.</span></span><span class="sig-name descname"><span class="pre">FridaManager</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">logger</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_remote</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">socket</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">verbose</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">frida_install_dst</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'/data/local/tmp/'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.adb_check_root">
+<span class="sig-name descname"><span class="pre">adb_check_root</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.adb_check_root" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.download_frida_server">
+<span class="sig-name descname"><span class="pre">download_frida_server</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'latest'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.download_frida_server" title="Link to this definition">¶</a></dt>
+<dd><p>Downloads a frida server. By default the latest version is used.
+If you want to download a specific version you have to provide it trough the version parameter.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path</strong> – The path where the compressed frida-server should be downloded.</p></li>
+<li><p><strong>version</strong> – The version. By default the latest version will be used.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The location of the downloaded frida server in its compressed form.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>string</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.extract_frida_server_comp">
+<span class="sig-name descname"><span class="pre">extract_frida_server_comp</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">file_path</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.extract_frida_server_comp" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.get_frida_server_for_android_url">
+<span class="sig-name descname"><span class="pre">get_frida_server_for_android_url</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">version</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.get_frida_server_for_android_url" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.install_frida_server">
+<span class="sig-name descname"><span class="pre">install_frida_server</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dst_dir</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'/data/local/tmp/'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">version</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'latest'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.install_frida_server" title="Link to this definition">¶</a></dt>
+<dd><p>Install the frida server binary on the Android device.
+This includes downloading the frida-server, decompress it and pushing it to the Android device.
+By default it is pushed into the /data/local/tmp/ directory.
+Further the binary will be set to executable in order to run it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dst_dir</strong> – The destination folder where the frida-server binary should be installed (pushed).</p></li>
+<li><p><strong>version</strong> – The version. By default the latest version will be used.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.is_frida_server_running">
+<span class="sig-name descname"><span class="pre">is_frida_server_running</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.is_frida_server_running" title="Link to this definition">¶</a></dt>
+<dd><p>Checks if on the connected device a frida server is running.
+The test is done by the Android system command pidof and is looking for the string frida-server.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>True if a frida-server is running otherwise False.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.make_frida_server_executable">
+<span class="sig-name descname"><span class="pre">make_frida_server_executable</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">frida_server_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'/data/tmp/local/tmp/'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.make_frida_server_executable" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.remove_frida_server">
+<span class="sig-name descname"><span class="pre">remove_frida_server</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">frida_server_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'/data/local/tmp/'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.remove_frida_server" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.run_adb_command_as_root">
+<span class="sig-name descname"><span class="pre">run_adb_command_as_root</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">command</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.run_adb_command_as_root" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.run_frida_server">
+<span class="sig-name descname"><span class="pre">run_frida_server</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">frida_server_path</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'/data/local/tmp/'</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.run_frida_server" title="Link to this definition">¶</a></dt>
+<dd><p>This function is used to run the frida server on the connected device.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>frida_server_path</strong> (<em>str</em>) – The path where the frida server is located. 
+Default is “/data/local/tmp/”.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>True if the frida server started successfully, False otherwise.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>bool</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.frida_manager.FridaManager.stop_frida_server">
+<span class="sig-name descname"><span class="pre">stop_frida_server</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.frida_manager.FridaManager.stop_frida_server" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.fridump">
+<span id="fridump-module"></span><h2><strong>fridump</strong> module<a class="headerlink" href="#module-src.utils.fridump" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.fridump.</span></span><span class="sig-name descname"><span class="pre">Fridump</span></span><a class="headerlink" href="#src.utils.fridump.Fridump" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.MAX_SIZE">
+<span class="sig-name descname"><span class="pre">MAX_SIZE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">20971520</span></em><a class="headerlink" href="#src.utils.fridump.Fridump.MAX_SIZE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.PERMS">
+<span class="sig-name descname"><span class="pre">PERMS</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'rw-'</span></em><a class="headerlink" href="#src.utils.fridump.Fridump.PERMS" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.attach_to_app">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">attach_to_app</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pid</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.attach_to_app" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.dump_memory">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dump_memory</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pid</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">process_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.dump_memory" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.dump_to_file">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">dump_to_file</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">agent</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">base</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">directory</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.dump_to_file" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'Fridump'</span></em><a class="headerlink" href="#src.utils.fridump.Fridump.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.on_message">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">on_message</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">message</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.on_message" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.printProgress">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">printProgress</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">times</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">total</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">prefix</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">suffix</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">''</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">decimals</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">2</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">bar</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">100</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.printProgress" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.process">
+<span class="sig-name descname"><span class="pre">process</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.fridump.Fridump.process" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.fridump.Fridump.splitter">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">splitter</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">agent</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">base</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">max_size</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">error</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">directory</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.fridump.Fridump.splitter" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.pdf_report">
+<span id="pdf-report-module"></span><h2><strong>pdf_report</strong> module<a class="headerlink" href="#module-src.utils.pdf_report" title="Link to this heading">¶</a></h2>
+<p>Adapted From <a class="reference external" href="https://github.com/jurasec/python-reportlab-example">https://github.com/jurasec/python-reportlab-example</a></p>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.pdf_report.FooterCanvas">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.pdf_report.</span></span><span class="sig-name descname"><span class="pre">FooterCanvas</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.FooterCanvas" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">Canvas</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.FooterCanvas.draw_canvas">
+<span class="sig-name descname"><span class="pre">draw_canvas</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">page_count</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.FooterCanvas.draw_canvas" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.FooterCanvas.save">
+<span class="sig-name descname"><span class="pre">save</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.FooterCanvas.save" title="Link to this definition">¶</a></dt>
+<dd><p>Saves and close the PDF document in the file.
+If there is current data a ShowPage is executed automatically.
+After this operation the canvas must not be used further.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.FooterCanvas.showPage">
+<span class="sig-name descname"><span class="pre">showPage</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.FooterCanvas.showPage" title="Link to this definition">¶</a></dt>
+<dd><p>Close the current page and possibly start on a new page.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.utils.pdf_report.</span></span><span class="sig-name descname"><span class="pre">PDFReport</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">result_file_to_parse</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></p>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.APKTableMaker">
+<span class="sig-name descname"><span class="pre">APKTableMaker</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.APKTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.changedFileHashesTableMaker">
+<span class="sig-name descname"><span class="pre">changedFileHashesTableMaker</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.changedFileHashesTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.changedFilesTableMaker">
+<span class="sig-name descname"><span class="pre">changedFilesTableMaker</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.changedFilesTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.convert_png_to_jpeg">
+<span class="sig-name descname"><span class="pre">convert_png_to_jpeg</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">filenames</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">img_dir</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.convert_png_to_jpeg" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.data">
+<span class="sig-name descname"><span class="pre">data</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></em><a class="headerlink" href="#src.utils.pdf_report.PDFReport.data" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.draw_panel">
+<span class="sig-name descname"><span class="pre">draw_panel</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">width</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">height</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">main_number</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">title</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">symbol</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.draw_panel" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.firstPage">
+<span class="sig-name descname"><span class="pre">firstPage</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.firstPage" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.generalTableMaker">
+<span class="sig-name descname"><span class="pre">generalTableMaker</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">json_section_to_tableize</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.generalTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.image_grid">
+<span class="sig-name descname"><span class="pre">image_grid</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.image_grid" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.inputFileName">
+<span class="sig-name descname"><span class="pre">inputFileName</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></em><a class="headerlink" href="#src.utils.pdf_report.PDFReport.inputFileName" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.make_header">
+<span class="sig-name descname"><span class="pre">make_header</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">header_array</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.make_header" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.newFileHashesTableMaker">
+<span class="sig-name descname"><span class="pre">newFileHashesTableMaker</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.newFileHashesTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.pageHeader">
+<span class="sig-name descname"><span class="pre">pageHeader</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">content</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.pageHeader" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.summaryTableMaker">
+<span class="sig-name descname"><span class="pre">summaryTableMaker</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.summaryTableMaker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.utils.pdf_report.PDFReport.timelinePage">
+<span class="sig-name descname"><span class="pre">timelinePage</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.pdf_report.PDFReport.timelinePage" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.utils.timeline_generator">
+<span id="timeline-generator-module"></span><h2><strong>timeline_generator</strong> module<a class="headerlink" href="#module-src.utils.timeline_generator" title="Link to this heading">¶</a></h2>
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.timeline_generator.create_timeline">
+<span class="sig-prename descclassname"><span class="pre">src.utils.timeline_generator.</span></span><span class="sig-name descname"><span class="pre">create_timeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">events</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">filename</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">duration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.timeline_generator.create_timeline" title="Link to this definition">¶</a></dt>
+<dd><p>Create a timeline plot with custom colors for different event types.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>events</strong> – A list of tuples where each tuple contains the event type, timestamp, and description.</p></li>
+<li><p><strong>filename</strong> – The name of the PNG file to save the timeline to.</p></li>
+<li><p><strong>duration</strong> – Duration of one of the actions</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.timeline_generator.filter_list">
+<span class="sig-prename descclassname"><span class="pre">src.utils.timeline_generator.</span></span><span class="sig-name descname"><span class="pre">filter_list</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">input_list</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.timeline_generator.filter_list" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="src.utils.timeline_generator.parse_timeline">
+<span class="sig-prename descclassname"><span class="pre">src.utils.timeline_generator.</span></span><span class="sig-name descname"><span class="pre">parse_timeline</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">output_file</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.utils.timeline_generator.parse_timeline" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</section>
+<section id="module-src.utils.toolbox">
+<span id="toolbox-module"></span><h2><strong>toolbox</strong> module<a class="headerlink" href="#module-src.utils.toolbox" title="Link to this heading">¶</a></h2>
+</section>
+<section id="module-src.utils">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-src.utils" title="Link to this heading">¶</a></h2>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="sidebar">
+          
+          <h3>Table of Contents</h3>
+          <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="instructions.html">Install Instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="groundtruthapk.html">Ground Truth APK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.datagather.html">datagather package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.functionality.html">functionality package</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">utils package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.CustomLoggerFormatter"><strong>CustomLoggerFormatter</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.actionQ"><strong>actionQ</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.adb"><strong>adb</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.apk_downloader"><strong>apk_downloader</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.ccl_abx"><strong>ccl_abx</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.file_diff"><strong>file_diff</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.frida_manager"><strong>frida_manager</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.fridump"><strong>fridump</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.pdf_report"><strong>pdf_report</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.timeline_generator"><strong>timeline_generator</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils.toolbox"><strong>toolbox</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.utils">Module contents</a></li>
+</ul>
+</li>
+</ul>
+
+          <search role="search">
+            <h3 style="margin-top: 1.5em;">Search</h3>
+            <form class="search" action="search.html" method="get">
+                <input type="text" name="q" />
+                <input type="submit" value="Go" />
+            </form>
+          </search>
+
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+    <div class="footer-wrapper">
+      <div class="footer">
+        <div class="left">
+          <div role="navigation" aria-label="Related">
+            <a href="src.functionality.html" title="functionality package"
+              >previous</a> |
+            <a href="py-modindex.html" title="Python Module Index"
+              >modules</a> |
+            <a href="genindex.html" title="General Index"
+              >index</a>
+          </div>
+          <div role="note" aria-label="source link">
+              <br/>
+              <a href="_sources/src.utils.rst.txt"
+                rel="nofollow">Show Source</a>
+          </div>
+        </div>
+
+        <div class="right">
+          
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2024, Erik Nathrath.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.0.2.
+    </div>
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

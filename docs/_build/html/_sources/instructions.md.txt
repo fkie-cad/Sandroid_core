@@ -1,0 +1,30 @@
+# Install Instructions
+## Setup
+You'll need:
+- Python 3.10 or newer
+- sqldiff
+- trigdroid
+- Android Studio
+- Android SDK & ADB (Comes with Studio)
+- A running emulator
+
+#### Step by step instruction:
+```bash
+$ sudo apt install python3
+$ sudo apt-get install sqlite3-tools
+$ git clone https://gitlab.fkie.fraunhofer.de/def/afae.git && cd afae
+$ pip install -r requirements.txt
+```
+- Download Android Studio from https://developer.android.com/studio, then create an emulator like this:
+- Open Android Studio
+- Click "more options"
+- from there, open "Virtual device manager"
+- Click "Create device"
+- Choose a phone (Preprogrammed actions are intended for Pixel 5). If you choose a phone with play services, you will need to jailbreak it before you can use the tool.
+- Choose an API
+- Click Finish
+- Start the emulator (little play button in the virtual device manager)
+
+
+## Dependencies
+- sqldiff: https://manpages.debian.org/unstable/sqlite3/sqldiff.1.en.html

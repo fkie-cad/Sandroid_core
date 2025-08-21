@@ -1,0 +1,159 @@
+src.datagather.network
+======================
+
+.. py:module:: src.datagather.network
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.datagather.network.Network
+
+
+Module Contents
+---------------
+
+.. py:class:: Network
+
+   Bases: :py:obj:`src.datagather.datagather.DataGather`
+
+
+   Abstract base class for all modules that perform some data gathering.
+
+   **Methods:**
+
+   - :meth:`gather`: Abstract method to gather data.
+   - :meth:`return_data`: Abstract method to return gathered data.
+   - :meth:`pretty_print`: Abstract method to pretty print the gathered data.
+
+
+   .. py:attribute:: internal_run_counter
+      :value: 1
+
+
+
+   .. py:attribute:: connections_made
+      :value: None
+
+
+
+   .. py:attribute:: dns_requests
+
+
+   .. py:attribute:: logger
+
+
+   .. py:attribute:: _path
+      :value: 'src/Data/network_trace_pull/'
+
+
+
+   .. py:attribute:: _emulator_path
+      :value: 'data/local/tmp/'
+
+
+
+   .. py:attribute:: _trace_file_name
+      :value: 'network_trace_run_'
+
+
+
+   .. py:attribute:: performed_diff
+      :value: False
+
+
+
+   .. py:method:: gather()
+
+      Gather data.
+
+      **Raises:**
+
+      - :class:`NotImplementedError`: If the method is not implemented in a subclass.
+
+
+
+   .. py:method:: return_data()
+
+      Return gathered data.
+
+      **Returns:**
+
+      - **Any**: The gathered data.
+
+      **Raises:**
+
+      - :class:`NotImplementedError`: If the method is not implemented in a subclass.
+
+
+
+   .. py:method:: pretty_print()
+
+      Pretty print the gathered data.
+
+      **Raises:**
+
+      - :class:`NotImplementedError`: If the method is not implemented in a subclass.
+
+
+
+   .. py:method:: tcpdump_thread()
+
+
+   .. py:method:: get_path()
+      :classmethod:
+
+
+
+   .. py:method:: get_file_name()
+      :classmethod:
+
+
+
+   .. py:method:: extract_dns_requests_for_all_pcaps()
+
+      Extracts DNS requests from a series of PCAP files and compares them
+      against a 'noise' PCAP file to identify unique DNS requests.
+
+      Returns:
+          list: A list of unique DNS requests found in the PCAP files excluding those found in the 'noise' PCAP.
+
+
+
+   .. py:method:: extract_dns_requests_from_pcap(pcap_path)
+      :classmethod:
+
+
+      Extracts all requested domain names from a PCAP file.
+
+      :param pcap_path: Path to the PCAP file
+      :return: A set of domain names
+
+
+
+   .. py:method:: extract_target_ips_and_ports_for_all_pcaps()
+
+      Extracts target IPs and ports from a series of PCAP files and compares them
+      against a 'noise' PCAP file to identify unique target IPs and ports.
+
+      Returns:
+          set: A set of unique target IPs and ports found in the PCAP files excluding those found in the 'noise' PCAP.
+
+
+
+   .. py:method:: extract_target_ips_and_ports(pcap_path)
+      :classmethod:
+
+
+      Extract all target IPs and ports from a pcap file.
+
+      :param pcap_path: Path to the pcap file
+      :return: A set of target IPs and ports in the format "IP:Port"
+
+
+
+   .. py:method:: count_bytes(ip_address, port, pcap_file)
+
+

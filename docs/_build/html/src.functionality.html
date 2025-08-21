@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>functionality package &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=a746c00c" />
+    <link rel="stylesheet" type="text/css" href="_static/agogo.css?v=ee97e451" />
+    <script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=9a2dae69"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="utils package" href="src.utils.html" />
+    <link rel="prev" title="datagather package" href="src.datagather.html" /> 
+  </head><body>
+    <div class="header-wrapper" role="banner">
+      <div class="header">
+        <div class="headertitle"><a
+          href="index.html">Sandroid 0.4.1 documentation</a></div>
+        <div class="rel" role="navigation" aria-label="Related">
+          <a href="src.datagather.html" title="datagather package"
+             accesskey="P">previous</a> |
+          <a href="src.utils.html" title="utils package"
+             accesskey="N">next</a> |
+          <a href="py-modindex.html" title="Python Module Index"
+             >modules</a> |
+          <a href="genindex.html" title="General Index"
+             accesskey="I">index</a>
+        </div>
+       </div>
+    </div>
+
+    <div class="content-wrapper">
+      <div class="content">
+        <div class="document">
+            
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="functionality-package">
+<h1>functionality package<a class="headerlink" href="#functionality-package" title="Link to this heading">¶</a></h1>
+<section id="module-src.functionality.functionality">
+<span id="functionality-module"></span><h2><strong>functionality</strong> module<a class="headerlink" href="#module-src.functionality.functionality" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.functionality.functionality.Functionality">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.functionality.functionality.</span></span><span class="sig-name descname"><span class="pre">Functionality</span></span><a class="headerlink" href="#src.functionality.functionality.Functionality" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">ABC</span></code></p>
+<p>Abstract base class for all modules that perform some functionality on the emulator.</p>
+<p>This class defines the common interface for all functionality modules. Subclasses must implement the
+<cite>perform</cite> method, which carries out the specific functionality. Additionally, when performing an action,
+it is essential to set the <cite>action_time</cite> in the toolbox.</p>
+<dl class="simple">
+<dt>Attributes:</dt><dd><p>None</p>
+</dd>
+<dt>Methods:</dt><dd><dl class="simple">
+<dt>perform(): Abstract method to be implemented by subclasses. Performs the specific functionality.</dt><dd><p>Must set the <cite>action_time</cite> in the toolbox.
+:returns: None
+:rtype: None</p>
+</dd>
+</dl>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.functionality.Functionality.perform">
+<em class="property"><span class="pre">abstract</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">perform</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.functionality.Functionality.perform" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.functionality.player">
+<span id="player-module"></span><h2><strong>player</strong> module<a class="headerlink" href="#module-src.functionality.player" title="Link to this heading">¶</a></h2>
+<p>This code is an excerpt from “adb-event-record” by Tzutalin.
+(<a class="reference external" href="https://github.com/tzutalin/adb-event-record">https://github.com/tzutalin/adb-event-record</a>)
+The excerpt was modified to fit the needs of this project</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.functionality.player.Player">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.functionality.player.</span></span><span class="sig-name descname"><span class="pre">Player</span></span><a class="headerlink" href="#src.functionality.player.Player" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.functionality.functionality.Functionality" title="src.functionality.functionality.Functionality"><code class="xref py py-class docutils literal notranslate"><span class="pre">Functionality</span></code></a></p>
+<p>Represents a player functionality for performing actions.</p>
+<p>This class handles replaying actions based on recorded data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Variables<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>STORE_LINE_RE</strong> – Regular expression pattern for parsing stored data lines.</p></li>
+<li><p><strong>logger</strong> – Logger instance for logging messages related to player functionality.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.player.Player.STORE_LINE_RE">
+<span class="sig-name descname"><span class="pre">STORE_LINE_RE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">re.compile('(\\S+)</span> <span class="pre">(\\S+)</span> <span class="pre">(\\S+)</span> <span class="pre">(\\S+)</span> <span class="pre">(\\S+)$')</span></em><a class="headerlink" href="#src.functionality.player.Player.STORE_LINE_RE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.player.Player.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'player'</span></em><a class="headerlink" href="#src.functionality.player.Player.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.player.Player.perform">
+<span class="sig-name descname"><span class="pre">perform</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.player.Player.perform" title="Link to this definition">¶</a></dt>
+<dd><p>Perform the player action.</p>
+<p>This method replays recorded actions based on stored data.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.functionality.recorder">
+<span id="recorder-module"></span><h2><strong>recorder</strong> module<a class="headerlink" href="#module-src.functionality.recorder" title="Link to this heading">¶</a></h2>
+<p>This code is an excerpt from “adb-event-record” by Tzutalin.
+(<a class="reference external" href="https://github.com/tzutalin/adb-event-record">https://github.com/tzutalin/adb-event-record</a>)
+The excerpt was modified to fit the needs of this project</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.functionality.recorder.Recorder">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.functionality.recorder.</span></span><span class="sig-name descname"><span class="pre">Recorder</span></span><a class="headerlink" href="#src.functionality.recorder.Recorder" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.functionality.functionality.Functionality" title="src.functionality.functionality.Functionality"><code class="xref py py-class docutils literal notranslate"><span class="pre">Functionality</span></code></a></p>
+<p>Represents a recorder functionality for capturing events.</p>
+<p>This class handles recording events based on input data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Variables<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>EVENT_LINE_RE</strong> – Regular expression pattern for parsing event lines.</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.recorder.Recorder.EVENT_LINE_RE">
+<span class="sig-name descname"><span class="pre">EVENT_LINE_RE</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">re.compile('(\\S+):</span> <span class="pre">(\\S+)</span> <span class="pre">(\\S+)</span> <span class="pre">(\\S+)$')</span></em><a class="headerlink" href="#src.functionality.recorder.Recorder.EVENT_LINE_RE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.recorder.Recorder.perform">
+<span class="sig-name descname"><span class="pre">perform</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.recorder.Recorder.perform" title="Link to this definition">¶</a></dt>
+<dd><p>This method captures events and writes them to a file.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.recorder.Recorder.write_dummy_event">
+<span class="sig-name descname"><span class="pre">write_dummy_event</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.recorder.Recorder.write_dummy_event" title="Link to this definition">¶</a></dt>
+<dd><p>Write a dummy event to the output file.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.recorder.Recorder.write_event">
+<span class="sig-name descname"><span class="pre">write_event</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">dev</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">etype</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ecode</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.recorder.Recorder.write_event" title="Link to this definition">¶</a></dt>
+<dd><p>Write an input event to the output file.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>dev</strong> (<em>str</em>) – Device identifier.</p></li>
+<li><p><strong>etype</strong> (<em>str</em>) – Event type.</p></li>
+<li><p><strong>ecode</strong> (<em>str</em>) – Event code.</p></li>
+<li><p><strong>data</strong> (<em>str</em>) – Event data.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.functionality.screenshot">
+<span id="screenshot-module"></span><h2><strong>screenshot</strong> module<a class="headerlink" href="#module-src.functionality.screenshot" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.functionality.screenshot.</span></span><span class="sig-name descname"><span class="pre">Screenshot</span></span><a class="headerlink" href="#src.functionality.screenshot.Screenshot" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.functionality.functionality.Functionality" title="src.functionality.functionality.Functionality"><code class="xref py py-class docutils literal notranslate"><span class="pre">Functionality</span></code></a></p>
+<p>This class provides functionality for capturing screenshots.</p>
+<dl class="simple">
+<dt>Methods:</dt><dd><ul class="simple">
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.perform" title="src.functionality.screenshot.Screenshot.perform"><code class="xref py py-meth docutils literal notranslate"><span class="pre">perform()</span></code></a>: Starts the screenshot thread.</p></li>
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.set_action" title="src.functionality.screenshot.Screenshot.set_action"><code class="xref py py-meth docutils literal notranslate"><span class="pre">set_action()</span></code></a>: Sets the current screenshot action.</p></li>
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.get_action" title="src.functionality.screenshot.Screenshot.get_action"><code class="xref py py-meth docutils literal notranslate"><span class="pre">get_action()</span></code></a>: Retrieves the current screenshot action.</p></li>
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.screenshot_thread" title="src.functionality.screenshot.Screenshot.screenshot_thread"><code class="xref py py-meth docutils literal notranslate"><span class="pre">screenshot_thread()</span></code></a>: Captures screenshots at regular intervals.</p></li>
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.stop" title="src.functionality.screenshot.Screenshot.stop"><code class="xref py py-meth docutils literal notranslate"><span class="pre">stop()</span></code></a>: Stops the screenshot thread.</p></li>
+<li><p><a class="reference internal" href="#src.functionality.screenshot.Screenshot.generate_name" title="src.functionality.screenshot.Screenshot.generate_name"><code class="xref py py-meth docutils literal notranslate"><span class="pre">generate_name()</span></code></a>: Generates a unique screenshot filename.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.actions">
+<span class="sig-name descname"><span class="pre">actions</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">&lt;queue.Queue</span> <span class="pre">object&gt;</span></em><a class="headerlink" href="#src.functionality.screenshot.Screenshot.actions" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.finished">
+<span class="sig-name descname"><span class="pre">finished</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.functionality.screenshot.Screenshot.finished" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.generate_name">
+<span class="sig-name descname"><span class="pre">generate_name</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.generate_name" title="Link to this definition">¶</a></dt>
+<dd><p>Generate a unique screenshot filename.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The generated screenshot filename.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.get_action">
+<span class="sig-name descname"><span class="pre">get_action</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.get_action" title="Link to this definition">¶</a></dt>
+<dd><p>Retrieve the current screenshot action.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The current screenshot action.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>str</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.perform">
+<span class="sig-name descname"><span class="pre">perform</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.perform" title="Link to this definition">¶</a></dt>
+<dd><p>Start the screenshot thread.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.screenshot_thread">
+<span class="sig-name descname"><span class="pre">screenshot_thread</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.screenshot_thread" title="Link to this definition">¶</a></dt>
+<dd><p>Capture screenshots at regular intervals. Meant to be run as a Thread.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.set_action">
+<span class="sig-name descname"><span class="pre">set_action</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">action</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.set_action" title="Link to this definition">¶</a></dt>
+<dd><p>Set the current screenshot action.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>action</strong> (<em>Anything that can reasonably be converted to a String</em>) – The screenshot action.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.screenshot.Screenshot.stop">
+<span class="sig-name descname"><span class="pre">stop</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.screenshot.Screenshot.stop" title="Link to this definition">¶</a></dt>
+<dd><p>Stop the screenshot thread.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.functionality.trigdroid">
+<span id="trigdroid-module"></span><h2><strong>trigdroid</strong> module<a class="headerlink" href="#module-src.functionality.trigdroid" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">src.functionality.trigdroid.</span></span><span class="sig-name descname"><span class="pre">Trigdroid</span></span><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="#src.functionality.functionality.Functionality" title="src.functionality.functionality.Functionality"><code class="xref py py-class docutils literal notranslate"><span class="pre">Functionality</span></code></a></p>
+<p>Wrapper for the Trigdroid Tool to integrate it into Sandroid</p>
+<dl class="simple">
+<dt><strong>Attributes:</strong></dt><dd><p>logger (Logger): Logger instance for Trigdroid.
+did_dummy_round (bool): Indicates if a dummy round was performed.
+override_package_name (str): Name of the overridden package.
+package_name_overridden (bool): Indicates if the package name was overridden.</p>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.did_dummy_round">
+<span class="sig-name descname"><span class="pre">did_dummy_round</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">True</span></em><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.did_dummy_round" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.logger">
+<span class="sig-name descname"><span class="pre">logger</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'trigdroid'</span></em><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.logger" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.overide_package">
+<span class="sig-name descname"><span class="pre">overide_package</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">new_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.overide_package" title="Link to this definition">¶</a></dt>
+<dd><p>Overrides the package name with a new name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>new_name</strong> (<em>str</em>) – The new package name.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.override_package_name">
+<span class="sig-name descname"><span class="pre">override_package_name</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></em><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.override_package_name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.package_name_overridden">
+<span class="sig-name descname"><span class="pre">package_name_overridden</span></span><em class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">False</span></em><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.package_name_overridden" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.perform">
+<span class="sig-name descname"><span class="pre">perform</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.perform" title="Link to this definition">¶</a></dt>
+<dd><p>Executes the main functionality of Trigdroid.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.run_ccf">
+<span class="sig-name descname"><span class="pre">run_ccf</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.run_ccf" title="Link to this definition">¶</a></dt>
+<dd><p>Runs the Trigdroid CCF utility.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="src.functionality.trigdroid.Trigdroid.run_trigdroid">
+<span class="sig-name descname"><span class="pre">run_trigdroid</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">package_name</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#src.functionality.trigdroid.Trigdroid.run_trigdroid" title="Link to this definition">¶</a></dt>
+<dd><p>Runs the Trigdroid with the specified package name.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Always uses the default config file (“config.yml”) which should be in the root folder where sandroid is run</p>
+</div>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>package_name</strong> (<em>str</em>) – The name of the package to be tested.</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="module-src.functionality">
+<span id="module-contents"></span><h2>Module contents<a class="headerlink" href="#module-src.functionality" title="Link to this heading">¶</a></h2>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="sidebar">
+          
+          <h3>Table of Contents</h3>
+          <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="instructions.html">Install Instructions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="groundtruthapk.html">Ground Truth APK</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.datagather.html">datagather package</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">functionality package</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality.functionality"><strong>functionality</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality.player"><strong>player</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality.recorder"><strong>recorder</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality.screenshot"><strong>screenshot</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality.trigdroid"><strong>trigdroid</strong> module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#module-src.functionality">Module contents</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="src.utils.html">utils package</a></li>
+</ul>
+
+          <search role="search">
+            <h3 style="margin-top: 1.5em;">Search</h3>
+            <form class="search" action="search.html" method="get">
+                <input type="text" name="q" />
+                <input type="submit" value="Go" />
+            </form>
+          </search>
+
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+    <div class="footer-wrapper">
+      <div class="footer">
+        <div class="left">
+          <div role="navigation" aria-label="Related">
+            <a href="src.datagather.html" title="datagather package"
+              >previous</a> |
+            <a href="src.utils.html" title="utils package"
+              >next</a> |
+            <a href="py-modindex.html" title="Python Module Index"
+              >modules</a> |
+            <a href="genindex.html" title="General Index"
+              >index</a>
+          </div>
+          <div role="note" aria-label="source link">
+              <br/>
+              <a href="_sources/src.functionality.rst.txt"
+                rel="nofollow">Show Source</a>
+          </div>
+        </div>
+
+        <div class="right">
+          
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2024, Erik Nathrath.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.0.2.
+    </div>
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

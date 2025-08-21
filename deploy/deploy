@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Function to check if a command is available
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+setup_and_start_emulator() {
+    local script_dir=$(cd "$(dirname "$0")" && pwd)
+    local emulator_dir="$script_dir/emulator"
+    local emulator_archive="$script_dir/emulator.tar.xz"
+    local start_script="$emulator_dir/install_and_start_emulator.sh"
+
+    # Check if emulator directory exists, if not unpack the archive
+    if [ ! -d "$emulator_dir" ]; then
+        echo "Unpacking emulator, this may up to 5 minutes on first run"
+        if [ -f "$emulator_archive" ]; then
+            # Check if pv is available for progress
+            if command_exists pv; then
+                pv "$emulator_archive" | tar -xJf - -C "$script_dir"
+            else
+                # Fallback: show spinning indicator
+                tar -xJf "$emulator_archive" -C "$script_dir" &
+                local tar_pid=$!
+                local spin='-\|/'
+                local i=0
+                echo -n "Unpacking... "
+                while kill -0 $tar_pid 2>/dev/null; do
+                    i=$(( (i+1) %4 ))
+                    printf "\r\033[KUnpacking... ${spin:$i:1}"
+                    sleep 0.5
+                done
+                printf "\r\033[K"
+                wait $tar_pid
+            fi
+            echo "Successfully unpacked emulator"
+        else
+            echo "Error: emulator.tar.xz not found at $emulator_archive"
+            exit 1
+        fi
+    fi
+
+    # Run the emulator start script
+    if [ -f "$start_script" ]; then
+        echo "Starting emulator..."
+        bash "$start_script"
+    else
+        echo "Error: Start script not found at $start_script (did you cancel the unpacking?)"
+        exit 1
+    fi
+}
+
+# Check if Docker is installed
+if ! command_exists docker; then
+    echo "Docker is not installed or not in PATH. Please install Docker or add it to your PATH."
+    exit 1
+fi
+
+# Check if adb is installed
+if ! command_exists adb; then
+    echo "adb is not installed or not in PATH. Please install it or add it to your PATH."
+    exit 1
+fi
+
+# Get the output folder from command line parameter or use default
+output_folder="${1:-$(pwd)/output}"
+
+# Extract the folder name without the path
+folder_name=$(basename "$output_folder")
+
+setup_and_start_emulator
+
+# Check if the Docker image file exists
+if [ -f "sandroid_image.tar.gz" ]; then
+    echo "Loading Sandroid Docker image..."
+    sudo docker load -i sandroid_image.tar.gz
+else
+    echo "Warning: sandroid_image.tar not found. Still attempting to run the image in case you deleted it to free up space after it was already loaded..."
+fi
+
+# Run the Sandroid container
+echo "Starting Sandroid container..."
+sudo docker run -it --name sandroid --net=host --rm \
+ -v ~/.emulator_console_auth_token:/root/.emulator_console_auth_token:ro \
+ -v "$output_folder:/sandroid/$folder_name" \
+ sandroid
+
+echo "Sandroid container has been stopped."

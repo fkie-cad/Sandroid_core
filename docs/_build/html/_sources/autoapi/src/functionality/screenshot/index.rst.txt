@@ -1,0 +1,72 @@
+src.functionality.screenshot
+============================
+
+.. py:module:: src.functionality.screenshot
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.functionality.screenshot.logger
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.functionality.screenshot.Screenshot
+
+
+Module Contents
+---------------
+
+.. py:data:: logger
+
+.. py:class:: Screenshot
+
+   Bases: :py:obj:`src.functionality.functionality.Functionality`
+
+
+   Abstract base class for all modules that perform some functionality on the emulator
+
+
+   .. py:attribute:: actions
+
+
+   .. py:attribute:: finished
+      :value: False
+
+
+
+   .. py:attribute:: interval
+
+
+   .. py:attribute:: thread
+
+
+   .. py:attribute:: daemon
+      :value: True
+
+
+
+   .. py:method:: perform()
+
+
+   .. py:method:: set_action(action)
+
+
+   .. py:method:: get_action()
+
+
+   .. py:method:: screenshot_thread()
+
+
+   .. py:method:: stop()
+
+
+   .. py:method:: generate_name()
+
+

@@ -1,0 +1,48 @@
+src.functionality.player
+========================
+
+.. py:module:: src.functionality.player
+
+.. autoapi-nested-parse::
+
+   This code is an excerpt from "adb-event-record" by Tzutalin.
+   (https://github.com/tzutalin/adb-event-record)
+   The excerpt was modified to fit the needs of this project
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   src.functionality.player.p
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   src.functionality.player.Player
+
+
+Module Contents
+---------------
+
+.. py:class:: Player
+
+   Bases: :py:obj:`src.functionality.functionality.Functionality`
+
+
+   .. py:attribute:: STORE_LINE_RE
+
+
+   .. py:attribute:: logger
+
+
+   .. py:method:: perform()
+
+
+.. py:data:: p
+

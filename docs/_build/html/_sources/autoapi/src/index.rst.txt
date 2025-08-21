@@ -1,0 +1,17 @@
+src
+===
+
+.. py:module:: src
+
+
+Subpackages
+-----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /autoapi/src/datagather/index
+   /autoapi/src/functionality/index
+   /autoapi/src/utils/index
+
+

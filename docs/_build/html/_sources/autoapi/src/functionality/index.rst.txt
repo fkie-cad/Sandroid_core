@@ -1,0 +1,19 @@
+src.functionality
+=================
+
+.. py:module:: src.functionality
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /autoapi/src/functionality/functionality/index
+   /autoapi/src/functionality/player/index
+   /autoapi/src/functionality/recorder/index
+   /autoapi/src/functionality/screenshot/index
+   /autoapi/src/functionality/trigdroid/index
+
+
