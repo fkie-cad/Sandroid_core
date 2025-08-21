@@ -17,6 +17,9 @@ secret-finder/
 research/
 temp_analysis/
 
+#misc
+*.tar.gz
+
 # venv
 env/
 venv/
