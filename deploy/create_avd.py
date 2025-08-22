@@ -2,6 +2,7 @@
 # Cross-platform AVD creator with SDK/AVD autodetect
 # Windows 10/11 (x64/ARM64), Linux (x64/ARM64), macOS (Intel/Apple Silicon)
 
+import importlib.util
 import os
 import platform
 import re
@@ -13,24 +14,19 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+from pathlib import Path
 
 
 # --------- try to enable line-editing (arrow keys) ----------
 def _enable_line_editing():
-    try:
-        if platform.system().lower().startswith("win"):
-            # On Windows, optionally support pyreadline3 if installed
-            import readline  # may be pyreadline3 behind the scenes
-        else:
-            # Unix/macOS: builtin readline is usually available
-            import readline  # noqa
-    except Exception:
-        # No readline available; input() will still work, just without cursor movement
-        pass
+    # Check if readline is available using importlib
+    if importlib.util.find_spec("readline") is not None:
+        import readline  # noqa: F401
+    # No readline available; input() will still work, just without cursor movement
 _enable_line_editing()
 
 # ============ Defaults (can be overridden by env or user input) ============
-DEFAULT_ROOT = os.environ.get("AVD_ROOT", os.path.expanduser("~/android_avd"))
+DEFAULT_ROOT = os.environ.get("AVD_ROOT", str(Path("~/android_avd").expanduser()))
 DEFAULT_API  = os.environ.get("AVD_API_LEVEL", "34")
 DEFAULT_NAME = os.environ.get("AVD_NAME", f"universal-avd-{DEFAULT_API}-googleapis")
 # ==========================================================================
@@ -39,20 +35,31 @@ def info(m): print(f"[+] {m}")
 def warn(m): print(f"[!] {m}")
 def err(m):  print(f"[x] {m}")
 
-def is_windows(): return platform.system().lower().startswith("win")
-def is_macos():   return platform.system().lower() == "darwin"
-def is_linux():   return platform.system().lower() == "linux"
+def is_windows():
+    return platform.system().lower().startswith("win")
+
+def is_macos():
+    return platform.system().lower() == "darwin"
+
+def is_linux():
+    return platform.system().lower() == "linux"
 
 def cpu_arch():
     a = platform.machine().lower()
-    if a in ("x86_64","amd64"): return "x86_64"
-    if a in ("arm64","aarch64"): return "arm64"
+    if a in ("x86_64","amd64"):
+        return "x86_64"
+    if a in ("arm64","aarch64"):
+        return "arm64"
     pa = os.environ.get("PROCESSOR_ARCHITECTURE","").lower()
-    if pa in ("amd64","x86_64"): return "x86_64"
-    if pa in ("arm64","aarch64"): return "arm64"
+    if pa in ("amd64","x86_64"):
+        return "x86_64"
+    if pa in ("arm64","aarch64"):
+        return "arm64"
     return a
 
-def ensure_dir(p): os.makedirs(p, exist_ok=True); return p
+def ensure_dir(p):
+    Path(p).mkdir(parents=True, exist_ok=True)
+    return p
 def make_exec(p):
     if os.path.exists(p) and not is_windows():
         st = os.stat(p); os.chmod(p, st.st_mode | stat.S_IEXEC)
