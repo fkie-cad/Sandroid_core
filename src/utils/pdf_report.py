@@ -1,19 +1,28 @@
+"""Adapted From https://github.com/jurasec/python-reportlab-example
 """
-Adapted From https://github.com/jurasec/python-reportlab-example
-"""
-import os
-from reportlab.pdfgen import canvas
-from reportlab.platypus import (SimpleDocTemplate, Paragraph, PageBreak, Image, Spacer, Table, TableStyle)
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER, TA_JUSTIFY
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.pagesizes import A4, inch
-from reportlab.graphics.shapes import Line, LineShape, Drawing
-from reportlab.lib.colors import Color
-from PIL import Image as PILImage
 import json
+import os
+
+from PIL import Image as PILImage
+from reportlab.graphics.shapes import Drawing, Line
+from reportlab.lib.colors import Color
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4, inch
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.pdfgen import canvas
+from reportlab.platypus import (
+    Image,
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from src.utils import timeline_generator
 from src.utils.toolbox import Toolbox
+
 
 class FooterCanvas(canvas.Canvas):
 
@@ -42,21 +51,21 @@ class FooterCanvas(canvas.Canvas):
         self.setStrokeColorRGB(0, 0, 0)
         self.setLineWidth(0.5)
         self.drawImage("assets/Fraunhofer_Logo.jpg", self.width-inch*8-5, self.height-50, width=100, height=20, preserveAspectRatio=True)
-        self.drawImage("assets/sandroid_logo.png", self.width - inch * 2, self.height-50, width=100, height=20, preserveAspectRatio=True, mask='auto')
+        self.drawImage("assets/sandroid_logo.png", self.width - inch * 2, self.height-50, width=100, height=20, preserveAspectRatio=True, mask="auto")
         # self.line(30, 760, A4[0] - 50, 760)
         self.line(66, 58, A4[0] - 66, 58)
-        self.setFont('Times-Roman', 10)
+        self.setFont("Times-Roman", 10)
         self.drawString(A4[0]-x, 45, page)
         self.restoreState()
 
 class PDFReport:
     data = None
-    inputFileName = ''
+    inputFileName = ""
     #logger = Toolbox.logger_factory("pdf_report")
 
     def __init__(self, path, result_file_to_parse):
         self.inputFileName = result_file_to_parse
-        inputFile = open(self.inputFileName, 'rb')
+        inputFile = open(self.inputFileName, "rb")
         self.data = json.loads(inputFile.read())
 
         self.path = path
@@ -79,16 +88,16 @@ class PDFReport:
                 case "Changed Files":
                     self.changedFilesTableMaker()
                 case "New Files":
-                    self.generalTableMaker('New Files')
+                    self.generalTableMaker("New Files")
                 case "Network":
-                    self.generalTableMaker('Network')
-                    self.generalTableMaker('Network IP:Port (send/recv)')
-                case 'Deleted Files':
-                    self.generalTableMaker('Deleted Files')
+                    self.generalTableMaker("Network")
+                    self.generalTableMaker("Network IP:Port (send/recv)")
+                case "Deleted Files":
+                    self.generalTableMaker("Deleted Files")
                 case "Processes":
-                    self.generalTableMaker('Processes')
+                    self.generalTableMaker("Processes")
                 case "Listening Sockets":
-                    self.generalTableMaker('Listening Sockets')
+                    self.generalTableMaker("Listening Sockets")
         for collected_data_item in self.data["Other Data"].keys():
             match collected_data_item:
                 case "APK Hashes":
@@ -98,12 +107,12 @@ class PDFReport:
                     self.changedFileHashesTableMaker()
                 case "AI Action Summary":
                     pass # Make page that displays action summary
-                    
+
 
         if len(os.listdir(f'{os.getenv("RAW_RESULTS_PATH")}screenshots')) != 0:
             self.pageHeader("Screenshots")
             self.image_grid()
-        
+
         # Build
         self.doc = SimpleDocTemplate(path, pagesize=A4)
         self.doc.multiBuild(self.elements, canvasmaker=FooterCanvas)
@@ -111,25 +120,25 @@ class PDFReport:
         inputFile.close()
 
     def firstPage(self):
-        img = Image('assets/Fraunhofer_Logo.jpg')
+        img = Image("assets/Fraunhofer_Logo.jpg")
         img.drawHeight = 0.5*inch
         img.drawWidth = 0.5*inch
-        img.hAlign = 'LEFT'
+        img.hAlign = "LEFT"
         self.elements.append(img)
 
         spacer = Spacer(30, 100)
         self.elements.append(spacer)
 
-        img = Image('assets/sandroid_logo.png')
+        img = Image("assets/sandroid_logo.png")
         img.drawHeight = 2.5*inch
         img.drawWidth = 2.5*inch
         self.elements.append(img)
-        
+
         spacer = Spacer(10, 40)
         self.elements.append(spacer)
 
         titleText = "Sandroid Forensic Report"
-        titleStyle = ParagraphStyle('Hed0', fontName='Helvetica-Bold', fontSize=30, leading=14, justifyBreaks=1, alignment=TA_CENTER, justifyLastLine=1)
+        titleStyle = ParagraphStyle("Hed0", fontName="Helvetica-Bold", fontSize=30, leading=14, justifyBreaks=1, alignment=TA_CENTER, justifyLastLine=1)
         title = Paragraph(titleText, titleStyle)
         self.elements.append(title)
 
@@ -141,15 +150,15 @@ class PDFReport:
         spacer = Spacer(10, 200)
         self.elements.append(spacer)
 
-        psDetalle = ParagraphStyle('Resumen', fontSize=9, leading=14, justifyBreaks=1, alignment=TA_LEFT, justifyLastLine=1)
+        psDetalle = ParagraphStyle("Resumen", fontSize=9, leading=14, justifyBreaks=1, alignment=TA_LEFT, justifyLastLine=1)
         text = """SANDROID FORENSIC REPORT<br/>
-        Device Name: """+str(self.data['Device Name'])+"""<br/>"""
-        
+        Device Name: """+str(self.data["Device Name"])+"""<br/>"""
+
         if "Other Data" in self.data and "AI Action Overview" in self.data["Other Data"]:
-            text += """Action: """+str(self.data['Other Data']["AI Action Overview"][0])+"""<br/>"""
-            
-        text += """Emulator relative action timestamp: """+str(self.data['Emulator relative action timestamp'])+"""<br/>
-        Action Duration: """+str(self.data['Action Duration'])+""" Seconds<br/>
+            text += """Action: """+str(self.data["Other Data"]["AI Action Overview"][0])+"""<br/>"""
+
+        text += """Emulator relative action timestamp: """+str(self.data["Emulator relative action timestamp"])+"""<br/>
+        Action Duration: """+str(self.data["Action Duration"])+""" Seconds<br/>
         """
         paragraphReportSummary = Paragraph(text, psDetalle)
         self.elements.append(paragraphReportSummary)
@@ -158,7 +167,7 @@ class PDFReport:
     def pageHeader(self, content):
         spacer = Spacer(10, 30)
         self.elements.append(spacer)
-        psHeaderText = ParagraphStyle('Hed0', fontSize=20, alignment=TA_LEFT, borderWidth=3, textColor=self.header_font_color, fontName='Helvetica-Bold')
+        psHeaderText = ParagraphStyle("Hed0", fontSize=20, alignment=TA_LEFT, borderWidth=3, textColor=self.header_font_color, fontName="Helvetica-Bold")
         paragraphReportHeader = Paragraph(content, psHeaderText)
         self.elements.append(paragraphReportHeader)
 
@@ -176,7 +185,7 @@ class PDFReport:
         self.elements.append(spacer)
 
     def timelinePage(self):
-        psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+        psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
         text = "Timeline"
         paragraphReportHeader = Paragraph(text, psHeaderText)
         self.elements.append(paragraphReportHeader)
@@ -189,8 +198,8 @@ class PDFReport:
         img.drawHeight = img.drawHeight*0.8
         self.elements.append(img)
 
-    def generalTableMaker(self, json_section_to_tableize):        
-        psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+    def generalTableMaker(self, json_section_to_tableize):
+        psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
         text = json_section_to_tableize
         paragraphReportHeader = Paragraph(text, psHeaderText)
         self.elements.append(paragraphReportHeader)
@@ -222,15 +231,15 @@ class PDFReport:
             data.append(formattedLineData)
             formattedLineData = []
             lineNum = lineNum+1
-        
+
         table = Table(data, colWidths=[50,450])
         tStyle = TableStyle([ #('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                ('BACKGROUND',(0, 0), (-1, 0), self.table_header_background_color),
-                ('SPAN',(0,-1),(-2,-1))
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                ("BACKGROUND",(0, 0), (-1, 0), self.table_header_background_color),
+                ("SPAN",(0,-1),(-2,-1))
                 ])
         table.setStyle(tStyle)
         self.elements.append(table)
@@ -238,8 +247,8 @@ class PDFReport:
 
 
     def summaryTableMaker(self):
-        psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
-        text = 'Summary'
+        psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+        text = "Summary"
         paragraphReportHeader = Paragraph(text, psHeaderText)
         self.elements.append(paragraphReportHeader)
 
@@ -247,11 +256,11 @@ class PDFReport:
         self.elements.append(spacer)
 
         tStyle = TableStyle([
-                   ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                   ("ALIGN", (0, 0), (0, -1), "LEFT"),
                    #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                   ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                   ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                   ('BACKGROUND',(-2, -1),(-1, -1), self.highlight_color)
+                   ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                   ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                   ("BACKGROUND",(-2, -1),(-1, -1), self.highlight_color)
                    ])
 
         fontSize = 8
@@ -292,7 +301,7 @@ class PDFReport:
         self.elements.append(PageBreak())
 
     def changedFilesTableMaker(self):
-        psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+        psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
         text = "Changed Files"
         paragraphReportHeader = Paragraph(text, psHeaderText)
         self.elements.append(paragraphReportHeader)
@@ -305,7 +314,7 @@ class PDFReport:
         body_style.alignment = TA_LEFT
         body_style.fontSize = 7
 
-        # Create table headers       
+        # Create table headers
         data = [self.make_header(["No.", "File Name", "Changes"])]
 
         # Populate data from JSON
@@ -334,12 +343,12 @@ class PDFReport:
 
         # Apply table style (similar to other tables)
         tStyle = TableStyle([ #('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                ('BACKGROUND',(0, 0), (-1, 0), self.table_header_background_color),
-                ('SPAN',(0,-1),(-2,-1))
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                ("BACKGROUND",(0, 0), (-1, 0), self.table_header_background_color),
+                ("SPAN",(0,-1),(-2,-1))
                 ])
         table.setStyle(tStyle)
 
@@ -348,10 +357,10 @@ class PDFReport:
 
         # Add page break after the table
         self.elements.append(PageBreak())
-    
 
-    def APKTableMaker(self):        
-        psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+
+    def APKTableMaker(self):
+        psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
         text = "APKs & Hashes"
         paragraphReportHeader = Paragraph(text, psHeaderText)
         self.elements.append(paragraphReportHeader)
@@ -384,16 +393,16 @@ class PDFReport:
             data.append(formattedLineData)
             formattedLineData = []
             lineNum = lineNum+1
-        
+
         #print(data)
         table = Table(data, colWidths=[50, 250, 200])
         tStyle = TableStyle([ #('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
                 #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                ('BACKGROUND',(0, 0), (-1, 0), self.table_header_background_color),
-                ('SPAN',(0,-1),(-2,-1))
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                ("BACKGROUND",(0, 0), (-1, 0), self.table_header_background_color),
+                ("SPAN",(0,-1),(-2,-1))
                 ])
         table.setStyle(tStyle)
         self.elements.append(table)
@@ -420,7 +429,7 @@ class PDFReport:
         new_width = a4_width_inches / 4
         scale_factor = new_width / img_width
         new_height = img_height * scale_factor
-        
+
         # Determine the number of images per row based on the square root of the total number of images
         images_per_row = 4
 
@@ -437,20 +446,20 @@ class PDFReport:
         # Create a table with the rows of images
         image_table = Table(image_rows)
         self.elements.append(image_table)
-    
+
     def convert_png_to_jpeg(self, filenames, img_dir):
         #self.logger.info("Rendering Screenshots into PDF Report, might take some time.")
         for filename in filenames:
-            if filename.endswith('.png'):
+            if filename.endswith(".png"):
                 img = PILImage.open(img_dir+filename)
-                rgb_img = img.convert('RGB')
-                jpeg_filename = filename[:-4] + '.jpeg'
-                rgb_img.save(img_dir+jpeg_filename, 'JPEG', quality=90)
+                rgb_img = img.convert("RGB")
+                jpeg_filename = filename[:-4] + ".jpeg"
+                rgb_img.save(img_dir+jpeg_filename, "JPEG", quality=90)
                 os.remove(img_dir+filename)  # remove the original PNG file
 
 
     def newFileHashesTableMaker(self):
-            psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+            psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
             text = "Hashes of new files"
             paragraphReportHeader = Paragraph(text, psHeaderText)
             self.elements.append(paragraphReportHeader)
@@ -489,12 +498,12 @@ class PDFReport:
 
             # Apply table style (similar to other tables)
             tStyle = TableStyle([ #('GRID',(0, 0), (-1, -1), 0.5, grey),
-                    ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                    ("ALIGN", (0, 0), (0, -1), "LEFT"),
                     #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                    ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                    ('BACKGROUND',(0, 0), (-1, 0), self.table_header_background_color),
-                    ('SPAN',(0,-1),(-2,-1))
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                    ("BACKGROUND",(0, 0), (-1, 0), self.table_header_background_color),
+                    ("SPAN",(0,-1),(-2,-1))
                     ])
             table.setStyle(tStyle)
 
@@ -505,7 +514,7 @@ class PDFReport:
             self.elements.append(PageBreak())
 
     def changedFileHashesTableMaker(self):
-            psHeaderText = ParagraphStyle('Hed0', fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
+            psHeaderText = ParagraphStyle("Hed0", fontSize=12, alignment=TA_LEFT, borderWidth=3, textColor=self.small_title_font_color)
             text = "Changed File Hashes"
             paragraphReportHeader = Paragraph(text, psHeaderText)
             self.elements.append(paragraphReportHeader)
@@ -544,12 +553,12 @@ class PDFReport:
 
             # Apply table style (similar to other tables)
             tStyle = TableStyle([ #('GRID',(0, 0), (-1, -1), 0.5, grey),
-                    ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+                    ("ALIGN", (0, 0), (0, -1), "LEFT"),
                     #('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ("ALIGN", (1, 0), (1, -1), 'RIGHT'),
-                    ('LINEABOVE', (0, 0), (-1, -1), 1, self.table_line_color),
-                    ('BACKGROUND',(0, 0), (-1, 0), self.table_header_background_color),
-                    ('SPAN',(0,-1),(-2,-1))
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                    ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
+                    ("BACKGROUND",(0, 0), (-1, 0), self.table_header_background_color),
+                    ("SPAN",(0,-1),(-2,-1))
                     ])
             table.setStyle(tStyle)
 
@@ -559,7 +568,7 @@ class PDFReport:
             # Add page break after the table
             self.elements.append(PageBreak())
 
-    
+
     def draw_panel(self, x, y, width, height, main_number, title, symbol):
         self.setStrokeColor(self.small_title_font_color)
         self.setFillColor(self.small_title_font_color)  # Light grey fill color
@@ -580,12 +589,12 @@ class PDFReport:
     def make_header(self, header_array):
         result = []
         fontSize = 8
-        centered = ParagraphStyle(name="centered", alignment=TA_CENTER, textColor=self.white, fontName='Helvetica-Bold')
+        centered = ParagraphStyle(name="centered", alignment=TA_CENTER, textColor=self.white, fontName="Helvetica-Bold")
         for text in header_array:
             ptext = "<font size='%s'><b>%s</b></font>" % (fontSize, text)
             titlesTable = Paragraph(ptext, centered)
             result.append(titlesTable)
         return result
 
-if __name__ == '__main__':
-    report = PDFReport('Sandroid_Forensic_Report.pdf', f'{os.getenv("RAW_RESULTS_PATH")}sandroid.json')
+if __name__ == "__main__":
+    report = PDFReport("Sandroid_Forensic_Report.pdf", f'{os.getenv("RAW_RESULTS_PATH")}sandroid.json')

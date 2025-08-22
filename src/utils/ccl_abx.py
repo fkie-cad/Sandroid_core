@@ -1,5 +1,4 @@
-"""
-Copyright 2021-2022, CCL Forensics
+"""Copyright 2021-2022, CCL Forensics
 Permission is hereby granted, free of charge, to any person obtaining a copy of
 this software and associated documentation files (the "Software"), to deal in
 the Software without restriction, including without limitation the rights to
@@ -22,7 +21,6 @@ import enum
 import struct
 import typing
 import xml.etree.ElementTree as etree
-
 
 __version__ = "0.2.0"
 __description__ = "Python module to convert Android ABX binary XML files"
@@ -123,8 +121,7 @@ class AbxReader:
         self._stream = stream
 
     def read(self, *, is_multi_root=False):
-        """
-        Read the ABX file
+        """Read the ABX file
         :param is_multi_root: some xml files on Android contain multiple root elements making reading them using a
         document model problematic. For these files, set is_multi_root to True and the output ElementTree will wrap
         the elements in a single "root" element.
@@ -286,7 +283,7 @@ def main(args):
     print(etree.tostring(doc.getroot()).decode())
 
 
-if __name__ == '__main__':
-    import sys
+if __name__ == "__main__":
     import pathlib
+    import sys
     main(sys.argv[1:])

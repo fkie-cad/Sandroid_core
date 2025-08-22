@@ -1,13 +1,12 @@
-import os
 import time
+from logging import getLogger
 
 from src.functionality.functionality import Functionality
 from src.utils.toolbox import Toolbox
-from logging import getLogger
 
 try:
-    from trigdroid import TrigDroidAPI, TestConfiguration, quick_test
-except ImportError as e:
+    from trigdroid import TestConfiguration, TrigDroidAPI, quick_test
+except ImportError:
     logger = getLogger(__name__)
     logger.warning("TrigDroid package not installed. TrigDroid functionality will be disabled.")
     TrigDroidAPI = None
@@ -18,8 +17,7 @@ logger = getLogger(__name__)
 
 
 class Trigdroid(Functionality):
-    """
-    Wrapper for the Trigdroid Tool to integrate it into Sandroid
+    """Wrapper for the Trigdroid Tool to integrate it into Sandroid
 
     **Attributes:**
         logger (Logger): Logger instance for Trigdroid.
@@ -30,10 +28,8 @@ class Trigdroid(Functionality):
     did_dummy_round = False
 
     def perform(self):
+        """Executes the main functionality of Trigdroid.
         """
-        Executes the main functionality of Trigdroid.
-        """
-
         logger.warning("Trigdroid dry run is disabled at the moment")
         package_under_test = Toolbox.get_spotlight_application()[0]
 
@@ -48,8 +44,7 @@ class Trigdroid(Functionality):
             Toolbox.noise_files.update(changed_files)  # registering files that changed in the dummy round as noise. This kind of goes against the Functionality/Datagather structural distinction, but oh well, it's an exception.
 
     def run_ccf(self):
-        """
-        Runs the Trigdroid CCF utility.
+        """Runs the Trigdroid CCF utility.
         """
         if TrigDroidAPI is None:
             logger.error("TrigDroid package not available. Cannot run CCF utility.")
@@ -74,8 +69,7 @@ class Trigdroid(Functionality):
         logger.warning("somehow Trigdroid.run_ccf() was called without trigdroid_ccf command line option")
 
     def run_trigdroid(self, package_name):
-        """
-        Runs the Trigdroid with the specified package name using the new API.
+        """Runs the Trigdroid with the specified package name using the new API.
 
         .. warning::
             Uses TestConfiguration for setup. Config file support depends on new API capabilities.
@@ -94,7 +88,7 @@ class Trigdroid(Functionality):
         logger.debug(f"TrigDroid analyzing package: {package_name}")
         Toolbox.set_action_time()
         start_time = time.perf_counter()
-        
+
         try:
             if package_name is None:
                 # Dummy/noise run - use minimal configuration
@@ -108,39 +102,36 @@ class Trigdroid(Functionality):
                     sensors=["accelerometer", "gyroscope"],  # Common sensors
                     frida_hooks=True
                 )
-                
+
                 with TrigDroidAPI() as trigdroid:
                     trigdroid.configure(config)
                     result = trigdroid.run_tests()
-                    
+
                     if result.success:
                         logger.info(f"TrigDroid analysis completed successfully for {package_name}")
                         # Store results in Toolbox for later retrieval
                         Toolbox.submit_other_data("TrigDroid Results", {
                             "package": package_name,
                             "success": result.success,
-                            "triggers_activated": getattr(result, 'triggers_activated', 0),
-                            "analysis_data": getattr(result, 'data', {})
+                            "triggers_activated": getattr(result, "triggers_activated", 0),
+                            "analysis_data": getattr(result, "data", {})
                         })
                     else:
                         logger.warning(f"TrigDroid analysis had issues for {package_name}")
-                        
+
         except Exception as e:
             logger.error(f"TrigDroid analysis failed: {e}")
         finally:
             end_time = time.perf_counter()
             Toolbox.set_action_duration(int(end_time - start_time))
-    
+
     def overide_package(self, new_name):
-        """
-        Overrides the package name with a new name.
+        """Overrides the package name with a new name.
 
         :param new_name: The new package name.
         :type new_name: str
         """
-        
         self.override_package_name = new_name
         self.package_name_overridden = True
 
 
-        

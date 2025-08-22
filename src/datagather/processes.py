@@ -1,29 +1,27 @@
 import threading
+import time
+from logging import getLogger
 
 from src.datagather.datagather import DataGather
 from src.utils.adb import Adb
 from src.utils.toolbox import Toolbox
-import src.utils.file_diff as file_diff
-import time
-from logging import getLogger
 
 logger = getLogger(__name__)
 
 class Bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
 
 
 class Processes(DataGather):
-    """
-    Handles the gathering and processing of active processes during an action.
+    """Handles the gathering and processing of active processes during an action.
     """
 
     run_process_lists = {}
@@ -32,17 +30,14 @@ class Processes(DataGather):
     performed_diff = False
 
     def gather(self):
+        """Starts a new thread to capture process data.
         """
-        Starts a new thread to capture process data.
-        """
-
         logger.info("Collecting information on active processes during action")
         t1 = threading.Thread(target=self.process_capture_thread, args=())
         t1.start()
 
     def return_data(self):
-        """
-        Returns the processed data of active processes.
+        """Returns the processed data of active processes.
 
         :returns: Dictionary containing the processes that were active.
         :rtype: dict
@@ -52,13 +47,11 @@ class Processes(DataGather):
         return {"Processes": self.final_processes_list}
 
     def pretty_print(self):
-        """
-        Returns a formatted string of the active processes for display.
+        """Returns a formatted string of the active processes for display.
 
         :returns: Formatted string of active processes.
         :rtype: str
         """
-
         if not self.performed_diff:
             self.process_processes()
         raw_output = self.final_processes_list
@@ -73,8 +66,7 @@ class Processes(DataGather):
         return result
 
     def process_capture_thread(self):
-        """
-        Captures the list of active processes over the duration of an action.
+        """Captures the list of active processes over the duration of an action.
         """
         runtime = Toolbox.get_action_duration()
         process_list = []
@@ -92,8 +84,7 @@ class Processes(DataGather):
 
 
     def process_processes(self):
-        """
-        Processes the collected process lists to filter out noise and identify true active processes.
+        """Processes the collected process lists to filter out noise and identify true active processes.
         """
         noise = Toolbox.noise_processes
 

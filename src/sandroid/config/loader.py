@@ -4,10 +4,10 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import yaml
-from platformdirs import user_config_dir, site_config_dir
+from platformdirs import site_config_dir, user_config_dir
 
 from .schema import SandroidConfig
 
@@ -33,96 +33,95 @@ class ConfigLoader:
         self._config_dirs = self._get_config_directories()
         self._config_files = self._discover_config_files()
 
-    def _get_config_directories(self) -> List[Path]:
+    def _get_config_directories(self) -> list[Path]:
         """Get configuration directories following XDG specification."""
         dirs = []
-        
+
         # User config directory (highest priority)
         user_dir = Path(user_config_dir(self.app_name))
         dirs.append(user_dir)
-        
+
         # Additional user directories from XDG_CONFIG_DIRS
         xdg_config_dirs = os.environ.get("XDG_CONFIG_DIRS", "")
         if xdg_config_dirs:
             for config_dir in xdg_config_dirs.split(":"):
                 if config_dir.strip():
                     dirs.append(Path(config_dir.strip()) / self.app_name)
-        
+
         # System config directory (lowest priority)
         system_dir = Path(site_config_dir(self.app_name))
         dirs.append(system_dir)
-        
+
         # Current working directory (for development)
         current_dir = Path.cwd()
         dirs.insert(0, current_dir)  # Highest priority for development
-        
+
         return dirs
 
-    def _discover_config_files(self) -> List[Path]:
+    def _discover_config_files(self) -> list[Path]:
         """Discover configuration files in order of preference."""
         config_files = []
         config_names = ["sandroid", "config"]
         extensions = [".yaml", ".yml", ".toml", ".json"]  # Prioritize YAML
-        
+
         for config_dir in self._config_dirs:
             for name in config_names:
                 for ext in extensions:
                     config_file = config_dir / f"{name}{ext}"
                     if config_file.exists() and config_file.is_file():
                         config_files.append(config_file)
-        
+
         return config_files
 
-    def _load_toml(self, path: Path) -> Dict[str, Any]:
+    def _load_toml(self, path: Path) -> dict[str, Any]:
         """Load TOML configuration file."""
         with open(path, "rb") as f:
             return tomllib.load(f)
 
-    def _load_yaml(self, path: Path) -> Dict[str, Any]:
+    def _load_yaml(self, path: Path) -> dict[str, Any]:
         """Load YAML configuration file."""
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    def _load_json(self, path: Path) -> Dict[str, Any]:
+    def _load_json(self, path: Path) -> dict[str, Any]:
         """Load JSON configuration file."""
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
 
-    def _load_file(self, path: Path) -> Dict[str, Any]:
+    def _load_file(self, path: Path) -> dict[str, Any]:
         """Load configuration file based on extension."""
         suffix = path.suffix.lower()
-        
+
         if suffix == ".toml":
             return self._load_toml(path)
-        elif suffix in [".yaml", ".yml"]:
+        if suffix in [".yaml", ".yml"]:
             return self._load_yaml(path)
-        elif suffix == ".json":
+        if suffix == ".json":
             return self._load_json(path)
-        else:
-            raise ValueError(f"Unsupported configuration file format: {suffix}")
+        raise ValueError(f"Unsupported configuration file format: {suffix}")
 
-    def _merge_configs(self, base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_configs(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """Recursively merge configuration dictionaries."""
         result = base.copy()
-        
+
         for key, value in override.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = self._merge_configs(result[key], value)
             else:
                 result[key] = value
-        
+
         return result
 
-    def load_environment_vars(self) -> Dict[str, Any]:
+    def load_environment_vars(self) -> dict[str, Any]:
         """Load configuration from environment variables."""
         config = {}
         prefix = "SANDROID_"
-        
+
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 # Remove prefix and convert to lowercase
                 config_key = key[len(prefix):].lower()
-                
+
                 # Handle nested configuration with double underscore
                 if "__" in config_key:
                     parts = config_key.split("__")
@@ -134,17 +133,17 @@ class ConfigLoader:
                     current[parts[-1]] = self._parse_env_value(value)
                 else:
                     config[config_key] = self._parse_env_value(value)
-        
+
         return config
 
-    def _parse_env_value(self, value: str) -> Union[str, int, float, bool]:
+    def _parse_env_value(self, value: str) -> str | int | float | bool:
         """Parse environment variable value to appropriate type."""
         # Boolean values
         if value.lower() in ("true", "yes", "1", "on"):
             return True
         if value.lower() in ("false", "no", "0", "off"):
             return False
-        
+
         # Numeric values
         try:
             if "." in value:
@@ -152,14 +151,14 @@ class ConfigLoader:
             return int(value)
         except ValueError:
             pass
-        
+
         return value
 
     def load(
         self,
-        config_file: Optional[Union[str, Path]] = None,
-        environment: Optional[str] = None,
-        cli_overrides: Optional[Dict[str, Any]] = None,
+        config_file: str | Path | None = None,
+        environment: str | None = None,
+        cli_overrides: dict[str, Any] | None = None,
     ) -> SandroidConfig:
         """Load configuration from all sources.
         
@@ -177,7 +176,7 @@ class ConfigLoader:
         """
         # Start with empty config
         merged_config = {}
-        
+
         # 1. Load from discovered config files (lowest priority)
         for config_path in reversed(self._config_files):  # Reverse for correct priority
             try:
@@ -186,19 +185,19 @@ class ConfigLoader:
             except Exception as e:
                 # Log warning but don't fail
                 print(f"Warning: Failed to load config from {config_path}: {e}")
-        
+
         # 2. Load explicit config file if provided
         if config_file:
             config_path = Path(config_file)
             if not config_path.exists():
                 raise FileNotFoundError(f"Configuration file not found: {config_path}")
-            
+
             try:
                 explicit_config = self._load_file(config_path)
                 merged_config = self._merge_configs(merged_config, explicit_config)
             except Exception as e:
                 raise ValueError(f"Failed to load configuration from {config_path}: {e}")
-        
+
         # 3. Load environment-specific config if environment is specified
         if environment:
             for config_dir in self._config_dirs:
@@ -209,16 +208,16 @@ class ConfigLoader:
                         merged_config = self._merge_configs(merged_config, env_config)
                     except Exception as e:
                         print(f"Warning: Failed to load environment config from {env_config_path}: {e}")
-        
+
         # 4. Load environment variables (higher priority)
         env_config = self.load_environment_vars()
         if env_config:
             merged_config = self._merge_configs(merged_config, env_config)
-        
+
         # 5. Apply CLI overrides (highest priority)
         if cli_overrides:
             merged_config = self._merge_configs(merged_config, cli_overrides)
-        
+
         # Validate and create config object
         try:
             config = SandroidConfig(**merged_config)
@@ -230,7 +229,7 @@ class ConfigLoader:
     def save_config(
         self,
         config: SandroidConfig,
-        config_file: Optional[Union[str, Path]] = None,
+        config_file: str | Path | None = None,
         format: str = "yaml",
     ) -> Path:
         """Save configuration to file.
@@ -250,10 +249,10 @@ class ConfigLoader:
         else:
             config_file = Path(config_file)
             config_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Convert to dict
         config_dict = config.dict(exclude_unset=True)
-        
+
         # Save based on format
         if format == "toml":
             with open(config_file, "wb") as f:
@@ -266,10 +265,10 @@ class ConfigLoader:
                 json.dump(config_dict, f, indent=2, default=str)
         else:
             raise ValueError(f"Unsupported format: {format}")
-        
+
         return config_file
 
-    def create_default_config(self, config_file: Optional[Union[str, Path]] = None) -> Path:
+    def create_default_config(self, config_file: str | Path | None = None) -> Path:
         """Create a default configuration file.
         
         Args:

@@ -1,24 +1,24 @@
-import threading
-from src.datagather.datagather import DataGather
-from src.utils.toolbox import Toolbox
-import time
-import os
-from src.utils.adb import Adb
-from colorama import Fore, Style
-from logging import getLogger
 # ensure that we only see errors from scapy
 import logging
-logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-from scapy.all import rdpcap, DNS, DNSQR, IP, TCP, UDP
-
+import os
+import threading
+import time
 from logging import getLogger
+
+from colorama import Fore, Style
+
+from src.datagather.datagather import DataGather
+from src.utils.adb import Adb
+from src.utils.toolbox import Toolbox
+
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+from scapy.all import DNS, DNSQR, IP, TCP, rdpcap
 
 logger = getLogger(__name__)
 
 
 class Network(DataGather):
-    """
-    Handles network traffic measurement and analysis.
+    """Handles network traffic measurement and analysis.
 
     **Attributes:**
         internal_run_counter (int): Counter for internal runs.
@@ -40,37 +40,31 @@ class Network(DataGather):
     performed_diff = False
 
     def gather(self):
+        """Starts a timed thread to measure network traffic.
         """
-        Starts a timed thread to measure network traffic.
-        """
-
-        logger.info(f"Measuring network traffic")
+        logger.info("Measuring network traffic")
         t1 = threading.Thread(target=self.tcpdump_thread, args=())
         t1.start()
         #time.sleep(0.5)
 
     def return_data(self):
-        """
-        Returns the gathered DNS requests and target IPs and ports.
+        """Returns the gathered DNS requests and target IPs and ports.
 
         :returns: Dictionary containing DNS requests and target IPs and ports.
         :rtype: dict
         """
-
         if not self.performed_diff:
             self.dns_requests = self.extract_dns_requests_for_all_pcaps()
-            self.target_ips_and_ports = self.extract_target_ips_and_ports_for_all_pcaps()   
+            self.target_ips_and_ports = self.extract_target_ips_and_ports_for_all_pcaps()
             self.performed_diff = True
         return {"Network": self.dns_requests, "Network IP:Port (send/recv)": self.target_ips_and_ports}
 
     def pretty_print(self):
-        """
-        Returns a formatted string of DNS requests and target IPs and ports.
+        """Returns a formatted string of DNS requests and target IPs and ports.
 
         :returns: Formatted string of DNS requests and target IPs and ports.
         :rtype: str
         """
-
         if not self.performed_diff:
             self.dns_requests = self.extract_dns_requests_for_all_pcaps()
             self.target_ips_and_ports = self.extract_target_ips_and_ports_for_all_pcaps()
@@ -90,15 +84,14 @@ class Network(DataGather):
         result += (
             Fore.LIGHTYELLOW_EX + Style.BRIGHT + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n")
 
-        
+
         return result
 
     def tcpdump_thread(self):
-        """
-        Meant to be run as a Thread that uses adb emu network capture.
+        """Meant to be run as a Thread that uses adb emu network capture.
         """
         noise_path = f"{self._path}{self._trace_file_name}noise.pcap"
-        path = f"{self._path}{self._trace_file_name}{str(self.internal_run_counter)}.pcap"
+        path = f"{self._path}{self._trace_file_name}{self.internal_run_counter!s}.pcap"
         accumulated_errors = ""
         runtime = Toolbox.get_action_duration()
         if Toolbox.is_dry_run():
@@ -122,36 +115,30 @@ class Network(DataGather):
 
     @classmethod
     def get_path(cls):
-        """
-        Returns the path for storing network trace files.
+        """Returns the path for storing network trace files.
 
         :returns: Path for storing network trace files.
         :rtype: str
         """
-
         return cls._path
 
     @classmethod
     def get_file_name(cls):
-        """
-        Returns the base name for trace files.
+        """Returns the base name for trace files.
 
         :returns: Base name for trace files.
         :rtype: str
         """
-
         return cls._trace_file_name
 
 
     def extract_dns_requests_for_all_pcaps(self):
-        """
-        Extracts DNS requests from a series of PCAP files and compares them
+        """Extracts DNS requests from a series of PCAP files and compares them
         against a 'noise' PCAP file to identify unique DNS requests.
 
         :returns: A list of unique DNS requests found in the PCAP files excluding those found in the 'noise' PCAP.
         :rtype: list
         """
-        
         # Set to store DNS requests from all pcaps except the noise pcap
         all_dns_requests = set()
 
@@ -176,14 +163,12 @@ class Network(DataGather):
 
     @classmethod
     def extract_dns_requests_from_pcap(cls, pcap_path):
-        """
-        Extracts all requested domain names from a PCAP file.
+        """Extracts all requested domain names from a PCAP file.
 
         :param pcap_path: Path to the PCAP file
         :returns: A set of domain names.
         :rtype: set
         """
-
         domain_names = set()
 
         # Read the pcap file
@@ -201,11 +186,10 @@ class Network(DataGather):
         #TODO: also store IPs of answer so they can be correlated later on
         return domain_names
 
-    
+
 
     def extract_target_ips_and_ports_for_all_pcaps(self):
-        """
-        Extracts target IPs and ports from a series of PCAP files and compares them
+        """Extracts target IPs and ports from a series of PCAP files and compares them
         against a 'noise' PCAP file to identify unique target IPs and ports.
 
         :returns: A set of unique target IPs and ports found in the PCAP files excluding those found in the 'noise' PCAP.
@@ -245,8 +229,7 @@ class Network(DataGather):
 
     @classmethod
     def extract_target_ips_and_ports(cls, pcap_path):
-        """
-        Extract all target IPs and ports from a pcap file.
+        """Extract all target IPs and ports from a pcap file.
 
         :param pcap_path: Path to the pcap file.
         :type pcap_path: str
@@ -266,7 +249,7 @@ class Network(DataGather):
             # Check if the packet is an IP packet
             if pkt.haslayer(IP):
                 # Check if the packet is a TCP packet and if it is a SYN packet
-                if pkt.haslayer(TCP) and pkt[TCP].flags == 'S':
+                if pkt.haslayer(TCP) and pkt[TCP].flags == "S":
                     # Extract the target IP and port
                     target_ip = pkt[IP].dst
                     target_port = pkt[TCP].dport
@@ -276,8 +259,7 @@ class Network(DataGather):
         return target_ips_and_ports
 
     def count_bytes(self, ip_address, port, pcap_file):
-        """
-        Internal helper function that counts how many bytes were sent from and to an IP address on a specified port
+        """Internal helper function that counts how many bytes were sent from and to an IP address on a specified port
 
         :param ip_address: IP address to investigate
         :type ip_address: str
@@ -290,15 +272,14 @@ class Network(DataGather):
         :returns: Number of bytes received
         :rtype: int
         """
-        
         packets = rdpcap(pcap_file)
         sent_bytes = 0
         received_bytes = 0
         for packet in packets:
-            if packet.haslayer('IP'):
-                ip = packet['IP']
-                if ip.haslayer('TCP') or ip.haslayer('UDP'):
-                    tcp_udp = ip['TCP'] if ip.haslayer('TCP') else ip['UDP']
+            if packet.haslayer("IP"):
+                ip = packet["IP"]
+                if ip.haslayer("TCP") or ip.haslayer("UDP"):
+                    tcp_udp = ip["TCP"] if ip.haslayer("TCP") else ip["UDP"]
                     if tcp_udp.dport == port or tcp_udp.sport == port:
                         if ip.src == ip_address:
                             received_bytes += len(tcp_udp.payload)

@@ -2,7 +2,6 @@
 
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, validator
 
@@ -26,11 +25,11 @@ class EmulatorConfig(BaseModel):
         default=Path("~/Android/Sdk/emulator/emulator").expanduser(),
         description="Path to Android emulator executable"
     )
-    sdk_path: Optional[Path] = Field(
+    sdk_path: Path | None = Field(
         default=None,
         description="Path to Android SDK (auto-detected if not provided)"
     )
-    adb_path: Optional[Path] = Field(
+    adb_path: Path | None = Field(
         default=None,
         description="Path to ADB executable (auto-detected if not provided)"
     )
@@ -54,7 +53,7 @@ class FridaConfig(BaseModel):
 
 class NetworkConfig(BaseModel):
     """Network analysis configuration."""
-    capture_interface: Optional[str] = Field(
+    capture_interface: str | None = Field(
         default=None,
         description="Network interface to capture (auto-detected if not provided)"
     )
@@ -106,7 +105,7 @@ class AnalysisConfig(BaseModel):
         default=False,
         description="Disable strong noise filtering (dry run)"
     )
-    screenshot_interval: Optional[int] = Field(
+    screenshot_interval: int | None = Field(
         default=None,
         ge=1,
         description="Screenshot interval in seconds"
@@ -147,11 +146,11 @@ class TrigDroidConfig(BaseModel):
         default=False,
         description="Enable TrigDroid malware triggers"
     )
-    package_name: Optional[str] = Field(
+    package_name: str | None = Field(
         default=None,
         description="Target package name for triggers"
     )
-    config_mode: Optional[str] = Field(
+    config_mode: str | None = Field(
         default=None,
         regex=r"^[ID]$",
         description="Configuration mode: I (interactive) or D (default)"
@@ -168,7 +167,7 @@ class AIConfig(BaseModel):
         default="google-genai",
         description="AI provider to use"
     )
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None,
         description="AI service API key (use environment variable or credentials section)"
     )
@@ -188,7 +187,7 @@ class ReportConfig(BaseModel):
         default=True,
         description="Include screenshots in reports"
     )
-    template_path: Optional[Path] = Field(
+    template_path: Path | None = Field(
         default=None,
         description="Custom report template path"
     )
@@ -196,11 +195,11 @@ class ReportConfig(BaseModel):
 
 class CredentialsConfig(BaseModel):
     """Secure credentials configuration."""
-    google_genai_api_key: Optional[str] = Field(
+    google_genai_api_key: str | None = Field(
         default=None,
         description="Google Generative AI API key"
     )
-    custom_api_keys: Dict[str, str] = Field(
+    custom_api_keys: dict[str, str] = Field(
         default_factory=dict,
         description="Additional API keys for custom integrations"
     )
@@ -222,11 +221,11 @@ class SandroidConfig(BaseModel):
         default=Path("sandroid.json"),
         description="Output file for analysis results"
     )
-    whitelist_file: Optional[Path] = Field(
+    whitelist_file: Path | None = Field(
         default=None,
         description="Path to file containing paths to exclude from analysis"
     )
-    
+
     # Component configurations
     emulator: EmulatorConfig = Field(default_factory=EmulatorConfig)
     frida: FridaConfig = Field(default_factory=FridaConfig)
@@ -237,15 +236,15 @@ class SandroidConfig(BaseModel):
     ai: AIConfig = Field(default_factory=AIConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
-    
+
     # Environment-specific overrides
     environment: str = Field(
         default="production",
         description="Environment name (development, testing, production)"
     )
-    
+
     # Custom settings (for user extensions)
-    custom: Dict[str, Union[str, int, bool, float]] = Field(
+    custom: dict[str, str | int | bool | float] = Field(
         default_factory=dict,
         description="Custom configuration values"
     )

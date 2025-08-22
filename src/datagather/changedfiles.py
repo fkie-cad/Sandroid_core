@@ -1,26 +1,26 @@
+import os
+from logging import getLogger
+
 from src.datagather.datagather import DataGather
 from src.utils import file_diff
 from src.utils.toolbox import Toolbox
-from logging import getLogger
-import os
 
 logger = getLogger(__name__)
 
 class Bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
 
 
 class ChangedFiles(DataGather):
-    """
-    A class to gather and process changed files, inheriting from DataGather.
+    """A class to gather and process changed files, inheriting from DataGather.
 
     **Attributes:**
 
@@ -38,14 +38,12 @@ class ChangedFiles(DataGather):
     fileListList = []
 
     def gather(self):
-        """
-        Gathers changed files and filters out new files.
+        """Gathers changed files and filters out new files.
 
         **Raises:**
 
         - **FileNotFoundError**: If a file is not found during processing.
         """
-        
         logger.debug("ChangedFiles object gathering data. Going to have " + str(len(self.fileListList)+1) + " dataset(s)")
         if Toolbox.is_dry_run():
             Toolbox.noise_files = Toolbox.fetch_changed_files()
@@ -60,24 +58,22 @@ class ChangedFiles(DataGather):
             self.fileListList.append(changed_files)
 
     def return_data(self):
-        """
-        Returns a dictionary with the changed files and their diffs.
+        """Returns a dictionary with the changed files and their diffs.
 
         **Returns:**
 
         - **dict**: A dictionary with the key "Changed Files" and a list of changed files and their diffs.
         """
-        
-        base_folder = os.getenv('RAW_RESULTS_PATH')
+        base_folder = os.getenv("RAW_RESULTS_PATH")
         result = []
         files_from_all_pulls = self.process_data()
 
         for file in files_from_all_pulls:
             try:
                 if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip('/'))
-                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip('/'))
-                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip('/'))
+                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip("/"))
+                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip("/"))
+                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip("/"))
                     diff = file_diff.db_diff(path_to_file_first_pull, path_to_file_second_pull, path_to_file_noise_pull)
                     if "ITS ALL NOISE" not in diff:
                         result.append({file: diff.splitlines()})
@@ -96,23 +92,22 @@ class ChangedFiles(DataGather):
         return {"Changed Files": result}
 
     def pretty_print(self):
-        """
-        Returns a formatted string of the changed files and their diffs.
+        """Returns a formatted string of the changed files and their diffs.
 
         **Returns:**
 
         - **str**: A formatted string of the changed files and their diffs.
         """
-        base_folder = os.getenv('RAW_RESULTS_PATH')
+        base_folder = os.getenv("RAW_RESULTS_PATH")
         files_from_all_pulls = self.process_data()
         result = (
                 Bcolors.OKBLUE + Bcolors.BOLD + "\n—————————————————CHANGED_FILES=(changed in all runs)——————————————————————————————————————————————————\n" + Bcolors.ENDC + Bcolors.OKBLUE)
         for file in files_from_all_pulls:
             try:
                 if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip('/'))
-                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip('/'))
-                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip('/'))
+                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip("/"))
+                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip("/"))
+                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip("/"))
                     diff = file_diff.db_diff(path_to_file_first_pull, path_to_file_second_pull, path_to_file_noise_pull)
                     diff = Toolbox.highlight_timestamps(Toolbox.truncate(diff),Bcolors.OKCYAN) + Bcolors.OKBLUE + "\n"
                     if "ITS ALL NOISE" not in diff:
@@ -139,8 +134,7 @@ class ChangedFiles(DataGather):
         return result
 
     def process_data(self):
-        """
-        Processes the gathered data to filter out noise and whitelist files.
+        """Processes the gathered data to filter out noise and whitelist files.
 
         **Returns:**
 
@@ -153,6 +147,6 @@ class ChangedFiles(DataGather):
             files_from_all_pulls = list(set(files_from_all_pulls) & set(fileList))
         files_from_all_pulls = [x for x in files_from_all_pulls if x not in noise or x.endswith(".db") or x.endswith(
             ".xml")]  # filter noise from files, ignore .db and .xml files
-        
+
         files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

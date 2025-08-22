@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
+import logging
+import lzma
+import os
+import re
+import subprocess
+import tempfile
+import time
 
 import frida
-import os
-import sys
-import logging
-import subprocess
 import requests
-import lzma
-import re
-import time
-from shutil import copyfile
-import tempfile
+
 from src.utils.adb import Adb
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
-class FridaManager():
+class FridaManager:
 
     def __init__(self, logger=None, is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/"):
-        """
-        Constructor of the current FridaManager instance
+        """Constructor of the current FridaManager instance
 
         :param is_remote: The number to multiply.
         :type number: bool
@@ -68,8 +66,7 @@ class FridaManager():
     #     logger.addHandler(logging_handler)
 
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
-        """
-        This function is used to run the frida server on the connected device.
+        """This function is used to run the frida server on the connected device.
 
         :param frida_server_path: The path where the frida server is located. 
                                   Default is "/data/local/tmp/".
@@ -78,7 +75,6 @@ class FridaManager():
         :return: True if the frida server started successfully, False otherwise.
         :rtype: bool
         """
-
         # Check if the default path is used
         if frida_server_path is self.run_frida_server.__defaults__[0]:
             # Construct the command to run the frida server from the default location
@@ -103,16 +99,14 @@ class FridaManager():
         if self.is_frida_server_running():
             self.logger.info("frida-server running...")
             return True
-        else:
-            # Kill the process if the frida server did not start
-            process.kill()
-            self.logger.critical("Could not start frida-server")
-            return False
-        
+        # Kill the process if the frida server did not start
+        process.kill()
+        self.logger.critical("Could not start frida-server")
+        return False
+
 
     def is_frida_server_running(self):
-        """
-        Checks if on the connected device a frida server is running.
+        """Checks if on the connected device a frida server is running.
         The test is done by the Android system command pidof and is looking for the string frida-server.
 
         :return: True if a frida-server is running otherwise False.
@@ -122,8 +116,7 @@ class FridaManager():
 
         if len(stdout) > 1:
             return True
-        else:
-            return False
+        return False
 
     def stop_frida_server(self):
         self.run_adb_command_as_root("/system/bin/killall frida-server")
@@ -138,8 +131,7 @@ class FridaManager():
         self._adb_remove_file_if_exist(cmd)
 
     def install_frida_server(self, dst_dir="/data/local/tmp/", version="latest"):
-        """
-        Install the frida server binary on the Android device.
+        """Install the frida server binary on the Android device.
         This includes downloading the frida-server, decompress it and pushing it to the Android device.
         By default it is pushed into the /data/local/tmp/ directory.
         Further the binary will be set to executable in order to run it.
@@ -169,8 +161,7 @@ class FridaManager():
 
     # by default the latest frida-server version will be downloaded
     def download_frida_server(self, path, version="latest"):
-        """
-        Downloads a frida server. By default the latest version is used.
+        """Downloads a frida server. By default the latest version is used.
         If you want to download a specific version you have to provide it trough the version parameter.
 
         :param path: The path where the compressed frida-server should be downloded.
@@ -196,9 +187,9 @@ class FridaManager():
         # create a subdir for the specified filename
         frida_server_dir = file_path[:-3]
         os.makedirs(frida_server_dir)
-        with lzma.open(file_path, 'rb') as f:
+        with lzma.open(file_path, "rb") as f:
             decompressed_file = f.read()
-        with open(frida_server_dir + '/frida-server', 'wb') as f:
+        with open(frida_server_dir + "/frida-server", "wb") as f:
             f.write(decompressed_file)
 
         # del compressed file
@@ -236,7 +227,7 @@ class FridaManager():
                 exit(2)
 
             frida_server_path = re.findall(
-                r'\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-' + arch + '.xz', res.text) #'\.xz'
+                r"\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-" + arch + ".xz", res.text) #'\.xz'
             final_url = frida_download_prefix + frida_server_path[0]
 
         else:
@@ -264,18 +255,18 @@ class FridaManager():
             exit(2)
 
         if self.is_magisk_mode:
-            output = subprocess.run(['adb', 'shell', 'su -c ' + command], capture_output=True, text=True)
+            output = subprocess.run(["adb", "shell", "su -c " + command], check=False, capture_output=True, text=True)
         else:
-            output = subprocess.run(['adb', 'shell', 'su 0 ' + command], capture_output=True, text=True)
+            output = subprocess.run(["adb", "shell", "su 0 " + command], check=False, capture_output=True, text=True)
 
         return output
 
     def _adb_push_file(self, file, dst):
-        output = subprocess.run(['adb', 'push', file, dst], capture_output=True, text=True)
+        output = subprocess.run(["adb", "push", file, dst], check=False, capture_output=True, text=True)
         return output
 
     def _adb_pull_file(self, src_file, dst):
-        output = subprocess.run(['adb', 'pull', src_file, dst], capture_output=True, text=True)
+        output = subprocess.run(["adb", "pull", src_file, dst], check=False, capture_output=True, text=True)
         return output
 
     def _get_android_device_arch(self):
@@ -283,7 +274,7 @@ class FridaManager():
             frida_usb_json_data = frida.get_remote_device().query_system_parameters()
         else:
             frida_usb_json_data = frida.get_usb_device().query_system_parameters()
-        return frida_usb_json_data['arch']
+        return frida_usb_json_data["arch"]
 
     def _adb_make_binary_executable(self, path):
         output = self.run_adb_command_as_root("chmod +x " + path)
@@ -292,15 +283,14 @@ class FridaManager():
         output = self.run_adb_command_as_root("ls " + path)
         if len(output.stderr) > 1:
             return False
-        else:
-            return True
+        return True
 
     def adb_check_root(self):
-        if bool(subprocess.run(['adb', 'shell', 'su -v'], capture_output=True, text=True).stdout):
+        if bool(subprocess.run(["adb", "shell", "su -v"], check=False, capture_output=True, text=True).stdout):
             self.is_magisk_mode = True
             return True
 
-        return bool(subprocess.run(['adb', 'shell', 'su 0 id -u'], capture_output=True, text=True).stdout)
+        return bool(subprocess.run(["adb", "shell", "su 0 id -u"], check=False, capture_output=True, text=True).stdout)
 
     def _adb_remove_file_if_exist(self, path="/data/local/tmp/frida-server"):
         if self._adb_does_file_exist(path):

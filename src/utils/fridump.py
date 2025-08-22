@@ -1,8 +1,8 @@
-import frida
 import os
 import sys
-from src.utils.toolbox import Toolbox
 from logging import getLogger
+
+import frida
 
 logger = getLogger(__name__)
 
@@ -14,7 +14,7 @@ class Fridump:
 
     # Define Configurations
     MAX_SIZE = 20971520
-    PERMS = 'rw-'
+    PERMS = "rw-"
 
     def __new__(cls):
         raise TypeError("This is a static class and cannot be instantiated.")
@@ -23,7 +23,7 @@ class Fridump:
     def attach_to_app(cls, pid):
         try:
             cls.process = frida.get_usb_device().attach(pid)
-        except Exception as e:
+        except Exception:
             logger.error("Can't connect to App. Have you connected the device?")
             return False
         logger.info(f"Attached to process with pid {pid}")
@@ -84,7 +84,7 @@ class Fridump:
             mem_access_viol = cls.dump_to_file(
                 agent, base, size, mem_access_viol, output_directory)
             i += 1
-            cls.printProgress(i, l, prefix='Progress:', suffix='Complete', bar=50)
+            cls.printProgress(i, l, prefix="Progress:", suffix="Complete", bar=50)
 
     # Method to receive messages from Javascript API calls
     @classmethod
@@ -96,9 +96,9 @@ class Fridump:
     # Reading bytes from session and saving it to a file
     def dump_to_file(cls, agent, base, size, error, directory):
         try:
-            filename = str(base) + '_dump.data'
+            filename = str(base) + "_dump.data"
             dump = agent.read_memory(base, size)
-            f = open(os.path.join(directory, filename), 'wb')
+            f = open(os.path.join(directory, filename), "wb")
             f.write(dump)
             f.close()
             return error
@@ -114,9 +114,9 @@ class Fridump:
         times = size / max_size
         diff = size % max_size
         if diff == 0:
-            logger.debug(f"Number of chunks:{str(times + 1)}")
+            logger.debug(f"Number of chunks:{times + 1!s}")
         else:
-            logger.debug(f"Number of chunks:{str(times)}")
+            logger.debug(f"Number of chunks:{times!s}")
         global cur_base
         cur_base = int(base, 0)
 
@@ -132,11 +132,11 @@ class Fridump:
 
     @classmethod
     # Progress bar function
-    def printProgress(cls, times, total, prefix='', suffix='', decimals=2, bar=100):
+    def printProgress(cls, times, total, prefix="", suffix="", decimals=2, bar=100):
         filled = int(round(bar * times / float(total)))
         percents = round(100.00 * (times / float(total)), decimals)
-        bar = '#' * filled + '-' * (bar - filled)
-        sys.stdout.write('%s [%s] %s%s %s\r' % (prefix, bar, percents, '%', suffix)),
+        bar = "#" * filled + "-" * (bar - filled)
+        sys.stdout.write("%s [%s] %s%s %s\r" % (prefix, bar, percents, "%", suffix)),
         sys.stdout.flush()
         if times == total:
             print("\n")

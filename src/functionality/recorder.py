@@ -1,25 +1,24 @@
-"""
-This code is an excerpt from "adb-event-record" by Tzutalin.
+"""This code is an excerpt from "adb-event-record" by Tzutalin.
 (https://github.com/tzutalin/adb-event-record)
 The excerpt was modified to fit the needs of this project
 """
 
-import time
-import re
-import os
 import math
-from src.functionality.functionality import Functionality
-from src.utils.toolbox import Toolbox
-from src.utils.adb import Adb
+import os
+import re
+import time
 from logging import getLogger
+
+from src.functionality.functionality import Functionality
+from src.utils.adb import Adb
+from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
 
 
 class Recorder(Functionality):
-    """
-    Represents a recorder functionality for capturing events.
+    """Represents a recorder functionality for capturing events.
 
     This class handles recording events based on input data.
 
@@ -30,32 +29,29 @@ class Recorder(Functionality):
     EVENT_LINE_RE = re.compile(r"(\S+): (\S+) (\S+) (\S+)$")
 
     def __init__(self):
+        """Initialize the Recorder instance.
         """
-        Initialize the Recorder instance.
-        """
-
         self.output_file_name = f'{os.getenv("RAW_RESULTS_PATH")}recording.txt'
         self.output_file = None
         #self.logger = Toolbox.logger_factory("recorder")
 
     def perform(self):
-        """
-        This method captures events and writes them to a file.
+        """This method captures events and writes them to a file.
         """
         if Toolbox.args.ai:
             Toolbox.toggle_screen_record()
-        self.output_file = open(self.output_file_name, 'w')
+        self.output_file = open(self.output_file_name, "w")
         logger.info("Start recording, press Ctrl+C to stop")
         record_command = "shell getevent"
         adb = Adb.send_adb_command_popen(record_command)
 
-        
+
         start_time = time.time()
         self.write_dummy_event()
 
         while adb.poll() is None:
             try:
-                line = adb.stdout.readline().decode('utf-8', 'replace').strip()
+                line = adb.stdout.readline().decode("utf-8", "replace").strip()
                 match = Recorder.EVENT_LINE_RE.match(line.strip())
                 if match is not None:
                     dev, etype, ecode, data = match.groups()
@@ -80,8 +76,7 @@ class Recorder(Functionality):
             Toolbox.toggle_screen_record()
 
     def write_event(self, dev, etype, ecode, data):
-        """
-        Write an input event to the output file.
+        """Write an input event to the output file.
 
         :param dev: Device identifier.
         :type dev: str
@@ -92,7 +87,6 @@ class Recorder(Functionality):
         :param data: Event data.
         :type data: str
         """
-
         millis = int(round(time.time() * 1000))
         etype, ecode, data = int(etype, 16), int(ecode, 16), int(data, 16)
         rline = "%s %s %s %s %s\n" % (millis, dev, etype, ecode, data)
@@ -100,9 +94,7 @@ class Recorder(Functionality):
         self.output_file.write(rline)
 
     def write_dummy_event(self):
+        """Write a dummy event to the output file.
         """
-        Write a dummy event to the output file.
-        """
-
         self.write_event("/dev/input/event1", "0", "0", "0")
 

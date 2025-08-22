@@ -2,16 +2,18 @@
 #based on https://github.com/sukhbinder/timeline_in_python
 import json
 import os
+
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-matplotlib.use('Agg')
-from datetime import datetime
-import numpy as np
+
+matplotlib.use("Agg")
 import random
 
+import numpy as np
+
+
 def parse_timeline(output_file):
-    with open(output_file, 'r') as json_file:
+    with open(output_file) as json_file:
         data = json.load(json_file)
         raw_timeline_data = data["Other Data"]["Timeline Data"][0] # TODO: Change to a merge of all Timeline data sublists
         new_files = data["New Files"]
@@ -64,7 +66,7 @@ def filter_list(input_list):
             count_dict[timestamp].append(item)
         else:
             count_dict[timestamp] = [item]
-    
+
     # Filter the list to ensure each timestamp occurs no more than 6 times
     filtered_list = []
     for timestamp, items in count_dict.items():
@@ -72,14 +74,13 @@ def filter_list(input_list):
             filtered_list.extend(random.sample(items, 6))
         else:
             filtered_list.extend(items)
-    
+
     return filtered_list
 
 
-    
+
 def create_timeline(events, filename, duration):
-    """
-    Create a timeline plot with custom colors for different event types.
+    """Create a timeline plot with custom colors for different event types.
 
     :param events: A list of tuples where each tuple contains the event type, timestamp, and description.
     :param filename: The name of the PNG file to save the timeline to.
@@ -90,7 +91,7 @@ def create_timeline(events, filename, duration):
 
     # Extract the event labels, timestamps, and colors
     if len(events) != 0:
-        labels, timestamps, colors = zip(*events)
+        labels, timestamps, colors = zip(*events, strict=False)
 
     # Create the plot
     levels = np.array([-5, 5, -3, 3, -1, 1])
@@ -99,25 +100,25 @@ def create_timeline(events, filename, duration):
     # Create the base line
     start = 0
     stop = duration
-    ax.plot((0, 0), (start, stop), 'k', alpha=.5)  # Change the base line to vertical
+    ax.plot((0, 0), (start, stop), "k", alpha=.5)  # Change the base line to vertical
 
     # Iterate through events annotating each one
     if len(events) != 0:
-        for ii, (label, timestamp, color) in enumerate(zip(labels, timestamps, colors)):
+        for ii, (label, timestamp, color) in enumerate(zip(labels, timestamps, colors, strict=False)):
             level = levels[ii % 6]
-            vert = 'center'
+            vert = "center"
 
-            ax.scatter(0, timestamp, s=100, facecolor=color, edgecolor='k', zorder=9999)  # Change scatter to vertical
+            ax.scatter(0, timestamp, s=100, facecolor=color, edgecolor="k", zorder=9999)  # Change scatter to vertical
             # Plot a line up to the text
             ax.plot((0, level), (timestamp, timestamp), c=color, alpha=.7)  # Change line to vertical
             # Give the text a faint background and align it properly
             if len(label)>17: label = label[0:17]+"..."
-            ax.text(level, timestamp, label, ha='center', va=vert, fontsize=18,
+            ax.text(level, timestamp, label, ha="center", va=vert, fontsize=18,
                     backgroundcolor=(1., 1., 1.), color=color)  # Change text to vertical
 
     # Set the yticks formatting
     ax.get_yaxis().set_major_locator(plt.MaxNLocator(integer=True))
-    ax.set_ylabel('Seconds since action start')
+    ax.set_ylabel("Seconds since action start")
 
     fig.autofmt_xdate()  # Use autofmt_xdate() instead
 
@@ -125,25 +126,25 @@ def create_timeline(events, filename, duration):
     plt.setp((ax.get_xticklabels() + ax.get_xticklines() +
               list(ax.spines.values())), visible=False)  # Change yticks to xticks
 
-    ax.spines['left'].set_position(('axes', 0))
+    ax.spines["left"].set_position(("axes", 0))
 
     plt.subplots_adjust(top=1, bottom=0, left=0.1, right=0.9, hspace=0, wspace=0)
     # Save the plot as a PNG file
-    plt.savefig(filename, bbox_inches='tight', pad_inches=0)
+    plt.savefig(filename, bbox_inches="tight", pad_inches=0)
 
     return ax
 
 
 # Example events
 events = [
-    ("File Created", 1, '#C80036'),
-    ("File Modified", 2, '#7ABA78'),
-    ("Process Spawned", 6, '#322C2B'),
-    ("Network Socket Opened", 7, 'r'),
-    ("File Modified", 6, '#0C1844'),
+    ("File Created", 1, "#C80036"),
+    ("File Modified", 2, "#7ABA78"),
+    ("Process Spawned", 6, "#322C2B"),
+    ("Network Socket Opened", 7, "r"),
+    ("File Modified", 6, "#0C1844"),
 ]
 
 # Create the timeline and save it as a PNG file
 # create_timeline(events, "timeline.png", 12)
-if __name__ == '__main__':
+if __name__ == "__main__":
     parse_timeline("sandroid.json")

@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from colorama import Fore, Style
@@ -15,11 +14,11 @@ from .config import ConfigLoader, SandroidConfig
 
 # Import existing modules (these will need to be refactored)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from src.utils.toolbox import Toolbox
 from src.utils.actionQ import ActionQ
 from src.utils.adb import Adb
-from src.utils.pdf_report import PDFReport
 from src.utils.AI_processing import AIProcessing
+from src.utils.pdf_report import PDFReport
+from src.utils.toolbox import Toolbox
 
 console = Console()
 
@@ -33,7 +32,7 @@ def setup_logging(config: SandroidConfig) -> logging.Logger:
         datefmt="[%X]",
         handlers=[RichHandler(console=console, rich_tracebacks=True)]
     )
-    
+
     # Setup file logging
     log_file = config.paths.results_path / "sandroid.log"
     file_handler = logging.FileHandler(log_file)
@@ -42,17 +41,17 @@ def setup_logging(config: SandroidConfig) -> logging.Logger:
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     file_handler.setFormatter(file_formatter)
-    
+
     logger = logging.getLogger("sandroid")
     logger.addHandler(file_handler)
-    
+
     return logger
 
 
 def pretty_logo():
     """Print the Sandroid logo."""
-    green = '\033[92m'
-    clear = '\033[0m'
+    green = "\033[92m"
+    clear = "\033[0m"
 
     print(f"""
 {green}⠀⠀⠀⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀
@@ -176,33 +175,32 @@ def pretty_logo():
 )
 @click.version_option()
 def main(
-    config: Optional[str],
-    environment: Optional[str],
-    file: Optional[str],
-    loglevel: Optional[str],
-    number: Optional[int],
+    config: str | None,
+    environment: str | None,
+    file: str | None,
+    loglevel: str | None,
+    number: int | None,
     avoid_strong_noise_filter: bool,
     network: bool,
     show_deleted: bool,
     no_processes: bool,
     sockets: bool,
-    screenshot: Optional[int],
-    trigdroid: Optional[str],
-    trigdroid_ccf: Optional[str],
+    screenshot: int | None,
+    trigdroid: str | None,
+    trigdroid_ccf: str | None,
     hash: bool,
     apk: bool,
     degrade_network: bool,
-    whitelist: Optional[str],
+    whitelist: str | None,
     ai: bool,
     report: bool,
     interactive: bool,
 ):
     """Sandroid: Extract forensic artifacts from Android Virtual Devices."""
-    
     try:
         # Load configuration
         loader = ConfigLoader()
-        
+
         # Build CLI overrides
         cli_overrides = {}
         if file:
@@ -213,7 +211,7 @@ def main(
             cli_overrides["analysis"] = {"number_of_runs": number}
         if whitelist:
             cli_overrides["whitelist_file"] = whitelist
-        
+
         # Analysis settings
         analysis_overrides = {}
         if avoid_strong_noise_filter:
@@ -234,10 +232,10 @@ def main(
             analysis_overrides["list_apks"] = True
         if degrade_network:
             analysis_overrides["degrade_network"] = True
-        
+
         if analysis_overrides:
             cli_overrides["analysis"] = analysis_overrides
-        
+
         # TrigDroid settings
         if trigdroid or trigdroid_ccf:
             trigdroid_overrides = {"enabled": True}
@@ -246,43 +244,43 @@ def main(
             if trigdroid_ccf:
                 trigdroid_overrides["config_mode"] = trigdroid_ccf
             cli_overrides["trigdroid"] = trigdroid_overrides
-        
+
         # AI settings
         if ai:
             cli_overrides["ai"] = {"enabled": True}
-        
+
         # Report settings
         if report:
             cli_overrides["report"] = {"generate_pdf": True}
-        
+
         # Load the configuration
         sandroid_config = loader.load(
             config_file=config,
             environment=environment,
             cli_overrides=cli_overrides
         )
-        
+
         # Setup logging
         logger = setup_logging(sandroid_config)
-        
+
         # Clear screen if not debug
         if sandroid_config.log_level != "DEBUG":
-            os.system('cls' if os.name == 'nt' else 'clear')
-        
+            os.system("cls" if os.name == "nt" else "clear")
+
         # Show logo
         pretty_logo()
-        
+
         # Setup environment variables for legacy code
         os.environ["RESULTS_PATH"] = str(sandroid_config.paths.results_path)
         os.environ["RAW_RESULTS_PATH"] = str(sandroid_config.paths.raw_results_path)
-        
+
         if interactive:
             # Start interactive mode
             start_interactive_mode(sandroid_config, logger)
         else:
             # Run analysis
             run_analysis(sandroid_config, logger)
-            
+
     except Exception as e:
         console.print(f"[red]Error: {e}")
         sys.exit(1)
@@ -295,7 +293,7 @@ def start_interactive_mode(config: SandroidConfig, logger: logging.Logger):
     Toolbox.init()
     Adb.init()
     Toolbox.check_setup()
-    
+
     # TODO: Implement interactive menu using rich/click
     console.print("[yellow]Interactive mode not yet implemented in the new CLI.")
     console.print("Please use the legacy ./sandroid script for interactive mode.")
@@ -310,44 +308,44 @@ def run_analysis(config: SandroidConfig, logger: logging.Logger):
         Toolbox.init()
         Adb.init()
         Toolbox.check_setup()
-        
+
         # Create and assemble action queue
         q = ActionQ()
         q.assembleQ()
-        
+
         # Process action queue
         while not q.finished:
             q.do_next()
-        
+
         # Handle AI summarization if enabled
         action = ""
         if config.ai.enabled:
             recording_path = config.paths.raw_results_path / "recording.webm"
             if recording_path.exists():
                 action = AIProcessing.summarize_video(str(recording_path))
-        
+
         # Finalize
         Toolbox.wrap_up()
-        
+
         # Write results
         output_file = config.paths.results_path / config.output_file.name
         with open(output_file, "w") as fd:
             fd.write(q.get_data())
-        
+
         # Display results
         if config.ai.enabled and action:
             print(Fore.GREEN + Style.BRIGHT + f"Sandroid Results for the action: {action}" + Style.RESET_ALL)
-        
+
         print(q.get_pretty_print())
-        
+
         # Generate PDF report if enabled
         if config.report.generate_pdf:
             pdf_path = config.paths.results_path / "Sandroid_Forensic_Report.pdf"
             PDFReport(str(pdf_path), str(output_file))
             logger.info(f"PDF report generated: {pdf_path}")
-        
+
         logger.info("Analysis completed successfully")
-        
+
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise

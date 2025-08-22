@@ -2,8 +2,7 @@ from abc import ABC, abstractmethod
 
 
 class DataGather(ABC):
-    """
-    Abstract base class for all modules that perform some data gathering.
+    """Abstract base class for all modules that perform some data gathering.
 
     **Methods:**
 
@@ -14,20 +13,16 @@ class DataGather(ABC):
 
     @abstractmethod
     def gather(self):
-        """
-        Gather data.
+        """Gather data.
 
         **Raises:**
 
         - :class:`NotImplementedError`: If the method is not implemented in a subclass.
         """
 
-        pass
-
     @abstractmethod
     def return_data(self):
-        """
-        Return gathered data.
+        """Return gathered data.
 
         **Returns:**
 
@@ -38,16 +33,11 @@ class DataGather(ABC):
         - :class:`NotImplementedError`: If the method is not implemented in a subclass.
         """
 
-        pass
-
     @abstractmethod
     def pretty_print(self):
-        """
-        Pretty print the gathered data.
+        """Pretty print the gathered data.
 
         **Raises:**
 
         - :class:`NotImplementedError`: If the method is not implemented in a subclass.
         """
-        
-        pass

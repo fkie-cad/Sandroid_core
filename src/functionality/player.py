@@ -1,24 +1,22 @@
-"""
-This code is an excerpt from "adb-event-record" by Tzutalin.
+"""This code is an excerpt from "adb-event-record" by Tzutalin.
 (https://github.com/tzutalin/adb-event-record)
 The excerpt was modified to fit the needs of this project
 """
 
-import time
-import re
-import os
 import math
+import os
+import re
+import time
+from logging import getLogger
 
 from src.functionality.functionality import Functionality
-from src.utils.toolbox import Toolbox
 from src.utils.adb import Adb
-from logging import getLogger
+from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
 class Player(Functionality):
-    """
-    Represents a player functionality for performing actions.
+    """Represents a player functionality for performing actions.
 
     This class handles replaying actions based on recorded data.
 
@@ -32,12 +30,10 @@ class Player(Functionality):
     STORE_LINE_RE = re.compile(r"(\S+) (\S+) (\S+) (\S+) (\S+)$")
 
     def perform(self):
-        """
-        Perform the player action.
+        """Perform the player action.
 
         This method replays recorded actions based on stored data.
         """
-
         # replay action
         Toolbox.set_action_time()
         start_time = int(round(time.time()))
@@ -67,6 +63,6 @@ class Player(Functionality):
         logger.debug(f"Set action duration to {action_duration} seconds")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     p = Player()
     p.perform()

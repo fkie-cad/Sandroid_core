@@ -1,8 +1,9 @@
+from logging import getLogger
+
+from friTap import SSL_Logger
+
 from src.datagather.datagather import DataGather
 from src.utils.toolbox import Toolbox
-from androidmalwaremotionmonitor import AppProfiler
-from logging import getLogger
-from friTap import SSL_Logger
 
 logger = getLogger(__name__)
 
@@ -43,17 +44,15 @@ class FriTap(DataGather):
     def stop(self):
         #self.job_manager.stop_job_with_id(self.job_id)
         self.job_manager.stop_app_with_closing_frida(self.app_package)
-    
+
 
 
     def gather(self):
-        """
-        Gather data from the monitored application.
+        """Gather data from the monitored application.
 
         .. warning::
             Context dependent behavior: Calling this method acts as a toggle, it starts or stops the monitoring process based on the current state.
         """
-
         if self.running:
             self.job_manager.stop_app_with_closing_frida(self.app_package)
             self.last_output = self.profiler.get_profiling_log_as_JSON()
@@ -70,34 +69,27 @@ class FriTap(DataGather):
             Toolbox.malware_monitor_running = True
 
     def has_new_results(self):
-        """
-        Check if there are new results available.
+        """Check if there are new results available.
 
         :returns: True if there are new results, False otherwise.
         :rtype: bool
         """
-
         if self.running:
             return False
         return self.has_new_results
-        
+
 
     def return_data(self):
-        """
-        Return the last profiling data.
+        """Return the last profiling data.
 
         This method returns the last profiling data and resets the new results flag.
 
         :returns: The last profiling data in JSON format.
         :rtype: str
         """
-
         self.has_new_results = False
         return self.last_output
 
     def pretty_print(self):
+        """Not implemented
         """
-        Not implemented
-        """
-
-        pass

@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-import sys
 import ssl
-import certifi
 import subprocess
-from geopy.geocoders import Nominatim
+import sys
+
+import certifi
 from geopy.exc import GeocoderServiceError
+from geopy.geocoders import Nominatim
 
 
 class AndroidLocationManager:
     def __init__(self, device_id=None, is_magisk_mode=False):
-        """
-        :param device_id:     E.g. "emulator-5554" or a real device ID.
+        """:param device_id:     E.g. "emulator-5554" or a real device ID.
         :param is_magisk_mode: If True, run 'su -c' commands for Magisk; otherwise 'su 0'.
         """
         self.device_id = device_id
         self.is_magisk_mode = is_magisk_mode
 
     def adb_check_root(self) -> bool:
-        """
-        A placeholder function that checks if the device is actually rooted.
+        """A placeholder function that checks if the device is actually rooted.
         Return True if rooted, False otherwise.
 
         Implementation can vary: you could run `adb shell su -c id`, parse output, etc.
@@ -33,21 +31,20 @@ class AndroidLocationManager:
         # We attempt a trivial root-check command
         cmd += ["shell", "which", "su"]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if result.returncode == 0 and "su" in result.stdout.strip():
             return True
         return False
 
     def run_adb_command_as_root(self, command: str):
-        """
-        Runs the given `command` as root via su on the Android device.
+        """Runs the given `command` as root via su on the Android device.
 
         :param command: e.g. 'setprop persist.sys.timezone "Europe/Berlin"'
         :return: CompletedProcess with stdout/stderr
         """
-        adb_command = ['adb']
+        adb_command = ["adb"]
         if self.device_id:
-            adb_command.extend(['-s', self.device_id])
+            adb_command.extend(["-s", self.device_id])
 
         # Check if device is rooted
         if not self.adb_check_root():
@@ -57,12 +54,12 @@ class AndroidLocationManager:
 
         # Decide if we should run 'su -c ...' vs 'su 0 ...'
         if self.is_magisk_mode:
-            full_cmd = adb_command + ['shell', f'su -c {command}']
+            full_cmd = adb_command + ["shell", f"su -c {command}"]
         else:
-            full_cmd = adb_command + ['shell', f'su 0 {command}']
+            full_cmd = adb_command + ["shell", f"su 0 {command}"]
 
         # Run the command
-        result = subprocess.run(full_cmd, capture_output=True, text=True)
+        result = subprocess.run(full_cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             # Improved error message
             print(f"[ERROR] Root command failed.\n"
@@ -75,16 +72,15 @@ class AndroidLocationManager:
         return result
 
     def run_adb_command_no_root(self, command_list):
-        """
-        For commands which do NOT require root (like 'adb emu geo fix').
+        """For commands which do NOT require root (like 'adb emu geo fix').
         :param command_list: List of strings, e.g. ['emu', 'geo', 'fix', '37.6176', '55.7558']
         """
-        adb_command = ['adb']
+        adb_command = ["adb"]
         if self.device_id:
-            adb_command.extend(['-s', self.device_id])
+            adb_command.extend(["-s", self.device_id])
         adb_command.extend(command_list)
 
-        result = subprocess.run(adb_command, capture_output=True, text=True)
+        result = subprocess.run(adb_command, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"[ERROR] Non-root adb command failed.\n"
                   f"  Command: {adb_command}\n"
@@ -96,24 +92,21 @@ class AndroidLocationManager:
         return result
 
     def set_avd_location(self, latitude: float, longitude: float):
-        """
-        Set the GPS location on the emulator. (Doesn't typically need root.)
+        """Set the GPS location on the emulator. (Doesn't typically need root.)
         """
         # On standard AVD, we do: adb emu geo fix <longitude> <latitude>
-        cmd_list = ['emu', 'geo', 'fix', str(longitude), str(latitude)]
+        cmd_list = ["emu", "geo", "fix", str(longitude), str(latitude)]
         self.run_adb_command_no_root(cmd_list)
 
     def set_time_zone(self, tz: str):
-        """
-        Set the system time zone, e.g. 'Europe/Moscow'.
+        """Set the system time zone, e.g. 'Europe/Moscow'.
         Usually requires root on modern Android.
         """
         command = f'setprop persist.sys.timezone "{tz}"'
         self.run_adb_command_as_root(command)
 
     def set_locale(self, language: str, country: str):
-        """
-        For older Android images, you might do:
+        """For older Android images, you might do:
             setprop persist.sys.language <lang>
             setprop persist.sys.country  <COUNTRY>
             stop
@@ -121,17 +114,16 @@ class AndroidLocationManager:
         This definitely requires root privileges.
         """
         commands = [
-            f'setprop persist.sys.language {language}',
-            f'setprop persist.sys.country {country}',
-            'stop',
-            'start'
+            f"setprop persist.sys.language {language}",
+            f"setprop persist.sys.country {country}",
+            "stop",
+            "start"
         ]
         for cmd in commands:
             self.run_adb_command_as_root(cmd)
 
     def set_telephony(self, iso_country: str, mnc: str):
-        """
-        e.g. iso_country='ru', mnc='25001'
+        """e.g. iso_country='ru', mnc='25001'
         Sets typical telephony props. Requires root.
         """
         props_to_set = {
@@ -141,12 +133,11 @@ class AndroidLocationManager:
             "gsm.operator.numeric": mnc,
         }
         for key, val in props_to_set.items():
-            cmd = f'setprop {key} {val}'
+            cmd = f"setprop {key} {val}"
             self.run_adb_command_as_root(cmd)
 
     def geocode_location(self, country: str, city: str):
-        """
-        Returns (latitude, longitude) by geocoding the given city & country
+        """Returns (latitude, longitude) by geocoding the given city & country
         using Nominatim (OpenStreetMap).
         """
         ctx = ssl.create_default_context(cafile=certifi.where())
@@ -163,8 +154,7 @@ class AndroidLocationManager:
 
 
 def main():
-    """
-    Example usage:
+    """Example usage:
       python3 set_avd_location.py <country_code> <city> [<device_name>]
       or
       python3 set_avd_location.py <latitude> <longitude> [<device_name>]

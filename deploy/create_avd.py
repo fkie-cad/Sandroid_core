@@ -2,8 +2,18 @@
 # Cross-platform AVD creator with SDK/AVD autodetect
 # Windows 10/11 (x64/ARM64), Linux (x64/ARM64), macOS (Intel/Apple Silicon)
 
-import os, sys, platform, shutil, subprocess, zipfile, tempfile, urllib.request, ssl, stat, re
-from typing import List, Tuple, Optional
+import os
+import platform
+import re
+import shutil
+import ssl
+import stat
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+
 
 # --------- try to enable line-editing (arrow keys) ----------
 def _enable_line_editing():
@@ -47,7 +57,7 @@ def make_exec(p):
     if os.path.exists(p) and not is_windows():
         st = os.stat(p); os.chmod(p, st.st_mode | stat.S_IEXEC)
 
-def run_cmd(cmd: List[str], env=None, input_text: Optional[str]=None) -> Tuple[int,str,str]:
+def run_cmd(cmd: list[str], env=None, input_text: str | None=None) -> tuple[int,str,str]:
     try:
         res = subprocess.run(cmd, input=(input_text.encode() if input_text else None),
                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -117,9 +127,8 @@ def looks_like_sdk(path: str) -> bool:
     return any(os.path.isdir(os.path.join(path, c)) for c in critical)
 
 
-def find_existing_sdk() -> Optional[str]:
-    """
-    Try to detect the Android SDK root from environment vars, known locations,
+def find_existing_sdk() -> str | None:
+    """Try to detect the Android SDK root from environment vars, known locations,
     and fallback strategies. Must contain cmdline-tools or platform-tools.
     """
     # 1. Check env vars first
@@ -166,7 +175,7 @@ def find_existing_sdk() -> Optional[str]:
     return None
 
 
-def find_existing_avd_home() -> Optional[str]:
+def find_existing_avd_home() -> str | None:
     p = os.environ.get("ANDROID_AVD_HOME")
     if p and os.path.isdir(p): return p
     default = os.path.expanduser("~/.android/avd")
@@ -175,8 +184,7 @@ def find_existing_avd_home() -> Optional[str]:
 
 
 def normalize_sdk_root(sdk_root: str) -> str:
-    """
-    Auto-correct if user provided parent folder but real SDK is in <root>/sdk.
+    """Auto-correct if user provided parent folder but real SDK is in <root>/sdk.
     """
     root = os.path.abspath(sdk_root)
     sdk_subdir = os.path.join(root, "sdk")
@@ -390,7 +398,7 @@ if not chosen_img:
     err("No suitable system image could be installed. Try a different API level."); sys.exit(4)
 
 # --------- Device profile selection ----------
-def list_device_ids() -> List[str]:
+def list_device_ids() -> list[str]:
     c,o,e = run_cmd([AVDMANAGER,"list","device"], env=env)
     if c!=0: return []
     return re.findall(r'id:\s*\d+\s+or\s+"([^"]+)"', o)
@@ -452,10 +460,10 @@ def quote(s: str) -> str:
     return s
 
 if is_windows():
-    launcher_cmd = f'set ANDROID_SDK_ROOT={SDK_ROOT}&& set ANDROID_HOME={SDK_ROOT}&& set ANDROID_AVD_HOME={ANDROID_AVD_HOME}&& {quote(EMULATOR_BIN)} -avd {avd_name}'
+    launcher_cmd = f"set ANDROID_SDK_ROOT={SDK_ROOT}&& set ANDROID_HOME={SDK_ROOT}&& set ANDROID_AVD_HOME={ANDROID_AVD_HOME}&& {quote(EMULATOR_BIN)} -avd {avd_name}"
     headless_cmd = launcher_cmd + " -no-window -no-boot-anim -gpu swiftshader_indirect"
 else:
-    launcher_cmd = f'ANDROID_SDK_ROOT={quote(SDK_ROOT)} ANDROID_HOME={quote(SDK_ROOT)} ANDROID_AVD_HOME={quote(ANDROID_AVD_HOME)} {quote(EMULATOR_BIN)} -avd {quote(avd_name)}'
+    launcher_cmd = f"ANDROID_SDK_ROOT={quote(SDK_ROOT)} ANDROID_HOME={quote(SDK_ROOT)} ANDROID_AVD_HOME={quote(ANDROID_AVD_HOME)} {quote(EMULATOR_BIN)} -avd {quote(avd_name)}"
     headless_cmd = launcher_cmd + " -no-window -no-boot-anim -gpu swiftshader_indirect"
 
 print("Start it (windowed):")

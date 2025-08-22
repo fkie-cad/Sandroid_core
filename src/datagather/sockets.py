@@ -1,29 +1,27 @@
 import threading
+import time
+from logging import getLogger
 
 from src.datagather.datagather import DataGather
 from src.utils.adb import Adb
 from src.utils.toolbox import Toolbox
-import src.utils.file_diff as file_diff
-import time
-from logging import getLogger
 
 logger = getLogger(__name__)
 
 class Bcolors:
-    HEADER = '\033[95m'
-    OKBLUE = '\033[94m'
-    OKCYAN = '\033[96m'
-    OKGREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
 
 
 class Sockets(DataGather):
-    """
-    Handles the gathering and processing of listening sockets during an action.
+    """Handles the gathering and processing of listening sockets during an action.
     """
 
     run_sockets_lists = {}
@@ -33,34 +31,28 @@ class Sockets(DataGather):
     performed_diff = False
 
     def gather(self):
+        """Collects information on listening sockets during an action.
         """
-        Collects information on listening sockets during an action.
-        """
-
         logger.info("Collecting information on listening sockets during action")
         t1 = threading.Thread(target=self.socket_capture_thread, args=())
         t1.start()
 
     def return_data(self):
-        """
-        Returns the processed data of listening sockets.
+        """Returns the processed data of listening sockets.
 
         :returns: Dictionary containing the listening sockets.
         :rtype: dict
         """
-
         if not self.performed_diff:
             self.process_sockets()
         return {"Listening Sockets": self.final_sockets_list}
 
     def pretty_print(self):
-        """
-        Returns a formatted string of the listening sockets for display.
+        """Returns a formatted string of the listening sockets for display.
 
         :returns: Formatted string of listening sockets.
         :rtype: str
         """
-
         if not self.performed_diff:
             self.process_sockets()
         raw_output = self.final_sockets_list
@@ -75,10 +67,8 @@ class Sockets(DataGather):
         return result
 
     def socket_capture_thread(self):
+        """Function meant to be used as a thread to create list of listening sockets over the duration of an action.
         """
-        Function meant to be used as a thread to create list of listening sockets over the duration of an action.
-        """
-
         runtime = Toolbox.get_action_duration()
         socket_list = []
         for i in range(runtime):
@@ -100,10 +90,8 @@ class Sockets(DataGather):
 
 
     def process_sockets(self):
+        """Processes the collected socket lists to filter out noise and identify true listening sockets.
         """
-        Processes the collected socket lists to filter out noise and identify true listening sockets.
-        """
-        
         noise = self.noise_sockets
 
         logger.debug("Processing collected listening sockets lists")
@@ -120,21 +108,21 @@ class Sockets(DataGather):
         for socket_list in self.run_sockets_lists.values():
             port_and_name_dict = {}
             for line in socket_list:
-                parts = line.split()    
-                port = parts[3].split(':')[-1]
-                if '/' in parts[-1]:
-                    program = parts[-1].split('/')[1]
+                parts = line.split()
+                port = parts[3].split(":")[-1]
+                if "/" in parts[-1]:
+                    program = parts[-1].split("/")[1]
                     port_and_name_dict[port] = program
                 else:
                     port_and_name_dict[port] = ""
 
             port_numbers_and_names_dict_list.append(port_and_name_dict)
-            
 
 
-        # Get all keys from all dictionaries    
+
+        # Get all keys from all dictionaries
         all_keys = set().union(*[d.keys() for d in port_numbers_and_names_dict_list])
-        # Initialize the result dictionary    
+        # Initialize the result dictionary
         result = {}
 
         # Check each key
@@ -151,7 +139,7 @@ class Sockets(DataGather):
 
 
         # Generate final socket list
-        for port in noise_adjusted_result.keys():
+        for port in noise_adjusted_result:
             self.final_sockets_list.append("Port "+str(port)+ " used by "+ noise_adjusted_result[port])
 
         self.performed_diff = True

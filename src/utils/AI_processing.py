@@ -1,7 +1,8 @@
-import time
-from google import genai
-from logging import getLogger
 import os
+import time
+from logging import getLogger
+
+from google import genai
 
 from src.utils.toolbox import Toolbox
 
@@ -10,24 +11,24 @@ logger = getLogger(__name__)
 def get_genai_client():
     """Get Google GenAI client with API key from configuration or environment."""
     # First try to get from Toolbox config (if available)
-    if hasattr(Toolbox, 'config') and Toolbox.config:
-        api_key = (Toolbox.config.credentials.google_genai_api_key or 
+    if hasattr(Toolbox, "config") and Toolbox.config:
+        api_key = (Toolbox.config.credentials.google_genai_api_key or
                   Toolbox.config.ai.api_key)
         if api_key:
             return genai.Client(api_key=api_key)
-    
+
     # Fall back to environment variable
     api_key = os.getenv("SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY") or \
               os.getenv("SANDROID_AI__API_KEY") or \
               os.getenv("GOOGLE_API_KEY")
-    
+
     if not api_key:
         raise ValueError(
             "Google GenAI API key not found. Please set it in configuration "
             "file under credentials.google_genai_api_key or use environment "
             "variable SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY"
         )
-    
+
     return genai.Client(api_key=api_key)
 
 video_summary_prompt = """
@@ -75,7 +76,7 @@ Example 2:
 ebay.com opened in chrome browser.
 """
 
-class AIProcessing():
+class AIProcessing:
     @staticmethod
     def list_models():
         client = get_genai_client()
@@ -85,7 +86,7 @@ class AIProcessing():
     @staticmethod
     def summarize_video(path, prompt=video_summary_prompt):
         client = get_genai_client()
-        logger.info(f"Summarizing recording, this may take a while depending on the video length")
+        logger.info("Summarizing recording, this may take a while depending on the video length")
         video = client.files.upload(file=path)
         logger.debug(f"Uploaded file: {video.name}")
 
@@ -118,7 +119,7 @@ class AIProcessing():
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(f"Overview: {overview.text}\n\nSummary: {summary.text}")
                 logger.debug(f"Summary saved to {file_path}")
-        except IOError as e:
+        except OSError as e:
             logger.error(f"Failed to write summary to file: {e}")
 
         return(overview.text)
@@ -132,7 +133,7 @@ if __name__ == "__main__":
     #TODO: add automatic path finding
 
 #Example output made with 2.5 flash model
-'''
+"""
 Here is a detailed breakdown of the provided screen recording:
 
 *   00:00 The device's home screen is displayed. The wallpaper is a gradient from light pink at the top to a darker purple at the bottom, resembling a sunset or sunrise over mountains. At the very bottom, a Google search bar is visible with a "G" icon on the left and a microphone icon on the right. Above the search bar, a row of app icons includes: "Messages" (blue speech bubble icon) and "Chrome" (red, yellow, green, blue circular icon). Above this row, three more app icons are displayed: "Gmail" (red and white 'M' envelope icon), "Photos" (colorful pinwheel icon), and "YouTube" (red play button icon).
@@ -160,4 +161,4 @@ Here is a detailed breakdown of the provided screen recording:
 *   00:23 The user continues typing, and the text in the "Text message" input field now reads "Hey". The send button remains active (blue paper airplane). The suggestion bar now displays "Hey", "They", and a waving hand emoji.
 *   00:25 The screen content remains identical to 00:23. The text "Hey" is in the input field, the keyboard is visible, and the send button is active.
 
-'''
+"""

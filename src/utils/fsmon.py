@@ -1,14 +1,17 @@
-import os
-import tempfile
-import requests
-import subprocess
 import logging
+import os
+import subprocess
+import tempfile
+
+import requests
+
 from src.utils.adb import Adb
+
 
 class FSMon:
     # Base binary name pattern
     FS_MON_BINARY_BASE = "/data/local/tmp/fsmon-{arch}"
-    
+
     # URLs for different architectures
     FS_MON_URLS = {
         "arm64": "https://github.com/nowsecure/fsmon/releases/download/1.8.6/fsmon-android-arm64",
@@ -19,54 +22,51 @@ class FSMon:
 
     # Default to arm64 until architecture is detected
     FS_MON_BINARY = "/data/local/tmp/fsmon-arm64"
-    
+
     # Logger
     logger = logging.getLogger(__name__)
 
     @classmethod
     def get_device_architecture(cls):
-        """
-        Detects the architecture of the connected Android device using ADB.
+        """Detects the architecture of the connected Android device using ADB.
         
         :return: Architecture string (arm64, arm, x86, or x86_64)
         :rtype: str
         """
         stdout, stderr = Adb.send_adb_command("shell getprop ro.product.cpu.abi")
         abi = stdout.strip()
-        
+
         if "arm64" in abi:
             return "arm64"
-        elif "armeabi" in abi:
+        if "armeabi" in abi:
             return "arm"
-        elif "x86_64" in abi:
+        if "x86_64" in abi:
             return "x86_64"
-        elif "x86" in abi:
+        if "x86" in abi:
             return "x86"
-        else:
-            # Default to arm64 if detection fails
-            return "arm64"
+        # Default to arm64 if detection fails
+        return "arm64"
 
     @classmethod
     def check_and_install_fsmon(cls):
-        """
-        Checks if the appropriate fsmon binary exists.
+        """Checks if the appropriate fsmon binary exists.
         If not, downloads it into a temporary directory,
         then pushes it to the device and makes it executable.
         """
         # Detect device architecture
         arch = cls.get_device_architecture()
-        
+
         # Set binary path and URL based on architecture
         binary_path = cls.FS_MON_BINARY_BASE.format(arch=arch)
         binary_url = cls.FS_MON_URLS.get(arch)
-        
+
         if not binary_url:
             binary_url = cls.FS_MON_URLS["arm64"]  # Default to arm64 if arch not found
             binary_path = cls.FS_MON_BINARY_BASE.format(arch="arm64")
-        
+
         # Update class variable to use the architecture-specific binary
         cls.FS_MON_BINARY = binary_path
-        
+
         # Check if fsmon exists on the device
         stdout, stderr = Adb.send_adb_command(f"shell [ -f {binary_path} ] && echo 'exists' || echo 'notfound'")
         if "exists" in stdout:
@@ -91,8 +91,7 @@ class FSMon:
 
     @classmethod
     def run_fsmon_by_path(cls, path):
-        """
-        Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified path.
+        """Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified path.
         Returns the subprocess.Popen object so the caller can terminate it later.
         
         :param path: The directory/path to monitor with fsmon.
@@ -103,7 +102,7 @@ class FSMon:
         if not path:
             cls.logger.error("Path cannot be empty for path-based monitoring")
             return None
-            
+
         cmd = ["adb", "exec-out", cls.FS_MON_BINARY, path]
         cls.logger.info(f"Monitoring path: {path}")
         cls.logger.debug(f"Running command: {' '.join(cmd)}")
@@ -112,8 +111,7 @@ class FSMon:
 
     @classmethod
     def run_fsmon_by_pid(cls, pid, path="/data/"):
-        """
-        Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified process ID.
+        """Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified process ID.
         Returns the subprocess.Popen object so the caller can terminate it later.
         
         :param pid: The process ID to monitor with fsmon.
@@ -124,7 +122,7 @@ class FSMon:
         if not pid:
             cls.logger.error("PID cannot be empty for process-based monitoring")
             return None
-            
+
         cmd = ["adb", "exec-out", cls.FS_MON_BINARY, "-p", str(pid), path]
         cls.logger.info(f"Monitoring process with PID: {pid}")
         cls.logger.debug(f"Running command: {' '.join(cmd)}")
