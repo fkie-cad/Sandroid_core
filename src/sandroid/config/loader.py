@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import yaml
-from platformdirs import user_config_dir, system_config_dir
+from platformdirs import user_config_dir, site_config_dir
 
 from .schema import SandroidConfig
 
@@ -49,7 +49,7 @@ class ConfigLoader:
                     dirs.append(Path(config_dir.strip()) / self.app_name)
         
         # System config directory (lowest priority)
-        system_dir = Path(system_config_dir(self.app_name))
+        system_dir = Path(site_config_dir(self.app_name))
         dirs.append(system_dir)
         
         # Current working directory (for development)

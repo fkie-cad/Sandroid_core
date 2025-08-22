@@ -5,11 +5,25 @@
 import os, sys, platform, shutil, subprocess, zipfile, tempfile, urllib.request, ssl, stat, re
 from typing import List, Tuple, Optional
 
-# ============ Defaults (can be overridden by env or user choice during prompts) ============
+# --------- try to enable line-editing (arrow keys) ----------
+def _enable_line_editing():
+    try:
+        if platform.system().lower().startswith("win"):
+            # On Windows, optionally support pyreadline3 if installed
+            import readline  # may be pyreadline3 behind the scenes
+        else:
+            # Unix/macOS: builtin readline is usually available
+            import readline  # noqa
+    except Exception:
+        # No readline available; input() will still work, just without cursor movement
+        pass
+_enable_line_editing()
+
+# ============ Defaults (can be overridden by env or user input) ============
 DEFAULT_ROOT = os.environ.get("AVD_ROOT", os.path.expanduser("~/android_avd"))
 DEFAULT_API  = os.environ.get("AVD_API_LEVEL", "34")
 DEFAULT_NAME = os.environ.get("AVD_NAME", f"universal-avd-{DEFAULT_API}-googleapis")
-# ==========================================================================================
+# ==========================================================================
 
 def info(m): print(f"[+] {m}")
 def warn(m): print(f"[!] {m}")
@@ -95,62 +109,90 @@ def best_download(url: str, dest: str) -> bool:
     return False
 
 # --------- Detect existing SDK & AVD locations ----------
+def looks_like_sdk(path: str) -> bool:
+    """Check if the given path looks like a valid Android SDK root."""
+    if not os.path.isdir(path):
+        return False
+    critical = ["platform-tools", "cmdline-tools"]
+    return any(os.path.isdir(os.path.join(path, c)) for c in critical)
+
+
 def find_existing_sdk() -> Optional[str]:
-    # 1) env
-    for k in ("ANDROID_SDK_ROOT","ANDROID_HOME"):
-        p = os.environ.get(k)
-        if p and os.path.isdir(p): return p
-    # 2) common defaults
+    """
+    Try to detect the Android SDK root from environment vars, known locations,
+    and fallback strategies. Must contain cmdline-tools or platform-tools.
+    """
+    # 1. Check env vars first
+    for var in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        sdk = os.environ.get(var)
+        if sdk and looks_like_sdk(sdk):
+            return sdk
+
+    # 2. Check common defaults per OS
     candidates = []
     if is_macos():
-        candidates += [os.path.expanduser("~/Library/Android/sdk")]
-    if is_linux():
-        candidates += [os.path.expanduser("~/Android/Sdk"), os.path.expanduser("~/Android/sdk"), os.path.expanduser("~/android-sdk")]
-    if is_windows():
         candidates += [
-            os.path.join(os.environ.get("LOCALAPPDATA",""), "Android","Sdk"),
-            os.path.join(os.environ.get("APPDATA",""), "Android","Sdk"),
+            os.path.expanduser("~/Library/Android/sdk"),
+            os.path.expanduser("~/Library/Android"),
         ]
-    # 3) sdkmanager on PATH
+    elif is_linux():
+        candidates += [
+            os.path.expanduser("~/Android/Sdk"),
+            os.path.expanduser("~/Android/sdk"),
+            os.path.expanduser("~/android-sdk"),
+        ]
+    elif is_windows():
+        candidates += [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Android", "Sdk"),
+            os.path.join(os.environ.get("APPDATA", ""), "Android", "Sdk"),
+        ]
+
+    # 3. Check sdkmanager on PATH
     sm = shutil.which("sdkmanager") or shutil.which("sdkmanager.bat")
     if sm:
-        # resolve .../cmdline-tools/latest/bin/sdkmanager -> SDK root is a few dirs up
-        p = os.path.abspath(sm)
-        # expected: <sdk>/cmdline-tools/latest/bin/sdkmanager
-        parts = p.replace("\\","/").split("/")
-        try:
-            i = parts.index("cmdline-tools")
-            sdk_root = "/".join(parts[:i])
-            if os.path.isdir(sdk_root): return sdk_root
-        except ValueError:
-            pass
-        # else, try up-three
-        sdk_root = os.path.abspath(os.path.join(os.path.dirname(p), "..","..",".."))
-        if os.path.isdir(sdk_root): return sdk_root
+        possible_sdk = os.path.abspath(os.path.join(os.path.dirname(sm), "..", ".."))
+        if looks_like_sdk(possible_sdk):
+            return possible_sdk
+
+    # 4. Validate candidates
     for c in candidates:
-        if c and os.path.isdir(c): return c
+        if looks_like_sdk(c):
+            return c
+        # Check if <c>/sdk exists instead (common on macOS)
+        sub = os.path.join(c, "sdk")
+        if looks_like_sdk(sub):
+            return sub
+
     return None
 
+
 def find_existing_avd_home() -> Optional[str]:
-    # 1) env
     p = os.environ.get("ANDROID_AVD_HOME")
     if p and os.path.isdir(p): return p
-    # 2) default
     default = os.path.expanduser("~/.android/avd")
     if os.path.isdir(default): return default
     return None
 
+
+def normalize_sdk_root(sdk_root: str) -> str:
+    """
+    Auto-correct if user provided parent folder but real SDK is in <root>/sdk.
+    """
+    root = os.path.abspath(sdk_root)
+    sdk_subdir = os.path.join(root, "sdk")
+    if looks_like_sdk(sdk_subdir) and not looks_like_sdk(root):
+        warn(f"SDK detected under '{sdk_subdir}', adjusting path.")
+        return sdk_subdir
+    return root
+
+
 # --------- Begin interactive setup ----------
 print("=== AVD Setup (auto-detect SDK/AVD) ===\n")
 
-# Detect SDK
 detected_sdk = find_existing_sdk()
 if detected_sdk:
     use = ask_yes_no(f"Detected existing Android SDK at '{detected_sdk}'. Use this SDK?", default_yes=True)
-    if use:
-        SDK_ROOT = detected_sdk
-    else:
-        SDK_ROOT = ask_str("Enter SDK install directory", os.path.join(DEFAULT_ROOT, "sdk"))
+    SDK_ROOT = detected_sdk if use else ask_str("Enter SDK install directory", os.path.join(DEFAULT_ROOT, "sdk"))
 else:
     info("No existing Android SDK detected.")
     if ask_yes_no("Install a fresh SDK with commandline-tools now?", default_yes=True):
@@ -158,19 +200,14 @@ else:
     else:
         err("Cannot proceed without an SDK."); sys.exit(2)
 
-# Detect AVD home
 detected_avd = find_existing_avd_home()
 if detected_avd:
     use_avd = ask_yes_no(f"Detected AVD home at '{detected_avd}'. Use this AVD directory?", default_yes=True)
-    if use_avd:
-        ANDROID_AVD_HOME = detected_avd
-    else:
-        ANDROID_AVD_HOME = ask_str("Enter AVD directory", os.path.join(DEFAULT_ROOT, "avd"))
+    ANDROID_AVD_HOME = detected_avd if use_avd else ask_str("Enter AVD directory", os.path.join(DEFAULT_ROOT, "avd"))
 else:
     info("No existing AVD home detected.")
     ANDROID_AVD_HOME = ask_str("Enter AVD directory", os.path.join(DEFAULT_ROOT, "avd"))
 
-# Ask API/Name
 api_level = ask_str("API level to install", DEFAULT_API).strip()
 if not api_level.isdigit():
     warn(f"API level '{api_level}' is not numeric. Falling back to {DEFAULT_API}.")
@@ -182,8 +219,7 @@ try:
 except Exception:
     api_level = DEFAULT_API
 
-default_name = ask_str("Default AVD name (press Enter to accept)", DEFAULT_NAME)
-avd_name = default_name
+avd_name = ask_str("Default AVD name (press Enter to accept)", DEFAULT_NAME)
 if not ascii_only(avd_name):
     warn("AVD name contains non-ASCII characters; sanitizing.")
     avd_name = sanitize_name(avd_name)
@@ -191,18 +227,22 @@ if not avd_name:
     warn("AVD name empty after sanitization; using fallback.")
     avd_name = f"universal-avd-{api_level}-googleapis"
 
-# --------- Paths & constants ----------
+# --------- Normalize and prepare paths ----------
+SDK_ROOT = normalize_sdk_root(SDK_ROOT)
 CMDLINE_DIR = os.path.join(SDK_ROOT, "cmdline-tools")
 LATEST_DIR  = os.path.join(CMDLINE_DIR, "latest")
 TOOLS_BIN   = os.path.join(LATEST_DIR, "bin")
 SDKMANAGER  = os.path.join(TOOLS_BIN, "sdkmanager" + (".bat" if is_windows() else ""))
 AVDMANAGER  = os.path.join(TOOLS_BIN, "avdmanager" + (".bat" if is_windows() else ""))
-EMULATOR_BIN = os.path.join(SDK_ROOT, "emulator", "emulator" + (".exe" if is_windows() else ""))
+EMULATOR_CANDIDATES = [
+    os.path.join(SDK_ROOT, "emulator", "emulator" + (".exe" if is_windows() else "")),
+    os.path.join(os.path.dirname(SDK_ROOT), "emulator", "emulator" + (".exe" if is_windows() else "")),  # parent/emulator
+]
+EMULATOR_BIN = None  # we will resolve later once installed/verified
 
 ensure_dir(SDK_ROOT); ensure_dir(CMDLINE_DIR); ensure_dir(ANDROID_AVD_HOME)
 
-# --------- Platform-specific cmdline-tools URL ----------
-arch = cpu_arch()
+# --------- cmdline-tools URL ----------
 if is_windows(): zip_name = "commandlinetools-win-10406996_latest.zip"
 elif is_macos(): zip_name = "commandlinetools-mac-10406996_latest.zip"
 elif is_linux(): zip_name = "commandlinetools-linux-10406996_latest.zip"
@@ -268,6 +308,7 @@ def ensure_cmdline_tools() -> bool:
     repair_cmdline_layout()
     return os.path.exists(SDKMANAGER)
 
+# --------- Ensure tools available ----------
 if not ensure_cmdline_tools():
     sys.exit(2)
 
@@ -284,14 +325,13 @@ if env.get("JAVA_HOME"):
 info("Accepting Android SDK licenses (quiet)...")
 code, out, err_ = run_cmd([SDKMANAGER, "--sdk_root="+SDK_ROOT, "--licenses"], env=env, input_text=("y\n"*30))
 if code != 0:
+    # Not fatal; continue and retry if needed during package install
     warn("License acceptance had issues; continuing.")
 
 # --------- Install base packages ----------
 sys_img_suffix = "arm64-v8a" if cpu_arch()=="arm64" else "x86_64"
 base_pkgs = ["emulator", "platform-tools", f"platforms;android-{api_level}"]
-# Only add cmdline-tools;latest if sdkmanager was missing at first (avoid latest-2)
-if not os.path.exists(SDKMANAGER):
-    base_pkgs.insert(0, "cmdline-tools;latest")
+# NOTE: we do NOT add 'cmdline-tools;latest' again to avoid latest-2 duplication
 
 info("Installing base packages (quiet)...")
 code, out, err_ = run_cmd([SDKMANAGER, "--sdk_root="+SDK_ROOT, *base_pkgs], env=env)
@@ -301,10 +341,37 @@ if code != 0:
         run_cmd([SDKMANAGER, "--sdk_root="+SDK_ROOT, "--licenses"], env=env, input_text=("y\n"*30))
         code, out, err_ = run_cmd([SDKMANAGER, "--sdk_root="+SDK_ROOT, *base_pkgs], env=env)
     if code != 0:
-        print((out or err_).strip()); err("Failed to install base packages."); sys.exit(3)
+        print((out or err_).strip())
+        err("Failed to install base packages."); sys.exit(3)
 
-# repair any latest-2 created by sdkmanager
+# Repair any latest-2 created by sdkmanager
 repair_cmdline_layout()
+
+# --------- Resolve EMULATOR_BIN now that emulator pkg is installed ----------
+for cand in EMULATOR_CANDIDATES:
+    if os.path.isfile(cand):
+        EMULATOR_BIN = cand; break
+if not EMULATOR_BIN:
+    # As a last resort, search a few typical spots under SDK_ROOT
+    possible = []
+    for root, dirs, files in os.walk(SDK_ROOT):
+        if "emulator" in files:
+            EMULATOR_BIN = os.path.join(root, "emulator")
+            break
+        if "emulator.exe" in files:
+            EMULATOR_BIN = os.path.join(root, "emulator.exe")
+            break
+    if not EMULATOR_BIN:
+        # Ask the user to locate it
+        warn("Unable to locate the emulator binary automatically.")
+        manual = ask_str("Please enter the full path to the emulator binary",
+                         os.path.join(SDK_ROOT, "emulator", "emulator" + (".exe" if is_windows() else "")))
+        if not os.path.isfile(manual):
+            err(f"Emulator binary not found at '{manual}'. Aborting.")
+            sys.exit(3)
+        EMULATOR_BIN = manual
+
+make_exec(EMULATOR_BIN)
 
 # --------- Install a system image ----------
 sys_img_candidates = [
@@ -335,12 +402,26 @@ device_def = next((d for d in preferred if d in devices), devices[0] if devices 
 # --------- Create (or re-create) AVD ----------
 ini_path = os.path.join(ANDROID_AVD_HOME, f"{avd_name}.ini")
 avd_dir  = os.path.join(ANDROID_AVD_HOME, f"{avd_name}.avd")
-if os.path.exists(ini_path) or os.path.exists(avd_dir):
+
+# Double-check AVD home exists and is writable; if not, ask for a different path
+try:
+    ensure_dir(ANDROID_AVD_HOME)
+    testfile = os.path.join(ANDROID_AVD_HOME, ".write_test")
+    with open(testfile, "w") as f: f.write("ok")
+    os.remove(testfile)
+except Exception as e:
+    warn(f"AVD home '{ANDROID_AVD_HOME}' not writable: {e}")
+    ANDROID_AVD_HOME = ask_str("Enter a writable AVD directory", os.path.join(DEFAULT_ROOT, "avd"))
+    env["ANDROID_AVD_HOME"] = ANDROID_AVD_HOME
+    ensure_dir(ANDROID_AVD_HOME)
+
+# If already exists, ask user what to do
+if os.path.exists(ini_path) or os.path.isdir(avd_dir):
     if ask_yes_no(f"AVD '{avd_name}' already exists in '{ANDROID_AVD_HOME}'. Recreate it?", default_yes=True):
         run_cmd([AVDMANAGER,"delete","avd","--name",avd_name], env=env)
     else:
         info("Keeping existing AVD and skipping creation.")
-        device_def = None  # avoid passing an invalid device to creation below
+        device_def = None
 
 if not (os.path.exists(ini_path) and os.path.isdir(avd_dir)):
     info(f"Creating AVD '{avd_name}' using image '{chosen_img}'" + (f" and device '{device_def}'" if device_def else ""))
@@ -354,9 +435,6 @@ if not (os.path.exists(ini_path) and os.path.isdir(avd_dir)):
     if c!=0:
         print((o or e).strip()); err("Failed to create the AVD."); sys.exit(5)
 
-# Ensure emulator is executable
-make_exec(EMULATOR_BIN)
-
 # --------- Final summary & ready-to-run command with correct env ---------
 print("\n====================================")
 print("✅ AVD ready!")
@@ -369,17 +447,21 @@ print(f"  API level:        {api_level}")
 print("====================================\n")
 
 # Print an env-inlined launcher so it works even if user env lacks these vars:
-launcher_cmd = f'ANDROID_SDK_ROOT="{SDK_ROOT}" ANDROID_HOME="{SDK_ROOT}" ANDROID_AVD_HOME="{ANDROID_AVD_HOME}" "{EMULATOR_BIN}" -avd "{avd_name}"'
+def quote(s: str) -> str:
+    if " " in s or "(" in s or ")" in s: return f'"{s}"'
+    return s
+
 if is_windows():
-    launcher_cmd = f'set ANDROID_SDK_ROOT={SDK_ROOT}&& set ANDROID_HOME={SDK_ROOT}&& set ANDROID_AVD_HOME={ANDROID_AVD_HOME}&& "{EMULATOR_BIN}" -avd {avd_name}'
+    launcher_cmd = f'set ANDROID_SDK_ROOT={SDK_ROOT}&& set ANDROID_HOME={SDK_ROOT}&& set ANDROID_AVD_HOME={ANDROID_AVD_HOME}&& {quote(EMULATOR_BIN)} -avd {avd_name}'
+    headless_cmd = launcher_cmd + " -no-window -no-boot-anim -gpu swiftshader_indirect"
+else:
+    launcher_cmd = f'ANDROID_SDK_ROOT={quote(SDK_ROOT)} ANDROID_HOME={quote(SDK_ROOT)} ANDROID_AVD_HOME={quote(ANDROID_AVD_HOME)} {quote(EMULATOR_BIN)} -avd {quote(avd_name)}'
+    headless_cmd = launcher_cmd + " -no-window -no-boot-anim -gpu swiftshader_indirect"
 
 print("Start it (windowed):")
 print(f"  {launcher_cmd}")
 print("\nStart it (headless / CI):")
-if is_windows():
-    print(f"  {launcher_cmd} -no-window -no-boot-anim -gpu swiftshader_indirect")
-else:
-    print(f"  {launcher_cmd} -no-window -no-boot-anim -gpu swiftshader_indirect")
+print(f"  {headless_cmd}")
 
 print("\nCheck with ADB:")
 print("  adb devices")
@@ -387,9 +469,3 @@ print("  adb devices")
 if is_macos():
     print("\nmacOS trust-store tip (if downloads ever fail):")
     print("  open '/Applications/Python 3.*/*Install Certificates.command'")
-
-print("\n")
-print(f"export ANDROID_SDK_ROOT={SDK_ROOT}")
-print(f"export ANDROID_HOME={SDK_ROOT}")
-print(f"export ANDROID_AVD_HOME={ANDROID_AVD_HOME}")
-print("\nHave a nice day :-)")

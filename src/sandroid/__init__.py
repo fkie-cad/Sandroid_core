@@ -1,9 +1,6 @@
-"""Sandroid: A framework for extracting forensic artifacts from Android Virtual Devices."""
+"""Sandroid: An Android sandbox for automated Forensic, Malware, and Security Analysis."""
 
-__version__ = "1.0.0"
-__author__ = "Fraunhofer FKIE"
-__email__ = "contact@fkie.fraunhofer.de"
-__description__ = "A framework for extracting forensic artifacts from Android Virtual Devices (AVD)"
+from ._about import __version__, __authors__, __author__, __email__, __description__
 
 from .config.schema import SandroidConfig
 from .config.loader import ConfigLoader
