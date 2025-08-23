@@ -1,9 +1,15 @@
 """Configuration schema for Sandroid using Pydantic."""
 
+import tempfile
 from enum import Enum
 from pathlib import Path
 
 from pydantic import BaseModel, Field, validator
+
+
+def get_secure_temp_dir() -> Path:
+    """Get a secure temporary directory for Sandroid."""
+    return Path(tempfile.gettempdir()) / "sandroid"
 
 
 class LogLevel(str, Enum):
@@ -78,7 +84,7 @@ class PathConfig(BaseModel):
         description="Directory for raw analysis data"
     )
     temp_path: Path = Field(
-        default=Path("/tmp/sandroid/"),
+        default_factory=get_secure_temp_dir,
         description="Directory for temporary files"
     )
     cache_path: Path = Field(

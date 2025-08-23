@@ -71,8 +71,8 @@ def db_diff_helper(db_path1, db_path2):
     result = ""
     logger.debug(f"Calculating Database Diff between {db_path1} and {db_path2}")
     deleted_rows = subprocess.run(
-        f"sqldiff '{db_path2}' '{db_path1}'",
-        check=False, shell=True,
+        ["sqldiff", db_path2, db_path1],
+        check=False,
         capture_output=True,
         text=False
     )
@@ -83,8 +83,8 @@ def db_diff_helper(db_path1, db_path2):
 
     logger.debug(f"Calculating reverse Database Diff between {db_path1} and {db_path2}")
     new_rows = subprocess.run(
-        f"sqldiff '{db_path1}' '{db_path2}'",
-        check=False, shell=True,
+        ["sqldiff", db_path1, db_path2],
+        check=False,
         capture_output=True,
         text=False
     )
@@ -307,12 +307,12 @@ def abx_xml_diff(file_path1, file_path2):
 
     # Convert the ABX files to XML in memory
     first_xml = subprocess.run(
-        [f"python3 src/utils/ccl_abx.py {file_path1} -mr"],
-        check=False, capture_output=True, text=True, shell=True).stdout
+        ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
+        check=False, capture_output=True, text=True).stdout
 
     second_xml = subprocess.run(
-        [f"python3 src/utils/ccl_abx.py {file_path2} -mr"],
-        check=False, capture_output=True, text=True, shell=True).stdout
+        ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
+        check=False, capture_output=True, text=True).stdout
 
     logger.debug("Converting ABX files to XML")
     logger.debug({"first_xml": first_xml, "second_xml": second_xml})

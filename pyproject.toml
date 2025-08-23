@@ -323,3 +323,27 @@ max-args = 10
 max-branches = 15
 max-returns = 8
 max-statements = 60
+
+# Bandit configuration for security linting
+[tool.bandit]
+exclude_dirs = ["tests", "ground_truth_src"]
+skips = [
+    "B605",  # Allow os.system for terminal screen clearing
+    "B324",  # Allow MD5 for forensic compatibility  
+]
+
+# Per-file exclusions for legitimate tool usage
+[[tool.bandit.overrides]]
+# Allow shell=True for legitimate ADB and emulator commands
+paths = ["src/utils/adb.py", "src/utils/toolbox.py", "src/utils/frida_manager.py"]
+skip_tests = ["B602"]
+
+[[tool.bandit.overrides]]
+# Terminal screen clearing is safe
+paths = ["src/sandroid/cli.py", "src/utils/actionQ.py"]  
+skip_tests = ["B605"]
+
+[[tool.bandit.overrides]]
+# Forensic tools need MD5 for compatibility
+paths = ["src/utils/toolbox.py"]
+skip_tests = ["B324"]

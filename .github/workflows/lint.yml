@@ -62,12 +62,12 @@ jobs:
     - name: Install security tools
       run: |
         python -m pip install --upgrade pip
-        pip install bandit safety ruff
+        pip install "bandit[toml]" safety ruff
         
     - name: Run Bandit security linter
       run: |
-        bandit -r src/ -f json -o bandit-report.json || true
-        bandit -r src/ -ll
+        bandit -r src/ -f json -o bandit-report.json -c pyproject.toml || true
+        bandit -r src/ -ll -c pyproject.toml
         
     - name: Run Safety check
       run: |
