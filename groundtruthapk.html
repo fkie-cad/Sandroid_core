@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+
+<html lang="en" data-content_root="./">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <title>Ground Truth APK &#8212; Sandroid 0.4.1 documentation</title>
+    <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=8f2a1f02" />
+    <link rel="stylesheet" type="text/css" href="_static/agogo.css?v=5d920fe5" />
+    <script src="_static/documentation_options.js?v=c87aa342"></script>
+    <script src="_static/doctools.js?v=9bcbadda"></script>
+    <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="datagather package" href="src.datagather.html" />
+    <link rel="prev" title="Install Instructions" href="instructions.html" /> 
+  </head><body>
+    <div class="header-wrapper" role="banner">
+      <div class="header">
+        <div class="headertitle"><a
+          href="index.html">Sandroid 0.4.1 documentation</a></div>
+        <div class="rel" role="navigation" aria-label="Related">
+          <a href="instructions.html" title="Install Instructions"
+             accesskey="P">previous</a> |
+          <a href="src.datagather.html" title="datagather package"
+             accesskey="N">next</a> |
+          <a href="py-modindex.html" title="Python Module Index"
+             >modules</a> |
+          <a href="genindex.html" title="General Index"
+             accesskey="I">index</a>
+        </div>
+       </div>
+    </div>
+
+    <div class="content-wrapper">
+      <div class="content">
+        <div class="document">
+            
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="ground-truth-apk">
+<h1>Ground Truth APK<a class="headerlink" href="#ground-truth-apk" title="Link to this heading">¶</a></h1>
+<p>The framework also includes a custom Android app for testing and calibration.
+This app is designed to <strong>create specific forensic artefacts with pinpoint accuracy</strong> at the user’s command, while being as minimal as possible to avoid unintended artefacts.
+To use it, simply install it on the emulator using Sandroid’s built-in APK installer and open the app.</p>
+<section id="supported-artefacts">
+<h2>Supported Artefacts<a class="headerlink" href="#supported-artefacts" title="Link to this heading">¶</a></h2>
+<p>In the current version, the ground truth app supports nine different artefacts</p>
+<ul class="simple">
+<li><p>Creating a new file</p></li>
+<li><p>Adding an entry to a Database</p></li>
+<li><p>Deleting an entry from a Database</p></li>
+<li><p>Updating an entry in a Database</p></li>
+<li><p>Sending a specific number of bytes to a specific URL</p></li>
+<li><p>Starting a specific process</p></li>
+<li><p>Adding an entry to a XML file</p></li>
+<li><p>Deleting an entry from a XML file</p></li>
+<li><p>Updating an entry in a XML file
+Simply press the corresponding button to generate the Artefact</p></li>
+</ul>
+</section>
+<section id="some-considerations">
+<h2>Some considerations<a class="headerlink" href="#some-considerations" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p>Values added to the XML file and the Database will be the current unix time on the emulator. It can deviate from the actual time but will be automatically be highlighted in the output.</p></li>
+<li><p>The first time the application is launched after installation, the XML file and database will be initialised, and Android will create a profile for the application, so <strong>it is recommended that you open the application first, and only then start any analysis.</strong></p></li>
+<li><p>The XML and database files are called <code class="docutils literal notranslate"><span class="pre">GroundTruth.xml</span></code> and <code class="docutils literal notranslate"><span class="pre">GroundTruth.db</span></code> respectively and are stored in the applications directory.</p></li>
+</ul>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+        </div>
+        <div class="sidebar">
+          
+          <h3>Table of Contents</h3>
+          <ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="instructions.html">Install Instructions</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Ground Truth APK</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#supported-artefacts">Supported Artefacts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#some-considerations">Some considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="src.datagather.html">datagather package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.functionality.html">functionality package</a></li>
+<li class="toctree-l1"><a class="reference internal" href="src.utils.html">utils package</a></li>
+</ul>
+
+          <search role="search">
+            <h3 style="margin-top: 1.5em;">Search</h3>
+            <form class="search" action="search.html" method="get">
+                <input type="text" name="q" />
+                <input type="submit" value="Go" />
+            </form>
+          </search>
+
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+    <div class="footer-wrapper">
+      <div class="footer">
+        <div class="left">
+          <div role="navigation" aria-label="Related">
+            <a href="instructions.html" title="Install Instructions"
+              >previous</a> |
+            <a href="src.datagather.html" title="datagather package"
+              >next</a> |
+            <a href="py-modindex.html" title="Python Module Index"
+              >modules</a> |
+            <a href="genindex.html" title="General Index"
+              >index</a>
+          </div>
+          <div role="note" aria-label="source link">
+              <br/>
+              <a href="_sources/groundtruthapk.md.txt"
+                rel="nofollow">Show Source</a>
+          </div>
+        </div>
+
+        <div class="right">
+          
+    <div class="footer" role="contentinfo">
+    &#169; Copyright 2024, Erik Nathrath.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 8.1.3.
+    </div>
+        </div>
+        <div class="clearer"></div>
+      </div>
+    </div>
+
+  </body>
+</html>

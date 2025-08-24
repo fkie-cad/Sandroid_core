@@ -1,0 +1,29 @@
+sandroid package
+================
+
+Subpackages
+-----------
+
+.. toctree::
+   :maxdepth: 4
+
+   sandroid.config
+
+Submodules
+----------
+
+sandroid.cli module
+-------------------
+
+.. automodule:: sandroid.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Module contents
+---------------
+
+.. automodule:: sandroid
+   :members:
+   :undoc-members:
+   :show-inheritance:

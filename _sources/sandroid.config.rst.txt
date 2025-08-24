@@ -1,0 +1,37 @@
+sandroid.config package
+=======================
+
+Submodules
+----------
+
+sandroid.config.cli module
+--------------------------
+
+.. automodule:: sandroid.config.cli
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.config.loader module
+-----------------------------
+
+.. automodule:: sandroid.config.loader
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.config.schema module
+-----------------------------
+
+.. automodule:: sandroid.config.schema
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Module contents
+---------------
+
+.. automodule:: sandroid.config
+   :members:
+   :undoc-members:
+   :show-inheritance:
