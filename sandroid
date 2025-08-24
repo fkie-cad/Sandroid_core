@@ -1,31 +1,29 @@
 #!/usr/bin/python3
 
 import os
-import shutil
 
 from src.utils.toolbox import Toolbox
-#TODO: This doesn't seem to be a good place for this, but is required because otherwise the imports fail
+
+# TODO: This doesn't seem to be a good place for this, but is required because otherwise the imports fail
 Toolbox.init()
+
+from colorama import Fore, Style
 
 from src.utils.actionQ import ActionQ
 from src.utils.adb import Adb
-from src.utils.frida_manager import FridaManager
-from colorama import Fore, Style
-from src.utils.pdf_report import PDFReport
 from src.utils.AI_processing import AIProcessing
+from src.utils.pdf_report import PDFReport
 
 
 # Prints the logo :)
 def pretty_logo():
-    """
-    **Prints** the Sandroid logo in *green* color.
+    """**Prints** the Sandroid logo in *green* color.
 
     This function uses ANSI escape codes to print the Sandroid logo in green color
     to the terminal.
     """
-
-    green = '\033[92m'
-    clear = '\033[0m'
+    green = "\033[92m"
+    clear = "\033[0m"
 
     print(f"""
 {green}⠀⠀⠀⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀
@@ -45,25 +43,20 @@ def pretty_logo():
 {green}⠀⠀⠀⠀⠀⠀⠈⠉⠉⠀⠀⠀⠀⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀{clear}⠀⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀""")
 
 
-
-
-import os
-import shutil
-
 def main():
-    """
-    **Main entry point** for the Sandroid program.
+    """**Main entry point** for the Sandroid program.
 
-    This function initializes the Toolbox, clears the terminal if the log level is not DEBUG,
-    prints the Sandroid logo, initializes ADB, checks the setup, and initializes necessary files.
-    It then creates an ActionQ object, assembles the action queue, and processes each action
-    until the queue is finished. Finally, it wraps up the Toolbox, writes the collected data
-    to a file, prints the pretty-printed data, and exits the program.
+    This function initializes the Toolbox, clears the terminal if the log level
+    is not DEBUG, prints the Sandroid logo, initializes ADB, checks the setup,
+    and initializes necessary files. It then creates an ActionQ object,
+    assembles the action queue, and processes each action until the queue is
+    finished. Finally, it wraps up the Toolbox, writes the collected data to a
+    file, prints the pretty-printed data, and exits the program.
 
     :returns: None
     """
     if Toolbox.args.loglevel != "DEBUG":
-            os.system('cls' if os.name == 'nt' else 'clear')
+        os.system("cls" if os.name == "nt" else "clear")
     pretty_logo()
     Adb.init()
     Toolbox.check_setup()
@@ -76,20 +69,31 @@ def main():
 
     action = ""
     if Toolbox.args.ai:
-        action = AIProcessing.summarize_video(path=f"{os.getenv('RAW_RESULTS_PATH')}recording.webm")
+        action = AIProcessing.summarize_video(
+            path=f"{os.getenv('RAW_RESULTS_PATH')}recording.webm"
+        )
     Toolbox.wrap_up()
     fd = open(Toolbox.args.file, "w")
     fd.write(q.get_data())
     fd.close()
 
     if Toolbox.args.ai:
-         print(Fore.GREEN + Style.BRIGHT + f"Sandroid Results for the action: {action}" + Style.RESET_ALL)
+        print(
+            Fore.GREEN
+            + Style.BRIGHT
+            + f"Sandroid Results for the action: {action}"
+            + Style.RESET_ALL
+        )
     print(q.get_pretty_print())
     if Toolbox.args.report is True:
-        PDFReport(f'{os.getenv("RESULTS_PATH")}Sandroid_Forensic_Report.pdf', Toolbox.args.file)
+        PDFReport(
+            f"{os.getenv('RESULTS_PATH')}Sandroid_Forensic_Report.pdf",
+            Toolbox.args.file,
+        )
     exit(0)
-    
-if __name__ == '__main__':
+
+
+if __name__ == "__main__":
     main()
 
 """

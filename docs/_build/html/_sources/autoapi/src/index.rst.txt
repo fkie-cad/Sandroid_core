@@ -13,5 +13,3 @@ Subpackages
    /autoapi/src/datagather/index
    /autoapi/src/functionality/index
    /autoapi/src/utils/index
-
-

@@ -251,4 +251,3 @@ Module Contents
 
 
 .. py:function:: main(args)
-

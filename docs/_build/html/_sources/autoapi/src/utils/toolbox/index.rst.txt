@@ -279,6 +279,3 @@ Module Contents
 
    .. py:method:: get_frida_job_manager()
       :classmethod:
-
-
-

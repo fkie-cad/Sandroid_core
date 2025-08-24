@@ -25,7 +25,7 @@ class ConfigLoader:
 
     def __init__(self, app_name: str = "sandroid"):
         """Initialize the config loader.
-        
+
         Args:
             app_name: Application name for config directory lookup
         """
@@ -100,12 +100,18 @@ class ConfigLoader:
             return self._load_json(path)
         raise ValueError(f"Unsupported configuration file format: {suffix}")
 
-    def _merge_configs(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    def _merge_configs(
+        self, base: dict[str, Any], override: dict[str, Any]
+    ) -> dict[str, Any]:
         """Recursively merge configuration dictionaries."""
         result = base.copy()
 
         for key, value in override.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            if (
+                key in result
+                and isinstance(result[key], dict)
+                and isinstance(value, dict)
+            ):
                 result[key] = self._merge_configs(result[key], value)
             else:
                 result[key] = value
@@ -120,7 +126,7 @@ class ConfigLoader:
         for key, value in os.environ.items():
             if key.startswith(prefix):
                 # Remove prefix and convert to lowercase
-                config_key = key[len(prefix):].lower()
+                config_key = key[len(prefix) :].lower()
 
                 # Handle nested configuration with double underscore
                 if "__" in config_key:
@@ -161,15 +167,15 @@ class ConfigLoader:
         cli_overrides: dict[str, Any] | None = None,
     ) -> SandroidConfig:
         """Load configuration from all sources.
-        
+
         Args:
             config_file: Explicit configuration file path
             environment: Environment name for environment-specific config
             cli_overrides: Command-line argument overrides
-            
+
         Returns:
             Loaded and validated Sandroid configuration
-            
+
         Raises:
             FileNotFoundError: If explicit config file is specified but not found
             ValueError: If configuration is invalid
@@ -196,7 +202,9 @@ class ConfigLoader:
                 explicit_config = self._load_file(config_path)
                 merged_config = self._merge_configs(merged_config, explicit_config)
             except Exception as e:
-                raise ValueError(f"Failed to load configuration from {config_path}: {e}")
+                raise ValueError(
+                    f"Failed to load configuration from {config_path}: {e}"
+                )
 
         # 3. Load environment-specific config if environment is specified
         if environment:
@@ -207,7 +215,9 @@ class ConfigLoader:
                         env_config = self._load_file(env_config_path)
                         merged_config = self._merge_configs(merged_config, env_config)
                     except Exception as e:
-                        print(f"Warning: Failed to load environment config from {env_config_path}: {e}")
+                        print(
+                            f"Warning: Failed to load environment config from {env_config_path}: {e}"
+                        )
 
         # 4. Load environment variables (higher priority)
         env_config = self.load_environment_vars()
@@ -233,12 +243,12 @@ class ConfigLoader:
         format: str = "yaml",
     ) -> Path:
         """Save configuration to file.
-        
+
         Args:
             config: Configuration to save
             config_file: Target file path (defaults to user config dir)
             format: Output format ('toml', 'yaml', 'json')
-            
+
         Returns:
             Path where configuration was saved
         """
@@ -259,7 +269,9 @@ class ConfigLoader:
                 tomli_w.dump(config_dict, f)
         elif format in ["yaml", "yml"]:
             with open(config_file, "w", encoding="utf-8") as f:
-                yaml.safe_dump(config_dict, f, default_flow_style=False, sort_keys=False)
+                yaml.safe_dump(
+                    config_dict, f, default_flow_style=False, sort_keys=False
+                )
         elif format == "json":
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump(config_dict, f, indent=2, default=str)
@@ -270,10 +282,10 @@ class ConfigLoader:
 
     def create_default_config(self, config_file: str | Path | None = None) -> Path:
         """Create a default configuration file.
-        
+
         Args:
             config_file: Target file path (defaults to user config dir)
-            
+
         Returns:
             Path where default configuration was created
         """

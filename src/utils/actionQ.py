@@ -36,7 +36,7 @@ from src.utils.toolbox import Toolbox
 class ActionQ:
     """Manages the action queue for various tasks and functionalities.
 
-    The idea of the action queue is to assemble the complex list of actions that need to be executed beforehand. 
+    The idea of the action queue is to assemble the complex list of actions that need to be executed beforehand.
     This provides a big picture view and a simple main function that simply steps through the queue.
     """
 
@@ -49,8 +49,7 @@ class ActionQ:
     malwaremonitor = None
 
     def assembleQ(self):
-        """Assembles the initial action queue based on provided arguments.
-        """
+        """Assembles the initial action queue based on provided arguments."""
         args = Toolbox.args
 
         if args.trigdroid_ccf:
@@ -103,7 +102,7 @@ class ActionQ:
         self.q.append("load_snapshot")
         self.q.append("baseline")
 
-        #assemble first run
+        # assemble first run
         self.q.append(action)  # or action?
         # create datagather objects
         self.q.append(changed_files_object)
@@ -112,14 +111,17 @@ class ActionQ:
         if args.show_deleted:
             self.q.append(deleted_files_object)
 
-        self.q.append("load_snapshot") # load snapshot BEFORE the pull only in the first run. This will give us a "pre action" version of the files and allow for intra file change detection
+        self.q.append(
+            "load_snapshot"
+        )  # load snapshot BEFORE the pull only in the first run. This will give us a "pre action" version of the files and allow for intra file change detection
         self.q.append("pull0")
 
-        #assemble runs in between
+        # assemble runs in between
         for run_number in range(1, args.number_of_runs):
-
             if args.network:
-                self.q.append(network_object)  # Network runs during action, so is started just before
+                self.q.append(
+                    network_object
+                )  # Network runs during action, so is started just before
             if args.processes:
                 self.q.append(processes_object)
             if args.sockets:
@@ -137,16 +139,18 @@ class ActionQ:
 
             self.q.append("load_snapshot")
 
-        #assemble dry run
+        # assemble dry run
         if not args.avoid_strong_noise_filter:
             self.q.append("init_dry_run")
 
             if args.network:
-                self.q.append(network_object)  # Network runs during action, so is started just before
+                self.q.append(
+                    network_object
+                )  # Network runs during action, so is started just before
             if args.processes:
                 self.q.append(processes_object)
             if args.sockets:
-                    self.q.append(sockets_object)
+                self.q.append(sockets_object)
 
             self.q.append("dry_run_sleep")
             self.q.append(changed_files_object)
@@ -156,8 +160,7 @@ class ActionQ:
         self.logger.debug("Our schedule for today: " + self.print_q())
 
     def do_next(self):
-        """Executes the next action in the queue.
-        """
+        """Executes the next action in the queue."""
         if self.index >= len(self.q):
             self.finished = True
             return
@@ -195,7 +198,11 @@ class ActionQ:
                 case "new_run":
                     self.logger.info(f"Starting run #{Toolbox.get_run_counter()}")
                 case "init_dry_run":
-                    self.logger.info("Measuring noise in dry run for " + str(Toolbox.action_duration) + " seconds")
+                    self.logger.info(
+                        "Measuring noise in dry run for "
+                        + str(Toolbox.action_duration)
+                        + " seconds"
+                    )
                     Toolbox.started_dry_run()
                     Toolbox.set_action_time()
                 case "dry_run_sleep":
@@ -222,8 +229,14 @@ class ActionQ:
 
         self.update_photographer()
 
-        if not isinstance(action, Functionality) and not isinstance(action, DataGather) and not isinstance(action, str):
-            self.logger.critical("Unable to parse action in Action Queue: " + str(action))
+        if (
+            not isinstance(action, Functionality)
+            and not isinstance(action, DataGather)
+            and not isinstance(action, str)
+        ):
+            self.logger.critical(
+                "Unable to parse action in Action Queue: " + str(action)
+            )
             exit(1)
 
     def get_pretty_print(self):
@@ -235,7 +248,10 @@ class ActionQ:
         result = ""
         already_looked_at_these = []
         for q_entry in self.q:
-            if isinstance(q_entry, DataGather) and q_entry not in already_looked_at_these:
+            if (
+                isinstance(q_entry, DataGather)
+                and q_entry not in already_looked_at_these
+            ):
                 result = result + q_entry.pretty_print()
                 already_looked_at_these.append(q_entry)
         return result
@@ -246,14 +262,20 @@ class ActionQ:
         :returns: Collected data in JSON format.
         :rtype: str
         """
-        data = {"Device Name": Toolbox.device_name, "Emulator relative action timestamp": Toolbox.get_action_time(),
-                "Action Duration": Toolbox.get_action_duration()}
+        data = {
+            "Device Name": Toolbox.device_name,
+            "Emulator relative action timestamp": Toolbox.get_action_time(),
+            "Action Duration": Toolbox.get_action_duration(),
+        }
 
-        data.update({"Other Data":Toolbox.other_output_data_collector})
+        data.update({"Other Data": Toolbox.other_output_data_collector})
 
         already_looked_at_these = []
         for q_entry in self.q:
-            if isinstance(q_entry, DataGather) and q_entry not in already_looked_at_these:
+            if (
+                isinstance(q_entry, DataGather)
+                and q_entry not in already_looked_at_these
+            ):
                 data.update(q_entry.return_data())
                 already_looked_at_these.append(q_entry)
         return json.dumps(data, indent=4)
@@ -281,7 +303,9 @@ class ActionQ:
         :type char: str
         """
         if Toolbox.args.loglevel != "DEBUG":
-            os.system("cls" if os.name == "nt" else "clear")  # Just to keep everything nice and clean
+            os.system(
+                "cls" if os.name == "nt" else "clear"
+            )  # Just to keep everything nice and clean
 
         # Check if char is a digit between 0-8
         if char.isdigit() and 0 <= int(char) <= 8:
@@ -296,7 +320,7 @@ class ActionQ:
                     # Display snapshots in a nice ASCII box
                     formatted_box = Toolbox._create_ascii_box(
                         snapshot_list.strip(),
-                        f"{Fore.MAGENTA}Available Snapshots{Fore.RESET}"
+                        f"{Fore.MAGENTA}Available Snapshots{Fore.RESET}",
                     )
                     print(f"\n{formatted_box}")
 
@@ -305,43 +329,58 @@ class ActionQ:
                     try:
                         while selected_idx < 1 or selected_idx > len(snapshots):
                             try:
-                                self.logger.info(f"{Fore.CYAN}Select a snapshot to load ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(snapshots)}{Fore.CYAN}): {Style.RESET_ALL}")
+                                self.logger.info(
+                                    f"{Fore.CYAN}Select a snapshot to load ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(snapshots)}{Fore.CYAN}): {Style.RESET_ALL}"
+                                )
                                 char = click.getchar()
                                 if char.isdigit():
                                     selected_idx = int(char)
                                 else:
                                     selected_idx = 0  # Invalid input
                                 if selected_idx < 1 or selected_idx > len(snapshots):
-                                    self.logger.info(f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(snapshots)}{Style.RESET_ALL}")
+                                    self.logger.info(
+                                        f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(snapshots)}{Style.RESET_ALL}"
+                                    )
                             except ValueError:
-                                self.logger.info(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+                                self.logger.info(
+                                    f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}"
+                                )
                     except KeyboardInterrupt:
-                        self.logger.info(f"\n{Fore.YELLOW}Snapshot selection cancelled by user.{Style.RESET_ALL}")
+                        self.logger.info(
+                            f"\n{Fore.YELLOW}Snapshot selection cancelled by user.{Style.RESET_ALL}"
+                        )
                         self.q.append("interactive")
                         return
 
                     # Load selected snapshot
-                    selected_snapshot = snapshots[selected_idx-1]["tag"]
+                    selected_snapshot = snapshots[selected_idx - 1]["tag"]
                     # Add load snapshot command to the queue
                     Toolbox.load_snapshot(selected_snapshot.encode())
                 else:
-                    self.logger.warning(f"{Fore.RED}No snapshots available.{Style.RESET_ALL}")
+                    self.logger.warning(
+                        f"{Fore.RED}No snapshots available.{Style.RESET_ALL}"
+                    )
 
                 self.q.append("interactive")
                 return
             # Keys 1-8 for creating snapshots
             # Prompt for snapshot name
             try:
-                self.logger.info(f"{Fore.CYAN}Enter snapshot name (or press Enter for timestamp): {Style.RESET_ALL}")
+                self.logger.info(
+                    f"{Fore.CYAN}Enter snapshot name (or press Enter for timestamp): {Style.RESET_ALL}"
+                )
                 snapshot_name = input()
                 if not snapshot_name:
                     from datetime import datetime
+
                     snapshot_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
                 # Create snapshot
                 Toolbox.create_snapshot(snapshot_name.encode())
             except KeyboardInterrupt:
-                self.logger.info(f"\n{Fore.YELLOW}Snapshot creation cancelled by user.{Style.RESET_ALL}")
+                self.logger.info(
+                    f"\n{Fore.YELLOW}Snapshot creation cancelled by user.{Style.RESET_ALL}"
+                )
 
             self.q.append("interactive")
             return
@@ -352,7 +391,9 @@ class ActionQ:
                 # Check if a spotlight file is set
                 spotlight_files = Toolbox.get_spotlight_files()
                 if not spotlight_files or len(spotlight_files) != 1:
-                    self.logger.warning("Exactly one spotlight file must be set to use this functionality.")
+                    self.logger.warning(
+                        "Exactly one spotlight file must be set to use this functionality."
+                    )
                     self.q.append("interactive")
                     return
 
@@ -361,14 +402,16 @@ class ActionQ:
                 wal_file = spotlight_file + "-wal"
                 journal_file = spotlight_file + "-journal"
 
-                target_dir = os.getenv("RESULTS_PATH")+"spotlight_files"
+                target_dir = os.getenv("RESULTS_PATH") + "spotlight_files"
 
                 # If the spotlight file path changed, reset previous pulls
                 if (
                     hasattr(Toolbox, "_spotlight_last_file")
                     and Toolbox._spotlight_last_file != spotlight_file
                 ):
-                    self.logger.info("Spotlight file changed. Resetting previous versions.")
+                    self.logger.info(
+                        "Spotlight file changed. Resetting previous versions."
+                    )
                     Toolbox._spotlight_pull_one = None
                     Toolbox._spotlight_pull_two = None
 
@@ -384,45 +427,73 @@ class ActionQ:
 
                 # Determine target path
                 if not Toolbox._spotlight_pull_one:
-                    target_path = os.path.join(target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}")
+                    target_path = os.path.join(
+                        target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}"
+                    )
                     Toolbox._spotlight_pull_one = target_path
                 else:
-                    target_path = os.path.join(target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}")
+                    target_path = os.path.join(
+                        target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}"
+                    )
                     Toolbox._spotlight_pull_two = target_path
 
                 # Pull the file from the device
-                output, error = Adb.send_adb_command(f"pull {spotlight_file} {target_path}")
+                output, error = Adb.send_adb_command(
+                    f"pull {spotlight_file} {target_path}"
+                )
 
-                if "failed to stat remote object" in str(output) or "failed to stat remote object" in str(error):
+                if "failed to stat remote object" in str(
+                    output
+                ) or "failed to stat remote object" in str(error):
                     self.logger.warning(f"File not found on device: {spotlight_file}")
                 elif "Permission denied" in str(output):
-                    self.logger.error(f"Permission denied when pulling {spotlight_file}")
+                    self.logger.error(
+                        f"Permission denied when pulling {spotlight_file}"
+                    )
                 else:
                     self.logger.info(f"Pulled {spotlight_file} to {target_path}")
 
                 # For .db files, also pull WAL and journal files if they exist
                 if spotlight_file.endswith(".db") or True:
-
                     # Pull the WAL file
                     wal_target = target_path + "-wal"
-                    output, error = Adb.send_adb_command(f"pull {wal_file} {wal_target}")
-                    if ("failed to stat remote object" not in str(output) and "Permission denied" not in str(output) and
-                        "failed to stat remote object" not in str(error) and "Permission denied" not in str(error)):
+                    output, error = Adb.send_adb_command(
+                        f"pull {wal_file} {wal_target}"
+                    )
+                    if (
+                        "failed to stat remote object" not in str(output)
+                        and "Permission denied" not in str(output)
+                        and "failed to stat remote object" not in str(error)
+                        and "Permission denied" not in str(error)
+                    ):
                         self.logger.info(f"Pulled WAL file: {wal_file}")
 
                     # Pull the journal file
                     journal_target = target_path + "-journal"
-                    output, error = Adb.send_adb_command(f"pull {journal_file} {journal_target}")
-                    if ("failed to stat remote object" not in str(output) and "Permission denied" not in str(output) and
-                        "failed to stat remote object" not in str(error) and "Permission denied" not in str(error)):
+                    output, error = Adb.send_adb_command(
+                        f"pull {journal_file} {journal_target}"
+                    )
+                    if (
+                        "failed to stat remote object" not in str(output)
+                        and "Permission denied" not in str(output)
+                        and "failed to stat remote object" not in str(error)
+                        and "Permission denied" not in str(error)
+                    ):
                         self.logger.info(f"Pulled journal file: {journal_file}")
-                        self.logger.info(f"Pull completed for {spotlight_file} and its associated files.")
+                        self.logger.info(
+                            f"Pull completed for {spotlight_file} and its associated files."
+                        )
 
                 if Toolbox._spotlight_pull_one and Toolbox._spotlight_pull_two:
                     # Perform diff
                     from src.utils.file_diff import db_diff
-                    self.logger.info(f"Performing diff on spotlight files using paths {Toolbox._spotlight_pull_one} and {Toolbox._spotlight_pull_two}")
-                    diff_result = db_diff(Toolbox._spotlight_pull_one, Toolbox._spotlight_pull_two)
+
+                    self.logger.info(
+                        f"Performing diff on spotlight files using paths {Toolbox._spotlight_pull_one} and {Toolbox._spotlight_pull_two}"
+                    )
+                    diff_result = db_diff(
+                        Toolbox._spotlight_pull_one, Toolbox._spotlight_pull_two
+                    )
                     self.logger.info("Diff result:")
                     print(diff_result)
 
@@ -431,7 +502,9 @@ class ActionQ:
 
             case "s":
                 try:
-                    self.logger.info("Enter filename for screenshot (or press ENTER for timestamp):")
+                    self.logger.info(
+                        "Enter filename for screenshot (or press ENTER for timestamp):"
+                    )
                     filename = input().strip()
                     Toolbox.take_screenshot(filename if filename else None)
                 except KeyboardInterrupt:
@@ -447,11 +520,15 @@ class ActionQ:
                 else:
                     # Ask for a filename
                     try:
-                        self.logger.info("Enter filename for screen recording (or press ENTER for timestamp):")
+                        self.logger.info(
+                            "Enter filename for screen recording (or press ENTER for timestamp):"
+                        )
                         filename = input().strip()
 
                         # Start the recording
-                        if Toolbox.start_screen_recording(filename if filename else None):
+                        if Toolbox.start_screen_recording(
+                            filename if filename else None
+                        ):
                             self.logger.info("Press 'g' again to stop the recording")
                         else:
                             self.logger.error("Failed to start screen recording")
@@ -482,7 +559,9 @@ class ActionQ:
                     if os.path.isfile(apk):
                         Adb.install_apk(apk)
                     else:
-                        self.logger.info("The path provided is not a valid file. Searching online.")
+                        self.logger.info(
+                            "The path provided is not a valid file. Searching online."
+                        )
                         app_id = ApkDownloader().search_for_name(apk)
                         ApkDownloader().install_app_id(app_id)
                 except KeyboardInterrupt:
@@ -491,7 +570,9 @@ class ActionQ:
             case "c":
                 Toolbox.set_spotlight_application(Adb.get_focused_app())
                 spotlight_application_name = Toolbox.get_spotlight_application()[0]
-                spotlight_application_pid = Adb.get_pid_for_package_name(spotlight_application_name)
+                spotlight_application_pid = Adb.get_pid_for_package_name(
+                    spotlight_application_name
+                )
                 Toolbox.set_spotlight_application_pid(spotlight_application_pid)
                 self.q.append("interactive")
             case "a":
@@ -503,8 +584,8 @@ class ActionQ:
                     return
                 asam = StaticAnalysis()
                 asam.gather()
-                #asam.pretty_print()
-                #Toolbox.submit_other_data("asam", asam.return_data())
+                # asam.pretty_print()
+                # Toolbox.submit_other_data("asam", asam.return_data())
                 self.q.append("interactive")
             case "m":
                 check_frida = self.check_frida_and_spotlight()
@@ -516,14 +597,21 @@ class ActionQ:
 
                 self.logger.info("Now the am3 output follows. End with CTRC-C")
                 if self.malwaremonitor == None:
-                    self.malwaremonitor = MalwareMonitor(path_filters=Toolbox.get_spotlight_files())
+                    self.malwaremonitor = MalwareMonitor(
+                        path_filters=Toolbox.get_spotlight_files()
+                    )
                 self.malwaremonitor.gather()
 
                 if self.malwaremonitor.has_new_results():
-                    Toolbox.submit_other_data("Android Malware Monitor (am3)", self.malwaremonitor.return_data())
+                    Toolbox.submit_other_data(
+                        "Android Malware Monitor (am3)",
+                        self.malwaremonitor.return_data(),
+                    )
 
                 try:
-                    self.logger.info("Malware monitoring in progress... Press CTRL+C to stop")
+                    self.logger.info(
+                        "Malware monitoring in progress... Press CTRL+C to stop"
+                    )
                     while True:
                         time.sleep(0.5)  # Sleep to reduce CPU usage
                 except KeyboardInterrupt:
@@ -546,7 +634,9 @@ class ActionQ:
                     fritap.start()
 
                     try:
-                        self.logger.info("FriTap monitoring in progress... Press CTRL+C to stop")
+                        self.logger.info(
+                            "FriTap monitoring in progress... Press CTRL+C to stop"
+                        )
                         while True:
                             time.sleep(0.5)  # Sleep to reduce CPU usage
                     except KeyboardInterrupt:
@@ -566,7 +656,9 @@ class ActionQ:
                     spotlight_application_pid, spotlight_application_name = check_frida
 
                     if spotlight_application_pid:
-                        Fridump.dump_memory(spotlight_application_pid, spotlight_application_name)
+                        Fridump.dump_memory(
+                            spotlight_application_pid, spotlight_application_name
+                        )
                     else:
                         self.logger.warning("Spotlight app has to be set first.")
                         self.q.append("interactive")
@@ -584,7 +676,9 @@ class ActionQ:
                     process = None
 
                     if spotlight_application_pid:
-                        self.logger.info(f"Press ENTER to monitor spotlight app (PID: {spotlight_application_pid}) or enter a path to monitor:")
+                        self.logger.info(
+                            f"Press ENTER to monitor spotlight app (PID: {spotlight_application_pid}) or enter a path to monitor:"
+                        )
                         user_input = input().strip()
 
                         if user_input:
@@ -592,13 +686,17 @@ class ActionQ:
                         else:
                             process = FSMon.run_fsmon_by_pid(spotlight_application_pid)
                     else:
-                        self.logger.info("No spotlight app is set. Enter a path to monitor:")
+                        self.logger.info(
+                            "No spotlight app is set. Enter a path to monitor:"
+                        )
                         user_input = input().strip()
 
                         if user_input:
                             process = FSMon.run_fsmon_by_path(user_input)
                         else:
-                            self.logger.warning("No path specified and no spotlight app available.")
+                            self.logger.warning(
+                                "No path specified and no spotlight app available."
+                            )
                             self.q.append("interactive")
                             return
 
@@ -608,9 +706,13 @@ class ActionQ:
                         return
 
                     if user_input:
-                        self.logger.info(f"Now fsmon output for path {user_input} follows. End with CTRL-C")
+                        self.logger.info(
+                            f"Now fsmon output for path {user_input} follows. End with CTRL-C"
+                        )
                     else:
-                        self.logger.info(f"Now fsmon output for PID {spotlight_application_pid} follows. End with CTRL-C")
+                        self.logger.info(
+                            f"Now fsmon output for PID {spotlight_application_pid} follows. End with CTRL-C"
+                        )
 
                     try:
                         while True:
@@ -645,12 +747,16 @@ class ActionQ:
                     if len(spotlight_files) > 1:
                         self.logger.info("Current spotlight files:")
                         for i, file_path in enumerate(spotlight_files):
-                            self.logger.info(f"{i+1}. {file_path}")
-                    self.logger.info("Enter the file path to add as a spotlight file (or press ENTER to skip):")
+                            self.logger.info(f"{i + 1}. {file_path}")
+                    self.logger.info(
+                        "Enter the file path to add as a spotlight file (or press ENTER to skip):"
+                    )
                     file_path = input().strip()
                     if file_path:
                         if file_path.endswith("-wal") or file_path.endswith("-journal"):
-                            self.logger.warning("WAL and journal files are handled automatically with their DB file. Not adding directly.")
+                            self.logger.warning(
+                                "WAL and journal files are handled automatically with their DB file. Not adding directly."
+                            )
                         else:
                             Toolbox.add_spotlight_file(file_path)
                     else:
@@ -668,9 +774,11 @@ class ActionQ:
                     else:
                         self.logger.info("Current spotlight files:")
                         for i, file_path in enumerate(spotlight_files):
-                            self.logger.info(f"{i+1}. {file_path}")
+                            self.logger.info(f"{i + 1}. {file_path}")
 
-                        self.logger.info("Enter the file path to remove from spotlight files:")
+                        self.logger.info(
+                            "Enter the file path to remove from spotlight files:"
+                        )
                         file_path = input().strip()
                         Toolbox.remove_spotlight_file(file_path)
                 except KeyboardInterrupt:
@@ -678,10 +786,14 @@ class ActionQ:
                 self.q.append("interactive")
             case "u":
                 try:
-                    self.logger.info("Enter a short description of the action performed (or press ENTER to skip):")
+                    self.logger.info(
+                        "Enter a short description of the action performed (or press ENTER to skip):"
+                    )
                     description = input().strip()
 
-                    success = Toolbox.pull_spotlight_files(description=description if description else None)
+                    success = Toolbox.pull_spotlight_files(
+                        description=description if description else None
+                    )
                     if success:
                         self.logger.info("Spotlight files pulled successfully.")
                     else:
@@ -704,10 +816,17 @@ class ActionQ:
 
                     spotlight_application_pid, spotlight_application_name = check_frida
 
-                    self.logger.info(f"Launching objection interactive shell for {spotlight_application_name}")
+                    self.logger.info(
+                        f"Launching objection interactive shell for {spotlight_application_name}"
+                    )
 
                     try:
-                        cmd = ["objection", "--gadget", str(spotlight_application_pid), "explore"]
+                        cmd = [
+                            "objection",
+                            "--gadget",
+                            str(spotlight_application_pid),
+                            "explore",
+                        ]
                         self.logger.info(f"Running command: {' '.join(cmd)}")
 
                         process = subprocess.Popen(cmd)
@@ -723,7 +842,9 @@ class ActionQ:
                 try:
                     # If a capture is already running, stop it
                     if Toolbox._network_capture_running:
-                        self.logger.info(f"Stopping network capture: {Toolbox._network_capture_file}")
+                        self.logger.info(
+                            f"Stopping network capture: {Toolbox._network_capture_file}"
+                        )
                         if Adb.stop_network_capture():
                             self.logger.info("Network capture stopped successfully")
                             Toolbox._network_capture_running = False
@@ -732,7 +853,9 @@ class ActionQ:
                             self.logger.error("Failed to stop network capture")
                     else:
                         # Ask for destination path
-                        self.logger.info("Enter path for the network capture file (or press ENTER for default):")
+                        self.logger.info(
+                            "Enter path for the network capture file (or press ENTER for default):"
+                        )
                         user_path = input().strip()
 
                         # Generate a default filename with timestamp if none provided
@@ -746,14 +869,22 @@ class ActionQ:
                             user_path += ".pcap"
 
                         # Create network_captures directory if it doesn't exist
-                        network_captures_dir = os.path.join(os.getcwd(), "network_captures")
+                        network_captures_dir = os.path.join(
+                            os.getcwd(), "network_captures"
+                        )
                         if not os.path.exists(network_captures_dir):
                             os.makedirs(network_captures_dir)
-                            self.logger.info(f"Created directory: {network_captures_dir}")
+                            self.logger.info(
+                                f"Created directory: {network_captures_dir}"
+                            )
 
                         # Combine path and filename
-                        user_path = os.path.join(network_captures_dir, os.path.basename(user_path))
-                        self.logger.info(f"Network capture will be saved to: {user_path}")
+                        user_path = os.path.join(
+                            network_captures_dir, os.path.basename(user_path)
+                        )
+                        self.logger.info(
+                            f"Network capture will be saved to: {user_path}"
+                        )
                         # Start the capture
                         if Adb.start_network_capture(user_path):
                             Toolbox._network_capture_running = True
@@ -785,7 +916,6 @@ class ActionQ:
             result += ", "
         return result[:-2]
 
-
     def check_frida_and_spotlight(self):
         """Checks if the frida server is running and if a spotlight application is set.
         Appends 'interactive' and returns None if the check fails.
@@ -793,17 +923,23 @@ class ActionQ:
         """
         # Check if the frida server is running
         if not Toolbox.frida_manager.is_frida_server_running():
-            self.logger.warning("No frida server is running. Please start or install it first.")
+            self.logger.warning(
+                "No frida server is running. Please start or install it first."
+            )
             self.q.append("interactive")
             return None
 
         spotlight_application = Toolbox.get_spotlight_application()
 
         if not spotlight_application:
-            self.logger.warning("No spotlight application is set. Using the currently focused app.")
+            self.logger.warning(
+                "No spotlight application is set. Using the currently focused app."
+            )
             Toolbox.set_spotlight_application(Adb.get_focused_app())
             spotlight_application_name = Toolbox.get_spotlight_application()[0]
-            spotlight_application_pid = Adb.get_pid_for_package_name(spotlight_application_name)
+            spotlight_application_pid = Adb.get_pid_for_package_name(
+                spotlight_application_name
+            )
             Toolbox.set_spotlight_application_pid(spotlight_application_pid)
 
         # Check if a spotlight application is set
@@ -815,7 +951,3 @@ class ActionQ:
             return None
 
         return (spotlight_application_pid, spotlight_application_name)
-
-
-
-

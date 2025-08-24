@@ -21,5 +21,3 @@ Submodules
    /autoapi/src/utils/pdf_report/index
    /autoapi/src/utils/timeline_generator/index
    /autoapi/src/utils/toolbox/index
-
-

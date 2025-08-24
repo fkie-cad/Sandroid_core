@@ -40,12 +40,11 @@ class Network(DataGather):
     performed_diff = False
 
     def gather(self):
-        """Starts a timed thread to measure network traffic.
-        """
+        """Starts a timed thread to measure network traffic."""
         logger.info("Measuring network traffic")
         t1 = threading.Thread(target=self.tcpdump_thread, args=())
         t1.start()
-        #time.sleep(0.5)
+        # time.sleep(0.5)
 
     def return_data(self):
         """Returns the gathered DNS requests and target IPs and ports.
@@ -55,9 +54,14 @@ class Network(DataGather):
         """
         if not self.performed_diff:
             self.dns_requests = self.extract_dns_requests_for_all_pcaps()
-            self.target_ips_and_ports = self.extract_target_ips_and_ports_for_all_pcaps()
+            self.target_ips_and_ports = (
+                self.extract_target_ips_and_ports_for_all_pcaps()
+            )
             self.performed_diff = True
-        return {"Network": self.dns_requests, "Network IP:Port (send/recv)": self.target_ips_and_ports}
+        return {
+            "Network": self.dns_requests,
+            "Network IP:Port (send/recv)": self.target_ips_and_ports,
+        }
 
     def pretty_print(self):
         """Returns a formatted string of DNS requests and target IPs and ports.
@@ -67,29 +71,41 @@ class Network(DataGather):
         """
         if not self.performed_diff:
             self.dns_requests = self.extract_dns_requests_for_all_pcaps()
-            self.target_ips_and_ports = self.extract_target_ips_and_ports_for_all_pcaps()
+            self.target_ips_and_ports = (
+                self.extract_target_ips_and_ports_for_all_pcaps()
+            )
             self.performed_diff = True
 
         result = (
-                Fore.YELLOW + Style.BRIGHT + "\n—————————————————NETWORK=(DNS requests made by emulator)———————————————————————————————————————————————\n")
+            Fore.YELLOW
+            + Style.BRIGHT
+            + "\n—————————————————NETWORK=(DNS requests made by emulator)———————————————————————————————————————————————\n"
+        )
         for entry in sorted(self.dns_requests):
             result += Fore.YELLOW + entry + "\n"
         result = result + (
-                Fore.YELLOW + Style.BRIGHT + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n")
+            Fore.YELLOW
+            + Style.BRIGHT
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+        )
 
         result += (
-            Fore.LIGHTYELLOW_EX + Style.BRIGHT + "\n—————————————————NETWORK=(Target IP ports)———————————————————————————————————————————————————————\n")
+            Fore.LIGHTYELLOW_EX
+            + Style.BRIGHT
+            + "\n—————————————————NETWORK=(Target IP ports)———————————————————————————————————————————————————————\n"
+        )
         for entry in self.target_ips_and_ports:
             result += Fore.LIGHTYELLOW_EX + entry + "\n"
         result += (
-            Fore.LIGHTYELLOW_EX + Style.BRIGHT + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n")
-
+            Fore.LIGHTYELLOW_EX
+            + Style.BRIGHT
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+        )
 
         return result
 
     def tcpdump_thread(self):
-        """Meant to be run as a Thread that uses adb emu network capture.
-        """
+        """Meant to be run as a Thread that uses adb emu network capture."""
         noise_path = f"{self._path}{self._trace_file_name}noise.pcap"
         path = f"{self._path}{self._trace_file_name}{self.internal_run_counter!s}.pcap"
         accumulated_errors = ""
@@ -104,14 +120,15 @@ class Network(DataGather):
         time.sleep(runtime)
 
         if Toolbox.is_dry_run():
-            out, err =Adb.send_telnet_command(f"network capture stop {noise_path}")
+            out, err = Adb.send_telnet_command(f"network capture stop {noise_path}")
         else:
-            out, err =Adb.send_telnet_command(f"network capture stop {path}")
+            out, err = Adb.send_telnet_command(f"network capture stop {path}")
         accumulated_errors += err
         self.internal_run_counter += 1
         if accumulated_errors:
-            logger.error(f"Errors occurred during network capture: {accumulated_errors}")
-
+            logger.error(
+                f"Errors occurred during network capture: {accumulated_errors}"
+            )
 
     @classmethod
     def get_path(cls):
@@ -131,7 +148,6 @@ class Network(DataGather):
         """
         return cls._trace_file_name
 
-
     def extract_dns_requests_for_all_pcaps(self):
         """Extracts DNS requests from a series of PCAP files and compares them
         against a 'noise' PCAP file to identify unique DNS requests.
@@ -145,7 +161,7 @@ class Network(DataGather):
         logger.info("Analyzing pcaps for DNS requests, this could take a minute...")
 
         # Iterate over PCAP files
-        for i in range(1, self.internal_run_counter-1):
+        for i in range(1, self.internal_run_counter - 1):
             path = f"{self._path}{self._trace_file_name}{i}.pcap"
 
             # Extract DNS requests and add them to the set
@@ -159,7 +175,6 @@ class Network(DataGather):
         # Return only the DNS names that were in all_dns_requests but not in noise_dns_requests as a list
         diff = list(all_dns_requests - noise_dns_requests)
         return diff
-
 
     @classmethod
     def extract_dns_requests_from_pcap(cls, pcap_path):
@@ -177,16 +192,16 @@ class Network(DataGather):
         # Iterate over each packet
         for pkt in packets:
             # Check if the packet is a DNS request
-            if pkt.haslayer(DNS) and pkt.getlayer(DNS).qr == 0:  # qr == 0 indicates a query
+            if (
+                pkt.haslayer(DNS) and pkt.getlayer(DNS).qr == 0
+            ):  # qr == 0 indicates a query
                 # Extract the queried domain names
                 dns_query = pkt.getlayer(DNS).qd[0]  # DNS question section
                 if dns_query is not None and isinstance(dns_query, DNSQR):
                     domain_names.add(dns_query.qname.decode())
 
-        #TODO: also store IPs of answer so they can be correlated later on
+        # TODO: also store IPs of answer so they can be correlated later on
         return domain_names
-
-
 
     def extract_target_ips_and_ports_for_all_pcaps(self):
         """Extracts target IPs and ports from a series of PCAP files and compares them
@@ -198,10 +213,12 @@ class Network(DataGather):
         # Set to store target IPs and ports from all pcaps except the noise pcap
         all_target_ips_and_ports = set()
 
-        logger.info("Analyzing pcaps for target IPs and ports, this could take a minute...")
+        logger.info(
+            "Analyzing pcaps for target IPs and ports, this could take a minute..."
+        )
 
         # Iterate over PCAP files
-        for i in range(1, self.internal_run_counter-1):
+        for i in range(1, self.internal_run_counter - 1):
             path = f"{self._path}{self._trace_file_name}{i}.pcap"
 
             # Extract target IPs and ports and add them to the set
@@ -220,12 +237,15 @@ class Network(DataGather):
         for ip_and_port in diff:
             target_IP = ip_and_port.split(":")[0]
             target_port = int(ip_and_port.split(":")[1])
-            pcap_path = self._path+"/network_trace_run_1.pcap"
-            sent_bytes, received_bytes = self.count_bytes(target_IP, target_port, pcap_path)
-            result.append(f"{target_IP}:{target_port} ({sent_bytes}B sent to / {received_bytes}B received from)")
+            pcap_path = self._path + "/network_trace_run_1.pcap"
+            sent_bytes, received_bytes = self.count_bytes(
+                target_IP, target_port, pcap_path
+            )
+            result.append(
+                f"{target_IP}:{target_port} ({sent_bytes}B sent to / {received_bytes}B received from)"
+            )
 
         return result
-
 
     @classmethod
     def extract_target_ips_and_ports(cls, pcap_path):
@@ -254,7 +274,7 @@ class Network(DataGather):
                     target_ip = pkt[IP].dst
                     target_port = pkt[TCP].dport
                     target_ips_and_ports.add(f"{target_ip}:{target_port}")
-            packet_number+=1
+            packet_number += 1
 
         return target_ips_and_ports
 

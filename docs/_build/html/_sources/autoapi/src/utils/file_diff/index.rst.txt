@@ -47,4 +47,3 @@ Module Contents
 .. py:function:: abx_xml_diff(xml_file, dir1, dir2)
 
 .. py:function:: txt_diff(txt_file)
-

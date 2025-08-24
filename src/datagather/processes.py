@@ -8,6 +8,7 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 class Bcolors:
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"
@@ -21,8 +22,7 @@ class Bcolors:
 
 
 class Processes(DataGather):
-    """Handles the gathering and processing of active processes during an action.
-    """
+    """Handles the gathering and processing of active processes during an action."""
 
     run_process_lists = {}
     final_processes_list = []
@@ -30,8 +30,7 @@ class Processes(DataGather):
     performed_diff = False
 
     def gather(self):
-        """Starts a new thread to capture process data.
-        """
+        """Starts a new thread to capture process data."""
         logger.info("Collecting information on active processes during action")
         t1 = threading.Thread(target=self.process_capture_thread, args=())
         t1.start()
@@ -57,22 +56,31 @@ class Processes(DataGather):
         raw_output = self.final_processes_list
 
         result = (
-                Bcolors.HEADER + Bcolors.BOLD + "\n—————————————————PROCESSES=(active at some point in each run, not in dry run)——————————————————————————\n" + Bcolors.ENDC + Bcolors.HEADER)
+            Bcolors.HEADER
+            + Bcolors.BOLD
+            + "\n—————————————————PROCESSES=(active at some point in each run, not in dry run)——————————————————————————\n"
+            + Bcolors.ENDC
+            + Bcolors.HEADER
+        )
         for entry in raw_output:
             result += entry + "\n"
         result = result + (
-                Bcolors.BOLD + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n" + Bcolors.ENDC)
+            Bcolors.BOLD
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+        )
 
         return result
 
     def process_capture_thread(self):
-        """Captures the list of active processes over the duration of an action.
-        """
+        """Captures the list of active processes over the duration of an action."""
         runtime = Toolbox.get_action_duration()
         process_list = []
         for i in range(runtime):
             stdout, stderr = Adb.send_adb_command("shell ps -Ao NAME")
-            process_list = list(set(stdout.splitlines()[1:] + process_list))  # Join new-found processes with the process list so far without duplicates
+            process_list = list(
+                set(stdout.splitlines()[1:] + process_list)
+            )  # Join new-found processes with the process list so far without duplicates
             logger.debug("Found " + str(len(process_list)) + " processes so far")
             time.sleep(1)
 
@@ -82,17 +90,15 @@ class Processes(DataGather):
             self.run_process_lists[self.run_counter] = process_list
             self.run_counter += 1
 
-
     def process_processes(self):
-        """Processes the collected process lists to filter out noise and identify true active processes.
-        """
+        """Processes the collected process lists to filter out noise and identify true active processes."""
         noise = Toolbox.noise_processes
 
         logger.debug("Processing collected process lists")
 
         result = []
 
-        #check for processes that are in at least one run, but NOT in noise
+        # check for processes that are in at least one run, but NOT in noise
         for process_list in self.run_process_lists.values():
             for process in process_list:
                 if process not in result:

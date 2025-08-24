@@ -36,5 +36,3 @@ Module Contents
 
 .. py:data:: events
    :value: [('File Created', 1, '#C80036'), ('File Modified', 2, '#7ABA78'), ('Process Spawned', 6,...
-
-

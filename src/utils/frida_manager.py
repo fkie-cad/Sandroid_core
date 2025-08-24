@@ -15,9 +15,16 @@ from src.utils.adb import Adb
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
-class FridaManager:
 
-    def __init__(self, logger=None, is_remote=False, socket="", verbose=False, frida_install_dst="/data/local/tmp/"):
+class FridaManager:
+    def __init__(
+        self,
+        logger=None,
+        is_remote=False,
+        socket="",
+        verbose=False,
+        frida_install_dst="/data/local/tmp/",
+    ):
         """Constructor of the current FridaManager instance
 
         :param is_remote: The number to multiply.
@@ -68,7 +75,7 @@ class FridaManager:
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
         """This function is used to run the frida server on the connected device.
 
-        :param frida_server_path: The path where the frida server is located. 
+        :param frida_server_path: The path where the frida server is located.
                                   Default is "/data/local/tmp/".
         :type frida_server_path: str
 
@@ -92,7 +99,9 @@ class FridaManager:
             command = "adb shell su 0 " + cmd
 
         # Execute the command and suppress the output
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
         time.sleep(1)
 
         # Check if the frida server is running
@@ -103,7 +112,6 @@ class FridaManager:
         process.kill()
         self.logger.critical("Could not start frida-server")
         return False
-
 
     def is_frida_server_running(self):
         """Checks if on the connected device a frida server is running.
@@ -153,11 +161,10 @@ class FridaManager:
             file_path = self.download_frida_server(dir, version)
             tmp_frida_server = self.extract_frida_server_comp(file_path)
             # ensure's that we always overwrite the current installation with our recent downloaded version
-            #TODO: Replace with adb class methods
+            # TODO: Replace with adb class methods
             self._adb_remove_file_if_exist(frida_dir + "frida-server")
             self._adb_push_file(tmp_frida_server, frida_dir)
             self.make_frida_server_executable()
-
 
     # by default the latest frida-server version will be downloaded
     def download_frida_server(self, path, version="latest"):
@@ -227,11 +234,23 @@ class FridaManager:
                 exit(2)
 
             frida_server_path = re.findall(
-                r"\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-" + arch + ".xz", res.text) #'\.xz'
+                r"\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-"
+                + arch
+                + ".xz",
+                res.text,
+            )  #'\.xz'
             final_url = frida_download_prefix + frida_server_path[0]
 
         else:
-            final_url = "https://github.com/frida/frida/releases/download/" + version + "/frida-server-" + version + "-android-" + arch + ".xz"
+            final_url = (
+                "https://github.com/frida/frida/releases/download/"
+                + version
+                + "/frida-server-"
+                + version
+                + "-android-"
+                + arch
+                + ".xz"
+            )
 
         if self.verbose:
             print(f"[*] frida-server download url: {final_url}")
@@ -251,22 +270,37 @@ class FridaManager:
     def run_adb_command_as_root(self, command):
         if self.adb_check_root() == False:
             print(
-                "[-] none rooted device. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary....")
+                "[-] none rooted device. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary...."
+            )
             exit(2)
 
         if self.is_magisk_mode:
-            output = subprocess.run(["adb", "shell", "su -c " + command], check=False, capture_output=True, text=True)
+            output = subprocess.run(
+                ["adb", "shell", "su -c " + command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
         else:
-            output = subprocess.run(["adb", "shell", "su 0 " + command], check=False, capture_output=True, text=True)
+            output = subprocess.run(
+                ["adb", "shell", "su 0 " + command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
 
         return output
 
     def _adb_push_file(self, file, dst):
-        output = subprocess.run(["adb", "push", file, dst], check=False, capture_output=True, text=True)
+        output = subprocess.run(
+            ["adb", "push", file, dst], check=False, capture_output=True, text=True
+        )
         return output
 
     def _adb_pull_file(self, src_file, dst):
-        output = subprocess.run(["adb", "pull", src_file, dst], check=False, capture_output=True, text=True)
+        output = subprocess.run(
+            ["adb", "pull", src_file, dst], check=False, capture_output=True, text=True
+        )
         return output
 
     def _get_android_device_arch(self):
@@ -286,15 +320,27 @@ class FridaManager:
         return True
 
     def adb_check_root(self):
-        if bool(subprocess.run(["adb", "shell", "su -v"], check=False, capture_output=True, text=True).stdout):
+        if bool(
+            subprocess.run(
+                ["adb", "shell", "su -v"], check=False, capture_output=True, text=True
+            ).stdout
+        ):
             self.is_magisk_mode = True
             return True
 
-        return bool(subprocess.run(["adb", "shell", "su 0 id -u"], check=False, capture_output=True, text=True).stdout)
+        return bool(
+            subprocess.run(
+                ["adb", "shell", "su 0 id -u"],
+                check=False,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
 
     def _adb_remove_file_if_exist(self, path="/data/local/tmp/frida-server"):
         if self._adb_does_file_exist(path):
             output = self.run_adb_command_as_root("rm " + path)
+
 
 # only there in order to do some tests will be removed soon
 # if __name__ == "__main__":

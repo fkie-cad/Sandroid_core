@@ -22,7 +22,7 @@ tqdm
 reportlab
 # Modern PyPI packages - these are now installed directly in Dockerfile
 # AndroidFridaManager>=0.2.0
-# trigdroid[full]>=1.0.0  
+# trigdroid[full]>=1.0.0
 # dexray-intercept>=1.0.0
 # dexray-insight>=1.0.0
 geopy

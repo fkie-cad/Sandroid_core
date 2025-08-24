@@ -17,7 +17,7 @@ class FSMon:
         "arm64": "https://github.com/nowsecure/fsmon/releases/download/1.8.6/fsmon-android-arm64",
         "arm": "https://github.com/nowsecure/fsmon/releases/download/1.8.4/fsmon-and-arm",
         "x86": "https://github.com/nowsecure/fsmon/releases/download/1.8.4/fsmon-and-x86",
-        "x86_64": "https://github.com/nowsecure/fsmon/releases/download/1.8.4/fsmon-and-x86_64"
+        "x86_64": "https://github.com/nowsecure/fsmon/releases/download/1.8.4/fsmon-and-x86_64",
     }
 
     # Default to arm64 until architecture is detected
@@ -29,7 +29,7 @@ class FSMon:
     @classmethod
     def get_device_architecture(cls):
         """Detects the architecture of the connected Android device using ADB.
-        
+
         :return: Architecture string (arm64, arm, x86, or x86_64)
         :rtype: str
         """
@@ -68,7 +68,9 @@ class FSMon:
         cls.FS_MON_BINARY = binary_path
 
         # Check if fsmon exists on the device
-        stdout, stderr = Adb.send_adb_command(f"shell [ -f {binary_path} ] && echo 'exists' || echo 'notfound'")
+        stdout, stderr = Adb.send_adb_command(
+            f"shell [ -f {binary_path} ] && echo 'exists' || echo 'notfound'"
+        )
         if "exists" in stdout:
             cls.logger.info(f"FSMon binary found on device at {binary_path}")
             return  # fsmon is already installed
@@ -93,7 +95,7 @@ class FSMon:
     def run_fsmon_by_path(cls, path):
         """Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified path.
         Returns the subprocess.Popen object so the caller can terminate it later.
-        
+
         :param path: The directory/path to monitor with fsmon.
         :type path: str
         :return: A subprocess.Popen object representing the running fsmon process.
@@ -113,7 +115,7 @@ class FSMon:
     def run_fsmon_by_pid(cls, pid, path="/data/"):
         """Starts fsmon in a subprocess via 'adb exec-out', monitoring the specified process ID.
         Returns the subprocess.Popen object so the caller can terminate it later.
-        
+
         :param pid: The process ID to monitor with fsmon.
         :type pid: int or str
         :return: A subprocess.Popen object representing the running fsmon process.

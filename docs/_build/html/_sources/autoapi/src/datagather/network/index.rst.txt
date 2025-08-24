@@ -155,5 +155,3 @@ Module Contents
 
 
    .. py:method:: count_bytes(ip_address, port, pcap_file)
-
-

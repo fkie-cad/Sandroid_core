@@ -1,6 +1,6 @@
 # Sandroid quickstart guide
 
-Run `./deploy` 
+Run `./deploy`
 
 ---
 

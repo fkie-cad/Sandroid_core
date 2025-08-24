@@ -1,6 +1,6 @@
 # # Stage 1: Build stage
 # FROM ubuntu:22.04 AS build
- 
+
 # # Install dependencies required for cloning and building
 # RUN apt-get update && apt-get install -y \
 #     git \
@@ -8,7 +8,7 @@
 #     python3-pip \
 #     cmake && \
 #     rm -rf /var/lib/apt/lists/*
- 
+
 # # Inject GitLab token as an argument for private repo access
 # ARG GITLAB_TOKEN
 # RUN git config --global credential.helper store &&\
@@ -20,7 +20,7 @@
 # RUN git clone -b sandroid-demo https://gitlab.fkie.fraunhofer.de/def/sandroid/androidmalwaremotionmonitor.git
 # RUN git clone https://gitlab.fkie.fraunhofer.de/def/sandroid/sandroid_apk_static_analysis_monitor.git
 # RUN git clone https://gitlab.fkie.fraunhofer.de/cad/shk/android-sandbox
- 
+
 # # Stage 2: Runtime stage
 # FROM debian:bookworm-slim
 
@@ -47,7 +47,7 @@
 #     adb \
 #     build-essential && \
 #     rm -rf /var/lib/apt/lists/*
- 
+
 # ENV DEBIAN_FRONTEND=dialog
 
 # # Copy cloned repositories from the build stage and install
@@ -120,14 +120,14 @@ ENV DEBIAN_FRONTEND=dialog
 
 # Copy actual sandroid application files
 WORKDIR /sandroid
-COPY /docker/docker_welcome_message /root/welcome 
-COPY /docs /sandroid/docs      
-COPY README.md /sandroid/README.md 
-COPY /src /sandroid/src 
-COPY ground_truth.apk /sandroid/ground_truth.apk 
+COPY /docker/docker_welcome_message /root/welcome
+COPY /docs /sandroid/docs
+COPY README.md /sandroid/README.md
+COPY /src /sandroid/src
+COPY ground_truth.apk /sandroid/ground_truth.apk
 COPY sandroid /sandroid/sandroid
 
-COPY /assets/Fraunhofer_Logo.jpg /sandroid/assets/Fraunhofer_Logo.jpg 
+COPY /assets/Fraunhofer_Logo.jpg /sandroid/assets/Fraunhofer_Logo.jpg
 COPY /assets/sandroid_logo.png /sandroid/assets/sandroid_logo.png
 
 # Set the container's default command

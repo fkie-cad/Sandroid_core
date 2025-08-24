@@ -21,14 +21,12 @@ class Bcolors:
 
 
 class NewFiles(DataGather):
-    """Handles the gathering and processing of new files detected in the system.
-    """
+    """Handles the gathering and processing of new files detected in the system."""
 
     newFileListList = []
 
     def gather(self):
-        """Gathers new files by comparing the current file list with the baseline.
-        """
+        """Gathers new files by comparing the current file list with the baseline."""
         newFiles = []
         changedFiles = Toolbox.fetch_changed_files()
 
@@ -37,22 +35,24 @@ class NewFiles(DataGather):
 
         logger.debug("Scanning for new files")
         for file in changedFiles:  # Get new files
-            if file not in Toolbox.baseline: # File is a new file
+            if file not in Toolbox.baseline:  # File is a new file
                 newFiles.append(file)
         self.newFileListList.append(newFiles)
-        logger.debug(str(len(newFiles))+" New files discovered")
+        logger.debug(str(len(newFiles)) + " New files discovered")
         logger.debug("New files found in this run: " + str(newFiles))
 
         logger.debug("Pulling unknown new files")
         for file in newFiles:
             # Create the target path where the file should be stored
-            target_path = os.path.join(f'{os.getenv("RAW_RESULTS_PATH")}new_pull', file.lstrip("/"))
+            target_path = os.path.join(
+                f"{os.getenv('RAW_RESULTS_PATH')}new_pull", file.lstrip("/")
+            )
 
             # Check if the file already exists at this path
             if not os.path.exists(target_path):
                 Toolbox.pull_file("new", file)
 
-            #check for new apk files to auto analyse with asam might implement double check to check signature bytes of potential apks.
+            # check for new apk files to auto analyse with asam might implement double check to check signature bytes of potential apks.
             if file.lower().endswith(".apk") and Toolbox.args.interative is True:
                 asam = StaticAnalysis()
                 asam.gather()
@@ -74,18 +74,28 @@ class NewFiles(DataGather):
         """
         true_new_files = self.process_data()
         result = (
-                Bcolors.OKGREEN + Bcolors.BOLD + "\n—————————————————CREATED_FILES=(created in second run)—————————————————————————————————————————————————\n" + Bcolors.ENDC + Bcolors.OKGREEN)
+            Bcolors.OKGREEN
+            + Bcolors.BOLD
+            + "\n—————————————————CREATED_FILES=(created in second run)—————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+            + Bcolors.OKGREEN
+        )
         for entry in true_new_files:
-            result = result + Toolbox.highlight_timestamps(entry, Bcolors.OKGREEN) + "\n"
+            result = (
+                result + Toolbox.highlight_timestamps(entry, Bcolors.OKGREEN) + "\n"
+            )
         result = result + (
-                Bcolors.BOLD + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n" + Bcolors.ENDC)
+            Bcolors.BOLD
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+        )
         return result
 
     def process_data(self):
         """Processes the gathered data to filter out noise and identify true new files.
         Also keeps files in directories that consistently have new files across runs.
         Only includes files from the second run for the directory consistency logic.
-    
+
         :returns: List of true new files.
         :rtype: list
         """
@@ -132,15 +142,23 @@ class NewFiles(DataGather):
                     true_new_files.add(file_path)
 
         # Apply noise filtering
-        true_new_files = [x for x in true_new_files if x not in noise or x.endswith(".db") or x.endswith(".xml")]
+        true_new_files = [
+            x
+            for x in true_new_files
+            if x not in noise or x.endswith(".db") or x.endswith(".xml")
+        ]
 
-        logger.debug("Searching for and if necessary deleting new files that were wrongly pulled")
+        logger.debug(
+            "Searching for and if necessary deleting new files that were wrongly pulled"
+        )
 
         # Clean up files that shouldn't be there
-        for root, dirs, files in os.walk(f'{os.getenv("RAW_RESULTS_PATH")}new_pull'):
+        for root, dirs, files in os.walk(f"{os.getenv('RAW_RESULTS_PATH')}new_pull"):
             for file_name in files:
                 # Reconstruct the relative path from the pull directory
-                rel_path = os.path.join(root, file_name).replace(f'{os.getenv("RAW_RESULTS_PATH")}new_pull/', "")
+                rel_path = os.path.join(root, file_name).replace(
+                    f"{os.getenv('RAW_RESULTS_PATH')}new_pull/", ""
+                )
                 # Convert to device path format for comparison
                 device_path = "/" + rel_path
                 if device_path not in true_new_files:
@@ -149,9 +167,9 @@ class NewFiles(DataGather):
         true_new_files = Toolbox.exclude_whitelist(true_new_files)
         return true_new_files
 
-    """This is old, not quite OOP translated code that was supposed to detect if a new file was created but in a different directory each run. 
+    """This is old, not quite OOP translated code that was supposed to detect if a new file was created but in a different directory each run.
     I am skipping this special case for now, but I'll leave the code here just in case
-    
+
     def process_data(self):
         new_dirs_list_list = []
         for newFileList in self.newFileListList:

@@ -15,5 +15,3 @@ Submodules
    /autoapi/src/functionality/recorder/index
    /autoapi/src/functionality/screenshot/index
    /autoapi/src/functionality/trigdroid/index
-
-

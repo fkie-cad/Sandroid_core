@@ -107,5 +107,3 @@ Module Contents
 
 
    .. py:method:: process_sockets()
-
-

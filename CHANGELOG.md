@@ -259,7 +259,7 @@ sandroid-config get emulator.device_name
 - Replace custom environment variables with `SANDROID_` prefixed versions
 - Validate new configuration with `sandroid-config validate`
 
-### Development Migration  
+### Development Migration
 - Install development dependencies: `pip install -e .[dev]`
 - Use modern testing: `pytest` instead of custom test scripts
 - Apply code formatting: `black src/` and `isort src/`

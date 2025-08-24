@@ -48,8 +48,10 @@ class AndroidLocationManager:
 
         # Check if device is rooted
         if not self.adb_check_root():
-            print("[ERROR] Non-rooted device. Please root it before proceeding. "
-                  "Ensure you can run 'su' on the device.")
+            print(
+                "[ERROR] Non-rooted device. Please root it before proceeding. "
+                "Ensure you can run 'su' on the device."
+            )
             sys.exit(2)
 
         # Decide if we should run 'su -c ...' vs 'su 0 ...'
@@ -62,11 +64,13 @@ class AndroidLocationManager:
         result = subprocess.run(full_cmd, check=False, capture_output=True, text=True)
         if result.returncode != 0:
             # Improved error message
-            print(f"[ERROR] Root command failed.\n"
-                  f"  Command: {full_cmd}\n"
-                  f"  Return code: {result.returncode}\n"
-                  f"  STDOUT: {result.stdout}\n"
-                  f"  STDERR: {result.stderr}")
+            print(
+                f"[ERROR] Root command failed.\n"
+                f"  Command: {full_cmd}\n"
+                f"  Return code: {result.returncode}\n"
+                f"  STDOUT: {result.stdout}\n"
+                f"  STDERR: {result.stderr}"
+            )
         else:
             print(f"[OK] Ran root command successfully: {command}")
         return result
@@ -80,20 +84,23 @@ class AndroidLocationManager:
             adb_command.extend(["-s", self.device_id])
         adb_command.extend(command_list)
 
-        result = subprocess.run(adb_command, check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            adb_command, check=False, capture_output=True, text=True
+        )
         if result.returncode != 0:
-            print(f"[ERROR] Non-root adb command failed.\n"
-                  f"  Command: {adb_command}\n"
-                  f"  Return code: {result.returncode}\n"
-                  f"  STDOUT: {result.stdout}\n"
-                  f"  STDERR: {result.stderr}")
+            print(
+                f"[ERROR] Non-root adb command failed.\n"
+                f"  Command: {adb_command}\n"
+                f"  Return code: {result.returncode}\n"
+                f"  STDOUT: {result.stdout}\n"
+                f"  STDERR: {result.stderr}"
+            )
         else:
             print(f"[OK] Ran non-root command successfully: {adb_command}")
         return result
 
     def set_avd_location(self, latitude: float, longitude: float):
-        """Set the GPS location on the emulator. (Doesn't typically need root.)
-        """
+        """Set the GPS location on the emulator. (Doesn't typically need root.)"""
         # On standard AVD, we do: adb emu geo fix <longitude> <latitude>
         cmd_list = ["emu", "geo", "fix", str(longitude), str(latitude)]
         self.run_adb_command_no_root(cmd_list)
@@ -117,7 +124,7 @@ class AndroidLocationManager:
             f"setprop persist.sys.language {language}",
             f"setprop persist.sys.country {country}",
             "stop",
-            "start"
+            "start",
         ]
         for cmd in commands:
             self.run_adb_command_as_root(cmd)
@@ -162,10 +169,12 @@ def main():
     The script sets GPS location, then attempts to set time zone, locale, telephony, etc.
     """
     if len(sys.argv) < 3:
-        print("Usage:\n"
-              "  python set_avd_location.py <country_code> <city> [<device_id>]\n"
-              "  OR\n"
-              "  python set_avd_location.py <latitude> <longitude> [<device_id>]\n")
+        print(
+            "Usage:\n"
+            "  python set_avd_location.py <country_code> <city> [<device_id>]\n"
+            "  OR\n"
+            "  python set_avd_location.py <latitude> <longitude> [<device_id>]\n"
+        )
         sys.exit(1)
 
     arg1 = sys.argv[1]
@@ -183,9 +192,13 @@ def main():
         latitude = float(arg1)
         longitude = float(arg2)
 
-        print(f"[INFO] Interpreting as direct lat/lon => lat={latitude}, lon={longitude}")
+        print(
+            f"[INFO] Interpreting as direct lat/lon => lat={latitude}, lon={longitude}"
+        )
         loc_mgr.set_avd_location(latitude, longitude)
-        print("[INFO] Not setting time zone / locale / telephony because we don't know the country code.")
+        print(
+            "[INFO] Not setting time zone / locale / telephony because we don't know the country code."
+        )
         return
 
     except ValueError:
@@ -216,7 +229,9 @@ def main():
         if tz:
             loc_mgr.set_time_zone(tz)
         else:
-            print(f"[WARN] No time zone mapping for {country_code} - skipping time zone.")
+            print(
+                f"[WARN] No time zone mapping for {country_code} - skipping time zone."
+            )
 
         # 3) Set locale (demo)
         #   Similarly naive approach
@@ -236,14 +251,16 @@ def main():
         telephony_map = {
             "ru": ("ru", "25001"),  # ISO 'ru', MNC '25001'
             "de": ("de", "26201"),  # T-Mobile Germany
-            "us": ("us", "310030"), # AT&T US
+            "us": ("us", "310030"),  # AT&T US
             # ...
         }
         if country_code.lower() in telephony_map:
             iso_cn, mnc = telephony_map[country_code.lower()]
             loc_mgr.set_telephony(iso_cn, mnc)
         else:
-            print(f"[WARN] No telephony mapping for {country_code} - skipping telephony.")
+            print(
+                f"[WARN] No telephony mapping for {country_code} - skipping telephony."
+            )
 
         print("[INFO] Done.")
 

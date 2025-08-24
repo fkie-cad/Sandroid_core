@@ -17,6 +17,7 @@ logger = getLogger(__name__)
 # Thats why, to get new rows that were added in run 2, we need the sqldiff of "db_run_1 db_run_2"
 # To see content that was deleted in run 2, we need to reverse the order of the diff
 
+
 # returns a nicely formatted string, naming entries that have been added and removed from filename_database_of_interest
 def db_diff(db_path1, db_path2, noise_path=None):
     """Calculates the differences between two database versions.
@@ -71,10 +72,7 @@ def db_diff_helper(db_path1, db_path2):
     result = ""
     logger.debug(f"Calculating Database Diff between {db_path1} and {db_path2}")
     deleted_rows = subprocess.run(
-        ["sqldiff", db_path2, db_path1],
-        check=False,
-        capture_output=True,
-        text=False
+        ["sqldiff", db_path2, db_path1], check=False, capture_output=True, text=False
     )
     try:
         deleted_stdout = deleted_rows.stdout.decode("utf-8", errors="replace")
@@ -83,10 +81,7 @@ def db_diff_helper(db_path1, db_path2):
 
     logger.debug(f"Calculating reverse Database Diff between {db_path1} and {db_path2}")
     new_rows = subprocess.run(
-        ["sqldiff", db_path1, db_path2],
-        check=False,
-        capture_output=True,
-        text=False
+        ["sqldiff", db_path1, db_path2], check=False, capture_output=True, text=False
     )
     try:
         new_stdout = new_rows.stdout.decode("utf-8", errors="replace")
@@ -94,9 +89,13 @@ def db_diff_helper(db_path1, db_path2):
         new_stdout = new_rows.stdout.decode("latin-1")
 
     complexity = new_stdout.count("\n") * 2 + deleted_stdout.count("\n")
-    logger.debug(f"Inferring inserted, updated, and deleted content from the diffs. Working through {complexity} cases")
+    logger.debug(
+        f"Inferring inserted, updated, and deleted content from the diffs. Working through {complexity} cases"
+    )
     if complexity > 30000:
-        logger.warning(f"Skipping intra file analysis of {db_path1} because the file is too big")
+        logger.warning(
+            f"Skipping intra file analysis of {db_path1} because the file is too big"
+        )
         return "\tToo many rows for intra file analysis ( more than 10000 )"
 
     if not new_stdout and not deleted_stdout:
@@ -106,26 +105,34 @@ def db_diff_helper(db_path1, db_path2):
     for line in new_stdout.splitlines():
         words = line.split(" ")
         if words[0] == "INSERT":
-            row_value = line[line.find("VALUES("):]
+            row_value = line[line.find("VALUES(") :]
             row_value = row_value[7:-2]
             table_of_row = words[2]
-            table_of_row = table_of_row[0:table_of_row.find("(")]
-            result = result + f"\t[{Fore.GREEN}INSERT{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.GREEN}{row_value}{Style.RESET_ALL}] has been added\n"
+            table_of_row = table_of_row[0 : table_of_row.find("(")]
+            result = (
+                result
+                + f"\t[{Fore.GREEN}INSERT{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.GREEN}{row_value}{Style.RESET_ALL}] has been added\n"
+            )
 
     # updated rows
     for line in new_stdout.splitlines():
         words = line.split(" ")
         if words[0] == "UPDATE":
-            row_value = line[line.find("SET") + 3:line.find("WHERE")]
+            row_value = line[line.find("SET") + 3 : line.find("WHERE")]
             table_of_row = words[1]
-            update_condition = line[line.find("WHERE") + 6:-1]
+            update_condition = line[line.find("WHERE") + 6 : -1]
             # find matching update in deleted_rows to get old value
             old_value = ""
             for old_line in deleted_stdout.splitlines():
                 words = old_line.split(" ")
-                if words[0] == "UPDATE" and words[1] == table_of_row and old_line[old_line.find(
-                        "WHERE") + 6:-1] == update_condition:
-                    old_value = old_line[old_line.find("SET") + 3:old_line.find("WHERE")]
+                if (
+                    words[0] == "UPDATE"
+                    and words[1] == table_of_row
+                    and old_line[old_line.find("WHERE") + 6 : -1] == update_condition
+                ):
+                    old_value = old_line[
+                        old_line.find("SET") + 3 : old_line.find("WHERE")
+                    ]
 
             # Parse key-value pairs from old_value and new_value (row_value)
             old_pairs = {}
@@ -152,24 +159,32 @@ def db_diff_helper(db_path1, db_path2):
 
                 if old_val != new_val:
                     # Use color for changed values
-                    diff_details.append(f"{key}=({Fore.YELLOW}{old_val} → {new_val}{Style.RESET_ALL})")
+                    diff_details.append(
+                        f"{key}=({Fore.YELLOW}{old_val} → {new_val}{Style.RESET_ALL})"
+                    )
                 else:
                     diff_details.append(f"{key}={old_val}")
 
             formatted_diff = ", ".join(diff_details)
 
-            result = result + f"\t[{Fore.YELLOW}UPDATE{Style.RESET_ALL}] Table [{table_of_row}] row " \
-                             f"where [{update_condition}] changed: {formatted_diff}\n"
+            result = (
+                result
+                + f"\t[{Fore.YELLOW}UPDATE{Style.RESET_ALL}] Table [{table_of_row}] row "
+                f"where [{update_condition}] changed: {formatted_diff}\n"
+            )
 
     # deleted rows
     for line in deleted_stdout.splitlines():
         words = line.split(" ")
         if words[0] == "INSERT":
-            row_value = line[line.find("VALUES("):]
+            row_value = line[line.find("VALUES(") :]
             row_value = row_value[7:-2]
             table_of_row = words[2]
-            table_of_row = table_of_row[0:table_of_row.find("(")]
-            result = result + f"\t[{Fore.RED}DELETE{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.RED}{row_value}{Style.RESET_ALL}] has been removed\n"
+            table_of_row = table_of_row[0 : table_of_row.find("(")]
+            result = (
+                result
+                + f"\t[{Fore.RED}DELETE{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.RED}{row_value}{Style.RESET_ALL}] has been removed\n"
+            )
 
     return result[:-1]
 
@@ -308,18 +323,26 @@ def abx_xml_diff(file_path1, file_path2):
     # Convert the ABX files to XML in memory
     first_xml = subprocess.run(
         ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
-        check=False, capture_output=True, text=True).stdout
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout
 
     second_xml = subprocess.run(
         ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
-        check=False, capture_output=True, text=True).stdout
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout
 
     logger.debug("Converting ABX files to XML")
     logger.debug({"first_xml": first_xml, "second_xml": second_xml})
 
     # Write the converted XML into temporary files.
-    with tempfile.NamedTemporaryFile(mode="w", delete=True) as temp1, \
-         tempfile.NamedTemporaryFile(mode="w", delete=True) as temp2:
+    with (
+        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp1,
+        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp2,
+    ):
         temp1.write(first_xml)
         temp2.write(second_xml)
         temp1.flush()
@@ -328,10 +351,10 @@ def abx_xml_diff(file_path1, file_path2):
         temp2_name = temp2.name
         diff = txt_xml_diff(temp1.name, temp2.name)
 
-
     if diff.strip() == "":
         return "\tNo change detected\n"
     return diff
+
 
 def xml_diff_beautify(raw_diff_string):
     """Formats the raw output from xmldiff into a more readable natural language format.
@@ -343,9 +366,11 @@ def xml_diff_beautify(raw_diff_string):
     """
     beautified_lines = []
     for line in raw_diff_string.strip().splitlines():
-        line = line.strip() # Remove leading/trailing whitespace
+        line = line.strip()  # Remove leading/trailing whitespace
         if not line.startswith("[") or not line.endswith("]"):
-            beautified_lines.append(f"\t{line}") # Keep lines that don't match the pattern
+            beautified_lines.append(
+                f"\t{line}"
+            )  # Keep lines that don't match the pattern
             continue
 
         try:
@@ -356,11 +381,13 @@ def xml_diff_beautify(raw_diff_string):
             # Clean up paths/values by removing potential extra quotes
             args = [p.strip().strip("'\"") for p in parts[1:]]
 
-            formatted_line = "\t" # Start with a tab for indentation
+            formatted_line = "\t"  # Start with a tab for indentation
 
             if action == "move" and len(args) == 3:
                 path, target_parent, position = args
-                formatted_line += f"Moved: {path} to position {position} under {target_parent}"
+                formatted_line += (
+                    f"Moved: {path} to position {position} under {target_parent}"
+                )
             elif action == "update-text" and len(args) == 2:
                 path, new_text = args
                 formatted_line += f'Updated text: {path} to "{new_text}"'
@@ -386,6 +413,7 @@ def xml_diff_beautify(raw_diff_string):
             beautified_lines.append(f"\tMalformed: {line}")
 
     return "\n".join(beautified_lines)
+
 
 def txt_diff(txt_file):
     """Calculates the differences between two text files.

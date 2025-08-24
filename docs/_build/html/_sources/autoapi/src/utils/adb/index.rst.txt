@@ -114,6 +114,3 @@ Module Contents
 
       Returns:
           list of tuple: A list of tuples where each tuple contains the interface name and its corresponding IPv4 address.
-
-
-

@@ -86,5 +86,3 @@ Module Contents
 
 
    .. py:method:: process_data()
-
-

@@ -295,7 +295,7 @@ sandroid-config init --output production.yaml
 sandroid-config init --output testing.yaml
 sandroid-config init --output development.yaml
 
-# Customize each environment  
+# Customize each environment
 sandroid-config set --config testing.yaml log_level DEBUG
 sandroid-config set --config testing.yaml analysis.number_of_runs 1
 

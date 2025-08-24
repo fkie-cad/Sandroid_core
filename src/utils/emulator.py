@@ -5,15 +5,15 @@ import time
 
 
 class Emulator:
-    """Utility class for working with Android emulators.
-    """
+    """Utility class for working with Android emulators."""
+
     # Class variable to store the emulator path
     _emulator_path = None
 
     @classmethod
     def detect_emulator_path(cls) -> str | None:
         """Detects the path to the Android emulator executable.
-        
+
         Returns:
             str: Path to the emulator executable if found, None otherwise
         """
@@ -33,33 +33,46 @@ class Emulator:
             possible_paths.append(os.path.join(android_home, "tools", "emulator"))
 
         if android_sdk_root:
-            possible_paths.append(os.path.join(android_sdk_root, "emulator", "emulator"))
+            possible_paths.append(
+                os.path.join(android_sdk_root, "emulator", "emulator")
+            )
             possible_paths.append(os.path.join(android_sdk_root, "tools", "emulator"))
 
         # Common installation locations based on platform
         system = platform.system()
         if system == "Darwin":  # macOS
-            possible_paths.extend([
-                "/Applications/Android Studio.app/Contents/sdk/emulator/emulator",
-                os.path.expanduser("~/Library/Android/sdk/emulator/emulator")
-            ])
+            possible_paths.extend(
+                [
+                    "/Applications/Android Studio.app/Contents/sdk/emulator/emulator",
+                    os.path.expanduser("~/Library/Android/sdk/emulator/emulator"),
+                ]
+            )
         elif system == "Windows":
-            possible_paths.extend([
-                r"C:\Program Files\Android\Android Studio\sdk\emulator\emulator.exe",
-                os.path.expanduser("~/AppData/Local/Android/sdk/emulator/emulator.exe")
-            ])
+            possible_paths.extend(
+                [
+                    r"C:\Program Files\Android\Android Studio\sdk\emulator\emulator.exe",
+                    os.path.expanduser(
+                        "~/AppData/Local/Android/sdk/emulator/emulator.exe"
+                    ),
+                ]
+            )
         elif system == "Linux":
-            possible_paths.extend([
-                os.path.expanduser("~/Android/Sdk/emulator/emulator"),
-                "/opt/android-sdk/emulator/emulator"
-            ])
+            possible_paths.extend(
+                [
+                    os.path.expanduser("~/Android/Sdk/emulator/emulator"),
+                    "/opt/android-sdk/emulator/emulator",
+                ]
+            )
 
         # Try command which emulator if available (for Unix-like systems)
         try:
-            result = subprocess.run(["which", "emulator"],
-                                   check=False, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE,
-                                   text=True)
+            result = subprocess.run(
+                ["which", "emulator"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             if result.returncode == 0 and result.stdout.strip():
                 possible_paths.append(result.stdout.strip())
         except:
@@ -76,7 +89,7 @@ class Emulator:
     @classmethod
     def list_available_avds(cls) -> list[str]:
         """Lists all available Android Virtual Devices (AVDs).
-        
+
         Returns:
             List[str]: Names of available emulator AVDs
         """
@@ -85,14 +98,19 @@ class Emulator:
             return []
 
         try:
-            result = subprocess.run([emulator_path, "-list-avds"],
-                                   check=False, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE,
-                                   text=True)
+            result = subprocess.run(
+                [emulator_path, "-list-avds"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
             if result.returncode == 0:
                 # Split the output by lines and filter out empty lines
-                avds = [line.strip() for line in result.stdout.split("\n") if line.strip()]
+                avds = [
+                    line.strip() for line in result.stdout.split("\n") if line.strip()
+                ]
                 return avds
             return []
         except Exception as e:

@@ -16,7 +16,6 @@ from src.utils.toolbox import Toolbox
 logger = getLogger(__name__)
 
 
-
 class Recorder(Functionality):
     """Represents a recorder functionality for capturing events.
 
@@ -29,22 +28,19 @@ class Recorder(Functionality):
     EVENT_LINE_RE = re.compile(r"(\S+): (\S+) (\S+) (\S+)$")
 
     def __init__(self):
-        """Initialize the Recorder instance.
-        """
-        self.output_file_name = f'{os.getenv("RAW_RESULTS_PATH")}recording.txt'
+        """Initialize the Recorder instance."""
+        self.output_file_name = f"{os.getenv('RAW_RESULTS_PATH')}recording.txt"
         self.output_file = None
-        #self.logger = Toolbox.logger_factory("recorder")
+        # self.logger = Toolbox.logger_factory("recorder")
 
     def perform(self):
-        """This method captures events and writes them to a file.
-        """
+        """This method captures events and writes them to a file."""
         if Toolbox.args.ai:
             Toolbox.toggle_screen_record()
         self.output_file = open(self.output_file_name, "w")
         logger.info("Start recording, press Ctrl+C to stop")
         record_command = "shell getevent"
         adb = Adb.send_adb_command_popen(record_command)
-
 
         start_time = time.time()
         self.write_dummy_event()
@@ -56,7 +52,6 @@ class Recorder(Functionality):
                 if match is not None:
                     dev, etype, ecode, data = match.groups()
                     self.write_event(dev, etype, ecode, data)
-
 
             except KeyboardInterrupt:
                 # Add a dummy event at the end of the recording
@@ -94,7 +89,5 @@ class Recorder(Functionality):
         self.output_file.write(rline)
 
     def write_dummy_event(self):
-        """Write a dummy event to the output file.
-        """
+        """Write a dummy event to the output file."""
         self.write_event("/dev/input/event1", "0", "0", "0")
-

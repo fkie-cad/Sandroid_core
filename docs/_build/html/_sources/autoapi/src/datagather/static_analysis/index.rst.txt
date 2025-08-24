@@ -33,5 +33,3 @@ Module Contents
 
 
    .. py:method:: pretty_print()
-
-

@@ -4,8 +4,12 @@
 </div>
 
 # Sandroid Framework
+![version](https://img.shields.io/badge/version-1.0.0.2-blue) [![PyPI version](https://badge.fury.io/py/Sandroid@2x.png)](https://badge.fury.io/py/Sandroid)
+[![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
+[![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/pypi-publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflowspypi-publish.yml)
 
-Sandroid provides a powerful **Android sandbox framework** that enables automated analysis of Android applications.  
+
+Sandroid provides a powerful **Android sandbox framework** that enables automated analysis of Android applications.
 It combines both **static** and **dynamic** techniques to help security researchers, forensic analysts, and malware analysts better understand how apps behave in a controlled environment.
 
 By using this framework, you can:
@@ -15,7 +19,7 @@ By using this framework, you can:
 - **Uncover security vulnerabilities** and misconfigurations in Android applications.
 - Gain deeper insights into app behavior without manual reverse engineering.
 
-The framework is designed to simplify the process of **forensic investigations**, **mobile threat detection**, and **security testing** by providing a streamlined, automated environment for analysis.  
+The framework is designed to simplify the process of **forensic investigations**, **mobile threat detection**, and **security testing** by providing a streamlined, automated environment for analysis.
 Whether you're investigating malicious apps, assessing security flaws, or collecting digital evidence, this solution helps you quickly identify and understand what happens inside Android applications.
 
 
@@ -25,7 +29,7 @@ Whether you're investigating malicious apps, assessing security flaws, or collec
 # Install from PyPI
 pip install sandroid
 
-# Initialize configuration  
+# Initialize configuration
 sandroid-config init
 
 # Run analysis
@@ -77,7 +81,7 @@ If you start Sandroid with `python3 sandroid` or just `./sandroid` you will see 
 === Interactive Menu ===
 Frida Server: [Not running]
 Spotlight Application: [n/a]
-        
+
     * print [e]mulator information (name, version, network, etc.)
     * [s]napshot
     * [g]o back to last snapshot
@@ -106,7 +110,7 @@ You'll need:
 ```bash
 $ sudo apt install python3 sqlite3-tools
 $ python3 -m venv env
-$ source env/bin/activate 
+$ source env/bin/activate
 $ pip install sandroid
 ```
 - Download Android Studio from https://developer.android.com/studio, then create an emulator like this:
@@ -165,7 +169,7 @@ sandroid --help
 ### Option 2: Legacy Installation (Still Supported)
 ```bash
 git clone <repository>
-./install-requirements.sh  
+./install-requirements.sh
 ./sandroid
 ```
 
@@ -189,7 +193,7 @@ sandroid-config validate
 ```
 
 Configuration files are automatically discovered in standard locations:
-- `~/.config/sandroid/sandroid.yaml` (user config) 
+- `~/.config/sandroid/sandroid.yaml` (user config)
 - `./sandroid.yaml` (project-specific config)
 - Environment variables with `SANDROID_` prefix
 

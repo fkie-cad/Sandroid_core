@@ -45,4 +45,3 @@ Module Contents
 
 
 .. py:data:: p
-

@@ -9,6 +9,7 @@ logger = getLogger(__name__)
 
 # parts of code taken from https://github.com/Nightbringer21/fridump
 
+
 class Fridump:
     process = None
 
@@ -56,7 +57,8 @@ class Fridump:
               }
             };
 
-            """)
+            """
+        )
         script.on("message", cls.on_message)
         script.load()
 
@@ -79,18 +81,19 @@ class Fridump:
             if size > cls.MAX_SIZE:
                 logger.debug("Too big, splitting the dump into chunks")
                 mem_access_viol = cls.splitter(
-                    agent, base, size, cls.MAX_SIZE, mem_access_viol, output_directory)
+                    agent, base, size, cls.MAX_SIZE, mem_access_viol, output_directory
+                )
                 continue
             mem_access_viol = cls.dump_to_file(
-                agent, base, size, mem_access_viol, output_directory)
+                agent, base, size, mem_access_viol, output_directory
+            )
             i += 1
             cls.printProgress(i, l, prefix="Progress:", suffix="Complete", bar=50)
 
     # Method to receive messages from Javascript API calls
     @classmethod
     def on_message(cls, message, data):
-       print("[on_message] message:", message, "data:", data)
-
+        print("[on_message] message:", message, "data:", data)
 
     @classmethod
     # Reading bytes from session and saving it to a file
@@ -107,7 +110,6 @@ class Fridump:
             logger.error("Oops, memory access violation!")
             return error
 
-
     # Read bytes that are bigger than the max_size value, split them into chunks and save them to a file
     @classmethod
     def splitter(cls, agent, base, size, max_size, error, directory):
@@ -121,14 +123,13 @@ class Fridump:
         cur_base = int(base, 0)
 
         for time in range(int(times)):
-            #logging.debug("Save bytes: " + str(cur_base) + " till " + str(cur_base + max_size))
+            # logging.debug("Save bytes: " + str(cur_base) + " till " + str(cur_base + max_size))
             cls.dump_to_file(agent, cur_base, max_size, error, directory)
             cur_base = cur_base + max_size
 
         if diff != 0:
-            #logging.debug("Save bytes: " + str(hex(cur_base)) + " till " + str(hex(cur_base + diff)))
+            # logging.debug("Save bytes: " + str(hex(cur_base)) + " till " + str(hex(cur_base + diff)))
             cls.dump_to_file(agent, cur_base, diff, error, directory)
-
 
     @classmethod
     # Progress bar function
@@ -136,7 +137,7 @@ class Fridump:
         filled = int(round(bar * times / float(total)))
         percents = round(100.00 * (times / float(total)), decimals)
         bar = "#" * filled + "-" * (bar - filled)
-        sys.stdout.write("%s [%s] %s%s %s\r" % (prefix, bar, percents, "%", suffix)),
+        (sys.stdout.write("%s [%s] %s%s %s\r" % (prefix, bar, percents, "%", suffix)),)
         sys.stdout.flush()
         if times == total:
             print("\n")

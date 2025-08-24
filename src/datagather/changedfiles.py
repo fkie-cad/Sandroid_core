@@ -7,6 +7,7 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 class Bcolors:
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"
@@ -44,7 +45,11 @@ class ChangedFiles(DataGather):
 
         - **FileNotFoundError**: If a file is not found during processing.
         """
-        logger.debug("ChangedFiles object gathering data. Going to have " + str(len(self.fileListList)+1) + " dataset(s)")
+        logger.debug(
+            "ChangedFiles object gathering data. Going to have "
+            + str(len(self.fileListList) + 1)
+            + " dataset(s)"
+        )
         if Toolbox.is_dry_run():
             Toolbox.noise_files = Toolbox.fetch_changed_files()
         else:
@@ -71,14 +76,28 @@ class ChangedFiles(DataGather):
         for file in files_from_all_pulls:
             try:
                 if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip("/"))
-                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip("/"))
-                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip("/"))
-                    diff = file_diff.db_diff(path_to_file_first_pull, path_to_file_second_pull, path_to_file_noise_pull)
+                    path_to_file_first_pull = os.path.join(
+                        f"{base_folder}first_pull", file.lstrip("/")
+                    )
+                    path_to_file_second_pull = os.path.join(
+                        f"{base_folder}second_pull", file.lstrip("/")
+                    )
+                    path_to_file_noise_pull = os.path.join(
+                        f"{base_folder}noise_pull", file.lstrip("/")
+                    )
+                    diff = file_diff.db_diff(
+                        path_to_file_first_pull,
+                        path_to_file_second_pull,
+                        path_to_file_noise_pull,
+                    )
                     if "ITS ALL NOISE" not in diff:
                         result.append({file: diff.splitlines()})
                 elif file[-4:] == ".xml":
-                    diff = file_diff.xml_diff(f"{base_folder}first_pull/{file}", f"{base_folder}second_pull/{file}", f"{base_folder}noise_pull/{file}")
+                    diff = file_diff.xml_diff(
+                        f"{base_folder}first_pull/{file}",
+                        f"{base_folder}second_pull/{file}",
+                        f"{base_folder}noise_pull/{file}",
+                    )
                     if "ITS ALL NOISE" not in diff:
                         result.append({file: diff.splitlines()})
                 elif file[-4:] == ".txt":
@@ -101,36 +120,88 @@ class ChangedFiles(DataGather):
         base_folder = os.getenv("RAW_RESULTS_PATH")
         files_from_all_pulls = self.process_data()
         result = (
-                Bcolors.OKBLUE + Bcolors.BOLD + "\n—————————————————CHANGED_FILES=(changed in all runs)——————————————————————————————————————————————————\n" + Bcolors.ENDC + Bcolors.OKBLUE)
+            Bcolors.OKBLUE
+            + Bcolors.BOLD
+            + "\n—————————————————CHANGED_FILES=(changed in all runs)——————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+            + Bcolors.OKBLUE
+        )
         for file in files_from_all_pulls:
             try:
                 if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(f"{base_folder}first_pull", file.lstrip("/"))
-                    path_to_file_second_pull = os.path.join(f"{base_folder}second_pull", file.lstrip("/"))
-                    path_to_file_noise_pull = os.path.join(f"{base_folder}noise_pull", file.lstrip("/"))
-                    diff = file_diff.db_diff(path_to_file_first_pull, path_to_file_second_pull, path_to_file_noise_pull)
-                    diff = Toolbox.highlight_timestamps(Toolbox.truncate(diff),Bcolors.OKCYAN) + Bcolors.OKBLUE + "\n"
+                    path_to_file_first_pull = os.path.join(
+                        f"{base_folder}first_pull", file.lstrip("/")
+                    )
+                    path_to_file_second_pull = os.path.join(
+                        f"{base_folder}second_pull", file.lstrip("/")
+                    )
+                    path_to_file_noise_pull = os.path.join(
+                        f"{base_folder}noise_pull", file.lstrip("/")
+                    )
+                    diff = file_diff.db_diff(
+                        path_to_file_first_pull,
+                        path_to_file_second_pull,
+                        path_to_file_noise_pull,
+                    )
+                    diff = (
+                        Toolbox.highlight_timestamps(
+                            Toolbox.truncate(diff), Bcolors.OKCYAN
+                        )
+                        + Bcolors.OKBLUE
+                        + "\n"
+                    )
                     if "ITS ALL NOISE" not in diff:
                         result = result + (Bcolors.OKCYAN + file + "\n")
                         result = result + diff
                 elif file[-4:] == ".xml":
-                    diff = Toolbox.highlight_timestamps(Toolbox.truncate(file_diff.xml_diff(f"{base_folder}first_pull/{file}", f"{base_folder}second_pull/{file}", f"{base_folder}noise_pull/{file}")),
-                                                        Bcolors.OKCYAN) + Bcolors.OKBLUE + "\n"
+                    diff = (
+                        Toolbox.highlight_timestamps(
+                            Toolbox.truncate(
+                                file_diff.xml_diff(
+                                    f"{base_folder}first_pull/{file}",
+                                    f"{base_folder}second_pull/{file}",
+                                    f"{base_folder}noise_pull/{file}",
+                                )
+                            ),
+                            Bcolors.OKCYAN,
+                        )
+                        + Bcolors.OKBLUE
+                        + "\n"
+                    )
                     if "ITS ALL NOISE" not in diff:
                         result = result + (Bcolors.OKCYAN + file + "\n")
                         result = result + diff
                 elif file[-4:] == ".txt":
-                    diff = Toolbox.highlight_timestamps(Toolbox.truncate(file_diff.txt_diff(file)),
-                                                        Bcolors.OKCYAN) + Bcolors.OKBLUE + "\n"
+                    diff = (
+                        Toolbox.highlight_timestamps(
+                            Toolbox.truncate(file_diff.txt_diff(file)), Bcolors.OKCYAN
+                        )
+                        + Bcolors.OKBLUE
+                        + "\n"
+                    )
                     if "ITS ALL NOISE" not in diff:
                         result = result + (Bcolors.OKCYAN + file + "\n")
                         result = result + diff
                 else:
-                    result = result + Toolbox.highlight_timestamps(Toolbox.truncate(file), Bcolors.OKBLUE) + "\n"
+                    result = (
+                        result
+                        + Toolbox.highlight_timestamps(
+                            Toolbox.truncate(file), Bcolors.OKBLUE
+                        )
+                        + "\n"
+                    )
             except FileNotFoundError:
-                result = result + "Changed but could not be pulled for intra file change detection (see warnings or errors during pull above): " + file + "\n"
+                result = (
+                    result
+                    + "Changed but could not be pulled for intra file change detection (see warnings or errors during pull above): "
+                    + file
+                    + "\n"
+                )
         result = result + (
-                Bcolors.BOLD + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n" + Bcolors.ENDC)
+            Bcolors.BOLD
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+        )
         return result
 
     def process_data(self):
@@ -145,8 +216,11 @@ class ChangedFiles(DataGather):
         noise = Toolbox.noise_files
         for fileList in self.fileListList:
             files_from_all_pulls = list(set(files_from_all_pulls) & set(fileList))
-        files_from_all_pulls = [x for x in files_from_all_pulls if x not in noise or x.endswith(".db") or x.endswith(
-            ".xml")]  # filter noise from files, ignore .db and .xml files
+        files_from_all_pulls = [
+            x
+            for x in files_from_all_pulls
+            if x not in noise or x.endswith(".db") or x.endswith(".xml")
+        ]  # filter noise from files, ignore .db and .xml files
 
         files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

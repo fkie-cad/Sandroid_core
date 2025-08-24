@@ -30,7 +30,7 @@ def setup_logging(config: SandroidConfig) -> logging.Logger:
         level=config.log_level.value,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)]
+        handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
 
     # Setup file logging
@@ -73,106 +73,84 @@ def pretty_logo():
 
 @click.command()
 @click.option(
-    "--config", "-c",
-    type=click.Path(exists=True),
-    help="Configuration file path"
+    "--config", "-c", type=click.Path(exists=True), help="Configuration file path"
 )
 @click.option(
-    "--environment", "-e",
-    help="Environment name (development, testing, production)"
+    "--environment", "-e", help="Environment name (development, testing, production)"
 )
 @click.option(
-    "--file", "-f",
-    type=click.Path(),
-    help="Save output to the specified file"
+    "--file", "-f", type=click.Path(), help="Save output to the specified file"
 )
 @click.option(
-    "--loglevel", "-ll",
+    "--loglevel",
+    "-ll",
     type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]),
-    help="Set the log level"
+    help="Set the log level",
 )
 @click.option(
-    "--number", "-n",
+    "--number",
+    "-n",
     type=click.IntRange(min=2),
-    help="Run action n times (Minimum is 2)"
+    help="Run action n times (Minimum is 2)",
 )
 @click.option(
     "--avoid-strong-noise-filter",
     is_flag=True,
-    help="Don't use a 'Dry Run'. This will catch more noise and disable intra file noise detection"
+    help="Don't use a 'Dry Run'. This will catch more noise and disable intra file noise detection",
 )
+@click.option("--network", is_flag=True, help="Capture traffic and show connections")
 @click.option(
-    "--network",
+    "--show-deleted",
+    "-d",
     is_flag=True,
-    help="Capture traffic and show connections"
-)
-@click.option(
-    "--show-deleted", "-d",
-    is_flag=True,
-    help="Perform additional full filesystem checks to reveal deleted files"
+    help="Perform additional full filesystem checks to reveal deleted files",
 )
 @click.option(
     "--no-processes",
     is_flag=True,
-    help="Do not monitor active processes during the action"
+    help="Do not monitor active processes during the action",
 )
 @click.option(
-    "--sockets",
-    is_flag=True,
-    help="Monitor listening sockets during the action"
+    "--sockets", is_flag=True, help="Monitor listening sockets during the action"
 )
 @click.option(
     "--screenshot",
     type=click.IntRange(min=1),
     metavar="INTERVAL",
-    help="Take a screenshot each INTERVAL seconds"
+    help="Take a screenshot each INTERVAL seconds",
 )
 @click.option(
     "--trigdroid",
     metavar="PACKAGE_NAME",
-    help="Use the TrigDroid tool to execute malware triggers in package PACKAGE_NAME"
+    help="Use the TrigDroid tool to execute malware triggers in package PACKAGE_NAME",
 )
 @click.option(
     "--trigdroid-ccf",
     type=click.Choice(["I", "D"]),
-    help="Use the TrigDroid CCF utility. I for interactive mode, D to create the default config file"
+    help="Use the TrigDroid CCF utility. I for interactive mode, D to create the default config file",
 )
 @click.option(
     "--hash",
     is_flag=True,
-    help="Create before/after md5 hashes of all changed and new files"
+    help="Create before/after md5 hashes of all changed and new files",
 )
 @click.option(
-    "--apk",
-    is_flag=True,
-    help="List all APKs from the emulator and their hashes"
+    "--apk", is_flag=True, help="List all APKs from the emulator and their hashes"
 )
 @click.option(
     "--degrade-network",
     is_flag=True,
-    help="Lower the emulator's network speed and latency to simulate UMTS/3G"
+    help="Lower the emulator's network speed and latency to simulate UMTS/3G",
 )
 @click.option(
     "--whitelist",
     type=click.Path(exists=True),
     metavar="FILE",
-    help="Entries in the whitelist will be excluded from any outputs"
+    help="Entries in the whitelist will be excluded from any outputs",
 )
-@click.option(
-    "--ai",
-    is_flag=True,
-    help="Enable AI-powered analysis and summarization"
-)
-@click.option(
-    "--report",
-    is_flag=True,
-    help="Generate PDF report"
-)
-@click.option(
-    "--interactive", "-i",
-    is_flag=True,
-    help="Start in interactive mode"
-)
+@click.option("--ai", is_flag=True, help="Enable AI-powered analysis and summarization")
+@click.option("--report", is_flag=True, help="Generate PDF report")
+@click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
 @click.version_option()
 def main(
     config: str | None,
@@ -255,9 +233,7 @@ def main(
 
         # Load the configuration
         sandroid_config = loader.load(
-            config_file=config,
-            environment=environment,
-            cli_overrides=cli_overrides
+            config_file=config, environment=environment, cli_overrides=cli_overrides
         )
 
         # Setup logging
@@ -334,7 +310,12 @@ def run_analysis(config: SandroidConfig, logger: logging.Logger):
 
         # Display results
         if config.ai.enabled and action:
-            print(Fore.GREEN + Style.BRIGHT + f"Sandroid Results for the action: {action}" + Style.RESET_ALL)
+            print(
+                Fore.GREEN
+                + Style.BRIGHT
+                + f"Sandroid Results for the action: {action}"
+                + Style.RESET_ALL
+            )
 
         print(q.get_pretty_print())
 

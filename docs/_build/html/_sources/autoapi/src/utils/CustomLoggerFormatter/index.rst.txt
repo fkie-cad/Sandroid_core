@@ -71,6 +71,3 @@ Module Contents
       time (as determined by a call to usesTime(), formatTime() is
       called to format the event time. If there is exception information,
       it is formatted using formatException() and appended to the message.
-
-
-

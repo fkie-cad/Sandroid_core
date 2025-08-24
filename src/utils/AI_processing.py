@@ -8,19 +8,23 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 def get_genai_client():
     """Get Google GenAI client with API key from configuration or environment."""
     # First try to get from Toolbox config (if available)
     if hasattr(Toolbox, "config") and Toolbox.config:
-        api_key = (Toolbox.config.credentials.google_genai_api_key or
-                  Toolbox.config.ai.api_key)
+        api_key = (
+            Toolbox.config.credentials.google_genai_api_key or Toolbox.config.ai.api_key
+        )
         if api_key:
             return genai.Client(api_key=api_key)
 
     # Fall back to environment variable
-    api_key = os.getenv("SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY") or \
-              os.getenv("SANDROID_AI__API_KEY") or \
-              os.getenv("GOOGLE_API_KEY")
+    api_key = (
+        os.getenv("SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY")
+        or os.getenv("SANDROID_AI__API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+    )
 
     if not api_key:
         raise ValueError(
@@ -30,6 +34,7 @@ def get_genai_client():
         )
 
     return genai.Client(api_key=api_key)
+
 
 video_summary_prompt = """
 Analyze the provided screen recording from an Android Phone.
@@ -62,7 +67,7 @@ Analyze the provided screen recording from an Android Phone.
 Your task is to come up with one sentence summarizing the main action that occurs in the recording.
 
 Focus on the central action (or actions if there are multiple major actions), do not go into detail, do not describe what can be seen on the screen, do not use timestamps.
-DO describe the overall point of the video, what the user is doing, concicely. Use no more than 1 sentence. 
+DO describe the overall point of the video, what the user is doing, concicely. Use no more than 1 sentence.
 
 Output only the overview and nothing else. Do not refer to the "user" or "device", just describe the action or event.
 
@@ -76,6 +81,7 @@ Example 2:
 ebay.com opened in chrome browser.
 """
 
+
 class AIProcessing:
     @staticmethod
     def list_models():
@@ -86,7 +92,9 @@ class AIProcessing:
     @staticmethod
     def summarize_video(path, prompt=video_summary_prompt):
         client = get_genai_client()
-        logger.info("Summarizing recording, this may take a while depending on the video length")
+        logger.info(
+            "Summarizing recording, this may take a while depending on the video length"
+        )
         video = client.files.upload(file=path)
         logger.debug(f"Uploaded file: {video.name}")
 
@@ -122,17 +130,15 @@ class AIProcessing:
         except OSError as e:
             logger.error(f"Failed to write summary to file: {e}")
 
-        return(overview.text)
-
-
+        return overview.text
 
 
 if __name__ == "__main__":
     pass
-    #print(summarize_video("Your friend who studied abroad.mp4"))
-    #TODO: add automatic path finding
+    # print(summarize_video("Your friend who studied abroad.mp4"))
+    # TODO: add automatic path finding
 
-#Example output made with 2.5 flash model
+# Example output made with 2.5 flash model
 """
 Here is a detailed breakdown of the provided screen recording:
 

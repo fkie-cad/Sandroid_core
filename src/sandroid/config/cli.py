@@ -25,19 +25,15 @@ def main():
     "--format",
     type=click.Choice(["yaml", "toml", "json"]),
     default="yaml",
-    help="Configuration file format"
+    help="Configuration file format",
 )
 @click.option(
     "--output",
     "-o",
     type=click.Path(),
-    help="Output file path (defaults to user config directory)"
+    help="Output file path (defaults to user config directory)",
 )
-@click.option(
-    "--force",
-    is_flag=True,
-    help="Overwrite existing configuration file"
-)
+@click.option("--force", is_flag=True, help="Overwrite existing configuration file")
 def init(format: str, output: str | None, force: bool):
     """Initialize a new Sandroid configuration file."""
     loader = ConfigLoader()
@@ -66,21 +62,14 @@ def init(format: str, output: str | None, force: bool):
 
 @main.command()
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True),
-    help="Configuration file path"
+    "--config", "-c", type=click.Path(exists=True), help="Configuration file path"
 )
-@click.option(
-    "--environment",
-    "-e",
-    help="Environment name"
-)
+@click.option("--environment", "-e", help="Environment name")
 @click.option(
     "--format",
     type=click.Choice(["rich", "toml", "yaml", "json"]),
     default="rich",
-    help="Output format"
+    help="Output format",
 )
 def show(config: str | None, environment: str | None, format: str):
     """Show current configuration."""
@@ -104,16 +93,9 @@ def show(config: str | None, environment: str | None, format: str):
 
 @main.command()
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True),
-    help="Configuration file path"
+    "--config", "-c", type=click.Path(exists=True), help="Configuration file path"
 )
-@click.option(
-    "--environment",
-    "-e",
-    help="Environment name"
-)
+@click.option("--environment", "-e", help="Environment name")
 def validate(config: str | None, environment: str | None):
     """Validate configuration file."""
     loader = ConfigLoader()
@@ -165,17 +147,12 @@ def paths():
 @main.command()
 @click.argument("key")
 @click.argument("value")
-@click.option(
-    "--config",
-    "-c",
-    type=click.Path(),
-    help="Configuration file path"
-)
+@click.option("--config", "-c", type=click.Path(), help="Configuration file path")
 @click.option(
     "--format",
     type=click.Choice(["yaml", "toml", "json"]),
     default="yaml",
-    help="Configuration file format"
+    help="Configuration file format",
 )
 def set(key: str, value: str, config: str | None, format: str):
     """Set a configuration value."""
@@ -219,16 +196,9 @@ def set(key: str, value: str, config: str | None, format: str):
 @main.command()
 @click.argument("key")
 @click.option(
-    "--config",
-    "-c",
-    type=click.Path(exists=True),
-    help="Configuration file path"
+    "--config", "-c", type=click.Path(exists=True), help="Configuration file path"
 )
-@click.option(
-    "--environment",
-    "-e",
-    help="Environment name"
-)
+@click.option("--environment", "-e", help="Environment name")
 def get(key: str, config: str | None, environment: str | None):
     """Get a configuration value."""
     loader = ConfigLoader()
@@ -292,7 +262,9 @@ def _show_config_rich(config: SandroidConfig):
     table.add_column("Value", style="magenta")
 
     table.add_row("Number of Runs", str(config.analysis.number_of_runs))
-    table.add_row("Strong Noise Filter", str(not config.analysis.avoid_strong_noise_filter))
+    table.add_row(
+        "Strong Noise Filter", str(not config.analysis.avoid_strong_noise_filter)
+    )
     table.add_row("Monitor Processes", str(config.analysis.monitor_processes))
     table.add_row("Monitor Sockets", str(config.analysis.monitor_sockets))
     table.add_row("Monitor Network", str(config.analysis.monitor_network))
@@ -311,6 +283,7 @@ def _show_config_format(config: SandroidConfig, format: str):
 
     # Create temporary file to get formatted output
     import tempfile
+
     with tempfile.NamedTemporaryFile(mode="w", suffix=f".{format}", delete=False) as f:
         temp_path = Path(f.name)
 

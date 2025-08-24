@@ -13,12 +13,12 @@ class CustomFormatter(ColoredFormatter):
             datefmt="%d-%m-%y %H:%M:%S",
             reset=True,
             log_colors={
-                "DEBUG":    "cyan",
-                "INFO":     "green",
-                "WARNING":  "bold_yellow",
-                "ERROR":    "bold_red",
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "bold_yellow",
+                "ERROR": "bold_red",
                 "CRITICAL": "bold_red",
             },
             secondary_log_colors={},
-            style="%"
+            style="%",
         )

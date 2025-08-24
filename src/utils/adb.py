@@ -7,6 +7,7 @@ from subprocess import PIPE
 
 logger = getLogger(__name__)
 
+
 class Adb:
     """Represents the Android Debug Bridge (ADB) functionality.
 
@@ -18,7 +19,7 @@ class Adb:
     ADB_PATH = None
 
     @classmethod
-    #TODO: make sure adb root is run
+    # TODO: make sure adb root is run
     def init(cls):
         """Initializes the ADB class by setting the ADB path and logger.
 
@@ -46,11 +47,13 @@ class Adb:
         :rtype: tuple
         """
         logger.debug("Running ADB command " + command)
-        output = subprocess.run([
-            cls.ADB_PATH + " " + command],
-            check=False, capture_output=True,
+        output = subprocess.run(
+            [cls.ADB_PATH + " " + command],
+            check=False,
+            capture_output=True,
             text=True,
-            shell=True)
+            shell=True,
+        )
         return output.stdout, output.stderr.strip()
 
     @classmethod
@@ -63,17 +66,17 @@ class Adb:
         :rtype: subprocess.Popen
         """
         logger.debug("Running ADB command " + command)
-        process = subprocess.Popen([
-            cls.ADB_PATH + " " + command],
+        process = subprocess.Popen(
+            [cls.ADB_PATH + " " + command],
             stdout=PIPE,
             stdin=PIPE,
             stderr=PIPE,
-            shell=True)
+            shell=True,
+        )
 
         return process
 
-
-    #TODO: This should also handle APK / package names and search online repos
+    # TODO: This should also handle APK / package names and search online repos
     @classmethod
     def install_apk(cls, apk_path):
         """Installs an APK file on the device.
@@ -83,7 +86,7 @@ class Adb:
         """
         apk_file = os.path.basename(apk_path)
         logger.info(f"Installing local APK {apk_file}")
-        #TODO: catch errors
+        # TODO: catch errors
         Adb.send_adb_command(f"install {apk_path}")
 
     @classmethod
@@ -121,7 +124,6 @@ class Adb:
                     return package_name, activity_name
         return None, None
 
-
     @classmethod
     def get_pid_for_package_name(cls, package_name):
         """Get the process ID (PID) for a given package name.
@@ -133,11 +135,10 @@ class Adb:
         """
         output = cls.send_adb_command(f"shell pidof {package_name}")[0]
 
-        #TODO: check, if output can be more than one process id
+        # TODO: check, if output can be more than one process id
         if output:
             return int(output.strip())
         return None
-
 
     @classmethod
     def get_network_info(cls):
@@ -147,7 +148,11 @@ class Adb:
         :rtype: list of tuple
         """
         output = cls.send_adb_command("shell ifconfig")[0]
-        interfaces = re.findall(r"(\w+)(?:\s+Link encap.+?\n)?\s+inet addr:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", output, re.DOTALL)
+        interfaces = re.findall(
+            r"(\w+)(?:\s+Link encap.+?\n)?\s+inet addr:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})",
+            output,
+            re.DOTALL,
+        )
         return interfaces
 
     @classmethod
@@ -170,7 +175,9 @@ class Adb:
             if match:
                 package_name = match.group(1)
 
-                detail_output, detail_error = cls.send_adb_command(f"shell dumpsys package {package_name} | grep firstInstallTime")
+                detail_output, detail_error = cls.send_adb_command(
+                    f"shell dumpsys package {package_name} | grep firstInstallTime"
+                )
                 install_date = None
 
                 if not detail_error and detail_output:
@@ -178,10 +185,9 @@ class Adb:
                     if install_match:
                         install_date = install_match.group(1)
 
-                packages.append({
-                    "package_name": package_name,
-                    "install_date": install_date
-                })
+                packages.append(
+                    {"package_name": package_name, "install_date": install_date}
+                )
 
         return packages
 
@@ -196,18 +202,19 @@ class Adb:
         """
         full_command = f"exec-out {command}"
         logger.debug("Running ADB command " + full_command)
-        output = subprocess.run([
-            cls.ADB_PATH + " " + full_command],
-            check=False, capture_output=True,
+        output = subprocess.run(
+            [cls.ADB_PATH + " " + full_command],
+            check=False,
+            capture_output=True,
             text=True,
-            shell=True)
+            shell=True,
+        )
         return output.stdout, output.stderr.strip()
-
 
     @classmethod
     def get_current_avd_name(cls):
         """Gets the name of the currently running AVD.
-        
+
         :returns: The name of the current AVD or None if it cannot be determined
         :rtype: str or None
         """
@@ -229,11 +236,10 @@ class Adb:
 
         return None
 
-
     @classmethod
     def get_current_avd_path(cls):
         """Gets the path of the currently running AVD.
-        
+
         :returns: The file system path of the current AVD or None if it cannot be determined
         :rtype: str or None
         """
@@ -255,11 +261,10 @@ class Adb:
 
         return None
 
-
     @classmethod
     def get_avd_snapshots(cls):
         """Gets a list of snapshots for the currently running AVD.
-        
+
         :returns: A list of dictionaries containing snapshot information (id, tag, size, date, clock)
         :rtype: list of dict
         """
@@ -296,8 +301,10 @@ class Adb:
                         size = tag_size_split.group(2)
 
                         # Extract the remaining part (date and clock)
-                        remaining = remaining[tag_size_split.end():].strip()
-                        date_clock_split = re.search(r"([\d-]+ [\d:]+)\s+([\d:\.]+)", remaining)
+                        remaining = remaining[tag_size_split.end() :].strip()
+                        date_clock_split = re.search(
+                            r"([\d-]+ [\d:]+)\s+([\d:\.]+)", remaining
+                        )
 
                         if date_clock_split:
                             date = date_clock_split.group(1)
@@ -306,18 +313,19 @@ class Adb:
                             date = remaining
                             clock = ""
 
-                        snapshots.append({
-                            "id": id_value,
-                            "tag": tag,
-                            "size": size,
-                            "date": date,
-                            "clock": clock
-                        })
+                        snapshots.append(
+                            {
+                                "id": id_value,
+                                "tag": tag,
+                                "size": size,
+                                "date": date,
+                                "clock": clock,
+                            }
+                        )
                     except Exception as e:
                         logger.warning(f"Error parsing snapshot line '{line}': {e!s}")
 
         return snapshots
-
 
     @classmethod
     def get_device_time(cls):
@@ -334,7 +342,6 @@ class Adb:
 
         return stdout.strip()
 
-
     @classmethod
     def get_device_locale(cls):
         """Retrieves the locale of the connected device.
@@ -350,7 +357,6 @@ class Adb:
 
         return stdout.strip() if stdout else None
 
-
     @classmethod
     def get_android_version_and_api_level(cls):
         """Retrieves the Android version and API level of the connected device.
@@ -358,23 +364,28 @@ class Adb:
         :returns: A dictionary containing the Android version and API level, or None if an error occurs.
         :rtype: dict or None
         """
-        version_stdout, version_stderr = cls.send_adb_command("shell getprop ro.build.version.release")
-        api_level_stdout, api_level_stderr = cls.send_adb_command("shell getprop ro.build.version.sdk")
+        version_stdout, version_stderr = cls.send_adb_command(
+            "shell getprop ro.build.version.release"
+        )
+        api_level_stdout, api_level_stderr = cls.send_adb_command(
+            "shell getprop ro.build.version.sdk"
+        )
 
         if version_stderr or api_level_stderr:
-            logger.error(f"Failed to get Android version or API level: {version_stderr or api_level_stderr}")
+            logger.error(
+                f"Failed to get Android version or API level: {version_stderr or api_level_stderr}"
+            )
             return None
 
         return {
             "android_version": version_stdout.strip() if version_stdout else None,
-            "api_level": api_level_stdout.strip() if api_level_stdout else None
+            "api_level": api_level_stdout.strip() if api_level_stdout else None,
         }
-
 
     @classmethod
     def start_network_capture(cls, filename):
         """Starts capturing network packets from the emulator to a file.
-        
+
         :param filename: Name of the file to save the network capture
         :type filename: str
         :returns: True if capture started successfully, False otherwise
@@ -399,7 +410,7 @@ class Adb:
     @classmethod
     def stop_network_capture(cls):
         """Stops the currently running network capture.
-        
+
         :returns: True if capture stopped successfully, False otherwise
         :rtype: bool
         """

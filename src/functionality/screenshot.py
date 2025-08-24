@@ -38,8 +38,7 @@ class Screenshot(Functionality):
         self.thread.daemon = True
 
     def perform(self):
-        """Start the screenshot thread.
-        """
+        """Start the screenshot thread."""
         self.actions.put("startup")
         self.thread.start()
         logger.info("Screenshot thread started")
@@ -63,24 +62,24 @@ class Screenshot(Functionality):
         return self.actions.queue[-1]
 
     def screenshot_thread(self):
-        """Capture screenshots at regular intervals. Meant to be run as a Thread.
-        """
+        """Capture screenshots at regular intervals. Meant to be run as a Thread."""
         while not self.finished:
             name = self.generate_name()
-            stdout, stderr = Adb.send_telnet_command(f'screenrecord screenshot {os.getenv("RAW_RESULTS_PATH")}screenshots/{name}')
+            stdout, stderr = Adb.send_telnet_command(
+                f"screenrecord screenshot {os.getenv('RAW_RESULTS_PATH')}screenshots/{name}"
+            )
             if not stderr:
                 logger.debug("Screenshot saved: " + name)
             time.sleep(self.interval)
 
     def stop(self):
-        """Stop the screenshot thread.
-        """
+        """Stop the screenshot thread."""
         self.finished = True
         logger.debug("Ending Screenshot thread")
 
     def generate_name(self):
         """Generate a unique screenshot filename.
-        
+
         :returns: The generated screenshot filename.
         :rtype: str
         """

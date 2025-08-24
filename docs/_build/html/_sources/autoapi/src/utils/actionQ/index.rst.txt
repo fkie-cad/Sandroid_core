@@ -67,5 +67,3 @@ Module Contents
 
 
    .. py:method:: print_q()
-
-

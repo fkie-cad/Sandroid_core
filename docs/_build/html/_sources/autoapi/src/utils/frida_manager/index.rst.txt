@@ -46,7 +46,7 @@ Module Contents
 
       This function is used to run the frida server on the connected device.
 
-      :param frida_server_path: The path where the frida server is located. 
+      :param frida_server_path: The path where the frida server is located.
                                 Default is "/data/local/tmp/".
       :type frida_server_path: str
 
@@ -135,5 +135,3 @@ Module Contents
 
 
    .. py:method:: _adb_remove_file_if_exist(path='/data/local/tmp/frida-server')
-
-

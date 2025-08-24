@@ -25,8 +25,7 @@ from src.utils.emulator import Emulator
 
 
 class Toolbox:
-    """A static class providing various utility functions for forensic analysis on an Android Virtual Device (AVD).
-    """
+    """A static class providing various utility functions for forensic analysis on an Android Virtual Device (AVD)."""
 
     action_time = 0
     already_looked_at_filesystem_for_this_action_time = False
@@ -57,7 +56,7 @@ class Toolbox:
     _screen_recording_running = False
 
     # replace these with your own values
-    #TODO: Shouldn't be hardcoded
+    # TODO: Shouldn't be hardcoded
     device_name = "Pixel_6_Pro_API_31"
     android_emulator_path = "~/Android/Sdk/emulator/emulator"
 
@@ -66,67 +65,149 @@ class Toolbox:
 
     @classmethod
     def init(cls):
-        """Initializes the Toolbox class by parsing command-line arguments and setting up the logger and Frida manager.
-        """
+        """Initializes the Toolbox class by parsing command-line arguments and setting up the logger and Frida manager."""
         cls.init_files()
 
         parser = argparse.ArgumentParser(
-            description="Find forensic artefacts for any action on an AVD")
-        parser.add_argument("-f", "--file", type=str, metavar="FILENAME",
-                            help="Save output to the specified file, default is sandroid.json", default=f'{os.getenv("RESULTS_PATH")}sandroid.json')
-        parser.add_argument("-ll", "--loglevel", type=str, metavar="LOGLEVEL",
-                            help="Set the log level. The logging file sandroid.log will always contain an expanded DEBUG level log.",
-                            default="INFO")
-        parser.add_argument("-n", "--number_of_runs", type=int, metavar="NUMBER",
-                            help="Run action n times (Minimum and default is 2)", default=2)
-        parser.add_argument("--avoid_strong_noise_filter", action="store_true",
-                            help='Don\'t use a "Dry Run". This will catch more noise and disable intra file noise detection.')
-        parser.add_argument("--network", action="store_true",
-                            help="Capture traffic and show connections. Connections are not necessarily in chronological order. Each connection will only show up once, even if it was made multiple times. For better results, \033[4m it is recommended to use at least -n 3 \033[0m and to leave the strong noise filter on")
-        parser.add_argument("-d", "--show_deleted", action="store_true",
-                            help="Perform additional full filesystem checks to reveal deleted files")
-        parser.add_argument("--no-processes", action="store_false", dest="processes",
-                            help="Do not monitor active processes during the action")
-        parser.add_argument("--sockets", action="store_true", dest="sockets",
-                            help="Monitor listening sockets during the action")
-        parser.add_argument("--screenshot", type=int, metavar="INTERVAL",
-                            help="Take a screenshot each INTERVAL seconds", default=0)
-        parser.add_argument("--trigdroid", type=str, metavar="PACKAGE NAME",
-                            help="Use the TrigDroid(tm) tool to execute malware triggers in package PACKAGE NAME")
-        parser.add_argument("--trigdroid_ccf", type=str, metavar="{I,D}",
-                            help="Use the TrigDroid(tm) CCF utility to create a Trigdroid config file. I for interactive mode, D to create the default config file")
-        parser.add_argument("--hash", action="store_true",
-                            help="Create before/after md5 hashes of all changed and new files and save them to hashes.json")
-        parser.add_argument("--apk", action="store_true",
-                            help="List all APKs from the emulator and their hashes in the output file")
-        parser.add_argument("--degrade_network", action="store_true",
-                            help="Lower the emulators network speed and network latency to simulate and 'UMTS/3G' connection. For more fine grained control, use the emulator console")
-        parser.add_argument("--whitelist", type=str, metavar="FILE",
-                            help="Entries in the whitelist will be excluded from any outputs. Separate paths by commas, wildcards are supported")
-        parser.add_argument("--iterative", action = "store_true",
-                            help="Enable iterative analysis of new apk files")
-        parser.add_argument("--report", action="store_true", default = True,
-                            help="Enable generation of a report file(pdf)")
-        parser.add_argument("--ai", action="store_true", default = False,
-                            help="Use AI to summarize the action and generate a report")
+            description="Find forensic artefacts for any action on an AVD"
+        )
+        parser.add_argument(
+            "-f",
+            "--file",
+            type=str,
+            metavar="FILENAME",
+            help="Save output to the specified file, default is sandroid.json",
+            default=f"{os.getenv('RESULTS_PATH')}sandroid.json",
+        )
+        parser.add_argument(
+            "-ll",
+            "--loglevel",
+            type=str,
+            metavar="LOGLEVEL",
+            help="Set the log level. The logging file sandroid.log will always contain an expanded DEBUG level log.",
+            default="INFO",
+        )
+        parser.add_argument(
+            "-n",
+            "--number_of_runs",
+            type=int,
+            metavar="NUMBER",
+            help="Run action n times (Minimum and default is 2)",
+            default=2,
+        )
+        parser.add_argument(
+            "--avoid_strong_noise_filter",
+            action="store_true",
+            help='Don\'t use a "Dry Run". This will catch more noise and disable intra file noise detection.',
+        )
+        parser.add_argument(
+            "--network",
+            action="store_true",
+            help="Capture traffic and show connections. Connections are not necessarily in chronological order. Each connection will only show up once, even if it was made multiple times. For better results, \033[4m it is recommended to use at least -n 3 \033[0m and to leave the strong noise filter on",
+        )
+        parser.add_argument(
+            "-d",
+            "--show_deleted",
+            action="store_true",
+            help="Perform additional full filesystem checks to reveal deleted files",
+        )
+        parser.add_argument(
+            "--no-processes",
+            action="store_false",
+            dest="processes",
+            help="Do not monitor active processes during the action",
+        )
+        parser.add_argument(
+            "--sockets",
+            action="store_true",
+            dest="sockets",
+            help="Monitor listening sockets during the action",
+        )
+        parser.add_argument(
+            "--screenshot",
+            type=int,
+            metavar="INTERVAL",
+            help="Take a screenshot each INTERVAL seconds",
+            default=0,
+        )
+        parser.add_argument(
+            "--trigdroid",
+            type=str,
+            metavar="PACKAGE NAME",
+            help="Use the TrigDroid(tm) tool to execute malware triggers in package PACKAGE NAME",
+        )
+        parser.add_argument(
+            "--trigdroid_ccf",
+            type=str,
+            metavar="{I,D}",
+            help="Use the TrigDroid(tm) CCF utility to create a Trigdroid config file. I for interactive mode, D to create the default config file",
+        )
+        parser.add_argument(
+            "--hash",
+            action="store_true",
+            help="Create before/after md5 hashes of all changed and new files and save them to hashes.json",
+        )
+        parser.add_argument(
+            "--apk",
+            action="store_true",
+            help="List all APKs from the emulator and their hashes in the output file",
+        )
+        parser.add_argument(
+            "--degrade_network",
+            action="store_true",
+            help="Lower the emulators network speed and network latency to simulate and 'UMTS/3G' connection. For more fine grained control, use the emulator console",
+        )
+        parser.add_argument(
+            "--whitelist",
+            type=str,
+            metavar="FILE",
+            help="Entries in the whitelist will be excluded from any outputs. Separate paths by commas, wildcards are supported",
+        )
+        parser.add_argument(
+            "--iterative",
+            action="store_true",
+            help="Enable iterative analysis of new apk files",
+        )
+        parser.add_argument(
+            "--report",
+            action="store_true",
+            default=True,
+            help="Enable generation of a report file(pdf)",
+        )
+        parser.add_argument(
+            "--ai",
+            action="store_true",
+            default=False,
+            help="Use AI to summarize the action and generate a report",
+        )
 
         cls.args = parser.parse_args()
         if cls.logger is None:
             cls.initialize_logger()
         if cls.frida_manager is None:
-            cls.frida_manager = FridaManager(verbose=True, frida_install_dst="/data/local/tmp/")
+            cls.frida_manager = FridaManager(
+                verbose=True, frida_install_dst="/data/local/tmp/"
+            )
 
         cls.scan_directories = ["/data", "/storage", "/sdcard"]
 
     @classmethod
     def init_files(cls):
-        """**Initializes** the necessary folders and files for the Sandroid program.
-        """
-        os.environ["RESULTS_PATH"] = f"results/{datetime.datetime.now().strftime('%Y.%m.%d_%H:%M:%S')}/"
+        """**Initializes** the necessary folders and files for the Sandroid program."""
+        os.environ["RESULTS_PATH"] = (
+            f"results/{datetime.datetime.now().strftime('%Y.%m.%d_%H:%M:%S')}/"
+        )
         os.environ["RAW_RESULTS_PATH"] = f"{os.getenv('RESULTS_PATH')}raw/"
 
-        folders_for_raw = ["first_pull", "second_pull", "noise_pull", "new_pull",
-                "network_trace_pull", "screenshots", "spotlight_files"]
+        folders_for_raw = [
+            "first_pull",
+            "second_pull",
+            "noise_pull",
+            "new_pull",
+            "network_trace_pull",
+            "screenshots",
+            "spotlight_files",
+        ]
         folders_for_result = ["spotlight_files"]
         base_folder_raw = os.getenv("RAW_RESULTS_PATH")
         base_folder = os.getenv("RESULTS_PATH")
@@ -146,11 +227,9 @@ class Toolbox:
         with open(f"{base_folder_raw}sandroid.log", "w"):
             pass
 
-
     @classmethod
     def check_setup(cls):
-        """Ensures the setup is correct by checking adb, root access, and SELinux permissive mode.
-        """
+        """Ensures the setup is correct by checking adb, root access, and SELinux permissive mode."""
         stdout, stderr = Adb.send_adb_command("shell ls /data")
         if "not found" in stderr:
             cls.logger.critical("Could not find adb")
@@ -170,7 +249,7 @@ class Toolbox:
                 # Display emulators in a nice ASCII box
                 formatted_box = cls._create_ascii_box(
                     emulator_list.strip(),
-                    f"{Fore.MAGENTA}Available Emulators{Fore.RESET}"
+                    f"{Fore.MAGENTA}Available Emulators{Fore.RESET}",
                 )
                 print(f"\n{formatted_box}")
 
@@ -179,51 +258,77 @@ class Toolbox:
                 try:
                     while selected_idx < 1 or selected_idx > len(available_emulators):
                         try:
-                            selected_idx = int(input(f"\n{Fore.CYAN}Select an emulator to start ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(available_emulators)}{Fore.CYAN}): {Style.RESET_ALL}"))
-                            if selected_idx < 1 or selected_idx > len(available_emulators):
-                                print(f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(available_emulators)}{Style.RESET_ALL}")
+                            selected_idx = int(
+                                input(
+                                    f"\n{Fore.CYAN}Select an emulator to start ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(available_emulators)}{Fore.CYAN}): {Style.RESET_ALL}"
+                                )
+                            )
+                            if selected_idx < 1 or selected_idx > len(
+                                available_emulators
+                            ):
+                                print(
+                                    f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(available_emulators)}{Style.RESET_ALL}"
+                                )
                         except ValueError:
-                            print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
+                            print(
+                                f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}"
+                            )
                 except KeyboardInterrupt:
-                    print(f"\n{Fore.YELLOW}Emulator selection cancelled by user. Exiting...{Style.RESET_ALL}")
+                    print(
+                        f"\n{Fore.YELLOW}Emulator selection cancelled by user. Exiting...{Style.RESET_ALL}"
+                    )
                     exit(0)
 
                 # Store the selected emulator name
-                selected_emulator = available_emulators[selected_idx-1]
+                selected_emulator = available_emulators[selected_idx - 1]
                 # Update the device name with selected emulator
                 cls.device_name = selected_emulator
-                cls.logger.info(f"Starting emulator {Fore.GREEN}{selected_emulator}{Style.RESET_ALL}...")
+                cls.logger.info(
+                    f"Starting emulator {Fore.GREEN}{selected_emulator}{Style.RESET_ALL}..."
+                )
 
                 if Emulator.start_avd(selected_emulator):
-                    cls.logger.info(f"Emulator '{Fore.GREEN}{selected_emulator}{Style.RESET_ALL}' started successfully. Continuing setup...")
+                    cls.logger.info(
+                        f"Emulator '{Fore.GREEN}{selected_emulator}{Style.RESET_ALL}' started successfully. Continuing setup..."
+                    )
                     # Re-check connection after starting
                     stdout_check, stderr_check = Adb.send_adb_command("shell ls /data")
                     if "no devices/emulators found" in stderr_check:
-                        cls.logger.critical("Emulator started but ADB connection failed. Please check manually.")
+                        cls.logger.critical(
+                            "Emulator started but ADB connection failed. Please check manually."
+                        )
                         exit(1)
                     # Proceed with the rest of the setup if connection is now okay
                 else:
-                    cls.logger.critical(f"Failed to start emulator '{selected_emulator}'. Please start it manually and rerun.")
+                    cls.logger.critical(
+                        f"Failed to start emulator '{selected_emulator}'. Please start it manually and rerun."
+                    )
             else:
                 cls.logger.critical("No available emulators found.")
                 exit(1)
 
         if "Permission denied" in stderr:
-            cls.logger.warning("Android Debug Bridge returned Permission denied, restarting adbd as root")
+            cls.logger.warning(
+                "Android Debug Bridge returned Permission denied, restarting adbd as root"
+            )
             Adb.send_adb_command("root")
             time.sleep(2)
 
         # Ensure adb root is enabled
         stdout, stderr = Adb.send_adb_command("root")
         if "adbd cannot run as root" in stderr:
-            cls.logger.critical("Device does not support adb root. Please ensure the device is rooted.")
+            cls.logger.critical(
+                "Device does not support adb root. Please ensure the device is rooted."
+            )
             exit(1)
         cls.logger.info("adb root enabled successfully.")
 
         # Ensure SELinux is set to permissive mode
         stdout, stderr = Adb.send_adb_command("shell setenforce 0")
         if stderr:
-            cls.logger.warning(f"Failed to set SELinux to permissive mode: {stderr.strip()}")
+            cls.logger.warning(
+                f"Failed to set SELinux to permissive mode: {stderr.strip()}"
+            )
         else:
             cls.logger.info("SELinux set to permissive mode.")
 
@@ -236,37 +341,41 @@ class Toolbox:
     @classmethod
     def check_sqldiff_binary(cls):
         """Checks if the sqldiff binary is available in the system PATH.
-        
+
         This binary is used for comparing SQLite databases. If it's missing,
         database comparison functionality will be limited.
-        
+
         :returns: True if the sqldiff binary is available, False otherwise.
         :rtype: bool
         """
         sqldiff_available = shutil.which("sqldiff") is not None
 
         if not sqldiff_available:
-            cls.logger.info("The 'sqldiff' binary was not found in PATH. "
-                            "Database comparison functionality will be limited. "
-                            "Please install sqlite3 tools to enable full database diffing.")
+            cls.logger.info(
+                "The 'sqldiff' binary was not found in PATH. "
+                "Database comparison functionality will be limited. "
+                "Please install sqlite3 tools to enable full database diffing."
+            )
 
         return sqldiff_available
 
     @classmethod
     def check_objection_binary(cls):
         """Checks if the objection command-line tool is available in the system PATH.
-        
+
         This tool is used for interactive exploration of mobile applications via Frida.
-        
+
         :returns: True if objection is available, False otherwise.
         :rtype: bool
         """
         objection_available = shutil.which("objection") is not None
 
         if not objection_available:
-            cls.logger.warning("The 'objection' tool was not found in PATH. "
-                             "Interactive application exploration will be limited. "
-                             "Please install objection using 'pip install objection'.")
+            cls.logger.warning(
+                "The 'objection' tool was not found in PATH. "
+                "Interactive application exploration will be limited. "
+                "Please install objection using 'pip install objection'."
+            )
 
         return objection_available
 
@@ -276,12 +385,15 @@ class Toolbox:
             cls.logger = logging.getLogger()
             cls.logger.setLevel(cls.args.loglevel)
 
-        # Check if the logger already has handlers
+            # Check if the logger already has handlers
             if not cls.logger.handlers:
                 file_formatter = logging.Formatter(
-                    "%(asctime)s~%(levelname)s~%(message)s~module:%(module)s~function:%(funcName)s~args:%(args)s")
+                    "%(asctime)s~%(levelname)s~%(message)s~module:%(module)s~function:%(funcName)s~args:%(args)s"
+                )
 
-                file_handler = logging.FileHandler(f'{os.getenv("RAW_RESULTS_PATH")}sandroid.log')
+                file_handler = logging.FileHandler(
+                    f"{os.getenv('RAW_RESULTS_PATH')}sandroid.log"
+                )
                 file_handler.setLevel(logging.DEBUG)
                 file_handler.setFormatter(file_formatter)
 
@@ -299,7 +411,9 @@ class Toolbox:
         :param name: The name of the snapshot.
         :type name: str
         """
-        cls.logger.info(f"Creating snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}")
+        cls.logger.info(
+            f"Creating snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}"
+        )
         Adb.send_telnet_command(b"avd snapshot save " + name)
 
     @classmethod
@@ -312,7 +426,9 @@ class Toolbox:
         :param name: The name of the snapshot.
         :type name: str
         """
-        cls.logger.info(f"Loading snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}")
+        cls.logger.info(
+            f"Loading snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}"
+        )
         Adb.send_telnet_command(b"avd snapshot load " + name)
         time.sleep(2)
 
@@ -332,11 +448,9 @@ class Toolbox:
             return cls.changed_files_cache
         return cls._fetch_changed_files(fetch_all)
 
-
     @classmethod
     def print_emulator_information(cls):
-        """Prints information about the emulator, including network interfaces, snapshots, date, locale, Android version, and API level.
-        """
+        """Prints information about the emulator, including network interfaces, snapshots, date, locale, Android version, and API level."""
         emulator_id = Adb.get_current_avd_name()
         emulator_path = Adb.get_current_avd_path()
         device_time = Adb.get_device_time()
@@ -365,14 +479,15 @@ class Toolbox:
                 info_text += f"{Fore.GREEN}{snapshot['date']}{Fore.RESET} - {Fore.CYAN}{snapshot['tag']}{Fore.RESET}\n"
 
         # Use the ASCII box format and print it
-        formatted_output = cls._create_ascii_box(info_text.strip(), f"{Fore.MAGENTA}Emulator Information{Fore.RESET}")
+        formatted_output = cls._create_ascii_box(
+            info_text.strip(), f"{Fore.MAGENTA}Emulator Information{Fore.RESET}"
+        )
         click.echo(formatted_output)
-
 
     @classmethod
     def _fetch_changed_files(cls, fetch_all=False):
         """Fetches changed files from the AVD filesystem.
-        
+
         .. warning::
             Not meant to be called directly, only through fetch_changed_files()
 
@@ -388,8 +503,10 @@ class Toolbox:
         # Right now only /data is scanned, if you want to scan more, remove "data" from command to pull everything or replace "data" with the line below to scan everything except dev, proc and data_mirror
         # acct bin config etc linkerconfig mnt oem product storage system_ext adb_keys bugreports d debug_ramdisk init lost+found odm postinstall sdcard sys vendor apex cache data init.environ.rc metadata odm_dlkm second_stage_resources system vendor_dlkm
         # "data/user/0/" is always ignored, because it's a duplicate of "data/data"
-        #filesystem, errors = Adb.send_adb_command("shell ls /data -ltRAp --full-time")
-        filesystem, errors = Adb.send_adb_command("shell ls {} -ltRAp --full-time".format(" ".join(cls.scan_directories)))
+        # filesystem, errors = Adb.send_adb_command("shell ls /data -ltRAp --full-time")
+        filesystem, errors = Adb.send_adb_command(
+            "shell ls {} -ltRAp --full-time".format(" ".join(cls.scan_directories))
+        )
         if errors != "":
             cls.logger.error("Errors from the subprocess on the phone: " + errors)
 
@@ -418,12 +535,21 @@ class Toolbox:
                     continue
                 secondsTimestamp = int(round(parsed_ts.timestamp()))
                 newestchange = max(newestchange, secondsTimestamp)
-                if (cls.action_time <= secondsTimestamp <= cls.action_time + cls.action_duration) or fetch_all:
+                if (
+                    cls.action_time
+                    <= secondsTimestamp
+                    <= cls.action_time + cls.action_duration
+                ) or fetch_all:
                     changedFiles.update({currentDir + filename: secondsTimestamp})
-                    cls.add_to_shadow_ts_list(currentDir, filename, secondsTimestamp, fetch_all = fetch_all)
+                    cls.add_to_shadow_ts_list(
+                        currentDir, filename, secondsTimestamp, fetch_all=fetch_all
+                    )
                     if filename.endswith(
-                            ".db-wal"):  # Make sure db files that use write ahead logging are also added to list
-                        changedFiles.update({currentDir + filename[0:-4]: secondsTimestamp})
+                        ".db-wal"
+                    ):  # Make sure db files that use write ahead logging are also added to list
+                        changedFiles.update(
+                            {currentDir + filename[0:-4]: secondsTimestamp}
+                        )
 
         returnThis = {}
         for changedFile, changedTime in reversed(changedFiles.items()):
@@ -435,7 +561,9 @@ class Toolbox:
         return returnThis
 
     @classmethod
-    def add_to_shadow_ts_list(cls, currentDir, filename, secondsTimestamp, color = "#1A535C", fetch_all = False):
+    def add_to_shadow_ts_list(
+        cls, currentDir, filename, secondsTimestamp, color="#1A535C", fetch_all=False
+    ):
         """Adds a file change entry to the shadow timestamp list. This list is meant for the timeline generation later on.
 
         :param currentDir: The current directory of the file.
@@ -448,20 +576,21 @@ class Toolbox:
         :param fetch_all: Whether this call was made during a fetch_all or normal run.
         :type fetch_all: bool
         """
-        if fetch_all: return
-        entry = {"id": currentDir+filename,
-                 "name": filename,
-                 "action_base_time": cls.action_time,
-                 "file_change_time": secondsTimestamp,
-                 "seconds_after_start": secondsTimestamp - cls.action_time,
-                 "timeline_color": color}
+        if fetch_all:
+            return
+        entry = {
+            "id": currentDir + filename,
+            "name": filename,
+            "action_base_time": cls.action_time,
+            "file_change_time": secondsTimestamp,
+            "seconds_after_start": secondsTimestamp - cls.action_time,
+            "timeline_color": color,
+        }
         cls._timestamps_shadow_dict_list.append(entry)
-
 
     @classmethod
     def set_action_time(cls):
-        """Sets the action time by fetching the current time from the emulator.
-        """
+        """Sets the action time by fetching the current time from the emulator."""
         cls.already_looked_at_filesystem_for_this_action_time = False
         output, error = Adb.send_adb_command("shell date +%s")
         if error:
@@ -499,8 +628,7 @@ class Toolbox:
 
     @classmethod
     def started_dry_run(cls):
-        """Marks the start of a dry run.
-        """
+        """Marks the start of a dry run."""
         cls._is_dry_run = True
 
     @classmethod
@@ -523,8 +651,7 @@ class Toolbox:
 
     @classmethod
     def increase_run_counter(cls):
-        """Increases the run counter by one.
-        """
+        """Increases the run counter by one."""
         cls._run_counter += 1
 
     @classmethod
@@ -541,7 +668,6 @@ class Toolbox:
             return None
         return cls._spotlight_application
 
-
     @classmethod
     def set_spotlight_application(cls, spotlight_application):
         """Sets the spotlight application.
@@ -551,7 +677,6 @@ class Toolbox:
         logging.info(f"Setting spotlight application to {spotlight_application}")
         cls._spotlight_application = spotlight_application
 
-
     @classmethod
     def get_spotlight_application_pid(cls):
         """Returns the PID of the spotlight application.
@@ -560,7 +685,6 @@ class Toolbox:
         :rtype: int
         """
         return cls._spotlight_application_pid
-
 
     @classmethod
     def set_spotlight_application_pid(cls, spotlight_application_pid):
@@ -613,7 +737,7 @@ class Toolbox:
     def add_spotlight_file(cls, file_path):
         """Adds a file to the spotlight files list for monitoring.
         Supports wildcards (*) to add multiple files matching a pattern.
-        
+
         :param file_path: Path to the file or pattern to add
         :type file_path: str
         :return: True if the file(s) were added, False otherwise
@@ -667,7 +791,9 @@ class Toolbox:
                     cls._add_single_spotlight_file(matched_file.strip())
                     added_count += 1
 
-            cls.logger.info(f"Added {added_count} files matching pattern '{file_path}' to spotlight files")
+            cls.logger.info(
+                f"Added {added_count} files matching pattern '{file_path}' to spotlight files"
+            )
             return added_count > 0
         # Original single file handling
         return cls._add_single_spotlight_file(file_path)
@@ -675,7 +801,7 @@ class Toolbox:
     @classmethod
     def _add_single_spotlight_file(cls, file_path):
         """Helper method to add a single file to spotlight files.
-        
+
         :param file_path: Path to the file to add
         :type file_path: str
         :return: True if the file was added, False otherwise
@@ -684,7 +810,6 @@ class Toolbox:
         # Don't add WAL and journal files directly
         if file_path.endswith("-wal") or file_path.endswith("-journal"):
             return False
-
 
         # Check if the file is already in the list
         if file_path in cls._spotlight_files:
@@ -710,7 +835,9 @@ class Toolbox:
             cls._spotlight_files.remove(file_path)
             cls.logger.info(f"Removed spotlight file: {file_path}")
         else:
-            cls.logger.warning("File not found in spotlight files or no file specified.")
+            cls.logger.warning(
+                "File not found in spotlight files or no file specified."
+            )
 
     @classmethod
     # pulls file_to_pull from emulator and puts it in the folder Data/[number]_pull
@@ -724,26 +851,44 @@ class Toolbox:
         :type file_to_pull: str
         """
         # Create the target directory structure if it doesn't exist
-        target_dir = os.path.join(f'{os.getenv("RAW_RESULTS_PATH")}{number}_pull', os.path.dirname(file_to_pull.lstrip("/")))
+        target_dir = os.path.join(
+            f"{os.getenv('RAW_RESULTS_PATH')}{number}_pull",
+            os.path.dirname(file_to_pull.lstrip("/")),
+        )
         os.makedirs(target_dir, exist_ok=True)
 
         # Pull the file while preserving its path
         output, error = Adb.send_adb_command(
-            "pull " + file_to_pull + " " + os.path.join(f'{os.getenv("RAW_RESULTS_PATH")}{number}_pull', file_to_pull.lstrip("/")))
+            "pull "
+            + file_to_pull
+            + " "
+            + os.path.join(
+                f"{os.getenv('RAW_RESULTS_PATH')}{number}_pull",
+                file_to_pull.lstrip("/"),
+            )
+        )
 
-        if "failed to stat remote object" in str(output) or "failed to stat remote object" in str(error):
-            cls.logger.warning("File likely deleted before it could be pulled: " + file_to_pull)
+        if "failed to stat remote object" in str(
+            output
+        ) or "failed to stat remote object" in str(error):
+            cls.logger.warning(
+                "File likely deleted before it could be pulled: " + file_to_pull
+            )
         if "Permission denied" in str(output) or "Permission denied" in str(error):
-            cls.logger.error("Permissions Error: Could not pull " + file_to_pull + " from device. This is not technically critical but will lead to incomplete results.")
+            cls.logger.error(
+                "Permissions Error: Could not pull "
+                + file_to_pull
+                + " from device. This is not technically critical but will lead to incomplete results."
+            )
 
     @classmethod
     def pull_spotlight_files(cls, description=None):
         """Pulls all spotlight files from the device to the 'spotlight_files' directory.
         Creates a timestamped subdirectory for each pull operation.
-        
+
         If multiple spotlight files are set, recreates their directory hierarchy.
         For .db files, also pulls the associated WAL and journal files.
-    
+
         :param description: A short description of the action performed before the pull.
         :type description: str or None
         """
@@ -752,14 +897,16 @@ class Toolbox:
             return False
 
         # Create or empty the spotlight_files directory
-        spotlight_dir = os.getenv("RESULTS_PATH")+"spotlight_files"
+        spotlight_dir = os.getenv("RESULTS_PATH") + "spotlight_files"
         if not os.path.exists(spotlight_dir):
             os.makedirs(spotlight_dir)
 
         # Create a timestamped subdirectory with optional description
         timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         if description:
-            pull_dir = os.path.join(spotlight_dir, f"{timestamp}_{description.replace(' ', '_')}")
+            pull_dir = os.path.join(
+                spotlight_dir, f"{timestamp}_{description.replace(' ', '_')}"
+            )
         else:
             pull_dir = os.path.join(spotlight_dir, timestamp)
         os.makedirs(pull_dir, exist_ok=True)
@@ -775,7 +922,9 @@ class Toolbox:
             # Set up the target path
             if len(cls._spotlight_files) > 1:
                 # Preserve hierarchy for multiple files
-                target_dir = os.path.join(pull_dir, os.path.dirname(file_path).lstrip("/"))
+                target_dir = os.path.join(
+                    pull_dir, os.path.dirname(file_path).lstrip("/")
+                )
                 os.makedirs(target_dir, exist_ok=True)
                 target = os.path.join(pull_dir, file_path.lstrip("/"))
             else:
@@ -785,7 +934,9 @@ class Toolbox:
             # Pull the file from the device
             output, error = Adb.send_adb_command(f"pull {file_path} {target}")
 
-            if "failed to stat remote object" in str(output) or "failed to stat remote object" in str(error):
+            if "failed to stat remote object" in str(
+                output
+            ) or "failed to stat remote object" in str(error):
                 cls.logger.warning(f"File not found on device: {file_path}")
             elif "Permission denied" in str(output):
                 cls.logger.error(f"Permission denied when pulling {file_path}")
@@ -800,15 +951,25 @@ class Toolbox:
                 # Pull the WAL file
                 wal_target = target + "-wal"
                 output, error = Adb.send_adb_command(f"pull {wal_file} {wal_target}")
-                if ("failed to stat remote object" not in str(output) and "Permission denied" not in str(output) and
-                    "failed to stat remote object" not in str(error) and "Permission denied" not in str(error)):
+                if (
+                    "failed to stat remote object" not in str(output)
+                    and "Permission denied" not in str(output)
+                    and "failed to stat remote object" not in str(error)
+                    and "Permission denied" not in str(error)
+                ):
                     cls.logger.info(f"Pulled WAL file: {wal_file}")
 
                 # Pull the journal file
                 journal_target = target + "-journal"
-                output, error = Adb.send_adb_command(f"pull {journal_file} {journal_target}")
-                if ("failed to stat remote object" not in str(output) and "Permission denied" not in str(output) and
-                    "failed to stat remote object" not in str(error) and "Permission denied" not in str(error)):
+                output, error = Adb.send_adb_command(
+                    f"pull {journal_file} {journal_target}"
+                )
+                if (
+                    "failed to stat remote object" not in str(output)
+                    and "Permission denied" not in str(output)
+                    and "failed to stat remote object" not in str(error)
+                    and "Permission denied" not in str(error)
+                ):
                     cls.logger.info(f"Pulled journal file: {journal_file}")
 
         cls.logger.info(f"All spotlight files pulled to {pull_dir}")
@@ -826,7 +987,9 @@ class Toolbox:
         :rtype: str
         """
         highlight_list = []
-        for i in range(cls.action_time - 100, cls.action_time + cls.action_duration + 100):
+        for i in range(
+            cls.action_time - 100, cls.action_time + cls.action_duration + 100
+        ):
             highlight_list.append(str(i))
         highlight_str = r"\b(?:" + "|".join(highlight_list) + r")"
         text_highlight = re.sub(highlight_str, r"\033[93m\g<0>\033[m" + restColor, s)
@@ -853,32 +1016,49 @@ class Toolbox:
 
         if input_string.count("\n") > line_number_cutoff:
             number_of_cut_lines = input_string.count("\n") - line_number_cutoff
-            output = output + "\n\t[" + str(
-                number_of_cut_lines) + " lines have been cut here for brevity]"
+            output = (
+                output
+                + "\n\t["
+                + str(number_of_cut_lines)
+                + " lines have been cut here for brevity]"
+            )
 
         return output
 
-    #TODO: seperate emulator stuff like snapshots from toolbox
+    # TODO: seperate emulator stuff like snapshots from toolbox
     @classmethod
     def restart_emulator(cls):
-        """Restarts the Android emulator.
-        """
+        """Restarts the Android emulator."""
         cls.logger.info("Trying to shut down Emulator")
         stdout, stderr = Adb.send_telnet_command(b"kill")
         if stderr:
-            cls.logger.warning("Emulator " + cls.device_name + " was not running, starting now")
-            subprocess.Popen([f"{cls.android_emulator_path} @ {cls.device_name} -feature -Vulkan -gpu host"],
-                             shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            cls.logger.warning(
+                "Emulator " + cls.device_name + " was not running, starting now"
+            )
+            subprocess.Popen(
+                [
+                    f"{cls.android_emulator_path} @ {cls.device_name} -feature -Vulkan -gpu host"
+                ],
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             time.sleep(5)
         cls.logger.info("Starting Emulator")
-        subprocess.Popen([f"{cls.android_emulator_path} @ {cls.device_name} -feature -Vulkan -gpu host"],
-                         shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.Popen(
+            [
+                f"{cls.android_emulator_path} @ {cls.device_name} -feature -Vulkan -gpu host"
+            ],
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         time.sleep(5)
 
     @classmethod
     def get_proxy_settings(cls):
         """Gets the current HTTP proxy settings from the device.
-        
+
         :returns: The current HTTP proxy settings as a string or "Not set" if no proxy is configured.
         :rtype: str
         """
@@ -897,7 +1077,9 @@ class Toolbox:
         current_proxy = cls.get_proxy_settings()
         if current_proxy != "Not set":
             cls.logger.info(f"Current proxy is set to: {current_proxy}")
-            stdout, stderr = Adb.send_adb_command("shell settings put global http_proxy :0")
+            stdout, stderr = Adb.send_adb_command(
+                "shell settings put global http_proxy :0"
+            )
             if not stderr:
                 cls.logger.info("Proxy unset successfully.")
             else:
@@ -911,12 +1093,13 @@ class Toolbox:
         cls.logger.info("Enter proxy port (default: 8080)")
         proxy_port = input().strip() or "8080"
 
-        stdout, stderr = Adb.send_adb_command(f"shell settings put global http_proxy {proxy_ip}:{proxy_port}")
+        stdout, stderr = Adb.send_adb_command(
+            f"shell settings put global http_proxy {proxy_ip}:{proxy_port}"
+        )
         if not stderr:
             cls.logger.info(f"Proxy set to {proxy_ip}:{proxy_port}")
         else:
             cls.logger.error(f"Failed to set proxy: {stderr}")
-
 
     @classmethod
     def get_host_ip(cls):
@@ -957,16 +1140,14 @@ class Toolbox:
         except socket.gaierror:
             cls.logger.debug("Failed to get IP from hostname extended lookup")
 
-
         # Fallback to localhost if all else fails
         cls.logger.warning("Could not determine host IP, using localhost (127.0.0.1)")
         return "127.0.0.1"
 
-
     @classmethod
     def take_screenshot(cls, filename=None):
         """Takes a screenshot of the Android device using telnet commands.
-        
+
         :param filename: Optional custom filename, otherwise a timestamped name is used
         :type filename: str
         :returns: Path to the saved screenshot file
@@ -1000,7 +1181,7 @@ class Toolbox:
     @classmethod
     def start_screen_recording(cls, filename=None):
         """Starts screen recording using the Android emulator's screenrecord command.
-        
+
         :param filename: Optional custom filename, otherwise a timestamped name is used
         :type filename: str
         :returns: True if recording started successfully, False otherwise
@@ -1027,7 +1208,9 @@ class Toolbox:
         cls._screen_recording_file = os.path.join(recording_dir, filename)
 
         # Start recording using telnet command
-        stdout, stderr = Adb.send_telnet_command(f"screenrecord start {cls._screen_recording_file}")
+        stdout, stderr = Adb.send_telnet_command(
+            f"screenrecord start {cls._screen_recording_file}"
+        )
 
         if stderr:
             cls.logger.error(f"Failed to start screen recording: {stderr}")
@@ -1035,12 +1218,15 @@ class Toolbox:
             return False
 
         cls._screen_recording_running = True
-        cls.logger.info(f"Started screen recording to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}")
+        cls.logger.info(
+            f"Started screen recording to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}"
+        )
         return True
+
     @classmethod
     def stop_screen_recording(cls):
         """Stops the current screen recording.
-        
+
         :returns: True if recording stopped successfully, False otherwise
         :rtype: bool
         """
@@ -1055,14 +1241,15 @@ class Toolbox:
             cls.logger.error(f"Failed to stop screen recording: {stderr}")
             return False
 
-        cls.logger.info(f"Screen recording saved to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}")
+        cls.logger.info(
+            f"Screen recording saved to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}"
+        )
         cls._screen_recording_running = False
         return True
 
     @classmethod
     def print_interactive_menu(cls):
-        """Prints the interactive main menu.
-        """
+        """Prints the interactive main menu."""
         is_frida_running = cls.frida_manager.is_frida_server_running()
         if is_frida_running:
             frida_server_string = f"{Fore.GREEN}Running{Fore.RESET}"
@@ -1083,10 +1270,16 @@ class Toolbox:
             spotlight_application_string = f"{Fore.YELLOW}{spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET}"
         else:
             spotlight_application_string = f"{Fore.RED}Not set{Fore.RESET}"
-        spotlight_application_string = f"Spotlight Application: [{spotlight_application_string}]"
+        spotlight_application_string = (
+            f"Spotlight Application: [{spotlight_application_string}]"
+        )
 
         # Filter spotlight files to exclude internal WAL and journal files
-        spotlight_files = [file for file in cls._spotlight_files if not (file.endswith("-wal") or file.endswith("-journal"))]
+        spotlight_files = [
+            file
+            for file in cls._spotlight_files
+            if not (file.endswith("-wal") or file.endswith("-journal"))
+        ]
 
         if not spotlight_files:
             spotlight_files_string = f"{Fore.RED}Not set{Fore.RESET}"
@@ -1094,7 +1287,9 @@ class Toolbox:
             spotlight_files_string = f"{Fore.YELLOW}{spotlight_files[0]}{Fore.RESET}"
         else:
             # Only show the count for multiple files
-            spotlight_files_string = f"{Fore.YELLOW}{len(spotlight_files)} files set{Fore.RESET}"
+            spotlight_files_string = (
+                f"{Fore.YELLOW}{len(spotlight_files)} files set{Fore.RESET}"
+            )
 
         spotlight_files_string = f"Spotlight Files: [{spotlight_files_string}]"
 
@@ -1115,8 +1310,9 @@ class Toolbox:
         else:
             screen_recording_string = f"* {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}g{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rab video of screen"
 
-
-        click.echo(cls._create_ascii_box(f"""{frida_server_string}
+        click.echo(
+            cls._create_ascii_box(
+                f"""{frida_server_string}
 {proxy_string}
 {spotlight_application_string}
 {spotlight_files_string}
@@ -1155,13 +1351,15 @@ class Toolbox:
     {network_capture_string}
 
 
-    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}q{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}uit""","Sandroid Interactive Menu"))
-
+    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}q{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}uit""",
+                "Sandroid Interactive Menu",
+            )
+        )
 
     @classmethod
     def _create_ascii_box(cls, text: str, title: str) -> str:
         """Creates an ASCII box with a title.
-        
+
         :param text: The text to be enclosed in the ASCII box.
         :type text: str
         :param title: The title of the ASCII box.
@@ -1174,7 +1372,9 @@ class Toolbox:
         # Strip ANSI color codes for length calculation with a more comprehensive regex
         def strip_ansi(line):
             # This improved regex pattern catches more ANSI escape codes
-            return re.sub(r"\x1b(?:\[[0-9;]*[a-zA-Z]|\][0-9;]*[a-zA-Z]|[()][A-Z]|[@-Z])", "", line)
+            return re.sub(
+                r"\x1b(?:\[[0-9;]*[a-zA-Z]|\][0-9;]*[a-zA-Z]|[()][A-Z]|[@-Z])", "", line
+            )
 
         # Calculate the actual visible width of each line
         visible_lengths = [len(strip_ansi(line)) for line in lines]
@@ -1200,7 +1400,9 @@ class Toolbox:
         return f"{top_border}{middle_text}{bottom_border}"
 
     @classmethod
-    def wrap_up(cls): # Closing routing to handle anything that needs to be done right before the program finishes
+    def wrap_up(
+        cls,
+    ):  # Closing routing to handle anything that needs to be done right before the program finishes
         """Closing routine to handle tasks that need to be done right before the program finishes.
 
         Runs before the final results are written to the output file.
@@ -1211,11 +1413,9 @@ class Toolbox:
             cls.pull_and_hash_apks()
         cls.submit_other_data("Timeline Data", cls._timestamps_shadow_dict_list)
 
-
     @classmethod
     def calculate_hashes(cls):
-        """Calculates MD5 hashes for new and changed files.
-        """
+        """Calculates MD5 hashes for new and changed files."""
         cls.logger.info("Calculating Hashes")
 
         base_folder = os.getenv("RAW_RESULTS_PATH")
@@ -1225,28 +1425,31 @@ class Toolbox:
         # hashes['Disclaimer'] = "If either the old or new version are not available, that hash will show as 'n/a', if a changed file could never be pulled, it will not have an entry at all. This is a list of hashes of all files that were pulled, so it can also contain extra entries that got removed as noise. For the complete list of all non-noise changed files, check the output file (default sandroid.json)"
 
         for file in os.listdir(f"{base_folder}new_pull"):
-            if file in os.listdir(f"{base_folder}noise_pull"): continue
-            f = open(f"{base_folder}new_pull/"+file, mode="rb")
+            if file in os.listdir(f"{base_folder}noise_pull"):
+                continue
+            f = open(f"{base_folder}new_pull/" + file, mode="rb")
             data = f.read()
             f.close()
 
-            cls.logger.debug("Hashing "+ file)
+            cls.logger.debug("Hashing " + file)
             new_file_hashes[file] = hashlib.md5(data).hexdigest()
         for file in os.listdir(f"{base_folder}first_pull"):
-            if file in os.listdir(f"{base_folder}noise_pull"): continue
-            f = open(f"{base_folder}first_pull/"+file, mode="rb")
+            if file in os.listdir(f"{base_folder}noise_pull"):
+                continue
+            f = open(f"{base_folder}first_pull/" + file, mode="rb")
             data = f.read()
             f.close()
 
-            cls.logger.debug("Hashing old version of "+ file)
+            cls.logger.debug("Hashing old version of " + file)
             change_file_hashes[file] = [hashlib.md5(data).hexdigest(), "n/a"]
         for file in os.listdir(f"{base_folder}second_pull"):
-            if file in os.listdir(f"{base_folder}noise_pull"): continue
-            f = open(f"{base_folder}second_pull/"+file, mode="rb")
+            if file in os.listdir(f"{base_folder}noise_pull"):
+                continue
+            f = open(f"{base_folder}second_pull/" + file, mode="rb")
             data = f.read()
             f.close()
 
-            cls.logger.debug("Hashing new version of "+ file)
+            cls.logger.debug("Hashing new version of " + file)
             if file in change_file_hashes:
                 change_file_hashes[file][1] = hashlib.md5(data).hexdigest()
             else:
@@ -1259,11 +1462,10 @@ class Toolbox:
         # f.write(json.dumps(hashes, indent = 4))
         cls.submit_other_data("Artifact Hashes", hashes)
 
-
     @classmethod
     def pull_and_hash_apks(cls):
         """Pulls APKs from the emulator, calculates their hashes and submits them into the output file.
-        
+
         Pulled files are deleted again after their hash has been calculated.
         """
         cls.logger.info("Pulling and hashing APKs")
@@ -1286,12 +1488,16 @@ class Toolbox:
                 f = open(f"{base_folder}{package}.apk", mode="rb")
                 data = f.read()
                 f.close()
-                cls.logger.debug("Hashing apk "+ package)
-                names_and_hashes.append(package + ": " + str(hashlib.md5(data).hexdigest()))
+                cls.logger.debug("Hashing apk " + package)
+                names_and_hashes.append(
+                    package + ": " + str(hashlib.md5(data).hexdigest())
+                )
 
                 os.remove(f"{base_folder}{package}.apk")
             else:
-                cls.logger.error("Something went wrong looking for a package: "+ package)
+                cls.logger.error(
+                    "Something went wrong looking for a package: " + package
+                )
                 names_and_hashes.append(package + ": n/a")
         cls.submit_other_data("APK Hashes", names_and_hashes)
         """
@@ -1316,10 +1522,20 @@ class Toolbox:
             if cls.file_paths_whitelist is None:
                 with open(cls.args.whitelist) as f:
                     cls.file_paths_whitelist = "".join(f.read()).split(",")
-            file_paths = [fp for fp in file_paths if not any(fnmatch.fnmatch(fp, pattern) for pattern in cls.file_paths_whitelist)]
-            cls.logger.info("My list is: "+str(cls.file_paths_whitelist))
+            file_paths = [
+                fp
+                for fp in file_paths
+                if not any(
+                    fnmatch.fnmatch(fp, pattern) for pattern in cls.file_paths_whitelist
+                )
+            ]
+            cls.logger.info("My list is: " + str(cls.file_paths_whitelist))
             after_len = len(file_paths)
-            cls.logger.debug("Filtered out "+str(before_len-after_len)+" paths because of whitelist")
+            cls.logger.debug(
+                "Filtered out "
+                + str(before_len - after_len)
+                + " paths because of whitelist"
+            )
         return file_paths
 
     @classmethod
@@ -1355,37 +1571,37 @@ class Toolbox:
 
     @classmethod
     def export_action(cls, snapshot_name="tmp"):
-
         cls.logger.debug(f'exporting snapshot "{snapshot_name}"')
         snapshot_path = f"{os.path.expanduser('~')}/.android/avd/{cls.device_name}.avd/snapshots/tmp"
 
-        if not os.path.exists(f'{os.getenv("RAW_RESULTS_PATH")}recording.txt'):
+        if not os.path.exists(f"{os.getenv('RAW_RESULTS_PATH')}recording.txt"):
             cls.logger.error("No recording currently loaded")
             return
         if not os.path.exists(snapshot_path):
-            cls.logger.error("No snapshot exists, a snapshot has to be part of the export")
+            cls.logger.error(
+                "No snapshot exists, a snapshot has to be part of the export"
+            )
             return
 
         action_name = input("Name your action for export: ")
 
         if os.path.exists(f"{action_name}.action"):
-            cls.logger.error("An action with this name already exist, choose a different name")
+            cls.logger.error(
+                "An action with this name already exist, choose a different name"
+            )
             return
 
-
-
         shutil.copytree(snapshot_path, action_name)
-        shutil.copy(f'{os.getenv("RAW_RESULTS_PATH")}recording.txt', action_name)
+        shutil.copy(f"{os.getenv('RAW_RESULTS_PATH')}recording.txt", action_name)
         shutil.make_archive(action_name, "zip", action_name)
-        os.rename(f"{action_name}.zip",f"{action_name}.action")
+        os.rename(f"{action_name}.zip", f"{action_name}.action")
         shutil.rmtree(action_name)
 
         cls.logger.info("Action sucessfully exported.")
 
     @classmethod
     def toggle_screen_record(cls):
-        """Starts screen recording on the emulator if not already running, or stops it if it is running.
-        """
+        """Starts screen recording on the emulator if not already running, or stops it if it is running."""
         if not cls._screen_recording_running:
             cls.logger.info("Starting screen recording")
             recorder = threading.Thread(target=cls._screenrecorder_thread, daemon=True)
@@ -1395,7 +1611,9 @@ class Toolbox:
             cls._screen_recording_running = False
             time.sleep(1)
             cls.logger.debug("Pulling screen recording file from device")
-            Adb.send_adb_command(f"pull sdcard/screenrecord.webm {os.getenv('RAW_RESULTS_PATH')}recording.webm")
+            Adb.send_adb_command(
+                f"pull sdcard/screenrecord.webm {os.getenv('RAW_RESULTS_PATH')}recording.webm"
+            )
 
     @classmethod
     def _screenrecorder_thread(cls):
@@ -1411,24 +1629,29 @@ class Toolbox:
             cls._screen_recording_process = subprocess.Popen(
                 ["adb", "shell", "screenrecord", device_path],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
             )
 
             cls.logger.debug(f"Started screen recording to device: {device_path}")
 
             # Wait for the recording to be stopped
             total_wait_time = 0
-            while cls._screen_recording_running and cls._screen_recording_process.poll() is None:
+            while (
+                cls._screen_recording_running
+                and cls._screen_recording_process.poll() is None
+            ):
                 time.sleep(0.5)
                 total_wait_time += 0.5
                 if total_wait_time > 178:
-                    cls.logger.warning("Maximum screen recording duration reached, stopping recording")
+                    cls.logger.warning(
+                        "Maximum screen recording duration reached, stopping recording"
+                    )
                     cls._screen_recording_running = False
-
 
             # Stop the recording if it's still running
             if cls._screen_recording_process.poll() is None:
                 import signal
+
                 try:
                     # Send SIGINT (Ctrl+C equivalent) to stop recording gracefully
                     cls._screen_recording_process.send_signal(signal.SIGINT)
@@ -1450,5 +1673,3 @@ class Toolbox:
         finally:
             cls._screen_recording_running = False
             cls._screen_recording_process = None
-
-

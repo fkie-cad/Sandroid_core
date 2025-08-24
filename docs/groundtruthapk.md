@@ -20,4 +20,3 @@ Simply press the corresponding button to generate the Artefact
 - Values added to the XML file and the Database will be the current unix time on the emulator. It can deviate from the actual time but will be automatically be highlighted in the output.
 - The first time the application is launched after installation, the XML file and database will be initialised, and Android will create a profile for the application, so **it is recommended that you open the application first, and only then start any analysis.**
 - The XML and database files are called `GroundTruth.xml` and `GroundTruth.db` respectively and are stored in the applications directory.
-

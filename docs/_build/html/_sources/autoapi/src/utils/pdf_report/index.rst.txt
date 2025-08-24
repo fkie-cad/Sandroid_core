@@ -58,7 +58,7 @@ Module Contents
 
    Here is a very silly example usage which generates a Hello World pdf document.
 
-   Example:: 
+   Example::
 
       from reportlab.pdfgen import canvas
       c = canvas.Canvas("hello.pdf")
@@ -184,4 +184,3 @@ Module Contents
 
 
 .. py:data:: report
-

@@ -19,5 +19,3 @@ Submodules
    /autoapi/src/datagather/processes/index
    /autoapi/src/datagather/sockets/index
    /autoapi/src/datagather/static_analysis/index
-
-

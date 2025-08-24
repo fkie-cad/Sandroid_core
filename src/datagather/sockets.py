@@ -8,6 +8,7 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 class Bcolors:
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"
@@ -21,8 +22,7 @@ class Bcolors:
 
 
 class Sockets(DataGather):
-    """Handles the gathering and processing of listening sockets during an action.
-    """
+    """Handles the gathering and processing of listening sockets during an action."""
 
     run_sockets_lists = {}
     final_sockets_list = []
@@ -31,8 +31,7 @@ class Sockets(DataGather):
     performed_diff = False
 
     def gather(self):
-        """Collects information on listening sockets during an action.
-        """
+        """Collects information on listening sockets during an action."""
         logger.info("Collecting information on listening sockets during action")
         t1 = threading.Thread(target=self.socket_capture_thread, args=())
         t1.start()
@@ -58,17 +57,24 @@ class Sockets(DataGather):
         raw_output = self.final_sockets_list
 
         result = (
-                Bcolors.OKCYAN + Bcolors.BOLD + "\n—————————————————LISTENING SOCKETS=(listening at some point in each run, not in dry run)——————————————\n" + Bcolors.ENDC + Bcolors.OKCYAN)
+            Bcolors.OKCYAN
+            + Bcolors.BOLD
+            + "\n—————————————————LISTENING SOCKETS=(listening at some point in each run, not in dry run)——————————————\n"
+            + Bcolors.ENDC
+            + Bcolors.OKCYAN
+        )
         for entry in raw_output:
             result += entry + "\n"
         result = result + (
-                Bcolors.BOLD + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n" + Bcolors.ENDC)
+            Bcolors.BOLD
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+        )
 
         return result
 
     def socket_capture_thread(self):
-        """Function meant to be used as a thread to create list of listening sockets over the duration of an action.
-        """
+        """Function meant to be used as a thread to create list of listening sockets over the duration of an action."""
         runtime = Toolbox.get_action_duration()
         socket_list = []
         for i in range(runtime):
@@ -78,7 +84,9 @@ class Sockets(DataGather):
             for socket in stdout:
                 if "LISTEN" in socket:
                     detected_listening.append(socket)
-            socket_list = list(set(detected_listening + socket_list))  # Join new-found sockets with the socket list so far without duplicates
+            socket_list = list(
+                set(detected_listening + socket_list)
+            )  # Join new-found sockets with the socket list so far without duplicates
             logger.debug("Found " + str(len(socket_list)) + " listening sockets so far")
             time.sleep(1)
 
@@ -88,10 +96,8 @@ class Sockets(DataGather):
             self.run_sockets_lists[self.run_counter] = socket_list
             self.run_counter += 1
 
-
     def process_sockets(self):
-        """Processes the collected socket lists to filter out noise and identify true listening sockets.
-        """
+        """Processes the collected socket lists to filter out noise and identify true listening sockets."""
         noise = self.noise_sockets
 
         logger.debug("Processing collected listening sockets lists")
@@ -118,8 +124,6 @@ class Sockets(DataGather):
 
             port_numbers_and_names_dict_list.append(port_and_name_dict)
 
-
-
         # Get all keys from all dictionaries
         all_keys = set().union(*[d.keys() for d in port_numbers_and_names_dict_list])
         # Initialize the result dictionary
@@ -127,8 +131,15 @@ class Sockets(DataGather):
 
         # Check each key
         for key in all_keys:
-        # If the key is in all dictionaries or its value is in all dictionaries
-            if all(key in d or (key in port_numbers_and_names_dict_list[0] and port_numbers_and_names_dict_list[0][key] in d.values()) for d in port_numbers_and_names_dict_list):
+            # If the key is in all dictionaries or its value is in all dictionaries
+            if all(
+                key in d
+                or (
+                    key in port_numbers_and_names_dict_list[0]
+                    and port_numbers_and_names_dict_list[0][key] in d.values()
+                )
+                for d in port_numbers_and_names_dict_list
+            ):
                 # Add the key and its value from the first dictionary to the result
                 result[key] = port_numbers_and_names_dict_list[0][key]
 
@@ -137,9 +148,10 @@ class Sockets(DataGather):
             if str(key) not in str(noise):
                 noise_adjusted_result[key] = result[key]
 
-
         # Generate final socket list
         for port in noise_adjusted_result:
-            self.final_sockets_list.append("Port "+str(port)+ " used by "+ noise_adjusted_result[port])
+            self.final_sockets_list.append(
+                "Port " + str(port) + " used by " + noise_adjusted_result[port]
+            )
 
         self.performed_diff = True

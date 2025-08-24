@@ -1,5 +1,4 @@
-
-#based on https://github.com/sukhbinder/timeline_in_python
+# based on https://github.com/sukhbinder/timeline_in_python
 import json
 import os
 
@@ -15,7 +14,9 @@ import numpy as np
 def parse_timeline(output_file):
     with open(output_file) as json_file:
         data = json.load(json_file)
-        raw_timeline_data = data["Other Data"]["Timeline Data"][0] # TODO: Change to a merge of all Timeline data sublists
+        raw_timeline_data = data["Other Data"]["Timeline Data"][
+            0
+        ]  # TODO: Change to a merge of all Timeline data sublists
         new_files = data["New Files"]
         changed_files_raw = data["Changed Files"]
         duration = data["Action Duration"]
@@ -26,7 +27,6 @@ def parse_timeline(output_file):
             changed_files_id.append(file)
         if isinstance(file, dict):
             changed_files_id.append(list(file.keys())[0])
-
 
     events = []
     for tl_event in raw_timeline_data:
@@ -44,17 +44,23 @@ def parse_timeline(output_file):
 
         id = tl_event["id"]
 
-        #print(f"Checking if {events_entry} is NOT in {events} ({events_entry not in events}),\nand making sure that {id} in {changed_files_id} ({id in changed_files_id})\n")
-        if events_entry not in events and id in changed_files_id: # add changed file to timeline (color is fine)
+        # print(f"Checking if {events_entry} is NOT in {events} ({events_entry not in events}),\nand making sure that {id} in {changed_files_id} ({id in changed_files_id})\n")
+        if (
+            events_entry not in events and id in changed_files_id
+        ):  # add changed file to timeline (color is fine)
             events.append(events_entry)
 
-        if events_entry not in events and id in new_files: # add new file to timeline (change color to green)
-            events_entry = (events_entry[0],events_entry[1], "#77D077")
-            if events_entry not in events: # prevent double entries in timeline since events_entry was changed
+        if (
+            events_entry not in events and id in new_files
+        ):  # add new file to timeline (change color to green)
+            events_entry = (events_entry[0], events_entry[1], "#77D077")
+            if (
+                events_entry not in events
+            ):  # prevent double entries in timeline since events_entry was changed
                 events.append(events_entry)
 
     events = filter_list(events)
-    create_timeline(events, f'{os.getenv("RESULTS_PATH")}timeline.png', duration)
+    create_timeline(events, f"{os.getenv('RESULTS_PATH')}timeline.png", duration)
 
 
 def filter_list(input_list):
@@ -78,7 +84,6 @@ def filter_list(input_list):
     return filtered_list
 
 
-
 def create_timeline(events, filename, duration):
     """Create a timeline plot with custom colors for different event types.
 
@@ -95,26 +100,43 @@ def create_timeline(events, filename, duration):
 
     # Create the plot
     levels = np.array([-5, 5, -3, 3, -1, 1])
-    fig, ax = plt.subplots(figsize=((210 / 25.4)*2.5, (297 / 25.4)*2.5))  # Adjust the figsize to make it taller
+    fig, ax = plt.subplots(
+        figsize=((210 / 25.4) * 2.5, (297 / 25.4) * 2.5)
+    )  # Adjust the figsize to make it taller
 
     # Create the base line
     start = 0
     stop = duration
-    ax.plot((0, 0), (start, stop), "k", alpha=.5)  # Change the base line to vertical
+    ax.plot((0, 0), (start, stop), "k", alpha=0.5)  # Change the base line to vertical
 
     # Iterate through events annotating each one
     if len(events) != 0:
-        for ii, (label, timestamp, color) in enumerate(zip(labels, timestamps, colors, strict=False)):
+        for ii, (label, timestamp, color) in enumerate(
+            zip(labels, timestamps, colors, strict=False)
+        ):
             level = levels[ii % 6]
             vert = "center"
 
-            ax.scatter(0, timestamp, s=100, facecolor=color, edgecolor="k", zorder=9999)  # Change scatter to vertical
+            ax.scatter(
+                0, timestamp, s=100, facecolor=color, edgecolor="k", zorder=9999
+            )  # Change scatter to vertical
             # Plot a line up to the text
-            ax.plot((0, level), (timestamp, timestamp), c=color, alpha=.7)  # Change line to vertical
+            ax.plot(
+                (0, level), (timestamp, timestamp), c=color, alpha=0.7
+            )  # Change line to vertical
             # Give the text a faint background and align it properly
-            if len(label)>17: label = label[0:17]+"..."
-            ax.text(level, timestamp, label, ha="center", va=vert, fontsize=18,
-                    backgroundcolor=(1., 1., 1.), color=color)  # Change text to vertical
+            if len(label) > 17:
+                label = label[0:17] + "..."
+            ax.text(
+                level,
+                timestamp,
+                label,
+                ha="center",
+                va=vert,
+                fontsize=18,
+                backgroundcolor=(1.0, 1.0, 1.0),
+                color=color,
+            )  # Change text to vertical
 
     # Set the yticks formatting
     ax.get_yaxis().set_major_locator(plt.MaxNLocator(integer=True))
@@ -123,8 +145,10 @@ def create_timeline(events, filename, duration):
     fig.autofmt_xdate()  # Use autofmt_xdate() instead
 
     # Remove components for a cleaner look
-    plt.setp((ax.get_xticklabels() + ax.get_xticklines() +
-              list(ax.spines.values())), visible=False)  # Change yticks to xticks
+    plt.setp(
+        (ax.get_xticklabels() + ax.get_xticklines() + list(ax.spines.values())),
+        visible=False,
+    )  # Change yticks to xticks
 
     ax.spines["left"].set_position(("axes", 0))
 

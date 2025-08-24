@@ -21,7 +21,9 @@ logger = getLogger(__name__)
 
 class ApkDownloaderTools:
     def __init__(self) -> None:
-        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"}
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36"
+        }
 
     def download_w_progress_bar(self, url: str, file_path):
         response = requests.get(url=url, stream=True, headers=self.headers)
@@ -44,14 +46,18 @@ class ApkDownloaderTools:
 
         return full_path
 
-class ApkDownloader:
 
+class ApkDownloader:
     def __init__(self) -> None:
-        self.aptoide_web_api_base_url_get_versions = "https://ws75.aptoide.com/api/7/app/getVersions/"
-        self.aptoide_web_api_base_url_get_meta = "https://ws2.aptoide.com/api/7/app/getMeta/"
+        self.aptoide_web_api_base_url_get_versions = (
+            "https://ws75.aptoide.com/api/7/app/getVersions/"
+        )
+        self.aptoide_web_api_base_url_get_meta = (
+            "https://ws2.aptoide.com/api/7/app/getMeta/"
+        )
         self.headers = ApkDownloaderTools().headers
 
-    def search_for_name(self, package_name, wanted_version = None, limit=10):
+    def search_for_name(self, package_name, wanted_version=None, limit=10):
         version_url = f"{self.aptoide_web_api_base_url_get_versions}package_name={package_name}/limit={limit}"
         v_res = requests.get(url=version_url, headers=self.headers)
         json_data_list = v_res.json()["list"]
@@ -62,10 +68,14 @@ class ApkDownloader:
         else:
             logger.info(f"Displaying search results for {package_name}")
             for json_data in json_data_list:
-                print(f"[{json_data['file']['vername']}] {json_data['name']} ({json_data['added']})")
+                print(
+                    f"[{json_data['file']['vername']}] {json_data['name']} ({json_data['added']})"
+                )
 
         # Ask for user input to select a version
-        logger.info("Enter the version string to select (press ENTER for the latest version): ")
+        logger.info(
+            "Enter the version string to select (press ENTER for the latest version): "
+        )
         version_input = input()
 
         if version_input == "":
@@ -108,9 +118,8 @@ class ApkDownloader:
             "app_download_url": app_download_url,
             "app_ext": app_ext,
             "app_name": app_name,
-            "app_fullname": app_fullname
+            "app_fullname": app_fullname,
         }
-
 
     def download_by_app_id(self, app_id, file_path):
         app_infos = self.__get_app_infos_by_app_id(app_id)
@@ -135,6 +144,7 @@ class ApkDownloader:
             if file_path:
                 logger.info(f"Installing {file_path}")
                 Adb.install_apk(file_path)
+
 
 class ApkDownloader_Old:
     """Handles APK downloading and installation from apksfull.com.
@@ -163,7 +173,6 @@ class ApkDownloader_Old:
         "Connection": "keep-alive",
     }
 
-
     def download_file(data):
         """Downloads the APK file using wget.
 
@@ -173,7 +182,12 @@ class ApkDownloader_Old:
         global bundle_identifier, app_version
         print("[+] Downloading...")
         subprocess.call(
-            ["wget", data["download_link"], "-O", f"{bundle_identifier}-{app_version}.apk"]
+            [
+                "wget",
+                data["download_link"],
+                "-O",
+                f"{bundle_identifier}-{app_version}.apk",
+            ]
         )
 
     @classmethod
@@ -186,7 +200,8 @@ class ApkDownloader_Old:
         :rtype: list of dict
         """
         res = requests.get(
-            f"{cls.search_url}/{name}", headers=cls.headers, allow_redirects=True)
+            f"{cls.search_url}/{name}", headers=cls.headers, allow_redirects=True
+        )
         if res.status_code != 200:
             print("ERROR")
 
@@ -203,7 +218,7 @@ class ApkDownloader_Old:
                 break
             title = link.get("title")
 
-            #only consider links for APKs
+            # only consider links for APKs
             if not title or title.split()[0] != "download":
                 continue
 
@@ -214,9 +229,13 @@ class ApkDownloader_Old:
             package_name = href.split("/")[-1]
             title = " ".join(title.split()[1:])
 
-
-            #print(f"{title} {version_number} {href}")
-            result = { "title" : title, "package_name" : package_name, "version" : version_number, "href" : href}
+            # print(f"{title} {version_number} {href}")
+            result = {
+                "title": title,
+                "package_name": package_name,
+                "version": version_number,
+                "href": href,
+            }
 
             search_results.append(result)
 
@@ -233,7 +252,7 @@ class ApkDownloader_Old:
         """
         display_string = f"""{Style.BRIGHT}+++ Search Results +++{Style.RESET_ALL}\n"""
         for i, result in enumerate(search_results):
-            display_string += (f"    [{i}] {result['title']} {result['version']} ({Fore.YELLOW}{result['package_name']}{Fore.RESET})\n")
+            display_string += f"    [{i}] {result['title']} {result['version']} ({Fore.YELLOW}{result['package_name']}{Fore.RESET})\n"
 
         click.echo(display_string)
 
@@ -277,18 +296,19 @@ class ApkDownloader_Old:
 
                 _version = link.text.strip()
                 _title = " ".join(link.get("title").split(" ")[1:-1])
-                versions.append({
-                    "url": f"{cls.base_url}{_link}",
-                    "version": _version,
-                    "package_name" : result["package_name"],
-                    "arch" : arch,
-                    "updated" : updated
-                })
+                versions.append(
+                    {
+                        "url": f"{cls.base_url}{_link}",
+                        "version": _version,
+                        "package_name": result["package_name"],
+                        "arch": arch,
+                        "updated": updated,
+                    }
+                )
 
                 counter += 1
 
-        return(versions)
-
+        return versions
 
     @classmethod
     def display_versions(cls, versions):
@@ -297,12 +317,11 @@ class ApkDownloader_Old:
         :param versions: List of available versions.
         :type versions: list of dict
         """
-        display_string = f"""{Style.BRIGHT}+++ Versions for {versions[0]['package_name']} +++{Style.RESET_ALL}\n"""
+        display_string = f"""{Style.BRIGHT}+++ Versions for {versions[0]["package_name"]} +++{Style.RESET_ALL}\n"""
         for i, version in enumerate(versions):
-            display_string += (f"    [{i}] {version['version']} {version['arch']} ({Fore.LIGHTMAGENTA_EX}{version['updated']}{Fore.RESET})\n")
+            display_string += f"    [{i}] {version['version']} {version['arch']} ({Fore.LIGHTMAGENTA_EX}{version['updated']}{Fore.RESET})\n"
 
         click.echo(display_string)
-
 
     @classmethod
     def get_real_download_url(cls, version_url):
@@ -332,7 +351,6 @@ class ApkDownloader_Old:
             return data["download_link"]
         return None
 
-
     @classmethod
     def download_version(cls, version, path):
         """Downloads a specific version of an APK to a given path.
@@ -358,7 +376,3 @@ class ApkDownloader_Old:
             fsb.write(res.content)
 
         return f"{path}/{file_name}"
-
-
-
-

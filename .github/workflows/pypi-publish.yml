@@ -11,21 +11,21 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-        
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install build twine
-        
+
     - name: Extract version from tag
       id: get_version
       run: |
@@ -35,20 +35,20 @@ jobs:
         else
           echo "version=dev" >> $GITHUB_OUTPUT
         fi
-        
+
     - name: Update version in pyproject.toml
       if: github.ref_type == 'tag'
       run: |
         sed -i 's/version = ".*"/version = "${{ steps.get_version.outputs.version }}"/' pyproject.toml
-        
+
     - name: Build package
       run: |
         python -m build
-        
+
     - name: Check distribution
       run: |
         python -m twine check dist/*
-        
+
     - name: Publish to Test PyPI (for testing)
       if: github.event_name == 'workflow_dispatch'
       env:
@@ -56,7 +56,7 @@ jobs:
         TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
       run: |
         python -m twine upload --repository testpypi dist/*
-        
+
     - name: Publish to PyPI
       if: github.ref_type == 'tag' || github.event_name == 'release'
       env:
@@ -64,7 +64,7 @@ jobs:
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
         python -m twine upload dist/*
-        
+
     - name: Create GitHub Release
       if: github.ref_type == 'tag'
       uses: softprops/action-gh-release@v1

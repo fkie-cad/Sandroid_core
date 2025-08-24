@@ -5,6 +5,7 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 class Bcolors:
     HEADER = "\033[95m"
     OKBLUE = "\033[94m"
@@ -30,7 +31,9 @@ class DeletedFiles(DataGather):
 
         This method pulls the entire filesystem and compares it to the baseline to identify deleted files.
         """
-        logger.info("Gathering information on deleted files, pulling entire filesystem and comparing to baseline")
+        logger.info(
+            "Gathering information on deleted files, pulling entire filesystem and comparing to baseline"
+        )
 
         deletedFiles = []
         allFiles = Toolbox.fetch_changed_files(fetch_all=True)
@@ -60,11 +63,21 @@ class DeletedFiles(DataGather):
         """
         deletedFiles = self.process_data()
         result = (
-                Bcolors.OKGREEN + Bcolors.BOLD + "\n—————————————————DELETED_FILES=(compared to baseline)—————————————————————————————————————————————————\n" + Bcolors.ENDC + Bcolors.OKGREEN)
+            Bcolors.OKGREEN
+            + Bcolors.BOLD
+            + "\n—————————————————DELETED_FILES=(compared to baseline)—————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+            + Bcolors.OKGREEN
+        )
         for entry in deletedFiles:
-            result = result + Toolbox.highlight_timestamps(entry, Bcolors.OKGREEN) + "\n"
+            result = (
+                result + Toolbox.highlight_timestamps(entry, Bcolors.OKGREEN) + "\n"
+            )
         result = result + (
-                Bcolors.BOLD + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n" + Bcolors.ENDC)
+            Bcolors.BOLD
+            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            + Bcolors.ENDC
+        )
         return result
 
     def process_data(self):
@@ -78,8 +91,11 @@ class DeletedFiles(DataGather):
         noise = Toolbox.noise_files
         for fileList in self.deletedFileListList:
             files_from_all_pulls = list(set(files_from_all_pulls) & set(fileList))
-        files_from_all_pulls = [x for x in files_from_all_pulls if x not in noise or x.endswith(".db") or x.endswith(
-            ".xml")]  # filter noise from files, ignore .db and .xml files
+        files_from_all_pulls = [
+            x
+            for x in files_from_all_pulls
+            if x not in noise or x.endswith(".db") or x.endswith(".xml")
+        ]  # filter noise from files, ignore .db and .xml files
 
         files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

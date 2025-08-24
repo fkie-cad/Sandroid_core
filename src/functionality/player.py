@@ -15,6 +15,7 @@ from src.utils.toolbox import Toolbox
 
 logger = getLogger(__name__)
 
+
 class Player(Functionality):
     """Represents a player functionality for performing actions.
 
@@ -39,8 +40,8 @@ class Player(Functionality):
         start_time = int(round(time.time()))
         logger.info("Start playing")
         last_ts = None
-        #TODO: Improve replay of swiping motions
-        with open(f'{os.getenv("RAW_RESULTS_PATH")}recording.txt') as fp:
+        # TODO: Improve replay of swiping motions
+        with open(f"{os.getenv('RAW_RESULTS_PATH')}recording.txt") as fp:
             for line in fp:
                 match = self.STORE_LINE_RE.match(line.strip())
                 ts, dev, etype, ecode, data = match.groups()
@@ -48,7 +49,7 @@ class Player(Functionality):
 
                 if last_ts and (ts - last_ts) > 0:
                     delta_second = (ts - last_ts) / 1000
-                    #if delta_second > 100: # Skip small sleep times for a slight speed up of swiping motions
+                    # if delta_second > 100: # Skip small sleep times for a slight speed up of swiping motions
                     time.sleep(delta_second)
 
                 last_ts = ts
