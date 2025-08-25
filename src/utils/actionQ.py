@@ -303,7 +303,7 @@ class ActionQ:
         :type char: str
         """
         if Toolbox.args.loglevel != "DEBUG":
-            os.system(
+            os.system(  # nosec S605 # Safe terminal clear command
                 "cls" if os.name == "nt" else "clear"
             )  # Just to keep everything nice and clean
 
@@ -829,7 +829,7 @@ class ActionQ:
                         ]
                         self.logger.info(f"Running command: {' '.join(cmd)}")
 
-                        process = subprocess.Popen(cmd)
+                        process = subprocess.Popen(cmd)  # nosec S603 # Launching objection security tool
                         process.communicate()
 
                         self.logger.info("Objection session ended")

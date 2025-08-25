@@ -26,7 +26,7 @@ class ApkDownloaderTools:
         }
 
     def download_w_progress_bar(self, url: str, file_path):
-        response = requests.get(url=url, stream=True, headers=self.headers)
+        response = requests.get(url=url, stream=True, headers=self.headers, timeout=30)
         try:
             total_size = int(response.headers.get("content-length"))
         except ValueError:
@@ -59,7 +59,7 @@ class ApkDownloader:
 
     def search_for_name(self, package_name, wanted_version=None, limit=10):
         version_url = f"{self.aptoide_web_api_base_url_get_versions}package_name={package_name}/limit={limit}"
-        v_res = requests.get(url=version_url, headers=self.headers)
+        v_res = requests.get(url=version_url, headers=self.headers, timeout=10)
         json_data_list = v_res.json()["list"]
 
         if json_data_list == []:
@@ -102,7 +102,7 @@ class ApkDownloader:
 
     def __get_app_infos_by_app_id(self, app_id: str):
         app_info_url = f"{self.aptoide_web_api_base_url_get_meta}app_id={app_id}"
-        i_res = requests.get(url=app_info_url, headers=self.headers)
+        i_res = requests.get(url=app_info_url, headers=self.headers, timeout=10)
         app_info_json = i_res.json()
 
         app_size = app_info_json["data"]["size"]
@@ -200,7 +200,10 @@ class ApkDownloader_Old:
         :rtype: list of dict
         """
         res = requests.get(
-            f"{cls.search_url}/{name}", headers=cls.headers, allow_redirects=True
+            f"{cls.search_url}/{name}",
+            headers=cls.headers,
+            allow_redirects=True,
+            timeout=10,
         )
         if res.status_code != 200:
             print("ERROR")
@@ -267,7 +270,9 @@ class ApkDownloader_Old:
         """
         apk_url = f"{cls.version_url}{result['package_name']}"
 
-        res = requests.get(apk_url, headers=cls.headers, allow_redirects=True)
+        res = requests.get(
+            apk_url, headers=cls.headers, allow_redirects=True, timeout=30
+        )
         if res.status_code != 200:
             print("ERROR")
 
@@ -286,7 +291,8 @@ class ApkDownloader_Old:
             # no href => probably first row without links
             try:
                 _link = link.get("href")
-            except:
+            except AttributeError:
+                logger.debug("Row has no link element, skipping")
                 continue
 
             if _link.find("/download/") != -1:
@@ -332,7 +338,9 @@ class ApkDownloader_Old:
         :returns: The real download URL if available, None otherwise.
         :rtype: str or None
         """
-        res = requests.get(version_url, headers=cls.headers, allow_redirects=True)
+        res = requests.get(
+            version_url, headers=cls.headers, allow_redirects=True, timeout=10
+        )
         if res.status_code != 200:
             return None
 
@@ -342,7 +350,9 @@ class ApkDownloader_Old:
 
         payload = {"token": token}
 
-        res = requests.post(cls.download_url, data=payload, headers=cls.headers)
+        res = requests.post(
+            cls.download_url, data=payload, headers=cls.headers, timeout=10
+        )
         if res.status_code != 200:
             return None
 
@@ -372,7 +382,7 @@ class ApkDownloader_Old:
 
         with open(f"{path}/{file_name}", "wb") as fsb:
             cls.logger.info(f"Downloading {version['package_name']} to {path}")
-            res = requests.get(download_url)
+            res = requests.get(download_url, timeout=30)
             fsb.write(res.content)
 
         return f"{path}/{file_name}"

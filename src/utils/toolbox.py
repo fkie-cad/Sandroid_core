@@ -531,7 +531,8 @@ class Toolbox:
                 timestamp = words[5] + " " + words[6] + " " + words[7]
                 try:
                     parsed_ts = dp.parse(timestamp)
-                except:
+                except (ValueError, TypeError) as e:
+                    cls.logger.debug(f"Could not parse timestamp '{timestamp}': {e}")
                     continue
                 secondsTimestamp = int(round(parsed_ts.timestamp()))
                 newestchange = max(newestchange, secondsTimestamp)

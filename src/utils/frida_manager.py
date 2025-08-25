@@ -181,7 +181,7 @@ class FridaManager:
         """
         url = self.get_frida_server_for_android_url(version)
         with open(path + "/frida-server", "wb") as fsb:
-            res = requests.get(url)
+            res = requests.get(url, timeout=30)
             fsb.write(res.content)
             if self.verbose:
                 self.logger.info(f"[*] writing frida-server to {path}")
@@ -228,7 +228,7 @@ class FridaManager:
             url = "https://api.github.com/repos/frida/frida/releases/" + version
 
             try:
-                res = requests.get(url)
+                res = requests.get(url, timeout=10)
             except requests.exceptions.RequestException as e:
                 print("[-] error in doing requests: " + e)
                 exit(2)

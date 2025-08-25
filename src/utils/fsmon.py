@@ -79,7 +79,7 @@ class FSMon:
         cls.logger.info(f"FSMon binary not found. Downloading {arch} version...")
         with tempfile.TemporaryDirectory() as tmp_dir:
             local_fsmon_path = os.path.join(tmp_dir, f"fsmon-{arch}")
-            response = requests.get(binary_url, allow_redirects=True)
+            response = requests.get(binary_url, allow_redirects=True, timeout=30)
             with open(local_fsmon_path, "wb") as f:
                 f.write(response.content)
 

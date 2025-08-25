@@ -241,7 +241,7 @@ def main(
 
         # Clear screen if not debug
         if sandroid_config.log_level != "DEBUG":
-            os.system("cls" if os.name == "nt" else "clear")
+            os.system("cls" if os.name == "nt" else "clear")  # nosec S605 # Safe terminal clear command
 
         # Show logo
         pretty_logo()

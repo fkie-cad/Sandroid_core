@@ -383,6 +383,9 @@ exclude = [
 
 # Per-file ignores for deployment scripts
 [tool.ruff.lint.per-file-ignores]
+"set_avd_location.py" = [
+    "S603", "S607", # Subprocess calls for AVD setup are controlled
+]
 "deploy/create_avd.py" = [
     "S603",   # subprocess calls are intentional for SDK management
     "S607",   # partial paths for curl/powershell are system standard
@@ -399,6 +402,35 @@ exclude = [
     "D205",   # Docstring formatting is less critical for deployment scripts
     "E501",   # Long lines acceptable for deployment script output
     "F811",   # Variable redefinition acceptable in exception handling
+]
+
+# Forensic utility files with legitimate security-related subprocess calls
+"src/sandroid/cli.py" = [
+    "S605", # Terminal clear command is safe and controlled
+]
+"src/utils/actionQ.py" = [
+    "S603", "S605", # Objection tool launching and terminal clear commands
+]
+"src/utils/adb.py" = [
+    "S602", "S603", "S607", # ADB subprocess calls with shell=True are necessary for Android forensics
+]
+"src/utils/apk_downloader.py" = [
+    "S603", "S607", # Controlled subprocess calls for APK processing
+]
+"src/utils/emulator.py" = [
+    "S603", "S607", # Emulator management requires subprocess calls
+]
+"src/utils/file_diff.py" = [
+    "S603", "S607", # sqldiff and ccl_abx.py calls are controlled forensic tools
+]
+"src/utils/frida_manager.py" = [
+    "S602", "S603", "S607", # Frida instrumentation requires subprocess calls to external tools
+]
+"src/utils/fsmon.py" = [
+    "S603", # Controlled subprocess calls for filesystem monitoring
+]
+"src/utils/toolbox.py" = [
+    "S324", "S602", "S603", "S607", # MD5 for forensic compatibility, subprocess for system operations
 ]
 
 [tool.ruff.format]

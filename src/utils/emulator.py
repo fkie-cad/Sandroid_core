@@ -2,6 +2,9 @@ import os
 import platform
 import subprocess
 import time
+from logging import getLogger
+
+logger = getLogger(__name__)
 
 
 class Emulator:
@@ -75,8 +78,9 @@ class Emulator:
             )
             if result.returncode == 0 and result.stdout.strip():
                 possible_paths.append(result.stdout.strip())
-        except:
-            pass
+        except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+            logger.debug(f"Could not detect emulator using 'which' command: {e}")
+            # Continue with other detection methods
 
         # Check each path
         for path in possible_paths:
