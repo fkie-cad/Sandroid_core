@@ -1,7 +1,7 @@
 name: Publish to PyPI
 
 on:
-  # Run on any push to main (we'll gate on "about file changed" inside the job),
+  # Run on any push to main (we'll gate on "version file changed" inside the job),
   # and also on tag pushes that match v*.
   push:
     branches: [ main ]
@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          FILE="src/sandroid/__about.py"
+          FILE="src/sandroid/_version.py"
           # Try to fetch a previous commit for diff (shallow clone safety)
           git fetch --no-tags --prune --depth=2 origin "${GITHUB_REF#refs/heads/}:${GITHUB_REF#refs/heads/}" || true
 
@@ -67,20 +67,20 @@ jobs:
             echo "ℹ️  No change in $FILE"
           fi
 
-      - name: Extract package version from __about.py
+      - name: Extract package version from _version.py
         id: get_version
         shell: bash
         run: |
           set -euo pipefail
           VERSION="$(python - <<'PY'
           import re, pathlib
-          p = pathlib.Path('src/sandroid/__about.py')
+          p = pathlib.Path('src/sandroid/_version.py')
           m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", p.read_text())
           print(m.group(1) if m else "", end="")
           PY
           )"
           if [[ -z "$VERSION" ]]; then
-            echo "Could not read __version__ from src/sandroid/__about.py"
+            echo "Could not read __version__ from src/sandroid/_version.py"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -142,7 +142,7 @@ jobs:
         run: python -m twine upload --repository testpypi dist/*
 
       # Publish to PyPI when:
-      # - tag push, OR release published, OR (branch push AND __about.py changed)
+      # - tag push, OR release published, OR (branch push AND _version.py changed)
       # AND the version isn't already on PyPI
       - name: Publish to PyPI
         if: |
