@@ -258,14 +258,14 @@ exclude = [
     "PLR2004","B007","D205","E501","F811",
 ]
 "src/sandroid/cli.py" = ["S605"]
-"src/sandroid/utils/actionQ.py" = ["S603","S605"]
-"src/sandroid/utils/adb.py" = ["S602","S603","S607"]
-"src/sandroid/utils/apk_downloader.py" = ["S603","S607"]
-"src/sandroid/utils/emulator.py" = ["S603","S607"]
-"src/sandroid/utils/file_diff.py" = ["S603","S607"]
-"src/sandroid/utils/frida_manager.py" = ["S602","S603","S607"]
-"src/sandroid/utils/fsmon.py" = ["S603"]
-"src/sandroid/utils/toolbox.py" = ["S324","S602","S603","S607"]
+"src/utils/actionQ.py" = ["S603","S605"]
+"src/utils/adb.py" = ["S602","S603","S607"]
+"src/utils/apk_downloader.py" = ["S603","S607"]
+"src/utils/emulator.py" = ["S603","S607"]
+"src/utils/file_diff.py" = ["S603","S607"]
+"src/utils/frida_manager.py" = ["S602","S603","S607"]
+"src/utils/fsmon.py" = ["S603"]
+"src/utils/toolbox.py" = ["S324","S602","S603","S607"]
 
 [tool.ruff.format]
 quote-style = "double"
