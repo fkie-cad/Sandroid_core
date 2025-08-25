@@ -1,5 +1,6 @@
 # src/sandroid/_about.py
-__version__ = "1.0.3"
+from ._version import __version__
+
 __authors__ = [
     {"name": "Erik Nathrath", "email": "erik.nathrath@fkie.fraunhofer.de"},
     {"name": "Daniel Baier", "email": "daniel.baier@fkie.fraunhofer.de"},

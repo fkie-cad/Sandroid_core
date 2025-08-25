@@ -126,7 +126,7 @@ include = ["sandroid*"]
 sandroid = ["config/*.yaml", "config/*.toml", "templates/*.html"]
 
 [tool.setuptools.dynamic]
-version = { attr = "sandroid.__about__.__version__" }
+version = { attr = "sandroid._version.__version__" }
 
 # ---------------- Development tools ----------------
 
