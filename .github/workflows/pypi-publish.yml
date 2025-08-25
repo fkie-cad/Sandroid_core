@@ -8,6 +8,9 @@ on:
     types: [published]
   workflow_dispatch:  # Allow manual triggering
 
+permissions:
+  contents: write
+
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
@@ -26,20 +29,50 @@ jobs:
         python -m pip install --upgrade pip
         pip install build twine
 
-    - name: Extract version from tag
+    - name: Extract and validate version
       id: get_version
       run: |
+        # Get version from __about.py (single source of truth) without requiring dependencies
+        PACKAGE_VERSION=$(python -c "
+        spec = {}
+        with open('src/sandroid/__about.py') as f:
+            exec(f.read(), spec)
+        print(spec['__version__'])
+        ")
+        echo "package_version=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
+
+        # Extract version from git reference for both tag pushes and releases
         if [[ ${{ github.ref_type }} == "tag" ]]; then
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Direct tag push: v1.0.0
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "📋 Triggered by tag push: v$TAG_VERSION"
+        elif [[ ${{ github.event_name }} == "release" ]]; then
+          # Release published: get version from release tag
+          TAG_VERSION=${{ github.event.release.tag_name }}
+          TAG_VERSION=${TAG_VERSION#v}  # Remove 'v' prefix if present
+          echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "📋 Triggered by release: ${{ github.event.release.tag_name }}"
         else
-          echo "version=dev" >> $GITHUB_OUTPUT
+          # Manual dispatch or other trigger
+          echo "tag_version=dev" >> $GITHUB_OUTPUT
+          echo "📋 Triggered manually - no version validation needed"
+          exit 0
         fi
 
-    - name: Update version in pyproject.toml
-      if: github.ref_type == 'tag'
-      run: |
-        sed -i 's/version = ".*"/version = "${{ steps.get_version.outputs.version }}"/' pyproject.toml
+        # CRITICAL: Validate version match for ALL publishing scenarios
+        if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
+          echo "❌ CRITICAL: Version mismatch detected!"
+          echo "   📦 Package version (__about.py): $PACKAGE_VERSION"
+          echo "   🏷️  Git tag/release version: $TAG_VERSION"
+          echo ""
+          echo "   Fix by either:"
+          echo "   1. Update src/sandroid/__about.py to version $TAG_VERSION, OR"
+          echo "   2. Create new tag/release v$PACKAGE_VERSION"
+          exit 1
+        fi
+
+        echo "✅ Version validation passed: $PACKAGE_VERSION"
 
     - name: Build package
       run: |

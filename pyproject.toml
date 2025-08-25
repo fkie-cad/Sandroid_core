@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Sandroid"
-version = "1.0.0"
+dynamic = ["version"]
 description = "A powerful Android sandbox framework designed to extract forensic artifacts from Android Virtual Devices (AVDs) and support common sandboxing functionalities."
 authors = [
     {name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de"},
@@ -274,6 +274,14 @@ ignore = [
     "D205", # 1 blank line required between summary line and description
     "D415", # First line should end with a period, question mark, or exclamation point
     "S101", # Use of assert detected
+    "S110", # Try-except-pass (acceptable for optional functionality)
+    "S112", # Try-except-continue (acceptable for error handling)
+    "S113", # Requests without timeout (forensic operations need reliability)
+    "S324", # MD5 usage (required for forensic compatibility)
+    "S602", # Subprocess with shell=True (required for ADB/system tools)
+    "S603", # Subprocess call check (controlled usage in forensic context)
+    "S605", # Process with shell (legitimate system operations)
+    "S607", # Partial executable path (system standard tools)
     "T201", # print found
     "T203", # pprint found
     "E501", # Line too long (compatibility with existing codebase)
@@ -460,3 +468,6 @@ skip_tests = ["B324"]
 # Deployment script needs subprocess, urllib, and process execution
 paths = ["deploy/create_avd.py"]
 skip_tests = ["B404", "B603", "B607", "B310", "B110"]
+
+[tool.setuptools.dynamic]
+version = {attr = "sandroid.__about.__version__"}
