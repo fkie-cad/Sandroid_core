@@ -72,13 +72,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(python - <<'PY'
-          import re, pathlib
-          p = pathlib.Path('src/sandroid/_version.py')
-          m = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", p.read_text())
-          print(m.group(1) if m else "", end="")
-          PY
-          )"
+          VERSION=$(python -c "import re,pathlib; p=pathlib.Path('src/sandroid/_version.py'); m=re.search(r'__version__\\s*=\\s*[\"'\''']([^\"'\'']+)[\"'\''']', p.read_text()); print(m.group(1) if m else '', end='')")
           if [[ -z "$VERSION" ]]; then
             echo "Could not read __version__ from src/sandroid/_version.py"
             exit 1
@@ -110,18 +104,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXISTS=$(python - <<'PY'
-          import json, os, urllib.request
-          name = os.environ["PROJECT_NAME"]
-          ver  = os.environ["VERSION"]
-          try:
-              with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/json", timeout=10) as r:
-                  data = json.load(r)
-              print("true" if ver in (data.get("releases") or {}) else "false")
-          except Exception:
-              print("false")
-          PY
-          )
+          EXISTS=$(python -c "import json,os,urllib.request; name=os.environ['PROJECT_NAME']; ver=os.environ['VERSION']; exec('try:\n with urllib.request.urlopen(f\"https://pypi.org/pypi/{name}/json\", timeout=10) as r:\n  data=json.load(r)\n print(\"true\" if ver in (data.get(\"releases\") or {}) else \"false\")\nexcept:\n print(\"false\")')")
           echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
           if [[ "$EXISTS" == "true" ]]; then
             echo "⚠️ Version $VERSION already on PyPI. Build will continue, publish will be skipped."
