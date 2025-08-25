@@ -4,7 +4,7 @@
 </div>
 
 # Sandroid Framework
-![version](https://img.shields.io/badge/version-1.0.0.3-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
+![version](https://img.shields.io/badge/version-1.0.0.4-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
 [![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
 [![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml)
 
