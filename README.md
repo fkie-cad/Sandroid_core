@@ -1,10 +1,10 @@
 <div align="center">
-    <img src="https://github.com/fkie-cad/Sandroid_core/blob/main/assets/sandroid_logo.png" alt="Sandroid Logo" width="200"/>
+    <img src="https://github.com/fkie-cad/Sandroid_core/blob/main/assets/sandroid_logo.png" alt="Sandroid Logo" width="180"/>
     <p></p><strong>Android Sandbox for Automated Forensic, Malware, and Security Analysis</strong></div></p>
 </div>
 
 # Sandroid Framework
-![version](https://img.shields.io/badge/version-1.0.0.2-blue) [![PyPI version](https://badge.fury.io/py/Sandroid@2x.png)](https://badge.fury.io/py/Sandroid)
+![version](https://img.shields.io/badge/version-1.0.0.2-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.png)](https://badge.fury.io/py/Sandroid)
 [![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
 [![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/pypi-publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflowspypi-publish.yml)
 
