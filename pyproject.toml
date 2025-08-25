@@ -5,20 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "Sandroid"
 dynamic = ["version"]
-description = "A powerful Android sandbox framework designed to extract forensic artifacts from Android Virtual Devices (AVDs) and support common sandboxing functionalities."
+description = "An Android sandbox for automated Forensic, Malware, and Security Analysis."
+readme = { file = "README.md", content-type = "text/markdown" }
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
 authors = [
-    {name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de"},
-    {name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de"},
-    {name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de"}
+    { name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de" },
+    { name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de" },
+    { name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de" }
 ]
 maintainers = [
-    {name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de"},
-    {name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de"},
-    {name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de"}
+    { name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de" },
+    { name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de" },
+    { name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de" }
 ]
-readme = "README.md"
-license = {file = "LICENSE"}
-keywords = ["android", "forensics", "security", "malware", "analysis", "frida", "emulator"]
+
+keywords = [
+    "android", "forensics", "security", "malware", "analysis", "frida", "emulator"
+]
+
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -28,26 +34,23 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Security",
     "Topic :: Software Development :: Testing",
     "Topic :: System :: Monitoring",
+    "Natural Language :: English",
 ]
-requires-python = ">=3.10"
 
-# Core dependencies
+# Core runtime dependencies (avoid pinning requests' transitive deps)
 dependencies = [
     "beautifulsoup4>=4.12.2",
-    "bs4>=0.0.1",
-    "certifi>=2023.11.17",
-    "charset-normalizer>=3.3.2",
     "click>=8.1.7",
     "colorama>=0.4.6",
     "frida>=16.1.10",
     "frida-tools>=12.3.0,<14.0.0",
-    "idna>=3.6",
     "lxml>=4.9.4",
     "prompt-toolkit>=3.0.43",
     "Pygments>=2.17.2",
@@ -55,9 +58,6 @@ dependencies = [
     "requests>=2.31.0",
     "scapy>=2.5.0",
     "six>=1.16.0",
-    "soupsieve>=2.5",
-    "urllib3>=2.1.0",
-    "wcwidth>=0.2.12",
     "xmldiff>=2.7.0",
     "tqdm>=4.64.0",
     "reportlab>=4.0.0",
@@ -77,7 +77,6 @@ dependencies = [
     "rich>=13.0.0",
 ]
 
-# Optional dependencies for different use cases
 [project.optional-dependencies]
 ai = [
     "google-generativeai>=0.3.0",
@@ -101,20 +100,23 @@ docs = [
     "myst-parser>=1.0.0",
 ]
 
-# Entry points for CLI commands
 [project.scripts]
 sandroid = "sandroid.cli:main"
 sandroid-config = "sandroid.config.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/fkie-cad/Sandroid_core"
-Documentation = "https://https://fkie-cad.github.io/Sandroid_core/"
-Repository = "https://github.com/fkie-cad/Sandroid_core.git"
+Documentation = "https://fkie-cad.github.io/Sandroid_core/"
+Repository = "https://github.com/fkie-cad/Sandroid_core"
 "Bug Tracker" = "https://github.com/fkie-cad/Sandroid_core/issues"
+"Changelog" = "https://github.com/fkie-cad/Sandroid_core/blob/main/CHANGELOG.md"
+"Authors" = "https://github.com/fkie-cad/Sandroid_core/blob/main/AUTHORS.md"
 
-# Setuptools configuration
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
+include-package-data = true
+# optionally:
+# license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -123,14 +125,17 @@ include = ["sandroid*"]
 [tool.setuptools.package-data]
 sandroid = ["config/*.yaml", "config/*.toml", "templates/*.html"]
 
-# Development tools configuration
+[tool.setuptools.dynamic]
+version = { attr = "sandroid.__about__.__version__" }
+
+# ---------------- Development tools ----------------
+
 [tool.black]
 line-length = 88
 target-version = ["py310"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
-    # directories
     \.eggs
   | \.git
   | \.hg
@@ -161,11 +166,9 @@ python_functions = ["test_*"]
 
 [tool.mypy]
 python_version = "3.10"
-# Extremely permissive configuration for legacy codebase - disable all checking
 ignore_errors = true
 ignore_missing_imports = true
 follow_imports = "skip"
-# Disable all warnings and checks
 warn_return_any = false
 warn_unused_configs = false
 disallow_any_unimported = false
@@ -185,10 +188,7 @@ warn_unused_ignores = false
 warn_no_return = false
 warn_unreachable = false
 strict_equality = false
-# Skip error reporting entirely
 show_error_codes = false
-
-# All errors are ignored globally, overrides not needed
 
 [tool.coverage.run]
 source = ["src/sandroid"]
@@ -208,230 +208,64 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-# Ruff configuration
 [tool.ruff]
 target-version = "py310"
 line-length = 88
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "D",   # pydocstyle
-    "UP",  # pyupgrade
-    "YTT", # flake8-2020
-    "S",   # bandit
-    "BLE", # flake8-blind-except
-    "FBT", # flake8-boolean-trap
-    "B",   # flake8-bugbear
-    "A",   # flake8-builtins
-    "COM", # flake8-commas
-    "C4",  # flake8-comprehensions
-    "DTZ", # flake8-datetimez
-    "T10", # flake8-debugger
-    "EM",  # flake8-errmsg
-    "EXE", # flake8-executable
-    "FA",  # flake8-future-annotations
-    "ISC", # flake8-implicit-str-concat
-    "ICN", # flake8-import-conventions
-    "G",   # flake8-logging-format
-    "INP", # flake8-no-pep420
-    "PIE", # flake8-pie
-    "T20", # flake8-print
-    "PYI", # flake8-pyi
-    "PT",  # flake8-pytest-style
-    "Q",   # flake8-quotes
-    "RSE", # flake8-raise
-    "RET", # flake8-return
-    "SLF", # flake8-self
-    "SLOT", # flake8-slots
-    "SIM", # flake8-simplify
-    "TID", # flake8-tidy-imports
-    "TCH", # flake8-type-checking
-    "INT", # flake8-gettext
-    "ARG", # flake8-unused-arguments
-    "PTH", # flake8-use-pathlib
-    "ERA", # eradicate
-    "PD",  # pandas-vet
-    "PGH", # pygrep-hooks
-    "PL",  # pylint
-    "TRY", # tryceratops
-    "FLY", # flynt
-    "NPY", # numpy
-    "RUF", # ruff-specific rules
+    "E","W","F","I","N","D","UP","YTT","S","BLE","FBT","B","A","COM","C4","DTZ",
+    "T10","EM","EXE","FA","ISC","ICN","G","INP","PIE","T20","PYI","PT","Q","RSE",
+    "RET","SLF","SLOT","SIM","TID","TCH","INT","ARG","PTH","ERA","PD","PGH","PL",
+    "TRY","FLY","NPY","RUF",
 ]
 ignore = [
-    "D100", # Missing docstring in public module
-    "D101", # Missing docstring in public class
-    "D102", # Missing docstring in public method
-    "D103", # Missing docstring in public function
-    "D104", # Missing docstring in public package
-    "D105", # Missing docstring in magic method
-    "D107", # Missing docstring in __init__
-    "D205", # 1 blank line required between summary line and description
-    "D415", # First line should end with a period, question mark, or exclamation point
-    "S101", # Use of assert detected
-    "S110", # Try-except-pass (acceptable for optional functionality)
-    "S112", # Try-except-continue (acceptable for error handling)
-    "S113", # Requests without timeout (forensic operations need reliability)
-    "S324", # MD5 usage (required for forensic compatibility)
-    "S602", # Subprocess with shell=True (required for ADB/system tools)
-    "S603", # Subprocess call check (controlled usage in forensic context)
-    "S605", # Process with shell (legitimate system operations)
-    "S607", # Partial executable path (system standard tools)
-    "T201", # print found
-    "T203", # pprint found
-    "E501", # Line too long (compatibility with existing codebase)
-    "E402", # Module level import not at top of file (needed for toolbox init)
-    "E722", # Do not use bare except (legacy exception handling)
-    "F841", # Local variable assigned but never used
-    "G003", # Logging % formatting (legacy logging style)
-    "G004", # Logging f-string format (legacy logging style)
-    "N802", # Function name should be lowercase (legacy naming)
-    "N806", # Variable name should be lowercase (legacy naming)
-    "N815", # Variable name mixed case (legacy naming)
-    "A001", # Variable shadows Python builtin (legacy variable names)
-    "A002", # Argument shadows Python builtin (legacy parameter names)
-    "B007", # Loop control variable not used within loop body
-    "S113", # Request timeout not specified (legacy request handling)
-    "S324", # Use of insecure MD5 hash (needed for forensic compatibility)
-    "S602", # subprocess call with shell=True (legitimate system calls)
-    "S603", # subprocess call without shell check (legitimate controlled usage)
-    "S605", # Start process with shell (legitimate system operations)
-    "S607", # Start process with partial path (system standard tools)
-    "PLR0913", # Too many arguments to function call
-    "PLR0912", # Too many branches
-    "PLR0915", # Too many statements
-    "PLR1722", # Use sys.exit() instead of exit()
-    "PLR2004", # Magic value used in comparison (legacy constants)
-    "SIM103", # Return condition directly (legacy control flow)
-    "SIM108", # Use ternary operator (legacy if-else style)
-    "SIM115", # Use context manager for opening files (legacy file handling)
-    "PTH100", "PTH104", "PTH110", "PTH111", "PTH118", "PTH123", # Path modernization (gradual migration)
-    "FBT002", # Boolean default positional argument (legacy function signatures)
-    "RUF005", # Consider unpacking instead of concatenation (legacy list operations)
-    "RUF012", # Mutable class attributes should use ClassVar (legacy class design)
-    "TRY300", # Consider moving to else block (legacy exception handling)
-    "TRY400", # Use logging.exception instead of logging.error (legacy logging)
-    "ERA001", # Commented-out code (legacy debugging code)
-    "D419", # Empty docstring (legacy documentation)
-    "E711", "E712", # None/bool comparison style (legacy comparison patterns)
-    "PLC0415", # Import should be at top-level (legacy conditional imports)
-    "BLE001", # Do not catch blind exception (legacy exception handling)
-    "B025", # Duplicate try-except blocks (legacy exception handling)
-    "TRY003", # Avoid specifying long messages outside the exception class (legacy exceptions)
-    "SLF001", # Private member accessed (legacy encapsulation patterns)
-    "EM101", "EM102", # Exception message formatting (legacy exception handling)
-    "RET504", # Unnecessary assignment before return (legacy return patterns)
-    "FBT001", # Boolean type hint positional argument (legacy function signatures)
-    "PTH103", "PTH107", "PTH113", "PTH119", "PTH120", "PTH208", # Additional path modernization
-    "PIE810", # Multiple starts-ends-with calls (legacy string checking)
-    "UP031", # Printf string formatting (legacy string formatting)
-    "F401", # Unused import (legacy imports)
-    "RUF046", # Unnecessary cast to int (legacy type handling)
-    "SIM118", # Use dict.get() instead of conditional (legacy dict access)
-    "DTZ005", # Call datetime.now() without timezone (legacy datetime usage)
-    "N803", "N805", "N801", "N813", "N817", "N999", # Naming convention issues (legacy naming)
-    "ARG001", "ARG002", "ARG003", "ARG004", # Unused function arguments (legacy interfaces)
-    "PLW0602", "PLW0603", "PLW2901", "PLR0911", # Pylint warnings (legacy code patterns)
-    "UP022", "UP038", # pyupgrade modernization (gradual migration)
-    "SIM102", "SIM105", "SIM113", "SIM201", # Code simplification suggestions (legacy patterns)
-    "B015", "B904", # Exception handling patterns (legacy error handling)
-    "TRY002", "TRY301", # Exception handling recommendations (legacy patterns)
-    "PTH109", "PTH112", # Additional path modernization (gradual migration)
-    "RUF013", "RUF015", # Ruff-specific recommendations (gradual adoption)
-    "PLC0206", # Dictionary iteration patterns (legacy code style)
-    "PLR1714", # Comparison simplification (legacy comparison patterns)
-    "PIE794", # Multiple starts/ends with (legacy string handling)
-    "ICN001", # Import conventions (legacy import style)
-    "S112", # Request without timeout continuation (legacy error handling)
-    "EXE001", # Shebang presence (deployment scripts)
-    "E741", # Ambiguous variable names (legacy variable naming)
-    "S110", # Try-except-pass (acceptable in deployment/optional functionality)
-    "COM812", # Missing trailing comma (conflicts with formatter)
-    "ISC001", # Implicitly concatenated string literals (conflicts with formatter)
+    "D100","D101","D102","D103","D104","D105","D107","D205","D415",
+    "S101","S110","S112","S113","S324","S602","S603","S605","S607",
+    "T201","T203","E501","E402","E722","F841","G003","G004",
+    "N802","N806","N815","A001","A002","B007",
+    "PLR0913","PLR0912","PLR0915","PLR1722","PLR2004",
+    "SIM103","SIM108","SIM115",
+    "PTH100","PTH104","PTH110","PTH111","PTH118","PTH123",
+    "FBT002","RUF005","RUF012","TRY300","TRY400","ERA001","D419",
+    "E711","E712","PLC0415","BLE001","B025","TRY003","SLF001",
+    "EM101","EM102","RET504","FBT001",
+    "PTH103","PTH107","PTH113","PTH119","PTH120","PTH208",
+    "PIE810","UP031","F401","RUF046","SIM118","DTZ005",
+    "N803","N805","N801","N813","N817","N999",
+    "ARG001","ARG002","ARG003","ARG004",
+    "PLW0602","PLW0603","PLW2901","PLR0911",
+    "UP022","UP038","SIM102","SIM105","SIM113","SIM201",
+    "B015","B904","TRY002","TRY301",
+    "PTH109","PTH112","RUF013","RUF015",
+    "PLC0206","PLR1714","PIE794","ICN001","S112",
+    "EXE001","E741","S110","COM812","ISC001",
 ]
 
 exclude = [
-    ".bzr",
-    ".direnv",
-    ".eggs",
-    ".git",
-    ".git-rewrite",
-    ".hg",
-    ".mypy_cache",
-    ".nox",
-    ".pants.d",
-    ".pytype",
-    ".ruff_cache",
-    ".svn",
-    ".tox",
-    ".venv",
-    "__pypackages__",
-    "_build",
-    "buck-out",
-    "build",
-    "dist",
-    "node_modules",
-    "venv",
-    "env",
-    "ground_truth_src",
+    ".bzr",".direnv",".eggs",".git",".git-rewrite",".hg",".mypy_cache",
+    ".nox",".pants.d",".pytype",".ruff_cache",".svn",".tox",".venv",
+    "__pypackages__","_build","buck-out","build","dist","node_modules",
+    "venv","env","ground_truth_src",
 ]
 
-# Per-file ignores for deployment scripts
 [tool.ruff.lint.per-file-ignores]
-"set_avd_location.py" = [
-    "S603", "S607", # Subprocess calls for AVD setup are controlled
-]
+"set_avd_location.py" = ["S603","S607"]
 "deploy/create_avd.py" = [
-    "S603",   # subprocess calls are intentional for SDK management
-    "S607",   # partial paths for curl/powershell are system standard
-    "S310",   # URL open is for legitimate Android SDK downloads
-    "S110",   # try-except-pass is acceptable for optional functionality
-    "BLE001", # General exceptions acceptable in deployment scripts
-    "TRY300", # Early returns are preferred style in this script
-    "FBT002", # Boolean arguments are clear in this context
-    "PLC0415", # certifi import is conditional and acceptable
-    "PTH110", "PTH111", "PTH112", "PTH113", "PTH118", "PTH123", "PTH107", # Path modernization can be gradual
-    "PTH100", "PTH116", "PTH119", "PTH120", "PTH202", "PTH208", # Path modernization can be gradual
-    "PLR2004", # Magic numbers (API levels) are clear in context
-    "B007",   # Unused loop variables are acceptable
-    "D205",   # Docstring formatting is less critical for deployment scripts
-    "E501",   # Long lines acceptable for deployment script output
-    "F811",   # Variable redefinition acceptable in exception handling
+    "S603","S607","S310","S110","BLE001","TRY300","FBT002","PLC0415",
+    "PTH110","PTH111","PTH112","PTH113","PTH118","PTH123","PTH107",
+    "PTH100","PTH116","PTH119","PTH120","PTH202","PTH208",
+    "PLR2004","B007","D205","E501","F811",
 ]
-
-# Forensic utility files with legitimate security-related subprocess calls
-"src/sandroid/cli.py" = [
-    "S605", # Terminal clear command is safe and controlled
-]
-"src/utils/actionQ.py" = [
-    "S603", "S605", # Objection tool launching and terminal clear commands
-]
-"src/utils/adb.py" = [
-    "S602", "S603", "S607", # ADB subprocess calls with shell=True are necessary for Android forensics
-]
-"src/utils/apk_downloader.py" = [
-    "S603", "S607", # Controlled subprocess calls for APK processing
-]
-"src/utils/emulator.py" = [
-    "S603", "S607", # Emulator management requires subprocess calls
-]
-"src/utils/file_diff.py" = [
-    "S603", "S607", # sqldiff and ccl_abx.py calls are controlled forensic tools
-]
-"src/utils/frida_manager.py" = [
-    "S602", "S603", "S607", # Frida instrumentation requires subprocess calls to external tools
-]
-"src/utils/fsmon.py" = [
-    "S603", # Controlled subprocess calls for filesystem monitoring
-]
-"src/utils/toolbox.py" = [
-    "S324", "S602", "S603", "S607", # MD5 for forensic compatibility, subprocess for system operations
-]
+"src/sandroid/cli.py" = ["S605"]
+"src/sandroid/utils/actionQ.py" = ["S603","S605"]
+"src/sandroid/utils/adb.py" = ["S602","S603","S607"]
+"src/sandroid/utils/apk_downloader.py" = ["S603","S607"]
+"src/sandroid/utils/emulator.py" = ["S603","S607"]
+"src/sandroid/utils/file_diff.py" = ["S603","S607"]
+"src/sandroid/utils/frida_manager.py" = ["S602","S603","S607"]
+"src/sandroid/utils/fsmon.py" = ["S603"]
+"src/sandroid/utils/toolbox.py" = ["S324","S602","S603","S607"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -457,49 +291,29 @@ max-branches = 15
 max-returns = 8
 max-statements = 60
 
-# Bandit configuration for security linting
 [tool.bandit]
 exclude_dirs = ["tests", "ground_truth_src"]
 skips = [
-    "B605",  # Allow os.system for terminal screen clearing
-    "B324",  # Allow MD5 for forensic compatibility
-    "B113",  # Allow requests without timeout for forensic operations
-    "B404",  # Allow subprocess module for system administration
-    "B405",  # Allow XML parsing for forensic Android XML analysis
-    "B410",  # Allow lxml.etree for forensic XML diff analysis
-    "B602",  # Allow subprocess with shell=True for system tools
-    "B603",  # Allow subprocess without shell check for controlled usage
-    "B607",  # Allow partial executable paths for system standard tools
-    "B110",  # Allow try-except-pass for optional functionality
-    "B112",  # Allow try-except-continue for error handling
-    "B311",  # Allow standard random for non-cryptographic sampling
+    "B605","B324","B113","B404","B405","B410",
+    "B602","B603","B607","B110","B112","B311",
 ]
 
-# Per-file exclusions for legitimate tool usage
 [[tool.bandit.overrides]]
-# Allow shell=True for legitimate ADB and emulator commands
-paths = ["src/utils/adb.py", "src/utils/toolbox.py", "src/utils/frida_manager.py"]
+paths = ["src/sandroid/utils/adb.py", "src/sandroid/utils/toolbox.py", "src/sandroid/utils/frida_manager.py"]
 skip_tests = ["B602"]
 
 [[tool.bandit.overrides]]
-# Forensic tools need HTTP requests without timeouts for operations
-paths = ["src/utils/apk_downloader.py", "src/utils/frida_manager.py", "src/utils/fsmon.py"]
+paths = ["src/sandroid/utils/apk_downloader.py", "src/sandroid/utils/frida_manager.py", "src/sandroid/utils/fsmon.py"]
 skip_tests = ["B113"]
 
 [[tool.bandit.overrides]]
-# Terminal screen clearing is safe
-paths = ["src/sandroid/cli.py", "src/utils/actionQ.py"]
+paths = ["src/sandroid/cli.py", "src/sandroid/utils/actionQ.py"]
 skip_tests = ["B605"]
 
 [[tool.bandit.overrides]]
-# Forensic tools need MD5 for compatibility
-paths = ["src/utils/toolbox.py"]
+paths = ["src/sandroid/utils/toolbox.py"]
 skip_tests = ["B324"]
 
 [[tool.bandit.overrides]]
-# Deployment script needs subprocess, urllib, and process execution
 paths = ["deploy/create_avd.py"]
 skip_tests = ["B404", "B603", "B607", "B310", "B110"]
-
-[tool.setuptools.dynamic]
-version = {attr = "sandroid.__about.__version__"}

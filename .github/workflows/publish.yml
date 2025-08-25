@@ -1,0 +1,132 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'               # tag-based releases still supported (e.g., v1.2.3)
+    paths:
+      - 'src/sandroid/__about__.py'  # publish when version file changes
+  release:
+    types: [published]
+  workflow_dispatch:        # manual runs (uses Test PyPI step)
+
+permissions:
+  contents: write           # needed if you create a GitHub release from a tag
+
+concurrency:
+  group: pypi-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Extract package version from src/sandroid/__about__.py
+        id: get_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(python -c "
+          import re, pathlib
+          p = pathlib.Path('src/sandroid/__about__.py')
+          m = re.search(r'__version__\s*=\s*[\"'\''']([^\"'\'']+)[\"'\''']', p.read_text())
+          print(m.group(1) if m else '', end='')
+          ")
+          if [[ -z "$VERSION" ]]; then
+            echo "Could not read __version__ from src/sandroid/__about__.py"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "📦 Package version: $VERSION"
+
+      - name: If tag/release, validate tag matches package version
+        if: github.ref_type == 'tag' || github.event_name == 'release'
+        shell: bash
+        run: |
+          PKG_VERSION="${{ steps.get_version.outputs.version }}"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            TAG_VERSION="${{ github.event.release.tag_name }}"
+            TAG_VERSION="${TAG_VERSION#v}"
+          fi
+          echo "🏷️ Tag version: $TAG_VERSION"
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "❌ Version mismatch: tag ($TAG_VERSION) != package ($PKG_VERSION)"
+            exit 1
+          fi
+          echo "✅ Tag matches package version"
+
+      - name: Check if version already exists on PyPI
+        id: pypi_check
+        env:
+          PROJECT_NAME: Sandroid
+          VERSION: ${{ steps.get_version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXISTS="false"
+          PYPI_URL="https://pypi.org/pypi/${PROJECT_NAME}/json"
+          if python -c "import json,os,urllib.request; name=os.environ['PROJECT_NAME']; ver=os.environ['VERSION']; exec('try:\n with urllib.request.urlopen(f\"https://pypi.org/pypi/{name}/json\", timeout=10) as r:\n  data=json.load(r)\n exists=ver in (data.get(\"releases\") or {})\n print(\"exists=\"+(\"true\" if exists else \"false\"))\nexcept:\n print(\"exists=false\")')"
+          then
+            :
+          fi | tee /tmp/pypi_exists
+          EXISTS="$(grep -o 'exists=.*' /tmp/pypi_exists | cut -d= -f2)"
+          echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
+          if [[ "$EXISTS" == "true" ]]; then
+            echo "⚠️ Version $VERSION already on PyPI. Build will continue, publish will be skipped."
+          fi
+
+      - name: Build package
+        run: python -m build
+
+      - name: Check distribution
+        run: python -m twine check dist/*
+
+      # Manual test uploads (when you click "Run workflow")
+      - name: Publish to Test PyPI
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: python -m twine upload --repository testpypi dist/*
+
+      # Publish to PyPI when:
+      # - tag push (v*), OR release published, OR the version file changed on a push,
+      # AND the version doesn't already exist on PyPI
+      - name: Publish to PyPI
+        if: |
+          steps.pypi_check.outputs.exists != 'true' && (
+            (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+            github.event_name == 'release' ||
+            (github.event_name == 'push' && endsWith(github.ref, '/heads/' + github.ref_name)) # about.py path trigger
+          )
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload dist/*
+
+      - name: Create GitHub Release (for tag pushes)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
