@@ -1,0 +1,125 @@
+sandroid.core package
+=====================
+
+Submodules
+----------
+
+sandroid.core.AI\_processing module
+-----------------------------------
+
+.. automodule:: sandroid.core.AI_processing
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.CustomLoggerFormatter module
+------------------------------------------
+
+.. automodule:: sandroid.core.CustomLoggerFormatter
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.actionQ module
+----------------------------
+
+.. automodule:: sandroid.core.actionQ
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.adb module
+------------------------
+
+.. automodule:: sandroid.core.adb
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.apk\_downloader module
+------------------------------------
+
+.. automodule:: sandroid.core.apk_downloader
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.ccl\_abx module
+-----------------------------
+
+.. automodule:: sandroid.core.ccl_abx
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.emulator module
+-----------------------------
+
+.. automodule:: sandroid.core.emulator
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.file\_diff module
+-------------------------------
+
+.. automodule:: sandroid.core.file_diff
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.frida\_manager module
+-----------------------------------
+
+.. automodule:: sandroid.core.frida_manager
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.fridump module
+----------------------------
+
+.. automodule:: sandroid.core.fridump
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.fsmon module
+--------------------------
+
+.. automodule:: sandroid.core.fsmon
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.pdf\_report module
+--------------------------------
+
+.. automodule:: sandroid.core.pdf_report
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.timeline\_generator module
+----------------------------------------
+
+.. automodule:: sandroid.core.timeline_generator
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.core.toolbox module
+----------------------------
+
+.. automodule:: sandroid.core.toolbox
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Module contents
+---------------
+
+.. automodule:: sandroid.core
+   :members:
+   :undoc-members:
+   :show-inheritance:

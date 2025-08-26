@@ -1,0 +1,53 @@
+sandroid.features package
+=========================
+
+Submodules
+----------
+
+sandroid.features.functionality module
+--------------------------------------
+
+.. automodule:: sandroid.features.functionality
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.features.player module
+-------------------------------
+
+.. automodule:: sandroid.features.player
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.features.recorder module
+---------------------------------
+
+.. automodule:: sandroid.features.recorder
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.features.screenshot module
+-----------------------------------
+
+.. automodule:: sandroid.features.screenshot
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+sandroid.features.trigdroid module
+----------------------------------
+
+.. automodule:: sandroid.features.trigdroid
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Module contents
+---------------
+
+.. automodule:: sandroid.features
+   :members:
+   :undoc-members:
+   :show-inheritance:

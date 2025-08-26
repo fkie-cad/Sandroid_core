@@ -7,7 +7,10 @@ Subpackages
 .. toctree::
    :maxdepth: 4
 
+   sandroid.analysis
    sandroid.config
+   sandroid.core
+   sandroid.features
 
 Submodules
 ----------
