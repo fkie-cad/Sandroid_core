@@ -259,6 +259,12 @@ exclude = [
 ]
 "src/sandroid/cli.py" = ["S605"]
 "src/utils/actionQ.py" = ["S603","S605"]
+
+# Compatibility alias files - star imports are intentional for transparent re-export
+"src/utils/*.py" = ["F403"]
+"src/datagather/*.py" = ["F403"]
+"src/functionality/*.py" = ["F403"]
+"src/sandroid/core/__init__.py" = ["F403", "F405"]
 "src/utils/adb.py" = ["S602","S603","S607"]
 "src/utils/apk_downloader.py" = ["S603","S607"]
 "src/utils/emulator.py" = ["S603","S607"]
