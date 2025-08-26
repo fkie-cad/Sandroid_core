@@ -184,17 +184,90 @@ def main(
     # Lazy imports - only load heavy modules when actually running (not for --version)
     from .config import ConfigLoader, SandroidConfig
 
-    # Import existing modules (these will need to be refactored)
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from src.utils.actionQ import ActionQ
-    from src.utils.adb import Adb
-    from src.utils.AI_processing import AIProcessing
-    from src.utils.pdf_report import PDFReport
-    from src.utils.toolbox import Toolbox
+    # Check if user has run sandroid-config init
+    try:
+        loader = ConfigLoader()
+        # Try to load config to see if it's been initialized
+        config_files = loader._config_files
+        if not config_files:
+            console.print("[red]Error: No configuration found!")
+            console.print(
+                "[yellow]Please run 'sandroid-config init' first to set up Sandroid."
+            )
+            console.print("This will create the necessary configuration files.")
+            sys.exit(1)
+    except Exception:
+        console.print("[red]Error: Configuration system not available!")
+        console.print(
+            "[yellow]Please run 'sandroid-config init' first to set up Sandroid."
+        )
+        sys.exit(1)
+
+    # Import legacy modules with fallback for different installation modes
+    try:
+        # Try development mode imports first (when working from git repo)
+        repo_root = Path(__file__).parent.parent.parent
+        if (repo_root / "src" / "utils").exists():
+            sys.path.insert(0, str(repo_root))
+
+            # Import Toolbox first and initialize it to avoid import-time dependency issues
+            # Create a mock args object to satisfy import-time dependencies
+            import argparse
+
+            from src.utils.toolbox import Toolbox
+
+            mock_args = argparse.Namespace()
+            mock_args.screenshot = screenshot  # From CLI args
+            mock_args.number_of_runs = number if number else 2
+            mock_args.avoid_strong_noise_filter = avoid_strong_noise_filter
+            mock_args.network = network
+            mock_args.show_deleted = show_deleted
+            mock_args.no_processes = no_processes
+            mock_args.sockets = sockets
+            mock_args.trigdroid = trigdroid
+            mock_args.trigdroid_ccf = trigdroid_ccf
+            mock_args.hash = locals()["hash"]  # Avoid collision with builtin hash()
+            mock_args.apk = apk
+            mock_args.degrade_network = degrade_network
+            mock_args.whitelist = whitelist
+            mock_args.file = file if file else "sandroid.json"
+            mock_args.loglevel = loglevel if loglevel else "INFO"
+            mock_args.ai = ai
+            mock_args.report = report
+
+            # Set the mock args to satisfy import dependencies
+            Toolbox.args = mock_args
+
+            # Now import the other modules
+            from src.utils.actionQ import ActionQ
+            from src.utils.adb import Adb
+            from src.utils.AI_processing import AIProcessing
+            from src.utils.pdf_report import PDFReport
+        else:
+            # Installed mode - legacy modules not available yet
+            console.print(
+                "[red]Error: Legacy analysis modules not available in this installation!"
+            )
+            console.print("[yellow]The new modern CLI is not yet feature-complete.")
+            console.print(
+                "For full functionality, please use the development installation:"
+            )
+            console.print("  git clone <repository>")
+            console.print("  ./install-requirements.sh")
+            console.print("  ./sandroid")
+            console.print("")
+            console.print("Alternatively, use individual commands like:")
+            console.print("  sandroid --version")
+            console.print("  sandroid-config --help")
+            sys.exit(1)
+    except (ImportError, AttributeError) as e:
+        console.print(f"[red]Error: Could not import legacy modules: {e}")
+        console.print("[yellow]Please ensure you have a complete installation.")
+        console.print("Try reinstalling with: pip install --upgrade sandroid")
+        sys.exit(1)
 
     try:
-        # Load configuration
-        loader = ConfigLoader()
+        # We already have the loader from the config check above
 
         # Build CLI overrides
         cli_overrides = {}

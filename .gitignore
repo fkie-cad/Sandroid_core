@@ -15,6 +15,10 @@ obj/
 apk_api_key_extractor/
 secret-finder/
 research/
+
+# sandroid files
+results/
+
 temp_analysis/
 
 # misc

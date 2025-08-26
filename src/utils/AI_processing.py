@@ -2,7 +2,14 @@ import os
 import time
 from logging import getLogger
 
-from google import genai
+# Optional dependency - make Google GenAI optional
+try:
+    from google import genai
+
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    GENAI_AVAILABLE = False
 
 from src.utils.toolbox import Toolbox
 
@@ -11,6 +18,12 @@ logger = getLogger(__name__)
 
 def get_genai_client():
     """Get Google GenAI client with API key from configuration or environment."""
+    if not GENAI_AVAILABLE:
+        raise ImportError(
+            "Google GenAI is not available. To use AI features, install with: "
+            "pip install sandroid[ai] or pip install google-genai"
+        )
+
     # First try to get from Toolbox config (if available)
     if hasattr(Toolbox, "config") and Toolbox.config:
         api_key = (
