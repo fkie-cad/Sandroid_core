@@ -4,21 +4,27 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 from colorama import Fore, Style
 from rich.console import Console
 from rich.logging import RichHandler
 
-from .config import ConfigLoader, SandroidConfig
+# Import version first (no dependencies)
+from ._version import __version__
 
-# Import existing modules (these will need to be refactored)
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from src.utils.actionQ import ActionQ
-from src.utils.adb import Adb
-from src.utils.AI_processing import AIProcessing
-from src.utils.pdf_report import PDFReport
-from src.utils.toolbox import Toolbox
+# Import SandroidConfig for type hints (used in function signatures)
+from .config import SandroidConfig
+
+# Type hints for heavy modules (runtime imports are lazy in main())
+if TYPE_CHECKING:
+    from src.utils.actionQ import ActionQ
+    from src.utils.adb import Adb
+    from src.utils.AI_processing import AIProcessing
+    from src.utils.pdf_report import PDFReport
+    from src.utils.toolbox import Toolbox
+
 
 console = Console()
 
@@ -151,7 +157,7 @@ def pretty_logo():
 @click.option("--ai", is_flag=True, help="Enable AI-powered analysis and summarization")
 @click.option("--report", is_flag=True, help="Generate PDF report")
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
-@click.version_option()
+@click.version_option(version=__version__, prog_name="sandroid")
 def main(
     config: str | None,
     environment: str | None,
@@ -175,6 +181,17 @@ def main(
     interactive: bool,
 ):
     """Sandroid: Extract forensic artifacts from Android Virtual Devices."""
+    # Lazy imports - only load heavy modules when actually running (not for --version)
+    from .config import ConfigLoader, SandroidConfig
+
+    # Import existing modules (these will need to be refactored)
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from src.utils.actionQ import ActionQ
+    from src.utils.adb import Adb
+    from src.utils.AI_processing import AIProcessing
+    from src.utils.pdf_report import PDFReport
+    from src.utils.toolbox import Toolbox
+
     try:
         # Load configuration
         loader = ConfigLoader()
@@ -252,17 +269,21 @@ def main(
 
         if interactive:
             # Start interactive mode
-            start_interactive_mode(sandroid_config, logger)
+            start_interactive_mode(sandroid_config, logger, Toolbox, Adb)
         else:
             # Run analysis
-            run_analysis(sandroid_config, logger)
+            run_analysis(
+                sandroid_config, logger, Toolbox, Adb, ActionQ, AIProcessing, PDFReport
+            )
 
     except Exception as e:
         console.print(f"[red]Error: {e}")
         sys.exit(1)
 
 
-def start_interactive_mode(config: SandroidConfig, logger: logging.Logger):
+def start_interactive_mode(
+    config: SandroidConfig, logger: logging.Logger, Toolbox, Adb
+):
     """Start interactive menu mode."""
     # Import and initialize legacy components
     Toolbox.config = config  # Pass config to legacy code
@@ -276,7 +297,15 @@ def start_interactive_mode(config: SandroidConfig, logger: logging.Logger):
     console.print("Run 'sandroid --help' for command-line options.")
 
 
-def run_analysis(config: SandroidConfig, logger: logging.Logger):
+def run_analysis(
+    config: SandroidConfig,
+    logger: logging.Logger,
+    Toolbox,
+    Adb,
+    ActionQ,
+    AIProcessing,
+    PDFReport,
+):
     """Run forensic analysis."""
     try:
         # Initialize legacy components with new config

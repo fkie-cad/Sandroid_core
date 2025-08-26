@@ -135,7 +135,7 @@ class TrigDroidConfig(BaseModel):
     )
     config_mode: str | None = Field(
         default=None,
-        regex=r"^[ID]$",
+        pattern=r"^[ID]$",
         description="Configuration mode: I (interactive) or D (default)",
     )
 
