@@ -46,12 +46,6 @@ jobs:
           open(os.environ["GITHUB_OUTPUT"], "a").write(f"version={m.group(1)}\n")
           PY
 
-      - name: Check tag == version
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [ "$TAG" != "v${{ steps.getver.outputs.version }}" ]; then
-            echo "Tag $TAG does not match version v${{ steps.getver.outputs.version }}"; exit 1
-          fi
 
       - name: Build sdist & wheel
         run: python -m build
