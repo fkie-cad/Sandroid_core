@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(python -c "import re,pathlib; p=pathlib.Path('src/sandroid/_version.py'); m=re.search(r'__version__\\s*=\\s*[\"'\''']([^\"'\'']+)[\"'\''']', p.read_text()); print(m.group(1) if m else '', end='')")
+          VERSION=$(python -c 'import re,pathlib; p=pathlib.Path("src/sandroid/_version.py"); content=p.read_text(); m=re.search(r"__version__.*=.*[\"\047]([^\"\047]+)[\"\047]", content); print(m.group(1) if m else "", end="")')
           if [[ -z "$VERSION" ]]; then
             echo "Could not read __version__ from src/sandroid/_version.py"
             exit 1
