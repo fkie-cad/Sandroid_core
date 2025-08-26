@@ -11,7 +11,7 @@ import time
 import frida
 import requests
 
-from src.utils.adb import Adb
+from .adb import Adb
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 

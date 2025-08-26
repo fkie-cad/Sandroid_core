@@ -5,7 +5,7 @@ import tempfile
 
 import requests
 
-from src.utils.adb import Adb
+from .adb import Adb
 
 
 class FSMon:

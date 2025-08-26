@@ -11,7 +11,7 @@ except ImportError:
     genai = None
     GENAI_AVAILABLE = False
 
-from src.utils.toolbox import Toolbox
+from .toolbox import Toolbox
 
 logger = getLogger(__name__)
 

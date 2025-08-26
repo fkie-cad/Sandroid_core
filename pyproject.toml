@@ -273,6 +273,16 @@ exclude = [
 "src/utils/fsmon.py" = ["S603"]
 "src/utils/toolbox.py" = ["S324","S602","S603","S607"]
 
+# Security rule ignores for migrated core modules (same as legacy utils modules)
+"src/sandroid/core/adb.py" = ["S602","S603","S607"]
+"src/sandroid/core/apk_downloader.py" = ["S603","S607"]
+"src/sandroid/core/emulator.py" = ["S603","S607"]
+"src/sandroid/core/file_diff.py" = ["S603","S607"]
+"src/sandroid/core/frida_manager.py" = ["S602","S603","S607"]
+"src/sandroid/core/fsmon.py" = ["S603"]
+"src/sandroid/core/actionQ.py" = ["S603","S605"]
+"src/sandroid/core/toolbox.py" = ["S324","S602","S603","S607"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

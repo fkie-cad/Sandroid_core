@@ -19,11 +19,11 @@ from .config import SandroidConfig
 
 # Type hints for heavy modules (runtime imports are lazy in main())
 if TYPE_CHECKING:
-    from src.utils.actionQ import ActionQ
-    from src.utils.adb import Adb
-    from src.utils.AI_processing import AIProcessing
-    from src.utils.pdf_report import PDFReport
-    from src.utils.toolbox import Toolbox
+    from .core.actionQ import ActionQ
+    from .core.adb import Adb
+    from .core.AI_processing import AIProcessing
+    from .core.pdf_report import PDFReport
+    from .core.toolbox import Toolbox
 
 
 console = Console()

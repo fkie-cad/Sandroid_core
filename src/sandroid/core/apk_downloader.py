@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup as BS
 from colorama import Fore, Style
 from tqdm import tqdm
 
-from src.utils.adb import Adb
+from .adb import Adb
 
 logger = getLogger(__name__)
 

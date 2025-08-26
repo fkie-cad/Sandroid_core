@@ -20,8 +20,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from src.utils import timeline_generator
-from src.utils.toolbox import Toolbox
+from . import timeline_generator
+from .toolbox import Toolbox
 
 
 class FooterCanvas(canvas.Canvas):
