@@ -92,17 +92,26 @@ class FridaManager:
 
         # Check if the device is in magisk mode
         if self.is_magisk_mode:
-            # Construct the command to run the frida server in magisk mode
-            command = "adb shell su -c " + cmd
+            command = f"""adb shell "su -c 'sh -c \"{cmd}\"'" """
         else:
-            # Construct the command to run the frida server in normal mode
-            command = "adb shell su 0 " + cmd
+            command = f"""adb shell "su 0 sh -c \\"{cmd}\\"\" """
 
         # Execute the command and suppress the output
         process = subprocess.Popen(
             command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         time.sleep(1)
+        # Check if process failed immediately
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            if "Address already in use" in stderr.decode():
+                self.logger.info("[*] frida-server is already running on the device")
+                return False
+            self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
+            return False
+        # Process is still running (background), which is expected for frida-server
+        if self.verbose:
+            self.logger.info("[*] frida-server started successfully in background")
 
         # Check if the frida server is running
         if self.is_frida_server_running():
@@ -124,6 +133,17 @@ class FridaManager:
 
         if len(stdout) > 1:
             return True
+
+        # Fallback to ps grep if pidof doesn't work
+        result = Adb.send_adb_command("shell ps | grep frida-server | grep -v grep")
+        if result.stdout.strip():
+            return True
+
+        # Try alternative ps command format
+        result = Adb.send_adb_command("shell ps -A | grep frida-server | grep -v grep")
+        if result.stdout.strip():
+            return True
+
         return False
 
     def stop_frida_server(self):
