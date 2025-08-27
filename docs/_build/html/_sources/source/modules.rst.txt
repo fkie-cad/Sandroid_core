@@ -1,4 +1,0 @@
-.. automodule:: datagather
-    :members:
-    :undoc-members:
-    :show-inheritance:

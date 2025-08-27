@@ -97,5 +97,9 @@ dist/
 *.egg
 venv
 
+# documentation build artifacts
+docs/_build/
+docs/_static/
+
 # misc
 testing_3rd_party_scripts/

@@ -2,7 +2,8 @@ name: Build and Deploy Documentation
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
     paths:
       - 'docs/**'
       - 'src/**'
@@ -10,23 +11,30 @@ on:
       - '*.rst'
       - 'pyproject.toml'
   pull_request:
-    branches: [ main, master ]
+    branches:
+      - main
     paths:
       - 'docs/**'
       - 'src/**'
       - '*.md'
       - '*.rst'
-  workflow_dispatch:  # Allow manual triggering
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
 
 jobs:
-  build-docs:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Fetch all history for proper version detection
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -36,110 +44,49 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y pandoc
+        sudo apt-get install -y build-essential
 
     - name: Install Python dependencies
       run: |
-        python -m pip install --upgrade pip setuptools wheel
-        # Install only minimal dependencies needed for docs
-        pip install sphinx sphinx-rtd-theme myst-parser
-        # Try to install the package with docs dependencies, but continue if it fails
-        pip install -e .[docs] || echo "Warning: Failed to install full package, continuing with minimal deps"
+        python -m pip install --upgrade pip
+        pip install -e ".[dev]" || pip install -e ".[docs]" || pip install -e .
+        pip install -r docs/requirements.txt
 
-    - name: Check if docs directory exists
-      id: check_docs
+    - name: Build documentation
       run: |
-        if [ -d "docs" ]; then
-          echo "docs_exists=true" >> $GITHUB_OUTPUT
+        cd docs
+        # Check if Makefile exists, otherwise use sphinx-build directly
+        if [ -f Makefile ]; then
+          make html
         else
-          echo "docs_exists=false" >> $GITHUB_OUTPUT
+          sphinx-build -b html . _build/html
         fi
-
-    - name: Build Sphinx documentation
-      if: steps.check_docs.outputs.docs_exists == 'true'
-      run: |
-        cd docs
-        make clean
-        make html
-
-    - name: Generate API documentation
-      if: steps.check_docs.outputs.docs_exists == 'true'
-      run: |
-        cd docs
-        sphinx-apidoc -f -o . ../src/sandroid ../src/sandroid/tests
-        make html
 
     - name: Upload documentation artifacts
       uses: actions/upload-artifact@v4
-      if: steps.check_docs.outputs.docs_exists == 'true'
       with:
         name: documentation
-        path: docs/_build/html/
+        path: docs/_build/html
 
-    - name: Deploy to GitHub Pages
-      if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.check_docs.outputs.docs_exists == 'true'
-      uses: peaceiris/actions-gh-pages@v3
+    - name: Setup Pages
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: actions/configure-pages@v4
+
+    - name: Upload to GitHub Pages
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      uses: actions/upload-pages-artifact@v3
       with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./docs/_build/html
-        user_name: 'github-actions[bot]'
-        user_email: 'github-actions[bot]@users.noreply.github.com'
-        commit_message: 'Deploy documentation ${{ github.sha }}'
+        path: docs/_build/html
 
-  build-readme-docs:
-    runs-on: ubuntu-latest
+  deploy:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install markdown beautifulsoup4 jinja2
-
-    - name: Generate simple docs from README
-      run: |
-        python -c "
-        import markdown
-        import os
-        from pathlib import Path
-
-        # Create HTML template components
-        html_head = '<!DOCTYPE html><html><head><title>Sandroid Documentation</title><meta charset=\"utf-8\">'
-        css_styles = '<style>body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Helvetica,Arial,sans-serif;max-width:1200px;margin:0 auto;padding:20px}code{background:#f6f8fa;padding:2px 4px;border-radius:3px}pre{background:#f6f8fa;padding:16px;border-radius:6px;overflow:auto}h1,h2,h3{color:#24292e}a{color:#0366d6;text-decoration:none}a:hover{text-decoration:underline}</style>'
-        html_body_start = '</head><body>'
-        html_end = '</body></html>'
-
-        # Convert README to HTML
-        with open('README.md', 'r', encoding='utf-8') as f:
-            readme_content = f.read()
-
-        html_content = markdown.markdown(readme_content, extensions=['codehilite', 'toc'])
-
-        # Create output directory
-        os.makedirs('simple_docs', exist_ok=True)
-
-        # Write HTML file
-        with open('simple_docs/index.html', 'w', encoding='utf-8') as f:
-            f.write(html_head + css_styles + html_body_start + html_content + html_end)
-
-        print('Simple documentation generated successfully')
-        "
-
-    - name: Deploy simple docs to GitHub Pages
-      if: "!contains(github.event.head_commit.message, '[skip docs]')"
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./simple_docs
-        destination_dir: simple
-        user_name: 'github-actions[bot]'
-        user_email: 'github-actions[bot]@users.noreply.github.com'
-        commit_message: 'Deploy simple documentation ${{ github.sha }}'
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4

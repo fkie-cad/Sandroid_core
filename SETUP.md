@@ -247,6 +247,18 @@ analysis:
   screenshot_interval: 5
 ```
 
+### For Contributors
+
+If you plan to contribute to Sandroid development, please review our comprehensive [CODING_GUIDELINES.md](CODING_GUIDELINES.md) which covers:
+
+- Python code style and conventions
+- Testing requirements and best practices
+- Security considerations for forensic tools
+- Sandroid-specific architectural patterns
+- Documentation and API design standards
+
+For detailed contribution workflow, see [docs/development/contributing.rst](docs/development/contributing.rst).
+
 ## Usage Examples
 
 ### Basic Malware Analysis

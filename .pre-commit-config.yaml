@@ -6,6 +6,7 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+        exclude: ^(docs/_build/|docs/_static/fonts/|assets/.*\.(png|jpg|jpeg|gif|ico|svg|ttf|woff|woff2)$|.*\.png$|.*\.jpg$|.*\.jpeg$|.*\.gif$|.*\.ico$|.*\.svg$|.*\.ttf$|.*\.woff$|.*\.woff2$)
       - id: check-case-conflict
       - id: check-merge-conflict
       - id: check-toml

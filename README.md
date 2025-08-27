@@ -198,6 +198,29 @@ Configuration files are automatically discovered in standard locations:
 
 Supported formats: YAML, TOML, JSON (YAML preferred)
 
+## Contributing
+
+We welcome contributions to Sandroid! Before contributing:
+
+1. **Review Coding Guidelines**: Please read our comprehensive [CODING_GUIDELINES.md](CODING_GUIDELINES.md) which covers:
+   - Python code style standards (PEP 8 compliance)
+   - Architecture patterns specific to Sandroid
+   - Testing requirements and best practices
+   - Security considerations for forensic tools
+   - Documentation standards
+
+2. **Development Setup**:
+   ```bash
+   git clone <repository>
+   cd Sandroid_core
+   pip install -e .[dev]
+   pytest  # Run tests
+   ```
+
+3. **Submit Changes**: Fork the repository, create a feature branch, ensure tests pass, and submit a pull request.
+
+For detailed contribution instructions, see [docs/development/contributing.rst](docs/development/contributing.rst).
+
 ## Version Information
 
 - **Current Version**: 1.0.0
