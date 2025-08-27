@@ -13,6 +13,10 @@ emulator:
   android_emulator_path: ~/Android/Sdk/emulator/emulator
   # sdk_path: ~/Android/Sdk  # Optional: auto-detected if not provided
   # adb_path: ~/Android/Sdk/platform-tools/adb  # Optional: auto-detected if not provided
+  # avd_home: ~/.android/avd  # Optional: auto-detected if not provided
+  # selected_avd: sandroid  # Optional: AVD name for Sandroid analysis
+  avd_headless: false  # Start AVD with UI by default
+  avd_auto_start: false  # Don't auto-start AVD by default
 
 frida:
   server_auto_start: true

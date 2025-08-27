@@ -39,6 +39,73 @@ class EmulatorConfig(BaseModel):
         default=None,
         description="Path to ADB executable (auto-detected if not provided)",
     )
+    avd_home: Path | None = Field(
+        default=None,
+        description="Android AVD home directory (auto-detected if not provided)",
+    )
+    selected_avd: str | None = Field(
+        default=None,
+        description="AVD name to use for Sandroid analysis",
+    )
+    avd_headless: bool = Field(
+        default=False,
+        description="Start AVD in headless mode (no UI)",
+    )
+    avd_auto_start: bool = Field(
+        default=False,
+        description="Automatically start AVD when needed",
+    )
+
+    @validator("android_emulator_path", "sdk_path", "adb_path", "avd_home", pre=True)
+    def expand_user_path(cls, v):
+        """Expand user path if it's a string or Path."""
+        if isinstance(v, (str, Path)) and v is not None:
+            return Path(str(v)).expanduser()
+        return v
+
+    def validate_android_environment(self) -> dict[str, bool]:
+        """Validate Android development environment setup.
+
+        Returns:
+            Dict mapping tool names to their availability status
+        """
+        status = {}
+
+        # Check ADB
+        if self.adb_path and self.adb_path.exists():
+            status["adb"] = True
+        else:
+            # Try to find adb in PATH
+            import shutil
+
+            adb_in_path = shutil.which("adb")
+            status["adb"] = adb_in_path is not None
+
+        # Check emulator
+        if self.android_emulator_path and self.android_emulator_path.exists():
+            status["emulator"] = True
+        else:
+            # Try to find emulator in PATH
+            import shutil
+
+            emulator_in_path = shutil.which("emulator")
+            status["emulator"] = emulator_in_path is not None
+
+        # Check SDK
+        if self.sdk_path and self.sdk_path.exists():
+            status["sdk"] = True
+        else:
+            status["sdk"] = False
+
+        # Check AVD home
+        if self.avd_home and self.avd_home.exists():
+            status["avd_home"] = True
+        else:
+            # Check default AVD location
+            default_avd = Path("~/.android/avd").expanduser()
+            status["avd_home"] = default_avd.exists()
+
+        return status
 
 
 class FridaConfig(BaseModel):
