@@ -18,6 +18,7 @@ on:
       - 'src/**'
       - '*.md'
       - '*.rst'
+  workflow_dispatch: {} # for manual runs
 
 permissions:
   contents: read
