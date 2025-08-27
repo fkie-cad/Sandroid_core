@@ -4,19 +4,43 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 # -- Path setup --------------------------------------------------------------
+import importlib.util
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Add the package to Python path for autodoc
 sys.path.insert(0, str(Path("../src").resolve()))
 
+# Add the src directory to Python path for autodoc
+src_path = os.path.abspath("../src")
+if src_path not in sys.path:
+    sys.path.insert(0, src_path)
+
+# ---- Paths -----------------------------------------------------------------
+ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+
 # -- Project information -----------------------------------------------------
+current_year = datetime.now().year
+start_year = 2024
+if current_year == start_year:
+    project_copyright = f"{start_year}, Fraunhofer FKIE"
+else:
+    project_copyright = f"{start_year} - {current_year}, Fraunhofer FKIE"
+
 project = "Sandroid"
-project_copyright = "2024, Fraunhofer FKIE"
 author = "Erik Nathrath, Daniel Baier, Jan-Niclas Hilgert"
-version = "1.1.0"
-release = "1.1.0"
+
+# The full version, including alpha/beta/rc tags
+about_path = SRC / "sandroid" / "_version.py"
+spec = importlib.util.spec_from_file_location("sandroid._version", about_path)
+about = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(about)
+
+release = about.__version__
+version = about.__version__
 
 # -- General configuration ---------------------------------------------------
 extensions = [
