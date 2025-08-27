@@ -312,7 +312,7 @@ cd Sandroid_core
 pip install -r docker/requirements.txt
 
 # Use the legacy CLI directly
-./sandroid
+./sandroid.legacy
 ```
 
 ### Docker Deployment

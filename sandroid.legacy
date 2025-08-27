@@ -97,8 +97,6 @@ if __name__ == "__main__":
     main()
 
 """
-vm = ssh -X -p 50222 erik@s01.ifl.seclab-bonn.de
-~/Android/Sdk/emulator/emulator @Pixel6 -feature -Vulkan
 
 Color Scheme:
     - #FFFFFF (White)

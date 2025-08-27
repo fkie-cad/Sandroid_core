@@ -119,7 +119,7 @@ For users who prefer the original installation method::
    git clone https://github.com/fkie-cad/Sandroid_core.git
    cd Sandroid_core
    ./install-requirements.sh
-   ./sandroid
+   ./sandroid.legacy
 
 Configuration
 -------------

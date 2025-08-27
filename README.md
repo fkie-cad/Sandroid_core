@@ -4,7 +4,7 @@
 </div>
 
 # Sandroid Framework
-![version](https://img.shields.io/badge/version-1.1.6-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
+![version](https://img.shields.io/badge/version-1.1.7-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
 [![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
 [![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml)
 
@@ -92,7 +92,7 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 ## The basics
 Sandroid is a framework for extracting forensic artefacts from Android Virtual Devices (AVD). It provides an ever-growing list of features, including static analysis of APKs, detailed dynamic analysis using dynamic instrumentation, automated execution of malware triggers, automated extraction of file system changes for arbitrary actions, and more.
 
-If you start Sandroid with `python3 sandroid` or just `./sandroid` you will see the interactive menu. You should start an AVD first, Sandroid will automatically attach to it.
+If you start Sandroid with `sandroid` or if you want use the legacy version `./sandroid.legacy` you will see the interactive menu. You should start an AVD first, Sandroid will automatically attach to it.
 ```bash
 === Interactive Menu ===
 Frida Server: [Not running]
@@ -138,7 +138,7 @@ $ pip install sandroid
 - Choose an API
 - Click Finish
 - Start the emulator (little play button in the virtual device manager)
-- run `./sandroid` to start the tool
+- run `sandroid` to start the tool (or `./sandroid.legacy` for the legacy version)
 
 
 ## Dependencies
@@ -174,18 +174,19 @@ Simply press the corresponding button to generate the Artefact
 
 ## Installation Options
 
-### Option 1: Modern PyPI Installation (Recommended)
+### Option 1: PyPI Installation (Recommended)
 ```bash
 pip install sandroid
 sandroid-config init
 sandroid --help
+sandroid # starting sandroid in interactive mode (default)
 ```
 
 ### Option 2: Legacy Installation (Still Supported)
 ```bash
 git clone <repository>
 ./install-requirements.sh
-./sandroid
+./sandroid.legacy
 ```
 
 ## Configuration Management

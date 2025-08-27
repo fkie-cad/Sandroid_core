@@ -337,15 +337,19 @@ def start_interactive_mode(
 ):
     """Start interactive menu mode."""
     # Import and initialize legacy components
+    from sandroid.core.actionQ import ActionQ
+
+    # Initialize legacy systems with modern config
     Toolbox.config = config  # Pass config to legacy code
     Toolbox.init()
     Adb.init()
     Toolbox.check_setup()
 
-    # TODO: Implement interactive menu using rich/click
-    console.print("[yellow]Interactive mode not yet implemented in the new CLI.")
-    console.print("Please use the legacy ./sandroid script for interactive mode.")
-    console.print("Run 'sandroid --help' for command-line options.")
+    # Start the interactive menu using the legacy ActionQ system
+    console.print("[bold green]🎯 Starting Sandroid interactive mode...[/bold green]")
+    action_q = ActionQ()
+    action_q.q.append("interactive")  # Add interactive mode to queue
+    action_q.run()  # Run the interactive menu
 
 
 def run_analysis(
