@@ -1,32 +1,86 @@
 # Sandroid Setup Guide
 
-This guide walks you through setting up Sandroid for forensic analysis of Android Virtual Devices.
+This comprehensive guide walks you through setting up Sandroid for forensic analysis of Android Virtual Devices.
 
-## Quick Start
+## 🚀 Quick Start (Recommended)
 
 ### Prerequisites
 
-- Python 3.10 or newer
-- Android Studio with Android SDK
-- A running Android Virtual Device (AVD)
-- Linux, macOS, or Windows with WSL2
+- **Python 3.10 or newer**
+- **Internet connection** (for automated Android SDK detection)
+- **Linux, macOS, or Windows** (WSL2 recommended for Windows)
 
-### Installation
+### One-Command Setup
 
 ```bash
-# Install Sandroid
+# Install Sandroid from PyPI
 pip install sandroid
 
-# Initialize configuration
+# Initialize configuration with automatic Android environment setup
 sandroid-config init
-
-# Run your first analysis
-sandroid --help
 ```
 
-## Detailed Setup
+The `sandroid-config init` command now provides:
+- 🔍 **Automatic Android SDK detection**
+- 📱 **AVD discovery and configuration**
+- ⚙️ **Interactive setup** with validation
+- 🎯 **Smart path detection** with user overrides
+- ✅ **Ready-to-use configuration**
 
-### 1. System Dependencies
+## 📋 Interactive Setup Experience
+
+When you run `sandroid-config init`, here's what happens:
+
+```bash
+$ sandroid-config init
+🔧 Initializing Sandroid configuration...
+
+🔍 Detecting Android development environment...
+✓ Found Android SDK: /Users/user/Android/Sdk
+✓ Found ADB: /opt/homebrew/bin/adb
+✓ Found Android Emulator: /Users/user/Android/Sdk/emulator/emulator
+✓ Found AVD Home: /Users/user/.android/avd
+✓ Found 3 AVDs: Pixel_6_Pro_API_31, Test_Device, sandroid_avd
+
+📱 Found 3 existing AVDs
+┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┓
+┃ Index ┃ AVD Name            ┃
+┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━┩
+│ 1     │ Pixel_6_Pro_API_31  │
+│ 2     │ Test_Device         │
+│ 3     │ sandroid_avd        │
+└───────┴─────────────────────┘
+
+Choose an option:
+  1. Pixel_6_Pro_API_31
+  2. Test_Device
+  3. sandroid_avd
+  4. Create new 'sandroid' AVD
+  5. Skip AVD configuration
+
+Enter choice [1-5]: 1
+✓ Selected AVD: Pixel_6_Pro_API_31
+
+Start AVD 'Pixel_6_Pro_API_31' with UI by default? [Y/n]: Y
+Automatically start AVD when Sandroid needs it? [y/N]: n
+
+✅ Configuration created successfully!
+📍 Location: ~/.config/sandroid/sandroid.yaml
+📱 Configured AVD: Pixel_6_Pro_API_31
+
+🚀 Start AVD 'Pixel_6_Pro_API_31' now? [y/N]: y
+✓ AVD 'Pixel_6_Pro_API_31' starting in background...
+
+Next steps:
+• Use sandroid-config show to view your configuration
+• Use sandroid-config avd list to see available AVDs
+• Use sandroid-config avd start to start your configured AVD
+• Run sandroid to begin Android forensic analysis
+```
+
+## 🛠️ Detailed Setup
+
+### 1. System Dependencies (Optional - Usually Auto-Detected)
 
 #### Linux (Ubuntu/Debian)
 ```bash
@@ -34,11 +88,13 @@ sudo apt update
 sudo apt install -y \
     python3 python3-pip \
     sqlite3-tools \
-    adb \
     cmake \
     build-essential \
     libxml2-dev \
     libxslt-dev
+
+# Android SDK (if not installed via Android Studio)
+sudo apt install adb  # Or install Android Studio
 ```
 
 #### macOS
@@ -47,385 +103,341 @@ sudo apt install -y \
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # Install dependencies
-brew install python sqlite android-platform-tools cmake
+brew install python sqlite cmake
+
+# Android tools (if not installed via Android Studio)
+brew install android-platform-tools  # Or install Android Studio
 ```
 
-#### Windows (WSL2)
-```bash
-# Use Ubuntu WSL2 and follow Linux instructions
-wsl --install -d Ubuntu
-# Then follow Linux setup in WSL2 environment
+#### Windows
+```powershell
+# Install via Chocolatey (recommended) or manually
+choco install python sqlite cmake
+
+# For Android development
+choco install androidstudio
+# OR manually download Android Studio
 ```
 
-### 2. Android Development Setup
+### 2. Android Development Environment
 
-#### Install Android Studio
-
-1. Download Android Studio from https://developer.android.com/studio
-2. Install and complete the setup wizard
-3. Install Android SDK and platform tools
-
-#### Create Android Virtual Device
-
-1. Open Android Studio
-2. Click "More Actions" → "Virtual Device Manager"
-3. Click "Create device"
-4. Choose a device (recommended: Pixel 6 Pro)
-5. Select API level (recommended: API 31+)
-6. Click "Finish"
-7. Start the emulator
-
-### 3. Python Environment Setup
-
-#### Create Virtual Environment (Recommended)
-
+#### Option A: Automatic Setup (Recommended)
 ```bash
-# Create virtual environment
-python3 -m venv sandroid-env
-
-# Activate virtual environment
-source sandroid-env/bin/activate  # Linux/macOS
-# or
-sandroid-env\Scripts\activate  # Windows
-
-# Install Sandroid
-pip install sandroid
-
-# Install optional dependencies if needed
-pip install sandroid[ai,dev]
-```
-
-#### Global Installation
-
-```bash
-# Install globally (not recommended for development)
-pip install sandroid
-```
-
-### 4. Configuration Setup
-
-#### Initialize Default Configuration
-
-```bash
-# Create default configuration
+# Let Sandroid detect and configure Android environment automatically
 sandroid-config init
 
-# View configuration paths
-sandroid-config paths
+# If detection fails, provide paths manually during setup
+```
 
-# Show current configuration
+#### Option B: Manual Android Studio Setup
+If automatic detection fails, install Android Studio manually:
+
+1. **Download Android Studio** from https://developer.android.com/studio
+2. **Install Android Studio** and launch it
+3. **Install SDK components**:
+   - Android SDK Platform-Tools (includes ADB)
+   - Android Emulator
+   - At least one Android system image (API 31+ recommended)
+4. **Create an AVD**:
+   - Open Virtual Device Manager in Android Studio
+   - Click "Create Device"
+   - Choose a device profile (Pixel devices work well)
+   - Select a system image (x86_64 for Intel/AMD, arm64 for Apple Silicon)
+   - Configure settings and create the AVD
+
+## 📱 AVD Management
+
+Sandroid now includes comprehensive AVD management commands:
+
+### List Available AVDs
+```bash
+# Show all available Android Virtual Devices
+sandroid-config avd list
+```
+
+### Start an AVD
+```bash
+# Start your configured AVD (from sandroid-config init)
+sandroid-config avd start
+
+# Start a specific AVD with UI
+sandroid-config avd start --avd-name Pixel_6_Pro_API_31
+
+# Start in headless mode (no UI - good for CI/CD)
+sandroid-config avd start --headless
+```
+
+### Stop Running AVDs
+```bash
+# Stop all running emulators
+sandroid-config avd stop
+```
+
+### Create New AVD
+```bash
+# Create a new AVD (basic - for complex setup use Android Studio)
+sandroid-config avd create --name my-avd --api-level 34
+
+# For full AVD creation with system image installation
+python deploy/create_avd.py
+```
+
+## ⚙️ Configuration Management
+
+### View Current Configuration
+```bash
+# Show complete configuration with rich formatting
 sandroid-config show
-```
 
-#### Customize Configuration
+# Show configuration in YAML format
+sandroid-config show --format yaml
 
-```bash
-# Edit the configuration file
-# Location: ~/.config/sandroid/sandroid.yaml
-
-# Or set individual values
-sandroid-config set emulator.device_name "Your_Device_Name"
-sandroid-config set analysis.number_of_runs 3
-sandroid-config set paths.results_path "/path/to/results"
-```
-
-#### Environment-Specific Configurations
-
-```bash
-# Create development configuration
-cp ~/.config/sandroid/sandroid.yaml ~/.config/sandroid/development.yaml
-
-# Edit development.yaml for dev-specific settings
-# Use with: sandroid --environment development
-```
-
-### 5. Verify Installation
-
-#### Check System Requirements
-
-```bash
-# Verify Python version
-python3 --version  # Should be 3.10+
-
-# Verify ADB
-adb version
-
-# List connected devices/emulators
-adb devices
-```
-
-#### Test Sandroid
-
-```bash
-# Show help
-sandroid --help
-
-# Show configuration
-sandroid-config show
-
-# Validate configuration
+# Validate your configuration
 sandroid-config validate
 ```
 
-## Configuration Examples
+### Manual Configuration Updates
+```bash
+# Set Android paths manually if needed
+sandroid-config set emulator.sdk_path "/path/to/Android/Sdk"
+sandroid-config set emulator.adb_path "/path/to/adb"
+sandroid-config set emulator.android_emulator_path "/path/to/emulator"
 
-### Basic Analysis Configuration
+# Configure AVD settings
+sandroid-config set emulator.selected_avd "Pixel_6_Pro_API_31"
+sandroid-config set emulator.avd_headless true
+sandroid-config set emulator.avd_auto_start false
 
-```yaml
-# ~/.config/sandroid/sandroid.yaml
-
-log_level: INFO
-output_file: sandroid.json
-
-emulator:
-  device_name: Pixel_6_Pro_API_31
-
-analysis:
-  number_of_runs: 2
-  monitor_processes: true
-  monitor_network: false
-
-paths:
-  results_path: ./results/
+# Set other analysis options
+sandroid-config set analysis.number_of_runs 3
+sandroid-config set analysis.monitor_network true
 ```
 
-### Advanced Security Analysis
+### Configuration File Locations
+Configuration files are searched in this order:
+1. `./sandroid.yaml` (current directory)
+2. `~/.config/sandroid/sandroid.yaml` (user config)
+3. `/etc/sandroid/sandroid.yaml` (system config)
 
-```yaml
-# ~/.config/sandroid/security.yaml
+Supported formats: YAML (recommended), TOML, JSON
 
-log_level: DEBUG
-output_file: security-analysis.json
-
-analysis:
-  number_of_runs: 3
-  avoid_strong_noise_filter: false
-  monitor_processes: true
-  monitor_sockets: true
-  monitor_network: true
-  show_deleted_files: true
-  hash_files: true
-  list_apks: true
-  screenshot_interval: 10
-
-trigdroid:
-  enabled: true
-  package_name: com.example.suspicious
-
-ai:
-  enabled: true
-  provider: google-genai
-  model: gemini-pro
-
-report:
-  generate_pdf: true
-  include_screenshots: true
-
-credentials:
-  # Set via environment variables or CLI for security
-  # google_genai_api_key: your-api-key-here
+### Environment Variables
+All configuration can be set via environment variables:
+```bash
+export SANDROID_LOG_LEVEL="DEBUG"
+export SANDROID_EMULATOR__DEVICE_NAME="Pixel_8_Pro_API_34"
+export SANDROID_ANALYSIS__NUMBER_OF_RUNS=3
+export SANDROID_EMULATOR__AVD_HEADLESS=true
 ```
 
-### Development Configuration
+## 🚨 Troubleshooting
 
-```yaml
-# ~/.config/sandroid/development.yaml
+### Android Environment Issues
 
-log_level: DEBUG
-output_file: dev-results.json
-environment: development
+**Problem: No Android SDK detected**
+```bash
+# Solution 1: Install Android Studio and re-run init
+sandroid-config init --force
 
-emulator:
-  device_name: Pixel_7_Pro_API_33
-
-paths:
-  results_path: ./dev-results/
-  temp_path: /tmp/sandroid-dev/
-
-analysis:
-  number_of_runs: 2
-  screenshot_interval: 5
+# Solution 2: Set paths manually
+sandroid-config set emulator.sdk_path "/path/to/Android/Sdk"
 ```
 
-### For Contributors
+**Problem: ADB not found**
+```bash
+# Check if ADB is in PATH
+which adb  # Linux/macOS
+where adb  # Windows
 
-If you plan to contribute to Sandroid development, please review our comprehensive [CODING_GUIDELINES.md](CODING_GUIDELINES.md) which covers:
+# If not found, install Android SDK or set path manually
+sandroid-config set emulator.adb_path "/path/to/adb"
+```
 
-- Python code style and conventions
-- Testing requirements and best practices
-- Security considerations for forensic tools
-- Sandroid-specific architectural patterns
-- Documentation and API design standards
+**Problem: No AVDs found**
+```bash
+# Create AVD using Android Studio or
+python deploy/create_avd.py
 
-For detailed contribution workflow, see [docs/development/contributing.rst](docs/development/contributing.rst).
+# Or point to existing AVD directory
+sandroid-config set emulator.avd_home "/path/to/avd"
+```
 
-## Usage Examples
+**Problem: AVD won't start**
+```bash
+# Check AVD exists
+sandroid-config avd list
+
+# Try starting manually with debug info
+sandroid-config avd start --avd-name YourAVD
+
+# Check emulator path is correct
+sandroid-config show
+```
+
+### Configuration Issues
+
+**Problem: Configuration validation fails**
+```bash
+# Check what's wrong
+sandroid-config validate
+
+# Reset to defaults
+sandroid-config init --force
+
+# View configuration paths
+sandroid-config paths
+```
+
+### Skip AVD Setup
+```bash
+# If you want to configure Android environment separately
+sandroid-config init --skip-avd-setup
+```
+
+## 🔧 Advanced Setup
+
+### Legacy Installation Method (Still Supported)
+
+For users who prefer the original installation method:
+
+```bash
+# Clone the repository
+git clone https://github.com/fkie-cad/Sandroid_core.git
+cd Sandroid_core
+
+# Install system dependencies
+./install-requirements.sh
+
+# Install Python dependencies manually
+pip install -r docker/requirements.txt
+
+# Use the legacy CLI directly
+./sandroid
+```
+
+### Docker Deployment
+
+For containerized environments:
+
+```bash
+# Build Docker image
+./build_and_export_docker.sh
+
+# Deploy with Docker
+cd deploy
+./deploy [output_path]
+```
+
+### Custom Android SDK Installation
+
+If you need a completely fresh Android SDK installation:
+
+```bash
+# Use the comprehensive AVD creation script
+python deploy/create_avd.py
+
+# This script will:
+# - Download and install Android SDK
+# - Install system images
+# - Create optimized AVDs
+# - Set up the complete environment
+```
+
+### Development Installation
+
+For contributors and developers:
+
+```bash
+# Install in development mode
+pip install -e .[dev]
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run tests
+pytest
+
+# Build documentation
+cd docs && make html
+```
+
+## 🚀 Usage Examples
 
 ### Basic Malware Analysis
 
 ```bash
-# Simple malware analysis
-sandroid --network --sockets --hash --screenshot 10
+# Start your configured AVD
+sandroid-config avd start
 
-# With custom config
-sandroid --config security.toml --trigdroid com.suspicious.app
+# Run analysis with network monitoring
+sandroid --network --screenshot 5 --report
 
-# With environment variables
-export SANDROID_ANALYSIS__MONITOR_NETWORK=true
-export SANDROID_ANALYSIS__HASH_FILES=true
+# Or use interactive mode
 sandroid
 ```
 
 ### Automated Analysis Pipeline
 
 ```bash
-#!/bin/bash
-# analysis-pipeline.sh
-
-# Initialize environment
-sandroid-config set analysis.number_of_runs 5
-sandroid-config set report.generate_pdf true
+# Headless analysis for CI/CD
+sandroid-config avd start --headless
 
 # Run comprehensive analysis
-sandroid \
-    --network \
-    --sockets \
-    --show-deleted \
-    --hash \
-    --apk \
-    --screenshot 30 \
-    --ai \
-    --report \
-    --file "analysis-$(date +%Y%m%d-%H%M%S).json"
+sandroid -f malware-analysis.json \
+  --network \
+  --screenshot 3 \
+  --trigdroid com.malware.example \
+  --hash \
+  --apk \
+  --report
 ```
 
-### Configuration Management Workflow
+### Custom Configuration Environment
 
 ```bash
-# Setup different environments
+# Create environment-specific config
 sandroid-config init --output production.yaml
-sandroid-config init --output testing.yaml
-sandroid-config init --output development.yaml
 
-# Customize each environment
-sandroid-config set --config testing.yaml log_level DEBUG
-sandroid-config set --config testing.yaml analysis.number_of_runs 1
-
-# Use specific environment
-sandroid --config testing.yaml --network
+# Use specific configuration
+sandroid --config production.yaml --network --ai
 ```
 
-## Environment Variables Reference
+## ✅ Verification
 
-Set these environment variables to override configuration:
+After setup, verify everything works:
 
 ```bash
-# Core settings
-export SANDROID_LOG_LEVEL="DEBUG"
-export SANDROID_OUTPUT_FILE="/path/to/output.json"
+# Check configuration
+sandroid-config validate
 
-# Emulator settings
-export SANDROID_EMULATOR__DEVICE_NAME="Custom_Device"
-export SANDROID_EMULATOR__ANDROID_EMULATOR_PATH="/custom/path/emulator"
+# List available AVDs
+sandroid-config avd list
 
-# Analysis settings
-export SANDROID_ANALYSIS__NUMBER_OF_RUNS=5
-export SANDROID_ANALYSIS__MONITOR_NETWORK=true
-export SANDROID_ANALYSIS__MONITOR_SOCKETS=true
+# Test AVD startup
+sandroid-config avd start --avd-name YourAVD
 
-# Paths
-export SANDROID_PATHS__RESULTS_PATH="/custom/results"
-export SANDROID_PATHS__TEMP_PATH="/custom/temp"
-
-# AI settings (API keys should use environment variables)
-export SANDROID_AI__ENABLED=true
-export SANDROID_AI__API_KEY="your-secret-api-key"
-
-# Credentials (recommended for API keys)
-export SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY="your-google-api-key"
-```
-
-## Troubleshooting
-
-### Common Issues
-
-#### "Device not found"
-```bash
-# Check ADB connection
+# Verify device connectivity
 adb devices
 
-# Restart ADB server
-adb kill-server && adb start-server
-
-# Check emulator is running
-sandroid-config get emulator.device_name
-```
-
-#### "Configuration validation failed"
-```bash
-# Check configuration syntax
-sandroid-config validate
-
-# Show current configuration
-sandroid-config show
-
-# Reset to defaults
-sandroid-config init --force
-```
-
-#### "Permission denied" for directories
-```bash
-# Check and fix directory permissions
-sandroid-config get paths.results_path
-mkdir -p "$(sandroid-config get paths.results_path)"
-chmod 755 "$(sandroid-config get paths.results_path)"
-```
-
-#### "Frida server not running"
-```bash
-# Check Frida configuration
-sandroid-config get frida.server_auto_start
-
-# Enable auto-start
-sandroid-config set frida.server_auto_start true
-```
-
-### Getting Help
-
-```bash
-# CLI help
+# Run Sandroid help
 sandroid --help
-sandroid-config --help
-
-# Configuration help
-sandroid-config paths
-sandroid-config show
-sandroid-config validate
-
-# Check version
-sandroid --version
 ```
 
-### Docker Alternative
+## 📚 Next Steps
 
-If you encounter installation issues, use Docker:
+- **Read the Documentation**: Check out the full documentation at `docs/`
+- **Interactive Mode**: Try `sandroid` to explore the interactive menu
+- **Ground Truth APK**: Install and test with the included `ground_truth.apk`
+- **Configuration**: Use `sandroid-config show` to understand all available options
+- **Troubleshooting**: Refer to the troubleshooting section above for common issues
 
-```bash
-# Build and run with Docker
-./build_and_export_docker.sh
-cd deploy && ./deploy
+## 🆘 Getting Help
 
-# Or pull from registry (when available)
-docker pull sandroid/sandroid:latest
-docker run -it --rm sandroid/sandroid:latest
-```
+- **Configuration Issues**: Use `sandroid-config validate` for detailed error messages
+- **AVD Problems**: Try `sandroid-config avd list` and `sandroid-config avd start`
+- **Documentation**: Full documentation available in the `docs/` directory
+- **Issue Reporting**: Report bugs at the project's GitHub issue tracker
 
-## Next Steps
+---
 
-1. **Configure your environment**: Edit `~/.config/sandroid/sandroid.yaml`
-2. **Test with ground truth APK**: Install and test with the included test app
-3. **Run your first analysis**: `sandroid --network --screenshot 10`
-4. **Review results**: Check the generated JSON and logs
-5. **Automate workflows**: Create scripts for common analysis patterns
-
-For advanced usage and upgrading from legacy installations, see the [MIGRATION.md](MIGRATION.md) guide.
+**Happy Android Forensics with Sandroid! 🔍📱**

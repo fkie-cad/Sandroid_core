@@ -1,22 +1,73 @@
 Installation
 ============
 
-Sandroid can be installed using modern Python packaging (recommended) or legacy installation methods.
+Sandroid features a streamlined installation process with automatic Android environment setup.
 
-Modern Installation (Recommended)
-----------------------------------
+🚀 Quick Start (Recommended)
+-----------------------------
 
-**Requirements**
+**One-Command Setup**
 
-- Python 3.10 or later
-- Android SDK with ADB
-- Android emulator or physical device
+.. code-block:: bash
 
-**Install from PyPI**::
-
+   # Install Sandroid from PyPI
    pip install sandroid
 
-**Install with Optional Dependencies**::
+   # Initialize with automatic Android environment setup
+   sandroid-config init
+
+The ``sandroid-config init`` command provides:
+
+- 🔍 **Automatic Android SDK detection**
+- 📱 **AVD discovery and configuration**
+- ⚙️ **Interactive setup** with validation
+- 🎯 **Smart path detection** with user overrides
+- ✅ **Ready-to-use configuration**
+
+📋 Interactive Setup Experience
+-------------------------------
+
+When you run ``sandroid-config init``, the system will:
+
+1. **Detect Android environment** - Find SDK, ADB, emulator paths
+2. **Discover existing AVDs** - List available virtual devices
+3. **Interactive selection** - Choose or create AVD for Sandroid
+4. **Configure preferences** - Set UI/headless mode, auto-start options
+5. **Validate setup** - Ensure everything works correctly
+
+.. code-block:: bash
+
+   $ sandroid-config init
+   🔧 Initializing Sandroid configuration...
+
+   🔍 Detecting Android development environment...
+   ✓ Found Android SDK: /Users/user/Android/Sdk
+   ✓ Found ADB: /opt/homebrew/bin/adb
+   ✓ Found Android Emulator: /Users/user/Android/Sdk/emulator/emulator
+   ✓ Found 3 AVDs: Pixel_6_Pro_API_31, Test_Device, sandroid_avd
+
+   📱 Found 3 existing AVDs
+   Choose an option:
+     1. Pixel_6_Pro_API_31 (recommended)
+     2. Test_Device
+     3. sandroid_avd
+     4. Create new 'sandroid' AVD
+     5. Skip AVD configuration
+
+   ✅ Configuration created successfully!
+
+System Requirements
+-------------------
+
+**Prerequisites**
+
+- Python 3.10 or newer
+- Internet connection (for automated detection)
+- Linux, macOS, or Windows (WSL2 recommended for Windows)
+
+**Optional Dependencies**
+
+.. code-block:: bash
 
    # With AI analysis support
    pip install sandroid[ai]
@@ -29,25 +80,6 @@ Modern Installation (Recommended)
 
    # Install everything
    pip install sandroid[ai,dev,docs]
-
-**Initialize Configuration**::
-
-   sandroid-config init
-
-**Verify Installation**::
-
-   sandroid --version
-   sandroid-config validate
-
-System Requirements
--------------------
-
-**Android SDK Setup**
-
-1. Download and install Android Studio
-2. Ensure ADB is in your PATH::
-
-   # Check ADB installation
    adb version
 
 3. Create an Android Virtual Device (AVD)::
