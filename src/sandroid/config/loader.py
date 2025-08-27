@@ -260,8 +260,9 @@ class ConfigLoader:
             config_file = Path(config_file)
             config_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Convert to dict
-        config_dict = config.dict(exclude_unset=True)
+        # Convert to dict with proper enum serialization
+        # Using JSON serialization ensures enums are converted to their values
+        config_dict = json.loads(config.model_dump_json(exclude_unset=True))
 
         # Save based on format
         if format == "toml":
