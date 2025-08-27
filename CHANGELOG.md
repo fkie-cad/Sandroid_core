@@ -5,6 +5,37 @@ All notable changes to the Sandroid project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2025-08-27
+
+### 🚀 Complete Package Migration: PyPI Distribution Now Feature-Complete
+
+This release resolves the critical "Legacy analysis modules not available" error and makes the PyPI installation fully feature-complete with the legacy version.
+
+### Fixed
+- **Package Migration**: Migrated 32 analysis modules from `src/utils/`, `src/datagather/`, and `src/functionality/` to proper pip-installable packages
+- **Import Errors**: Fixed "No module named 'src'" errors that prevented PyPI installation from working
+- **Module Structure**: Reorganized code into modern package structure:
+  - `src/utils/` → `src/sandroid/core/` (15 modules)
+  - `src/datagather/` → `src/sandroid/analysis/` (10 modules)
+  - `src/functionality/` → `src/sandroid/features/` (5 modules)
+
+### Added
+- **Dual-Mode Architecture**: Both legacy (`./sandroid`) and modern (`sandroid`) CLI work identically
+- **Compatibility Layer**: Transparent import redirection maintains 100% backward compatibility
+- **Code Quality**: Comprehensive linting configuration with security rule exemptions for forensic tools
+- **Modern Dependencies**: Updated Frida to v17+ and frida-tools to v14+
+
+### Changed
+- **Package Structure**: Migrated to modern Python packaging while preserving all functionality
+- **Import Paths**: Fixed hardcoded `from src.` imports throughout the codebase
+- **Build Configuration**: Updated `pyproject.toml` to include all migrated packages
+
+### Technical Details
+- **32 Modules Migrated**: Complete analysis framework now properly packaged
+- **Circular Import Resolution**: Fixed complex interdependencies between modules
+- **Linting Compliance**: Resolved F403, TID252, F405, and security (S*) linting issues
+- **Type Safety**: Fixed Pydantic v2 API compatibility (`regex` → `pattern`)
+
 ## [1.0.0] - 2025-01-21
 
 ### 🚀 Major Release: Modern PyPI Package with Advanced Configuration

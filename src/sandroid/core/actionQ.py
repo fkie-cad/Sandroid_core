@@ -600,7 +600,9 @@ class ActionQ:
 
                 spotlight_application_pid, spotlight_application_name = check_frida
 
-                self.logger.info("Now the am3 output follows. End with CTRC-C")
+                self.logger.info(
+                    "Now the dexray-intercept output follows. End with CTRC-C"
+                )
                 if self.malwaremonitor == None:
                     self.malwaremonitor = MalwareMonitor(
                         path_filters=Toolbox.get_spotlight_files()
@@ -609,7 +611,7 @@ class ActionQ:
 
                 if self.malwaremonitor.has_new_results():
                     Toolbox.submit_other_data(
-                        "Android Malware Monitor (am3)",
+                        "Dexray Intercept",
                         self.malwaremonitor.return_data(),
                     )
 

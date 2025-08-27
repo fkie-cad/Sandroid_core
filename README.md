@@ -4,7 +4,7 @@
 </div>
 
 # Sandroid Framework
-![version](https://img.shields.io/badge/version-1.1.2-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
+![version](https://img.shields.io/badge/version-1.1.3-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
 [![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
 [![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml)
 
@@ -32,13 +32,13 @@ pip install sandroid
 # Initialize configuration
 sandroid-config init
 
-# Run analysis
-sandroid --network --screenshot 10 --report
+# Run analysis in interactive mode
+sandroid
 ```
 
 See [SETUP.md](SETUP.md) for all installation possibilities.
 
-## Legacy Usage
+## Usage
 ```
 usage: sandroid [-h] [-f FILENAME] [-ll LOGLEVEL] [-n NUMBER] [--avoid_strong_noise_filter] [--network] [-d] [--no-processes] [--sockets] [--screenshot INTERVAL] [--trigdroid PACKAGE NAME]
                 [--trigdroid_ccf {I,D}] [--hash] [--apk] [--degrade_network] [--whitelist FILE]
@@ -154,7 +154,6 @@ Simply press the corresponding button to generate the Artefact
 ## Documentation
 
 - **[SETUP.md](SETUP.md)** - Complete setup guide for new installation method
-- **[MIGRATION.md](MIGRATION.md)** - Guide for upgrading from legacy installation
 - **[CHANGELOG.md](CHANGELOG.md)** - Detailed release notes and version history
 
 ## Installation Options
@@ -204,4 +203,3 @@ Supported formats: YAML, TOML, JSON (YAML preferred)
 - **Current Version**: 1.0.0
 - **Backward Compatibility**: Full compatibility with legacy installations
 - **Python Requirements**: Python 3.10+
-- **Migration**: See [MIGRATION.md](MIGRATION.md) for upgrade instructions

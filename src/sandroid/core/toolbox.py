@@ -1296,9 +1296,9 @@ class Toolbox:
         spotlight_files_string = f"Spotlight Files: [{spotlight_files_string}]"
 
         if cls.malware_monitor_running == False:
-            malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware motion monitor (am3) on spotlight app"
+            malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on spotlight app"
         else:
-            malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware motion monitor (am3) on {spotlight_application}"
+            malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on {spotlight_application}"
 
         # Network capture menu text changes based on capture status
         if cls._network_capture_running:
@@ -1327,7 +1327,7 @@ class Toolbox:
 
     {Fore.CYAN}=== Spotlight Application ==={Fore.RESET}
     * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app
-    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with asam
+    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with dexray-insight
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app (using fridump)
     {malware_monitor_string}
     * start o{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}b{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}jection interactive shell for spotlight app
