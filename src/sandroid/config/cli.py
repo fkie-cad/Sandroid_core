@@ -481,7 +481,7 @@ def avd_list():
                 )
         except Exception:
             # Intentionally ignore config loading errors for optional information display
-            pass  # nosec S110
+            pass
 
     except Exception as e:
         console.print(f"[red]Error listing AVDs: {e}[/red]")
@@ -634,7 +634,7 @@ def _start_avd(avd_name: str, headless: bool, android_env: dict) -> bool:
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
         # Start emulator in background
-        process = subprocess.Popen(  # nosec S603 # Command arguments are controlled, not user input
+        process = subprocess.Popen(  # Command arguments are controlled, not user input
             cmd,
             env=env,
             stdout=subprocess.DEVNULL,

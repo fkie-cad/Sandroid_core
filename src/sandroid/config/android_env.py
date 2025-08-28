@@ -37,7 +37,7 @@ def run_cmd(
     """Run command and return exit code, stdout, stderr."""
     try:
         input_bytes = input_text.encode() if input_text else None
-        res = subprocess.run(  # nosec S603 # Command arguments are controlled, not user input
+        res = subprocess.run(  # Command arguments are controlled, not user input
             cmd, input=input_bytes, env=env, capture_output=True, check=False
         )
         stdout = res.stdout.decode(errors="replace")
