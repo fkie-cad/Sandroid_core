@@ -479,8 +479,7 @@ def avd_list():
                 console.print(
                     "Configure with: [cyan]sandroid-config set emulator.selected_avd AVD_NAME[/cyan]"
                 )
-        except Exception:
-            # Intentionally ignore config loading errors for optional information display
+        except Exception:  # Intentionally ignore config loading errors for optional information display
             pass
 
     except Exception as e:
