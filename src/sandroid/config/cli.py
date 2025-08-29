@@ -650,7 +650,7 @@ def _start_avd(avd_name: str, headless: bool, android_env: dict) -> bool:
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
         # Start emulator in background with validated command
-        process = subprocess.Popen(  # Command and arguments validated above
+        process = subprocess.Popen(
             cmd,
             env=env,
             stdout=subprocess.DEVNULL,

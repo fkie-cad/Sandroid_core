@@ -63,7 +63,7 @@ def run_cmd(
 
     try:
         input_bytes = input_text.encode() if input_text else None
-        res = subprocess.run(  # Commands validated against whitelist above
+        res = subprocess.run(
             cmd, input=input_bytes, env=env, capture_output=True, check=False
         )
         stdout = res.stdout.decode(errors="replace")
