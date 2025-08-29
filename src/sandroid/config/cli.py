@@ -1,5 +1,6 @@
 """Configuration management CLI for Sandroid."""
 
+import logging
 import sys
 from pathlib import Path
 
@@ -479,8 +480,9 @@ def avd_list():
                 console.print(
                     "Configure with: [cyan]sandroid-config set emulator.selected_avd AVD_NAME[/cyan]"
                 )
-        except Exception:  # Intentionally ignore config loading errors for optional information display
-            pass
+        except Exception as e:
+            # Config loading errors for optional information display - log at debug level
+            logging.debug(f"Failed to load config for AVD display: {e}")
 
     except Exception as e:
         console.print(f"[red]Error listing AVDs: {e}[/red]")
@@ -616,9 +618,24 @@ def _start_avd(avd_name: str, headless: bool, android_env: dict) -> bool:
             console.print("[red]Emulator path not configured[/red]")
             return False
 
-        # Build command
+        # Validate emulator executable path
+        emulator_name = Path(emulator_path).name
+        if emulator_name not in {"emulator", "emulator.exe"}:
+            console.print(f"[red]Invalid emulator executable: {emulator_name}[/red]")
+            return False
+
+        # Validate AVD name (prevent command injection)
+        if (
+            not avd_name
+            or not avd_name.replace("_", "").replace("-", "").replace(".", "").isalnum()
+        ):
+            console.print(f"[red]Invalid AVD name: {avd_name}[/red]")
+            return False
+
+        # Build command with validated inputs
         cmd = [str(emulator_path), "-avd", avd_name]
 
+        # Only allow specific safe emulator arguments
         if headless:
             cmd.extend(["-no-window", "-no-boot-anim", "-gpu", "swiftshader_indirect"])
 
@@ -632,8 +649,8 @@ def _start_avd(avd_name: str, headless: bool, android_env: dict) -> bool:
 
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
-        # Start emulator in background
-        process = subprocess.Popen(  # Command arguments are controlled, not user input
+        # Start emulator in background with validated command
+        process = subprocess.Popen(  # Command and arguments validated above
             cmd,
             env=env,
             stdout=subprocess.DEVNULL,

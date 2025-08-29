@@ -34,10 +34,36 @@ def is_linux() -> bool:
 def run_cmd(
     cmd: list[str], env=None, input_text: str | None = None
 ) -> tuple[int, str, str]:
-    """Run command and return exit code, stdout, stderr."""
+    """Run command and return exit code, stdout, stderr.
+
+    Only executes commands from a whitelist of known safe Android SDK tools.
+    """
+    if not cmd:
+        return 1, "", "Empty command provided"
+
+    # Whitelist of allowed commands for Android environment detection
+    allowed_commands = {
+        "emulator",
+        "emulator.exe",
+        "adb",
+        "adb.exe",
+        "sdkmanager",
+        "sdkmanager.bat",
+        "avdmanager",
+        "avdmanager.bat",
+    }
+
+    command_name = Path(cmd[0]).name
+    if command_name not in allowed_commands:
+        return (
+            1,
+            "",
+            f"Command '{command_name}' not in allowed list: {', '.join(allowed_commands)}",
+        )
+
     try:
         input_bytes = input_text.encode() if input_text else None
-        res = subprocess.run(  # Command arguments are controlled, not user input
+        res = subprocess.run(  # Commands validated against whitelist above
             cmd, input=input_bytes, env=env, capture_output=True, check=False
         )
         stdout = res.stdout.decode(errors="replace")
