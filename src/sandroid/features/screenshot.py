@@ -84,7 +84,7 @@ class Screenshot(Functionality):
         :returns: The generated screenshot filename.
         :rtype: str
         """
-        timestring = datetime.now().strftime("%Y-%d-%m--%H-%M-%S-")
+        timestring = datetime.now().strftime("%Y%m%d_%H%M%S_")
         return timestring + self.get_action() + ".png"
 
 
