@@ -5,6 +5,10 @@ All notable changes to the Sandroid project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.9] - 2025-09-15
+
+Updated Fridump class to work with frida >= 17.0
+
 ## [1.1.0] - 2025-08-27
 
 ### 🚀 Complete Package Migration: PyPI Distribution Now Feature-Complete

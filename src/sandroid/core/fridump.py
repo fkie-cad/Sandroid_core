@@ -49,12 +49,13 @@ class Fridump:
             """'use strict';
 
             rpc.exports = {
-              enumerateRanges: function (prot) {
-                return Process.enumerateRangesSync(prot);
-              },
-              readMemory: function (address, size) {
-                return Memory.readByteArray(ptr(address), size);
-              }
+                enumerateRanges: async function (prot) {
+                    const ranges = await Process.enumerateRanges(prot);
+                    return ranges;
+                },
+                readMemory: function (address, size) {
+                    return ptr(address).readByteArray(size);
+                }
             };
 
             """
