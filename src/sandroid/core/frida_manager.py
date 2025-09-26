@@ -82,45 +82,56 @@ class FridaManager:
         :return: True if the frida server started successfully, False otherwise.
         :rtype: bool
         """
-        # Check if the default path is used
+        # Check if frida-server is already running
+        if self.is_frida_server_running():
+            if self.verbose:
+                self.logger.info("[*] frida-server is already running, skipping start")
+            return True
+
         if frida_server_path is self.run_frida_server.__defaults__[0]:
-            # Construct the command to run the frida server from the default location
             cmd = self.frida_install_dst + "frida-server &"
         else:
-            # Construct the command to run the frida server from the specified location
             cmd = frida_server_path + "frida-server &"
 
-        # Check if the device is in magisk mode
         if self.is_magisk_mode:
             command = f"""adb shell "su -c 'sh -c \"{cmd}\"'" """
         else:
             command = f"""adb shell "su 0 sh -c \\"{cmd}\\"\" """
 
-        # Execute the command and suppress the output
-        process = subprocess.Popen(
-            command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        time.sleep(1)
-        # Check if process failed immediately
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            if "Address already in use" in stderr.decode():
-                self.logger.info("[*] frida-server is already running on the device")
-                return False
-            self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
-            return False
-        # Process is still running (background), which is expected for frida-server
-        if self.verbose:
-            self.logger.info("[*] frida-server started successfully in background")
+        try:
+            process = subprocess.Popen(
+                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            # Give it a moment to start and potentially fail
+            import time
 
-        # Check if the frida server is running
-        if self.is_frida_server_running():
-            self.logger.info("frida-server running...")
-            return True
-        # Kill the process if the frida server did not start
-        process.kill()
-        self.logger.critical("Could not start frida-server")
-        return False
+            time.sleep(1)
+
+            # Check if process failed immediately
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                if "Address already in use" in stderr.decode():
+                    self.logger.info(
+                        "[*] frida-server is already running on the device"
+                    )
+                    return True
+                self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
+                process.kill()
+                return False
+            # Process is still running (background), which is expected for frida-server
+            if self.verbose:
+                self.logger.info("[*] frida-server started successfully in background")
+
+            if self.is_frida_server_running():
+                return True
+            self.logger.error(
+                "frida-server process started but not detected as running"
+            )
+            return False
+
+        except Exception as e:
+            self.logger.error(f"Error starting frida-server: {e}")
+            return False
 
     def is_frida_server_running(self):
         """Checks if on the connected device a frida server is running.

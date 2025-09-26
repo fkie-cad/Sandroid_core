@@ -1,3 +1,3 @@
 # Version file for build-time import
 # This file should have no dependencies to avoid import issues during build
-__version__ = "1.1.9"
+__version__ = "1.2.0"
