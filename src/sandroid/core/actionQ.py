@@ -554,9 +554,13 @@ class ActionQ:
                 self.assembleQ_for_runs(trigdroid_object)
             case "f":
                 if not Toolbox.frida_manager.is_frida_server_running():
-                    Toolbox.frida_manager.install_frida_server()
-                    Toolbox.frida_manager.run_frida_server()
-                self.q.append("interactive")
+                    try:
+                        Toolbox.frida_manager.install_frida_server()
+                        Toolbox.frida_manager.run_frida_server()
+                        self.q.append("interactive")
+                    except Exception as e:
+                        self.logger.error(f"Error starting frida server: {e!s}")
+                        self.q.append("interactive")
             case "n":  # New APK installation
                 try:
                     self.logger.info("Enter file path of APK or search term:")
