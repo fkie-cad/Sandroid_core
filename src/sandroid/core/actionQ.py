@@ -639,24 +639,28 @@ class ActionQ:
                         return
 
                     spotlight_application_pid, spotlight_application_name = check_frida
-
+                    #self.logger.info("Keys will be written to keylog.log")
                     self.logger.info("Now fritap output follows. End with CTRC-C")
                     fritap = FriTap(spotlight_application_pid)
                     fritap.start()
 
                     try:
                         self.logger.info(
-                            "FriTap monitoring in progress... Press CTRL+C to stop"
+                            "friTap monitoring in progress... Press CTRL+C to stop"
                         )
                         while True:
                             time.sleep(0.5)  # Sleep to reduce CPU usage
                     except KeyboardInterrupt:
                         self.logger.info("CTRL-C detected. Stopping FriTap monitoring.")
                         fritap.stop()
+                        self.logger.info("FriTap monitoring stopped.")
                         # Reset spotlight app info as the app may have been closed
                         Toolbox.reset_spotlight_application()
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
+                except Exception as e:
+                    self.logger.error(f"Error during friTap monitoring: {e!s}")
+
                 self.q.append("interactive")
             case "d":
                 try:

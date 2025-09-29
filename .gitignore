@@ -18,6 +18,7 @@ research/
 
 # sandroid files
 results/
+*.log
 
 temp_analysis/
 

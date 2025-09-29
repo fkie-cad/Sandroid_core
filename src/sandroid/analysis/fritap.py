@@ -1,4 +1,5 @@
-from logging import getLogger
+import logging
+import os
 
 from friTap import SSL_Logger
 
@@ -6,7 +7,32 @@ from sandroid.core.toolbox import Toolbox
 
 from .datagather import DataGather
 
-logger = getLogger(__name__)
+logger = logging.getLogger(__name__)
+
+# Set up dedicated fritap log file
+def _setup_fritap_logging():
+    """Set up dedicated file logging for friTap in the Sandroid results folder."""
+    fritap_logger = logging.getLogger('friTap')
+
+    # Check if we already have a file handler to avoid duplicates
+    has_file_handler = any(
+        isinstance(handler, logging.FileHandler)
+        for handler in fritap_logger.handlers
+    )
+
+    if not has_file_handler and os.getenv('RAW_RESULTS_PATH'):
+        file_handler = logging.FileHandler(
+            f"{os.getenv('RAW_RESULTS_PATH')}fritap.log"
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            "%(asctime)s~%(levelname)s~%(message)s~module:%(module)s~function:%(funcName)s"
+        )
+        file_handler.setFormatter(file_formatter)
+        fritap_logger.addHandler(file_handler)
+        fritap_logger.setLevel(logging.DEBUG)
+
+        logger.info(f"FriTap logs will be saved to {os.getenv('RAW_RESULTS_PATH')}fritap.log")
 
 
 class FriTap(DataGather):
@@ -15,12 +41,18 @@ class FriTap(DataGather):
         self.job_manager = Toolbox.get_frida_job_manager()
         self.process_id = process_id
 
+        # Set up dedicated fritap logging
+        _setup_fritap_logging()
+
         # Initialize SSL_Logger with optional arguments
+        keylog_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_keylog.log"
+        json_output_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_output.json"
         self.ssl_log = SSL_Logger(
             self.process_id,
             verbose=True,  # Enable verbose output
-            keylog="keylog.log",  # Path to save SSL key log
+            keylog=keylog_path,  # Path to save SSL key log in results folder
             debug_output=True,  # Enable debug output
+            json_output=json_output_path,  # Path to save JSON output in results folder
         )
 
         # Get the Frida script path from SSL_Logger
