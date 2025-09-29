@@ -89,61 +89,6 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 | [**friTap**](https://github.com/fkie-cad/friTap) | TLS key extraction and decrypted traffic interception for Android, enabling advanced network analysis in sandboxed environments. | ✅ Integrated |
 
 
-## The basics
-Sandroid is a framework for extracting forensic artefacts from Android Virtual Devices (AVD). It provides an ever-growing list of features, including static analysis of APKs, detailed dynamic analysis using dynamic instrumentation, automated execution of malware triggers, automated extraction of file system changes for arbitrary actions, and more.
-
-If you start Sandroid with `sandroid` or if you want use the legacy version `./sandroid.legacy` you will see the interactive menu. You should start an AVD first, Sandroid will automatically attach to it.
-```bash
-=== Interactive Menu ===
-Frida Server: [Not running]
-Spotlight Application: [n/a]
-
-    * print [e]mulator information (name, version, network, etc.)
-    * [s]napshot
-    * [g]o back to last snapshot
-    * [r]ecord and replay
-    * run [t]rigdroid malware triggers
-    * [i]nstall APK (local or remote via apksfull.com)
-    * run [f]rida server (install, if required)
-    * set [c]urrent app in focus to spotlight app
-    * [a]nalyze spotlight app with dexray-insight
-    * [d]ump memory of spotlight app (using fridump)
-    * [q]uit
-```
-From here, you can interact with the AVD in real time and let the framework perform helpful actions such as saving or restoring snapshots and automatically installing APKs.
-When you are ready, select one of the analysis options, such as ASAM for static analysis, or record and replay for dynamic analysis. Depending on the log level selected, logs and results will be printed. Detailed logs are always available in sandroid.log, regardless of the selected log level. By default, results are saved to sandroid.json and compiled into a PDF file.
-
-## Setup
-You'll need:
-- Python 3.10 or newer
-- sqldiff
-- trigdroid
-- Android Studio
-- Android SDK & ADB (Comes with Studio)
-- A running emulator
-
-#### Step by step instruction:
-```bash
-$ sudo apt install python3 sqlite3-tools
-$ python3 -m venv env
-$ source env/bin/activate
-$ pip install sandroid
-```
-- Download Android Studio from https://developer.android.com/studio, then create an emulator like this:
-- Open Android Studio
-- Click "more options"
-- from there, open "Virtual device manager"
-- Click "Create device"
-- Choose a phone. If you choose a phone with play services, you will probably need to jailbreak it before you can use the tool. (If you're looking to work with your own or third party apps, a better way is to use the integrated "install APK" function later).
-- Choose an API
-- Click Finish
-- Start the emulator (little play button in the virtual device manager)
-- run `sandroid` to start the tool (or `./sandroid.legacy` for the legacy version)
-
-
-## Dependencies
-- sqldiff: https://manpages.debian.org/unstable/sqlite3/sqldiff.1.en.html
-
 # Ground Truth APK
 The framework also includes a custom Android app for testing and calibration.
 This app is designed to **create specific forensic artefacts with pinpoint accuracy** at the user's command, while being as minimal as possible to avoid unintended artefacts.
