@@ -565,16 +565,38 @@ class ActionQ:
                 try:
                     self.logger.info("Enter file path of APK or search term:")
                     apk = input().strip()
-                    if os.path.isfile(apk):
-                        Adb.install_apk(apk)
+
+                    # Expand user path (~) and convert to absolute path
+                    expanded_apk_path = os.path.abspath(os.path.expanduser(apk))
+
+                    if os.path.isfile(expanded_apk_path):
+                        self.logger.info(f"Found local APK file: {expanded_apk_path}")
+                        Adb.install_apk(expanded_apk_path)
+                        self.logger.info("APK installation completed successfully")
                     else:
                         self.logger.info(
-                            "The path provided is not a valid file. Searching online."
+                            f"The path '{apk}' is not a valid file. Searching online for package."
                         )
-                        app_id = ApkDownloader().search_for_name(apk)
-                        ApkDownloader().install_app_id(app_id)
+                        try:
+                            app_id = ApkDownloader().search_for_name(apk)
+                            ApkDownloader().install_app_id(app_id)
+                            self.logger.info(
+                                "Online APK installation completed successfully"
+                            )
+                        except Exception as e:
+                            self.logger.error(
+                                f"Online APK search/installation failed: {e}"
+                            )
+                            self.logger.info(
+                                "Please check the search term or try a different APK"
+                            )
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
+                except Exception as e:
+                    self.logger.error(
+                        f"APK installation failed with unexpected error: {e}"
+                    )
+                    self.logger.info("Please check the file path or try again")
                 self.q.append("interactive")
             case "c":
                 Toolbox.set_spotlight_application(Adb.get_focused_app())
@@ -639,7 +661,7 @@ class ActionQ:
                         return
 
                     spotlight_application_pid, spotlight_application_name = check_frida
-                    #self.logger.info("Keys will be written to keylog.log")
+                    # self.logger.info("Keys will be written to keylog.log")
                     self.logger.info("Now fritap output follows. End with CTRC-C")
                     fritap = FriTap(spotlight_application_pid)
                     fritap.start()

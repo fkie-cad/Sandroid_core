@@ -59,8 +59,27 @@ class ApkDownloader:
 
     def search_for_name(self, package_name, wanted_version=None, limit=10):
         version_url = f"{self.aptoide_web_api_base_url_get_versions}package_name={package_name}/limit={limit}"
-        v_res = requests.get(url=version_url, headers=self.headers, timeout=10)
-        json_data_list = v_res.json()["list"]
+        try:
+            v_res = requests.get(url=version_url, headers=self.headers, timeout=10)
+            v_res.raise_for_status()  # Raise an exception for bad HTTP status codes
+            response_data = v_res.json()
+
+            if "list" not in response_data:
+                logger.error(
+                    f"Unexpected API response format for package '{package_name}': {response_data}"
+                )
+                raise ValueError("API returned unexpected format - no 'list' key found")
+
+            json_data_list = response_data["list"]
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error while searching for '{package_name}': {e}")
+            raise
+        except ValueError as e:
+            logger.error(f"JSON parsing error or invalid response format: {e}")
+            raise
+        except KeyError as e:
+            logger.error(f"Missing expected key in API response: {e}")
+            raise
 
         if json_data_list == []:
             logger.error(f"{package_name} could not be found.")
