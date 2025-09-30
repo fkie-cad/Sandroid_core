@@ -1044,6 +1044,7 @@ class Toolbox:
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                start_new_session=True,
             )
             time.sleep(5)
         cls.logger.info("Starting Emulator")
@@ -1054,6 +1055,7 @@ class Toolbox:
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         time.sleep(5)
 

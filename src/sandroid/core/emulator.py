@@ -147,7 +147,8 @@ class Emulator:
         try:
             print(f"Starting emulator '{avd_name}' with command: {' '.join(command)}")
             # Use Popen for non-blocking start
-            subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # start_new_session=True isolates emulator from terminal signals (e.g., Ctrl+C)
+            subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
             print(f"Emulator '{avd_name}' is starting up. Please wait...")
             # Note: A fixed sleep might not be reliable. Consider adding checks later.
             time.sleep(10)
