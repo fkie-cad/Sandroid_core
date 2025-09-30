@@ -1,6 +1,7 @@
 import os
 from logging import getLogger
 
+from sandroid.core import file_diff
 from sandroid.core.toolbox import Toolbox
 
 from .datagather import DataGather
@@ -146,7 +147,9 @@ class NewFiles(DataGather):
         true_new_files = [
             x
             for x in true_new_files
-            if x not in noise or x.endswith(".db") or x.endswith(".xml")
+            if x not in noise
+            or file_diff.is_sqlite_from_device_path(x)
+            or x.endswith(".xml")
         ]
 
         logger.debug(

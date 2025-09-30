@@ -30,6 +30,7 @@ from sandroid.features.trigdroid import Trigdroid
 
 from .adb import Adb
 from .apk_downloader import ApkDownloader
+from .file_diff import is_sqlite_file
 from .fridump import Fridump
 from .fsmon import FSMon
 from .toolbox import Toolbox
@@ -458,8 +459,8 @@ class ActionQ:
                 else:
                     self.logger.info(f"Pulled {spotlight_file} to {target_path}")
 
-                # For .db files, also pull WAL and journal files if they exist
-                if spotlight_file.endswith(".db") or True:
+                # For SQLite database files, also pull WAL and journal files if they exist
+                if is_sqlite_file(target_path):
                     # Pull the WAL file
                     wal_target = target_path + "-wal"
                     output, error = Adb.send_adb_command(

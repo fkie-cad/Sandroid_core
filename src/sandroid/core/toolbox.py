@@ -23,6 +23,7 @@ from colorama import Fore, Style
 from .adb import Adb
 from .CustomLoggerFormatter import CustomFormatter
 from .emulator import Emulator
+from .file_diff import is_sqlite_file
 
 
 class Toolbox:
@@ -546,11 +547,14 @@ class Toolbox:
                     cls.add_to_shadow_ts_list(
                         currentDir, filename, secondsTimestamp, fetch_all=fetch_all
                     )
-                    if filename.endswith(
-                        ".db-wal"
-                    ):  # Make sure db files that use write ahead logging are also added to list
+                    # Make sure parent db files are added when WAL or journal files change
+                    if filename.endswith("-wal"):
                         changedFiles.update(
                             {currentDir + filename[0:-4]: secondsTimestamp}
+                        )
+                    elif filename.endswith("-journal"):
+                        changedFiles.update(
+                            {currentDir + filename[0:-8]: secondsTimestamp}
                         )
 
         returnThis = {}
@@ -945,8 +949,8 @@ class Toolbox:
             else:
                 cls.logger.info(f"Pulled {file_path} to {target}")
 
-            # For .db files, also pull WAL and journal files if they exist
-            if file_path.endswith(".db"):
+            # For SQLite database files, also pull WAL and journal files if they exist
+            if is_sqlite_file(target):
                 wal_file = file_path + "-wal"
                 journal_file = file_path + "-journal"
 

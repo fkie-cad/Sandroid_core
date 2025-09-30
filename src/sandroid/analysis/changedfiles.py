@@ -76,16 +76,16 @@ class ChangedFiles(DataGather):
 
         for file in files_from_all_pulls:
             try:
-                if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(
-                        f"{base_folder}first_pull", file.lstrip("/")
-                    )
-                    path_to_file_second_pull = os.path.join(
-                        f"{base_folder}second_pull", file.lstrip("/")
-                    )
-                    path_to_file_noise_pull = os.path.join(
-                        f"{base_folder}noise_pull", file.lstrip("/")
-                    )
+                path_to_file_first_pull = os.path.join(
+                    f"{base_folder}first_pull", file.lstrip("/")
+                )
+                path_to_file_second_pull = os.path.join(
+                    f"{base_folder}second_pull", file.lstrip("/")
+                )
+                path_to_file_noise_pull = os.path.join(
+                    f"{base_folder}noise_pull", file.lstrip("/")
+                )
+                if file_diff.is_sqlite_file(path_to_file_first_pull):
                     diff = file_diff.db_diff(
                         path_to_file_first_pull,
                         path_to_file_second_pull,
@@ -129,16 +129,16 @@ class ChangedFiles(DataGather):
         )
         for file in files_from_all_pulls:
             try:
-                if file[-3:] == ".db":
-                    path_to_file_first_pull = os.path.join(
-                        f"{base_folder}first_pull", file.lstrip("/")
-                    )
-                    path_to_file_second_pull = os.path.join(
-                        f"{base_folder}second_pull", file.lstrip("/")
-                    )
-                    path_to_file_noise_pull = os.path.join(
-                        f"{base_folder}noise_pull", file.lstrip("/")
-                    )
+                path_to_file_first_pull = os.path.join(
+                    f"{base_folder}first_pull", file.lstrip("/")
+                )
+                path_to_file_second_pull = os.path.join(
+                    f"{base_folder}second_pull", file.lstrip("/")
+                )
+                path_to_file_noise_pull = os.path.join(
+                    f"{base_folder}noise_pull", file.lstrip("/")
+                )
+                if file_diff.is_sqlite_file(path_to_file_first_pull):
                     diff = file_diff.db_diff(
                         path_to_file_first_pull,
                         path_to_file_second_pull,
@@ -220,8 +220,10 @@ class ChangedFiles(DataGather):
         files_from_all_pulls = [
             x
             for x in files_from_all_pulls
-            if x not in noise or x.endswith(".db") or x.endswith(".xml")
-        ]  # filter noise from files, ignore .db and .xml files
+            if x not in noise
+            or file_diff.is_sqlite_from_device_path(x)
+            or x.endswith(".xml")
+        ]  # filter noise from files, ignore SQLite and .xml files
 
         files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

@@ -1,5 +1,6 @@
 from logging import getLogger
 
+from sandroid.core import file_diff
 from sandroid.core.toolbox import Toolbox
 
 from .datagather import DataGather
@@ -95,8 +96,10 @@ class DeletedFiles(DataGather):
         files_from_all_pulls = [
             x
             for x in files_from_all_pulls
-            if x not in noise or x.endswith(".db") or x.endswith(".xml")
-        ]  # filter noise from files, ignore .db and .xml files
+            if x not in noise
+            or file_diff.is_sqlite_from_device_path(x)
+            or x.endswith(".xml")
+        ]  # filter noise from files, ignore SQLite and .xml files
 
         files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

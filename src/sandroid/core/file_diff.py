@@ -11,6 +11,67 @@ from xmldiff import formatting, main
 
 logger = getLogger(__name__)
 
+# Cache to avoid re-reading files
+_sqlite_file_cache = {}
+
+
+def is_sqlite_file(file_path):
+    """Check if a file is a SQLite database by reading its magic header.
+
+    SQLite databases have a distinctive 16-byte header starting with "SQLite format 3\x00".
+    This function reads the header to determine if a file is a SQLite database,
+    regardless of its file extension.
+
+    :param file_path: The full path to the file to check.
+    :type file_path: str
+    :returns: True if the file is a SQLite database, False otherwise.
+    :rtype: bool
+    """
+    # Check cache first
+    if file_path in _sqlite_file_cache:
+        return _sqlite_file_cache[file_path]
+
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(16)
+            is_sqlite = header.startswith(b"SQLite format 3\x00")
+            _sqlite_file_cache[file_path] = is_sqlite
+            return is_sqlite
+    except (FileNotFoundError, PermissionError, OSError, IOError) as e:
+        logger.debug(f"Could not read file header for {file_path}: {e}")
+        _sqlite_file_cache[file_path] = False
+        return False
+
+
+def is_sqlite_from_device_path(device_path, base_folder=""):
+    """Check if a device file path corresponds to a SQLite database.
+
+    This is a helper for noise filtering where we have device paths (like /data/data/...)
+    and need to check if the pulled local file is a SQLite database.
+
+    :param device_path: The device file path (e.g., /data/data/com.app/databases/file).
+    :type device_path: str
+    :param base_folder: The base folder where files are pulled (default to RAW_RESULTS_PATH).
+    :type base_folder: str
+    :returns: True if the file is a SQLite database or has .db extension, False otherwise.
+    :rtype: bool
+    """
+    # Fast path: check common SQLite extensions
+    if device_path.endswith((".db", ".sqlite", ".sqlite3", ".db3")):
+        return True
+
+    # Try to check the actual file header if it was pulled
+    if not base_folder:
+        base_folder = os.getenv("RAW_RESULTS_PATH")
+
+    # Try first_pull directory first
+    local_path = os.path.join(f"{base_folder}first_pull", device_path.lstrip("/"))
+    if os.path.isfile(local_path):
+        return is_sqlite_file(local_path)
+
+    # Fallback: assume not SQLite if we can't check
+    return False
+
 
 # sqldiff will give a script to turn one db into another. So rows that are in db1 but not in db2 are inserted
 # (INSERT INTO statement names the content we are interested in).
