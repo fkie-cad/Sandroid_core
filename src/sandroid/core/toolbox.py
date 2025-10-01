@@ -57,6 +57,11 @@ class Toolbox:
     _spotlight_pull_two = None
     _screen_recording_running = False
 
+    # Spawn mode variables
+    _spawn_mode = False
+    _spotlight_spawn_application = None
+    _auto_resume_after_spawn = True  # Auto-resume by default
+
     # replace these with your own values
     # TODO: Shouldn't be hardcoded
     device_name = "Pixel_6_Pro_API_31"
@@ -708,14 +713,322 @@ class Toolbox:
         """
         cls._spotlight_application = None
         cls._spotlight_application_pid = None
+        cls._spawn_mode = False
+        cls._spotlight_spawn_application = None
         cls.logger.info("Spotlight application information has been reset.")
+
+    @classmethod
+    def set_spawn_mode(cls, enabled):
+        """Sets whether spawn mode is enabled.
+
+        :param enabled: True to enable spawn mode, False for attach mode.
+        :type enabled: bool
+        """
+        cls._spawn_mode = enabled
+        mode_str = "SPAWN" if enabled else "ATTACH"
+        cls.logger.info(f"Spotlight mode set to: {mode_str}")
+
+    @classmethod
+    def is_spawn_mode(cls):
+        """Returns whether spawn mode is currently enabled.
+
+        :returns: True if spawn mode is enabled, False otherwise.
+        :rtype: bool
+        """
+        return cls._spawn_mode
+
+    @classmethod
+    def set_spotlight_spawn_application(cls, package_name):
+        """Sets the application to be spawned when using Frida-based tools.
+
+        :param package_name: The package name of the app to spawn.
+        :type package_name: str
+        """
+        cls._spotlight_spawn_application = package_name
+        cls._spawn_mode = True
+        cls.logger.info(f"Spotlight spawn application set to: {package_name}")
+
+    @classmethod
+    def get_spotlight_spawn_application(cls):
+        """Returns the package name of the app to be spawned.
+
+        :returns: The package name of the spawn app, or None if not set.
+        :rtype: str or None
+        """
+        return cls._spotlight_spawn_application
+
+    @classmethod
+    def set_auto_resume_after_spawn(cls, enabled):
+        """Sets whether spawned apps should be auto-resumed.
+
+        :param enabled: True to auto-resume, False to leave paused.
+        :type enabled: bool
+        """
+        cls._auto_resume_after_spawn = enabled
+        cls.logger.info(f"Auto-resume after spawn: {enabled}")
+
+    @classmethod
+    def get_auto_resume_after_spawn(cls):
+        """Returns whether auto-resume after spawn is enabled.
+
+        :returns: True if auto-resume is enabled, False otherwise.
+        :rtype: bool
+        """
+        return cls._auto_resume_after_spawn
+
+    @classmethod
+    def get_frida_session_for_spotlight(cls):
+        """Returns appropriate Frida session based on current mode (spawn/attach).
+
+        This is the unified abstraction layer for all Frida-based tools.
+
+        :returns: A tuple of (session, mode, app_info) where:
+            - session: Frida session object
+            - mode: "spawn" or "attach"
+            - app_info: dict with package_name, pid, mode, etc.
+        :rtype: tuple
+        :raises: Exception if Frida setup fails
+        """
+        import frida
+
+        try:
+            device = frida.get_usb_device()
+
+            if cls._spawn_mode and cls._spotlight_spawn_application:
+                # SPAWN MODE
+                cls.logger.info(
+                    f"Spawning application: {Fore.GREEN}{cls._spotlight_spawn_application}{Style.RESET_ALL}"
+                )
+
+                # Spawn the application (starts paused)
+                pid = device.spawn([cls._spotlight_spawn_application])
+                cls.logger.debug(f"Spawned process with PID: {pid}")
+
+                # Attach to the spawned process
+                session = device.attach(pid)
+                cls.logger.debug(f"Attached to spawned process")
+
+                # Resume the process if auto-resume is enabled
+                if cls._auto_resume_after_spawn:
+                    cls.logger.debug("Auto-resuming spawned process")
+                    device.resume(pid)
+                else:
+                    cls.logger.info(
+                        f"{Fore.YELLOW}Process spawned but PAUSED. "
+                        f"Resume manually or enable auto-resume.{Style.RESET_ALL}"
+                    )
+
+                app_info = {
+                    "package_name": cls._spotlight_spawn_application,
+                    "pid": pid,
+                    "mode": "spawn",
+                    "device": device
+                }
+
+                cls.logger.info(
+                    f"{Fore.GREEN}Successfully spawned and attached to {cls._spotlight_spawn_application} "
+                    f"(PID: {pid}){Style.RESET_ALL}"
+                )
+
+                return session, "spawn", app_info
+
+            else:
+                # ATTACH MODE (existing behavior)
+                if not cls._spotlight_application:
+                    raise ValueError(
+                        "No spotlight application set. Press 'c' to set current app or 'C' to select spawn app."
+                    )
+
+                package_name = cls._spotlight_application[0]
+                cls.logger.info(
+                    f"Attaching to running application: {Fore.GREEN}{package_name}{Style.RESET_ALL}"
+                )
+
+                # Get PID if not already set
+                if not cls._spotlight_application_pid:
+                    from .adb import Adb
+                    pid = Adb.get_pid_for_package_name(package_name)
+                    if not pid:
+                        raise ValueError(
+                            f"Application {package_name} is not running. "
+                            f"Start it first or use spawn mode (Shift+C)."
+                        )
+                    cls._spotlight_application_pid = pid
+                else:
+                    pid = cls._spotlight_application_pid
+
+                # Attach to running process
+                session = device.attach(package_name)
+                cls.logger.debug(f"Attached to running process (PID: {pid})")
+
+                app_info = {
+                    "package_name": package_name,
+                    "pid": pid,
+                    "mode": "attach",
+                    "device": device
+                }
+
+                cls.logger.info(
+                    f"{Fore.GREEN}Successfully attached to {package_name} "
+                    f"(PID: {pid}){Style.RESET_ALL}"
+                )
+
+                return session, "attach", app_info
+
+        except frida.ProcessNotFoundError as e:
+            cls.logger.error(f"Process not found: {e}")
+            raise
+        except frida.ServerNotRunningError:
+            cls.logger.error(
+                "Frida server is not running. Press 'f' to start it."
+            )
+            raise
+        except Exception as e:
+            cls.logger.error(f"Error setting up Frida session: {e}")
+            raise
+
+    @classmethod
+    def select_app_with_fuzzy_search(cls):
+        """Interactive app selection with fuzzy search capability.
+
+        Displays all installed apps and allows user to filter them with fuzzy search.
+
+        :returns: Selected package name, or None if cancelled.
+        :rtype: str or None
+        """
+        from .adb import Adb
+
+        try:
+            # Try to import fuzzy search library
+            try:
+                from thefuzz import fuzz, process
+                has_fuzzy = True
+            except ImportError:
+                cls.logger.warning(
+                    "thefuzz library not installed. Install with: pip install thefuzz"
+                )
+                cls.logger.info("Falling back to simple numbered selection")
+                has_fuzzy = False
+
+            # Get all installed packages
+            cls.logger.info("Fetching installed applications...")
+            packages = Adb.get_installed_packages()
+
+            if not packages:
+                cls.logger.error("No packages found on device")
+                return None
+
+            # Sort by package name for easier browsing
+            packages.sort(key=lambda x: x["package_name"])
+
+            if has_fuzzy:
+                # Fuzzy search mode
+                cls.logger.info(
+                    f"{Fore.CYAN}=== Fuzzy Search Mode ==={Style.RESET_ALL}\n"
+                    f"Enter search term to filter apps (or press ENTER to see all):"
+                )
+
+                search_term = input(f"{Fore.YELLOW}Search: {Style.RESET_ALL}").strip()
+
+                if search_term:
+                    # Perform fuzzy matching
+                    package_names = [p["package_name"] for p in packages]
+                    matches = process.extract(
+                        search_term,
+                        package_names,
+                        scorer=fuzz.partial_ratio,
+                        limit=20
+                    )
+
+                    # Filter packages based on matches
+                    filtered_packages = [
+                        p for p in packages
+                        if p["package_name"] in [m[0] for m in matches if m[1] > 50]
+                    ]
+
+                    if not filtered_packages:
+                        cls.logger.warning(
+                            f"No matches found for '{search_term}'. Showing all apps."
+                        )
+                        filtered_packages = packages
+                else:
+                    filtered_packages = packages
+
+            else:
+                # Simple mode without fuzzy search
+                filtered_packages = packages
+
+            # Display filtered packages
+            cls.logger.info(
+                f"\n{Fore.CYAN}=== Available Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
+            )
+
+            for idx, pkg in enumerate(filtered_packages, 1):
+                install_date = pkg.get("install_date", "Unknown")
+                # Truncate long package names for display
+                pkg_name = pkg["package_name"]
+                if len(pkg_name) > 60:
+                    pkg_name = pkg_name[:57] + "..."
+
+                print(
+                    f"{Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} "
+                    f"{Fore.GREEN}{pkg_name:60s}{Style.RESET_ALL} "
+                    f"{Fore.CYAN}[{install_date}]{Style.RESET_ALL}"
+                )
+
+                # Add pagination for long lists
+                if idx % 20 == 0 and idx < len(filtered_packages):
+                    response = input(
+                        f"\n{Fore.YELLOW}Press ENTER to see more, or type a number to select: {Style.RESET_ALL}"
+                    ).strip()
+                    if response.isdigit():
+                        selected_idx = int(response)
+                        if 1 <= selected_idx <= len(filtered_packages):
+                            return filtered_packages[selected_idx - 1]["package_name"]
+
+            # Get user selection
+            while True:
+                try:
+                    selection_input = input(
+                        f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}) or 'q' to cancel: {Style.RESET_ALL}"
+                    ).strip()
+
+                    if selection_input.lower() == 'q':
+                        cls.logger.info("Selection cancelled")
+                        return None
+
+                    selected_idx = int(selection_input)
+
+                    if 1 <= selected_idx <= len(filtered_packages):
+                        selected_package = filtered_packages[selected_idx - 1]["package_name"]
+                        cls.logger.info(
+                            f"Selected: {Fore.GREEN}{selected_package}{Style.RESET_ALL}"
+                        )
+                        return selected_package
+                    else:
+                        print(
+                            f"{Fore.RED}Invalid number. Please enter 1-{len(filtered_packages)}{Style.RESET_ALL}"
+                        )
+                except ValueError:
+                    print(
+                        f"{Fore.RED}Invalid input. Please enter a number or 'q'{Style.RESET_ALL}"
+                    )
+                except KeyboardInterrupt:
+                    cls.logger.info("\nSelection cancelled by user")
+                    return None
+
+        except Exception as e:
+            cls.logger.error(f"Error during app selection: {e}")
+            return None
 
     @classmethod
     def get_spotlighted_app_data_path(cls):
         """Returns the /data/data/<spotlight_application> path if a spotlight app is set.
         Otherwise, returns None and logs a warning.
         """
-        if not cls._spotlight_application:
+        if cls._spawn_mode and cls._spotlight_spawn_application:
+            return f"/data/data/{cls._spotlight_spawn_application}"
+        elif not cls._spotlight_application:
             cls.logger.warning("No spotlight application is set.")
             return None
 
@@ -1273,11 +1586,26 @@ class Toolbox:
             proxy_string = f"{Fore.GREEN}{proxy_settings}{Fore.RESET}"
         proxy_string = f"HTTP Proxy: [{proxy_string}]"
 
-        spotlight_application = cls._spotlight_application
-        if spotlight_application:
-            spotlight_application_string = f"{Fore.YELLOW}{spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET}"
+        # Spotlight application with spawn/attach mode indicator
+        if cls._spawn_mode and cls._spotlight_spawn_application:
+            # SPAWN MODE
+            spotlight_application_string = (
+                f"{Fore.YELLOW}🚀 {cls._spotlight_spawn_application}{Fore.RESET} "
+                f"{Fore.CYAN}[SPAWN MODE]{Fore.RESET}"
+            )
+            if cls._auto_resume_after_spawn:
+                spotlight_application_string += f" {Fore.GREEN}(auto-resume){Fore.RESET}"
+            else:
+                spotlight_application_string += f" {Fore.YELLOW}(manual resume){Fore.RESET}"
+        elif cls._spotlight_application:
+            # ATTACH MODE
+            spotlight_application_string = (
+                f"{Fore.YELLOW}📌 {cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET} "
+                f"{Fore.GREEN}[ATTACH MODE]{Fore.RESET}"
+            )
         else:
             spotlight_application_string = f"{Fore.RED}Not set{Fore.RESET}"
+
         spotlight_application_string = (
             f"Spotlight Application: [{spotlight_application_string}]"
         )
@@ -1301,10 +1629,18 @@ class Toolbox:
 
         spotlight_files_string = f"Spotlight Files: [{spotlight_files_string}]"
 
+        # Mode indicator for Frida-based tools
+        mode_indicator = ""
+        if cls._spawn_mode:
+            mode_indicator = f" {Fore.CYAN}[🚀 SPAWN]{Fore.RESET}"
+        elif cls._spotlight_application:
+            mode_indicator = f" {Fore.GREEN}[📌 ATTACH]{Fore.RESET}"
+
         if cls.malware_monitor_running == False:
-            malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on spotlight app"
+            malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept){mode_indicator}"
         else:
-            malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on {spotlight_application}"
+            current_app = cls._spotlight_spawn_application if cls._spawn_mode else (cls._spotlight_application[0] if cls._spotlight_application else "app")
+            malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on {current_app}"
 
         # Network capture menu text changes based on capture status
         if cls._network_capture_running:
@@ -1332,11 +1668,12 @@ class Toolbox:
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}i{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mport action
 
     {Fore.CYAN}=== Spotlight Application ==={Fore.RESET}
-    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app
+    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[ATTACH MODE]{Fore.RESET}
+    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[SPAWN MODE]{Fore.RESET}
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with dexray-insight
-    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app (using fridump)
+    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app{mode_indicator}
     {malware_monitor_string}
-    * start o{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}b{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}jection interactive shell for spotlight app
+    * start o{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}b{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}jection interactive shell{mode_indicator}
     * run {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}t{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rigdroid malware triggers
 
     {Fore.CYAN}=== Spotlight Files ==={Fore.RESET}
@@ -1355,7 +1692,7 @@ class Toolbox:
 
     {Fore.CYAN}=== Network Management ==={Fore.RESET}
     * set/unset network prox{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}y{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}
-    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}h{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ook encryption routines with friTap
+    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}h{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ook encryption routines with friTap{mode_indicator}
     {network_capture_string}
 
 

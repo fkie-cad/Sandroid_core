@@ -32,8 +32,39 @@ class Fridump:
         return True
 
     @classmethod
-    def dump_memory(cls, pid, process_name):
-        cls.attach_to_app(pid)
+    def dump_memory(cls, pid=None, process_name=None, mode=None):
+        """Dump memory of a process.
+
+        Can use either explicit pid/name or get from Toolbox spotlight session.
+
+        :param pid: Process ID (optional if using spotlight)
+        :param process_name: Process name (optional if using spotlight)
+        :param mode: "spawn" or "attach" (optional, for logging)
+        """
+        # If no PID provided, get from unified session
+        if pid is None:
+            from .toolbox import Toolbox
+
+            try:
+                session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
+                pid = app_info["pid"]
+                process_name = app_info["package_name"]
+                # Session already attached/spawned, use it directly
+                cls.process = session
+                logger.info(
+                    f"Using {mode.upper()} mode session for memory dump of {process_name} (PID: {pid})"
+                )
+            except Exception as e:
+                logger.error(f"Failed to get spotlight session: {e}")
+                return
+        else:
+            # Legacy path: attach explicitly
+            cls.attach_to_app(pid)
+            if mode:
+                logger.info(
+                    f"Dumping memory in {mode.upper()} mode for {process_name} (PID: {pid})"
+                )
+
         subdirectory = process_name.replace(".", "-")
         output_directory = os.path.join(os.getcwd(), "dump", subdirectory)
         logger.debug(f"Output directory for memory dump is set to {output_directory}")

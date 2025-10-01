@@ -600,12 +600,63 @@ class ActionQ:
                     self.logger.info("Please check the file path or try again")
                 self.q.append("interactive")
             case "c":
+                # ATTACH MODE: Set currently focused app as spotlight (existing behavior)
                 Toolbox.set_spotlight_application(Adb.get_focused_app())
                 spotlight_application_name = Toolbox.get_spotlight_application()[0]
                 spotlight_application_pid = Adb.get_pid_for_package_name(
                     spotlight_application_name
                 )
                 Toolbox.set_spotlight_application_pid(spotlight_application_pid)
+                Toolbox.set_spawn_mode(False)  # Ensure attach mode
+                self.logger.info(
+                    f"{Fore.GREEN}Spotlight app set in ATTACH mode: {spotlight_application_name}{Style.RESET_ALL}"
+                )
+                self.q.append("interactive")
+            case "C":
+                # SPAWN MODE: Select app to spawn with fuzzy search
+                try:
+                    self.logger.info(
+                        f"\n{Fore.CYAN}=== Spawn Mode Selection ==={Style.RESET_ALL}"
+                    )
+                    self.logger.info(
+                        "Select an application to spawn when using Frida-based tools.\n"
+                        "The app will be launched fresh with hooks active from the start.\n"
+                    )
+
+                    # Use fuzzy search to select app
+                    selected_package = Toolbox.select_app_with_fuzzy_search()
+
+                    if selected_package:
+                        Toolbox.set_spotlight_spawn_application(selected_package)
+
+                        # Ask about auto-resume preference
+                        self.logger.info(
+                            f"\n{Fore.CYAN}Auto-resume spawned app?{Style.RESET_ALL}"
+                        )
+                        self.logger.info(
+                            f"  {Fore.YELLOW}Y{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
+                        )
+                        self.logger.info(
+                            f"  {Fore.YELLOW}N{Style.RESET_ALL} = App stays paused, resume manually"
+                        )
+
+                        resume_choice = click.getchar().lower()
+                        Toolbox.set_auto_resume_after_spawn(resume_choice != 'n')
+
+                        resume_status = "enabled" if resume_choice != 'n' else "disabled"
+                        self.logger.info(
+                            f"\n{Fore.GREEN}✓ Spotlight app set in SPAWN mode:{Style.RESET_ALL}\n"
+                            f"  Package: {Fore.YELLOW}{selected_package}{Style.RESET_ALL}\n"
+                            f"  Auto-resume: {Fore.YELLOW}{resume_status}{Style.RESET_ALL}\n"
+                        )
+                    else:
+                        self.logger.info("Spawn mode selection cancelled")
+
+                except KeyboardInterrupt:
+                    self.logger.info("\n Spawn mode selection cancelled by user")
+                except Exception as e:
+                    self.logger.error(f"Error setting spawn mode: {e}")
+
                 self.q.append("interactive")
             case "a":
                 try:
@@ -656,15 +707,17 @@ class ActionQ:
                 self.q.append("interactive")
             case "h":
                 try:
-                    check_frida = self.check_frida_and_spotlight()
-                    if not check_frida:
+                    # Check Frida is running
+                    if not Toolbox.frida_manager.is_frida_server_running():
+                        self.logger.warning(
+                            "No frida server is running. Please start or install it first."
+                        )
                         self.q.append("interactive")
                         return
 
-                    spotlight_application_pid, spotlight_application_name = check_frida
-                    # self.logger.info("Keys will be written to keylog.log")
-                    self.logger.info("Now fritap output follows. End with CTRC-C")
-                    fritap = FriTap(spotlight_application_pid)
+                    # FriTap now handles both spawn/attach internally
+                    self.logger.info("Now fritap output follows. End with CTRL-C")
+                    fritap = FriTap()  # No args needed, uses unified session getter
                     fritap.start()
 
                     try:
@@ -677,8 +730,9 @@ class ActionQ:
                         self.logger.info("CTRL-C detected. Stopping FriTap monitoring.")
                         fritap.stop()
                         self.logger.info("FriTap monitoring stopped.")
-                        # Reset spotlight app info as the app may have been closed
-                        Toolbox.reset_spotlight_application()
+                        # Reset spotlight app info if spawned
+                        if Toolbox.is_spawn_mode():
+                            Toolbox.reset_spotlight_application()
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
                 except Exception as e:
@@ -687,70 +741,109 @@ class ActionQ:
                 self.q.append("interactive")
             case "d":
                 try:
-                    check_frida = self.check_frida_and_spotlight()
-                    if not check_frida:
-                        return
-
-                    spotlight_application_pid, spotlight_application_name = check_frida
-
-                    if spotlight_application_pid:
-                        Fridump.dump_memory(
-                            spotlight_application_pid, spotlight_application_name
+                    # Check Frida is running
+                    if not Toolbox.frida_manager.is_frida_server_running():
+                        self.logger.warning(
+                            "No frida server is running. Please start or install it first."
                         )
-                    else:
-                        self.logger.warning("Spotlight app has to be set first.")
                         self.q.append("interactive")
                         return
+
+                    # Fridump now handles both spawn/attach internally
+                    Fridump.dump_memory()  # Uses unified session getter
+
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
+                except Exception as e:
+                    self.logger.error(f"Error during memory dump: {e}")
                 self.q.append("interactive")
 
             case "o":
                 try:
                     FSMon.check_and_install_fsmon()
 
+                    # Get spotlight info (works with both spawn and attach modes)
                     spotlight_data_path = Toolbox.get_spotlighted_app_data_path()
-                    spotlight_application_pid = Toolbox.get_spotlight_application_pid()
                     process = None
 
-                    if spotlight_application_pid:
-                        self.logger.info(
-                            f"Press ENTER to monitor spotlight app (PID: {spotlight_application_pid}) or enter a path to monitor:"
-                        )
-                        user_input = input().strip()
-
-                        if user_input:
-                            process = FSMon.run_fsmon_by_path(user_input)
-                        else:
-                            process = FSMon.run_fsmon_by_pid(spotlight_application_pid)
-                    else:
-                        self.logger.info(
-                            "No spotlight app is set. Enter a path to monitor:"
-                        )
-                        user_input = input().strip()
-
-                        if user_input:
-                            process = FSMon.run_fsmon_by_path(user_input)
-                        else:
-                            self.logger.warning(
-                                "No path specified and no spotlight app available."
+                    # Try to get PID from current spotlight settings
+                    if Toolbox.is_spawn_mode():
+                        # In spawn mode, app may not be running yet
+                        spawn_app = Toolbox.get_spotlight_spawn_application()
+                        if spawn_app:
+                            self.logger.info(
+                                f"{Fore.YELLOW}Spawn mode active for {spawn_app}.{Style.RESET_ALL}"
                             )
-                            self.q.append("interactive")
-                            return
+                            self.logger.info(
+                                "FSMon requires a running process. Options:\n"
+                                "  1. Press ENTER to monitor app's data directory\n"
+                                "  2. Enter a custom path to monitor"
+                            )
+                            user_input = input().strip()
+
+                            if user_input:
+                                process = FSMon.run_fsmon_by_path(user_input)
+                            elif spotlight_data_path:
+                                process = FSMon.run_fsmon_by_path(spotlight_data_path)
+                            else:
+                                self.logger.warning("No valid path available.")
+                                self.q.append("interactive")
+                                return
+                        else:
+                            self.logger.info("No spotlight app set. Enter a path to monitor:")
+                            user_input = input().strip()
+                            if user_input:
+                                process = FSMon.run_fsmon_by_path(user_input)
+                            else:
+                                self.logger.warning("No path specified.")
+                                self.q.append("interactive")
+                                return
+                    else:
+                        # Attach mode or no mode - try to get PID
+                        spotlight_application_pid = Toolbox.get_spotlight_application_pid()
+
+                        if spotlight_application_pid:
+                            mode_str = f"{Fore.GREEN}[ATTACH MODE]{Style.RESET_ALL}" if Toolbox.get_spotlight_application() else ""
+                            self.logger.info(
+                                f"Press ENTER to monitor spotlight app {mode_str} (PID: {spotlight_application_pid}) or enter a path to monitor:"
+                            )
+                            user_input = input().strip()
+
+                            if user_input:
+                                process = FSMon.run_fsmon_by_path(user_input)
+                            else:
+                                process = FSMon.run_fsmon_by_pid(spotlight_application_pid)
+                        else:
+                            self.logger.info(
+                                "No spotlight app is set. Enter a path to monitor:"
+                            )
+                            user_input = input().strip()
+
+                            if user_input:
+                                process = FSMon.run_fsmon_by_path(user_input)
+                            else:
+                                self.logger.warning(
+                                    "No path specified and no spotlight app available."
+                                )
+                                self.q.append("interactive")
+                                return
 
                     if process is None:
                         self.logger.warning("Failed to start FSMon monitoring.")
                         self.q.append("interactive")
                         return
 
-                    if user_input:
-                        self.logger.info(
-                            f"Now fsmon output for path {user_input} follows. End with CTRL-C"
-                        )
+                    # Determine what we're monitoring for log message
+                    if 'user_input' in locals() and user_input:
+                        monitor_target = f"path {user_input}"
+                    elif 'spotlight_application_pid' in locals() and spotlight_application_pid:
+                        monitor_target = f"PID {spotlight_application_pid}"
                     else:
-                        self.logger.info(
-                            f"Now fsmon output for PID {spotlight_application_pid} follows. End with CTRL-C"
-                        )
+                        monitor_target = f"path {spotlight_data_path}"
+
+                    self.logger.info(
+                        f"Now fsmon output for {monitor_target} follows. End with CTRL-C"
+                    )
 
                     try:
                         while True:
@@ -848,33 +941,65 @@ class ActionQ:
 
             case "b":
                 try:
-                    check_frida = self.check_frida_and_spotlight()
-                    if not check_frida:
+                    # Check Frida is running
+                    if not Toolbox.frida_manager.is_frida_server_running():
+                        self.logger.warning(
+                            "No frida server is running. Please start or install it first."
+                        )
+                        self.q.append("interactive")
                         return
 
-                    spotlight_application_pid, spotlight_application_name = check_frida
-
-                    self.logger.info(
-                        f"Launching objection interactive shell for {spotlight_application_name}"
-                    )
-
+                    # Get session info using unified getter
                     try:
-                        cmd = [
-                            "objection",
-                            "--gadget",
-                            str(spotlight_application_pid),
-                            "explore",
-                        ]
+                        session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
+                        package_name = app_info["package_name"]
+                        pid = app_info["pid"]
+
+                        self.logger.info(
+                            f"Launching objection interactive shell in {mode.upper()} mode for {package_name}"
+                        )
+
+                        # Build objection command based on mode
+                        if mode == "spawn":
+                            # For spawn mode, objection can handle spawning itself
+                            cmd = [
+                                "objection",
+                                "-g",
+                                package_name,
+                                "explore",
+                                "--startup-command",
+                                "android hooking watch class_method *.*",  # Example startup hook
+                            ]
+                            self.logger.info(
+                                f"{Fore.YELLOW}Note: Objection will spawn a fresh instance of {package_name}{Style.RESET_ALL}"
+                            )
+                        else:
+                            # Attach mode (existing behavior)
+                            cmd = [
+                                "objection",
+                                "--gadget",
+                                str(pid),
+                                "explore",
+                            ]
+
                         self.logger.info(f"Running command: {' '.join(cmd)}")
 
                         process = subprocess.Popen(cmd)  # nosec S603 # Launching objection security tool
                         process.communicate()
 
                         self.logger.info("Objection session ended")
+
+                        # Reset spotlight if spawned
+                        if mode == "spawn":
+                            Toolbox.reset_spotlight_application()
+
                     except Exception as e:
-                        self.logger.error(f"Error launching objection: {e!s}")
+                        self.logger.error(f"Error getting spotlight session: {e}")
+
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
+                except Exception as e:
+                    self.logger.error(f"Error launching objection: {e!s}")
                 self.q.append("interactive")
             case "w":
                 try:

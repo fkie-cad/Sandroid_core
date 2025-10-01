@@ -36,15 +36,29 @@ def _setup_fritap_logging():
 
 
 class FriTap(DataGather):
-    def __init__(self, process_id):
+    def __init__(self):
+        """Initialize FriTap without process_id - will get session info when starting."""
         self.last_results = {}
         self.job_manager = Toolbox.get_frida_job_manager()
-        self.process_id = process_id
+        self.process_id = None
+        self.app_package = None
+        self.mode = None
+        self.ssl_log = None
+        self.frida_script_path = None
 
         # Set up dedicated fritap logging
         _setup_fritap_logging()
 
-        # Initialize SSL_Logger with optional arguments
+    def _setup_session(self):
+        """Set up FriTap session using unified Frida session getter."""
+        # Use unified session getter (supports both spawn and attach modes)
+        session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
+
+        self.process_id = app_info["pid"]
+        self.app_package = app_info["package_name"]
+        self.mode = mode
+
+        # Initialize SSL_Logger with the obtained process ID
         keylog_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_keylog.log"
         json_output_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_output.json"
         self.ssl_log = SSL_Logger(
@@ -59,20 +73,32 @@ class FriTap(DataGather):
         self.frida_script_path = self.ssl_log.get_fritap_frida_script_path()
 
         # Set up the Frida session in the JobManager
+        # Note: We already spawned/attached via get_frida_session_for_spotlight()
+        should_spawn = (mode == "spawn")
         self.job_manager.setup_frida_session(
             self.process_id,
             self.ssl_log.on_fritap_message,
-            should_spawn=False,  # Do not spawn the process
+            should_spawn=False,  # Already spawned/attached
+        )
+
+        logger.info(
+            f"FriTap initialized in {mode.upper()} mode for {self.app_package} (PID: {self.process_id})"
         )
 
     def start(self):
+        """Start FriTap monitoring."""
+        # Set up session if not already done
+        if self.process_id is None:
+            self._setup_session()
+
         # Start the job with a custom hooking handler
         self.job_id = self.job_manager.start_job(
             self.frida_script_path,
             custom_hooking_handler_name=self.ssl_log.on_fritap_message,
         )
-        self.app_package, _ = Toolbox.get_spotlight_application()
-        logger.info(f"Job started with ID: {self.job_id}")
+        logger.info(
+            f"FriTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
+        )
 
     def stop(self):
         # self.job_manager.stop_job_with_id(self.job_id)
