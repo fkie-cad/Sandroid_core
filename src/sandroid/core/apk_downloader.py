@@ -11,6 +11,7 @@ from colorama import Fore, Style
 from tqdm import tqdm
 
 from .adb import Adb
+from .toolbox import Toolbox
 
 logger = getLogger(__name__)
 
@@ -95,7 +96,7 @@ class ApkDownloader:
         logger.info(
             "Enter the version string to select (press ENTER for the latest version): "
         )
-        version_input = input()
+        version_input = Toolbox.safe_input()
 
         if version_input == "":
             # Select the latest version

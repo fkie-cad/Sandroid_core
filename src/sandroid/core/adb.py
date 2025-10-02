@@ -79,15 +79,91 @@ class Adb:
     # TODO: This should also handle APK / package names and search online repos
     @classmethod
     def install_apk(cls, apk_path):
-        """Installs an APK file on the device.
+        """Installs an APK file on the device and returns the package name.
 
         :param apk_path: The path to the APK file.
         :type apk_path: str
+        :returns: The package name of the installed APK, or None if it cannot be determined.
+        :rtype: str or None
         """
         apk_file = os.path.basename(apk_path)
         logger.info(f"Installing local APK {apk_file}")
-        # TODO: catch errors
-        Adb.send_adb_command(f"install {apk_path}")
+
+        # Install the APK
+        stdout, stderr = cls.send_adb_command(f"install {apk_path}")
+
+        # Check for installation errors
+        if stderr and "error" in stderr.lower():
+            logger.error(f"APK installation failed: {stderr}")
+            return None
+
+        if "Success" not in stdout:
+            logger.warning(f"APK installation may have failed: {stdout}")
+
+        # Try to extract package name using aapt
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                ["aapt", "dump", "badging", apk_path],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                match = re.search(r"package: name='([^']+)'", result.stdout)
+                if match:
+                    package_name = match.group(1)
+                    logger.info(f"Installed package: {package_name}")
+                    return package_name
+        except (subprocess.SubprocessError, FileNotFoundError):
+            logger.debug("aapt not available for package name extraction")
+
+        # Fallback: try using aapt from Android SDK
+        try:
+            import subprocess
+
+            # Try to find aapt in Android SDK
+            android_home = os.environ.get("ANDROID_HOME") or os.path.expanduser(
+                "~/Android/Sdk"
+            )
+            aapt_path = None
+
+            # Look for aapt in build-tools
+            build_tools_dir = os.path.join(android_home, "build-tools")
+            if os.path.exists(build_tools_dir):
+                # Get the latest build-tools version
+                versions = sorted(
+                    [
+                        d
+                        for d in os.listdir(build_tools_dir)
+                        if os.path.isdir(os.path.join(build_tools_dir, d))
+                    ],
+                    reverse=True,
+                )
+                if versions:
+                    aapt_path = os.path.join(build_tools_dir, versions[0], "aapt")
+
+            if aapt_path and os.path.exists(aapt_path):
+                result = subprocess.run(
+                    [aapt_path, "dump", "badging", apk_path],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if result.returncode == 0:
+                    match = re.search(r"package: name='([^']+)'", result.stdout)
+                    if match:
+                        package_name = match.group(1)
+                        logger.info(f"Installed package: {package_name}")
+                        return package_name
+        except Exception as e:
+            logger.debug(f"Could not extract package name using Android SDK aapt: {e}")
+
+        logger.warning("Could not determine package name of installed APK")
+        return None
 
     @classmethod
     def send_telnet_command(cls, command):
@@ -156,13 +232,20 @@ class Adb:
         return interfaces
 
     @classmethod
-    def get_installed_packages(cls):
+    def get_installed_packages(cls, user_only=False):
         """Get a list of installed packages along with their installation dates.
 
-        :returns: A list of dictionaries where each dictionary contains the package name and installation date.
+        :param user_only: If True, only return user-installed apps (not system apps).
+        :type user_only: bool
+        :returns: A list of dictionaries where each dictionary contains the package name, installation date, and whether it's a system app.
         :rtype: list of dict
         """
-        output, error = cls.send_adb_command("shell pm list packages")
+        # Use -3 flag to get only third-party (user-installed) apps if requested
+        if user_only:
+            output, error = cls.send_adb_command("shell pm list packages -3")
+        else:
+            output, error = cls.send_adb_command("shell pm list packages")
+
         if error:
             logger.error(f"Error getting installed packages: {error}")
             return []
@@ -186,7 +269,11 @@ class Adb:
                         install_date = install_match.group(1)
 
                 packages.append(
-                    {"package_name": package_name, "install_date": install_date}
+                    {
+                        "package_name": package_name,
+                        "install_date": install_date,
+                        "is_user_app": user_only,  # Mark if it's a user app based on filter
+                    }
                 )
 
         return packages

@@ -335,8 +335,9 @@ class ActionQ:
                     try:
                         while selected_idx < 1 or selected_idx > len(snapshots):
                             try:
-                                self.logger.info(
-                                    f"{Fore.CYAN}Select a snapshot to load ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(snapshots)}{Fore.CYAN}): {Style.RESET_ALL}"
+                                click.echo(
+                                    f"{Fore.CYAN}Select a snapshot to load ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(snapshots)}{Fore.CYAN}): {Style.RESET_ALL}",
+                                    nl=False,
                                 )
                                 char = click.getchar()
                                 if char.isdigit():
@@ -344,15 +345,15 @@ class ActionQ:
                                 else:
                                     selected_idx = 0  # Invalid input
                                 if selected_idx < 1 or selected_idx > len(snapshots):
-                                    self.logger.info(
+                                    click.echo(
                                         f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(snapshots)}{Style.RESET_ALL}"
                                     )
                             except ValueError:
-                                self.logger.info(
+                                click.echo(
                                     f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}"
                                 )
                     except KeyboardInterrupt:
-                        self.logger.info(
+                        click.echo(
                             f"\n{Fore.YELLOW}Snapshot selection cancelled by user.{Style.RESET_ALL}"
                         )
                         self.q.append("interactive")
@@ -363,19 +364,18 @@ class ActionQ:
                     # Add load snapshot command to the queue
                     Toolbox.load_snapshot(selected_snapshot.encode())
                 else:
-                    self.logger.warning(
-                        f"{Fore.RED}No snapshots available.{Style.RESET_ALL}"
-                    )
+                    self.logger.warning("No snapshots available.")
 
                 self.q.append("interactive")
                 return
             # Keys 1-8 for creating snapshots
             # Prompt for snapshot name
             try:
-                self.logger.info(
-                    f"{Fore.CYAN}Enter snapshot name (or press Enter for timestamp): {Style.RESET_ALL}"
+                click.echo(
+                    f"{Fore.CYAN}Enter snapshot name (or press Enter for timestamp): {Style.RESET_ALL}",
+                    nl=False,
                 )
-                snapshot_name = input()
+                snapshot_name = Toolbox.safe_input()
                 if not snapshot_name:
                     from datetime import datetime
 
@@ -384,7 +384,7 @@ class ActionQ:
                 # Create snapshot
                 Toolbox.create_snapshot(snapshot_name.encode())
             except KeyboardInterrupt:
-                self.logger.info(
+                click.echo(
                     f"\n{Fore.YELLOW}Snapshot creation cancelled by user.{Style.RESET_ALL}"
                 )
 
@@ -511,7 +511,7 @@ class ActionQ:
                     self.logger.info(
                         "Enter filename for screenshot (or press ENTER for timestamp):"
                     )
-                    filename = input().strip()
+                    filename = Toolbox.safe_input()
                     Toolbox.take_screenshot(filename if filename else None)
                 except KeyboardInterrupt:
                     self.logger.info("\nScreenshot cancelled")
@@ -529,7 +529,7 @@ class ActionQ:
                         self.logger.info(
                             "Enter filename for screen recording (or press ENTER for timestamp):"
                         )
-                        filename = input().strip()
+                        filename = Toolbox.safe_input()
 
                         # Start the recording
                         if Toolbox.start_screen_recording(
@@ -565,15 +565,24 @@ class ActionQ:
             case "n":  # New APK installation
                 try:
                     self.logger.info("Enter file path of APK or search term:")
-                    apk = input().strip()
+                    apk = Toolbox.safe_input()
+
+                    installed_package = None  # Track the installed package name
 
                     # Expand user path (~) and convert to absolute path
                     expanded_apk_path = os.path.abspath(os.path.expanduser(apk))
 
                     if os.path.isfile(expanded_apk_path):
                         self.logger.info(f"Found local APK file: {expanded_apk_path}")
-                        Adb.install_apk(expanded_apk_path)
-                        self.logger.info("APK installation completed successfully")
+                        installed_package = Adb.install_apk(expanded_apk_path)
+                        if installed_package:
+                            self.logger.info(
+                                f"APK installation completed successfully: {installed_package}"
+                            )
+                        else:
+                            self.logger.info(
+                                "APK installation completed, but package name could not be determined"
+                            )
                     else:
                         self.logger.info(
                             f"The path '{apk}' is not a valid file. Searching online for package."
@@ -581,6 +590,7 @@ class ActionQ:
                         try:
                             app_id = ApkDownloader().search_for_name(apk)
                             ApkDownloader().install_app_id(app_id)
+                            installed_package = app_id  # Online installers typically return package name
                             self.logger.info(
                                 "Online APK installation completed successfully"
                             )
@@ -591,6 +601,59 @@ class ActionQ:
                             self.logger.info(
                                 "Please check the search term or try a different APK"
                             )
+
+                    # Offer to set as spotlight spawn app
+                    if installed_package:
+                        click.echo(
+                            f"\n{Fore.GREEN}✓ Successfully installed: {Fore.YELLOW}{installed_package}{Style.RESET_ALL}"
+                        )
+                        click.echo(
+                            f"\n{Fore.CYAN}Would you like to set this app for spawning?{Style.RESET_ALL}"
+                        )
+                        click.echo(
+                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = Yes, set as spotlight spawn app"
+                        )
+                        click.echo(
+                            f"{Fore.YELLOW}[n]{Style.RESET_ALL} = No, return to menu"
+                        )
+
+                        try:
+                            choice = click.getchar().lower()
+                            if choice == "y":
+                                Toolbox.set_spotlight_spawn_application(
+                                    installed_package
+                                )
+
+                                # Ask about auto-resume
+                                click.echo(
+                                    f"\n{Fore.CYAN}Auto-resume spawned app?{Style.RESET_ALL}"
+                                )
+                                click.echo(
+                                    f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
+                                )
+                                click.echo(
+                                    f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
+                                )
+
+                                resume_choice = click.getchar().lower()
+                                Toolbox.set_auto_resume_after_spawn(
+                                    resume_choice == "y"
+                                )
+
+                                resume_status = (
+                                    "enabled" if resume_choice == "y" else "disabled"
+                                )
+                                click.echo(
+                                    f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
+                                    f"  Package: {Fore.YELLOW}{installed_package}{Style.RESET_ALL}\n"
+                                    f"  Mode: {Fore.CYAN}SPAWN{Style.RESET_ALL}\n"
+                                    f"  Auto-resume: {Fore.YELLOW}{resume_status}{Style.RESET_ALL}\n"
+                                )
+                            else:
+                                self.logger.info("Returning to menu...")
+                        except (KeyboardInterrupt, EOFError):
+                            self.logger.info("\nReturning to menu...")
+
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
                 except Exception as e:
@@ -608,17 +671,17 @@ class ActionQ:
                 )
                 Toolbox.set_spotlight_application_pid(spotlight_application_pid)
                 Toolbox.set_spawn_mode(False)  # Ensure attach mode
-                self.logger.info(
+                click.echo(
                     f"{Fore.GREEN}Spotlight app set in ATTACH mode: {spotlight_application_name}{Style.RESET_ALL}"
                 )
                 self.q.append("interactive")
             case "C":
                 # SPAWN MODE: Select app to spawn with fuzzy search
                 try:
-                    self.logger.info(
+                    click.echo(
                         f"\n{Fore.CYAN}=== Spawn Mode Selection ==={Style.RESET_ALL}"
                     )
-                    self.logger.info(
+                    click.echo(
                         "Select an application to spawn when using Frida-based tools.\n"
                         "The app will be launched fresh with hooks active from the start.\n"
                     )
@@ -629,31 +692,40 @@ class ActionQ:
                     if selected_package:
                         Toolbox.set_spotlight_spawn_application(selected_package)
 
-                        # Ask about auto-resume preference
-                        self.logger.info(
-                            f"\n{Fore.CYAN}Auto-resume spawned app?{Style.RESET_ALL}"
+                        # Ask about auto-resume preference with clear prompt
+                        click.echo(
+                            f"\n{Fore.CYAN}=== Auto-Resume Configuration ==={Style.RESET_ALL}"
                         )
-                        self.logger.info(
-                            f"  {Fore.YELLOW}Y{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
+                        click.echo(
+                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
                         )
-                        self.logger.info(
-                            f"  {Fore.YELLOW}N{Style.RESET_ALL} = App stays paused, resume manually"
+                        click.echo(
+                            f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
+                        )
+                        click.echo(
+                            f"\n{Fore.GREEN}► Press y or n:{Style.RESET_ALL} ", nl=False
                         )
 
                         resume_choice = click.getchar().lower()
-                        Toolbox.set_auto_resume_after_spawn(resume_choice != 'n')
+                        print(
+                            f"{Fore.YELLOW}{resume_choice}{Style.RESET_ALL}"
+                        )  # Echo the choice
+                        Toolbox.set_auto_resume_after_spawn(resume_choice == "y")
 
-                        resume_status = "enabled" if resume_choice != 'n' else "disabled"
-                        self.logger.info(
-                            f"\n{Fore.GREEN}✓ Spotlight app set in SPAWN mode:{Style.RESET_ALL}\n"
+                        resume_status = (
+                            "enabled" if resume_choice == "y" else "disabled"
+                        )
+                        click.echo(
+                            f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
                             f"  Package: {Fore.YELLOW}{selected_package}{Style.RESET_ALL}\n"
+                            f"  Mode: {Fore.CYAN}SPAWN{Style.RESET_ALL}\n"
                             f"  Auto-resume: {Fore.YELLOW}{resume_status}{Style.RESET_ALL}\n"
                         )
                     else:
                         self.logger.info("Spawn mode selection cancelled")
 
                 except KeyboardInterrupt:
-                    self.logger.info("\n Spawn mode selection cancelled by user")
+                    self.logger.info("\nSpawn mode selection cancelled by user")
                 except Exception as e:
                     self.logger.error(f"Error setting spawn mode: {e}")
 
@@ -671,37 +743,38 @@ class ActionQ:
                 # Toolbox.submit_other_data("asam", asam.return_data())
                 self.q.append("interactive")
             case "m":
-                check_frida = self.check_frida_and_spotlight()
-                if not check_frida:
-                    self.q.append("interactive")
-                    return
-
-                spotlight_application_pid, spotlight_application_name = check_frida
-
-                self.logger.info(
-                    "Now the dexray-intercept output follows. End with CTRC-C"
-                )
-                if self.malwaremonitor == None:
-                    self.malwaremonitor = MalwareMonitor(
-                        path_filters=Toolbox.get_spotlight_files()
-                    )
-                self.malwaremonitor.gather()
-
-                if self.malwaremonitor.has_new_results():
-                    Toolbox.submit_other_data(
-                        "Dexray Intercept",
-                        self.malwaremonitor.return_data(),
-                    )
-
                 try:
+                    check_frida = self.check_frida_and_spotlight()
+                    if not check_frida:
+                        self.q.append("interactive")
+                        return
+
+                    spotlight_application_pid, spotlight_application_name = check_frida
+
+                    self.logger.info(
+                        "Now the dexray-intercept output follows. End with CTRL-C"
+                    )
+                    if self.malwaremonitor == None:
+                        self.malwaremonitor = MalwareMonitor(
+                            path_filters=Toolbox.get_spotlight_files()
+                        )
+                    self.malwaremonitor.gather()
+
+                    if self.malwaremonitor.has_new_results():
+                        Toolbox.submit_other_data(
+                            "Dexray Intercept",
+                            self.malwaremonitor.return_data(),
+                        )
+
                     self.logger.info(
                         "Malware monitoring in progress... Press CTRL+C to stop"
                     )
                     while True:
                         time.sleep(0.5)  # Sleep to reduce CPU usage
                 except KeyboardInterrupt:
-                    self.logger.info("CTRL-C detected. Stopping malware monitoring.")
-                    self.malwaremonitor.gather()
+                    self.logger.info("\nCTRL-C detected. Stopping malware monitoring.")
+                    if self.malwaremonitor:
+                        self.malwaremonitor.gather()
                     # Reset spotlight app info as the app may have been closed
                     Toolbox.reset_spotlight_application()
                 self.q.append("interactive")
@@ -720,21 +793,19 @@ class ActionQ:
                     fritap = FriTap()  # No args needed, uses unified session getter
                     fritap.start()
 
-                    try:
-                        self.logger.info(
-                            "friTap monitoring in progress... Press CTRL+C to stop"
-                        )
-                        while True:
-                            time.sleep(0.5)  # Sleep to reduce CPU usage
-                    except KeyboardInterrupt:
-                        self.logger.info("CTRL-C detected. Stopping FriTap monitoring.")
+                    self.logger.info(
+                        "friTap monitoring in progress... Press CTRL+C to stop"
+                    )
+                    while True:
+                        time.sleep(0.5)  # Sleep to reduce CPU usage
+                except KeyboardInterrupt:
+                    self.logger.info("\nCTRL-C detected. Stopping FriTap monitoring.")
+                    if "fritap" in locals():
                         fritap.stop()
                         self.logger.info("FriTap monitoring stopped.")
-                        # Reset spotlight app info if spawned
-                        if Toolbox.is_spawn_mode():
-                            Toolbox.reset_spotlight_application()
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
+                    # Reset spotlight app info if spawned
+                    if Toolbox.is_spawn_mode():
+                        Toolbox.reset_spotlight_application()
                 except Exception as e:
                     self.logger.error(f"Error during friTap monitoring: {e!s}")
 
@@ -771,15 +842,15 @@ class ActionQ:
                         # In spawn mode, app may not be running yet
                         spawn_app = Toolbox.get_spotlight_spawn_application()
                         if spawn_app:
-                            self.logger.info(
+                            click.echo(
                                 f"{Fore.YELLOW}Spawn mode active for {spawn_app}.{Style.RESET_ALL}"
                             )
-                            self.logger.info(
+                            click.echo(
                                 "FSMon requires a running process. Options:\n"
                                 "  1. Press ENTER to monitor app's data directory\n"
                                 "  2. Enter a custom path to monitor"
                             )
-                            user_input = input().strip()
+                            user_input = Toolbox.safe_input()
 
                             if user_input:
                                 process = FSMon.run_fsmon_by_path(user_input)
@@ -790,8 +861,10 @@ class ActionQ:
                                 self.q.append("interactive")
                                 return
                         else:
-                            self.logger.info("No spotlight app set. Enter a path to monitor:")
-                            user_input = input().strip()
+                            self.logger.info(
+                                "No spotlight app set. Enter a path to monitor:"
+                            )
+                            user_input = Toolbox.safe_input()
                             if user_input:
                                 process = FSMon.run_fsmon_by_path(user_input)
                             else:
@@ -800,24 +873,32 @@ class ActionQ:
                                 return
                     else:
                         # Attach mode or no mode - try to get PID
-                        spotlight_application_pid = Toolbox.get_spotlight_application_pid()
+                        spotlight_application_pid = (
+                            Toolbox.get_spotlight_application_pid()
+                        )
 
                         if spotlight_application_pid:
-                            mode_str = f"{Fore.GREEN}[ATTACH MODE]{Style.RESET_ALL}" if Toolbox.get_spotlight_application() else ""
-                            self.logger.info(
+                            mode_str = (
+                                f"{Fore.GREEN}[ATTACH MODE]{Style.RESET_ALL}"
+                                if Toolbox.get_spotlight_application()
+                                else ""
+                            )
+                            click.echo(
                                 f"Press ENTER to monitor spotlight app {mode_str} (PID: {spotlight_application_pid}) or enter a path to monitor:"
                             )
-                            user_input = input().strip()
+                            user_input = Toolbox.safe_input()
 
                             if user_input:
                                 process = FSMon.run_fsmon_by_path(user_input)
                             else:
-                                process = FSMon.run_fsmon_by_pid(spotlight_application_pid)
+                                process = FSMon.run_fsmon_by_pid(
+                                    spotlight_application_pid
+                                )
                         else:
                             self.logger.info(
                                 "No spotlight app is set. Enter a path to monitor:"
                             )
-                            user_input = input().strip()
+                            user_input = Toolbox.safe_input()
 
                             if user_input:
                                 process = FSMon.run_fsmon_by_path(user_input)
@@ -834,9 +915,12 @@ class ActionQ:
                         return
 
                     # Determine what we're monitoring for log message
-                    if 'user_input' in locals() and user_input:
+                    if "user_input" in locals() and user_input:
                         monitor_target = f"path {user_input}"
-                    elif 'spotlight_application_pid' in locals() and spotlight_application_pid:
+                    elif (
+                        "spotlight_application_pid" in locals()
+                        and spotlight_application_pid
+                    ):
                         monitor_target = f"PID {spotlight_application_pid}"
                     else:
                         monitor_target = f"path {spotlight_data_path}"
@@ -845,14 +929,13 @@ class ActionQ:
                         f"Now fsmon output for {monitor_target} follows. End with CTRL-C"
                     )
 
-                    try:
-                        while True:
-                            pass
-                    except KeyboardInterrupt:
-                        process.terminate()
-                        self.logger.info("CTRL-C detected. Exiting fsmon loop.")
+                    while True:
+                        pass
                 except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
+                    self.logger.info("\nCTRL-C detected. Stopping FSMon monitoring.")
+                    if "process" in locals() and process is not None:
+                        process.terminate()
+                        self.logger.info("FSMon process terminated.")
                 self.q.append("interactive")
 
             case "e":
@@ -882,7 +965,7 @@ class ActionQ:
                     self.logger.info(
                         "Enter the file path to add as a spotlight file (or press ENTER to skip):"
                     )
-                    file_path = input().strip()
+                    file_path = Toolbox.safe_input()
                     if file_path:
                         if file_path.endswith("-wal") or file_path.endswith("-journal"):
                             self.logger.warning(
@@ -910,7 +993,7 @@ class ActionQ:
                         self.logger.info(
                             "Enter the file path to remove from spotlight files:"
                         )
-                        file_path = input().strip()
+                        file_path = Toolbox.safe_input()
                         Toolbox.remove_spotlight_file(file_path)
                 except KeyboardInterrupt:
                     self.logger.info("\nOperation cancelled")
@@ -920,7 +1003,7 @@ class ActionQ:
                     self.logger.info(
                         "Enter a short description of the action performed (or press ENTER to skip):"
                     )
-                    description = input().strip()
+                    description = Toolbox.safe_input()
 
                     success = Toolbox.pull_spotlight_files(
                         description=description if description else None
@@ -951,7 +1034,9 @@ class ActionQ:
 
                     # Get session info using unified getter
                     try:
-                        session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
+                        session, mode, app_info = (
+                            Toolbox.get_frida_session_for_spotlight()
+                        )
                         package_name = app_info["package_name"]
                         pid = app_info["pid"]
 
@@ -971,7 +1056,7 @@ class ActionQ:
                                 "android hooking watch class_method *.*",  # Example startup hook
                             ]
                             self.logger.info(
-                                f"{Fore.YELLOW}Note: Objection will spawn a fresh instance of {package_name}{Style.RESET_ALL}"
+                                f"Note: Objection will spawn a fresh instance of {package_name}"
                             )
                         else:
                             # Attach mode (existing behavior)
@@ -1019,7 +1104,7 @@ class ActionQ:
                         self.logger.info(
                             "Enter path for the network capture file (or press ENTER for default):"
                         )
-                        user_path = input().strip()
+                        user_path = Toolbox.safe_input()
 
                         # Generate a default filename with timestamp if none provided
                         if not user_path:
@@ -1082,7 +1167,7 @@ class ActionQ:
     def check_frida_and_spotlight(self):
         """Checks if the frida server is running and if a spotlight application is set.
         Appends 'interactive' and returns None if the check fails.
-        Returns (PID, app_name) if successful.
+        Returns (PID, app_name) if successful (for attach mode) or (None, package_name) for spawn mode.
         """
         # Check if the frida server is running
         if not Toolbox.frida_manager.is_frida_server_running():
@@ -1092,6 +1177,19 @@ class ActionQ:
             self.q.append("interactive")
             return None
 
+        # Check for spawn mode first
+        if Toolbox.is_spawn_mode():
+            spawn_app = Toolbox.get_spotlight_spawn_application()
+            if spawn_app:
+                # Spawn mode is set with an app
+                return (None, spawn_app)
+            self.logger.warning(
+                "Spawn mode is enabled but no spawn application is set."
+            )
+            self.q.append("interactive")
+            return None
+
+        # Check for attach mode
         spotlight_application = Toolbox.get_spotlight_application()
 
         if not spotlight_application:

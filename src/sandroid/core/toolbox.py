@@ -8,8 +8,25 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
+
+# Platform-specific imports for stdin flushing
+try:
+    import fcntl
+    import termios
+
+    TERMIOS_AVAILABLE = True
+except ImportError:
+    TERMIOS_AVAILABLE = False
+
+try:
+    import msvcrt
+
+    MSVCRT_AVAILABLE = True
+except ImportError:
+    MSVCRT_AVAILABLE = False
 
 # Third-party imports
 import click
@@ -69,6 +86,54 @@ class Toolbox:
 
     def __new__(cls):
         raise TypeError("This is a static class and cannot be instantiated.")
+
+    @classmethod
+    def safe_input(cls, prompt: str = "") -> str:
+        """Safely read input from stdin with buffer flushing to prevent input swallowing issues.
+
+        This method addresses buffering problems that occur when multiple interactive programs
+        (e.g., Claude Code, then sandroid) run in the same terminal session. It flushes any
+        pending stdin input before reading, which prevents leftover buffered data from being
+        consumed or terminal state issues from causing input to be lost.
+
+        Args:
+            prompt: Optional prompt string to display before reading input
+
+        Returns:
+            The user's input as a string (stripped of leading/trailing whitespace)
+
+        Note:
+            Works cross-platform (Linux, macOS, Windows) and handles non-TTY cases gracefully.
+        """
+        # Only attempt flushing if stdin is a TTY (interactive terminal)
+        if sys.stdin.isatty():
+            try:
+                # Unix-like systems (Linux, macOS)
+                if TERMIOS_AVAILABLE:
+                    # Flush the input buffer
+                    termios.tcflush(sys.stdin, termios.TCIFLUSH)
+
+                # Windows systems
+                elif MSVCRT_AVAILABLE:
+                    # Flush Windows console input buffer
+                    while msvcrt.kbhit():
+                        msvcrt.getch()
+
+            except Exception as e:
+                # Log but don't fail - just proceed with regular input
+                if cls.logger:
+                    cls.logger.debug(f"Could not flush stdin buffer: {e}")
+
+        # Display prompt if provided
+        if prompt:
+            print(prompt, end="", flush=True)
+
+        # Read input normally
+        try:
+            return input().strip()
+        except EOFError:
+            # Handle EOF gracefully (e.g., when input is redirected)
+            return ""
 
     @classmethod
     def init(cls):
@@ -266,7 +331,7 @@ class Toolbox:
                     while selected_idx < 1 or selected_idx > len(available_emulators):
                         try:
                             selected_idx = int(
-                                input(
+                                cls.safe_input(
                                     f"\n{Fore.CYAN}Select an emulator to start ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(available_emulators)}{Fore.CYAN}): {Style.RESET_ALL}"
                                 )
                             )
@@ -290,13 +355,11 @@ class Toolbox:
                 selected_emulator = available_emulators[selected_idx - 1]
                 # Update the device name with selected emulator
                 cls.device_name = selected_emulator
-                cls.logger.info(
-                    f"Starting emulator {Fore.GREEN}{selected_emulator}{Style.RESET_ALL}..."
-                )
+                cls.logger.info(f"Starting emulator {selected_emulator}...")
 
                 if Emulator.start_avd(selected_emulator):
                     cls.logger.info(
-                        f"Emulator '{Fore.GREEN}{selected_emulator}{Style.RESET_ALL}' started successfully. Continuing setup..."
+                        f"Emulator '{selected_emulator}' started successfully. Continuing setup..."
                     )
                     # Re-check connection after starting
                     stdout_check, stderr_check = Adb.send_adb_command("shell ls /data")
@@ -418,9 +481,7 @@ class Toolbox:
         :param name: The name of the snapshot.
         :type name: str
         """
-        cls.logger.info(
-            f"Creating snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}"
-        )
+        cls.logger.info(f"Creating snapshot: {name.decode('utf-8')}")
         Adb.send_telnet_command(b"avd snapshot save " + name)
 
     @classmethod
@@ -433,9 +494,7 @@ class Toolbox:
         :param name: The name of the snapshot.
         :type name: str
         """
-        cls.logger.info(
-            f"Loading snapshot: {Fore.GREEN}{name.decode('utf-8')}{Style.RESET_ALL}"
-        )
+        cls.logger.info(f"Loading snapshot: {name.decode('utf-8')}")
         Adb.send_telnet_command(b"avd snapshot load " + name)
         time.sleep(2)
 
@@ -797,7 +856,7 @@ class Toolbox:
             if cls._spawn_mode and cls._spotlight_spawn_application:
                 # SPAWN MODE
                 cls.logger.info(
-                    f"Spawning application: {Fore.GREEN}{cls._spotlight_spawn_application}{Style.RESET_ALL}"
+                    f"Spawning application: {cls._spotlight_spawn_application}"
                 )
 
                 # Spawn the application (starts paused)
@@ -806,7 +865,7 @@ class Toolbox:
 
                 # Attach to the spawned process
                 session = device.attach(pid)
-                cls.logger.debug(f"Attached to spawned process")
+                cls.logger.debug("Attached to spawned process")
 
                 # Resume the process if auto-resume is enabled
                 if cls._auto_resume_after_spawn:
@@ -814,85 +873,100 @@ class Toolbox:
                     device.resume(pid)
                 else:
                     cls.logger.info(
-                        f"{Fore.YELLOW}Process spawned but PAUSED. "
-                        f"Resume manually or enable auto-resume.{Style.RESET_ALL}"
+                        "Process spawned but PAUSED. "
+                        "Resume manually or enable auto-resume."
                     )
 
                 app_info = {
                     "package_name": cls._spotlight_spawn_application,
                     "pid": pid,
                     "mode": "spawn",
-                    "device": device
+                    "device": device,
                 }
 
                 cls.logger.info(
-                    f"{Fore.GREEN}Successfully spawned and attached to {cls._spotlight_spawn_application} "
-                    f"(PID: {pid}){Style.RESET_ALL}"
+                    f"Successfully spawned and attached to {cls._spotlight_spawn_application} "
+                    f"(PID: {pid})"
                 )
 
                 return session, "spawn", app_info
 
-            else:
-                # ATTACH MODE (existing behavior)
-                if not cls._spotlight_application:
+            # ATTACH MODE (existing behavior)
+            if not cls._spotlight_application:
+                raise ValueError(
+                    "No spotlight application set. Press 'c' to set current app or 'C' to select spawn app."
+                )
+
+            package_name = cls._spotlight_application[0]
+            cls.logger.info(f"Attaching to running application: {package_name}")
+
+            # Get PID if not already set
+            if not cls._spotlight_application_pid:
+                from .adb import Adb
+
+                pid = Adb.get_pid_for_package_name(package_name)
+                if not pid:
                     raise ValueError(
-                        "No spotlight application set. Press 'c' to set current app or 'C' to select spawn app."
+                        f"Application {package_name} is not running. "
+                        f"Start it first or use spawn mode (Shift+C)."
                     )
+                cls._spotlight_application_pid = pid
+            else:
+                pid = cls._spotlight_application_pid
 
-                package_name = cls._spotlight_application[0]
-                cls.logger.info(
-                    f"Attaching to running application: {Fore.GREEN}{package_name}{Style.RESET_ALL}"
-                )
+            # Attach to running process
+            session = device.attach(package_name)
+            cls.logger.debug(f"Attached to running process (PID: {pid})")
 
-                # Get PID if not already set
-                if not cls._spotlight_application_pid:
-                    from .adb import Adb
-                    pid = Adb.get_pid_for_package_name(package_name)
-                    if not pid:
-                        raise ValueError(
-                            f"Application {package_name} is not running. "
-                            f"Start it first or use spawn mode (Shift+C)."
-                        )
-                    cls._spotlight_application_pid = pid
-                else:
-                    pid = cls._spotlight_application_pid
+            app_info = {
+                "package_name": package_name,
+                "pid": pid,
+                "mode": "attach",
+                "device": device,
+            }
 
-                # Attach to running process
-                session = device.attach(package_name)
-                cls.logger.debug(f"Attached to running process (PID: {pid})")
+            cls.logger.info(f"Successfully attached to {package_name} (PID: {pid})")
 
-                app_info = {
-                    "package_name": package_name,
-                    "pid": pid,
-                    "mode": "attach",
-                    "device": device
-                }
-
-                cls.logger.info(
-                    f"{Fore.GREEN}Successfully attached to {package_name} "
-                    f"(PID: {pid}){Style.RESET_ALL}"
-                )
-
-                return session, "attach", app_info
+            return session, "attach", app_info
 
         except frida.ProcessNotFoundError as e:
             cls.logger.error(f"Process not found: {e}")
             raise
         except frida.ServerNotRunningError:
-            cls.logger.error(
-                "Frida server is not running. Press 'f' to start it."
-            )
+            cls.logger.error("Frida server is not running. Press 'f' to start it.")
             raise
         except Exception as e:
-            cls.logger.error(f"Error setting up Frida session: {e}")
+            error_msg = str(e).lower()
+
+            # Handle specific "front-door activity" error in spawn mode
+            if "front-door" in error_msg or "unable to find" in error_msg:
+                cls.logger.error(f"Error setting up Frida session: {e}")
+                cls.logger.error("")
+                cls.logger.error("This error typically occurs when:")
+                cls.logger.error("  1. The app has no launchable main activity")
+                cls.logger.error("  2. The package name is incorrect")
+                cls.logger.error("  3. The app cannot be launched directly")
+                cls.logger.error("")
+                cls.logger.error("Suggestions:")
+                cls.logger.error("  - Verify the package name is correct")
+                cls.logger.error(
+                    "  - Try using ATTACH mode instead (press 'c' after launching the app manually)"
+                )
+                cls.logger.error("  - Check if the app appears in the launcher")
+                cls.logger.error("  - For system services, use attach mode only")
+            else:
+                cls.logger.error(f"Error setting up Frida session: {e}")
             raise
 
     @classmethod
-    def select_app_with_fuzzy_search(cls):
+    def select_app_with_fuzzy_search(cls, recently_installed_package=None):
         """Interactive app selection with fuzzy search capability.
 
-        Displays all installed apps and allows user to filter them with fuzzy search.
+        Displays user-installed apps by default and allows user to filter them with fuzzy search.
+        Offers option to show all apps (including system apps).
 
+        :param recently_installed_package: Package name of a recently installed app to highlight/suggest.
+        :type recently_installed_package: str or None
         :returns: Selected package name, or None if cancelled.
         :rtype: str or None
         """
@@ -902,6 +976,7 @@ class Toolbox:
             # Try to import fuzzy search library
             try:
                 from thefuzz import fuzz, process
+
                 has_fuzzy = True
             except ImportError:
                 cls.logger.warning(
@@ -910,109 +985,193 @@ class Toolbox:
                 cls.logger.info("Falling back to simple numbered selection")
                 has_fuzzy = False
 
-            # Get all installed packages
+            # Suggest recently installed app first if provided
+            if recently_installed_package:
+                click.echo(
+                    f"\n{Fore.CYAN}=== Recently Installed App ==={Style.RESET_ALL}"
+                )
+                click.echo(
+                    f"{Fore.YELLOW}[0]{Style.RESET_ALL} {Fore.GREEN}{recently_installed_package}{Style.RESET_ALL} "
+                    f"{Fore.CYAN}(Just installed){Style.RESET_ALL}"
+                )
+                click.echo(
+                    f"\n{Fore.YELLOW}Press 0 to use this app, or press ENTER to see all apps:{Style.RESET_ALL}"
+                )
+
+                try:
+                    char = click.getchar()
+                    if char == "0":
+                        cls.logger.info(
+                            f"Selected recently installed app: {recently_installed_package}"
+                        )
+                        return recently_installed_package
+                except (KeyboardInterrupt, EOFError):
+                    pass  # Continue to app list
+
+            # Ask if user wants to see all apps or just user-installed
+            click.echo(f"\n{Fore.CYAN}=== App Filter ==={Style.RESET_ALL}")
+            click.echo(
+                f"{Fore.YELLOW}[1]{Style.RESET_ALL} Show only user-installed apps (recommended)"
+            )
+            click.echo(
+                f"{Fore.YELLOW}[2]{Style.RESET_ALL} Show all apps (including system apps)"
+            )
+            click.echo(
+                f"\n{Fore.YELLOW}Select filter (press 1 or 2, default is 1):{Style.RESET_ALL}"
+            )
+
+            try:
+                char = click.getchar()
+                show_all = char == "2"
+            except (KeyboardInterrupt, EOFError):
+                show_all = False  # Default to user-installed only
+
+            # Get installed packages based on filter
             cls.logger.info("Fetching installed applications...")
-            packages = Adb.get_installed_packages()
+            packages = Adb.get_installed_packages(user_only=not show_all)
 
             if not packages:
                 cls.logger.error("No packages found on device")
                 return None
 
-            # Sort by package name for easier browsing
-            packages.sort(key=lambda x: x["package_name"])
+            # Sort by install date (newest first), then by package name
+            packages.sort(
+                key=lambda x: (x.get("install_date") or "", x["package_name"]),
+                reverse=True,
+            )
 
-            if has_fuzzy:
-                # Fuzzy search mode
-                cls.logger.info(
-                    f"{Fore.CYAN}=== Fuzzy Search Mode ==={Style.RESET_ALL}\n"
-                    f"Enter search term to filter apps (or press ENTER to see all):"
-                )
-
-                search_term = input(f"{Fore.YELLOW}Search: {Style.RESET_ALL}").strip()
-
-                if search_term:
-                    # Perform fuzzy matching
-                    package_names = [p["package_name"] for p in packages]
-                    matches = process.extract(
-                        search_term,
-                        package_names,
-                        scorer=fuzz.partial_ratio,
-                        limit=20
-                    )
-
-                    # Filter packages based on matches
-                    filtered_packages = [
-                        p for p in packages
-                        if p["package_name"] in [m[0] for m in matches if m[1] > 50]
-                    ]
-
-                    if not filtered_packages:
-                        cls.logger.warning(
-                            f"No matches found for '{search_term}'. Showing all apps."
-                        )
-                        filtered_packages = packages
-                else:
-                    filtered_packages = packages
-
-            else:
-                # Simple mode without fuzzy search
-                filtered_packages = packages
+            # Start with all packages (show apps first, then allow filtering)
+            filtered_packages = packages
 
             # Display filtered packages
-            cls.logger.info(
-                f"\n{Fore.CYAN}=== Available Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
+            app_type = "User-Installed" if not show_all else "All"
+            click.echo(
+                f"\n{Fore.CYAN}=== {app_type} Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
             )
 
             for idx, pkg in enumerate(filtered_packages, 1):
                 install_date = pkg.get("install_date", "Unknown")
                 # Truncate long package names for display
                 pkg_name = pkg["package_name"]
-                if len(pkg_name) > 60:
-                    pkg_name = pkg_name[:57] + "..."
+                if len(pkg_name) > 50:
+                    pkg_name = pkg_name[:47] + "..."
+
+                # Show app type indicator if showing all apps
+                type_indicator = ""
+                if show_all and pkg.get("is_user_app", False):
+                    type_indicator = f" {Fore.BLUE}[USER]{Style.RESET_ALL}"
 
                 print(
                     f"{Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} "
-                    f"{Fore.GREEN}{pkg_name:60s}{Style.RESET_ALL} "
+                    f"{Fore.GREEN}{pkg_name:50s}{Style.RESET_ALL}"
+                    f"{type_indicator} "
                     f"{Fore.CYAN}[{install_date}]{Style.RESET_ALL}"
                 )
 
                 # Add pagination for long lists
                 if idx % 20 == 0 and idx < len(filtered_packages):
-                    response = input(
+                    response = cls.safe_input(
                         f"\n{Fore.YELLOW}Press ENTER to see more, or type a number to select: {Style.RESET_ALL}"
-                    ).strip()
+                    )
                     if response.isdigit():
                         selected_idx = int(response)
                         if 1 <= selected_idx <= len(filtered_packages):
                             return filtered_packages[selected_idx - 1]["package_name"]
 
-            # Get user selection
+            # Get user selection (with optional fuzzy filtering)
             while True:
                 try:
-                    selection_input = input(
-                        f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}) or 'q' to cancel: {Style.RESET_ALL}"
-                    ).strip()
+                    # Build prompt based on fuzzy search availability
+                    if has_fuzzy and filtered_packages == packages:
+                        prompt = f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}), 'f' to filter, or 'q' to cancel: {Style.RESET_ALL}"
+                    else:
+                        prompt = f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}) or 'q' to cancel: {Style.RESET_ALL}"
 
-                    if selection_input.lower() == 'q':
+                    selection_input = cls.safe_input(prompt)
+
+                    if selection_input.lower() == "q":
                         cls.logger.info("Selection cancelled")
                         return None
+
+                    # Fuzzy search filter option
+                    if selection_input.lower() == "f" and has_fuzzy:
+                        click.echo(
+                            f"\n{Fore.CYAN}=== Fuzzy Search Filter ==={Style.RESET_ALL}"
+                        )
+                        search_term = cls.safe_input(
+                            f"{Fore.YELLOW}Enter search term (or press ENTER to show all): {Style.RESET_ALL}"
+                        )
+
+                        if search_term:
+                            # Perform fuzzy matching
+                            package_names = [p["package_name"] for p in packages]
+                            matches = process.extract(
+                                search_term,
+                                package_names,
+                                scorer=fuzz.partial_ratio,
+                                limit=20,
+                            )
+
+                            # Filter packages based on matches
+                            filtered_packages = [
+                                p
+                                for p in packages
+                                if p["package_name"]
+                                in [m[0] for m in matches if m[1] > 50]
+                            ]
+
+                            if not filtered_packages:
+                                cls.logger.warning(
+                                    f"No matches found for '{search_term}'. Showing all apps."
+                                )
+                                filtered_packages = packages
+                        else:
+                            filtered_packages = packages
+
+                        # Re-display filtered packages
+                        app_type = "User-Installed" if not show_all else "All"
+                        click.echo(
+                            f"\n{Fore.CYAN}=== {app_type} Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
+                        )
+
+                        for idx, pkg in enumerate(filtered_packages, 1):
+                            install_date = pkg.get("install_date", "Unknown")
+                            pkg_name = pkg["package_name"]
+                            if len(pkg_name) > 50:
+                                pkg_name = pkg_name[:47] + "..."
+
+                            type_indicator = ""
+                            if show_all and pkg.get("is_user_app", False):
+                                type_indicator = f" {Fore.BLUE}[USER]{Style.RESET_ALL}"
+
+                            print(
+                                f"{Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} "
+                                f"{Fore.GREEN}{pkg_name:50s}{Style.RESET_ALL}"
+                                f"{type_indicator} "
+                                f"{Fore.CYAN}[{install_date}]{Style.RESET_ALL}"
+                            )
+                        continue  # Go back to selection prompt
 
                     selected_idx = int(selection_input)
 
                     if 1 <= selected_idx <= len(filtered_packages):
-                        selected_package = filtered_packages[selected_idx - 1]["package_name"]
-                        cls.logger.info(
-                            f"Selected: {Fore.GREEN}{selected_package}{Style.RESET_ALL}"
-                        )
+                        selected_package = filtered_packages[selected_idx - 1][
+                            "package_name"
+                        ]
+                        cls.logger.info(f"Selected: {selected_package}")
                         return selected_package
+                    print(
+                        f"{Fore.RED}Invalid number. Please enter 1-{len(filtered_packages)}{Style.RESET_ALL}"
+                    )
+                except ValueError:
+                    if has_fuzzy and filtered_packages == packages:
+                        print(
+                            f"{Fore.RED}Invalid input. Please enter a number, 'f' to filter, or 'q'{Style.RESET_ALL}"
+                        )
                     else:
                         print(
-                            f"{Fore.RED}Invalid number. Please enter 1-{len(filtered_packages)}{Style.RESET_ALL}"
+                            f"{Fore.RED}Invalid input. Please enter a number or 'q'{Style.RESET_ALL}"
                         )
-                except ValueError:
-                    print(
-                        f"{Fore.RED}Invalid input. Please enter a number or 'q'{Style.RESET_ALL}"
-                    )
                 except KeyboardInterrupt:
                     cls.logger.info("\nSelection cancelled by user")
                     return None
@@ -1028,7 +1187,7 @@ class Toolbox:
         """
         if cls._spawn_mode and cls._spotlight_spawn_application:
             return f"/data/data/{cls._spotlight_spawn_application}"
-        elif not cls._spotlight_application:
+        if not cls._spotlight_application:
             cls.logger.warning("No spotlight application is set.")
             return None
 
@@ -1410,9 +1569,9 @@ class Toolbox:
         # Get the host IP address
         host_ip = cls.get_host_ip()
         cls.logger.info(f"Enter proxy IP (default: {host_ip})")
-        proxy_ip = input().strip() or host_ip
+        proxy_ip = cls.safe_input() or host_ip
         cls.logger.info("Enter proxy port (default: 8080)")
-        proxy_port = input().strip() or "8080"
+        proxy_port = cls.safe_input() or "8080"
 
         stdout, stderr = Adb.send_adb_command(
             f"shell settings put global http_proxy {proxy_ip}:{proxy_port}"
@@ -1487,7 +1646,7 @@ class Toolbox:
             filename = f"{screenshots_dir}/{filename}"
 
         # Take the screenshot using the telnet command
-        cls.logger.info(f"Taking screenshot: {Fore.GREEN}{filename}{Style.RESET_ALL}")
+        cls.logger.info(f"Taking screenshot: {filename}")
 
         # Use the specified telnet command
         stdout, stderr = Adb.send_telnet_command(f"screenrecord screenshot {filename}")
@@ -1496,7 +1655,7 @@ class Toolbox:
             cls.logger.error(f"Failed to capture screenshot: {stderr}")
             return None
 
-        cls.logger.info(f"Screenshot saved to {Fore.GREEN}{filename}{Style.RESET_ALL}")
+        cls.logger.info(f"Screenshot saved to {filename}")
         return filename
 
     @classmethod
@@ -1539,9 +1698,7 @@ class Toolbox:
             return False
 
         cls._screen_recording_running = True
-        cls.logger.info(
-            f"Started screen recording to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}"
-        )
+        cls.logger.info(f"Started screen recording to {cls._screen_recording_file}")
         return True
 
     @classmethod
@@ -1562,9 +1719,7 @@ class Toolbox:
             cls.logger.error(f"Failed to stop screen recording: {stderr}")
             return False
 
-        cls.logger.info(
-            f"Screen recording saved to {Fore.GREEN}{cls._screen_recording_file}{Style.RESET_ALL}"
-        )
+        cls.logger.info(f"Screen recording saved to {cls._screen_recording_file}")
         cls._screen_recording_running = False
         return True
 
@@ -1590,19 +1745,19 @@ class Toolbox:
         if cls._spawn_mode and cls._spotlight_spawn_application:
             # SPAWN MODE
             spotlight_application_string = (
-                f"{Fore.YELLOW}🚀 {cls._spotlight_spawn_application}{Fore.RESET} "
-                f"{Fore.CYAN}[SPAWN MODE]{Fore.RESET}"
+                f"{Fore.YELLOW}🚀 {cls._spotlight_spawn_application}{Fore.RESET}"
             )
             if cls._auto_resume_after_spawn:
-                spotlight_application_string += f" {Fore.GREEN}(auto-resume){Fore.RESET}"
+                spotlight_application_string += (
+                    f" {Fore.GREEN}(auto-resume){Fore.RESET}"
+                )
             else:
-                spotlight_application_string += f" {Fore.YELLOW}(manual resume){Fore.RESET}"
+                spotlight_application_string += (
+                    f" {Fore.YELLOW}(manual resume){Fore.RESET}"
+                )
         elif cls._spotlight_application:
             # ATTACH MODE
-            spotlight_application_string = (
-                f"{Fore.YELLOW}📌 {cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET} "
-                f"{Fore.GREEN}[ATTACH MODE]{Fore.RESET}"
-            )
+            spotlight_application_string = f"{Fore.YELLOW}📌 {cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET}"
         else:
             spotlight_application_string = f"{Fore.RED}Not set{Fore.RESET}"
 
@@ -1639,7 +1794,15 @@ class Toolbox:
         if cls.malware_monitor_running == False:
             malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept){mode_indicator}"
         else:
-            current_app = cls._spotlight_spawn_application if cls._spawn_mode else (cls._spotlight_application[0] if cls._spotlight_application else "app")
+            current_app = (
+                cls._spotlight_spawn_application
+                if cls._spawn_mode
+                else (
+                    cls._spotlight_application[0]
+                    if cls._spotlight_application
+                    else "app"
+                )
+            )
             malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on {current_app}"
 
         # Network capture menu text changes based on capture status
@@ -1928,7 +2091,7 @@ class Toolbox:
             )
             return
 
-        action_name = input("Name your action for export: ")
+        action_name = cls.safe_input("Name your action for export: ")
 
         if os.path.exists(f"{action_name}.action"):
             cls.logger.error(

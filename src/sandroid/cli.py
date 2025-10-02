@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
+import colorama
 from colorama import Fore, Style
 from rich.console import Console
 from rich.logging import RichHandler
@@ -181,6 +182,9 @@ def main(
     interactive: bool,
 ):
     """Sandroid: Extract forensic artifacts from Android Virtual Devices."""
+    # Initialize colorama for cross-platform colored terminal output
+    colorama.init(autoreset=True)
+
     # Lazy imports - only load heavy modules when actually running (not for --version)
     from .config import ConfigLoader, SandroidConfig
 
