@@ -160,7 +160,7 @@ def pretty_logo():
 @click.option(
     "--debug",
     is_flag=True,
-    help="Enable debug/verbose mode (shows detailed hook installation and internal messages from dexray-intercept)",
+    help="Enable debug/verbose mode",
 )
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
 @click.version_option(version=__version__, prog_name="sandroid")

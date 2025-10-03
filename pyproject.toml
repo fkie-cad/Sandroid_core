@@ -75,7 +75,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "platformdirs>=3.0.0",
     "rich>=13.0.0",
-    "thefuzz=>0.22.1",
+    "thefuzz>=0.22.1",
 ]
 
 [project.optional-dependencies]
