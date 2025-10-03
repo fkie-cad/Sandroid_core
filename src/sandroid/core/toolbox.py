@@ -6,12 +6,13 @@ import hashlib
 import logging
 import os
 import re
-from wcwidth import wcswidth
 import shutil
 import subprocess
 import sys
 import threading
 import time
+
+from wcwidth import wcswidth
 
 # Platform-specific imports for stdin flushing
 try:
@@ -1105,6 +1106,18 @@ class Toolbox:
                         if 1 <= selected_idx <= len(filtered_packages):
                             return filtered_packages[selected_idx - 1]["package_name"]
 
+            # Special handling for single app - auto-select with Enter
+            if len(filtered_packages) == 1:
+                click.echo(
+                    f"\n{Fore.GREEN}Press Enter to select this app, or 'q' to cancel:{Style.RESET_ALL} ",
+                    nl=False,
+                )
+                choice = cls.safe_input("")
+                if choice.lower() != "q":
+                    return filtered_packages[0]["package_name"]
+                cls.logger.info("Selection cancelled")
+                return None
+
             # Get user selection (with optional fuzzy filtering)
             while True:
                 try:
@@ -1902,10 +1915,10 @@ class Toolbox:
         :returns: The formatted ASCII box.
         :rtype: str
         """
-        ANSI_RE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
+        ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
         def strip_ansi(s: str) -> str:
-            return ANSI_RE.sub('', s)
+            return ANSI_RE.sub("", s)
 
         # Prepare lines, but compute visible width using wcswidth()
         raw_lines = text.splitlines()
@@ -1934,18 +1947,14 @@ class Toolbox:
 
         # Body lines: pad by display width, not codepoint length
         body_parts = []
-        for raw, stripped in zip(raw_lines, stripped_lines):
+        for raw, stripped in zip(raw_lines, stripped_lines, strict=False):
             pad = inner_width - cell_width(stripped)
-            if pad < 0:
-                # (Optional) hard truncate by cell width if someone prints an extra-long line
-                # You can implement a cell-aware truncation; here we just avoid negative padding.
-                pad = 0
+            pad = max(pad, 0)
             body_parts.append(f"│{raw}{' ' * pad}│")
         body = "\n".join(body_parts)
 
         bottom = f"\n└{'─' * inner_width}┘"
         return f"{top}{body}{bottom}"
-
 
     @classmethod
     def wrap_up(
