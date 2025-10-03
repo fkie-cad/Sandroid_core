@@ -755,8 +755,11 @@ class ActionQ:
                         "Now the dexray-intercept output follows. End with CTRL-C"
                     )
                     if self.malwaremonitor == None:
+                        # Get debug mode from Toolbox args (set by CLI --debug flag)
+                        debug_mode = getattr(Toolbox.args, "debug", False)
                         self.malwaremonitor = MalwareMonitor(
-                            path_filters=Toolbox.get_spotlight_files()
+                            path_filters=Toolbox.get_spotlight_files(),
+                            debug_mode=debug_mode,
                         )
                     self.malwaremonitor.gather()
 

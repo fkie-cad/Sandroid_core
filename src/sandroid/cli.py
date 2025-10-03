@@ -157,6 +157,11 @@ def pretty_logo():
 )
 @click.option("--ai", is_flag=True, help="Enable AI-powered analysis and summarization")
 @click.option("--report", is_flag=True, help="Generate PDF report")
+@click.option(
+    "--debug",
+    is_flag=True,
+    help="Enable debug/verbose mode (shows detailed hook installation and internal messages from dexray-intercept)",
+)
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
 @click.version_option(version=__version__, prog_name="sandroid")
 def main(
@@ -179,6 +184,7 @@ def main(
     whitelist: str | None,
     ai: bool,
     report: bool,
+    debug: bool,
     interactive: bool,
 ):
     """Sandroid: Extract forensic artifacts from Android Virtual Devices."""
@@ -238,6 +244,7 @@ def main(
         mock_args.loglevel = loglevel if loglevel else "INFO"
         mock_args.ai = ai
         mock_args.report = report
+        mock_args.debug = debug  # Debug mode for dexray-intercept verbose output
 
         # Set the args to satisfy dependencies
         Toolbox.args = mock_args
@@ -255,7 +262,10 @@ def main(
         cli_overrides = {}
         if file:
             cli_overrides["output_file"] = file
-        if loglevel:
+        # Debug flag forces DEBUG log level (unless explicitly overridden by loglevel)
+        if debug and not loglevel:
+            cli_overrides["log_level"] = "DEBUG"
+        elif loglevel:
             cli_overrides["log_level"] = loglevel
         if number:
             cli_overrides["analysis"] = {"number_of_runs": number}
