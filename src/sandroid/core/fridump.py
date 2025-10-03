@@ -94,6 +94,15 @@ class Fridump:
         script.on("message", cls.on_message)
         script.load()
 
+        # Resume spawned process now that hooks are installed
+        # Check if we got session from get_frida_session_for_spotlight (mode and app_info available)
+        if 'mode' in locals() and 'app_info' in locals() and mode == "spawn":
+            from .toolbox import Toolbox
+            Toolbox.resume_spawned_process_after_hooks(
+                app_info['device'],
+                app_info['pid']
+            )
+
         # Replace script.exports with script.exports_sync to fix the deprecation warning
         agent = script.exports_sync
         ranges = agent.enumerate_ranges(cls.PERMS)

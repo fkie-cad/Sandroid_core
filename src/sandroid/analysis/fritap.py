@@ -57,6 +57,7 @@ class FriTap(DataGather):
         self.process_id = app_info["pid"]
         self.app_package = app_info["package_name"]
         self.mode = mode
+        self.frida_device = app_info["device"]  # Store device for resume after hooks
 
         # Initialize SSL_Logger with the obtained process ID
         keylog_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_keylog.log"
@@ -96,6 +97,14 @@ class FriTap(DataGather):
             self.frida_script_path,
             custom_hooking_handler_name=self.ssl_log.on_fritap_message,
         )
+
+        # Resume spawned process now that hooks are installed
+        if self.mode == "spawn":
+            Toolbox.resume_spawned_process_after_hooks(
+                self.frida_device,
+                self.process_id
+            )
+
         logger.info(
             f"FriTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
         )
@@ -127,6 +136,14 @@ class FriTap(DataGather):
                 self.frida_script_path,
                 custom_hooking_handler_name=self.profiler.on_appProfiling_message,
             )
+
+            # Resume spawned process now that hooks are installed (if in spawn mode)
+            if hasattr(self, 'mode') and self.mode == "spawn" and hasattr(self, 'frida_device') and hasattr(self, 'process_id'):
+                Toolbox.resume_spawned_process_after_hooks(
+                    self.frida_device,
+                    self.process_id
+                )
+
             self.running = True
             Toolbox.malware_monitor_running = True
 

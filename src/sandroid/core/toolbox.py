@@ -252,6 +252,12 @@ class Toolbox:
             default=False,
             help="Use AI to summarize the action and generate a report",
         )
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            default=False,
+            help="Enable debug/verbose mode (shows detailed hook installation and internal messages from dexray-intercept)",
+        )
 
         cls.args = parser.parse_args()
         if cls.logger is None:
@@ -836,6 +842,30 @@ class Toolbox:
         return cls._auto_resume_after_spawn
 
     @classmethod
+    def resume_spawned_process_after_hooks(cls, device, pid):
+        """Resume a spawned process after hooks have been installed.
+
+        This includes the required 1-second sleep to prevent Java.perform from silently failing.
+
+        :param device: Frida device object
+        :type device: frida.core.Device
+        :param pid: Process ID to resume
+        :type pid: int
+        """
+        import time
+
+        if cls._auto_resume_after_spawn:
+            cls.logger.debug(f"Resuming spawned process {pid} after hook installation")
+            device.resume(pid)
+            time.sleep(1)  # CRITICAL: Prevents Java.perform from silently failing
+            cls.logger.debug("Process resumed and stabilized")
+        else:
+            cls.logger.info(
+                f"Process {pid} remains PAUSED (auto-resume disabled). "
+                "Resume manually when ready."
+            )
+
+    @classmethod
     def get_frida_session_for_spotlight(cls):
         """Returns appropriate Frida session based on current mode (spawn/attach).
 
@@ -867,15 +897,11 @@ class Toolbox:
                 session = device.attach(pid)
                 cls.logger.debug("Attached to spawned process")
 
-                # Resume the process if auto-resume is enabled
-                if cls._auto_resume_after_spawn:
-                    cls.logger.debug("Auto-resuming spawned process")
-                    device.resume(pid)
-                else:
-                    cls.logger.info(
-                        "Process spawned but PAUSED. "
-                        "Resume manually or enable auto-resume."
-                    )
+                # Don't resume yet - let the caller resume AFTER installing hooks
+                cls.logger.debug(
+                    f"Process spawned and attached but PAUSED. "
+                    f"Will be resumed after hooks are installed (auto-resume: {cls._auto_resume_after_spawn})"
+                )
 
                 app_info = {
                     "package_name": cls._spotlight_spawn_application,
