@@ -1857,8 +1857,8 @@ class Toolbox:
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}i{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mport action
 
     {Fore.CYAN}=== Spotlight Application ==={Fore.RESET}
-    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[ATTACH MODE]{Fore.RESET}
-    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[SPAWN MODE]{Fore.RESET}
+    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[📌 ATTACH MODE]{Fore.RESET}
+    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[🚀 SPAWN MODE]{Fore.RESET}
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with dexray-insight
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app{mode_indicator}
     {malware_monitor_string}
@@ -1881,7 +1881,7 @@ class Toolbox:
 
     {Fore.CYAN}=== Network Management ==={Fore.RESET}
     * set/unset network prox{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}y{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}
-    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}h{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ook encryption routines with friTap{mode_indicator}
+    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}h{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ook and install key extraction with friTap{mode_indicator}
     {network_capture_string}
 
 

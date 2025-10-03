@@ -46,6 +46,7 @@ class ActionQ:
     index = 0
     q = []
     finished = False
+    recently_installed_package = None  # Track the last installed package for spawn mode
 
     logger = getLogger(__name__)
     photographer = None
@@ -604,6 +605,9 @@ class ActionQ:
 
                     # Offer to set as spotlight spawn app
                     if installed_package:
+                        # Store as recently installed for later use
+                        ActionQ.recently_installed_package = installed_package
+
                         click.echo(
                             f"\n{Fore.GREEN}✓ Successfully installed: {Fore.YELLOW}{installed_package}{Style.RESET_ALL}"
                         )
@@ -629,19 +633,25 @@ class ActionQ:
                                     f"\n{Fore.CYAN}Auto-resume spawned app?{Style.RESET_ALL}"
                                 )
                                 click.echo(
-                                    f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
+                                    f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended, default)"
                                 )
                                 click.echo(
                                     f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
                                 )
+                                click.echo(
+                                    f"\n{Fore.GREEN}► Press y or n (Enter = yes):{Style.RESET_ALL} ",
+                                    nl=False,
+                                )
 
                                 resume_choice = click.getchar().lower()
+                                # Default to 'y' if Enter is pressed
                                 Toolbox.set_auto_resume_after_spawn(
-                                    resume_choice == "y"
+                                    resume_choice
+                                    != "n"  # Anything except 'n' means yes (including Enter)
                                 )
 
                                 resume_status = (
-                                    "enabled" if resume_choice == "y" else "disabled"
+                                    "enabled" if resume_choice != "n" else "disabled"
                                 )
                                 click.echo(
                                     f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
@@ -686,8 +696,10 @@ class ActionQ:
                         "The app will be launched fresh with hooks active from the start.\n"
                     )
 
-                    # Use fuzzy search to select app
-                    selected_package = Toolbox.select_app_with_fuzzy_search()
+                    # Use fuzzy search to select app (with recently installed as default)
+                    selected_package = Toolbox.select_app_with_fuzzy_search(
+                        recently_installed_package=ActionQ.recently_installed_package
+                    )
 
                     if selected_package:
                         Toolbox.set_spotlight_spawn_application(selected_package)
@@ -697,23 +709,25 @@ class ActionQ:
                             f"\n{Fore.CYAN}=== Auto-Resume Configuration ==={Style.RESET_ALL}"
                         )
                         click.echo(
-                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended)"
+                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended, default)"
                         )
                         click.echo(
                             f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
                         )
                         click.echo(
-                            f"\n{Fore.GREEN}► Press y or n:{Style.RESET_ALL} ", nl=False
+                            f"\n{Fore.GREEN}► Press y or n (Enter = yes):{Style.RESET_ALL} ",
+                            nl=False,
                         )
 
                         resume_choice = click.getchar().lower()
                         print(
                             f"{Fore.YELLOW}{resume_choice}{Style.RESET_ALL}"
                         )  # Echo the choice
-                        Toolbox.set_auto_resume_after_spawn(resume_choice == "y")
+                        # Default to 'y' if Enter is pressed
+                        Toolbox.set_auto_resume_after_spawn(resume_choice != "n")
 
                         resume_status = (
-                            "enabled" if resume_choice == "y" else "disabled"
+                            "enabled" if resume_choice != "n" else "disabled"
                         )
                         click.echo(
                             f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
