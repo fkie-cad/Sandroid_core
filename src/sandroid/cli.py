@@ -187,7 +187,7 @@ def main(
     debug: bool,
     interactive: bool,
 ):
-    """Sandroid: Extract forensic artifacts from Android Virtual Devices."""
+    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
     # Initialize colorama for cross-platform colored terminal output
     colorama.init(autoreset=True)
 

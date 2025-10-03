@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+from wcwidth import wcswidth
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,7 @@ from .file_diff import is_sqlite_file
 
 
 class Toolbox:
-    """A static class providing various utility functions for forensic analysis on an Android Virtual Device (AVD)."""
+    """A static class providing various utility functions for forensic, malware and securty analysis on an Android Virtual Device (AVD)."""
 
     action_time = 0
     already_looked_at_filesystem_for_this_action_time = False
@@ -1901,37 +1902,50 @@ class Toolbox:
         :returns: The formatted ASCII box.
         :rtype: str
         """
-        lines = text.splitlines()
+        ANSI_RE = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
 
-        # Strip ANSI color codes for length calculation with a more comprehensive regex
-        def strip_ansi(line):
-            # This improved regex pattern catches more ANSI escape codes
-            return re.sub(
-                r"\x1b(?:\[[0-9;]*[a-zA-Z]|\][0-9;]*[a-zA-Z]|[()][A-Z]|[@-Z])", "", line
-            )
+        def strip_ansi(s: str) -> str:
+            return ANSI_RE.sub('', s)
 
-        # Calculate the actual visible width of each line
-        visible_lengths = [len(strip_ansi(line)) for line in lines]
-        max_length = max(visible_lengths) + 4
+        # Prepare lines, but compute visible width using wcswidth()
+        raw_lines = text.splitlines()
+        stripped_lines = [strip_ansi(ln).expandtabs(4) for ln in raw_lines]
 
-        # Create the top border with the title in the center
+        # Display width in terminal cells (handles emoji, combining marks, etc.)
+        def cell_width(s: str) -> int:
+            # wcswidth returns -1 if it encounters a nonprintable; treat as 0
+            w = wcswidth(s)
+            return 0 if w < 0 else w
+
+        visible_widths = [cell_width(ln) for ln in stripped_lines]
+        inner_width = (max(visible_widths) if visible_widths else 0) + 2  # your padding
+
+        # Title line (measure width without ANSI, but print the original)
         stripped_title = strip_ansi(title)
-        title_padding = (max_length - len(stripped_title)) // 2
-        top_border = f"┌{'─' * max_length}┐\n│{' ' * title_padding}{title}{' ' * (max_length - len(stripped_title) - title_padding)}│\n├{'─' * max_length}┤\n"
+        title_w = cell_width(stripped_title)
+        pad_left = (inner_width - title_w) // 2
+        pad_right = inner_width - title_w - pad_left
 
-        # Create the middle section with correct padding
-        middle_text = ""
-        for i, line in enumerate(lines):
-            visible_length = len(strip_ansi(line))
-            padding = max_length - visible_length
-            middle_text += f"│{line}{' ' * padding}│"
-            if i < len(lines) - 1:
-                middle_text += "\n"
+        top = (
+            f"┌{'─' * inner_width}┐\n"
+            f"│{' ' * pad_left}{title}{' ' * pad_right}│\n"
+            f"├{'─' * inner_width}┤\n"
+        )
 
-        # Create the bottom border
-        bottom_border = f"\n└{'─' * max_length}┘"
+        # Body lines: pad by display width, not codepoint length
+        body_parts = []
+        for raw, stripped in zip(raw_lines, stripped_lines):
+            pad = inner_width - cell_width(stripped)
+            if pad < 0:
+                # (Optional) hard truncate by cell width if someone prints an extra-long line
+                # You can implement a cell-aware truncation; here we just avoid negative padding.
+                pad = 0
+            body_parts.append(f"│{raw}{' ' * pad}│")
+        body = "\n".join(body_parts)
 
-        return f"{top_border}{middle_text}{bottom_border}"
+        bottom = f"\n└{'─' * inner_width}┘"
+        return f"{top}{body}{bottom}"
+
 
     @classmethod
     def wrap_up(
