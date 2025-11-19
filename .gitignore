@@ -21,6 +21,7 @@ results/
 *.log
 
 temp_analysis/
+dump/
 
 # misc
 *.tar.gz

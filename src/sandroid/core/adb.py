@@ -204,16 +204,98 @@ class Adb:
     def get_pid_for_package_name(cls, package_name):
         """Get the process ID (PID) for a given package name.
 
+        Tries multiple methods in order:
+        1. pidof command (fast, standard)
+        2. ps -A command (more compatible)
+        3. ps -o PID,NAME (alternative format)
+        4. Frida enumerate_processes (last resort, requires Frida)
+
         :param package_name: The name of the package.
         :type package_name: str
         :returns: The process ID if found, None otherwise.
         :rtype: int or None
         """
-        output = cls.send_adb_command(f"shell pidof {package_name}")[0]
+        # Method 1: Try pidof first (fast but not always available)
+        output, stderr = cls.send_adb_command(f"shell pidof {package_name}")
+        logger.debug(f"pidof output: '{output}', stderr: '{stderr}'")
 
-        # TODO: check, if output can be more than one process id
+        if output and output.strip():
+            try:
+                pid = int(output.strip().split()[0])  # Take first PID if multiple
+                logger.debug(f"Found PID {pid} for {package_name} via pidof")
+                return pid
+            except (ValueError, IndexError) as e:
+                logger.debug(f"pidof parsing failed: {e}")
+
+        # Method 2: Use ps -A command (more reliable across Android versions)
+        logger.debug(f"Trying ps -A fallback for {package_name}")
+        output, stderr = cls.send_adb_command("shell ps -A")
+        logger.debug(f"ps -A output length: {len(output) if output else 0} chars")
+
         if output:
-            return int(output.strip())
+            # Parse ps output: looking for lines with the package name
+            for line in output.strip().split("\n"):
+                if package_name in line:
+                    logger.debug(f"Found matching line: '{line}'")
+                    # ps output format varies, but PID is typically the second column
+                    # Example: u0_a123      12345  1234 ... com.example.app
+                    parts = line.split()
+                    logger.debug(f"Line parts: {parts}")
+                    if len(parts) >= 2:
+                        try:
+                            # Try to find the PID (usually second column)
+                            pid_candidate = parts[1]
+                            pid = int(pid_candidate)
+                            logger.debug(
+                                f"Found PID {pid} for {package_name} via ps -A"
+                            )
+                            return pid
+                        except (ValueError, IndexError) as e:
+                            logger.debug(f"Failed to parse PID from parts: {e}")
+                            continue
+
+        # Method 3: Try with -o flag (some Android versions)
+        logger.debug(f"Trying ps -o PID,NAME fallback for {package_name}")
+        output, stderr = cls.send_adb_command("shell ps -o PID,NAME")
+
+        if output:
+            for line in output.strip().split("\n"):
+                if package_name in line:
+                    logger.debug(f"Found matching line in ps -o: '{line}'")
+                    parts = line.split()
+                    if len(parts) >= 1:
+                        try:
+                            pid = int(parts[0])
+                            logger.debug(
+                                f"Found PID {pid} for {package_name} via ps -o"
+                            )
+                            return pid
+                        except (ValueError, IndexError) as e:
+                            logger.debug(f"Failed to parse PID from ps -o: {e}")
+                            continue
+
+        # Method 4: Last resort - Try Frida if available (only if all ADB methods failed)
+        logger.debug(
+            f"All ADB methods failed, trying Frida as last resort for {package_name}"
+        )
+        try:
+            import frida
+
+            device = frida.get_usb_device()
+            processes = device.enumerate_processes()
+            for proc in processes:
+                if proc.name == package_name or package_name in proc.name:
+                    logger.info(
+                        f"Found PID {proc.pid} for {package_name} via Frida (last resort)"
+                    )
+                    return proc.pid
+            logger.debug(f"Frida didn't find process {package_name}")
+        except Exception as e:
+            logger.debug(f"Frida PID lookup failed: {e}")
+
+        logger.warning(
+            f"Could not find PID for package {package_name} using any method"
+        )
         return None
 
     @classmethod

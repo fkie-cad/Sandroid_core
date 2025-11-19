@@ -47,6 +47,15 @@ enabled = false
 # package_name = "com.example.malware"  # Required when enabled
 # config_mode = "I"  # I for interactive, D for default
 
+[spotlight_memory]
+enabled = false
+tracker_backend = "frida"  # Future: "process_vm_readv", "kernel"
+capture_baseline_dumps = false  # Only store checksums by default (saves space)
+checksum_algorithm = "crc32"  # Fast checksum for dirty page detection
+max_page_size = 20971520  # 20MB maximum page size
+target_permissions = "rw-"  # Focus on writable (dirty) pages
+# custom_regions = ["0x12345000-0x12350000"]  # Optional: specific memory regions
+
 [ai]
 enabled = false
 provider = "google-genai"

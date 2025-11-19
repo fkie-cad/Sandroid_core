@@ -162,6 +162,17 @@ def pretty_logo():
     is_flag=True,
     help="Enable debug/verbose mode",
 )
+@click.option(
+    "--spotlight-memory",
+    is_flag=True,
+    help="Track memory changes in spotlight application (dirty pages)",
+)
+@click.option(
+    "--memory-regions",
+    type=str,
+    metavar="REGIONS",
+    help="Specific memory regions to monitor (e.g., '0x12345000-0x12350000,0x20000000-0x20010000')",
+)
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
 @click.version_option(version=__version__, prog_name="sandroid")
 def main(
@@ -185,6 +196,8 @@ def main(
     ai: bool,
     report: bool,
     debug: bool,
+    spotlight_memory: bool,
+    memory_regions: str | None,
     interactive: bool,
 ):
     """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
@@ -245,6 +258,12 @@ def main(
         mock_args.ai = ai
         mock_args.report = report
         mock_args.debug = debug  # Debug mode for dexray-intercept verbose output
+        mock_args.spotlight_memory = spotlight_memory
+        # Parse memory regions if provided
+        if memory_regions:
+            mock_args.memory_regions = [r.strip() for r in memory_regions.split(",")]
+        else:
+            mock_args.memory_regions = None
 
         # Set the args to satisfy dependencies
         Toolbox.args = mock_args

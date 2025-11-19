@@ -20,6 +20,7 @@ from sandroid.analysis.network import Network
 from sandroid.analysis.newfiles import NewFiles
 from sandroid.analysis.processes import Processes
 from sandroid.analysis.sockets import Sockets
+from sandroid.analysis.spotlightmemory import SpotlightMemory
 from sandroid.analysis.static_analysis import StaticAnalysis
 from sandroid.features.functionality import Functionality
 from sandroid.features.player import Player
@@ -104,6 +105,8 @@ class ActionQ:
             processes_object = Processes()
         if args.sockets:
             sockets_object = Sockets()
+        if getattr(args, "spotlight_memory", False):
+            spotlight_memory_object = SpotlightMemory()
 
         # pre-workout routine
         self.q.append("load_snapshot")
@@ -125,6 +128,8 @@ class ActionQ:
 
         # assemble runs in between
         for run_number in range(1, args.number_of_runs):
+            if getattr(args, "spotlight_memory", False):
+                self.q.append(spotlight_memory_object)  # Capture baseline before action
             if args.network:
                 self.q.append(
                     network_object
@@ -844,6 +849,103 @@ class ActionQ:
                     self.logger.info("\nOperation cancelled")
                 except Exception as e:
                     self.logger.error(f"Error during memory dump: {e}")
+                self.q.append("interactive")
+
+            case "M":  # Shift+M - Track memory changes (spotlight memory)
+                try:
+                    # Check Frida is running
+                    if not Toolbox.frida_manager.is_frida_server_running():
+                        self.logger.warning(
+                            "No frida server is running. Please start or install it first."
+                        )
+                        self.q.append("interactive")
+                        return
+
+                    # Check if spotlight app is set (either in attach or spawn mode)
+                    spotlight_set = Toolbox._spotlight_application is not None or (
+                        Toolbox.is_spawn_mode()
+                        and Toolbox.get_spotlight_spawn_application() is not None
+                    )
+
+                    if not spotlight_set:
+                        self.logger.warning(
+                            "No spotlight application set. Please set one first with 'c' or Shift+C."
+                        )
+                        self.q.append("interactive")
+                        return
+
+                    self.logger.info("Starting spotlight memory tracking...")
+                    click.echo(
+                        f"\n{Fore.CYAN}=== Spotlight Memory Tracking ==={Fore.RESET}"
+                    )
+                    click.echo(
+                        "This will track memory changes in the spotlight application."
+                    )
+                    click.echo("1. Baseline snapshot will be captured")
+                    click.echo("2. Perform your action in the app")
+                    click.echo(
+                        "3. Press ENTER when done to compare and dump changed pages"
+                    )
+
+                    # Optional: Ask for custom regions
+                    custom_regions = None
+                    use_custom = (
+                        input("\nMonitor specific memory regions? (y/N): ")
+                        .strip()
+                        .lower()
+                    )
+                    if use_custom == "y":
+                        regions_input = input(
+                            "Enter regions (e.g., 0x12345000-0x12350000,0x20000000-0x20010000): "
+                        ).strip()
+                        if regions_input:
+                            custom_regions = [
+                                r.strip() for r in regions_input.split(",")
+                            ]
+                            click.echo(f"Monitoring regions: {custom_regions}")
+
+                    # Create SpotlightMemory instance
+                    from sandroid.analysis.spotlightmemory import SpotlightMemory
+
+                    spotlight_memory = SpotlightMemory()
+
+                    # Set custom regions if provided
+                    if custom_regions:
+                        spotlight_memory.custom_regions = custom_regions
+
+                    # Capture baseline
+                    click.echo(
+                        f"\n{Fore.YELLOW}Capturing baseline snapshot...{Fore.RESET}"
+                    )
+                    spotlight_memory.gather()
+
+                    # Wait for user action
+                    click.echo(f"\n{Fore.GREEN}Baseline captured!{Fore.RESET}")
+                    click.echo("Now perform your action in the app...")
+                    input("Press ENTER when done: ")
+
+                    # Capture current state and compare
+                    click.echo(
+                        f"\n{Fore.YELLOW}Comparing memory and dumping changed pages...{Fore.RESET}"
+                    )
+                    result = spotlight_memory.return_data()
+
+                    # Display results
+                    click.echo(spotlight_memory.pretty_print())
+
+                    if result.get("SpotlightMemory", {}).get("changed_pages", 0) > 0:
+                        dump_dir = result["SpotlightMemory"].get("dump_directory")
+                        if dump_dir:
+                            click.echo(
+                                f"\n{Fore.GREEN}Dumps saved to: {dump_dir}{Fore.RESET}"
+                            )
+
+                except KeyboardInterrupt:
+                    self.logger.info("\nMemory tracking cancelled")
+                except Exception as e:
+                    self.logger.error(
+                        f"Error during memory tracking: {e}", exc_info=True
+                    )
                 self.q.append("interactive")
 
             case "o":

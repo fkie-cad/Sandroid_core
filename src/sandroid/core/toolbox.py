@@ -942,8 +942,10 @@ class Toolbox:
             else:
                 pid = cls._spotlight_application_pid
 
-            # Attach to running process
-            session = device.attach(package_name)
+            # Attach to running process using PID (not package name)
+            # Using PID is more reliable than package name
+            cls.logger.debug(f"Attaching to {package_name} with PID {pid}")
+            session = device.attach(pid)
             cls.logger.debug(f"Attached to running process (PID: {pid})")
 
             app_info = {
@@ -1875,6 +1877,7 @@ class Toolbox:
     * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[🚀 SPAWN MODE]{Fore.RESET}
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with dexray-insight
     * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app{mode_indicator}
+    * track {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+M{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}emory changes (dirty pages){mode_indicator}
     {malware_monitor_string}
     * start o{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}b{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}jection interactive shell{mode_indicator}
     * run {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}t{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rigdroid malware triggers
