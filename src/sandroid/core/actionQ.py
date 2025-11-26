@@ -397,6 +397,42 @@ class ActionQ:
             self.q.append("interactive")
             return
 
+        # Handle TAB key for view switching
+        if char == "\t":  # TAB key
+            Toolbox.cycle_view()
+            self.q.append("interactive")
+            return
+
+        # Validate key based on current view
+        current_view = Toolbox.get_current_view()
+
+        # Define allowed keys for each view
+        forensic_keys = {'r', 'p', 'x', 'i', 'c', 'C', 'd', 'l', 'v', 'u', 'o', ' ',
+                        'e', 's', 'g', 'n', 'f', '0', '1', '2', '3', '4', '5', '6', '7', '8',
+                        'y', 'w', 'q'}
+        malware_keys = {'r', 'p', 'x', 'i', 'c', 'C', 'M', 'm', 'b', 't',
+                       'e', 's', 'g', 'n', 'f', '0', '1', '2', '3', '4', '5', '6', '7', '8',
+                       'y', 'w', 'h', 'q'}
+        security_keys = {'c', 'C', 'n', 'a', 'e', 'f', 'q'}
+
+        # Check if key is valid for current view
+        valid_keys = []
+        if current_view == "forensic":
+            valid_keys = forensic_keys
+        elif current_view == "malware":
+            valid_keys = malware_keys
+        elif current_view == "security":
+            valid_keys = security_keys
+
+        if char not in valid_keys:
+            Toolbox.show_blocking_warning(
+                title="Key Not Available",
+                message=f"Key '{char}' is not available in {current_view.upper()} view.",
+                action_hint="Press TAB to switch between views: Forensic → Malware → Security"
+            )
+            self.q.append("interactive")
+            return
+
         # Original match/case statement continues here
         match char:
             case " ":
@@ -457,10 +493,16 @@ class ActionQ:
                 if "failed to stat remote object" in str(
                     output
                 ) or "failed to stat remote object" in str(error):
-                    self.logger.warning(f"File not found on device: {spotlight_file}")
+                    Toolbox.show_blocking_warning(
+                        title="File Not Found",
+                        message=f"The spotlight file does not exist on the device:\n{spotlight_file}",
+                        action_hint="Check if the file path is correct or if the app has created the file yet"
+                    )
                 elif "Permission denied" in str(output):
-                    self.logger.error(
-                        f"Permission denied when pulling {spotlight_file}"
+                    Toolbox.show_blocking_error(
+                        title="Permission Denied",
+                        message=f"Cannot pull file due to permission restrictions:\n{spotlight_file}",
+                        action_hint="The file may be in a protected directory. Try running as root or accessing a different location."
                     )
                 else:
                     self.logger.info(f"Pulled {spotlight_file} to {target_path}")
@@ -568,6 +610,13 @@ class ActionQ:
                     except Exception as e:
                         self.logger.error(f"Error starting frida server: {e!s}")
                         self.q.append("interactive")
+                else:
+                    Toolbox.show_blocking_info(
+                        title="Frida Already Running",
+                        message="Frida server is already running on the device.",
+                        action_hint="No action needed - Frida is ready to use"
+                    )
+                    self.q.append("interactive")
             case "n":  # New APK installation
                 try:
                     self.logger.info("Enter file path of APK or search term:")
@@ -751,15 +800,59 @@ class ActionQ:
                 self.q.append("interactive")
             case "a":
                 try:
-                    apk_name = Toolbox.get_spotlight_application()[0]
-                except:
-                    self.logger.warning("Spotlight app has to be set first.")
-                    self.q.append("interactive")
-                    return
-                asam = StaticAnalysis()
-                asam.gather()
-                # asam.pretty_print()
-                # Toolbox.submit_other_data("asam", asam.return_data())
+                    # Check if spotlight app is set
+                    spotlight_app = Toolbox.get_spotlight_application()
+                    if spotlight_app is None:
+                        if Toolbox._spawn_mode and Toolbox._spotlight_spawn_application:
+                            package_name = Toolbox._spotlight_spawn_application
+                        else:
+                            Toolbox.show_blocking_error(
+                                title="Spotlight App Required",
+                                message="You need to set a spotlight application before running static analysis.",
+                                action_hint="Press [c] for ATTACH mode or [Shift+C] for SPAWN mode"
+                            )
+                            self.q.append("interactive")
+                            return
+                    else:
+                        package_name = spotlight_app[0]
+
+                    # Get the APK path from the device
+                    self.logger.info(f"Pulling APK for {package_name}...")
+                    stdout, stderr = Adb.send_adb_command(f"shell pm path {package_name}")
+
+                    if not stdout or "package:" not in stdout:
+                        self.logger.error(f"Could not find APK path for {package_name}")
+                        self.q.append("interactive")
+                        return
+
+                    # Extract the APK path (format is "package:/path/to/apk")
+                    apk_path = stdout.strip().replace("package:", "")
+
+                    # Pull the APK to a temporary location
+                    import tempfile
+                    temp_dir = tempfile.gettempdir()
+                    local_apk_path = os.path.join(temp_dir, f"{package_name}.apk")
+
+                    self.logger.info(f"Downloading APK from device...")
+                    stdout, stderr = Adb.send_adb_command(f"pull {apk_path} {local_apk_path}")
+
+                    if stderr and "error" in stderr.lower():
+                        self.logger.error(f"Failed to pull APK: {stderr}")
+                        self.q.append("interactive")
+                        return
+
+                    self.logger.info(f"APK saved to: {local_apk_path}")
+                    self.logger.info("Running dexray-insight static analysis...")
+
+                    # Run static analysis
+                    asam = StaticAnalysis()
+                    asam.gather()
+                    # asam.pretty_print()
+                    # Toolbox.submit_other_data("asam", asam.return_data())
+
+                except Exception as e:
+                    self.logger.error(f"Error during static analysis: {e}")
+
                 self.q.append("interactive")
             case "m":
                 try:
@@ -804,11 +897,26 @@ class ActionQ:
                 try:
                     # Check Frida is running
                     if not Toolbox.frida_manager.is_frida_server_running():
-                        self.logger.warning(
-                            "No frida server is running. Please start or install it first."
+                        result = Toolbox.show_blocking_warning(
+                            title="Frida Server Required",
+                            message="No Frida server is running. This feature requires Frida to be installed and running.",
+                            action_hint="Press [f] to install and start Frida server",
+                            action_key='f'
                         )
-                        self.q.append("interactive")
-                        return
+                        if result == 'f':
+                            # User pressed 'f' - install and start Frida
+                            try:
+                                Toolbox.frida_manager.install_frida_server()
+                                Toolbox.frida_manager.run_frida_server()
+                                # Don't return - let the feature continue to execute
+                            except Exception as e:
+                                self.logger.error(f"Error starting frida server: {e!s}")
+                                self.q.append("interactive")
+                                return
+                        else:
+                            # User pressed Enter - return to menu
+                            self.q.append("interactive")
+                            return
 
                     # FriTap now handles both spawn/attach internally
                     self.logger.info("Now fritap output follows. End with CTRL-C")
@@ -836,11 +944,26 @@ class ActionQ:
                 try:
                     # Check Frida is running
                     if not Toolbox.frida_manager.is_frida_server_running():
-                        self.logger.warning(
-                            "No frida server is running. Please start or install it first."
+                        result = Toolbox.show_blocking_warning(
+                            title="Frida Server Required",
+                            message="No Frida server is running. This feature requires Frida to be installed and running.",
+                            action_hint="Press [f] to install and start Frida server",
+                            action_key='f'
                         )
-                        self.q.append("interactive")
-                        return
+                        if result == 'f':
+                            # User pressed 'f' - install and start Frida
+                            try:
+                                Toolbox.frida_manager.install_frida_server()
+                                Toolbox.frida_manager.run_frida_server()
+                                # Don't return - let the feature continue to execute
+                            except Exception as e:
+                                self.logger.error(f"Error starting frida server: {e!s}")
+                                self.q.append("interactive")
+                                return
+                        else:
+                            # User pressed Enter - return to menu
+                            self.q.append("interactive")
+                            return
 
                     # Fridump now handles both spawn/attach internally
                     Fridump.dump_memory()  # Uses unified session getter
@@ -855,11 +978,26 @@ class ActionQ:
                 try:
                     # Check Frida is running
                     if not Toolbox.frida_manager.is_frida_server_running():
-                        self.logger.warning(
-                            "No frida server is running. Please start or install it first."
+                        result = Toolbox.show_blocking_warning(
+                            title="Frida Server Required",
+                            message="No Frida server is running. This feature requires Frida to be installed and running.",
+                            action_hint="Press [f] to install and start Frida server",
+                            action_key='f'
                         )
-                        self.q.append("interactive")
-                        return
+                        if result == 'f':
+                            # User pressed 'f' - install and start Frida
+                            try:
+                                Toolbox.frida_manager.install_frida_server()
+                                Toolbox.frida_manager.run_frida_server()
+                                # Don't return - let the feature continue to execute
+                            except Exception as e:
+                                self.logger.error(f"Error starting frida server: {e!s}")
+                                self.q.append("interactive")
+                                return
+                        else:
+                            # User pressed Enter - return to menu
+                            self.q.append("interactive")
+                            return
 
                     # Check if spotlight app is set (either in attach or spawn mode)
                     spotlight_set = Toolbox._spotlight_application is not None or (
@@ -1145,11 +1283,26 @@ class ActionQ:
                 try:
                     # Check Frida is running
                     if not Toolbox.frida_manager.is_frida_server_running():
-                        self.logger.warning(
-                            "No frida server is running. Please start or install it first."
+                        result = Toolbox.show_blocking_warning(
+                            title="Frida Server Required",
+                            message="No Frida server is running. This feature requires Frida to be installed and running.",
+                            action_hint="Press [f] to install and start Frida server",
+                            action_key='f'
                         )
-                        self.q.append("interactive")
-                        return
+                        if result == 'f':
+                            # User pressed 'f' - install and start Frida
+                            try:
+                                Toolbox.frida_manager.install_frida_server()
+                                Toolbox.frida_manager.run_frida_server()
+                                # Don't return - let the feature continue to execute
+                            except Exception as e:
+                                self.logger.error(f"Error starting frida server: {e!s}")
+                                self.q.append("interactive")
+                                return
+                        else:
+                            # User pressed Enter - return to menu
+                            self.q.append("interactive")
+                            return
 
                     # Get session info using unified getter
                     try:
@@ -1188,7 +1341,12 @@ class ActionQ:
 
                         self.logger.info(f"Running command: {' '.join(cmd)}")
 
-                        process = subprocess.Popen(cmd)  # nosec S603 # Launching objection security tool
+                        process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )  # nosec S603 # Launching objection security tool
                         process.communicate()
 
                         self.logger.info("Objection session ended")
@@ -1290,11 +1448,26 @@ class ActionQ:
         """
         # Check if the frida server is running
         if not Toolbox.frida_manager.is_frida_server_running():
-            self.logger.warning(
-                "No frida server is running. Please start or install it first."
+            result = Toolbox.show_blocking_warning(
+                title="Frida Server Required",
+                message="No Frida server is running. This feature requires Frida to be installed and running.",
+                action_hint="Press [f] to install and start Frida server",
+                action_key='f'
             )
-            self.q.append("interactive")
-            return None
+            if result == 'f':
+                # User pressed 'f' - install and start Frida
+                try:
+                    Toolbox.frida_manager.install_frida_server()
+                    Toolbox.frida_manager.run_frida_server()
+                    # Continue with the check - don't return None
+                except Exception as e:
+                    self.logger.error(f"Error starting frida server: {e!s}")
+                    self.q.append("interactive")
+                    return None
+            else:
+                # User pressed Enter - return to menu
+                self.q.append("interactive")
+                return None
 
         # Check for spawn mode first
         if Toolbox.is_spawn_mode():
@@ -1302,8 +1475,10 @@ class ActionQ:
             if spawn_app:
                 # Spawn mode is set with an app
                 return (None, spawn_app)
-            self.logger.warning(
-                "Spawn mode is enabled but no spawn application is set."
+            Toolbox.show_blocking_warning(
+                title="Spotlight App Required",
+                message="Spawn mode is enabled but no spawn application is set.",
+                action_hint="Press [Shift+C] to set a spawn application"
             )
             self.q.append("interactive")
             return None
@@ -1312,8 +1487,10 @@ class ActionQ:
         spotlight_application = Toolbox.get_spotlight_application()
 
         if not spotlight_application:
-            self.logger.warning(
-                "No spotlight application is set. Using the currently focused app."
+            Toolbox.show_blocking_info(
+                title="Auto-selecting Spotlight App",
+                message="No spotlight application was set. Automatically using the currently focused app.",
+                action_hint="To manually select an app, press [c] for ATTACH mode or [Shift+C] for SPAWN mode"
             )
             Toolbox.set_spotlight_application(Adb.get_focused_app())
             spotlight_application_name = Toolbox.get_spotlight_application()[0]

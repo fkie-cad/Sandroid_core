@@ -612,7 +612,7 @@ if not (os.path.exists(ini_path) and os.path.isdir(avd_dir)):
 
 # --------- Final summary & ready-to-run command with correct env ---------
 print("\n====================================")
-print("✅ AVD ready!")
+print("✓ AVD ready!")
 print("SDK:")
 print(f"  ANDROID_SDK_ROOT: {SDK_ROOT}")
 print("AVD:")

@@ -189,6 +189,11 @@ class AnalysisConfig(BaseModel):
     degrade_network: bool = Field(
         default=False, description="Simulate UMTS/3G connection speeds"
     )
+    default_view: str = Field(
+        default="forensic",
+        description="Default view mode for interactive menu (forensic, malware, or security)",
+        pattern=r"^(forensic|malware|security)$"
+    )
 
 
 class TrigDroidConfig(BaseModel):

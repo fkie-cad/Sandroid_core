@@ -108,7 +108,12 @@ class FSMon:
         cmd = ["adb", "exec-out", cls.FS_MON_BINARY, path]
         cls.logger.info(f"Monitoring path: {path}")
         cls.logger.debug(f"Running command: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
         return proc
 
     @classmethod
@@ -128,5 +133,10 @@ class FSMon:
         cmd = ["adb", "exec-out", cls.FS_MON_BINARY, "-p", str(pid), path]
         cls.logger.info(f"Monitoring process with PID: {pid}")
         cls.logger.debug(f"Running command: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
         return proc

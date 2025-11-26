@@ -100,7 +100,11 @@ class FridaManager:
 
         try:
             process = subprocess.Popen(
-                command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                command,
+                shell=True,
+                stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
             )
             # Give it a moment to start and potentially fail
             import time

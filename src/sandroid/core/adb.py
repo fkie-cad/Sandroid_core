@@ -69,7 +69,7 @@ class Adb:
         process = subprocess.Popen(
             [cls.ADB_PATH + " " + command],
             stdout=PIPE,
-            stdin=PIPE,
+            stdin=subprocess.DEVNULL,  # Changed from PIPE - ADB doesn't need stdin
             stderr=PIPE,
             shell=True,
         )

@@ -61,7 +61,7 @@ def init(format: str, output: str | None, force: bool, skip_avd_setup: bool):
         sys.exit(1)
 
     # Create base configuration
-    console.print("[bold blue]🔧 Initializing Sandroid configuration...[/bold blue]")
+    console.print("[bold blue]Initializing Sandroid configuration...[/bold blue]")
 
     try:
         # Set up Android environment if not skipped
@@ -123,18 +123,18 @@ def init(format: str, output: str | None, force: bool, skip_avd_setup: bool):
         created_path = loader.save_config(base_config, config_path, format)
 
         console.print(
-            "\n[bold green]✅ Configuration created successfully![/bold green]"
+            "\n[bold green]✓ Configuration created successfully![/bold green]"
         )
-        console.print(f"📍 Location: [cyan]{created_path}[/cyan]")
+        console.print(f"Location: [cyan]{created_path}[/cyan]")
 
         if android_config.get("selected_avd"):
             console.print(
-                f"📱 Configured AVD: [green]{android_config['selected_avd']}[/green]"
+                f"Configured AVD: [green]{android_config['selected_avd']}[/green]"
             )
 
             # Ask if user wants to start the AVD now
             if Confirm.ask(
-                f"\n🚀 Start AVD '{android_config['selected_avd']}' now?", default=False
+                f"\nStart AVD '{android_config['selected_avd']}' now?", default=False
             ):
                 _start_avd(
                     android_config["selected_avd"],
@@ -438,21 +438,21 @@ def avd_list():
     """List available Android Virtual Devices."""
     from .android_env import find_emulator_path, find_existing_sdk, list_available_avds
 
-    console.print("[bold blue]📱 Available Android Virtual Devices[/bold blue]")
+    console.print("[bold blue]Available Android Virtual Devices[/bold blue]")
 
     try:
         emulator_path = find_emulator_path()
         sdk_path = find_existing_sdk()
 
         if not emulator_path:
-            console.print("[red]❌ Android emulator not found in PATH or SDK[/red]")
+            console.print("[red]✗ Android emulator not found in PATH or SDK[/red]")
             console.print("Use 'sandroid-config init' to configure Android environment")
             return
 
         avds = list_available_avds(emulator_path, sdk_path)
 
         if not avds:
-            console.print("[yellow]⚠️  No AVDs found[/yellow]")
+            console.print("[yellow]! No AVDs found[/yellow]")
             console.print("Create one with: [cyan]sandroid-config avd create[/cyan]")
             return
 
@@ -501,7 +501,7 @@ def avd_start(headless: bool, avd_name: str | None):
         target_avd = avd_name or config.emulator.selected_avd
 
         if not target_avd:
-            console.print("[red]❌ No AVD specified[/red]")
+            console.print("[red]✗ No AVD specified[/red]")
             console.print(
                 "Either configure one with 'sandroid-config init' or specify --avd-name"
             )
@@ -510,7 +510,7 @@ def avd_start(headless: bool, avd_name: str | None):
         # Use headless from config if not overridden
         use_headless = headless or config.emulator.avd_headless
 
-        console.print(f"[bold blue]🚀 Starting AVD '{target_avd}'...[/bold blue]")
+        console.print(f"[bold blue]Starting AVD '{target_avd}'...[/bold blue]")
 
         android_env = {
             "emulator_path": config.emulator.android_emulator_path,
@@ -521,12 +521,12 @@ def avd_start(headless: bool, avd_name: str | None):
         success = _start_avd(target_avd, use_headless, android_env)
 
         if success:
-            console.print(f"[green]✅ AVD '{target_avd}' started successfully[/green]")
+            console.print(f"[green]✓ AVD '{target_avd}' started successfully[/green]")
             console.print("\n[bold blue]Next steps:[/bold blue]")
             console.print("• Check device with: [cyan]adb devices[/cyan]")
             console.print("• Run Sandroid analysis: [cyan]sandroid[/cyan]")
         else:
-            console.print(f"[red]❌ Failed to start AVD '{target_avd}'[/red]")
+            console.print(f"[red]✗ Failed to start AVD '{target_avd}'[/red]")
 
     except Exception as e:
         console.print(f"[red]Error starting AVD: {e}[/red]")
@@ -550,10 +550,10 @@ def avd_stop(avd_name: str | None):
                 adb_path = str(config.emulator.adb_path)
 
         if not adb_path:
-            console.print("[red]❌ ADB not found[/red]")
+            console.print("[red]✗ ADB not found[/red]")
             return
 
-        console.print("[bold blue]🛑 Stopping AVDs...[/bold blue]")
+        console.print("[bold blue]Stopping AVDs...[/bold blue]")
 
         # Get running devices
         code, stdout, stderr = run_cmd([adb_path, "devices"])
@@ -570,9 +570,9 @@ def avd_stop(avd_name: str | None):
             code, _, _ = run_cmd(["pkill", "-f", "emulator"])
 
         if code == 0:
-            console.print("[green]✅ Stopped running AVDs[/green]")
+            console.print("[green]✓ Stopped running AVDs[/green]")
         else:
-            console.print("[yellow]⚠️  No running AVDs found to stop[/yellow]")
+            console.print("[yellow]! No running AVDs found to stop[/yellow]")
 
     except Exception as e:
         console.print(f"[red]Error stopping AVDs: {e}[/red]")
@@ -584,8 +584,8 @@ def avd_stop(avd_name: str | None):
 @click.option("--force", is_flag=True, help="Recreate AVD if it already exists")
 def avd_create(name: str, api_level: str, force: bool):
     """Create a new Android Virtual Device."""
-    console.print(f"[bold blue]📱 Creating AVD '{name}' (API {api_level})[/bold blue]")
-    console.print("[yellow]⚠️  AVD creation requires a full Android SDK setup.[/yellow]")
+    console.print(f"[bold blue]Creating AVD '{name}' (API {api_level})[/bold blue]")
+    console.print("[yellow]! AVD creation requires a full Android SDK setup.[/yellow]")
     console.print(
         "This is a complex process that may require downloading system images."
     )

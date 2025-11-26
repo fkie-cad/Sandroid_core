@@ -301,7 +301,7 @@ def list_available_avds(
 def detect_android_environment() -> dict[str, Any]:
     """Detect current Android development environment setup."""
     console.print(
-        "[bold blue]🔍 Detecting Android development environment...[/bold blue]"
+        "[bold blue]Detecting Android development environment...[/bold blue]"
     )
 
     environment = {
@@ -319,7 +319,7 @@ def detect_android_environment() -> dict[str, Any]:
         console.print(f"[green]✓[/green] Found Android SDK: {sdk_path}")
         environment["sdk_path"] = sdk_path
     else:
-        console.print("[yellow]⚠[/yellow] Android SDK not detected")
+        console.print("[yellow]![/yellow] Android SDK not detected")
 
     # Detect ADB
     adb_path = find_adb_path()
@@ -327,7 +327,7 @@ def detect_android_environment() -> dict[str, Any]:
         console.print(f"[green]✓[/green] Found ADB: {adb_path}")
         environment["adb_path"] = adb_path
     else:
-        console.print("[yellow]⚠[/yellow] ADB not found in PATH or SDK")
+        console.print("[yellow]![/yellow] ADB not found in PATH or SDK")
 
     # Detect Emulator
     emulator_path = find_emulator_path()
@@ -335,7 +335,7 @@ def detect_android_environment() -> dict[str, Any]:
         console.print(f"[green]✓[/green] Found Android Emulator: {emulator_path}")
         environment["emulator_path"] = emulator_path
     else:
-        console.print("[yellow]⚠[/yellow] Android Emulator not found")
+        console.print("[yellow]![/yellow] Android Emulator not found")
 
     # Detect AVD Home
     avd_home = find_existing_avd_home()
@@ -349,9 +349,9 @@ def detect_android_environment() -> dict[str, Any]:
             console.print(f"[green]✓[/green] Found {len(avds)} AVDs: {', '.join(avds)}")
             environment["available_avds"] = avds
         else:
-            console.print("[yellow]⚠[/yellow] No AVDs found")
+            console.print("[yellow]![/yellow] No AVDs found")
     else:
-        console.print("[yellow]⚠[/yellow] AVD Home directory not found")
+        console.print("[yellow]![/yellow] AVD Home directory not found")
 
     # Check if environment is ready
     environment["environment_ready"] = all(
@@ -368,7 +368,7 @@ def detect_android_environment() -> dict[str, Any]:
 
 def prompt_for_missing_paths(environment: dict[str, Any]) -> dict[str, Any]:
     """Prompt user to provide paths for missing Android tools."""
-    console.print("\n[bold yellow]⚙️ Configuring missing Android tools...[/bold yellow]")
+    console.print("\n[bold yellow]Configuring missing Android tools...[/bold yellow]")
 
     updated_env = environment.copy()
 
@@ -453,7 +453,7 @@ def select_or_create_avd(environment: dict[str, Any]) -> tuple[str | None, bool]
     avds = environment.get("available_avds", [])
 
     if avds:
-        console.print(f"\n[bold blue]📱 Found {len(avds)} existing AVDs[/bold blue]")
+        console.print(f"\n[bold blue]Found {len(avds)} existing AVDs[/bold blue]")
 
         # Show AVDs in a table
         table = Table(title="Available Android Virtual Devices")
@@ -493,7 +493,7 @@ def select_or_create_avd(environment: dict[str, Any]) -> tuple[str | None, bool]
                 console.print("[red]Please enter a number[/red]")
 
     else:
-        console.print("\n[bold yellow]📱 No existing AVDs found[/bold yellow]")
+        console.print("\n[bold yellow]No existing AVDs found[/bold yellow]")
 
         if Confirm.ask("Create new 'sandroid' AVD?", default=True):
             return "sandroid", True
@@ -515,7 +515,7 @@ def print_missing_tools_warning(environment: dict[str, Any]):
 
     if missing_tools:
         console.print(
-            f"\n[bold yellow]⚠️ Missing Android tools: {', '.join(missing_tools)}[/bold yellow]"
+            f"\n[bold yellow]! Missing Android tools: {', '.join(missing_tools)}[/bold yellow]"
         )
         console.print("\n[bold]Impact on Sandroid functionality:[/bold]")
 
@@ -558,7 +558,7 @@ def setup_android_environment(skip_setup: bool = False) -> dict[str, Any]:
     # If environment is already complete, just confirm with user
     if environment["environment_ready"]:
         console.print(
-            "\n[bold green]🎉 Android development environment looks good![/bold green]"
+            "\n[bold green]✓ Android development environment looks good![/bold green]"
         )
 
         if environment["available_avds"]:

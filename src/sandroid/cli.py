@@ -174,6 +174,12 @@ def pretty_logo():
     help="Specific memory regions to monitor (e.g., '0x12345000-0x12350000,0x20000000-0x20010000')",
 )
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
+@click.option(
+    "--view",
+    type=click.Choice(["forensic", "malware", "security"]),
+    default=None,
+    help="Set the initial view mode (forensic, malware, or security). Default: from config or forensic",
+)
 @click.version_option(version=__version__, prog_name="sandroid")
 def main(
     config: str | None,
@@ -199,6 +205,7 @@ def main(
     spotlight_memory: bool,
     memory_regions: str | None,
     interactive: bool,
+    view: str | None,
 ):
     """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
     # Initialize colorama for cross-platform colored terminal output
@@ -337,6 +344,10 @@ def main(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
 
+        # Set the initial view mode (use CLI view if provided, otherwise use config's default_view)
+        initial_view = view if view is not None else sandroid_config.analysis.default_view
+        Toolbox.set_current_view(initial_view)
+
         # Setup logging
         logger = setup_logging(sandroid_config)
 
@@ -379,7 +390,7 @@ def start_interactive_mode(
     Toolbox.check_setup()
 
     # Start the interactive menu using the legacy ActionQ system
-    console.print("[bold green]🎯 Starting Sandroid interactive mode...[/bold green]")
+    console.print("[bold green]Starting Sandroid interactive mode...[/bold green]")
     action_q = ActionQ()
     action_q.q.append("interactive")  # Add interactive mode to queue
     action_q.run()  # Run the interactive menu
