@@ -37,10 +37,9 @@ import dateutil.parser as dp
 # Local imports
 from AndroidFridaManager import FridaManager, JobManager
 
-from .console import SandroidConsole
-
 # Updated to use migrated modules within same package
 from .adb import Adb
+from .console import SandroidConsole
 from .CustomLoggerFormatter import CustomFormatter
 from .emulator import Emulator
 from .file_diff import is_sqlite_file
@@ -362,9 +361,7 @@ class Toolbox:
                                     f"[error]Please enter a number between [warning]1[/warning] and [warning]{len(available_emulators)}[/warning][/error]"
                                 )
                         except ValueError:
-                            console.print(
-                                "[error]Please enter a valid number[/error]"
-                            )
+                            console.print("[error]Please enter a valid number[/error]")
                 except KeyboardInterrupt:
                     console.print(
                         "\n[warning]Emulator selection cancelled by user. Exiting...[/warning]"
@@ -412,6 +409,9 @@ class Toolbox:
             )
             exit(1)
         cls.logger.info("adb root enabled successfully.")
+        SandroidConsole.add_startup_message(
+            "[info]adb root enabled successfully.[/info]"
+        )
 
         # Ensure SELinux is set to permissive mode
         stdout, stderr = Adb.send_adb_command("shell setenforce 0")
@@ -419,8 +419,14 @@ class Toolbox:
             cls.logger.warning(
                 f"Failed to set SELinux to permissive mode: {stderr.strip()}"
             )
+            SandroidConsole.add_startup_message(
+                f"[warning]Failed to set SELinux to permissive mode: {stderr.strip()}[/warning]"
+            )
         else:
             cls.logger.info("SELinux set to permissive mode.")
+            SandroidConsole.add_startup_message(
+                "[info]SELinux set to permissive mode.[/info]"
+            )
 
         # Check for sqldiff binary
         cls.check_sqldiff_binary()
@@ -441,11 +447,13 @@ class Toolbox:
         sqldiff_available = shutil.which("sqldiff") is not None
 
         if not sqldiff_available:
-            cls.logger.info(
+            msg = (
                 "The 'sqldiff' binary was not found in PATH. "
                 "Database comparison functionality will be limited. "
                 "Please install sqlite3 tools to enable full database diffing."
             )
+            cls.logger.info(msg)
+            SandroidConsole.add_startup_message(f"[info]{msg}[/info]")
 
         return sqldiff_available
 
@@ -461,11 +469,13 @@ class Toolbox:
         objection_available = shutil.which("objection") is not None
 
         if not objection_available:
-            cls.logger.warning(
+            msg = (
                 "The 'objection' tool was not found in PATH. "
                 "Interactive application exploration will be limited. "
                 "Please install objection using 'pip install objection'."
             )
+            cls.logger.warning(msg)
+            SandroidConsole.add_startup_message(f"[warning]{msg}[/warning]")
 
         return objection_available
 
@@ -550,10 +560,18 @@ class Toolbox:
         snapshots = Adb.get_avd_snapshots()
 
         # Build information string with Rich markup
-        info_text = f"[primary]Emulator ID:[/primary] [success]{emulator_id}[/success]\n"
-        info_text += f"[primary]Emulator Path:[/primary] [success]{emulator_path}[/success]\n"
-        info_text += f"[primary]Device Time:[/primary] [success]{device_time}[/success]\n"
-        info_text += f"[primary]Device Locale:[/primary] [success]{device_locale}[/success]\n"
+        info_text = (
+            f"[primary]Emulator ID:[/primary] [success]{emulator_id}[/success]\n"
+        )
+        info_text += (
+            f"[primary]Emulator Path:[/primary] [success]{emulator_path}[/success]\n"
+        )
+        info_text += (
+            f"[primary]Device Time:[/primary] [success]{device_time}[/success]\n"
+        )
+        info_text += (
+            f"[primary]Device Locale:[/primary] [success]{device_locale}[/success]\n"
+        )
         info_text += f"[primary]Android Version & API Level:[/primary] [success]{android_info.get('android_version', 'Unknown')} (API {android_info.get('api_level', 'Unknown')})[/success]\n\n"
 
         # Add network interfaces section
@@ -1632,9 +1650,10 @@ class Toolbox:
             cls._current_view = view
             if cls.logger:
                 cls.logger.info(f"View changed to: {view.upper()}")
-        else:
-            if cls.logger:
-                cls.logger.warning(f"Invalid view mode: {view}. Valid modes are: {', '.join(cls._view_cycle)}")
+        elif cls.logger:
+            cls.logger.warning(
+                f"Invalid view mode: {view}. Valid modes are: {', '.join(cls._view_cycle)}"
+            )
 
     @classmethod
     def cycle_view(cls):
@@ -1647,7 +1666,9 @@ class Toolbox:
         return cls._current_view
 
     @classmethod
-    def show_blocking_warning(cls, title: str, message: str, action_hint: str = None, action_key: str = None):
+    def show_blocking_warning(
+        cls, title: str, message: str, action_hint: str = None, action_key: str = None
+    ):
         """Display a warning modal that requires user acknowledgment.
 
         This creates a blocking dialog box that overlays the terminal and requires
@@ -1666,8 +1687,8 @@ class Toolbox:
         :rtype: str or None
         """
         try:
-            from rich.panel import Panel
             from rich.console import Console
+            from rich.panel import Panel
             from rich.text import Text
 
             # Build message with optional action hint using Rich markup
@@ -1689,7 +1710,7 @@ class Toolbox:
                 title=f"! {title}",
                 border_style="yellow bold",
                 padding=(1, 2),
-                expand=False
+                expand=False,
             )
 
             print()  # Add spacing before panel
@@ -1698,11 +1719,12 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
@@ -1718,16 +1740,19 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
     @classmethod
-    def show_blocking_error(cls, title: str, message: str, action_hint: str = None, action_key: str = None):
+    def show_blocking_error(
+        cls, title: str, message: str, action_hint: str = None, action_key: str = None
+    ):
         """Display an error modal that requires user acknowledgment.
 
         Similar to show_blocking_warning but styled for errors with red border.
@@ -1744,8 +1769,8 @@ class Toolbox:
         :rtype: str or None
         """
         try:
-            from rich.panel import Panel
             from rich.console import Console
+            from rich.panel import Panel
             from rich.text import Text
 
             # Build message with optional action hint using Rich markup
@@ -1767,7 +1792,7 @@ class Toolbox:
                 title=f"✗ {title}",
                 border_style="red bold",
                 padding=(1, 2),
-                expand=False
+                expand=False,
             )
 
             print()  # Add spacing before panel
@@ -1776,11 +1801,12 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
@@ -1796,16 +1822,19 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
     @classmethod
-    def show_blocking_info(cls, title: str, message: str, action_hint: str = None, action_key: str = None):
+    def show_blocking_info(
+        cls, title: str, message: str, action_hint: str = None, action_key: str = None
+    ):
         """Display an info modal that requires user acknowledgment.
 
         Similar to show_blocking_warning but styled for informational messages with cyan border.
@@ -1822,8 +1851,8 @@ class Toolbox:
         :rtype: str or None
         """
         try:
-            from rich.panel import Panel
             from rich.console import Console
+            from rich.panel import Panel
             from rich.text import Text
 
             # Build message with optional action hint using Rich markup
@@ -1845,7 +1874,7 @@ class Toolbox:
                 title=f"[i] {title}",
                 border_style="cyan bold",
                 padding=(1, 2),
-                expand=False
+                expand=False,
             )
 
             print()  # Add spacing before panel
@@ -1854,11 +1883,12 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
@@ -1874,11 +1904,12 @@ class Toolbox:
 
             # Wait for Enter key or action key
             import click
+
             while True:
                 key = click.getchar()
-                if key in ('\r', '\n'):  # Enter key
+                if key in ("\r", "\n"):  # Enter key
                     return None
-                elif action_key and key == action_key:
+                if action_key and key == action_key:
                     return action_key
                 # Ignore all other keys
 
@@ -2064,6 +2095,11 @@ class Toolbox:
 
         console = SandroidConsole.get()
 
+        # Clear screen and show logo at top, so menu stays at top and logs appear below
+        SandroidConsole.clear()
+        SandroidConsole.print_logo()
+        console.print()  # Add blank line after logo
+
         # Get current view
         current_view = cls._current_view
         view_display = current_view.upper()
@@ -2096,19 +2132,17 @@ class Toolbox:
                 f"[warning]{cls._spotlight_spawn_application}[/warning]"
             )
             if cls._auto_resume_after_spawn:
-                spotlight_application_string += (
-                    " [success](auto-resume)[/success]"
-                )
+                spotlight_application_string += " [success](auto-resume)[/success]"
             else:
-                spotlight_application_string += (
-                    " [warning](manual resume)[/warning]"
-                )
+                spotlight_application_string += " [warning](manual resume)[/warning]"
             spotlight_application_string = f"Spotlight Application: [{spotlight_application_string}] [mode.spawn]\\[SPAWN MODE][/mode.spawn]"
         elif cls._spotlight_application:
             # ATTACH MODE
             spotlight_application_string = f"Spotlight Application: [[warning]{cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}[/warning]] [mode.attach]\\[ATTACH MODE][/mode.attach]"
         else:
-            spotlight_application_string = "Spotlight Application: [[status.stopped]Not set[/status.stopped]]"
+            spotlight_application_string = (
+                "Spotlight Application: [[status.stopped]Not set[/status.stopped]]"
+            )
 
         # Spotlight files (shown in all views)
         spotlight_files = [
@@ -2152,34 +2186,40 @@ class Toolbox:
         # === FORENSIC VIEW ===
         if current_view == "forensic":
             # Action Recording & Playback
-            menu_content.extend([
-                "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
-                "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
+                    "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
+                    "",
+                ]
+            )
 
             # Spotlight Application
-            menu_content.extend([
-                "    [menu.section]=== Spotlight Application ===[/menu.section]",
-                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
-                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
-                f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]d[/menu.key][menu.key.bracket]][/menu.key.bracket]ump memory of spotlight app{mode_indicator}",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Spotlight Application ===[/menu.section]",
+                    "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                    "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                    f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]d[/menu.key][menu.key.bracket]][/menu.key.bracket]ump memory of spotlight app{mode_indicator}",
+                    "",
+                ]
+            )
 
             # Spotlight Files
-            menu_content.extend([
-                "    [menu.section]=== Spotlight Files ===[/menu.section]",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]l[/menu.key][menu.key.bracket]][/menu.key.bracket]ist/add spotlight file",
-                "    * remo[menu.key.bracket]\\[[/menu.key.bracket][menu.key]v[/menu.key][menu.key.bracket]][/menu.key.bracket]e spotlight file",
-                "    * p[menu.key.bracket]\\[[/menu.key.bracket][menu.key]u[/menu.key][menu.key.bracket]][/menu.key.bracket]ll spotlight files",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]o[/menu.key][menu.key.bracket]][/menu.key.bracket]bserve file system changes (fsmon)",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]space[/menu.key][menu.key.bracket]][/menu.key.bracket] pull spotlight memory/DB file",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Spotlight Files ===[/menu.section]",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]l[/menu.key][menu.key.bracket]][/menu.key.bracket]ist/add spotlight file",
+                    "    * remo[menu.key.bracket]\\[[/menu.key.bracket][menu.key]v[/menu.key][menu.key.bracket]][/menu.key.bracket]e spotlight file",
+                    "    * p[menu.key.bracket]\\[[/menu.key.bracket][menu.key]u[/menu.key][menu.key.bracket]][/menu.key.bracket]ll spotlight files",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]o[/menu.key][menu.key.bracket]][/menu.key.bracket]bserve file system changes (fsmon)",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]space[/menu.key][menu.key.bracket]][/menu.key.bracket] pull spotlight memory/DB file",
+                    "",
+                ]
+            )
 
             # Emulator Management
             screen_recording_string = ""
@@ -2188,16 +2228,18 @@ class Toolbox:
             else:
                 screen_recording_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rab video of screen"
 
-            menu_content.extend([
-                "    [menu.section]=== Emulator Management ===[/menu.section]",
-                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
-                "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
-                "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
-                f"    {screen_recording_string}",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
-                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Emulator Management ===[/menu.section]",
+                    "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                    "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
+                    "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
+                    f"    {screen_recording_string}",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
+                    "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
+                    "",
+                ]
+            )
 
             # Network Management (no friTap in forensic view)
             network_capture_string = ""
@@ -2206,24 +2248,28 @@ class Toolbox:
             else:
                 network_capture_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]rite network capture file"
 
-            menu_content.extend([
-                "    [menu.section]=== Network Management ===[/menu.section]",
-                "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
-                f"    {network_capture_string}",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Network Management ===[/menu.section]",
+                    "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
+                    f"    {network_capture_string}",
+                    "",
+                ]
+            )
 
         # === MALWARE ANALYSIS VIEW ===
         elif current_view == "malware":
             # Action Recording & Playback
-            menu_content.extend([
-                "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
-                "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
+                    "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
+                    "",
+                ]
+            )
 
             # Spotlight Application (malware-specific tools)
             malware_monitor_string = ""
@@ -2241,16 +2287,18 @@ class Toolbox:
                 )
                 malware_monitor_string = f"* stop android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept) on {current_app}"
 
-            menu_content.extend([
-                "    [menu.section]=== Spotlight Application ===[/menu.section]",
-                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
-                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
-                f"    * track [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+M[/menu.key][menu.key.bracket]][/menu.key.bracket]emory changes (dirty pages){mode_indicator}",
-                f"    {malware_monitor_string}",
-                f"    * start o[menu.key.bracket]\\[[/menu.key.bracket][menu.key]b[/menu.key][menu.key.bracket]][/menu.key.bracket]jection interactive shell{mode_indicator}",
-                "    * run [menu.key.bracket]\\[[/menu.key.bracket][menu.key]t[/menu.key][menu.key.bracket]][/menu.key.bracket]rigdroid malware triggers",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Spotlight Application ===[/menu.section]",
+                    "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                    "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                    f"    * track [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+M[/menu.key][menu.key.bracket]][/menu.key.bracket]emory changes (dirty pages){mode_indicator}",
+                    f"    {malware_monitor_string}",
+                    f"    * start o[menu.key.bracket]\\[[/menu.key.bracket][menu.key]b[/menu.key][menu.key.bracket]][/menu.key.bracket]jection interactive shell{mode_indicator}",
+                    "    * run [menu.key.bracket]\\[[/menu.key.bracket][menu.key]t[/menu.key][menu.key.bracket]][/menu.key.bracket]rigdroid malware triggers",
+                    "",
+                ]
+            )
 
             # Emulator Management
             screen_recording_string = ""
@@ -2259,16 +2307,18 @@ class Toolbox:
             else:
                 screen_recording_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rab video of screen"
 
-            menu_content.extend([
-                "    [menu.section]=== Emulator Management ===[/menu.section]",
-                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
-                "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
-                "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
-                f"    {screen_recording_string}",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
-                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Emulator Management ===[/menu.section]",
+                    "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                    "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
+                    "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
+                    f"    {screen_recording_string}",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
+                    "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
+                    "",
+                ]
+            )
 
             # Network Management (includes friTap)
             network_capture_string = ""
@@ -2277,36 +2327,42 @@ class Toolbox:
             else:
                 network_capture_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]rite network capture file"
 
-            menu_content.extend([
-                "    [menu.section]=== Network Management ===[/menu.section]",
-                "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
-                f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ook and install key extraction with friTap{mode_indicator}",
-                f"    {network_capture_string}",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Network Management ===[/menu.section]",
+                    "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
+                    f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ook and install key extraction with friTap{mode_indicator}",
+                    f"    {network_capture_string}",
+                    "",
+                ]
+            )
 
         # === SECURITY VIEW ===
         elif current_view == "security":
             # Minimal view - only static analysis and basic controls
-            menu_content.extend([
-                "    [menu.section]=== Application Management ===[/menu.section]",
-                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
-                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
-                "",
-                "    [menu.section]=== Static Analysis ===[/menu.section]",
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]a[/menu.key][menu.key.bracket]][/menu.key.bracket]nalyze spotlight app with dexray-insight",
-                "",
-                "    [menu.section]=== System ===[/menu.section]",
-                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
-                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
-                "",
-            ])
+            menu_content.extend(
+                [
+                    "    [menu.section]=== Application Management ===[/menu.section]",
+                    "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                    "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
+                    "",
+                    "    [menu.section]=== Static Analysis ===[/menu.section]",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]a[/menu.key][menu.key.bracket]][/menu.key.bracket]nalyze spotlight app with dexray-insight",
+                    "",
+                    "    [menu.section]=== System ===[/menu.section]",
+                    "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                    "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
+                    "",
+                ]
+            )
 
         # Footer (common to all views)
-        menu_content.extend([
-            "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]TAB[/menu.key][menu.key.bracket]][/menu.key.bracket] switch view  |  [menu.key.bracket]\\[[/menu.key.bracket][menu.key]q[/menu.key][menu.key.bracket]][/menu.key.bracket]uit"
-        ])
+        menu_content.extend(
+            [
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]TAB[/menu.key][menu.key.bracket]][/menu.key.bracket] switch view  |  [menu.key.bracket]\\[[/menu.key.bracket][menu.key]q[/menu.key][menu.key.bracket]][/menu.key.bracket]uit"
+            ]
+        )
 
         # Create the menu with view-specific title using custom bordered box
         # Title with VIEW in a unique color (yellow)
@@ -2317,8 +2373,13 @@ class Toolbox:
         box_output = cls._create_colored_box(content, title, border_color="cyan")
         console.print(box_output)
 
+        # Print any buffered startup messages below the menu
+        SandroidConsole.print_startup_messages()
+
     @classmethod
-    def _create_colored_box(cls, text: str, title: str, border_color: str = "cyan") -> str:
+    def _create_colored_box(
+        cls, text: str, title: str, border_color: str = "cyan"
+    ) -> str:
         """Creates a bordered box with colored borders and a title section.
 
         The title gets its own row with a separator line below it.
