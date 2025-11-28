@@ -7,10 +7,10 @@ from logging import getLogger
 import click
 import requests
 from bs4 import BeautifulSoup as BS
-from colorama import Fore, Style
 from tqdm import tqdm
 
 from .adb import Adb
+from .console import SandroidConsole
 from .toolbox import Toolbox
 
 logger = getLogger(__name__)
@@ -273,11 +273,10 @@ class ApkDownloader_Old:
         :param search_results: List of search results.
         :type search_results: list of dict
         """
-        display_string = f"""{Style.BRIGHT}+++ Search Results +++{Style.RESET_ALL}\n"""
+        console = SandroidConsole.get()
+        console.print("[bold]+++ Search Results +++[/bold]")
         for i, result in enumerate(search_results):
-            display_string += f"    [{i}] {result['title']} {result['version']} ({Fore.YELLOW}{result['package_name']}{Fore.RESET})\n"
-
-        click.echo(display_string)
+            console.print(f"    \\[{i}] {result['title']} {result['version']} ([accent]{result['package_name']}[/accent])")
 
     @classmethod
     def get_versions(cls, result):
@@ -343,11 +342,10 @@ class ApkDownloader_Old:
         :param versions: List of available versions.
         :type versions: list of dict
         """
-        display_string = f"""{Style.BRIGHT}+++ Versions for {versions[0]["package_name"]} +++{Style.RESET_ALL}\n"""
+        console = SandroidConsole.get()
+        console.print(f"[bold]+++ Versions for {versions[0]['package_name']} +++[/bold]")
         for i, version in enumerate(versions):
-            display_string += f"    [{i}] {version['version']} {version['arch']} ({Fore.LIGHTMAGENTA_EX}{version['updated']}{Fore.RESET})\n"
-
-        click.echo(display_string)
+            console.print(f"    \\[{i}] {version['version']} {version['arch']} ([secondary]{version['updated']}[/secondary])")
 
     @classmethod
     def get_real_download_url(cls, version_url):

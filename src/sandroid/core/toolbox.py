@@ -36,7 +36,8 @@ import dateutil.parser as dp
 
 # Local imports
 from AndroidFridaManager import FridaManager, JobManager
-from colorama import Fore, Style
+
+from .console import SandroidConsole
 
 # Updated to use migrated modules within same package
 from .adb import Adb
@@ -325,17 +326,24 @@ class Toolbox:
             available_emulators = Emulator.list_available_avds()
 
             if available_emulators:
+                from rich.panel import Panel
+
+                console = SandroidConsole.get()
+
                 # Build formatted emulator list
                 emulator_list = ""
                 for idx, emulator in enumerate(available_emulators, 1):
-                    emulator_list += f"{Fore.CYAN}[{Fore.YELLOW}{idx}{Fore.CYAN}] {Fore.GREEN}{emulator}{Fore.RESET}\n"
+                    emulator_list += f"[primary]\\[[/primary][warning]{idx}[/warning][primary]][/primary] [success]{emulator}[/success]\n"
 
-                # Display emulators in a nice ASCII box
-                formatted_box = cls._create_ascii_box(
+                # Display emulators in a Rich Panel
+                panel = Panel(
                     emulator_list.strip(),
-                    f"{Fore.MAGENTA}Available Emulators{Fore.RESET}",
+                    title="[accent]Available Emulators[/accent]",
+                    border_style="cyan",
+                    expand=False,
                 )
-                print(f"\n{formatted_box}")
+                console.print()
+                console.print(panel)
 
                 # Ask user to select an emulator
                 selected_idx = 0
@@ -344,22 +352,22 @@ class Toolbox:
                         try:
                             selected_idx = int(
                                 cls.safe_input(
-                                    f"\n{Fore.CYAN}Select an emulator to start ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(available_emulators)}{Fore.CYAN}): {Style.RESET_ALL}"
+                                    f"\nSelect an emulator to start (1-{len(available_emulators)}): "
                                 )
                             )
                             if selected_idx < 1 or selected_idx > len(
                                 available_emulators
                             ):
-                                print(
-                                    f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(available_emulators)}{Style.RESET_ALL}"
+                                console.print(
+                                    f"[error]Please enter a number between [warning]1[/warning] and [warning]{len(available_emulators)}[/warning][/error]"
                                 )
                         except ValueError:
-                            print(
-                                f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}"
+                            console.print(
+                                "[error]Please enter a valid number[/error]"
                             )
                 except KeyboardInterrupt:
-                    print(
-                        f"\n{Fore.YELLOW}Emulator selection cancelled by user. Exiting...{Style.RESET_ALL}"
+                    console.print(
+                        "\n[warning]Emulator selection cancelled by user. Exiting...[/warning]"
                     )
                     exit(0)
 
@@ -529,6 +537,10 @@ class Toolbox:
     @classmethod
     def print_emulator_information(cls):
         """Prints information about the emulator, including network interfaces, snapshots, date, locale, Android version, and API level."""
+        from rich.panel import Panel
+
+        console = SandroidConsole.get()
+
         emulator_id = Adb.get_current_avd_name()
         emulator_path = Adb.get_current_avd_path()
         device_time = Adb.get_device_time()
@@ -537,30 +549,33 @@ class Toolbox:
         network_info = Adb.get_network_info()
         snapshots = Adb.get_avd_snapshots()
 
-        # Build information string with colorful formatting
-        info_text = f"{Fore.CYAN}Emulator ID:{Fore.RESET} {Fore.GREEN}{emulator_id}{Fore.RESET}\n"
-        info_text += f"{Fore.CYAN}Emulator Path:{Fore.RESET} {Fore.GREEN}{emulator_path}{Fore.RESET}\n"
-        info_text += f"{Fore.CYAN}Device Time:{Fore.RESET} {Fore.GREEN}{device_time}{Fore.RESET}\n"
-        info_text += f"{Fore.CYAN}Device Locale:{Fore.RESET} {Fore.GREEN}{device_locale}{Fore.RESET}\n"
-        info_text += f"{Fore.CYAN}Android Version & API Level:{Fore.RESET} {Fore.GREEN}{android_info.get('android_version', 'Unknown')} (API {android_info.get('api_level', 'Unknown')}){Fore.RESET}\n\n"
+        # Build information string with Rich markup
+        info_text = f"[primary]Emulator ID:[/primary] [success]{emulator_id}[/success]\n"
+        info_text += f"[primary]Emulator Path:[/primary] [success]{emulator_path}[/success]\n"
+        info_text += f"[primary]Device Time:[/primary] [success]{device_time}[/success]\n"
+        info_text += f"[primary]Device Locale:[/primary] [success]{device_locale}[/success]\n"
+        info_text += f"[primary]Android Version & API Level:[/primary] [success]{android_info.get('android_version', 'Unknown')} (API {android_info.get('api_level', 'Unknown')})[/success]\n\n"
 
         # Add network interfaces section
-        info_text += f"{Fore.YELLOW}Network Interfaces:{Fore.RESET}\n"
+        info_text += "[warning]Network Interfaces:[/warning]\n"
         for interface, ip in network_info:
-            info_text += f"{Fore.CYAN}Interface:{Fore.RESET} {Fore.GREEN}{interface}{Fore.RESET} ({Fore.BLUE}{ip}{Fore.RESET})\n"
+            info_text += f"[primary]Interface:[/primary] [success]{interface}[/success] ([info]{ip}[/info])\n"
 
         # Add snapshots section if available
         if snapshots:
-            info_text += f"\n{Fore.YELLOW}Available Snapshots:{Fore.RESET}\n"
+            info_text += "\n[warning]Available Snapshots:[/warning]\n"
             for snapshot in snapshots:
                 # Switch order to put date first for better alignment
-                info_text += f"{Fore.GREEN}{snapshot['date']}{Fore.RESET} - {Fore.CYAN}{snapshot['tag']}{Fore.RESET}\n"
+                info_text += f"[success]{snapshot['date']}[/success] - [primary]{snapshot['tag']}[/primary]\n"
 
-        # Use the ASCII box format and print it
-        formatted_output = cls._create_ascii_box(
-            info_text.strip(), f"{Fore.MAGENTA}Emulator Information{Fore.RESET}"
+        # Display in Rich Panel
+        panel = Panel(
+            info_text.strip(),
+            title="[accent]Emulator Information[/accent]",
+            border_style="cyan",
+            expand=False,
         )
-        click.echo(formatted_output)
+        console.print(panel)
 
     @classmethod
     def _fetch_changed_files(cls, fetch_all=False):
@@ -1019,17 +1034,20 @@ class Toolbox:
                 cls.logger.info("Falling back to simple numbered selection")
                 has_fuzzy = False
 
+            # Get Rich console
+            console = SandroidConsole.get()
+
             # Suggest recently installed app first if provided
             if recently_installed_package:
-                click.echo(
-                    f"\n{Fore.CYAN}=== Recently Installed App ==={Style.RESET_ALL}"
+                console.print(
+                    "\n[menu.section]=== Recently Installed App ===[/menu.section]"
                 )
-                click.echo(
-                    f"{Fore.YELLOW}[0]{Style.RESET_ALL} {Fore.GREEN}{recently_installed_package}{Style.RESET_ALL} "
-                    f"{Fore.CYAN}(Just installed){Style.RESET_ALL}"
+                console.print(
+                    f"[warning]\\[0][/warning] [success]{recently_installed_package}[/success] "
+                    f"[primary](Just installed)[/primary]"
                 )
-                click.echo(
-                    f"\n{Fore.YELLOW}Press 0 to use this app, or press ENTER to see all apps:{Style.RESET_ALL}"
+                console.print(
+                    "\n[warning]Press 0 to use this app, or press ENTER to see all apps:[/warning]"
                 )
 
                 try:
@@ -1043,15 +1061,15 @@ class Toolbox:
                     pass  # Continue to app list
 
             # Ask if user wants to see all apps or just user-installed
-            click.echo(f"\n{Fore.CYAN}=== App Filter ==={Style.RESET_ALL}")
-            click.echo(
-                f"{Fore.YELLOW}[1]{Style.RESET_ALL} Show only user-installed apps (recommended)"
+            console.print("\n[menu.section]=== App Filter ===[/menu.section]")
+            console.print(
+                "[warning]\\[1][/warning] Show only user-installed apps (recommended)"
             )
-            click.echo(
-                f"{Fore.YELLOW}[2]{Style.RESET_ALL} Show all apps (including system apps)"
+            console.print(
+                "[warning]\\[2][/warning] Show all apps (including system apps)"
             )
-            click.echo(
-                f"\n{Fore.YELLOW}Select filter (press 1 or 2, default is 1):{Style.RESET_ALL}"
+            console.print(
+                "\n[warning]Select filter (press 1 or 2, default is 1):[/warning]"
             )
 
             try:
@@ -1079,8 +1097,8 @@ class Toolbox:
 
             # Display filtered packages
             app_type = "User-Installed" if not show_all else "All"
-            click.echo(
-                f"\n{Fore.CYAN}=== {app_type} Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
+            console.print(
+                f"\n[menu.section]=== {app_type} Applications ({len(filtered_packages)}) ===[/menu.section]"
             )
 
             for idx, pkg in enumerate(filtered_packages, 1):
@@ -1093,19 +1111,19 @@ class Toolbox:
                 # Show app type indicator if showing all apps
                 type_indicator = ""
                 if show_all and pkg.get("is_user_app", False):
-                    type_indicator = f" {Fore.BLUE}[USER]{Style.RESET_ALL}"
+                    type_indicator = " [info]\\[USER][/info]"
 
-                print(
-                    f"{Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} "
-                    f"{Fore.GREEN}{pkg_name:50s}{Style.RESET_ALL}"
+                console.print(
+                    f"[warning]{idx:3d}.[/warning] "
+                    f"[success]{pkg_name:50s}[/success]"
                     f"{type_indicator} "
-                    f"{Fore.CYAN}[{install_date}]{Style.RESET_ALL}"
+                    f"[primary]\\[{install_date}][/primary]"
                 )
 
                 # Add pagination for long lists
                 if idx % 20 == 0 and idx < len(filtered_packages):
                     response = cls.safe_input(
-                        f"\n{Fore.YELLOW}Press ENTER to see more, or type a number to select: {Style.RESET_ALL}"
+                        "\nPress ENTER to see more, or type a number to select: "
                     )
                     if response.isdigit():
                         selected_idx = int(response)
@@ -1114,9 +1132,9 @@ class Toolbox:
 
             # Special handling for single app - auto-select with Enter
             if len(filtered_packages) == 1:
-                click.echo(
-                    f"\n{Fore.GREEN}Press Enter to select this app, or 'q' to cancel:{Style.RESET_ALL} ",
-                    nl=False,
+                console.print(
+                    "\n[success]Press Enter to select this app, or 'q' to cancel:[/success] ",
+                    end="",
                 )
                 choice = cls.safe_input("")
                 if choice.lower() != "q":
@@ -1129,9 +1147,9 @@ class Toolbox:
                 try:
                     # Build prompt based on fuzzy search availability
                     if has_fuzzy and filtered_packages == packages:
-                        prompt = f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}), 'f' to filter, or 'q' to cancel: {Style.RESET_ALL}"
+                        prompt = f"\nEnter number (1-{len(filtered_packages)}), 'f' to filter, or 'q' to cancel: "
                     else:
-                        prompt = f"\n{Fore.YELLOW}Enter number (1-{len(filtered_packages)}) or 'q' to cancel: {Style.RESET_ALL}"
+                        prompt = f"\nEnter number (1-{len(filtered_packages)}) or 'q' to cancel: "
 
                     selection_input = cls.safe_input(prompt)
 
@@ -1141,11 +1159,11 @@ class Toolbox:
 
                     # Fuzzy search filter option
                     if selection_input.lower() == "f" and has_fuzzy:
-                        click.echo(
-                            f"\n{Fore.CYAN}=== Fuzzy Search Filter ==={Style.RESET_ALL}"
+                        console.print(
+                            "\n[menu.section]=== Fuzzy Search Filter ===[/menu.section]"
                         )
                         search_term = cls.safe_input(
-                            f"{Fore.YELLOW}Enter search term (or press ENTER to show all): {Style.RESET_ALL}"
+                            "Enter search term (or press ENTER to show all): "
                         )
 
                         if search_term:
@@ -1176,8 +1194,8 @@ class Toolbox:
 
                         # Re-display filtered packages
                         app_type = "User-Installed" if not show_all else "All"
-                        click.echo(
-                            f"\n{Fore.CYAN}=== {app_type} Applications ({len(filtered_packages)}) ==={Style.RESET_ALL}"
+                        console.print(
+                            f"\n[menu.section]=== {app_type} Applications ({len(filtered_packages)}) ===[/menu.section]"
                         )
 
                         for idx, pkg in enumerate(filtered_packages, 1):
@@ -1188,13 +1206,13 @@ class Toolbox:
 
                             type_indicator = ""
                             if show_all and pkg.get("is_user_app", False):
-                                type_indicator = f" {Fore.BLUE}[USER]{Style.RESET_ALL}"
+                                type_indicator = " [info]\\[USER][/info]"
 
-                            print(
-                                f"{Fore.YELLOW}{idx:3d}.{Style.RESET_ALL} "
-                                f"{Fore.GREEN}{pkg_name:50s}{Style.RESET_ALL}"
+                            console.print(
+                                f"[warning]{idx:3d}.[/warning] "
+                                f"[success]{pkg_name:50s}[/success]"
                                 f"{type_indicator} "
-                                f"{Fore.CYAN}[{install_date}]{Style.RESET_ALL}"
+                                f"[primary]\\[{install_date}][/primary]"
                             )
                         continue  # Go back to selection prompt
 
@@ -1206,17 +1224,17 @@ class Toolbox:
                         ]
                         cls.logger.info(f"Selected: {selected_package}")
                         return selected_package
-                    print(
-                        f"{Fore.RED}Invalid number. Please enter 1-{len(filtered_packages)}{Style.RESET_ALL}"
+                    console.print(
+                        f"[error]Invalid number. Please enter 1-{len(filtered_packages)}[/error]"
                     )
                 except ValueError:
                     if has_fuzzy and filtered_packages == packages:
-                        print(
-                            f"{Fore.RED}Invalid input. Please enter a number, 'f' to filter, or 'q'{Style.RESET_ALL}"
+                        console.print(
+                            "[error]Invalid input. Please enter a number, 'f' to filter, or 'q'[/error]"
                         )
                     else:
-                        print(
-                            f"{Fore.RED}Invalid input. Please enter a number or 'q'{Style.RESET_ALL}"
+                        console.print(
+                            "[error]Invalid input. Please enter a number or 'q'[/error]"
                         )
                 except KeyboardInterrupt:
                     cls.logger.info("\nSelection cancelled by user")
@@ -2042,6 +2060,10 @@ class Toolbox:
     @classmethod
     def print_interactive_menu(cls):
         """Prints the interactive main menu with view-based filtering."""
+        from rich.panel import Panel
+
+        console = SandroidConsole.get()
+
         # Get current view
         current_view = cls._current_view
         view_display = current_view.upper()
@@ -2049,44 +2071,44 @@ class Toolbox:
         # Frida server status
         is_frida_running = cls.frida_manager.is_frida_server_running()
         if is_frida_running:
-            frida_server_string = f"{Fore.GREEN}Running{Fore.RESET}"
+            frida_server_string = "[status.running]Running[/status.running]"
         else:
-            frida_server_string = f"{Fore.RED}Not running{Fore.RESET}"
+            frida_server_string = "[status.stopped]Not running[/status.stopped]"
         frida_server_string = f"Frida Server: [{frida_server_string}]"
 
         # Proxy settings (shown in all views)
         proxy_settings = cls.get_proxy_settings()
         if proxy_settings == "Not set":
-            proxy_string = f"{Fore.RED}Not set{Fore.RESET}"
+            proxy_string = "[status.stopped]Not set[/status.stopped]"
         else:
-            proxy_string = f"{Fore.GREEN}{proxy_settings}{Fore.RESET}"
+            proxy_string = f"[success]{proxy_settings}[/success]"
 
         # Add adjustment note if not in a view where it can be modified
         if current_view == "security":
-            proxy_string = f"HTTP Proxy: [{proxy_string}] {Fore.YELLOW}(adjust in forensic/malware view){Fore.RESET}"
+            proxy_string = f"HTTP Proxy: [{proxy_string}] [warning](adjust in forensic/malware view)[/warning]"
         else:
             proxy_string = f"HTTP Proxy: [{proxy_string}]"
 
         # Spotlight application (shown in all views)
         if cls._spawn_mode and cls._spotlight_spawn_application:
-            # SPAWN MODE (no emojis)
+            # SPAWN MODE
             spotlight_application_string = (
-                f"{Fore.YELLOW}{cls._spotlight_spawn_application}{Fore.RESET}"
+                f"[warning]{cls._spotlight_spawn_application}[/warning]"
             )
             if cls._auto_resume_after_spawn:
                 spotlight_application_string += (
-                    f" {Fore.GREEN}(auto-resume){Fore.RESET}"
+                    " [success](auto-resume)[/success]"
                 )
             else:
                 spotlight_application_string += (
-                    f" {Fore.YELLOW}(manual resume){Fore.RESET}"
+                    " [warning](manual resume)[/warning]"
                 )
-            spotlight_application_string = f"Spotlight Application: [{spotlight_application_string}] {Fore.CYAN}[SPAWN MODE]{Fore.RESET}"
+            spotlight_application_string = f"Spotlight Application: [{spotlight_application_string}] [mode.spawn]\\[SPAWN MODE][/mode.spawn]"
         elif cls._spotlight_application:
-            # ATTACH MODE (no emojis)
-            spotlight_application_string = f"Spotlight Application: [{Fore.YELLOW}{cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}{Fore.RESET}] {Fore.GREEN}[ATTACH MODE]{Fore.RESET}"
+            # ATTACH MODE
+            spotlight_application_string = f"Spotlight Application: [[warning]{cls._spotlight_application[0]}, PID: {cls._spotlight_application_pid}[/warning]] [mode.attach]\\[ATTACH MODE][/mode.attach]"
         else:
-            spotlight_application_string = f"Spotlight Application: [{Fore.RED}Not set{Fore.RESET}]"
+            spotlight_application_string = "Spotlight Application: [[status.stopped]Not set[/status.stopped]]"
 
         # Spotlight files (shown in all views)
         spotlight_files = [
@@ -2096,26 +2118,26 @@ class Toolbox:
         ]
 
         if not spotlight_files:
-            spotlight_files_display = f"{Fore.RED}Not set{Fore.RESET}"
+            spotlight_files_display = "[status.stopped]Not set[/status.stopped]"
         elif len(spotlight_files) == 1:
-            spotlight_files_display = f"{Fore.YELLOW}{spotlight_files[0]}{Fore.RESET}"
+            spotlight_files_display = f"[warning]{spotlight_files[0]}[/warning]"
         else:
             spotlight_files_display = (
-                f"{Fore.YELLOW}{len(spotlight_files)} files set{Fore.RESET}"
+                f"[warning]{len(spotlight_files)} files set[/warning]"
             )
 
         # Add adjustment note if not in forensic view
         if current_view == "forensic":
             spotlight_files_string = f"Spotlight Files: [{spotlight_files_display}]"
         else:
-            spotlight_files_string = f"Spotlight Files: [{spotlight_files_display}] {Fore.YELLOW}(adjust in forensic view){Fore.RESET}"
+            spotlight_files_string = f"Spotlight Files: [{spotlight_files_display}] [warning](adjust in forensic view)[/warning]"
 
-        # Mode indicator for Frida-based tools (no emojis)
+        # Mode indicator for Frida-based tools
         mode_indicator = ""
         if cls._spawn_mode:
-            mode_indicator = f" {Fore.CYAN}[SPAWN]{Fore.RESET}"
+            mode_indicator = " [mode.spawn]\\[SPAWN][/mode.spawn]"
         elif cls._spotlight_application:
-            mode_indicator = f" {Fore.GREEN}[ATTACH]{Fore.RESET}"
+            mode_indicator = " [mode.attach]\\[ATTACH][/mode.attach]"
 
         # Build menu content based on view
         menu_content = []
@@ -2131,62 +2153,62 @@ class Toolbox:
         if current_view == "forensic":
             # Action Recording & Playback
             menu_content.extend([
-                f"    {Fore.CYAN}=== Action Recording & Playback ==={Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}r{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ecord an action",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}p{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}lay the currently loaded action",
-                f"    * e{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}x{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}port currently loaded action",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}i{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mport action",
+                "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
+                "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
                 "",
             ])
 
             # Spotlight Application
             menu_content.extend([
-                f"    {Fore.CYAN}=== Spotlight Application ==={Fore.RESET}",
-                f"    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[ATTACH MODE]{Fore.RESET}",
-                f"    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[SPAWN MODE]{Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}d{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ump memory of spotlight app{mode_indicator}",
+                "    [menu.section]=== Spotlight Application ===[/menu.section]",
+                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]d[/menu.key][menu.key.bracket]][/menu.key.bracket]ump memory of spotlight app{mode_indicator}",
                 "",
             ])
 
             # Spotlight Files
             menu_content.extend([
-                f"    {Fore.CYAN}=== Spotlight Files ==={Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}l{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ist/add spotlight file",
-                f"    * remo{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}v{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}e spotlight file",
-                f"    * p{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}u{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ll spotlight files",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}o{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}bserve file system changes (fsmon)",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}space{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} pull spotlight memory/DB file",
+                "    [menu.section]=== Spotlight Files ===[/menu.section]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]l[/menu.key][menu.key.bracket]][/menu.key.bracket]ist/add spotlight file",
+                "    * remo[menu.key.bracket]\\[[/menu.key.bracket][menu.key]v[/menu.key][menu.key.bracket]][/menu.key.bracket]e spotlight file",
+                "    * p[menu.key.bracket]\\[[/menu.key.bracket][menu.key]u[/menu.key][menu.key.bracket]][/menu.key.bracket]ll spotlight files",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]o[/menu.key][menu.key.bracket]][/menu.key.bracket]bserve file system changes (fsmon)",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]space[/menu.key][menu.key.bracket]][/menu.key.bracket] pull spotlight memory/DB file",
                 "",
             ])
 
             # Emulator Management
             screen_recording_string = ""
             if cls._screen_recording_running:
-                screen_recording_string = f"* stop {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}g{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rabbing video of screen ({Fore.YELLOW}{os.path.basename(cls._screen_recording_file)}{Fore.RESET})"
+                screen_recording_string = f"* stop [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rabbing video of screen ([warning]{os.path.basename(cls._screen_recording_file)}[/warning])"
             else:
-                screen_recording_string = f"* {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}g{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rab video of screen"
+                screen_recording_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rab video of screen"
 
             menu_content.extend([
-                f"    {Fore.CYAN}=== Emulator Management ==={Fore.RESET}",
-                f"    * show {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}e{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mulator information",
-                f"    * keys {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}1-8{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} create snapshots, key {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}0{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} lists/loads snapshots",
-                f"    * take {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}s{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}creenshot of device",
+                "    [menu.section]=== Emulator Management ===[/menu.section]",
+                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
+                "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
                 f"    {screen_recording_string}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}n{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ew APK installation",
-                f"    * run/install {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}f{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rida server",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
+                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
                 "",
             ])
 
             # Network Management (no friTap in forensic view)
             network_capture_string = ""
             if cls._network_capture_running:
-                network_capture_string = f"* stop {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}w{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}riting network capture file ({Fore.YELLOW}{os.path.basename(cls._network_capture_file)}{Fore.RESET})"
+                network_capture_string = f"* stop [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]riting network capture file ([warning]{os.path.basename(cls._network_capture_file)}[/warning])"
             else:
-                network_capture_string = f"* {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}w{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rite network capture file"
+                network_capture_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]rite network capture file"
 
             menu_content.extend([
-                f"    {Fore.CYAN}=== Network Management ==={Fore.RESET}",
-                f"    * set/unset network prox{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}y{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}",
+                "    [menu.section]=== Network Management ===[/menu.section]",
+                "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
                 f"    {network_capture_string}",
                 "",
             ])
@@ -2195,18 +2217,18 @@ class Toolbox:
         elif current_view == "malware":
             # Action Recording & Playback
             menu_content.extend([
-                f"    {Fore.CYAN}=== Action Recording & Playback ==={Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}r{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ecord an action",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}p{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}lay the currently loaded action",
-                f"    * e{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}x{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}port currently loaded action",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}i{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mport action",
+                "    [menu.section]=== Action Recording & Playback ===[/menu.section]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]r[/menu.key][menu.key.bracket]][/menu.key.bracket]ecord an action",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]p[/menu.key][menu.key.bracket]][/menu.key.bracket]lay the currently loaded action",
+                "    * e[menu.key.bracket]\\[[/menu.key.bracket][menu.key]x[/menu.key][menu.key.bracket]][/menu.key.bracket]port currently loaded action",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]i[/menu.key][menu.key.bracket]][/menu.key.bracket]mport action",
                 "",
             ])
 
             # Spotlight Application (malware-specific tools)
             malware_monitor_string = ""
             if cls.malware_monitor_running == False:
-                malware_monitor_string = f"* start android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept){mode_indicator}"
+                malware_monitor_string = f"* start android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept){mode_indicator}"
             else:
                 current_app = (
                     cls._spotlight_spawn_application
@@ -2217,48 +2239,48 @@ class Toolbox:
                         else "app"
                     )
                 )
-                malware_monitor_string = f"* stop android {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}m{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}alware monitor (dexray-intercept) on {current_app}"
+                malware_monitor_string = f"* stop android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept) on {current_app}"
 
             menu_content.extend([
-                f"    {Fore.CYAN}=== Spotlight Application ==={Fore.RESET}",
-                f"    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[ATTACH MODE]{Fore.RESET}",
-                f"    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[SPAWN MODE]{Fore.RESET}",
-                f"    * track {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+M{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}emory changes (dirty pages){mode_indicator}",
+                "    [menu.section]=== Spotlight Application ===[/menu.section]",
+                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                f"    * track [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+M[/menu.key][menu.key.bracket]][/menu.key.bracket]emory changes (dirty pages){mode_indicator}",
                 f"    {malware_monitor_string}",
-                f"    * start o{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}b{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}jection interactive shell{mode_indicator}",
-                f"    * run {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}t{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rigdroid malware triggers",
+                f"    * start o[menu.key.bracket]\\[[/menu.key.bracket][menu.key]b[/menu.key][menu.key.bracket]][/menu.key.bracket]jection interactive shell{mode_indicator}",
+                "    * run [menu.key.bracket]\\[[/menu.key.bracket][menu.key]t[/menu.key][menu.key.bracket]][/menu.key.bracket]rigdroid malware triggers",
                 "",
             ])
 
             # Emulator Management
             screen_recording_string = ""
             if cls._screen_recording_running:
-                screen_recording_string = f"* stop {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}g{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rabbing video of screen ({Fore.YELLOW}{os.path.basename(cls._screen_recording_file)}{Fore.RESET})"
+                screen_recording_string = f"* stop [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rabbing video of screen ([warning]{os.path.basename(cls._screen_recording_file)}[/warning])"
             else:
-                screen_recording_string = f"* {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}g{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rab video of screen"
+                screen_recording_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]g[/menu.key][menu.key.bracket]][/menu.key.bracket]rab video of screen"
 
             menu_content.extend([
-                f"    {Fore.CYAN}=== Emulator Management ==={Fore.RESET}",
-                f"    * show {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}e{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mulator information",
-                f"    * keys {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}1-8{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} create snapshots, key {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}0{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} lists/loads snapshots",
-                f"    * take {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}s{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}creenshot of device",
+                "    [menu.section]=== Emulator Management ===[/menu.section]",
+                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                "    * keys [menu.key.bracket]\\[[/menu.key.bracket][menu.key]1-8[/menu.key][menu.key.bracket]][/menu.key.bracket] create snapshots, key [menu.key.bracket]\\[[/menu.key.bracket][menu.key]0[/menu.key][menu.key.bracket]][/menu.key.bracket] lists/loads snapshots",
+                "    * take [menu.key.bracket]\\[[/menu.key.bracket][menu.key]s[/menu.key][menu.key.bracket]][/menu.key.bracket]creenshot of device",
                 f"    {screen_recording_string}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}n{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ew APK installation",
-                f"    * run/install {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}f{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rida server",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
+                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
                 "",
             ])
 
             # Network Management (includes friTap)
             network_capture_string = ""
             if cls._network_capture_running:
-                network_capture_string = f"* stop {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}w{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}riting network capture file ({Fore.YELLOW}{os.path.basename(cls._network_capture_file)}{Fore.RESET})"
+                network_capture_string = f"* stop [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]riting network capture file ([warning]{os.path.basename(cls._network_capture_file)}[/warning])"
             else:
-                network_capture_string = f"* {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}w{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rite network capture file"
+                network_capture_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]rite network capture file"
 
             menu_content.extend([
-                f"    {Fore.CYAN}=== Network Management ==={Fore.RESET}",
-                f"    * set/unset network prox{Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}y{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}h{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ook and install key extraction with friTap{mode_indicator}",
+                "    [menu.section]=== Network Management ===[/menu.section]",
+                "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
+                f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ook and install key extraction with friTap{mode_indicator}",
                 f"    {network_capture_string}",
                 "",
             ])
@@ -2267,28 +2289,115 @@ class Toolbox:
         elif current_view == "security":
             # Minimal view - only static analysis and basic controls
             menu_content.extend([
-                f"    {Fore.CYAN}=== Application Management ==={Fore.RESET}",
-                f"    * set {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}c{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}urrent app in focus as spotlight app {Fore.GREEN}[ATTACH MODE]{Fore.RESET}",
-                f"    * select app with {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}Shift+C{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} for spawning {Fore.CYAN}[SPAWN MODE]{Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}n{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}ew APK installation",
+                "    [menu.section]=== Application Management ===[/menu.section]",
+                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]n[/menu.key][menu.key.bracket]][/menu.key.bracket]ew APK installation",
                 "",
-                f"    {Fore.CYAN}=== Static Analysis ==={Fore.RESET}",
-                f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}a{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}nalyze spotlight app with dexray-insight",
+                "    [menu.section]=== Static Analysis ===[/menu.section]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]a[/menu.key][menu.key.bracket]][/menu.key.bracket]nalyze spotlight app with dexray-insight",
                 "",
-                f"    {Fore.CYAN}=== System ==={Fore.RESET}",
-                f"    * show {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}e{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}mulator information",
-                f"    * run/install {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}f{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}rida server",
+                "    [menu.section]=== System ===[/menu.section]",
+                "    * show [menu.key.bracket]\\[[/menu.key.bracket][menu.key]e[/menu.key][menu.key.bracket]][/menu.key.bracket]mulator information",
+                "    * run/install [menu.key.bracket]\\[[/menu.key.bracket][menu.key]f[/menu.key][menu.key.bracket]][/menu.key.bracket]rida server",
                 "",
             ])
 
         # Footer (common to all views)
         menu_content.extend([
-            f"    * {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}TAB{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET} switch view  |  {Fore.LIGHTMAGENTA_EX}[{Style.BRIGHT}q{Style.RESET_ALL}{Fore.LIGHTMAGENTA_EX}]{Fore.RESET}uit"
+            "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]TAB[/menu.key][menu.key.bracket]][/menu.key.bracket] switch view  |  [menu.key.bracket]\\[[/menu.key.bracket][menu.key]q[/menu.key][menu.key.bracket]][/menu.key.bracket]uit"
         ])
 
-        # Create the menu with view-specific title
-        title = f"Sandroid Interactive Menu - {Fore.CYAN}{view_display} VIEW{Fore.RESET}"
-        click.echo(cls._create_ascii_box("\n".join(menu_content), title))
+        # Create the menu with view-specific title using custom bordered box
+        # Title with VIEW in a unique color (yellow)
+        title = f"Sandroid Interactive Menu - [bold yellow]{view_display} VIEW[/bold yellow]"
+        content = "\n".join(menu_content)
+
+        # Create the bordered box
+        box_output = cls._create_colored_box(content, title, border_color="cyan")
+        console.print(box_output)
+
+    @classmethod
+    def _create_colored_box(cls, text: str, title: str, border_color: str = "cyan") -> str:
+        """Creates a bordered box with colored borders and a title section.
+
+        The title gets its own row with a separator line below it.
+
+        :param text: The text to be enclosed in the box.
+        :type text: str
+        :param title: The title of the box (can include Rich markup).
+        :type title: str
+        :param border_color: Color for the box borders.
+        :type border_color: str
+        :returns: The formatted box with Rich color markup.
+        :rtype: str
+        """
+        ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
+        def strip_rich_markup(s: str) -> str:
+            """Strip Rich markup tags but preserve escaped brackets as visible text."""
+            # First, replace escaped brackets \[ with a placeholder
+            PLACEHOLDER = "\x00LBRACKET\x00"
+            s = s.replace("\\[", PLACEHOLDER)
+
+            # Now strip actual Rich markup tags [tag]...[/tag]
+            # Match tags like [bold], [red], [/bold], [menu.key], [bold yellow], etc.
+            # Tags can contain: letters, numbers, dots, underscores, slashes, hashes, spaces
+            RICH_MARKUP_RE = re.compile(r"\[[a-zA-Z0-9_./#\s]+\]")
+            s = RICH_MARKUP_RE.sub("", s)
+
+            # Restore escaped brackets as literal [ characters
+            s = s.replace(PLACEHOLDER, "[")
+            return s
+
+        def strip_formatting(s: str) -> str:
+            s = ANSI_RE.sub("", s)
+            s = strip_rich_markup(s)
+            return s
+
+        def cell_width(s: str) -> int:
+            w = wcswidth(s)
+            return 0 if w < 0 else w
+
+        # Prepare content lines
+        raw_lines = text.splitlines()
+        stripped_lines = [strip_formatting(ln).expandtabs(4) for ln in raw_lines]
+        visible_widths = [cell_width(ln) for ln in stripped_lines]
+
+        # Calculate title width (without formatting)
+        stripped_title = strip_formatting(title)
+        title_w = cell_width(stripped_title)
+
+        # Inner width is max of content width and title width, plus padding
+        content_max_width = max(visible_widths) if visible_widths else 0
+        inner_width = max(content_max_width, title_w) + 4  # padding on both sides
+
+        # Build the box with colored borders
+        bc = border_color  # shorthand
+
+        # Title padding
+        pad_left = (inner_width - title_w) // 2
+        pad_right = inner_width - title_w - pad_left
+
+        # Top border and title section
+        top = (
+            f"[{bc}]┌{'─' * inner_width}┐[/{bc}]\n"
+            f"[{bc}]│[/{bc}]{' ' * pad_left}{title}{' ' * pad_right}[{bc}]│[/{bc}]\n"
+            f"[{bc}]├{'─' * inner_width}┤[/{bc}]\n"
+        )
+
+        # Body lines with colored borders
+        body_parts = []
+        for raw, stripped in zip(raw_lines, stripped_lines, strict=False):
+            pad = inner_width - cell_width(stripped)
+            pad = max(pad, 0)
+            body_parts.append(f"[{bc}]│[/{bc}]{raw}{' ' * pad}[{bc}]│[/{bc}]")
+        body = "\n".join(body_parts)
+
+        # Bottom border
+        bottom = f"\n[{bc}]└{'─' * inner_width}┘[/{bc}]"
+
+        return f"{top}{body}{bottom}"
 
     @classmethod
     def _create_ascii_box(cls, text: str, title: str) -> str:

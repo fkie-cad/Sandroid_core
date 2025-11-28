@@ -5,11 +5,12 @@ import time
 import warnings
 
 import click
-from colorama import Fore, Style
 
 warnings.filterwarnings("ignore", category=ResourceWarning)  # it is what it is
 
 from logging import getLogger
+
+from .console import SandroidConsole
 
 from sandroid.analysis.changedfiles import ChangedFiles
 from sandroid.analysis.datagather import DataGather
@@ -325,25 +326,26 @@ class ActionQ:
                 snapshots = Adb.get_avd_snapshots()
                 if snapshots:
                     # Create formatted list of snapshots
+                    console = SandroidConsole.get()
                     snapshot_list = ""
                     for idx, snapshot in enumerate(snapshots, 1):
-                        snapshot_list += f"{Fore.GREEN}{snapshot['date']}{Fore.RESET} - {Fore.CYAN}{snapshot['tag']}{Fore.RESET}\n"
+                        snapshot_list += f"[success]{snapshot['date']}[/success] - [primary]{snapshot['tag']}[/primary]\n"
 
-                    # Display snapshots in a nice ASCII box
-                    formatted_box = Toolbox._create_ascii_box(
+                    # Display snapshots in a Rich panel
+                    console.print()
+                    SandroidConsole.print_panel(
                         snapshot_list.strip(),
-                        f"{Fore.MAGENTA}Available Snapshots{Fore.RESET}",
+                        title="Available Snapshots"
                     )
-                    print(f"\n{formatted_box}")
 
                     # Ask user to select a snapshot
                     selected_idx = 0
                     try:
                         while selected_idx < 1 or selected_idx > len(snapshots):
                             try:
-                                click.echo(
-                                    f"{Fore.CYAN}Select a snapshot to load ({Fore.YELLOW}1{Fore.CYAN}-{Fore.YELLOW}{len(snapshots)}{Fore.CYAN}): {Style.RESET_ALL}",
-                                    nl=False,
+                                console.print(
+                                    f"[primary]Select a snapshot to load ([accent]1[/accent]-[accent]{len(snapshots)}[/accent]): [/primary]",
+                                    end="",
                                 )
                                 char = click.getchar()
                                 if char.isdigit():
@@ -351,16 +353,16 @@ class ActionQ:
                                 else:
                                     selected_idx = 0  # Invalid input
                                 if selected_idx < 1 or selected_idx > len(snapshots):
-                                    click.echo(
-                                        f"{Fore.RED}Please enter a number between {Fore.YELLOW}1{Fore.RED} and {Fore.YELLOW}{len(snapshots)}{Style.RESET_ALL}"
+                                    console.print(
+                                        f"[error]Please enter a number between [accent]1[/accent] and [accent]{len(snapshots)}[/accent][/error]"
                                     )
                             except ValueError:
-                                click.echo(
-                                    f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}"
+                                console.print(
+                                    "[error]Please enter a valid number[/error]"
                                 )
                     except KeyboardInterrupt:
-                        click.echo(
-                            f"\n{Fore.YELLOW}Snapshot selection cancelled by user.{Style.RESET_ALL}"
+                        console.print(
+                            "\n[warning]Snapshot selection cancelled by user.[/warning]"
                         )
                         self.q.append("interactive")
                         return
@@ -376,10 +378,11 @@ class ActionQ:
                 return
             # Keys 1-8 for creating snapshots
             # Prompt for snapshot name
+            console = SandroidConsole.get()
             try:
-                click.echo(
-                    f"{Fore.CYAN}Enter snapshot name (or press Enter for timestamp): {Style.RESET_ALL}",
-                    nl=False,
+                console.print(
+                    "[primary]Enter snapshot name (or press Enter for timestamp): [/primary]",
+                    end="",
                 )
                 snapshot_name = Toolbox.safe_input()
                 if not snapshot_name:
@@ -390,8 +393,8 @@ class ActionQ:
                 # Create snapshot
                 Toolbox.create_snapshot(snapshot_name.encode())
             except KeyboardInterrupt:
-                click.echo(
-                    f"\n{Fore.YELLOW}Snapshot creation cancelled by user.{Style.RESET_ALL}"
+                console.print(
+                    "\n[warning]Snapshot creation cancelled by user.[/warning]"
                 )
 
             self.q.append("interactive")
@@ -661,18 +664,19 @@ class ActionQ:
                     if installed_package:
                         # Store as recently installed for later use
                         ActionQ.recently_installed_package = installed_package
+                        console = SandroidConsole.get()
 
-                        click.echo(
-                            f"\n{Fore.GREEN}✓ Successfully installed: {Fore.YELLOW}{installed_package}{Style.RESET_ALL}"
+                        console.print(
+                            f"\n[success]✓ Successfully installed: [accent]{installed_package}[/accent][/success]"
                         )
-                        click.echo(
-                            f"\n{Fore.CYAN}Would you like to set this app for spawning?{Style.RESET_ALL}"
+                        console.print(
+                            "\n[primary]Would you like to set this app for spawning?[/primary]"
                         )
-                        click.echo(
-                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = Yes, set as spotlight spawn app"
+                        console.print(
+                            "[accent]\\[y][/accent] = Yes, set as spotlight spawn app"
                         )
-                        click.echo(
-                            f"{Fore.YELLOW}[n]{Style.RESET_ALL} = No, return to menu"
+                        console.print(
+                            "[accent]\\[n][/accent] = No, return to menu"
                         )
 
                         try:
@@ -683,18 +687,18 @@ class ActionQ:
                                 )
 
                                 # Ask about auto-resume
-                                click.echo(
-                                    f"\n{Fore.CYAN}Auto-resume spawned app?{Style.RESET_ALL}"
+                                console.print(
+                                    "\n[primary]Auto-resume spawned app?[/primary]"
                                 )
-                                click.echo(
-                                    f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended, default)"
+                                console.print(
+                                    "[accent]\\[y][/accent] = App starts immediately after spawn (recommended, default)"
                                 )
-                                click.echo(
-                                    f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
+                                console.print(
+                                    "[accent]\\[n][/accent] = App stays paused, resume manually"
                                 )
-                                click.echo(
-                                    f"\n{Fore.GREEN}► Press y or n (Enter = yes):{Style.RESET_ALL} ",
-                                    nl=False,
+                                console.print(
+                                    "\n[success]► Press y or n (Enter = yes):[/success] ",
+                                    end="",
                                 )
 
                                 resume_choice = click.getchar().lower()
@@ -707,11 +711,11 @@ class ActionQ:
                                 resume_status = (
                                     "enabled" if resume_choice != "n" else "disabled"
                                 )
-                                click.echo(
-                                    f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
-                                    f"  Package: {Fore.YELLOW}{installed_package}{Style.RESET_ALL}\n"
-                                    f"  Mode: {Fore.CYAN}SPAWN{Style.RESET_ALL}\n"
-                                    f"  Auto-resume: {Fore.YELLOW}{resume_status}{Style.RESET_ALL}\n"
+                                console.print(
+                                    f"\n[success]✓ Spotlight app configured:[/success]\n"
+                                    f"  Package: [accent]{installed_package}[/accent]\n"
+                                    f"  Mode: [primary]SPAWN[/primary]\n"
+                                    f"  Auto-resume: [accent]{resume_status}[/accent]\n"
                                 )
                             else:
                                 self.logger.info("Returning to menu...")
@@ -735,17 +739,19 @@ class ActionQ:
                 )
                 Toolbox.set_spotlight_application_pid(spotlight_application_pid)
                 Toolbox.set_spawn_mode(False)  # Ensure attach mode
-                click.echo(
-                    f"{Fore.GREEN}Spotlight app set in ATTACH mode: {spotlight_application_name}{Style.RESET_ALL}"
+                console = SandroidConsole.get()
+                console.print(
+                    f"[success]Spotlight app set in ATTACH mode: {spotlight_application_name}[/success]"
                 )
                 self.q.append("interactive")
             case "C":
                 # SPAWN MODE: Select app to spawn with fuzzy search
+                console = SandroidConsole.get()
                 try:
-                    click.echo(
-                        f"\n{Fore.CYAN}=== Spawn Mode Selection ==={Style.RESET_ALL}"
+                    console.print(
+                        "\n[menu.section]=== Spawn Mode Selection ===[/menu.section]"
                     )
-                    click.echo(
+                    console.print(
                         "Select an application to spawn when using Frida-based tools.\n"
                         "The app will be launched fresh with hooks active from the start.\n"
                     )
@@ -759,23 +765,23 @@ class ActionQ:
                         Toolbox.set_spotlight_spawn_application(selected_package)
 
                         # Ask about auto-resume preference with clear prompt
-                        click.echo(
-                            f"\n{Fore.CYAN}=== Auto-Resume Configuration ==={Style.RESET_ALL}"
+                        console.print(
+                            "\n[menu.section]=== Auto-Resume Configuration ===[/menu.section]"
                         )
-                        click.echo(
-                            f"{Fore.YELLOW}[y]{Style.RESET_ALL} = App starts immediately after spawn (recommended, default)"
+                        console.print(
+                            "[accent]\\[y][/accent] = App starts immediately after spawn (recommended, default)"
                         )
-                        click.echo(
-                            f"{Fore.YELLOW}[n]{Style.RESET_ALL} = App stays paused, resume manually"
+                        console.print(
+                            "[accent]\\[n][/accent] = App stays paused, resume manually"
                         )
-                        click.echo(
-                            f"\n{Fore.GREEN}► Press y or n (Enter = yes):{Style.RESET_ALL} ",
-                            nl=False,
+                        console.print(
+                            "\n[success]► Press y or n (Enter = yes):[/success] ",
+                            end="",
                         )
 
                         resume_choice = click.getchar().lower()
-                        print(
-                            f"{Fore.YELLOW}{resume_choice}{Style.RESET_ALL}"
+                        console.print(
+                            f"[accent]{resume_choice}[/accent]"
                         )  # Echo the choice
                         # Default to 'y' if Enter is pressed
                         Toolbox.set_auto_resume_after_spawn(resume_choice != "n")
@@ -783,11 +789,11 @@ class ActionQ:
                         resume_status = (
                             "enabled" if resume_choice != "n" else "disabled"
                         )
-                        click.echo(
-                            f"\n{Fore.GREEN}✓ Spotlight app configured:{Style.RESET_ALL}\n"
-                            f"  Package: {Fore.YELLOW}{selected_package}{Style.RESET_ALL}\n"
-                            f"  Mode: {Fore.CYAN}SPAWN{Style.RESET_ALL}\n"
-                            f"  Auto-resume: {Fore.YELLOW}{resume_status}{Style.RESET_ALL}\n"
+                        console.print(
+                            f"\n[success]✓ Spotlight app configured:[/success]\n"
+                            f"  Package: [accent]{selected_package}[/accent]\n"
+                            f"  Mode: [primary]SPAWN[/primary]\n"
+                            f"  Auto-resume: [accent]{resume_status}[/accent]\n"
                         )
                     else:
                         self.logger.info("Spawn mode selection cancelled")
@@ -1013,15 +1019,16 @@ class ActionQ:
                         return
 
                     self.logger.info("Starting spotlight memory tracking...")
-                    click.echo(
-                        f"\n{Fore.CYAN}=== Spotlight Memory Tracking ==={Fore.RESET}"
+                    console = SandroidConsole.get()
+                    console.print(
+                        "\n[menu.section]=== Spotlight Memory Tracking ===[/menu.section]"
                     )
-                    click.echo(
+                    console.print(
                         "This will track memory changes in the spotlight application."
                     )
-                    click.echo("1. Baseline snapshot will be captured")
-                    click.echo("2. Perform your action in the app")
-                    click.echo(
+                    console.print("1. Baseline snapshot will be captured")
+                    console.print("2. Perform your action in the app")
+                    console.print(
                         "3. Press ENTER when done to compare and dump changed pages"
                     )
 
@@ -1040,7 +1047,7 @@ class ActionQ:
                             custom_regions = [
                                 r.strip() for r in regions_input.split(",")
                             ]
-                            click.echo(f"Monitoring regions: {custom_regions}")
+                            console.print(f"Monitoring regions: {custom_regions}")
 
                     # Create SpotlightMemory instance
                     from sandroid.analysis.spotlightmemory import SpotlightMemory
@@ -1052,30 +1059,30 @@ class ActionQ:
                         spotlight_memory.custom_regions = custom_regions
 
                     # Capture baseline
-                    click.echo(
-                        f"\n{Fore.YELLOW}Capturing baseline snapshot...{Fore.RESET}"
+                    console.print(
+                        "\n[warning]Capturing baseline snapshot...[/warning]"
                     )
                     spotlight_memory.gather()
 
                     # Wait for user action
-                    click.echo(f"\n{Fore.GREEN}Baseline captured!{Fore.RESET}")
-                    click.echo("Now perform your action in the app...")
+                    console.print("\n[success]Baseline captured![/success]")
+                    console.print("Now perform your action in the app...")
                     input("Press ENTER when done: ")
 
                     # Capture current state and compare
-                    click.echo(
-                        f"\n{Fore.YELLOW}Comparing memory and dumping changed pages...{Fore.RESET}"
+                    console.print(
+                        "\n[warning]Comparing memory and dumping changed pages...[/warning]"
                     )
                     result = spotlight_memory.return_data()
 
                     # Display results
-                    click.echo(spotlight_memory.pretty_print())
+                    console.print(spotlight_memory.pretty_print())
 
                     if result.get("SpotlightMemory", {}).get("changed_pages", 0) > 0:
                         dump_dir = result["SpotlightMemory"].get("dump_directory")
                         if dump_dir:
-                            click.echo(
-                                f"\n{Fore.GREEN}Dumps saved to: {dump_dir}{Fore.RESET}"
+                            console.print(
+                                f"\n[success]Dumps saved to: {dump_dir}[/success]"
                             )
 
                 except KeyboardInterrupt:
@@ -1095,12 +1102,13 @@ class ActionQ:
                     process = None
 
                     # Try to get PID from current spotlight settings
+                    console = SandroidConsole.get()
                     if Toolbox.is_spawn_mode():
                         # In spawn mode, app may not be running yet
                         spawn_app = Toolbox.get_spotlight_spawn_application()
                         if spawn_app:
-                            click.echo(
-                                f"{Fore.YELLOW}Spawn mode active for {spawn_app}.{Style.RESET_ALL}"
+                            console.print(
+                                f"[warning]Spawn mode active for {spawn_app}.[/warning]"
                             )
                             click.echo(
                                 "FSMon requires a running process. Options:\n"
@@ -1136,11 +1144,11 @@ class ActionQ:
 
                         if spotlight_application_pid:
                             mode_str = (
-                                f"{Fore.GREEN}[ATTACH MODE]{Style.RESET_ALL}"
+                                "[success]\\[ATTACH MODE][/success]"
                                 if Toolbox.get_spotlight_application()
                                 else ""
                             )
-                            click.echo(
+                            console.print(
                                 f"Press ENTER to monitor spotlight app {mode_str} (PID: {spotlight_application_pid}) or enter a path to monitor:"
                             )
                             user_input = Toolbox.safe_input()

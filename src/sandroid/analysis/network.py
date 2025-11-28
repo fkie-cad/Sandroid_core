@@ -5,9 +5,8 @@ import threading
 import time
 from logging import getLogger
 
-from colorama import Fore, Style
-
 from sandroid.core.adb import Adb
+from sandroid.core.console import SandroidConsole
 from sandroid.core.toolbox import Toolbox
 
 from .datagather import DataGather
@@ -78,29 +77,29 @@ class Network(DataGather):
             self.performed_diff = True
 
         result = (
-            Fore.YELLOW
-            + Style.BRIGHT
-            + "\n—————————————————NETWORK=(DNS requests made by emulator)———————————————————————————————————————————————\n"
+            "[warning bold]"
+            "\n—————————————————NETWORK=(DNS requests made by emulator)———————————————————————————————————————————————\n"
+            "[/warning bold]"
         )
         for entry in sorted(self.dns_requests):
-            result += Fore.YELLOW + entry + "\n"
+            result += f"[warning]{entry}[/warning]\n"
         result = result + (
-            Fore.YELLOW
-            + Style.BRIGHT
-            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[warning bold]"
+            "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[/warning bold]"
         )
 
         result += (
-            Fore.LIGHTYELLOW_EX
-            + Style.BRIGHT
-            + "\n—————————————————NETWORK=(Target IP ports)———————————————————————————————————————————————————————\n"
+            "[accent bold]"
+            "\n—————————————————NETWORK=(Target IP ports)———————————————————————————————————————————————————————\n"
+            "[/accent bold]"
         )
         for entry in self.target_ips_and_ports:
-            result += Fore.LIGHTYELLOW_EX + entry + "\n"
+            result += f"[accent]{entry}[/accent]\n"
         result += (
-            Fore.LIGHTYELLOW_EX
-            + Style.BRIGHT
-            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[accent bold]"
+            "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[/accent bold]"
         )
 
         return result

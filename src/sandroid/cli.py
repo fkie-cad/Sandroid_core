@@ -7,10 +7,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
-import colorama
-from colorama import Fore, Style
-from rich.console import Console
 from rich.logging import RichHandler
+
+from .core.console import SandroidConsole
 
 # Import version first (no dependencies)
 from ._version import __version__
@@ -27,11 +26,11 @@ if TYPE_CHECKING:
     from .core.toolbox import Toolbox
 
 
-console = Console()
-
-
 def setup_logging(config: SandroidConfig) -> logging.Logger:
     """Setup logging with Rich handler."""
+    # Get the themed console
+    console = SandroidConsole.get()
+
     # Configure root logger
     logging.basicConfig(
         level=config.log_level.value,
@@ -56,26 +55,8 @@ def setup_logging(config: SandroidConfig) -> logging.Logger:
 
 
 def pretty_logo():
-    """Print the Sandroid logo."""
-    green = "\033[92m"
-    clear = "\033[0m"
-
-    print(f"""
-{green}⠀⠀⠀⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⣀⣀⣀⣀⡀⠀⠀⠀⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠀⠙⢷⣤⣤⣴⣶⣶⣦⣤⣤⡾⠋⠀⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⠾⠛⢉⣉⣉⣉⡉⠛⠷⣦⣄⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠀⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⠋⣠⣴⣿⣿⣿⣿⣿⡿⣿⣶⣌⠹⣷⡀⠀⠀
-{green}⠀⠀⠀⠀⣼⣿⣿⣉⣹⣿⣿⣿⣿⣏⣉⣿⣿⣧⠀⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⠁⣴⣿⣿⣿⣿⣿⣿⣿⣿⣆⠉⠻⣧⠘⣷⠀⠀
-{green}⠀⠀⠀⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⠀⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⢰⡇⢰⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠀⠀⠈⠀⢹⡇⠀
-{green}⣠⣄⠀⢠⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠀⣠⣄⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡇⢸⣿⠛⣿⣿⣿⣿⣿⣿⡿⠃⠀⠀⠀⠀⢸⡇⠀
-{green}⣿⣿⡇⢸⣿⣿⣿{clear}Sandroid{green}⣿⣿⣿⡇⢸⣿⣿⠀⠀⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠈⣷⠀⢿⡆⠈⠛⠻⠟⠛⠉⠀⠀⠀⠀⠀⠀⣾⠃⠀
-{green}⣿⣿⡇⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⢸⣿⣿⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⣧⡀⠻⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣼⠃⠀⠀
-{green}⣿⣿⡇⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⢸⣿⣿⠀{clear}⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢼⠿⣦⣄⠀⠀⠀⠀⠀⠀⠀⣀⣴⠟⠁⠀⠀⠀
-{green}⣿⣿⡇⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⢸⣿⣿⠀{clear}⠀⠀⠀⠀⠀⠀⠀⣠⣾⣿⣦⠀⠀⠈⠉⠛⠓⠲⠶⠖⠚⠋⠉⠀⠀⠀⠀⠀⠀
-{green}⠻⠟⠁⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇⠈⠻⠟⠀{clear}⠀⠀⠀⠀⠀⣠⣾⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠉⠉⣿⣿⣿⡏⠉⠉⢹⣿⣿⣿⠉⠉⠀⠀⠀⠀⠀{clear}⠀⠀⠀⣠⣾⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠀⠀⣿⣿⣿⡇⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀{clear}⠀⠀⣾⣿⣿⠟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠀⠀⣿⣿⣿⡇⠀⠀⢸⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀{clear}⢀⣄⠈⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-{green}⠀⠀⠀⠀⠀⠀⠈⠉⠉⠀⠀⠀⠀⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀{clear}⠀⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀""")
+    """Print the Sandroid logo using themed colors."""
+    SandroidConsole.print_logo()
 
 
 @click.command()
@@ -208,8 +189,9 @@ def main(
     view: str | None,
 ):
     """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
-    # Initialize colorama for cross-platform colored terminal output
-    colorama.init(autoreset=True)
+    # Initialize console with default theme (will be re-initialized with config theme later)
+    SandroidConsole.initialize()
+    console = SandroidConsole.get()
 
     # Lazy imports - only load heavy modules when actually running (not for --version)
     from .config import ConfigLoader, SandroidConfig
@@ -220,16 +202,16 @@ def main(
         # Try to load config to see if it's been initialized
         config_files = loader._config_files
         if not config_files:
-            console.print("[red]Error: No configuration found!")
+            console.print("[error]Error: No configuration found![/error]")
             console.print(
-                "[yellow]Please run 'sandroid-config init' first to set up Sandroid."
+                "[warning]Please run 'sandroid-config init' first to set up Sandroid.[/warning]"
             )
             console.print("This will create the necessary configuration files.")
             sys.exit(1)
     except Exception:
-        console.print("[red]Error: Configuration system not available!")
+        console.print("[error]Error: Configuration system not available![/error]")
         console.print(
-            "[yellow]Please run 'sandroid-config init' first to set up Sandroid."
+            "[warning]Please run 'sandroid-config init' first to set up Sandroid.[/warning]"
         )
         sys.exit(1)
 
@@ -276,8 +258,8 @@ def main(
         Toolbox.args = mock_args
 
     except ImportError as e:
-        console.print(f"[red]Error: Could not import analysis modules: {e}")
-        console.print("[yellow]This indicates a packaging issue.")
+        console.print(f"[error]Error: Could not import analysis modules: {e}[/error]")
+        console.print("[warning]This indicates a packaging issue.[/warning]")
         console.print("Try reinstalling with: pip install --upgrade sandroid")
         sys.exit(1)
 
@@ -344,6 +326,10 @@ def main(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
 
+        # Re-initialize console with the configured theme preset
+        SandroidConsole.initialize(sandroid_config.theme.preset)
+        console = SandroidConsole.get()
+
         # Set the initial view mode (use CLI view if provided, otherwise use config's default_view)
         initial_view = view if view is not None else sandroid_config.analysis.default_view
         Toolbox.set_current_view(initial_view)
@@ -372,7 +358,7 @@ def main(
             )
 
     except Exception as e:
-        console.print(f"[red]Error: {e}")
+        console.print(f"[error]Error: {e}[/error]")
         sys.exit(1)
 
 
@@ -390,7 +376,8 @@ def start_interactive_mode(
     Toolbox.check_setup()
 
     # Start the interactive menu using the legacy ActionQ system
-    console.print("[bold green]Starting Sandroid interactive mode...[/bold green]")
+    console = SandroidConsole.get()
+    console.print("[success bold]Starting Sandroid interactive mode...[/success bold]")
     action_q = ActionQ()
     action_q.q.append("interactive")  # Add interactive mode to queue
     action_q.run()  # Run the interactive menu
@@ -437,12 +424,10 @@ def run_analysis(
             fd.write(q.get_data())
 
         # Display results
+        console = SandroidConsole.get()
         if config.ai.enabled and action:
-            print(
-                Fore.GREEN
-                + Style.BRIGHT
-                + f"Sandroid Results for the action: {action}"
-                + Style.RESET_ALL
+            console.print(
+                f"[success bold]Sandroid Results for the action: {action}[/success bold]"
             )
 
         print(q.get_pretty_print())

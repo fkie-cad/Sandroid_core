@@ -67,6 +67,11 @@ generate_pdf = false
 include_screenshots = true
 # template_path = "/path/to/custom/template.html"  # Optional: custom report template
 
+[theme]
+# Theme preset for terminal colors
+# Available presets: default, dark, light, high_contrast
+preset = "default"
+
 # Custom settings (add your own as needed)
 [custom]
 # my_setting = "value"

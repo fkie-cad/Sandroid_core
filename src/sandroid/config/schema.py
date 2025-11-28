@@ -263,6 +263,25 @@ class ReportConfig(BaseModel):
     )
 
 
+class ThemeConfig(BaseModel):
+    """Theme/appearance configuration for terminal output."""
+
+    preset: str = Field(
+        default="default",
+        description="Theme preset: default, dark, light, high_contrast",
+    )
+
+    @validator("preset")
+    def validate_preset(cls, v):
+        """Validate that preset is a known theme name."""
+        valid_presets = {"default", "dark", "light", "high_contrast"}
+        if v.lower() not in valid_presets:
+            raise ValueError(
+                f"Invalid theme preset: {v}. Must be one of: {', '.join(valid_presets)}"
+            )
+        return v.lower()
+
+
 class CredentialsConfig(BaseModel):
     """Secure credentials configuration."""
 
@@ -306,6 +325,7 @@ class SandroidConfig(BaseModel):
     ai: AIConfig = Field(default_factory=AIConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
+    theme: ThemeConfig = Field(default_factory=ThemeConfig)
 
     # Environment-specific overrides
     environment: str = Field(

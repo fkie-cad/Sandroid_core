@@ -5,7 +5,6 @@ import subprocess
 import tempfile
 from logging import getLogger
 
-from colorama import Fore, Style
 from lxml import etree
 from xmldiff import formatting, main
 
@@ -172,7 +171,7 @@ def db_diff_helper(db_path1, db_path2):
             table_of_row = table_of_row[0 : table_of_row.find("(")]
             result = (
                 result
-                + f"\t[{Fore.GREEN}INSERT{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.GREEN}{row_value}{Style.RESET_ALL}] has been added\n"
+                + f"\t\\[[success]INSERT[/success]] Table \\[{table_of_row}] row \\[[success]{row_value}[/success]] has been added\n"
             )
 
     # updated rows
@@ -221,7 +220,7 @@ def db_diff_helper(db_path1, db_path2):
                 if old_val != new_val:
                     # Use color for changed values
                     diff_details.append(
-                        f"{key}=({Fore.YELLOW}{old_val} → {new_val}{Style.RESET_ALL})"
+                        f"{key}=([warning]{old_val} → {new_val}[/warning])"
                     )
                 else:
                     diff_details.append(f"{key}={old_val}")
@@ -230,8 +229,8 @@ def db_diff_helper(db_path1, db_path2):
 
             result = (
                 result
-                + f"\t[{Fore.YELLOW}UPDATE{Style.RESET_ALL}] Table [{table_of_row}] row "
-                f"where [{update_condition}] changed: {formatted_diff}\n"
+                + f"\t\\[[warning]UPDATE[/warning]] Table \\[{table_of_row}] row "
+                f"where \\[{update_condition}] changed: {formatted_diff}\n"
             )
 
     # deleted rows
@@ -244,7 +243,7 @@ def db_diff_helper(db_path1, db_path2):
             table_of_row = table_of_row[0 : table_of_row.find("(")]
             result = (
                 result
-                + f"\t[{Fore.RED}DELETE{Style.RESET_ALL}] Table [{table_of_row}] row [{Fore.RED}{row_value}{Style.RESET_ALL}] has been removed\n"
+                + f"\t\\[[error]DELETE[/error]] Table \\[{table_of_row}] row \\[[error]{row_value}[/error]] has been removed\n"
             )
 
     return result[:-1]
