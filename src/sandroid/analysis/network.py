@@ -25,25 +25,44 @@ class Network(DataGather):
         connections_made (None): Placeholder for connections made.
         dns_requests (set): Set of DNS requests.
         logger (Logger): Logger instance for the class.
-        _path (str): Path for storing network trace files.
         _emulator_path (str): Path on the emulator for storing trace files.
         _trace_file_name (str): Base name for trace files.
         performed_diff (bool): Flag indicating if the diff has been performed.
+        _current_capture_file (str): Path to the currently active capture file.
+        _capture_running (bool): Flag indicating if capture is running.
+        _stop_event (threading.Event): Event to signal thread to stop early.
     """
 
+    # Class-level variables for shared state
     internal_run_counter = 1
     connections_made = None
     dns_requests = set()
-    _path = f"{os.getenv('RAW_RESULTS_PATH')}network_trace_pull/"
     _emulator_path = "data/local/tmp/"
     _trace_file_name = "network_trace_run_"
     performed_diff = False
 
+    def __init__(self):
+        """Initialize Network instance with proper instance variables."""
+        super().__init__()
+        self._current_capture_file = None
+        self._capture_running = False
+        self._stop_event = None
+        self._thread = None
+
+    @classmethod
+    def _get_path(cls):
+        """Get the network trace path dynamically (env var may not be set at import time)."""
+        raw_results_path = os.getenv('RAW_RESULTS_PATH', '')
+        return f"{raw_results_path}network_trace_pull/"
+
     def gather(self):
         """Starts a timed thread to measure network traffic."""
         logger.info("Measuring network traffic")
-        t1 = threading.Thread(target=self.tcpdump_thread, args=())
-        t1.start()
+        self._stop_event = threading.Event()
+        self._capture_running = True  # Set immediately to avoid race condition
+        Toolbox._network_capture_running = True
+        self._thread = threading.Thread(target=self.tcpdump_thread, args=(), daemon=True)
+        self._thread.start()
         # time.sleep(0.5)
 
     def return_data(self):
@@ -106,29 +125,74 @@ class Network(DataGather):
 
     def tcpdump_thread(self):
         """Meant to be run as a Thread that uses adb emu network capture."""
-        noise_path = f"{self._path}{self._trace_file_name}noise.pcap"
-        path = f"{self._path}{self._trace_file_name}{self.internal_run_counter!s}.pcap"
+        base_path = self._get_path()
+        noise_path = f"{base_path}{self._trace_file_name}noise.pcap"
+        path = f"{base_path}{self._trace_file_name}{self.internal_run_counter!s}.pcap"
         accumulated_errors = ""
         runtime = Toolbox.get_action_duration()
         if Toolbox.is_dry_run():
             command = f"network capture start {noise_path}"
+            capture_file = noise_path
         else:
             command = f"network capture start {path}"
+            capture_file = path
+
+        # Track current capture file (capture_running already set in gather())
+        self._current_capture_file = capture_file
+        Toolbox._network_capture_file = capture_file
+
         out, err = Adb.send_telnet_command(command)
         accumulated_errors += err
 
-        time.sleep(runtime)
+        # Register tool usage for exit summary
+        Toolbox.mark_tool_used("network", files=[capture_file])
 
-        if Toolbox.is_dry_run():
-            out, err = Adb.send_telnet_command(f"network capture stop {noise_path}")
+        # Use Event.wait() instead of time.sleep() for interruptible waiting
+        if self._stop_event:
+            self._stop_event.wait(timeout=runtime)
         else:
-            out, err = Adb.send_telnet_command(f"network capture stop {path}")
-        accumulated_errors += err
+            time.sleep(runtime)
+
+        # Only stop if still running (might have been stopped early)
+        if self._capture_running:
+            self._stop_capture()
+
         self.internal_run_counter += 1
         if accumulated_errors:
             logger.error(
                 f"Errors occurred during network capture: {accumulated_errors}"
             )
+
+    def _stop_capture(self):
+        """Internal method to stop the current capture."""
+        if not self._capture_running:
+            return
+
+        # Only send stop command if we have a capture file
+        if self._current_capture_file:
+            out, err = Adb.send_telnet_command(
+                f"network capture stop {self._current_capture_file}"
+            )
+            if err:
+                logger.error(f"Error stopping network capture: {err}")
+            logger.info(f"Network capture stopped: {self._current_capture_file}")
+        else:
+            logger.debug("Network capture stopped before file was set")
+
+        # Always reset flags
+        self._capture_running = False
+        Toolbox._network_capture_running = False
+
+    def stop(self):
+        """Stop network capture early. Can be called to stop capture before timeout."""
+        # Signal the thread to wake up from Event.wait() first
+        if self._stop_event:
+            self._stop_event.set()
+
+        if self._capture_running:
+            self._stop_capture()
+        else:
+            logger.debug("Network capture was not running")
 
     @classmethod
     def get_path(cls):
@@ -137,7 +201,7 @@ class Network(DataGather):
         :returns: Path for storing network trace files.
         :rtype: str
         """
-        return cls._path
+        return cls._get_path()
 
     @classmethod
     def get_file_name(cls):
@@ -161,15 +225,16 @@ class Network(DataGather):
         logger.info("Analyzing pcaps for DNS requests, this could take a minute...")
 
         # Iterate over PCAP files
+        base_path = self._get_path()
         for i in range(1, self.internal_run_counter - 1):
-            path = f"{self._path}{self._trace_file_name}{i}.pcap"
+            path = f"{base_path}{self._trace_file_name}{i}.pcap"
 
             # Extract DNS requests and add them to the set
             dns_requests = self.extract_dns_requests_from_pcap(path)
             all_dns_requests.update(dns_requests)
 
         # Extract DNS requests from the noise pcap
-        noise_path = f"{self._path}{self._trace_file_name}noise.pcap"
+        noise_path = f"{base_path}{self._trace_file_name}noise.pcap"
         noise_dns_requests = self.extract_dns_requests_from_pcap(noise_path)
 
         # Return only the DNS names that were in all_dns_requests but not in noise_dns_requests as a list
@@ -218,15 +283,16 @@ class Network(DataGather):
         )
 
         # Iterate over PCAP files
+        base_path = self._get_path()
         for i in range(1, self.internal_run_counter - 1):
-            path = f"{self._path}{self._trace_file_name}{i}.pcap"
+            path = f"{base_path}{self._trace_file_name}{i}.pcap"
 
             # Extract target IPs and ports and add them to the set
             target_ips_and_ports = self.extract_target_ips_and_ports(path)
             all_target_ips_and_ports.update(target_ips_and_ports)
 
         # Extract target IPs and ports from the noise pcap
-        noise_path = f"{self._path}{self._trace_file_name}noise.pcap"
+        noise_path = f"{base_path}{self._trace_file_name}noise.pcap"
         noise_target_ips_and_ports = self.extract_target_ips_and_ports(noise_path)
 
         # Return only the target IPs and ports that were in all_target_ips_and_ports but not in noise_target_ips_and_ports
@@ -237,7 +303,7 @@ class Network(DataGather):
         for ip_and_port in diff:
             target_IP = ip_and_port.split(":")[0]
             target_port = int(ip_and_port.split(":")[1])
-            pcap_path = self._path + "/network_trace_run_1.pcap"
+            pcap_path = f"{base_path}network_trace_run_1.pcap"
             sent_bytes, received_bytes = self.count_bytes(
                 target_IP, target_port, pcap_path
             )

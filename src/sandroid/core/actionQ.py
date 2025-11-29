@@ -848,13 +848,15 @@ class ActionQ:
                         return
 
                     self.logger.info(f"APK saved to: {local_apk_path}")
-                    self.logger.info("Running dexray-insight static analysis...")
 
-                    # Run static analysis
-                    asam = StaticAnalysis()
-                    asam.gather()
-                    # asam.pretty_print()
-                    # Toolbox.submit_other_data("asam", asam.return_data())
+                    # Run static analysis with interactive menu
+                    static_analysis = StaticAnalysis()
+                    if not static_analysis.gather(interactive=True):
+                        # User cancelled from interactive menu
+                        self.q.append("interactive")
+                        return
+                    # static_analysis.pretty_print()
+                    # Toolbox.submit_other_data("static_analysis", static_analysis.return_data())
 
                 except Exception as e:
                     self.logger.error(f"Error during static analysis: {e}")
@@ -862,90 +864,112 @@ class ActionQ:
                 self.q.append("interactive")
             case "m":
                 try:
-                    check_frida = self.check_frida_and_spotlight()
-                    if not check_frida:
-                        self.q.append("interactive")
-                        return
+                    if Toolbox.is_task_running("dexray-intercept"):
+                        # STOP Dexray-Intercept
+                        Toolbox.stop_task_with_prompt("dexray-intercept")
 
-                    spotlight_application_pid, spotlight_application_name = check_frida
+                        # Collect results if available
+                        if self.malwaremonitor and self.malwaremonitor.has_new_results():
+                            Toolbox.submit_other_data(
+                                "Dexray Intercept",
+                                self.malwaremonitor.return_data(),
+                            )
 
-                    self.logger.info(
-                        "Now the dexray-intercept output follows. End with CTRL-C"
-                    )
-                    if self.malwaremonitor == None:
+                        # Reset spotlight app info as the app may have been closed
+                        Toolbox.reset_spotlight_application()
+                    else:
+                        # START Dexray-Intercept
+                        # Ensure spotlight app is set (prompts user if not)
+                        if not Toolbox.ensure_spotlight_app_for_tools("Dexray-Intercept"):
+                            self.q.append("interactive")
+                            return
+
+                        check_frida = self.check_frida_and_spotlight()
+                        if not check_frida:
+                            self.q.append("interactive")
+                            return
+
+                        spotlight_application_pid, spotlight_application_name = check_frida
+
                         # Get debug mode from Toolbox args (set by CLI --debug flag)
                         debug_mode = getattr(Toolbox.args, "debug", False)
+
                         self.malwaremonitor = MalwareMonitor(
                             path_filters=Toolbox.get_spotlight_files(),
                             debug_mode=debug_mode,
                         )
-                    self.malwaremonitor.gather()
 
-                    if self.malwaremonitor.has_new_results():
-                        Toolbox.submit_other_data(
-                            "Dexray Intercept",
-                            self.malwaremonitor.return_data(),
-                        )
+                        # Start monitoring (non-blocking)
+                        if self.malwaremonitor.start_monitoring():
+                            # Register as background task with PID
+                            Toolbox.register_background_task(
+                                name="dexray-intercept",
+                                display_name="Dexray-Intercept",
+                                instance=self.malwaremonitor,
+                                stop_callback=self.malwaremonitor.stop_monitoring,
+                                app_name=spotlight_application_name,
+                                target_pid=spotlight_application_pid,
+                            )
 
-                    self.logger.info(
-                        "Malware monitoring in progress... Press CTRL+C to stop"
-                    )
-                    while True:
-                        time.sleep(0.5)  # Sleep to reduce CPU usage
-                except KeyboardInterrupt:
-                    self.logger.info("\nCTRL-C detected. Stopping malware monitoring.")
-                    if self.malwaremonitor:
-                        self.malwaremonitor.gather()
-                    # Reset spotlight app info as the app may have been closed
-                    Toolbox.reset_spotlight_application()
-                self.q.append("interactive")
+                            self.logger.info(
+                                "Dexray-Intercept started in background. Press 'm' again to stop."
+                            )
+                        # else: user cancelled from interactive menu
+
+                except Exception as e:
+                    self.logger.error(f"Error managing Dexray-Intercept: {e}")
+
+                self.q.append("interactive")  # Always return to menu
             case "h":
                 try:
-                    # Check Frida is running
-                    if not Toolbox.frida_manager.is_frida_server_running():
-                        result = Toolbox.show_blocking_warning(
-                            title="Frida Server Required",
-                            message="No Frida server is running. This feature requires Frida to be installed and running.",
-                            action_hint="Press [f] to install and start Frida server",
-                            action_key='f'
-                        )
-                        if result == 'f':
-                            # User pressed 'f' - install and start Frida
-                            try:
-                                Toolbox.frida_manager.install_frida_server()
-                                Toolbox.frida_manager.run_frida_server()
-                                # Don't return - let the feature continue to execute
-                            except Exception as e:
-                                self.logger.error(f"Error starting frida server: {e!s}")
+                    if Toolbox.is_task_running("fritap"):
+                        # STOP FriTap with dependency prompt
+                        Toolbox.stop_task_with_prompt("fritap")
+                        # Reset spotlight app info if spawned
+                        if Toolbox.is_spawn_mode():
+                            Toolbox.reset_spotlight_application()
+                    else:
+                        # START FriTap
+                        # Check Frida is running
+                        if not Toolbox.frida_manager.is_frida_server_running():
+                            result = Toolbox.show_blocking_warning(
+                                title="Frida Server Required",
+                                message="No Frida server is running. This feature requires Frida to be installed and running.",
+                                action_hint="Press [f] to install and start Frida server",
+                                action_key='f'
+                            )
+                            if result == 'f':
+                                # User pressed 'f' - install and start Frida
+                                try:
+                                    Toolbox.frida_manager.install_frida_server()
+                                    Toolbox.frida_manager.run_frida_server()
+                                    # Don't return - let the feature continue to execute
+                                except Exception as e:
+                                    self.logger.error(f"Error starting frida server: {e!s}")
+                                    self.q.append("interactive")
+                                    return
+                            else:
+                                # User pressed Enter - return to menu
                                 self.q.append("interactive")
                                 return
-                        else:
-                            # User pressed Enter - return to menu
+
+                        # Ensure spotlight app is set (prompts user if not)
+                        if not Toolbox.ensure_spotlight_app_for_tools("FriTap"):
                             self.q.append("interactive")
                             return
 
-                    # FriTap now handles both spawn/attach internally
-                    self.logger.info("Now fritap output follows. End with CTRL-C")
-                    fritap = FriTap()  # No args needed, uses unified session getter
-                    fritap.start()
+                        # FriTap now handles both spawn/attach internally with interactive menu
+                        fritap = FriTap()  # No args needed, uses unified session getter
+                        if fritap.start(interactive=True):
+                            self.logger.info(
+                                "FriTap started in background. Press 'h' again to stop."
+                            )
+                        # else: user cancelled from interactive menu
 
-                    self.logger.info(
-                        "friTap monitoring in progress... Press CTRL+C to stop"
-                    )
-                    while True:
-                        time.sleep(0.5)  # Sleep to reduce CPU usage
-                except KeyboardInterrupt:
-                    self.logger.info("\nCTRL-C detected. Stopping FriTap monitoring.")
-                    if "fritap" in locals():
-                        fritap.stop()
-                        self.logger.info("FriTap monitoring stopped.")
-                    # Reset spotlight app info if spawned
-                    if Toolbox.is_spawn_mode():
-                        Toolbox.reset_spotlight_application()
                 except Exception as e:
-                    self.logger.error(f"Error during friTap monitoring: {e!s}")
+                    self.logger.error(f"Error managing FriTap: {e!s}")
 
-                self.q.append("interactive")
+                self.q.append("interactive")  # Always return to menu
             case "d":
                 try:
                     # Check Frida is running
@@ -1005,16 +1029,8 @@ class ActionQ:
                             self.q.append("interactive")
                             return
 
-                    # Check if spotlight app is set (either in attach or spawn mode)
-                    spotlight_set = Toolbox._spotlight_application is not None or (
-                        Toolbox.is_spawn_mode()
-                        and Toolbox.get_spotlight_spawn_application() is not None
-                    )
-
-                    if not spotlight_set:
-                        self.logger.warning(
-                            "No spotlight application set. Please set one first with 'c' or Shift+C."
-                        )
+                    # Ensure spotlight app is set (prompts user if not)
+                    if not Toolbox.ensure_spotlight_app_for_tools("Memory Tracking"):
                         self.q.append("interactive")
                         return
 
@@ -1312,6 +1328,11 @@ class ActionQ:
                             self.q.append("interactive")
                             return
 
+                    # Ensure spotlight app is set (prompts user if not)
+                    if not Toolbox.ensure_spotlight_app_for_tools("Objection"):
+                        self.q.append("interactive")
+                        return
+
                     # Get session info using unified getter
                     try:
                         session, mode, app_info = (
@@ -1374,11 +1395,15 @@ class ActionQ:
             case "w":
                 try:
                     # If a capture is already running, stop it
-                    if Toolbox._network_capture_running:
+                    if Toolbox._network_capture_running or Toolbox.is_task_running("network"):
                         self.logger.info(
                             f"Stopping network capture: {Toolbox._network_capture_file}"
                         )
-                        if Adb.stop_network_capture():
+
+                        # If network was registered as background task, stop via that mechanism
+                        if Toolbox.is_task_running("network"):
+                            Toolbox.stop_task("network")
+                        elif Adb.stop_network_capture():
                             self.logger.info("Network capture stopped successfully")
                             Toolbox._network_capture_running = False
                             Toolbox.set_network_capture_path(None)

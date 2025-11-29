@@ -11,6 +11,8 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 from wcwidth import wcswidth
 
@@ -43,6 +45,20 @@ from .console import SandroidConsole
 from .CustomLoggerFormatter import CustomFormatter
 from .emulator import Emulator
 from .file_diff import is_sqlite_file
+
+
+@dataclass
+class BackgroundTask:
+    """Represents a running background task."""
+
+    name: str  # e.g., "fritap", "dexray-intercept", "network"
+    display_name: str  # e.g., "FriTap", "Dexray-Intercept"
+    instance: object  # The actual tool instance
+    stop_callback: Callable  # Function to call when stopping
+    started_at: datetime.datetime  # When the task started
+    started_by: Optional[str] = None  # Which task started this one (for dependencies)
+    app_name: Optional[str] = None  # Target application package name (if applicable)
+    target_pid: Optional[int] = None  # Target process PID (if applicable)
 
 
 class Toolbox:
@@ -84,6 +100,12 @@ class Toolbox:
     # View mode variables
     _current_view = "forensic"  # Default view: forensic, malware, or security
     _view_cycle = ["forensic", "malware", "security"]  # Cycle order
+
+    # Tool usage tracking for exit summary
+    _tools_used: dict = {}  # {"tool_name": {"used": True, "files": [...]}}
+
+    # Background task management
+    _background_tasks: dict[str, BackgroundTask] = {}
 
     # replace these with your own values
     # TODO: Shouldn't be hardcoded
@@ -307,6 +329,13 @@ class Toolbox:
             if os.path.isdir(folder_path):
                 shutil.rmtree(folder_path)
             os.makedirs(folder_path)
+
+        # Create tool-specific folders at results root (sibling to raw/, like dexray_intercept/)
+        tool_folders = ["fritap", "dexray_insight"]
+        for folder in tool_folders:
+            folder_path = os.path.join(base_folder, folder)
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
 
         with open(f"{base_folder_raw}sandroid.log", "w"):
             pass
@@ -1024,6 +1053,139 @@ class Toolbox:
             else:
                 cls.logger.error(f"Error setting up Frida session: {e}")
             raise
+
+    @classmethod
+    def ensure_spotlight_app_for_tools(cls, tool_name: str = "this tool") -> bool:
+        """Ensure a spotlight app is set, prompting user to select if not.
+
+        This is the unified entry point for tools that require a spotlight application.
+        Shows a nice UI asking user to choose ATTACH or SPAWN mode if no app is set.
+
+        Args:
+            tool_name: Name of the tool requiring spotlight (for display)
+
+        Returns:
+            True if spotlight is now set, False if user cancelled
+        """
+        from .adb import Adb
+
+        console = SandroidConsole.get()
+
+        # Check if spotlight is already set
+        spotlight_set = cls._spotlight_application is not None or (
+            cls._spawn_mode and cls._spotlight_spawn_application is not None
+        )
+
+        if spotlight_set:
+            return True
+
+        # No spotlight set - prompt user
+        BOX_WIDTH = 70
+
+        def _box_line(content: str, align: str = "center") -> str:
+            """Create a box line with proper alignment accounting for Rich markup."""
+            import re
+            PLACEHOLDER = "\x00LBRACKET\x00"
+            temp = content.replace("\\[", PLACEHOLDER)
+            RICH_MARKUP_RE = re.compile(r"\[[a-zA-Z0-9_./#\s]+\]")
+            visual_text = RICH_MARKUP_RE.sub("", temp)
+            visual_text = visual_text.replace(PLACEHOLDER, "[")
+            visual_len = len(visual_text)
+
+            if align == "center":
+                left_pad = (BOX_WIDTH - visual_len) // 2
+                right_pad = BOX_WIDTH - visual_len - left_pad
+            else:  # left align
+                left_pad = 2
+                right_pad = BOX_WIDTH - visual_len - left_pad
+
+            return f"[primary]║[/primary]{' ' * left_pad}{content}{' ' * right_pad}[primary]║[/primary]"
+
+        console.print()
+        console.print(f"[primary]╔{'═' * BOX_WIDTH}╗[/primary]")
+        console.print(_box_line(f"[bold]Spotlight Application Required for {tool_name}[/bold]"))
+        console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
+        console.print(_box_line("[accent]Choose how to target the application:[/accent]"))
+        console.print(_box_line(""))
+        console.print(_box_line("[warning]\\[A][/warning] ATTACH mode - Hook into currently running app", align="left"))
+        console.print(_box_line("    [dim]Use if app is already open on device[/dim]", align="left"))
+        console.print(_box_line(""))
+        console.print(_box_line("[warning]\\[S][/warning] SPAWN mode - Launch app fresh with hooks", align="left"))
+        console.print(_box_line("    [dim]Use for clean analysis from app startup[/dim]", align="left"))
+        console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
+        console.print(_box_line("[success]\\[A/S][/success] Select mode    [error]\\[Esc/Q][/error] Cancel", align="left"))
+        console.print(f"[primary]╚{'═' * BOX_WIDTH}╝[/primary]")
+
+        console.print(f"\n[success]► Select mode:[/success] ", end="")
+
+        try:
+            choice = click.getchar().lower()
+            console.print(f"[accent]{choice}[/accent]")
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[warning]Cancelled[/warning]")
+            return False
+
+        if choice in ('\x1b', 'q'):  # ESC or Q
+            console.print("[warning]Cancelled[/warning]")
+            return False
+        elif choice == 'a':
+            # ATTACH MODE - use currently focused app
+            focused_app = Adb.get_focused_app()
+            if not focused_app:
+                console.print("[error]No app is currently focused on the device.[/error]")
+                console.print("[warning]Please open an app on the device and try again.[/warning]")
+                return False
+
+            cls.set_spotlight_application(focused_app)
+            spotlight_name = cls.get_spotlight_application()[0]
+            spotlight_pid = Adb.get_pid_for_package_name(spotlight_name)
+
+            if not spotlight_pid:
+                console.print(f"[error]Could not get PID for {spotlight_name}[/error]")
+                return False
+
+            cls.set_spotlight_application_pid(spotlight_pid)
+            cls.set_spawn_mode(False)
+
+            console.print(f"\n[success]✓ Spotlight set in ATTACH mode:[/success]")
+            console.print(f"  Package: [warning]{spotlight_name}[/warning]")
+            console.print(f"  PID: [warning]{spotlight_pid}[/warning]")
+            return True
+
+        elif choice == 's':
+            # SPAWN MODE - select app with fuzzy search
+            console.print("\n[primary]Select an application to spawn...[/primary]")
+
+            selected_package = cls.select_app_with_fuzzy_search()
+            if not selected_package:
+                console.print("[warning]No app selected[/warning]")
+                return False
+
+            cls.set_spotlight_spawn_application(selected_package)
+
+            # Ask about auto-resume
+            console.print(f"\n[primary]Auto-resume spawned app?[/primary]")
+            console.print("[accent]\\[Y][/accent] = App starts immediately after spawn (recommended)")
+            console.print("[accent]\\[N][/accent] = App stays paused, resume manually")
+            console.print("\n[success]► Press y or n (Enter = yes):[/success] ", end="")
+
+            try:
+                resume_choice = click.getchar().lower()
+                console.print(f"[accent]{resume_choice}[/accent]")
+            except (KeyboardInterrupt, EOFError):
+                resume_choice = 'y'
+
+            cls.set_auto_resume_after_spawn(resume_choice != 'n')
+
+            resume_status = "enabled" if resume_choice != 'n' else "disabled"
+            console.print(f"\n[success]✓ Spotlight set in SPAWN mode:[/success]")
+            console.print(f"  Package: [warning]{selected_package}[/warning]")
+            console.print(f"  Auto-resume: [warning]{resume_status}[/warning]")
+            return True
+
+        else:
+            console.print(f"[error]Invalid choice: {choice}[/error]")
+            return False
 
     @classmethod
     def select_app_with_fuzzy_search(cls, recently_installed_package=None):
@@ -2021,6 +2183,10 @@ class Toolbox:
             return None
 
         cls.logger.info(f"Screenshot saved to {filename}")
+
+        # Register tool usage for exit summary
+        cls.mark_tool_used("screenshots", files=[filename])
+
         return filename
 
     @classmethod
@@ -2166,6 +2332,12 @@ class Toolbox:
         else:
             spotlight_files_string = f"Spotlight Files: [{spotlight_files_display}] [warning](adjust in forensic view)[/warning]"
 
+        # Background tasks status
+        bg_tasks_status = cls.get_background_tasks_status_string()
+        background_tasks_string = ""
+        if bg_tasks_status:
+            background_tasks_string = f"Background Tasks: {bg_tasks_status}"
+
         # Mode indicator for Frida-based tools
         mode_indicator = ""
         if cls._spawn_mode:
@@ -2181,6 +2353,8 @@ class Toolbox:
         menu_content.append(proxy_string)
         menu_content.append(spotlight_application_string)
         menu_content.append(spotlight_files_string)
+        if background_tasks_string:
+            menu_content.append(background_tasks_string)
         menu_content.append("")  # Blank line
 
         # === FORENSIC VIEW ===
@@ -2273,19 +2447,13 @@ class Toolbox:
 
             # Spotlight Application (malware-specific tools)
             malware_monitor_string = ""
-            if cls.malware_monitor_running == False:
-                malware_monitor_string = f"* start android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept){mode_indicator}"
+            if cls.is_task_running("dexray-intercept"):
+                dexray_task = cls.get_task("dexray-intercept")
+                # Show app name in [warning] color for consistency with filenames
+                current_app = dexray_task.app_name if dexray_task and dexray_task.app_name else "app"
+                malware_monitor_string = f"* stop android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept) on [warning]{current_app}[/warning]"
             else:
-                current_app = (
-                    cls._spotlight_spawn_application
-                    if cls._spawn_mode
-                    else (
-                        cls._spotlight_application[0]
-                        if cls._spotlight_application
-                        else "app"
-                    )
-                )
-                malware_monitor_string = f"* stop android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept) on {current_app}"
+                malware_monitor_string = f"* start android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept){mode_indicator}"
 
             menu_content.extend(
                 [
@@ -2327,11 +2495,20 @@ class Toolbox:
             else:
                 network_capture_string = "* [menu.key.bracket]\\[[/menu.key.bracket][menu.key]w[/menu.key][menu.key.bracket]][/menu.key.bracket]rite network capture file"
 
+            # FriTap menu item with toggle state
+            if cls.is_task_running("fritap"):
+                fritap_task = cls.get_task("fritap")
+                # Show app name in [warning] color for consistency with filenames
+                fritap_app = fritap_task.app_name if fritap_task and fritap_task.app_name else "app"
+                fritap_string = f"* stop friTap [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ooking on [warning]{fritap_app}[/warning]"
+            else:
+                fritap_string = f"* start friTap [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ooking{mode_indicator}"
+
             menu_content.extend(
                 [
                     "    [menu.section]=== Network Management ===[/menu.section]",
                     "    * set/unset network prox[menu.key.bracket]\\[[/menu.key.bracket][menu.key]y[/menu.key][menu.key.bracket]][/menu.key.bracket]",
-                    f"    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ook and install key extraction with friTap{mode_indicator}",
+                    f"    {fritap_string}",
                     f"    {network_capture_string}",
                     "",
                 ]
@@ -2525,6 +2702,275 @@ class Toolbox:
         if cls.args.apk:
             cls.pull_and_hash_apks()
         cls.submit_other_data("Timeline Data", cls._timestamps_shadow_dict_list)
+
+    @classmethod
+    def mark_tool_used(cls, tool_name: str, files: list = None):
+        """Mark a tool as used and optionally track its output files.
+
+        Args:
+            tool_name: Name of the tool (e.g., 'fritap', 'network', 'dexray-intercept')
+            files: Optional list of file paths generated by this tool
+        """
+        if tool_name not in cls._tools_used:
+            cls._tools_used[tool_name] = {"used": True, "files": []}
+        if files:
+            cls._tools_used[tool_name]["files"].extend(files)
+
+    @classmethod
+    def get_tools_used(cls) -> dict:
+        """Return dictionary of tools used during this session.
+
+        Returns:
+            Dictionary mapping tool names to their usage info and generated files
+        """
+        return cls._tools_used
+
+    # ==================== Background Task Management ====================
+
+    @classmethod
+    def register_background_task(
+        cls,
+        name: str,
+        display_name: str,
+        instance: object,
+        stop_callback: Callable,
+        started_by: str = None,
+        app_name: str = None,
+        target_pid: int = None,
+    ):
+        """Register a new background task.
+
+        Args:
+            name: Internal task identifier (e.g., "fritap", "dexray-intercept")
+            display_name: User-friendly name (e.g., "FriTap", "Dexray-Intercept")
+            instance: The actual tool instance
+            stop_callback: Function to call when stopping the task
+            started_by: Name of task that started this one (for dependency tracking)
+            app_name: Target application package name (if applicable)
+            target_pid: Target process PID (if applicable)
+        """
+        cls._background_tasks[name] = BackgroundTask(
+            name=name,
+            display_name=display_name,
+            instance=instance,
+            stop_callback=stop_callback,
+            started_at=datetime.datetime.now(),
+            started_by=started_by,
+            app_name=app_name,
+            target_pid=target_pid,
+        )
+        cls.logger.info(f"Background task '{display_name}' registered")
+
+    @classmethod
+    def unregister_background_task(cls, name: str):
+        """Remove a task from tracking (after it's stopped).
+
+        Args:
+            name: Internal task identifier to remove
+        """
+        if name in cls._background_tasks:
+            task = cls._background_tasks[name]
+            del cls._background_tasks[name]
+            cls.logger.info(f"Background task '{task.display_name}' unregistered")
+
+    @classmethod
+    def is_task_running(cls, name: str) -> bool:
+        """Check if a specific task is running.
+
+        Args:
+            name: Internal task identifier
+
+        Returns:
+            True if the task is currently running
+        """
+        return name in cls._background_tasks
+
+    @classmethod
+    def get_running_tasks(cls) -> list[str]:
+        """Get list of all running task names.
+
+        Returns:
+            List of internal task identifiers for all running tasks
+        """
+        return list(cls._background_tasks.keys())
+
+    @classmethod
+    def get_task(cls, name: str) -> Optional[BackgroundTask]:
+        """Get a specific background task by name.
+
+        Args:
+            name: Internal task identifier
+
+        Returns:
+            BackgroundTask instance or None if not found
+        """
+        return cls._background_tasks.get(name)
+
+    @classmethod
+    def get_tasks_started_by(cls, parent_name: str) -> list[str]:
+        """Get tasks that were started by a specific parent task.
+
+        Args:
+            parent_name: Name of the parent task
+
+        Returns:
+            List of task names that were started by the parent
+        """
+        return [
+            name
+            for name, task in cls._background_tasks.items()
+            if task.started_by == parent_name
+        ]
+
+    @classmethod
+    def stop_task(cls, name: str) -> bool:
+        """Stop a single task without prompting for dependencies.
+
+        Args:
+            name: Internal task identifier
+
+        Returns:
+            True if task was stopped successfully
+        """
+        if name not in cls._background_tasks:
+            return False
+
+        task = cls._background_tasks[name]
+        console = SandroidConsole.get()
+
+        try:
+            task.stop_callback()
+            console.print(f"[success]✓ {task.display_name} stopped[/success]")
+        except Exception as e:
+            cls.logger.error(f"Error stopping {task.display_name}: {e}")
+
+        cls.unregister_background_task(name)
+        return True
+
+    @classmethod
+    def stop_task_with_prompt(cls, name: str) -> bool:
+        """Stop a task and prompt for dependent tasks.
+
+        Args:
+            name: Internal task identifier
+
+        Returns:
+            True if task was stopped, False if not found
+        """
+        if name not in cls._background_tasks:
+            return False
+
+        task = cls._background_tasks[name]
+        console = SandroidConsole.get()
+
+        # Find tasks started by this one
+        dependent_tasks = cls.get_tasks_started_by(name)
+
+        # Stop the main task
+        try:
+            task.stop_callback()
+        except Exception as e:
+            cls.logger.error(f"Error stopping {task.display_name}: {e}")
+
+        cls.unregister_background_task(name)
+        console.print(f"[success]✓ {task.display_name} stopped[/success]")
+
+        # Prompt for dependent tasks
+        if dependent_tasks:
+            for dep_name in dependent_tasks:
+                dep_task = cls._background_tasks.get(dep_name)
+                if dep_task:
+                    console.print(
+                        f"\n[warning]{dep_task.display_name} was started with {task.display_name}.[/warning]"
+                    )
+                    console.print(
+                        f"Stop {dep_task.display_name} too? [primary]\\[Y/n][/primary] ",
+                        end="",
+                    )
+
+                    choice = click.getchar().lower()
+                    console.print(choice)
+
+                    if choice != "n":
+                        try:
+                            dep_task.stop_callback()
+                            cls.unregister_background_task(dep_name)
+                            console.print(
+                                f"[success]✓ {dep_task.display_name} stopped[/success]"
+                            )
+                        except Exception as e:
+                            cls.logger.error(
+                                f"Error stopping {dep_task.display_name}: {e}"
+                            )
+
+        return True
+
+    @classmethod
+    def stop_all_background_tasks(cls):
+        """Stop all running background tasks. Used during cleanup/exit."""
+        console = SandroidConsole.get()
+        tasks_to_stop = list(cls._background_tasks.keys())
+
+        for name in tasks_to_stop:
+            task = cls._background_tasks.get(name)
+            if task:
+                try:
+                    task.stop_callback()
+                    console.print(f"[success]✓ {task.display_name} stopped[/success]")
+                except Exception as e:
+                    cls.logger.error(f"Error stopping {task.display_name}: {e}")
+                cls.unregister_background_task(name)
+
+    @classmethod
+    def get_background_tasks_status_string(cls) -> str:
+        """Get a formatted string showing running background tasks for menu display.
+
+        Returns:
+            Formatted string like "● FriTap (PID: 12345) | ● Network Capture" or empty string
+        """
+        if not cls._background_tasks:
+            return ""
+
+        task_parts = []
+        for name in cls._background_tasks:
+            task = cls._background_tasks[name]
+            # Show PID in consistent [warning] color (same as filenames)
+            if task.target_pid:
+                task_parts.append(
+                    f"[success]●[/success] {task.display_name} ([warning]{task.target_pid}[/warning])"
+                )
+            else:
+                task_parts.append(f"[success]●[/success] {task.display_name}")
+
+        return " | ".join(task_parts)
+
+    # ==================== End Background Task Management ====================
+
+    @classmethod
+    def print_exit_summary(cls):
+        """Print summary of results folder and generated files on exit."""
+        console = SandroidConsole.get()
+        results_path = os.getenv("RESULTS_PATH", "results/")
+
+        console.print()
+        console.print("[bold cyan]═══ Sandroid Session Complete ═══[/bold cyan]")
+        console.print()
+        console.print(f"[success]Results saved to:[/success] [bold]{results_path}[/bold]")
+
+        # List tool-specific files
+        if cls._tools_used:
+            console.print()
+            console.print("[info]Generated files by tool:[/info]")
+            for tool_name, tool_info in cls._tools_used.items():
+                if tool_info.get("files"):
+                    console.print(f"  [accent]{tool_name}:[/accent]")
+                    for file_path in tool_info["files"]:
+                        # Show relative path from results folder
+                        if file_path and os.path.exists(file_path):
+                            rel_path = os.path.relpath(file_path, results_path)
+                            console.print(f"    • {rel_path}")
+
+        console.print()
 
     @classmethod
     def calculate_hashes(cls):

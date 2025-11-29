@@ -440,6 +440,12 @@ def run_analysis(
 
         logger.info("Analysis completed successfully")
 
+        # Stop all background tasks before exit
+        Toolbox.stop_all_background_tasks()
+
+        # Print exit summary with results folder and generated files
+        Toolbox.print_exit_summary()
+
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise

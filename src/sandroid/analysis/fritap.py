@@ -1,8 +1,10 @@
 import logging
 import os
 
+import click
 from friTap import SSL_Logger
 
+from sandroid.core.console import SandroidConsole
 from sandroid.core.toolbox import Toolbox
 
 from .datagather import DataGather
@@ -11,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Set up dedicated fritap log file
 def _setup_fritap_logging():
-    """Set up dedicated file logging for friTap in the Sandroid results folder."""
+    """Set up dedicated file logging for friTap in the fritap results folder."""
     fritap_logger = logging.getLogger('friTap')
 
     # Check if we already have a file handler to avoid duplicates
@@ -20,10 +22,10 @@ def _setup_fritap_logging():
         for handler in fritap_logger.handlers
     )
 
-    if not has_file_handler and os.getenv('RAW_RESULTS_PATH'):
-        file_handler = logging.FileHandler(
-            f"{os.getenv('RAW_RESULTS_PATH')}fritap.log"
-        )
+    if not has_file_handler and os.getenv('RESULTS_PATH'):
+        fritap_dir = f"{os.getenv('RESULTS_PATH')}fritap/"
+        log_path = f"{fritap_dir}fritap.log"
+        file_handler = logging.FileHandler(log_path)
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             "%(asctime)s~%(levelname)s~%(message)s~module:%(module)s~function:%(funcName)s"
@@ -32,7 +34,7 @@ def _setup_fritap_logging():
         fritap_logger.addHandler(file_handler)
         fritap_logger.setLevel(logging.DEBUG)
 
-        logger.info(f"FriTap logs will be saved to {os.getenv('RAW_RESULTS_PATH')}fritap.log")
+        logger.info(f"FriTap logs will be saved to {log_path}")
 
 
 class FriTap(DataGather):
@@ -49,8 +51,12 @@ class FriTap(DataGather):
         # Set up dedicated fritap logging
         _setup_fritap_logging()
 
-    def _setup_session(self):
-        """Set up FriTap session using unified Frida session getter."""
+    def _setup_session(self, config: dict = None):
+        """Set up FriTap session using unified Frida session getter.
+
+        Args:
+            config: Optional configuration dict from interactive menu
+        """
         # Use unified session getter (supports both spawn and attach modes)
         session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
 
@@ -59,15 +65,23 @@ class FriTap(DataGather):
         self.mode = mode
         self.frida_device = app_info["device"]  # Store device for resume after hooks
 
+        # Use config or defaults
+        output_keylog = config.get("output_keylog", True) if config else True
+        output_json = config.get("output_json", True) if config else True
+
+        # Use fritap folder at results root (sibling to raw/, like dexray_intercept/)
+        fritap_dir = f"{os.getenv('RESULTS_PATH', '')}fritap/"
+        self.keylog_path = f"{fritap_dir}fritap_keylog.log" if output_keylog else None
+        self.json_output_path = f"{fritap_dir}fritap_output.json" if output_json else None
+        self.log_path = f"{fritap_dir}fritap.log"
+
         # Initialize SSL_Logger with the obtained process ID
-        keylog_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_keylog.log"
-        json_output_path = f"{os.getenv('RAW_RESULTS_PATH', '')}fritap_output.json"
         self.ssl_log = SSL_Logger(
             self.process_id,
             verbose=True,  # Enable verbose output
-            keylog=keylog_path,  # Path to save SSL key log in results folder
+            keylog=self.keylog_path,  # Path to save SSL key log in results folder
             debug_output=True,  # Enable debug output
-            json_output=json_output_path,  # Path to save JSON output in results folder
+            json_output=self.json_output_path,  # Path to save JSON output in results folder
         )
 
         # Get the Frida script path from SSL_Logger
@@ -86,32 +100,202 @@ class FriTap(DataGather):
             f"FriTap initialized in {mode.upper()} mode for {self.app_package} (PID: {self.process_id})"
         )
 
-    def start(self):
-        """Start FriTap monitoring."""
-        # Set up session if not already done
-        if self.process_id is None:
-            self._setup_session()
+    def _interactive_configuration(self) -> dict | None:
+        """Interactive configuration menu for FriTap options.
 
-        # Start the job with a custom hooking handler
-        self.job_id = self.job_manager.start_job(
-            self.frida_script_path,
-            custom_hooking_handler_name=self.ssl_log.on_fritap_message,
-        )
+        Returns:
+            Configuration dict if user confirms, None if cancelled
+        """
+        import re
+        console = SandroidConsole.get()
 
-        # Resume spawned process now that hooks are installed
-        if self.mode == "spawn":
-            Toolbox.resume_spawned_process_after_hooks(
-                self.frida_device,
-                self.process_id
+        # Box width (inner content width)
+        BOX_WIDTH = 60
+
+        def _box_line(content: str, align: str = "center") -> str:
+            """Create a box line with proper alignment accounting for Rich markup."""
+            # Strip Rich markup to calculate visual width
+            PLACEHOLDER = "\x00LBRACKET\x00"
+            temp = content.replace("\\[", PLACEHOLDER)
+            RICH_MARKUP_RE = re.compile(r"\[[a-zA-Z0-9_./#\s]+\]")
+            visual_text = RICH_MARKUP_RE.sub("", temp)
+            visual_text = visual_text.replace(PLACEHOLDER, "[")
+            visual_len = len(visual_text)
+
+            # Calculate padding
+            if align == "center":
+                left_pad = (BOX_WIDTH - visual_len) // 2
+                right_pad = BOX_WIDTH - visual_len - left_pad
+            else:  # left align
+                left_pad = 1
+                right_pad = BOX_WIDTH - visual_len - left_pad
+
+            return f"[primary]║[/primary]{' ' * left_pad}{content}{' ' * right_pad}[primary]║[/primary]"
+
+        # Default settings
+        settings = {
+            "enable_network_capture": False,
+            "output_keylog": True,
+            "output_json": True,
+        }
+
+        # Check if network capture is already running
+        network_already_running = Toolbox._network_capture_running
+
+        while True:
+            console.clear()
+
+            # Draw configuration box
+            console.print(f"[primary]╔{'═' * BOX_WIDTH}╗[/primary]")
+            console.print(_box_line("[bold]FriTap Configuration[/bold]"))
+            console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
+
+            # Network capture option
+            if network_already_running:
+                net_status = "[success]● Running[/success]"
+                net_note = "(already active)"
+            elif settings["enable_network_capture"]:
+                net_status = "[success]● Enabled[/success]"
+                net_note = "(will start tcpdump)"
+            else:
+                net_status = "[error]○ Disabled[/error]"
+                net_note = ""
+            console.print(_box_line(f"[accent]\\[N][/accent] Network Capture: {net_status} {net_note}", align="left"))
+
+            # Output format options
+            keylog_status = "[success]●[/success]" if settings["output_keylog"] else "[error]○[/error]"
+            json_status = "[success]●[/success]" if settings["output_json"] else "[error]○[/error]"
+            console.print(_box_line(f"[accent]\\[K][/accent] Keylog Output:   {keylog_status} (SSLKEYLOGFILE format)", align="left"))
+            console.print(_box_line(f"[accent]\\[J][/accent] JSON Output:     {json_status} (structured data)", align="left"))
+
+            console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
+            console.print(_box_line("[success]\\[Enter][/success] Start FriTap    [warning]\\[Esc/Q][/warning] Cancel", align="left"))
+            console.print(f"[primary]╚{'═' * BOX_WIDTH}╝[/primary]")
+
+            # Get user input
+            try:
+                choice = click.getchar().lower()
+            except (KeyboardInterrupt, EOFError):
+                return None
+
+            if choice in ('\r', '\n'):  # Enter - start
+                return settings
+            elif choice in ('\x1b', 'q'):  # Escape or Q - cancel
+                return None
+            elif choice == 'n' and not network_already_running:
+                settings["enable_network_capture"] = not settings["enable_network_capture"]
+            elif choice == 'k':
+                settings["output_keylog"] = not settings["output_keylog"]
+            elif choice == 'j':
+                settings["output_json"] = not settings["output_json"]
+
+    def start(self, interactive: bool = True) -> bool:
+        """Start FriTap monitoring.
+
+        Args:
+            interactive: If True, show interactive configuration menu first
+
+        Returns:
+            True if started successfully, False if cancelled
+        """
+        config = None
+        network_instance = None
+        network_started = False
+
+        if interactive:
+            config = self._interactive_configuration()
+            if config is None:
+                logger.info("FriTap configuration cancelled")
+                return False
+
+        try:
+            # Set up session FIRST (before starting network) to fail fast
+            if self.process_id is None:
+                self._setup_session(config)
+
+            # Now start network capture if requested (after session setup succeeded)
+            if config and config.get("enable_network_capture") and not Toolbox._network_capture_running:
+                # Set long action duration for FriTap sessions (1 hour)
+                Toolbox.action_duration = 3600
+                from sandroid.analysis.network import Network
+
+                network_instance = Network()
+                network_instance.gather()  # This starts tcpdump capture
+                network_started = True
+                logger.info("Network capture started for FriTap")
+
+                # Register network as background task (started by fritap)
+                Toolbox.register_background_task(
+                    name="network",
+                    display_name="Network Capture",
+                    instance=network_instance,
+                    stop_callback=network_instance.stop,
+                    started_by="fritap",
+                )
+
+            # Start the job with a custom hooking handler
+            self.job_id = self.job_manager.start_job(
+                self.frida_script_path,
+                custom_hooking_handler_name=self.ssl_log.on_fritap_message,
             )
 
-        logger.info(
-            f"FriTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
-        )
+            # Resume spawned process now that hooks are installed
+            if self.mode == "spawn":
+                Toolbox.resume_spawned_process_after_hooks(
+                    self.frida_device,
+                    self.process_id
+                )
+
+            # Register tool usage and files for exit summary
+            files = [self.log_path]
+            if self.keylog_path:
+                files.append(self.keylog_path)
+            if self.json_output_path:
+                files.append(self.json_output_path)
+            Toolbox.mark_tool_used("fritap", files=files)
+
+            # Register FriTap as background task with PID
+            Toolbox.register_background_task(
+                name="fritap",
+                display_name="FriTap",
+                instance=self,
+                stop_callback=self.stop,
+                app_name=self.app_package,
+                target_pid=self.process_id,
+            )
+
+            logger.info(
+                f"FriTap job started with ID: {self.job_id} in {self.mode.upper()} mode for {self.app_package}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start FriTap: {e}")
+            # Clean up network capture if we started it
+            if network_started and network_instance:
+                logger.info("Cleaning up network capture due to FriTap startup failure")
+                try:
+                    network_instance.stop()
+                    if Toolbox.is_task_running("network"):
+                        Toolbox.unregister_background_task("network")
+                except Exception as cleanup_error:
+                    logger.warning(f"Error during network cleanup: {cleanup_error}")
+            raise  # Re-raise so the caller knows it failed
 
     def stop(self):
-        # self.job_manager.stop_job_with_id(self.job_id)
-        self.job_manager.stop_app_with_closing_frida(self.app_package)
+        """Stop FriTap monitoring and finalize outputs."""
+        # Finalize JSON output before stopping
+        if self.ssl_log:
+            if hasattr(self.ssl_log, "_finalize_json_output"):
+                try:
+                    self.ssl_log._finalize_json_output()
+                    logger.info("FriTap JSON output finalized")
+                except Exception as e:
+                    logger.warning(f"Error finalizing JSON output: {e}")
+
+        # Stop the Frida job
+        if self.app_package:
+            self.job_manager.stop_app_with_closing_frida(self.app_package)
 
     def gather(self):
         """Gather data from the monitored application.
