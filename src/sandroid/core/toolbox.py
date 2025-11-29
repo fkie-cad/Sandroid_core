@@ -11,8 +11,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 from wcwidth import wcswidth
 
@@ -56,9 +57,9 @@ class BackgroundTask:
     instance: object  # The actual tool instance
     stop_callback: Callable  # Function to call when stopping
     started_at: datetime.datetime  # When the task started
-    started_by: Optional[str] = None  # Which task started this one (for dependencies)
-    app_name: Optional[str] = None  # Target application package name (if applicable)
-    target_pid: Optional[int] = None  # Target process PID (if applicable)
+    started_by: str | None = None  # Which task started this one (for dependencies)
+    app_name: str | None = None  # Target application package name (if applicable)
+    target_pid: int | None = None  # Target process PID (if applicable)
 
 
 class Toolbox:
@@ -106,6 +107,12 @@ class Toolbox:
 
     # Background task management
     _background_tasks: dict[str, BackgroundTask] = {}
+
+    # Background task output buffering for menu display
+    _background_output_buffer: list[
+        tuple[str, str, str]
+    ] = []  # [(timestamp, task_name, message)]
+    _background_output_max_lines: int = 50
 
     # replace these with your own values
     # TODO: Shouldn't be hardcoded
@@ -162,6 +169,59 @@ class Toolbox:
         except EOFError:
             # Handle EOF gracefully (e.g., when input is redirected)
             return ""
+
+    @classmethod
+    def buffer_background_output(cls, task_name: str, message: str) -> None:
+        """Buffer output from a background task for display in menu.
+
+        Args:
+            task_name: Name of the background task producing the output
+            message: The message/output to buffer
+        """
+        import datetime
+
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        cls._background_output_buffer.append((timestamp, task_name, message))
+        # Keep only the most recent lines
+        if len(cls._background_output_buffer) > cls._background_output_max_lines:
+            cls._background_output_buffer = cls._background_output_buffer[
+                -cls._background_output_max_lines :
+            ]
+
+        # Emit event for task output
+        try:
+            from sandroid.core.events import Event, EventBus, EventType
+
+            EventBus.get().publish(
+                Event(
+                    type=EventType.TASK_OUTPUT,
+                    data={
+                        "task_name": task_name,
+                        "message": message,
+                        "timestamp": timestamp,
+                    },
+                    source=task_name,
+                )
+            )
+        except ImportError:
+            pass  # Events module not available
+
+    @classmethod
+    def get_recent_background_output(cls, count: int = 5) -> list[tuple[str, str, str]]:
+        """Get the most recent background output lines.
+
+        Args:
+            count: Number of recent lines to return (default: 5)
+
+        Returns:
+            List of (timestamp, task_name, message) tuples
+        """
+        return cls._background_output_buffer[-count:]
+
+    @classmethod
+    def clear_background_output_buffer(cls) -> None:
+        """Clear the background output buffer."""
+        cls._background_output_buffer = []
 
     @classmethod
     def init(cls):
@@ -287,7 +347,14 @@ class Toolbox:
             help="Enable debug/verbose mode (shows detailed hook installation and internal messages from dexray-intercept)",
         )
 
-        cls.args = parser.parse_args()
+        # Only parse args if not already set by modern CLI (click-based)
+        # When running via `sandroid -i`, cli.py sets Toolbox.args before calling init()
+        if cls.args is None:
+            cls.args = parser.parse_args()
+        else:
+            # Args were already set by the modern CLI - don't parse again
+            # This avoids argparse failing on click-only options like -i/--interactive
+            pass
         if cls.logger is None:
             cls.initialize_logger()
         if cls.frida_manager is None:
@@ -1085,6 +1152,7 @@ class Toolbox:
         def _box_line(content: str, align: str = "center") -> str:
             """Create a box line with proper alignment accounting for Rich markup."""
             import re
+
             PLACEHOLDER = "\x00LBRACKET\x00"
             temp = content.replace("\\[", PLACEHOLDER)
             RICH_MARKUP_RE = re.compile(r"\[[a-zA-Z0-9_./#\s]+\]")
@@ -1103,20 +1171,47 @@ class Toolbox:
 
         console.print()
         console.print(f"[primary]╔{'═' * BOX_WIDTH}╗[/primary]")
-        console.print(_box_line(f"[bold]Spotlight Application Required for {tool_name}[/bold]"))
+        console.print(
+            _box_line(f"[bold]Spotlight Application Required for {tool_name}[/bold]")
+        )
         console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
-        console.print(_box_line("[accent]Choose how to target the application:[/accent]"))
+        console.print(
+            _box_line("[accent]Choose how to target the application:[/accent]")
+        )
         console.print(_box_line(""))
-        console.print(_box_line("[warning]\\[A][/warning] ATTACH mode - Hook into currently running app", align="left"))
-        console.print(_box_line("    [dim]Use if app is already open on device[/dim]", align="left"))
+        console.print(
+            _box_line(
+                "[warning]\\[A][/warning] ATTACH mode - Hook into currently running app",
+                align="left",
+            )
+        )
+        console.print(
+            _box_line(
+                "    [dim]Use if app is already open on device[/dim]", align="left"
+            )
+        )
         console.print(_box_line(""))
-        console.print(_box_line("[warning]\\[S][/warning] SPAWN mode - Launch app fresh with hooks", align="left"))
-        console.print(_box_line("    [dim]Use for clean analysis from app startup[/dim]", align="left"))
+        console.print(
+            _box_line(
+                "[warning]\\[S][/warning] SPAWN mode - Launch app fresh with hooks",
+                align="left",
+            )
+        )
+        console.print(
+            _box_line(
+                "    [dim]Use for clean analysis from app startup[/dim]", align="left"
+            )
+        )
         console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
-        console.print(_box_line("[success]\\[A/S][/success] Select mode    [error]\\[Esc/Q][/error] Cancel", align="left"))
+        console.print(
+            _box_line(
+                "[success]\\[A/S][/success] Select mode    [error]\\[Esc/Q][/error] Cancel",
+                align="left",
+            )
+        )
         console.print(f"[primary]╚{'═' * BOX_WIDTH}╝[/primary]")
 
-        console.print(f"\n[success]► Select mode:[/success] ", end="")
+        console.print("\n[success]► Select mode:[/success] ", end="")
 
         try:
             choice = click.getchar().lower()
@@ -1125,15 +1220,19 @@ class Toolbox:
             console.print("\n[warning]Cancelled[/warning]")
             return False
 
-        if choice in ('\x1b', 'q'):  # ESC or Q
+        if choice in ("\x1b", "q"):  # ESC or Q
             console.print("[warning]Cancelled[/warning]")
             return False
-        elif choice == 'a':
+        if choice == "a":
             # ATTACH MODE - use currently focused app
             focused_app = Adb.get_focused_app()
             if not focused_app:
-                console.print("[error]No app is currently focused on the device.[/error]")
-                console.print("[warning]Please open an app on the device and try again.[/warning]")
+                console.print(
+                    "[error]No app is currently focused on the device.[/error]"
+                )
+                console.print(
+                    "[warning]Please open an app on the device and try again.[/warning]"
+                )
                 return False
 
             cls.set_spotlight_application(focused_app)
@@ -1147,12 +1246,12 @@ class Toolbox:
             cls.set_spotlight_application_pid(spotlight_pid)
             cls.set_spawn_mode(False)
 
-            console.print(f"\n[success]✓ Spotlight set in ATTACH mode:[/success]")
+            console.print("\n[success]✓ Spotlight set in ATTACH mode:[/success]")
             console.print(f"  Package: [warning]{spotlight_name}[/warning]")
             console.print(f"  PID: [warning]{spotlight_pid}[/warning]")
             return True
 
-        elif choice == 's':
+        if choice == "s":
             # SPAWN MODE - select app with fuzzy search
             console.print("\n[primary]Select an application to spawn...[/primary]")
 
@@ -1164,8 +1263,10 @@ class Toolbox:
             cls.set_spotlight_spawn_application(selected_package)
 
             # Ask about auto-resume
-            console.print(f"\n[primary]Auto-resume spawned app?[/primary]")
-            console.print("[accent]\\[Y][/accent] = App starts immediately after spawn (recommended)")
+            console.print("\n[primary]Auto-resume spawned app?[/primary]")
+            console.print(
+                "[accent]\\[Y][/accent] = App starts immediately after spawn (recommended)"
+            )
             console.print("[accent]\\[N][/accent] = App stays paused, resume manually")
             console.print("\n[success]► Press y or n (Enter = yes):[/success] ", end="")
 
@@ -1173,19 +1274,18 @@ class Toolbox:
                 resume_choice = click.getchar().lower()
                 console.print(f"[accent]{resume_choice}[/accent]")
             except (KeyboardInterrupt, EOFError):
-                resume_choice = 'y'
+                resume_choice = "y"
 
-            cls.set_auto_resume_after_spawn(resume_choice != 'n')
+            cls.set_auto_resume_after_spawn(resume_choice != "n")
 
-            resume_status = "enabled" if resume_choice != 'n' else "disabled"
-            console.print(f"\n[success]✓ Spotlight set in SPAWN mode:[/success]")
+            resume_status = "enabled" if resume_choice != "n" else "disabled"
+            console.print("\n[success]✓ Spotlight set in SPAWN mode:[/success]")
             console.print(f"  Package: [warning]{selected_package}[/warning]")
             console.print(f"  Auto-resume: [warning]{resume_status}[/warning]")
             return True
 
-        else:
-            console.print(f"[error]Invalid choice: {choice}[/error]")
-            return False
+        console.print(f"[error]Invalid choice: {choice}[/error]")
+        return False
 
     @classmethod
     def select_app_with_fuzzy_search(cls, recently_installed_package=None):
@@ -2390,7 +2490,7 @@ class Toolbox:
                     "    * remo[menu.key.bracket]\\[[/menu.key.bracket][menu.key]v[/menu.key][menu.key.bracket]][/menu.key.bracket]e spotlight file",
                     "    * p[menu.key.bracket]\\[[/menu.key.bracket][menu.key]u[/menu.key][menu.key.bracket]][/menu.key.bracket]ll spotlight files",
                     "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]o[/menu.key][menu.key.bracket]][/menu.key.bracket]bserve file system changes (fsmon)",
-                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]space[/menu.key][menu.key.bracket]][/menu.key.bracket] pull spotlight memory/DB file",
+                    "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]space[/menu.key][menu.key.bracket]][/menu.key.bracket] pull spotlight DB file",
                     "",
                 ]
             )
@@ -2447,26 +2547,38 @@ class Toolbox:
 
             # Spotlight Application (malware-specific tools)
             malware_monitor_string = ""
+            hook_config_string = ""
             if cls.is_task_running("dexray-intercept"):
                 dexray_task = cls.get_task("dexray-intercept")
                 # Show app name in [warning] color for consistency with filenames
-                current_app = dexray_task.app_name if dexray_task and dexray_task.app_name else "app"
+                current_app = (
+                    dexray_task.app_name
+                    if dexray_task and dexray_task.app_name
+                    else "app"
+                )
                 malware_monitor_string = f"* stop android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept) on [warning]{current_app}[/warning]"
+                # Show option to reconfigure hooks while running
+                hook_config_string = "    * reconfigure hoo[menu.key.bracket]\\[[/menu.key.bracket][menu.key]k[/menu.key][menu.key.bracket]][/menu.key.bracket]s (stops, reconfigures, restarts)"
             else:
                 malware_monitor_string = f"* start android [menu.key.bracket]\\[[/menu.key.bracket][menu.key]m[/menu.key][menu.key.bracket]][/menu.key.bracket]alware monitor (dexray-intercept){mode_indicator}"
 
-            menu_content.extend(
+            menu_items = [
+                "    [menu.section]=== Spotlight Application ===[/menu.section]",
+                "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
+                "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
+                f"    {malware_monitor_string}",
+            ]
+            # Add hook config option only when dexray-intercept is running
+            if hook_config_string:
+                menu_items.append(hook_config_string)
+            menu_items.extend(
                 [
-                    "    [menu.section]=== Spotlight Application ===[/menu.section]",
-                    "    * set [menu.key.bracket]\\[[/menu.key.bracket][menu.key]c[/menu.key][menu.key.bracket]][/menu.key.bracket]urrent app in focus as spotlight app [mode.attach]\\[ATTACH MODE][/mode.attach]",
-                    "    * select app with [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+C[/menu.key][menu.key.bracket]][/menu.key.bracket] for spawning [mode.spawn]\\[SPAWN MODE][/mode.spawn]",
-                    f"    * track [menu.key.bracket]\\[[/menu.key.bracket][menu.key]Shift+M[/menu.key][menu.key.bracket]][/menu.key.bracket]emory changes (dirty pages){mode_indicator}",
-                    f"    {malware_monitor_string}",
                     f"    * start o[menu.key.bracket]\\[[/menu.key.bracket][menu.key]b[/menu.key][menu.key.bracket]][/menu.key.bracket]jection interactive shell{mode_indicator}",
                     "    * run [menu.key.bracket]\\[[/menu.key.bracket][menu.key]t[/menu.key][menu.key.bracket]][/menu.key.bracket]rigdroid malware triggers",
                     "",
                 ]
             )
+            menu_content.extend(menu_items)
 
             # Emulator Management
             screen_recording_string = ""
@@ -2499,7 +2611,11 @@ class Toolbox:
             if cls.is_task_running("fritap"):
                 fritap_task = cls.get_task("fritap")
                 # Show app name in [warning] color for consistency with filenames
-                fritap_app = fritap_task.app_name if fritap_task and fritap_task.app_name else "app"
+                fritap_app = (
+                    fritap_task.app_name
+                    if fritap_task and fritap_task.app_name
+                    else "app"
+                )
                 fritap_string = f"* stop friTap [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ooking on [warning]{fritap_app}[/warning]"
             else:
                 fritap_string = f"* start friTap [menu.key.bracket]\\[[/menu.key.bracket][menu.key]h[/menu.key][menu.key.bracket]][/menu.key.bracket]ooking{mode_indicator}"
@@ -2534,10 +2650,41 @@ class Toolbox:
                 ]
             )
 
+        # Background Activity Section (shown if there are background tasks or recent output)
+        recent_output = cls.get_recent_background_output(5)  # Show last 5 messages
+        if recent_output or cls._background_tasks:
+            menu_content.append("")
+            menu_content.append(
+                "    [menu.section]=== Background Activity ===[/menu.section]"
+            )
+            if recent_output:
+                for timestamp, task_name, msg in recent_output:
+                    # Truncate long messages to fit in menu
+                    display_msg = msg[:65] + "..." if len(msg) > 65 else msg
+                    # Escape any brackets in the message to prevent Rich markup issues
+                    display_msg = display_msg.replace("[", "\\[").replace("]", "\\]")
+                    menu_content.append(
+                        f"    [dim]{timestamp}[/dim] [accent]{task_name}:[/accent] {display_msg}"
+                    )
+                # Show hint for more output
+                total_buffered = len(cls._background_output_buffer)
+                if total_buffered > 5:
+                    menu_content.append(
+                        f"    [dim]... {total_buffered - 5} more messages buffered[/dim]"
+                    )
+            else:
+                # Show that tasks are running but no output yet
+                running_tasks = ", ".join(cls._background_tasks.keys())
+                menu_content.append(
+                    f"    [dim]Tasks running: {running_tasks} (no output yet)[/dim]"
+                )
+
         # Footer (common to all views)
         menu_content.extend(
             [
-                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]TAB[/menu.key][menu.key.bracket]][/menu.key.bracket] switch view  |  [menu.key.bracket]\\[[/menu.key.bracket][menu.key]q[/menu.key][menu.key.bracket]][/menu.key.bracket]uit"
+                "",
+                "    [dim]💡 Tip: Press the same key again to stop/toggle active background processes[/dim]",
+                "    * [menu.key.bracket]\\[[/menu.key.bracket][menu.key]TAB[/menu.key][menu.key.bracket]][/menu.key.bracket] switch view  |  [menu.key.bracket]\\[[/menu.key.bracket][menu.key]q[/menu.key][menu.key.bracket]][/menu.key.bracket]uit",
             ]
         )
 
@@ -2761,6 +2908,25 @@ class Toolbox:
         )
         cls.logger.info(f"Background task '{display_name}' registered")
 
+        # Emit event for task started
+        try:
+            from sandroid.core.events import Event, EventBus, EventType
+
+            EventBus.get().publish(
+                Event(
+                    type=EventType.TASK_STARTED,
+                    data={
+                        "name": name,
+                        "display_name": display_name,
+                        "app_name": app_name,
+                        "target_pid": target_pid,
+                    },
+                    source="toolbox",
+                )
+            )
+        except ImportError:
+            pass  # Events module not available
+
     @classmethod
     def unregister_background_task(cls, name: str):
         """Remove a task from tracking (after it's stopped).
@@ -2772,6 +2938,24 @@ class Toolbox:
             task = cls._background_tasks[name]
             del cls._background_tasks[name]
             cls.logger.info(f"Background task '{task.display_name}' unregistered")
+
+            # Emit event for task stopped
+            try:
+                from sandroid.core.events import Event, EventBus, EventType
+
+                EventBus.get().publish(
+                    Event(
+                        type=EventType.TASK_STOPPED,
+                        data={
+                            "name": name,
+                            "display_name": task.display_name,
+                            "app_name": task.app_name,
+                        },
+                        source="toolbox",
+                    )
+                )
+            except ImportError:
+                pass  # Events module not available
 
     @classmethod
     def is_task_running(cls, name: str) -> bool:
@@ -2795,7 +2979,7 @@ class Toolbox:
         return list(cls._background_tasks.keys())
 
     @classmethod
-    def get_task(cls, name: str) -> Optional[BackgroundTask]:
+    def get_task(cls, name: str) -> BackgroundTask | None:
         """Get a specific background task by name.
 
         Args:
@@ -2955,7 +3139,9 @@ class Toolbox:
         console.print()
         console.print("[bold cyan]═══ Sandroid Session Complete ═══[/bold cyan]")
         console.print()
-        console.print(f"[success]Results saved to:[/success] [bold]{results_path}[/bold]")
+        console.print(
+            f"[success]Results saved to:[/success] [bold]{results_path}[/bold]"
+        )
 
         # List tool-specific files
         if cls._tools_used:

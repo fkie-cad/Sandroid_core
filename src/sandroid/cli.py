@@ -9,13 +9,12 @@ from typing import TYPE_CHECKING
 import click
 from rich.logging import RichHandler
 
-from .core.console import SandroidConsole
-
 # Import version first (no dependencies)
 from ._version import __version__
 
 # Import SandroidConfig for type hints (used in function signatures)
 from .config import SandroidConfig
+from .core.console import SandroidConsole
 
 # Type hints for heavy modules (runtime imports are lazy in main())
 if TYPE_CHECKING:
@@ -143,18 +142,12 @@ def pretty_logo():
     is_flag=True,
     help="Enable debug/verbose mode",
 )
-@click.option(
-    "--spotlight-memory",
-    is_flag=True,
-    help="Track memory changes in spotlight application (dirty pages)",
-)
-@click.option(
-    "--memory-regions",
-    type=str,
-    metavar="REGIONS",
-    help="Specific memory regions to monitor (e.g., '0x12345000-0x12350000,0x20000000-0x20010000')",
-)
 @click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
+@click.option(
+    "--rich-mode",
+    is_flag=True,
+    help="Use classic Rich-based menu instead of the Textual TUI (default is TUI mode)",
+)
 @click.option(
     "--view",
     type=click.Choice(["forensic", "malware", "security"]),
@@ -183,9 +176,8 @@ def main(
     ai: bool,
     report: bool,
     debug: bool,
-    spotlight_memory: bool,
-    memory_regions: str | None,
     interactive: bool,
+    rich_mode: bool,
     view: str | None,
 ):
     """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
@@ -247,12 +239,6 @@ def main(
         mock_args.ai = ai
         mock_args.report = report
         mock_args.debug = debug  # Debug mode for dexray-intercept verbose output
-        mock_args.spotlight_memory = spotlight_memory
-        # Parse memory regions if provided
-        if memory_regions:
-            mock_args.memory_regions = [r.strip() for r in memory_regions.split(",")]
-        else:
-            mock_args.memory_regions = None
 
         # Set the args to satisfy dependencies
         Toolbox.args = mock_args
@@ -331,7 +317,9 @@ def main(
         console = SandroidConsole.get()
 
         # Set the initial view mode (use CLI view if provided, otherwise use config's default_view)
-        initial_view = view if view is not None else sandroid_config.analysis.default_view
+        initial_view = (
+            view if view is not None else sandroid_config.analysis.default_view
+        )
         Toolbox.set_current_view(initial_view)
 
         # Setup logging
@@ -350,7 +338,9 @@ def main(
 
         if interactive:
             # Start interactive mode
-            start_interactive_mode(sandroid_config, logger, Toolbox, Adb)
+            start_interactive_mode(
+                sandroid_config, logger, Toolbox, Adb, use_tui=not rich_mode
+            )
         else:
             # Run analysis
             run_analysis(
@@ -363,9 +353,17 @@ def main(
 
 
 def start_interactive_mode(
-    config: SandroidConfig, logger: logging.Logger, Toolbox, Adb
+    config: SandroidConfig, logger: logging.Logger, Toolbox, Adb, use_tui: bool = True
 ):
-    """Start interactive menu mode."""
+    """Start interactive menu mode.
+
+    Args:
+        config: Sandroid configuration
+        logger: Logger instance
+        Toolbox: Toolbox class
+        Adb: Adb class
+        use_tui: If True, use Textual TUI (default). If False, use classic Rich menu.
+    """
     # Import and initialize legacy components
     from sandroid.core.actionQ import ActionQ
 
@@ -375,9 +373,52 @@ def start_interactive_mode(
     Adb.init()
     Toolbox.check_setup()
 
-    # Start the interactive menu using the legacy ActionQ system
     console = SandroidConsole.get()
-    console.print("[success bold]Starting Sandroid interactive mode...[/success bold]")
+
+    if use_tui:
+        # Try to start Textual TUI
+        try:
+            from sandroid.tui import SandroidTUI
+
+            console.print("[success bold]Starting Sandroid TUI mode...[/success bold]")
+            console.print("[dim]Use --rich-mode for classic menu interface[/dim]")
+
+            # Create action queue for the TUI to use
+            action_q = ActionQ()
+
+            # Run the TUI application
+            app = SandroidTUI(action_queue=action_q)
+            app.run()
+
+        except ImportError as e:
+            logger.warning(
+                f"Textual TUI not available: {e}. Falling back to Rich mode."
+            )
+            console.print(
+                "[warning]TUI not available, falling back to Rich mode...[/warning]"
+            )
+            # Fall back to classic Rich mode
+            _start_rich_interactive_mode(ActionQ, console)
+        except Exception as e:
+            logger.error(f"TUI failed to start: {e}. Falling back to Rich mode.")
+            console.print(f"[error]TUI error: {e}[/error]")
+            console.print("[warning]Falling back to Rich mode...[/warning]")
+            _start_rich_interactive_mode(ActionQ, console)
+    else:
+        # Use classic Rich-based menu
+        _start_rich_interactive_mode(ActionQ, console)
+
+
+def _start_rich_interactive_mode(ActionQ, console):
+    """Start the classic Rich-based interactive menu.
+
+    Args:
+        ActionQ: ActionQ class
+        console: SandroidConsole instance
+    """
+    console.print(
+        "[success bold]Starting Sandroid interactive mode (Rich)...[/success bold]"
+    )
     action_q = ActionQ()
     action_q.q.append("interactive")  # Add interactive mode to queue
     action_q.run()  # Run the interactive menu

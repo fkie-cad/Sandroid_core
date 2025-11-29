@@ -11,18 +11,18 @@ from .datagather import DataGather
 
 logger = logging.getLogger(__name__)
 
+
 # Set up dedicated fritap log file
 def _setup_fritap_logging():
     """Set up dedicated file logging for friTap in the fritap results folder."""
-    fritap_logger = logging.getLogger('friTap')
+    fritap_logger = logging.getLogger("friTap")
 
     # Check if we already have a file handler to avoid duplicates
     has_file_handler = any(
-        isinstance(handler, logging.FileHandler)
-        for handler in fritap_logger.handlers
+        isinstance(handler, logging.FileHandler) for handler in fritap_logger.handlers
     )
 
-    if not has_file_handler and os.getenv('RESULTS_PATH'):
+    if not has_file_handler and os.getenv("RESULTS_PATH"):
         fritap_dir = f"{os.getenv('RESULTS_PATH')}fritap/"
         log_path = f"{fritap_dir}fritap.log"
         file_handler = logging.FileHandler(log_path)
@@ -72,15 +72,19 @@ class FriTap(DataGather):
         # Use fritap folder at results root (sibling to raw/, like dexray_intercept/)
         fritap_dir = f"{os.getenv('RESULTS_PATH', '')}fritap/"
         self.keylog_path = f"{fritap_dir}fritap_keylog.log" if output_keylog else None
-        self.json_output_path = f"{fritap_dir}fritap_output.json" if output_json else None
+        self.json_output_path = (
+            f"{fritap_dir}fritap_output.json" if output_json else None
+        )
         self.log_path = f"{fritap_dir}fritap.log"
 
         # Initialize SSL_Logger with the obtained process ID
+        # Note: verbose and debug_output are disabled to prevent terminal interference
+        # All output goes to log files in the fritap directory
         self.ssl_log = SSL_Logger(
             self.process_id,
-            verbose=True,  # Enable verbose output
+            verbose=False,  # Disable verbose output to prevent terminal noise
             keylog=self.keylog_path,  # Path to save SSL key log in results folder
-            debug_output=True,  # Enable debug output
+            debug_output=False,  # Disable debug output to prevent terminal noise
             json_output=self.json_output_path,  # Path to save JSON output in results folder
         )
 
@@ -89,7 +93,7 @@ class FriTap(DataGather):
 
         # Set up the Frida session in the JobManager
         # Note: We already spawned/attached via get_frida_session_for_spotlight()
-        should_spawn = (mode == "spawn")
+        should_spawn = mode == "spawn"
         self.job_manager.setup_frida_session(
             self.process_id,
             self.ssl_log.on_fritap_message,
@@ -107,6 +111,7 @@ class FriTap(DataGather):
             Configuration dict if user confirms, None if cancelled
         """
         import re
+
         console = SandroidConsole.get()
 
         # Box width (inner content width)
@@ -160,16 +165,44 @@ class FriTap(DataGather):
             else:
                 net_status = "[error]○ Disabled[/error]"
                 net_note = ""
-            console.print(_box_line(f"[accent]\\[N][/accent] Network Capture: {net_status} {net_note}", align="left"))
+            console.print(
+                _box_line(
+                    f"[accent]\\[N][/accent] Network Capture: {net_status} {net_note}",
+                    align="left",
+                )
+            )
 
             # Output format options
-            keylog_status = "[success]●[/success]" if settings["output_keylog"] else "[error]○[/error]"
-            json_status = "[success]●[/success]" if settings["output_json"] else "[error]○[/error]"
-            console.print(_box_line(f"[accent]\\[K][/accent] Keylog Output:   {keylog_status} (SSLKEYLOGFILE format)", align="left"))
-            console.print(_box_line(f"[accent]\\[J][/accent] JSON Output:     {json_status} (structured data)", align="left"))
+            keylog_status = (
+                "[success]●[/success]"
+                if settings["output_keylog"]
+                else "[error]○[/error]"
+            )
+            json_status = (
+                "[success]●[/success]"
+                if settings["output_json"]
+                else "[error]○[/error]"
+            )
+            console.print(
+                _box_line(
+                    f"[accent]\\[K][/accent] Keylog Output:   {keylog_status} (SSLKEYLOGFILE format)",
+                    align="left",
+                )
+            )
+            console.print(
+                _box_line(
+                    f"[accent]\\[J][/accent] JSON Output:     {json_status} (structured data)",
+                    align="left",
+                )
+            )
 
             console.print(f"[primary]╠{'═' * BOX_WIDTH}╣[/primary]")
-            console.print(_box_line("[success]\\[Enter][/success] Start FriTap    [warning]\\[Esc/Q][/warning] Cancel", align="left"))
+            console.print(
+                _box_line(
+                    "[success]\\[Enter][/success] Start FriTap    [warning]\\[Esc/Q][/warning] Cancel",
+                    align="left",
+                )
+            )
             console.print(f"[primary]╚{'═' * BOX_WIDTH}╝[/primary]")
 
             # Get user input
@@ -178,15 +211,17 @@ class FriTap(DataGather):
             except (KeyboardInterrupt, EOFError):
                 return None
 
-            if choice in ('\r', '\n'):  # Enter - start
+            if choice in ("\r", "\n"):  # Enter - start
                 return settings
-            elif choice in ('\x1b', 'q'):  # Escape or Q - cancel
+            if choice in ("\x1b", "q"):  # Escape or Q - cancel
                 return None
-            elif choice == 'n' and not network_already_running:
-                settings["enable_network_capture"] = not settings["enable_network_capture"]
-            elif choice == 'k':
+            if choice == "n" and not network_already_running:
+                settings["enable_network_capture"] = not settings[
+                    "enable_network_capture"
+                ]
+            elif choice == "k":
                 settings["output_keylog"] = not settings["output_keylog"]
-            elif choice == 'j':
+            elif choice == "j":
                 settings["output_json"] = not settings["output_json"]
 
     def start(self, interactive: bool = True) -> bool:
@@ -214,7 +249,11 @@ class FriTap(DataGather):
                 self._setup_session(config)
 
             # Now start network capture if requested (after session setup succeeded)
-            if config and config.get("enable_network_capture") and not Toolbox._network_capture_running:
+            if (
+                config
+                and config.get("enable_network_capture")
+                and not Toolbox._network_capture_running
+            ):
                 # Set long action duration for FriTap sessions (1 hour)
                 Toolbox.action_duration = 3600
                 from sandroid.analysis.network import Network
@@ -242,8 +281,7 @@ class FriTap(DataGather):
             # Resume spawned process now that hooks are installed
             if self.mode == "spawn":
                 Toolbox.resume_spawned_process_after_hooks(
-                    self.frida_device,
-                    self.process_id
+                    self.frida_device, self.process_id
                 )
 
             # Register tool usage and files for exit summary
@@ -322,10 +360,14 @@ class FriTap(DataGather):
             )
 
             # Resume spawned process now that hooks are installed (if in spawn mode)
-            if hasattr(self, 'mode') and self.mode == "spawn" and hasattr(self, 'frida_device') and hasattr(self, 'process_id'):
+            if (
+                hasattr(self, "mode")
+                and self.mode == "spawn"
+                and hasattr(self, "frida_device")
+                and hasattr(self, "process_id")
+            ):
                 Toolbox.resume_spawned_process_after_hooks(
-                    self.frida_device,
-                    self.process_id
+                    self.frida_device, self.process_id
                 )
 
             self.running = True

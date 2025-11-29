@@ -192,7 +192,7 @@ class AnalysisConfig(BaseModel):
     default_view: str = Field(
         default="forensic",
         description="Default view mode for interactive menu (forensic, malware, or security)",
-        pattern=r"^(forensic|malware|security)$"
+        pattern=r"^(forensic|malware|security)$",
     )
 
 
@@ -209,33 +209,6 @@ class TrigDroidConfig(BaseModel):
         default=None,
         pattern=r"^[ID]$",
         description="Configuration mode: I (interactive) or D (default)",
-    )
-
-
-class SpotlightMemoryConfig(BaseModel):
-    """Spotlight memory tracking configuration."""
-
-    enabled: bool = Field(default=False, description="Enable spotlight memory tracking")
-    tracker_backend: str = Field(
-        default="frida",
-        description="Memory tracker backend: frida, process_vm_readv (future), kernel (future)",
-    )
-    capture_baseline_dumps: bool = Field(
-        default=False, description="Dump baseline pages (not just checksums)"
-    )
-    checksum_algorithm: str = Field(
-        default="crc32", description="Checksum algorithm for change detection"
-    )
-    max_page_size: int = Field(
-        default=20971520,
-        description="Maximum page size to process (20MB default)",
-    )
-    target_permissions: str = Field(
-        default="rw-", description="Target memory permissions (focus on dirty pages)"
-    )
-    custom_regions: list[str] = Field(
-        default_factory=list,
-        description="Custom memory regions to monitor (e.g., ['0x12345000-0x12350000'])",
     )
 
 
@@ -319,9 +292,6 @@ class SandroidConfig(BaseModel):
     paths: PathConfig = Field(default_factory=PathConfig)
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     trigdroid: TrigDroidConfig = Field(default_factory=TrigDroidConfig)
-    spotlight_memory: SpotlightMemoryConfig = Field(
-        default_factory=SpotlightMemoryConfig
-    )
     ai: AIConfig = Field(default_factory=AIConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
