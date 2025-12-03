@@ -95,9 +95,9 @@ class ChangedFiles(DataGather):
                         result.append({file: diff.splitlines()})
                 elif file[-4:] == ".xml":
                     diff = file_diff.xml_diff(
-                        f"{base_folder}first_pull/{file}",
-                        f"{base_folder}second_pull/{file}",
-                        f"{base_folder}noise_pull/{file}",
+                        path_to_file_first_pull,
+                        path_to_file_second_pull,
+                        path_to_file_noise_pull,
                     )
                     if "ITS ALL NOISE" not in diff:
                         result.append({file: diff.splitlines()})
@@ -159,9 +159,9 @@ class ChangedFiles(DataGather):
                         Toolbox.highlight_timestamps(
                             Toolbox.truncate(
                                 file_diff.xml_diff(
-                                    f"{base_folder}first_pull/{file}",
-                                    f"{base_folder}second_pull/{file}",
-                                    f"{base_folder}noise_pull/{file}",
+                                    path_to_file_first_pull,
+                                    path_to_file_second_pull,
+                                    path_to_file_noise_pull,
                                 )
                             ),
                             Bcolors.OKCYAN,

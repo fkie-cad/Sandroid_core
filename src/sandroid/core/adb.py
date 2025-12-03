@@ -48,7 +48,7 @@ class Adb:
         """
         logger.debug("Running ADB command " + command)
         output = subprocess.run(
-            [cls.ADB_PATH + " " + command],
+            cls._build_shell_command(command),
             check=False,
             capture_output=True,
             text=True,
@@ -67,7 +67,7 @@ class Adb:
         """
         logger.debug("Running ADB command " + command)
         process = subprocess.Popen(
-            [cls.ADB_PATH + " " + command],
+            cls._build_shell_command(command),
             stdout=PIPE,
             stdin=PIPE,
             stderr=PIPE,
@@ -290,13 +290,21 @@ class Adb:
         full_command = f"exec-out {command}"
         logger.debug("Running ADB command " + full_command)
         output = subprocess.run(
-            [cls.ADB_PATH + " " + full_command],
+            cls._build_shell_command(full_command),
             check=False,
             capture_output=True,
             text=True,
             shell=True,
         )
         return output.stdout, output.stderr.strip()
+
+    @classmethod
+    def _build_shell_command(cls, command: str) -> str:
+        """Return a shell-safe command string with a quoted adb path."""
+        adb_path = cls.ADB_PATH or "adb"
+        if " " in adb_path:
+            adb_path = f'"{adb_path}"'
+        return f"{adb_path} {command}"
 
     @classmethod
     def get_current_avd_name(cls):
