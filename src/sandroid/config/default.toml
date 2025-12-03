@@ -49,9 +49,10 @@ enabled = false
 
 [ai]
 enabled = false
-provider = "google-genai"
 # api_key = "your-api-key-here"  # Better to use SANDROID_AI__API_KEY env var
-model = "gemini-pro"
+# agent_provider = "google-gla"  # Optional override for agent provider
+# agent_model = "gemini-2.5-pro"  # Optional override for agent model
+video_model = "gemini-2.5-flash"  # Provider is fixed to google-gla
 
 [report]
 generate_pdf = false

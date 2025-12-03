@@ -158,10 +158,10 @@ Configuration Structure
 
        "ai": {
            "enabled": False,
-           "provider": "google",
-           "model": "gemini-pro",
            "api_key": None,
-           "temperature": 0.7
+           "agent_provider": None,
+           "agent_model": None,
+           "video_model": "gemini-2.5-flash"
        },
 
        "report": {

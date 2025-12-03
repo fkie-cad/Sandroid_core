@@ -3,6 +3,7 @@
 import tempfile
 from enum import Enum
 from pathlib import Path
+from typing import ClassVar
 
 from pydantic import BaseModel, Field, validator
 
@@ -210,13 +211,41 @@ class TrigDroidConfig(BaseModel):
 class AIConfig(BaseModel):
     """AI processing configuration."""
 
+    VIDEO_PROVIDER: ClassVar[str] = "google-gla"
+
     enabled: bool = Field(default=False, description="Enable AI-powered analysis")
-    provider: str = Field(default="google-genai", description="AI provider to use")
     api_key: str | None = Field(
         default=None,
         description="AI service API key (use environment variable or credentials section)",
     )
-    model: str = Field(default="gemini-pro", description="AI model to use")
+    agent_provider: str | None = Field(
+        default=None,
+        description=(
+            "Provider identifier for the AI agent (e.g. google-gla, openai). "
+            "If omitted, the video provider is used."
+        ),
+    )
+    agent_model: str | None = Field(
+        default=None,
+        description=(
+            "Model identifier for the AI agent. Leaving this empty makes the agent "
+            "reuse the configured video model."
+        ),
+    )
+    video_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Model used for video analysis (provider fixed to google-gla)",
+    )
+
+    def agent_identifier(self) -> str | None:
+        """Return provider/model identifier for the agent, if fully configured."""
+        if self.agent_provider and self.agent_model:
+            return f"{self.agent_provider}:{self.agent_model}"
+        return None
+
+    def video_identifier(self) -> str:
+        """Return provider/model identifier for the video pipeline."""
+        return f"{self.VIDEO_PROVIDER}:{self.video_model}"
 
 
 class ReportConfig(BaseModel):

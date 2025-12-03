@@ -231,17 +231,15 @@ AI Analysis
    # Enable AI-powered analysis
    enabled = false
 
-   # AI provider (google, openai)
-   provider = "google"
-
-   # Model to use
-   model = "gemini-pro"
-
    # API key (better to use environment variable)
    api_key = ""
 
-   # Temperature for AI generation
-   temperature = 0.7
+   # Optional overrides for the artifact analysis agent
+   # agent_provider = "google-gla"
+   # agent_model = "gemini-2.5-pro"
+
+   # Video model (provider is fixed to google-gla and reused by the agent if unset)
+   video_model = "gemini-2.5-flash"
 
 Report Generation
 ~~~~~~~~~~~~~~~~~

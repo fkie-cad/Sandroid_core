@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+import asyncio
 
 import click
 import colorama
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from .core.AI_processing import AIProcessing
     from .core.pdf_report import PDFReport
     from .core.toolbox import Toolbox
+    from .core.ai_agent_system import AIAgentSystem
 
 
 console = Console()
@@ -225,6 +227,7 @@ def main(
         from .core.AI_processing import AIProcessing
         from .core.pdf_report import PDFReport
         from .core.toolbox import Toolbox
+        from .core.ai_agent_system import AIAgentSystem
 
         mock_args = argparse.Namespace()
         mock_args.screenshot = screenshot
@@ -338,7 +341,7 @@ def main(
         else:
             # Run analysis
             run_analysis(
-                sandroid_config, logger, Toolbox, Adb, ActionQ, AIProcessing, PDFReport
+                sandroid_config, logger, Toolbox, Adb, ActionQ, AIProcessing, PDFReport, AIAgentSystem
             )
 
     except Exception as e:
@@ -374,6 +377,7 @@ def run_analysis(
     ActionQ,
     AIProcessing,
     PDFReport,
+    AIAgentSystem
 ):
     """Run forensic analysis."""
     try:
@@ -391,12 +395,6 @@ def run_analysis(
         while not q.finished:
             q.do_next()
 
-        # Handle AI summarization if enabled
-        action = ""
-        if config.ai.enabled:
-            recording_path = config.paths.raw_results_path / "recording.webm"
-            if recording_path.exists():
-                action = AIProcessing.summarize_video(str(recording_path))
 
         # Finalize
         Toolbox.wrap_up()
@@ -406,16 +404,31 @@ def run_analysis(
         with open(output_file, "w") as fd:
             fd.write(q.get_data())
 
-        # Display results
-        if config.ai.enabled and action:
-            print(
-                Fore.GREEN
-                + Style.BRIGHT
-                + f"Sandroid Results for the action: {action}"
-                + Style.RESET_ALL
-            )
+        # Handle AI summarization if enabled
+        action = ""
+        ground_truth = ""
+        if config.ai.enabled:
+            recording_path = Path(os.getenv("RAW_RESULTS_PATH")) / "recording.webm"
+            if recording_path.exists():
+                action, ground_truth = AIProcessing.summarize_video(str(recording_path))
+                print(
+                    Fore.GREEN
+                    + Style.BRIGHT
+                    + f"Sandroid Results for the action: {action}"
+                    + Style.RESET_ALL
+                )
+            else:
+                logger.warning("No screen recording found. Skipping AI summarization.")
 
-        print(q.get_pretty_print())
+        pretty_results = q.get_pretty_print()
+        print(pretty_results)
+
+        if config.ai.enabled:
+            if ground_truth != "":
+                agent = AIAgentSystem()
+                asyncio.run(agent.find_artifacts(task=f'Sandroid results: {pretty_results}\n\nUser action ground truth: {ground_truth}'))
+            else:
+                logger.warning("No ground truth available. Skipping AI artifact analysis.")
 
         # Generate PDF report if enabled
         if config.report.generate_pdf:
