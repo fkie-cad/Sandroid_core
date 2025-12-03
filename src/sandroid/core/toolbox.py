@@ -275,7 +275,7 @@ class Toolbox:
     def init_files(cls):
         """**Initializes** the necessary folders and files for the Sandroid program."""
         os.environ["RESULTS_PATH"] = (
-            f"results/{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}/"
+            f"results/{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}/"
         )
         os.environ["RAW_RESULTS_PATH"] = f"{os.getenv('RESULTS_PATH')}raw/"
 

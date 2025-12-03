@@ -2,12 +2,13 @@ import os
 import os.path
 import sqlite3
 import subprocess
-import tempfile
+import xml.etree.ElementTree as xmltree
 from logging import getLogger
 
 from colorama import Fore, Style
 from lxml import etree
 from xmldiff import formatting, main
+from sandroid.core.ccl_abx import AbxDecodeError, AbxReader
 
 logger = getLogger(__name__)
 
@@ -356,65 +357,55 @@ def txt_xml_diff(file_path1, file_path2):
         logger.error(f"XML Syntax Error encountered: {e}")
         return "\tNo change detected\n"
 
-    if changes == "":
-        return "\tNo change detected\n"
+    return _format_xml_diff_output(changes)
 
-    s = changes.splitlines()
-    result = ""
-    for line in s:
-        result = result + "\t" + line + "\n"
-    return result
+
+def _format_xml_diff_output(changes):
+    """Format xmldiff output consistently for CLI consumption."""
+    if not changes:
+        return "\tNo change detected\n"
+    return "".join(f"\t{line}\n" for line in changes.splitlines())
+
+
+def _convert_abx_to_xml_string(file_path):
+    """Convert an ABX file to a unicode XML string using the in-repo decoder."""
+    with open(file_path, "rb") as abx_file:
+        reader = AbxReader(abx_file)
+        document = reader.read(is_multi_root=True)
+    return xmltree.tostring(document.getroot(), encoding="unicode")
 
 
 def abx_xml_diff(file_path1, file_path2):
-    """Calculates the differences between two ABX XML files.
-
-    :param xml_file: The name of the XML file to compare.
-    :type xml_file: str
-    :param dir1: The base directory of the first XML version.
-    :type dir1: str
-    :param dir2: The base directory of the second XML version.
-    :type dir2: str
-    :returns: A formatted string naming entries that have been added and removed.
-    :rtype: str
-    """
+    """Calculates the differences between two ABX XML files."""
     logger.debug("Calculating ABX XML Diff between both versions of " + file_path1)
     logger.debug({"file_path1": file_path1, "file_path2": file_path2})
 
-    # Convert the ABX files to XML in memory
-    first_xml = subprocess.run(
-        ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout
+    try:
+        first_xml = _convert_abx_to_xml_string(file_path1)
+        second_xml = _convert_abx_to_xml_string(file_path2)
+    except (OSError, ValueError, AbxDecodeError) as exc:
+        logger.error(f"Failed to convert ABX files for diff: {exc}")
+        return "\tFailed to convert ABX files for diff\n"
 
-    second_xml = subprocess.run(
-        ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout
+    logger.debug("Converted ABX files to XML via AbxReader")
+    logger.debug(
+        {
+            "file_path1": file_path1,
+            "file_path2": file_path2,
+            "first_xml_length": len(first_xml),
+            "second_xml_length": len(second_xml),
+        }
+    )
 
-    logger.debug("Converting ABX files to XML")
-    logger.debug({"first_xml": first_xml, "second_xml": second_xml})
+    formatter = formatting.DiffFormatter(pretty_print=True)
 
-    # Write the converted XML into temporary files.
-    with (
-        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp1,
-        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp2,
-    ):
-        temp1.write(first_xml)
-        temp2.write(second_xml)
-        temp1.flush()
-        temp2.flush()
-        temp1_name = temp1.name
-        temp2_name = temp2.name
-        diff = txt_xml_diff(temp1.name, temp2.name)
-
-    if diff.strip() == "":
+    try:
+        changes = main.diff_texts(first_xml, second_xml, formatter=formatter)
+    except etree.XMLSyntaxError as e:
+        logger.error(f"XML Syntax Error encountered while diffing ABX XML: {e}")
         return "\tNo change detected\n"
-    return diff
+
+    return _format_xml_diff_output(changes)
 
 
 def xml_diff_beautify(raw_diff_string):
