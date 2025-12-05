@@ -93,6 +93,7 @@ To aid you in cataloging the user actions, you are provided with a json datastru
 'touch_x': the x coordinate of the touch input when it ended,
 'touch_y': the y coordinate of the touch input when it ended,
 'touch_location_description': a rough textual description of where the input ended,
+'input_type': whether the input was a tap, long press or swipe,
 'element': an xml representation of the UI element that was probably touched,
 'element_age': how long ago before the touch input the element was last recorded, if this value is high, it might be out of date.
 The true selected element may be different from the one that was recorded. The touch locations are always complete, correct and sorted, so you must represent every single data structure entry in your output in, in order.
@@ -297,11 +298,16 @@ class AIProcessing():
                     'raw_x': None,
                     'raw_y': None,
                     'screen_x': None,
-                    'screen_y': None
+                    'screen_y': None,
+                    'input_type': None
                 }
                 
                 # Look ahead to collect coordinates and find end event
                 j = i + 1
+                start_x = None
+                start_x_set = False
+                start_y = None
+                start_y_set = False
                 while j < len(lines):
                     next_line = lines[j].strip()
                     if not next_line:
@@ -325,8 +331,14 @@ class AIProcessing():
                         
                     # Collect coordinates
                     if next_event_code == 53:  # X coordinate
+                        if not start_x_set:
+                            start_x = next_data
+                            start_x_set = True
                         current_touch['raw_x'] = next_data
                     elif next_event_code == 54:  # Y coordinate  
+                        if not start_y_set:
+                            start_y = next_data
+                            start_y_set = True
                         current_touch['raw_y'] = next_data
                     elif next_event_code == 57 and next_data == 4294967295:  # Touch end
                         current_touch['end_timestamp'] = next_timestamp
@@ -334,12 +346,25 @@ class AIProcessing():
                         
                     j += 1
                 
-                # Step 6: Scale coordinates and add valid touch events
+                # Step 6: Detect swipes vs taps and create touch event entry
                 if (current_touch['raw_x'] is not None and 
                     current_touch['raw_y'] is not None and
                     current_touch['end_timestamp'] is not None):
                     current_touch['screen_x'] = int(current_touch['raw_x'] * scale_x)
                     current_touch['screen_y'] = int(current_touch['raw_y'] * scale_y)
+                    start_x = int(start_x * scale_x)
+                    start_y = int(start_y * scale_y)
+
+                    if (abs(current_touch['screen_x'] - start_x) > 30 or
+                        abs(current_touch['screen_y'] - start_y) > 30):
+                        # Swipe detected
+                        current_touch["input_type"] = f"This Input is a swipe from {AIProcessing.get_touch_location_description(start_x, start_y, screen_width, screen_height)} ({start_x},{start_y}) to {AIProcessing.get_touch_location_description(current_touch['screen_x'], current_touch['screen_y'], screen_width, screen_height)} ({current_touch['screen_x']},{current_touch['screen_y']})"
+                    elif (current_touch['end_timestamp'] - current_touch['start_timestamp']) > 800: 
+                        # long press detected
+                        current_touch["input_type"] = "This Input is a long press"
+                    else:
+                        # Tap detected
+                        current_touch["input_type"] = "This Input is a normal tap"
                     touch_events.append(current_touch)
                 
                 current_touch = None
@@ -361,24 +386,6 @@ class AIProcessing():
             if match:
                 return tuple(map(int, match.groups()))
             return (0, 0, 0, 0)
-        
-        def get_touch_location_description(touch_x: int, touch_y: int, width: int, height: int) -> str:
-            """Get a text description of the touch location on a 3x3 grid."""
-            if touch_y < height / 3:
-                vertical = "top"
-            elif touch_y < 2 * height / 3:
-                vertical = "middle"
-            else:
-                vertical = "bottom"
-            
-            if touch_x < width / 3:
-                horizontal = "left"
-            elif touch_x < 2 * width / 3:
-                horizontal = "center"
-            else:
-                horizontal = "right"
-            
-            return f"{vertical} {horizontal}"
 
         def point_in_bounds(x: int, y: int, bounds: Tuple[int, int, int, int]) -> bool:
             """Check if point is within element bounds"""
@@ -507,9 +514,10 @@ class AIProcessing():
                     'end_timestamp': format_timestamp_ms(touch_event['end_timestamp']),
                     'touch_x': touch_event['screen_x'],
                     'touch_y': touch_event['screen_y'],
-                    'touch_location_description': get_touch_location_description(
+                    'touch_location_description': AIProcessing.get_touch_location_description(
                         touch_event['screen_x'], touch_event['screen_y'], screen_width, screen_height
                     ),
+                    'input_type': touch_event.get('input_type', None),
                     'element': closest_element,
                     'element_age': round(element_age_seconds, 2)
                 }
@@ -531,6 +539,25 @@ class AIProcessing():
             logger.error(f"Failed to write input timeline to file: {e}")
 
         return timeline
+
+    @staticmethod
+    def get_touch_location_description(touch_x: int, touch_y: int, width: int, height: int) -> str:
+                """Get a text description of the touch location on a 3x3 grid."""
+                if touch_y < height / 3:
+                    vertical = "top"
+                elif touch_y < 2 * height / 3:
+                    vertical = "middle"
+                else:
+                    vertical = "bottom"
+                
+                if touch_x < width / 3:
+                    horizontal = "left"
+                elif touch_x < 2 * width / 3:
+                    horizontal = "center"
+                else:
+                    horizontal = "right"
+                
+                return f"{vertical} {horizontal}"
 
 
 if __name__ == "__main__":
