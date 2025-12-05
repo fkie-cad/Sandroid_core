@@ -185,6 +185,18 @@ class AIProcessing():
     
     @staticmethod
     def create_touch_timeline():
+        # Variables
+        DEVICE_DUMMY = "/dev/input/event1"
+        DEVICE_TOUCH = "/dev/input/event2"
+        EVENT_TYPE_TOUCH = 3
+        EVENT_CODE_FINGER_DOWN = 57
+        EVENT_CODE_X_COORD = 53
+        EVENT_CODE_Y_COORD = 54
+        DATA_INPUT_END = 4294967295
+        SWIPE_DISTANCE_THRESHOLD = 30  # pixels
+        LONG_PRESS_DURATION_THRESHOLD = 800  # milliseconds
+
+
         logger.debug("Touch Timeline: Creating touch timeline from recorded inputs and UI dumps")
         # Step 1: Get screen resolution
         stdout, stderr = Adb.send_adb_command("shell wm size")
@@ -263,12 +275,12 @@ class AIProcessing():
             data = int(data)
             
             # Ignore dummy events
-            if device == "/dev/input/event1":
+            if device == DEVICE_DUMMY:
                 i += 1
                 continue
 
             # Process non-touch events
-            if device != "/dev/input/event2":
+            if device is not DEVICE_TOUCH:
                 # To avoid multiple entries for one key press, check timestamp
                 if timestamp != last_dummy_timestamp:
                     timeline.append({
@@ -286,12 +298,12 @@ class AIProcessing():
                 continue
 
             # Only process touch events with event type 3
-            if event_type != 3:
+            if event_type != EVENT_TYPE_TOUCH:
                 i += 1
                 continue
             
             # Touch start event
-            if event_code == 57 and data == 0:
+            if event_code == EVENT_CODE_FINGER_DOWN and data == 0:
                 current_touch = {
                     'start_timestamp': timestamp,
                     'end_timestamp': None,
@@ -325,22 +337,22 @@ class AIProcessing():
                     next_event_code = int(next_event_code)
                     next_data = int(next_data)
                     
-                    if next_device != "/dev/input/event2" or next_event_type != 3:
+                    if next_device != DEVICE_TOUCH or next_event_type != EVENT_TYPE_TOUCH:
                         j += 1
                         continue
                         
                     # Collect coordinates
-                    if next_event_code == 53:  # X coordinate
+                    if next_event_code == EVENT_CODE_X_COORD:  # X coordinate
                         if not start_x_set:
                             start_x = next_data
                             start_x_set = True
                         current_touch['raw_x'] = next_data
-                    elif next_event_code == 54:  # Y coordinate  
+                    elif next_event_code == EVENT_CODE_Y_COORD:  # Y coordinate  
                         if not start_y_set:
                             start_y = next_data
                             start_y_set = True
                         current_touch['raw_y'] = next_data
-                    elif next_event_code == 57 and next_data == 4294967295:  # Touch end
+                    elif next_event_code == EVENT_CODE_FINGER_DOWN and next_data == DATA_INPUT_END:  # Touch end
                         current_touch['end_timestamp'] = next_timestamp
                         break
                         
@@ -355,11 +367,11 @@ class AIProcessing():
                     start_x = int(start_x * scale_x)
                     start_y = int(start_y * scale_y)
 
-                    if (abs(current_touch['screen_x'] - start_x) > 30 or
-                        abs(current_touch['screen_y'] - start_y) > 30):
+                    if (abs(current_touch['screen_x'] - start_x) > SWIPE_DISTANCE_THRESHOLD or
+                        abs(current_touch['screen_y'] - start_y) > SWIPE_DISTANCE_THRESHOLD):
                         # Swipe detected
                         current_touch["input_type"] = f"This Input is a swipe from {AIProcessing.get_touch_location_description(start_x, start_y, screen_width, screen_height)} ({start_x},{start_y}) to {AIProcessing.get_touch_location_description(current_touch['screen_x'], current_touch['screen_y'], screen_width, screen_height)} ({current_touch['screen_x']},{current_touch['screen_y']})"
-                    elif (current_touch['end_timestamp'] - current_touch['start_timestamp']) > 800: 
+                    elif (current_touch['end_timestamp'] - current_touch['start_timestamp']) > LONG_PRESS_DURATION_THRESHOLD: 
                         # long press detected
                         current_touch["input_type"] = "This Input is a long press"
                     else:
