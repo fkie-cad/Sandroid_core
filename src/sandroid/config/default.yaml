@@ -10,7 +10,7 @@ environment: production
 
 emulator:
   device_name: Pixel_6_Pro_API_31
-  android_emulator_path: ~/Android/Sdk/emulator/emulator
+  # android_emulator_path: ~/Android/Sdk/emulator/emulator  # Optional: auto-detected if not provided
   # sdk_path: ~/Android/Sdk  # Optional: auto-detected if not provided
   # adb_path: ~/Android/Sdk/platform-tools/adb  # Optional: auto-detected if not provided
   # avd_home: ~/.android/avd  # Optional: auto-detected if not provided

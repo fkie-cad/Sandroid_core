@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 from platformdirs import site_config_dir, user_config_dir
+from pydantic import ValidationError
 
 from .schema import SandroidConfig
 
@@ -34,12 +35,27 @@ class ConfigLoader:
         self._config_files = self._discover_config_files()
 
     def _get_config_directories(self) -> list[Path]:
-        """Get configuration directories following XDG specification."""
+        """Get configuration directories following XDG specification.
+
+        On macOS, we prefer ~/.config/sandroid over ~/Library/Application Support
+        for consistency with Linux and user expectations.
+        """
         dirs = []
 
-        # User config directory (highest priority)
-        user_dir = Path(user_config_dir(self.app_name))
+        # User config directory - prefer XDG style (~/.config/sandroid) on all platforms
+        # This is more consistent and expected by users
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config_home:
+            user_dir = Path(xdg_config_home) / self.app_name
+        else:
+            # Default to ~/.config/sandroid on all platforms (including macOS)
+            user_dir = Path.home() / ".config" / self.app_name
         dirs.append(user_dir)
+
+        # Also check platformdirs location as fallback (e.g., ~/Library/Application Support on macOS)
+        platform_user_dir = Path(user_config_dir(self.app_name))
+        if platform_user_dir != user_dir:
+            dirs.append(platform_user_dir)
 
         # Additional user directories from XDG_CONFIG_DIRS
         xdg_config_dirs = os.environ.get("XDG_CONFIG_DIRS", "")
@@ -62,7 +78,7 @@ class ConfigLoader:
         """Discover configuration files in order of preference."""
         config_files = []
         config_names = ["sandroid", "config"]
-        extensions = [".yaml", ".yml", ".toml", ".json"]  # Prioritize YAML
+        extensions = [".toml", ".yaml", ".yml", ".json"]  # TOML is default format
 
         for config_dir in self._config_dirs:
             for name in config_names:
@@ -94,7 +110,7 @@ class ConfigLoader:
 
         if suffix == ".toml":
             return self._load_toml(path)
-        if suffix in [".yaml", ".yml"]:
+        if suffix in (".yaml", ".yml"):
             return self._load_yaml(path)
         if suffix == ".json":
             return self._load_json(path)
@@ -233,27 +249,39 @@ class ConfigLoader:
             config = SandroidConfig(**merged_config)
             config.create_directories()  # Ensure directories exist
             return config
+        except ValidationError as e:
+            errors = []
+            for error in e.errors():
+                loc = " -> ".join(str(loc_part) for loc_part in error["loc"])
+                msg = error["msg"]
+                errors.append(f"  {loc}: {msg}")
+            error_text = "\n".join(errors)
+            raise ValueError(
+                f"Invalid configuration in sandroid.toml:\n{error_text}\n\n"
+                f"Run 'sandroid-config show' to see valid options."
+            ) from e
         except Exception as e:
-            raise ValueError(f"Invalid configuration: {e}")
+            raise ValueError(f"Invalid configuration: {e}") from e
 
     def save_config(
         self,
         config: SandroidConfig,
         config_file: str | Path | None = None,
-        format: str = "yaml",
+        format: str = "toml",
     ) -> Path:
         """Save configuration to file.
 
         Args:
             config: Configuration to save
-            config_file: Target file path (defaults to user config dir)
-            format: Output format ('toml', 'yaml', 'json')
+            config_file: Target file path (defaults to ~/.config/sandroid/)
+            format: Output format ('toml', 'yaml', 'json'). Default is 'toml'.
 
         Returns:
             Path where configuration was saved
         """
         if config_file is None:
-            user_dir = Path(user_config_dir(self.app_name))
+            # Use XDG-style path: ~/.config/sandroid/sandroid.toml
+            user_dir = Path.home() / ".config" / self.app_name
             user_dir.mkdir(parents=True, exist_ok=True)
             config_file = user_dir / f"sandroid.{format}"
         else:
@@ -262,13 +290,20 @@ class ConfigLoader:
 
         # Convert to dict with proper enum serialization
         # Using JSON serialization ensures enums are converted to their values
-        config_dict = json.loads(config.model_dump_json(exclude_unset=True))
+        # For TOML, we must exclude None values since TOML has no null representation
+        if format == "toml":
+            config_dict = json.loads(
+                config.model_dump_json(exclude_unset=True, exclude_none=True)
+            )
+        else:
+            # JSON and YAML support null/None values
+            config_dict = json.loads(config.model_dump_json(exclude_unset=True))
 
         # Save based on format
         if format == "toml":
             with open(config_file, "wb") as f:
                 tomli_w.dump(config_dict, f)
-        elif format in ["yaml", "yml"]:
+        elif format in ("yaml", "yml"):
             with open(config_file, "w", encoding="utf-8") as f:
                 yaml.safe_dump(
                     config_dict, f, default_flow_style=False, sort_keys=False
@@ -280,6 +315,46 @@ class ConfigLoader:
             raise ValueError(f"Unsupported format: {format}")
 
         return config_file
+
+    @staticmethod
+    def _suffix_to_format(path: Path | None) -> str:
+        """Map a file suffix to a config format string."""
+        if path is not None:
+            suffix = path.suffix
+            if suffix in (".yaml", ".yml"):
+                return "yaml"
+            if suffix == ".json":
+                return "json"
+        return "toml"
+
+    def detect_and_save(
+        self, config: SandroidConfig, config_path: str | Path | None = None
+    ) -> Path:
+        """Detect existing config format and save. Uses first discovered file if no path given."""
+        target_path = config_path
+        if target_path is None and self._config_files:
+            target_path = self._config_files[0]
+
+        target = Path(target_path) if target_path is not None else None
+        return self.save_config(config, target, self._suffix_to_format(target))
+
+    def load_and_update_section(
+        self, section: str, updates: dict[str, Any]
+    ) -> tuple[SandroidConfig, Path]:
+        """Load config, update a section dict, validate, and save."""
+        try:
+            current_config = self.load()
+        except FileNotFoundError:
+            current_config = SandroidConfig()
+
+        config_dict = current_config.model_dump()
+        if section not in config_dict:
+            config_dict[section] = {}
+        config_dict[section].update(updates)
+
+        updated_config = SandroidConfig(**config_dict)
+        saved_path = self.detect_and_save(updated_config)
+        return updated_config, saved_path
 
     def create_default_config(self, config_file: str | Path | None = None) -> Path:
         """Create a default configuration file.

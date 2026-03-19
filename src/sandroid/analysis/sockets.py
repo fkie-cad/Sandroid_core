@@ -1,85 +1,106 @@
 import threading
 import time
 from logging import getLogger
+from typing import Any
 
-from sandroid.core.adb import Adb
-from sandroid.core.toolbox import Toolbox
+from sandroid.core.events.events import NetworkEvent, TaskOutput
 
-from .datagather import DataGather
+from .base_di import DataGatherBase
 
 logger = getLogger(__name__)
 
 
-class Bcolors:
-    HEADER = "\033[95m"
-    OKBLUE = "\033[94m"
-    OKCYAN = "\033[96m"
-    OKGREEN = "\033[92m"
-    WARNING = "\033[93m"
-    FAIL = "\033[91m"
-    ENDC = "\033[0m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
-
-
-class Sockets(DataGather):
+class Sockets(DataGatherBase):
     """Handles the gathering and processing of listening sockets during an action."""
 
-    run_sockets_lists = {}
-    final_sockets_list = []
-    noise_sockets = []
-    run_counter = 0
-    performed_diff = False
+    def __init__(self, **kwargs: Any) -> None:
+        """Initialize the Sockets data gatherer.
 
-    def gather(self):
-        """Collects information on listening sockets during an action."""
+        Args:
+            **kwargs: Arguments passed to DataGatherBase including:
+                - forensic_service: ForensicService for file tracking
+                - adb: ADB interface for device communication
+                - config: Configuration object
+                - logger: Logger instance
+        """
+        super().__init__(**kwargs)
+        self.run_sockets_lists: dict[int, list[str]] = {}
+        self.final_sockets_list: list[str] = []
+        self.noise_sockets: list[str] = []
+        self.run_counter: int = 0
+        self.performed_diff: bool = False
+
+    def gather(self) -> None:
+        """Start listening socket collection in a background thread.
+
+        Initiates a thread that continuously monitors listening sockets on
+        the device over the configured action duration. Socket data is
+        collected via ADB shell netstat commands.
+        """
         logger.info("Collecting information on listening sockets during action")
         t1 = threading.Thread(target=self.socket_capture_thread, args=())
         t1.start()
 
-    def return_data(self):
-        """Returns the processed data of listening sockets.
+    def return_data(self) -> dict[str, list[str]]:
+        """Return the processed list of listening sockets.
 
-        :returns: Dictionary containing the listening sockets.
-        :rtype: dict
+        Processes the collected data if not already done, filtering out
+        baseline noise sockets captured during the dry run.
+
+        Returns:
+            A dictionary with key "Listening Sockets" containing a list of
+            formatted strings describing port numbers and associated programs.
         """
         if not self.performed_diff:
             self.process_sockets()
         return {"Listening Sockets": self.final_sockets_list}
 
-    def pretty_print(self):
-        """Returns a formatted string of the listening sockets for display.
+    def pretty_print(self) -> str:
+        """Return a Rich-formatted string of listening sockets for display.
 
-        :returns: Formatted string of listening sockets.
-        :rtype: str
+        Formats the socket list with Rich markup for terminal display.
+        Processes the data if not already done.
+
+        Returns:
+            A Rich-formatted string containing the list of listening sockets
+            that were not present in the baseline dry run.
         """
         if not self.performed_diff:
             self.process_sockets()
         raw_output = self.final_sockets_list
 
         result = (
-            Bcolors.OKCYAN
-            + Bcolors.BOLD
-            + "\n—————————————————LISTENING SOCKETS=(listening at some point in each run, not in dry run)——————————————\n"
-            + Bcolors.ENDC
-            + Bcolors.OKCYAN
+            "[accent bold]"
+            "\n—————————————————LISTENING SOCKETS=(listening at some point in each run, not in dry run)——————————————\n"
+            "[/accent bold]"
+            "[accent]"
         )
         for entry in raw_output:
             result += entry + "\n"
         result = result + (
-            Bcolors.BOLD
-            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
-            + Bcolors.ENDC
+            "[/accent]"
+            "[accent bold]"
+            "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[/accent bold]"
         )
 
         return result
 
-    def socket_capture_thread(self):
-        """Function meant to be used as a thread to create list of listening sockets over the duration of an action."""
-        runtime = Toolbox.get_action_duration()
+    def socket_capture_thread(self) -> None:
+        """Capture listening sockets over the action duration.
+
+        This method is designed to run in a background thread. It polls the
+        device every second via ADB netstat command to get TCP/UDP listening
+        sockets, building a cumulative set of all sockets seen during the
+        capture period.
+
+        During dry runs, the captured sockets are stored as baseline noise.
+        During normal runs, sockets are stored per run for later comparison.
+        """
+        runtime = self._get_toolbox().get_action_duration()
         socket_list = []
         for i in range(runtime):
-            stdout, stderr = Adb.send_adb_command("shell netstat -tulp")
+            stdout, _stderr = self._send_adb_command("shell netstat -tulp")
             stdout = stdout.splitlines()[1:]
             detected_listening = []
             for socket in stdout:
@@ -91,14 +112,23 @@ class Sockets(DataGather):
             logger.debug("Found " + str(len(socket_list)) + " listening sockets so far")
             time.sleep(1)
 
-        if Toolbox.is_dry_run():
+        if self._get_toolbox().is_dry_run():
             self.noise_sockets = socket_list
         else:
             self.run_sockets_lists[self.run_counter] = socket_list
             self.run_counter += 1
 
-    def process_sockets(self):
-        """Processes the collected socket lists to filter out noise and identify true listening sockets."""
+    def process_sockets(self) -> None:
+        """Process collected data to identify application-specific listening sockets.
+
+        Filters out baseline noise sockets captured during the dry run, using
+        a two-step matching process:
+        1. Match by port number across all runs.
+        2. If port is missing but program name matches, still count as a match.
+
+        Sets performed_diff flag and publishes TaskOutput with summary.
+        Also publishes NetworkEvent for each identified listening socket.
+        """
         noise = self.noise_sockets
 
         logger.debug("Processing collected listening sockets lists")
@@ -156,3 +186,26 @@ class Sockets(DataGather):
             )
 
         self.performed_diff = True
+
+        # Publish summary event
+        count = len(self.final_sockets_list)
+        TaskOutput(
+            task_name="sockets",
+            message=f"Found {count} active listening sockets",
+            level="info",
+            source="sockets",
+        ).publish()
+
+        # Publish individual network events for each listening socket
+        for port, program in noise_adjusted_result.items():
+            NetworkEvent(
+                event_type_name="listening",
+                protocol="tcp",  # netstat -tulp captures tcp listening sockets
+                dest_ip="0.0.0.0",  # listening sockets bind locally
+                dest_port=int(port) if port.isdigit() else 0,
+                source="sockets",
+                data_size=0,
+            ).publish()
+            logger.debug(
+                f"Published NetworkEvent for listening socket on port {port} ({program})"
+            )

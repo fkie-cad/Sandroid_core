@@ -4,16 +4,47 @@ import subprocess
 import tempfile
 from logging import getLogger
 
-import click
 import requests
 from bs4 import BeautifulSoup as BS
 from tqdm import tqdm
 
+from sandroid.services import get_ui_service
+
 from .adb import Adb
 from .console import SandroidConsole
-from .toolbox import Toolbox
+from .exceptions import (
+    APKInstallError,
+    APKNetworkError,
+    APKNotFoundError,
+    APKVersionNotFoundError,
+)
+
+try:
+    from sandroid.config import get_config
+except ImportError:
+    get_config = None
 
 logger = getLogger(__name__)
+
+
+def _get_display_value(field: str, default):
+    """Read a display config value with fallback."""
+    try:
+        if get_config is not None:
+            return getattr(get_config().display, field, default)
+    except Exception:
+        pass
+    return default
+
+
+def _get_external_url(field: str, default: str) -> str:
+    """Read an external URL config value with fallback."""
+    try:
+        if get_config is not None:
+            return getattr(get_config().external_urls, field, default)
+    except Exception:
+        pass
+    return default
 
 
 # parts taken and adapted from https://github.com/jayluxferro/APK-Downloader/blob/main/apk-downloader.py
@@ -27,35 +58,43 @@ class ApkDownloaderTools:
         }
 
     def download_w_progress_bar(self, url: str, file_path):
-        response = requests.get(url=url, stream=True, headers=self.headers, timeout=30)
-        try:
-            total_size = int(response.headers.get("content-length"))
-        except ValueError:
-            pass
-        if total_size is None:
-            return None
-        chunk_size = 1024
-        progress_bar = tqdm(total=total_size, unit="B", unit_scale=True)
+        with requests.get(
+            url=url, stream=True, headers=self.headers, timeout=30
+        ) as response:
+            total_size_header = response.headers.get("content-length")
+            if total_size_header is None:
+                return None
+            try:
+                total_size = int(total_size_header)
+            except ValueError:
+                return None
+            chunk_size = 1024
+            progress_bar = tqdm(total=total_size, unit="B", unit_scale=True)
 
-        full_path = os.path.join(file_path, url.split("/")[-1])
-        with open(full_path, "wb") as f:
-            logger.info(f"Downloading to {full_path}")
-            for data in response.iter_content(chunk_size=chunk_size):
-                progress_bar.update(len(data))
-                f.write(data)
-        progress_bar.close()
+            full_path = os.path.join(file_path, url.rsplit("/", maxsplit=1)[-1])
+            with open(full_path, "wb") as f:
+                logger.info(f"Downloading to {full_path}")
+                for data in response.iter_content(chunk_size=chunk_size):
+                    progress_bar.update(len(data))
+                    f.write(data)
+            progress_bar.close()
 
         return full_path
 
 
 class ApkDownloader:
+    _DEFAULT_APTOIDE_API_URL = "https://ws75.aptoide.com/api/7"
+    _DEFAULT_APTOIDE_META_URL = "https://ws2.aptoide.com/api/7"
+
     def __init__(self) -> None:
-        self.aptoide_web_api_base_url_get_versions = (
-            "https://ws75.aptoide.com/api/7/app/getVersions/"
+        aptoide_api = _get_external_url(
+            "aptoide_api_url", self._DEFAULT_APTOIDE_API_URL
         )
-        self.aptoide_web_api_base_url_get_meta = (
-            "https://ws2.aptoide.com/api/7/app/getMeta/"
+        aptoide_meta = _get_external_url(
+            "aptoide_meta_url", self._DEFAULT_APTOIDE_META_URL
         )
+        self.aptoide_web_api_base_url_get_versions = f"{aptoide_api}/app/getVersions/"
+        self.aptoide_web_api_base_url_get_meta = f"{aptoide_meta}/app/getMeta/"
         self.headers = ApkDownloaderTools().headers
 
     def search_for_name(self, package_name, wanted_version=None, limit=10):
@@ -84,19 +123,18 @@ class ApkDownloader:
 
         if json_data_list == []:
             logger.error(f"{package_name} could not be found.")
-            exit()
-        else:
-            logger.info(f"Displaying search results for {package_name}")
-            for json_data in json_data_list:
-                print(
-                    f"[{json_data['file']['vername']}] {json_data['name']} ({json_data['added']})"
-                )
+            raise APKNotFoundError(package_name)
+        logger.info(f"Displaying search results for {package_name}")
+        for json_data in json_data_list:
+            print(
+                f"[{json_data['file']['vername']}] {json_data['name']} ({json_data['added']})"
+            )
 
         # Ask for user input to select a version
         logger.info(
             "Enter the version string to select (press ENTER for the latest version): "
         )
-        version_input = Toolbox.safe_input()
+        version_input = get_ui_service().safe_input()
 
         if version_input == "":
             # Select the latest version
@@ -112,8 +150,8 @@ class ApkDownloader:
                     break
 
             if app_id is None:
-                logger.error(f"Version {version_input} could not be found.")
-                exit()
+                available = [j["file"]["vername"] for j in json_data_list]
+                raise APKVersionNotFoundError(package_name, version_input, available)
 
         # Continue with the selected app_id
         logger.info(f"Selected version: {json_data['file']['vername']} (ID: {app_id})")
@@ -143,7 +181,6 @@ class ApkDownloader:
 
     def download_by_app_id(self, app_id, file_path):
         app_infos = self.__get_app_infos_by_app_id(app_id)
-        print(app_infos)
         d_url = app_infos["app_download_url"]
         app_size = app_infos["app_size"]
         app_ext = app_infos["app_ext"]
@@ -160,10 +197,98 @@ class ApkDownloader:
         """
         with tempfile.TemporaryDirectory() as dir:
             file_path = self.download_by_app_id(app_id, dir)
-            print(file_path)
             if file_path:
                 logger.info(f"Installing {file_path}")
                 Adb.install_apk(file_path)
+
+    def install_app_id_simple(self, app_id) -> str:
+        """Downloads and installs APK without progress bar (TUI-friendly).
+
+        This method is designed for use in async/TUI contexts where tqdm
+        progress bars cause issues with file descriptors.
+
+        Args:
+            app_id: The Aptoide app ID to install
+
+        Returns:
+            Package name of installed app
+
+        Raises:
+            APKInstallError: If download or installation fails
+        """
+        app_infos = self.__get_app_infos_by_app_id(app_id)
+        download_url = app_infos["app_download_url"]
+        app_name = app_infos.get("app_name", "Unknown")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Download without tqdm (simpler, works in async contexts)
+            file_name = download_url.split("/")[-1]
+            file_path = os.path.join(temp_dir, file_name)
+
+            logger.info(f"Downloading {app_name}...")
+            try:
+                response = requests.get(
+                    download_url,
+                    headers=ApkDownloaderTools().headers,
+                    timeout=120,
+                    stream=True,
+                )
+                response.raise_for_status()
+
+                with open(file_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+            except requests.exceptions.RequestException as e:
+                raise APKInstallError(app_name, f"Download failed: {e}")
+
+            if not os.path.exists(file_path):
+                raise APKInstallError(app_name, "Download failed - file not created")
+
+            logger.info(f"Installing {app_name}...")
+            result = Adb.install_apk(file_path)
+            return result or app_name
+
+    def get_versions_only(self, package_name: str, limit: int = 10) -> list[dict]:
+        """Get available versions without interactive prompts.
+
+        For use by TUI modal to display version selection.
+
+        Args:
+            package_name: Package name to search for
+            limit: Maximum number of versions to return
+
+        Returns:
+            List of version dictionaries with keys:
+                - id: App ID for installation
+                - name: App name
+                - file.vername: Version string
+                - added: Date added
+
+        Raises:
+            APKNotFoundError: If package not found
+            APKNetworkError: If network request fails
+        """
+        version_url = f"{self.aptoide_web_api_base_url_get_versions}package_name={package_name}/limit={limit}"
+
+        try:
+            v_res = requests.get(url=version_url, headers=self.headers, timeout=10)
+            v_res.raise_for_status()
+            response_data = v_res.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error while searching for '{package_name}': {e}")
+            raise APKNetworkError(f"Network error searching for '{package_name}'", e)
+
+        if "list" not in response_data:
+            logger.error(f"Unexpected API response for '{package_name}'")
+            raise APKNotFoundError(package_name, "API returned unexpected format")
+
+        json_data_list = response_data["list"]
+
+        if not json_data_list:
+            raise APKNotFoundError(package_name)
+
+        return json_data_list
 
 
 class ApkDownloader_Old:
@@ -178,7 +303,32 @@ class ApkDownloader_Old:
         headers (dict): HTTP headers for requests.
     """
 
-    base_url = "https://apksfull.com"
+    _DEFAULT_BASE_URL = "https://apksfull.com"
+    _DEFAULT_APK_SEARCH_LIMIT = 5
+
+    @classmethod
+    def _get_base_url(cls) -> str:
+        """Get base URL from config with fallback."""
+        return _get_external_url("apksfull_base_url", cls._DEFAULT_BASE_URL)
+
+    @classmethod
+    def _get_search_limit(cls) -> int:
+        """Get APK search result limit from config with fallback."""
+        return _get_display_value("apk_search_limit", cls._DEFAULT_APK_SEARCH_LIMIT)
+
+    @classmethod
+    def _get_urls(cls) -> dict[str, str]:
+        """Get all derived URLs from base URL."""
+        base = cls._get_base_url()
+        return {
+            "base": base,
+            "version": f"{base}/version/",
+            "download": f"{base}/dl/",
+            "search": f"{base}/search/",
+        }
+
+    # Keep class-level attrs for backwards compatibility with headers
+    base_url = _DEFAULT_BASE_URL
     version_url = f"{base_url}/version/"
     download_url = f"{base_url}/dl/"
     search_url = f"{base_url}/search/"
@@ -201,14 +351,19 @@ class ApkDownloader_Old:
         """
         global bundle_identifier, app_version
         print("[+] Downloading...")
-        subprocess.call(
-            [
-                "wget",
-                data["download_link"],
-                "-O",
-                f"{bundle_identifier}-{app_version}.apk",
-            ]
-        )
+        try:
+            subprocess.call(
+                [
+                    "wget",
+                    data["download_link"],
+                    "-O",
+                    f"{bundle_identifier}-{app_version}.apk",
+                ]
+            )
+        except OSError as e:
+            logger.error(f"Failed to start wget process: {e}")
+        except subprocess.SubprocessError as e:
+            logger.error(f"Subprocess error running wget: {e}")
 
     @classmethod
     def search_for_name(cls, name):
@@ -219,8 +374,9 @@ class ApkDownloader_Old:
         :returns: A list of search results.
         :rtype: list of dict
         """
+        urls = cls._get_urls()
         res = requests.get(
-            f"{cls.search_url}/{name}",
+            f"{urls['search']}/{name}",
             headers=cls.headers,
             allow_redirects=True,
             timeout=10,
@@ -231,8 +387,8 @@ class ApkDownloader_Old:
         web_data = BS(res.content, "html.parser")
         links = web_data.findAll("a")
 
-        # take top 5 hits of the links
-        TOP_HITS = 5
+        # take top hits from config (default 5)
+        TOP_HITS = cls._get_search_limit()
         counter = 0
         search_results = []
 
@@ -242,17 +398,19 @@ class ApkDownloader_Old:
             title = link.get("title")
 
             # only consider links for APKs
-            if not title or title.split()[0] != "download":
+            if not title:
+                continue
+            title_parts = title.split()
+            if not title_parts or title_parts[0] != "download":
                 continue
 
             last_p = link.find_all("p")[-1]
             last_span = last_p.find_all("span")[-1]
             version_number = last_span.text
-            href = f"{cls.base_url}{link.get('href')}"
-            package_name = href.split("/")[-1]
+            href = f"{urls['base']}{link.get('href')}"
+            package_name = href.rsplit("/", maxsplit=1)[-1]
             title = " ".join(title.split()[1:])
 
-            # print(f"{title} {version_number} {href}")
             result = {
                 "title": title,
                 "package_name": package_name,
@@ -276,7 +434,9 @@ class ApkDownloader_Old:
         console = SandroidConsole.get()
         console.print("[bold]+++ Search Results +++[/bold]")
         for i, result in enumerate(search_results):
-            console.print(f"    \\[{i}] {result['title']} {result['version']} ([accent]{result['package_name']}[/accent])")
+            console.print(
+                f"    \\[{i}] {result['title']} {result['version']} ([accent]{result['package_name']}[/accent])"
+            )
 
     @classmethod
     def get_versions(cls, result):
@@ -287,7 +447,8 @@ class ApkDownloader_Old:
         :returns: A list of available versions.
         :rtype: list of dict
         """
-        apk_url = f"{cls.version_url}{result['package_name']}"
+        urls = cls._get_urls()
+        apk_url = f"{urls['version']}{result['package_name']}"
 
         res = requests.get(
             apk_url, headers=cls.headers, allow_redirects=True, timeout=30
@@ -299,7 +460,7 @@ class ApkDownloader_Old:
         rows = web_data.findAll("tr")
         versions = []
 
-        TOP_HITS = 5
+        TOP_HITS = cls._get_search_limit()
         counter = 0
 
         for row in rows:
@@ -323,7 +484,7 @@ class ApkDownloader_Old:
                 _title = " ".join(link.get("title").split(" ")[1:-1])
                 versions.append(
                     {
-                        "url": f"{cls.base_url}{_link}",
+                        "url": f"{urls['base']}{_link}",
                         "version": _version,
                         "package_name": result["package_name"],
                         "arch": arch,
@@ -343,9 +504,13 @@ class ApkDownloader_Old:
         :type versions: list of dict
         """
         console = SandroidConsole.get()
-        console.print(f"[bold]+++ Versions for {versions[0]['package_name']} +++[/bold]")
+        console.print(
+            f"[bold]+++ Versions for {versions[0]['package_name']} +++[/bold]"
+        )
         for i, version in enumerate(versions):
-            console.print(f"    \\[{i}] {version['version']} {version['arch']} ([secondary]{version['updated']}[/secondary])")
+            console.print(
+                f"    \\[{i}] {version['version']} {version['arch']} ([secondary]{version['updated']}[/secondary])"
+            )
 
     @classmethod
     def get_real_download_url(cls, version_url):
@@ -375,7 +540,7 @@ class ApkDownloader_Old:
             return None
 
         data = res.json()
-        if data["status"] == True:
+        if data["status"] is True:
             return data["download_link"]
         return None
 

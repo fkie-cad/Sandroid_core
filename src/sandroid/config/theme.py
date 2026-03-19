@@ -4,15 +4,12 @@ This module provides terminal-independent color theming using Rich.
 Users can select from preset themes via configuration.
 """
 
-from typing import Dict, List
-
 from rich.style import Style
 from rich.theme import Theme
 
-
 # Theme presets with semantic color mappings
 # Each preset defines colors for different UI elements
-THEME_PRESETS: Dict[str, Dict[str, str]] = {
+THEME_PRESETS: dict[str, dict[str, str]] = {
     "default": {
         # Primary UI colors
         "primary": "cyan",
@@ -145,7 +142,7 @@ def create_rich_theme(preset_name: str = "default") -> Theme:
     return Theme({name: Style.parse(style) for name, style in colors.items()})
 
 
-def get_preset_names() -> List[str]:
+def get_preset_names() -> list[str]:
     """Return list of available theme preset names.
 
     Returns:
@@ -154,7 +151,7 @@ def get_preset_names() -> List[str]:
     return list(THEME_PRESETS.keys())
 
 
-def get_preset_colors(preset_name: str = "default") -> Dict[str, str]:
+def get_preset_colors(preset_name: str = "default") -> dict[str, str]:
     """Get the color definitions for a specific preset.
 
     Args:

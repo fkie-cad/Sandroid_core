@@ -15,7 +15,7 @@ _sqlite_file_cache = {}
 
 
 def is_sqlite_file(file_path):
-    """Check if a file is a SQLite database by reading its magic header.
+    r"""Check if a file is a SQLite database by reading its magic header.
 
     SQLite databases have a distinctive 16-byte header starting with "SQLite format 3\x00".
     This function reads the header to determine if a file is a SQLite database,
@@ -36,7 +36,7 @@ def is_sqlite_file(file_path):
             is_sqlite = header.startswith(b"SQLite format 3\x00")
             _sqlite_file_cache[file_path] = is_sqlite
             return is_sqlite
-    except (FileNotFoundError, PermissionError, OSError, IOError) as e:
+    except (FileNotFoundError, PermissionError, OSError) as e:
         logger.debug(f"Could not read file header for {file_path}: {e}")
         _sqlite_file_cache[file_path] = False
         return False
@@ -131,18 +131,38 @@ def db_diff_helper(db_path1, db_path2):
 
     result = ""
     logger.debug(f"Calculating Database Diff between {db_path1} and {db_path2}")
-    deleted_rows = subprocess.run(
-        ["sqldiff", db_path2, db_path1], check=False, capture_output=True, text=False
-    )
+    try:
+        deleted_rows = subprocess.run(
+            ["sqldiff", db_path2, db_path1],
+            check=False,
+            capture_output=True,
+            text=False,
+        )
+    except OSError as e:
+        logger.error(f"Failed to start sqldiff process: {e}")
+        return "\tError: sqldiff command not found or failed to start"
+    except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error running sqldiff: {e}")
+        return "\tError: sqldiff subprocess failed"
     try:
         deleted_stdout = deleted_rows.stdout.decode("utf-8", errors="replace")
     except UnicodeDecodeError:
         deleted_stdout = deleted_rows.stdout.decode("latin-1")
 
     logger.debug(f"Calculating reverse Database Diff between {db_path1} and {db_path2}")
-    new_rows = subprocess.run(
-        ["sqldiff", db_path1, db_path2], check=False, capture_output=True, text=False
-    )
+    try:
+        new_rows = subprocess.run(
+            ["sqldiff", db_path1, db_path2],
+            check=False,
+            capture_output=True,
+            text=False,
+        )
+    except OSError as e:
+        logger.error(f"Failed to start sqldiff process: {e}")
+        return "\tError: sqldiff command not found or failed to start"
+    except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error running sqldiff: {e}")
+        return "\tError: sqldiff subprocess failed"
     try:
         new_stdout = new_rows.stdout.decode("utf-8", errors="replace")
     except UnicodeDecodeError:
@@ -249,20 +269,35 @@ def db_diff_helper(db_path1, db_path2):
     return result[:-1]
 
 
+def _integrate_pending_writes(db_path, label, extra_pragmas=None):
+    """Integrate pending writes (WAL or journal) into a SQLite database.
+
+    :param db_path: The full path to the database file.
+    :type db_path: str
+    :param label: Human-readable label for log messages (e.g., "WAL", "journal").
+    :type label: str
+    :param extra_pragmas: Optional list of PRAGMA statements to execute before VACUUM.
+    :type extra_pragmas: list[str] or None
+    """
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    try:
+        for pragma in extra_pragmas or []:
+            cur.execute(pragma)
+        cur.execute("VACUUM")
+    except Exception as e:
+        logger.warning(f"Failed to integrate {label} file for {db_path}: {e}")
+    finally:
+        con.close()
+
+
 def db_wal_helper(db_path):
     """Integrates any temporary database files (.db-wal) that may be around.
 
     :param db_path: The full path to the database file whose .db-wal file to integrate.
     :type db_path: str
     """
-    con = sqlite3.connect(db_path)
-    cur = con.cursor()
-    try:
-        cur.execute("VACUUM")
-    except Exception as e:
-        logger.warning(f"Failed to integrate WAL file for {db_path}: {e}")
-    finally:
-        con.close()
+    _integrate_pending_writes(db_path, "WAL")
 
 
 def db_journal_helper(db_path):
@@ -271,17 +306,9 @@ def db_journal_helper(db_path):
     :param db_path: The full path to the database file whose .db-journal file to integrate.
     :type db_path: str
     """
-    con = sqlite3.connect(db_path)
-    cur = con.cursor()
-    try:
-        # PRAGMA integrity_check ensures the journal is applied
-        cur.execute("PRAGMA integrity_check")
-        # VACUUM rebuilds the database
-        cur.execute("VACUUM")
-    except Exception as e:
-        logger.warning(f"Failed to integrate journal file for {db_path}: {e}")
-    finally:
-        con.close()
+    _integrate_pending_writes(
+        db_path, "journal", extra_pragmas=["PRAGMA integrity_check"]
+    )
 
 
 def xml_diff(xml_path1, xml_path2, noise_path=None):
@@ -317,6 +344,7 @@ def xml_diff(xml_path1, xml_path2, noise_path=None):
 
 def xml_diff_helper(xml_path1, xml_path2):
     """Helper function to calculate the differences between two XML files.
+
     This function differentiates between normal XML files and binary XML (ABX) files.
 
     :param xml_path1: The full path to the first XML file.
@@ -326,14 +354,16 @@ def xml_diff_helper(xml_path1, xml_path2):
     :returns: A formatted string naming entries that have been added and removed.
     :rtype: str
     """
-    file = open(xml_path1, "rb")
-    # Read the first 3 bytes to check if it's an ABX file
-    first_bytes = file.read(3)
-    file.close()
+    try:
+        with open(xml_path1, "rb") as f:
+            first_bytes = f.read(3)
+    except OSError as e:
+        logger.error(f"Failed to open XML file '{xml_path1}': {e}")
+        return f"\tError: Could not open file {xml_path1}"
+
     if first_bytes == b"ABX":
         logger.debug("ABX file detected")
         return abx_xml_diff(xml_path1, xml_path2)
-    # Use full paths for txt_xml_diff
     return txt_xml_diff(xml_path1, xml_path2)
 
 
@@ -368,12 +398,13 @@ def txt_xml_diff(file_path1, file_path2):
 def abx_xml_diff(file_path1, file_path2):
     """Calculates the differences between two ABX XML files.
 
-    :param xml_file: The name of the XML file to compare.
-    :type xml_file: str
-    :param dir1: The base directory of the first XML version.
-    :type dir1: str
-    :param dir2: The base directory of the second XML version.
-    :type dir2: str
+    Converts ABX binary XML files to text XML using ccl_abx, then delegates
+    to txt_xml_diff for the actual comparison.
+
+    :param file_path1: The full path to the first ABX XML file.
+    :type file_path1: str
+    :param file_path2: The full path to the second ABX XML file.
+    :type file_path2: str
     :returns: A formatted string naming entries that have been added and removed.
     :rtype: str
     """
@@ -381,19 +412,35 @@ def abx_xml_diff(file_path1, file_path2):
     logger.debug({"file_path1": file_path1, "file_path2": file_path2})
 
     # Convert the ABX files to XML in memory
-    first_xml = subprocess.run(
-        ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout
+    try:
+        first_xml_result = subprocess.run(
+            ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        first_xml = first_xml_result.stdout
+    except OSError as e:
+        logger.error(f"Failed to start ABX conversion process: {e}")
+        return "\tError: ABX conversion failed - python3 or ccl_abx.py not found"
+    except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error during ABX conversion: {e}")
+        return "\tError: ABX conversion subprocess failed"
 
-    second_xml = subprocess.run(
-        ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout
+    try:
+        second_xml_result = subprocess.run(
+            ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        second_xml = second_xml_result.stdout
+    except OSError as e:
+        logger.error(f"Failed to start ABX conversion process: {e}")
+        return "\tError: ABX conversion failed - python3 or ccl_abx.py not found"
+    except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error during ABX conversion: {e}")
+        return "\tError: ABX conversion subprocess failed"
 
     logger.debug("Converting ABX files to XML")
     logger.debug({"first_xml": first_xml, "second_xml": second_xml})
@@ -483,23 +530,38 @@ def txt_diff(txt_file):
     :returns: A formatted string naming entries that have been added and removed.
     :rtype: str
     """
-    old = open(f"{os.getenv('RAW_RESULTS_PATH')}first_pull/{txt_file}")
-    new = open(f"{os.getenv('RAW_RESULTS_PATH')}second_pull/{txt_file}")
+    raw_results = os.getenv("RAW_RESULTS_PATH", "")
+    old_path = os.path.join(raw_results, "first_pull", txt_file)
+    new_path = os.path.join(raw_results, "second_pull", txt_file)
 
-    old_text = old.readlines()
-    new_text = new.readlines()
+    try:
+        with open(old_path) as f:
+            old_text = f.readlines()
+    except OSError as e:
+        logger.error(f"Failed to open old text file '{old_path}': {e}")
+        return f"\tError: Could not open file {old_path}"
 
-    result = ""
+    try:
+        with open(new_path) as f:
+            new_text = f.readlines()
+    except OSError as e:
+        logger.error(f"Failed to open new text file '{new_path}': {e}")
+        return f"\tError: Could not open file {new_path}"
 
+    # Use sets for efficient membership testing
+    old_set = set(old_text)
+    new_set = set(new_text)
+
+    parts = []
     for line in old_text:
-        if line not in new_text:
-            result = result + "\t[LINE DELETED] " + line
+        if line not in new_set:
+            parts.append(f"\t[LINE DELETED] {line}")
 
     for line in new_text:
-        if line not in old_text:
-            result = result + "\t[LINE ADDED] " + line
+        if line not in old_set:
+            parts.append(f"\t[LINE ADDED] {line}")
 
-    return result
+    return "".join(parts)
 
 
 # to get the sqldiff tool, run "sudo apt install sqlite3-tools"

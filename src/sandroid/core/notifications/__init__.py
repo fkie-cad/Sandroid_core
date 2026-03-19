@@ -4,21 +4,21 @@ This module provides a frontend-agnostic notification system that can be used
 across multiple interfaces (CLI, Web, GUI).
 
 Current Status:
-    - Phase 1: Modal notifications implemented via Toolbox methods
+    - Phase 1: Modal notifications implemented via UIService
     - Phase 2: Full abstraction layer (future implementation)
 
 Usage (Current - Phase 1):
-    from sandroid.core.toolbox import Toolbox
+    from sandroid.services import get_ui_service
 
     # Display blocking warning
-    Toolbox.show_blocking_warning(
+    get_ui_service().show_blocking_warning(
         title="Frida Server Required",
         message="No frida server is running.",
         action_hint="Press [f] to install and start Frida server"
     )
 
     # Display blocking error
-    Toolbox.show_blocking_error(
+    get_ui_service().show_blocking_error(
         title="Operation Failed",
         message="Failed to install APK: Permission denied"
     )

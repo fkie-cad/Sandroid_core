@@ -1,483 +1,990 @@
 """Main Sandroid TUI Application.
 
-This module implements the Textual-based terminal user interface for Sandroid.
-It provides a split-pane layout with menu navigation and real-time background
-activity monitoring.
+Textual-based terminal UI for Sandroid providing a mitmproxy-like experience.
+
+Extracted modules:
+- ``terminal_reset`` -- terminal cleanup sequences
+- ``launcher`` -- ``run_tui`` / ``run_tui_guarded``
+- ``activity_log_adapter`` -- safe activity-log wrapper
+- ``callback_bundle`` -- ``TUICallbackBundle`` dataclass
+- ``css_resolver`` -- CSS file resolution logic
 """
 
+import atexit
 import logging
-from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
-from rich.panel import Panel
-from rich.text import Text
-from textual import events
-from textual.app import App, ComposeResult
+from textual.app import App
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, ScrollableContainer, Vertical
-from textual.reactive import reactive
-from textual.widgets import Footer, Header, Label, RichLog, Static
+
+from sandroid.tui.terminal_reset import reset_terminal
+
+atexit.register(reset_terminal)
+
+from sandroid.core.enums import ViewMode
+from sandroid.core.menu_controller import MenuController
+from sandroid.services import get_spotlight_service, get_task_service, get_ui_service
+from sandroid.tui.activity_log_adapter import ActivityLogAdapter
+from sandroid.tui.callback_bundle import TUICallbackBundle
+from sandroid.tui.controllers import (
+    APKInstallController,
+    DeviceController,
+    ForensicAPKController,
+    ForensicController,
+    FSMonController,
+    NetworkCaptureController,
+    ObjectionResumeController,
+    ProxyController,
+    QuitController,
+    RecordingController,
+    ScreenshotController,
+    SpotlightController,
+    TrigDroidController,
+    WidgetRefreshController,
+)
+from sandroid.tui.css_resolver import (
+    DEFAULT_CSS_PATH,
+    load_css_content,
+    resolve_css_path,
+)
+from sandroid.tui.launcher import run_tui, run_tui_guarded
+from sandroid.tui.modal_manager import ModalManager
+from sandroid.tui.screens.command_palette import CommandPalette
+from sandroid.tui.screens.help_screen import HelpScreen
+from sandroid.tui.screens.main_screen import MainScreen
+from sandroid.tui.themes import THEMES, get_theme
+from sandroid.tui.utils import copy_to_clipboard
+from sandroid.tui.widgets import ActivityLog, MenuPanel
+
+if TYPE_CHECKING:
+    from sandroid.config import SandroidConfig
+    from sandroid.core.actionQ import ActionQ
 
 logger = logging.getLogger(__name__)
 
-
-class MenuSection(Static):
-    """A section in the menu with a title and items."""
-
-    def __init__(self, title: str, items: list[tuple[str, str]], **kwargs):
-        """Initialize a menu section.
-
-        Args:
-            title: Section title (e.g., "Action Recording & Playback")
-            items: List of (key, description) tuples
-        """
-        super().__init__(**kwargs)
-        self.section_title = title
-        self.items = items
-
-    def compose(self) -> ComposeResult:
-        yield Static(
-            f"[bold cyan]=== {self.section_title} ===[/bold cyan]",
-            classes="menu-section-title",
-        )
-        for key, description in self.items:
-            yield Static(f"  [{key}] {description}", classes="menu-item")
+# Module-level reference for cross-thread access (ContextVars don't work across threads).
+_current_tui_app: Optional["SandroidTUI"] = None
 
 
-class StatusBar(Static):
-    """Status bar showing current application state."""
-
-    frida_status = reactive("Not running")
-    spotlight_app = reactive("Not set")
-    current_view = reactive("FORENSIC")
-
-    def render(self) -> str:
-        frida_color = "green" if self.frida_status == "Running" else "red"
-        return (
-            f"Frida: [{frida_color}]{self.frida_status}[/{frida_color}] | "
-            f"App: [yellow]{self.spotlight_app}[/yellow] | "
-            f"View: [bold cyan]{self.current_view}[/bold cyan]"
-        )
-
-
-class BackgroundActivityLog(RichLog):
-    """Log widget for displaying background task output."""
-
-    def __init__(self, **kwargs):
-        super().__init__(highlight=True, markup=True, wrap=True, **kwargs)
-
-
-class MenuPanel(ScrollableContainer):
-    """Scrollable menu panel with all menu sections."""
-
-    current_view = reactive("forensic")
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._menu_sections = {}
-
-    def compose(self) -> ComposeResult:
-        """Compose the menu based on current view."""
-        yield Static("[bold]Sandroid Interactive Menu[/bold]", id="menu-title")
-        yield Static("", id="menu-content")
-
-    def update_menu(self, view: str = None):
-        """Update menu content based on view."""
-        if view:
-            self.current_view = view
-
-        content = self._build_menu_content()
-        menu_content = self.query_one("#menu-content", Static)
-        menu_content.update(content)
-
-    def _build_menu_content(self) -> str:
-        """Build menu content string based on current view."""
-        lines = []
-
-        if self.current_view == "forensic":
-            lines.extend(
-                [
-                    "",
-                    "[bold cyan]=== Action Recording & Playback ===[/bold cyan]",
-                    "  [r] record an action",
-                    "  [p] play the currently loaded action",
-                    "  [x] export currently loaded action",
-                    "  [i] import action",
-                    "",
-                    "[bold cyan]=== Spotlight Application ===[/bold cyan]",
-                    "  [c] set current app as spotlight app [ATTACH]",
-                    "  [C] select app for spawning [SPAWN]",
-                    "  [d] dump memory of spotlight app",
-                    "",
-                    "[bold cyan]=== Spotlight Files ===[/bold cyan]",
-                    "  [l] list/add spotlight file",
-                    "  [v] remove spotlight file",
-                    "  [u] pull spotlight files",
-                    "  [o] observe file system changes (fsmon)",
-                    "  [SPACE] pull spotlight DB file",
-                    "",
-                    "[bold cyan]=== Emulator Management ===[/bold cyan]",
-                    "  [e] show emulator information",
-                    "  [f] run/install frida server",
-                    "  [s] take screenshot",
-                    "  [g] grab video of screen",
-                    "",
-                ]
-            )
-        elif self.current_view == "malware":
-            lines.extend(
-                [
-                    "",
-                    "[bold cyan]=== Spotlight Application ===[/bold cyan]",
-                    "  [c] set current app as spotlight app [ATTACH]",
-                    "  [C] select app for spawning [SPAWN]",
-                    "",
-                    "[bold cyan]=== Dynamic Analysis ===[/bold cyan]",
-                    "  [m] start dexray-intercept monitoring",
-                    "  [t] run trigdroid automatic malware trigger",
-                    "",
-                    "[bold cyan]=== Network Management ===[/bold cyan]",
-                    "  [y] set/unset network proxy",
-                    "  [h] start friTap hooking",
-                    "  [w] write network capture file",
-                    "",
-                ]
-            )
-        elif self.current_view == "security":
-            lines.extend(
-                [
-                    "",
-                    "[bold cyan]=== Application Management ===[/bold cyan]",
-                    "  [c] set current app as spotlight app [ATTACH]",
-                    "  [C] select app for spawning [SPAWN]",
-                    "  [n] new APK installation",
-                    "",
-                    "[bold cyan]=== Static Analysis ===[/bold cyan]",
-                    "  [a] analyze spotlight app with dexray-insight",
-                    "",
-                    "[bold cyan]=== System ===[/bold cyan]",
-                    "  [e] show emulator information",
-                    "  [f] run/install frida server",
-                    "",
-                ]
-            )
-
-        # Common footer
-        lines.extend(
-            [
-                "",
-                "[dim]Tip: Press the same key to stop/toggle active background processes[/dim]",
-                "",
-                "[TAB] switch view  |  [q] quit",
-            ]
-        )
-
-        return "\n".join(lines)
+def get_tui_app() -> Optional["SandroidTUI"]:
+    """Get the currently running TUI app instance (or None)."""
+    return _current_tui_app
 
 
 class SandroidTUI(App):
-    """Main Sandroid TUI Application.
+    """Textual-based TUI for Android forensic analysis (mitmproxy-like UX)."""
 
-    A Textual-based terminal user interface with split-pane layout showing
-    the menu on the left and background activity on the right.
-    """
+    TITLE = "Sandroid"
+    CSS_PATH = None  # loaded dynamically via css_resolver
+    ENABLE_COMMAND_PALETTE = False  # we use our own CommandPalette
 
-    CSS = """
-    Screen {
-        layout: horizontal;
-    }
-
-    #left-panel {
-        width: 50%;
-        height: 100%;
-        border: solid cyan;
-        padding: 1;
-    }
-
-    #right-panel {
-        width: 50%;
-        height: 100%;
-        border: solid green;
-        padding: 1;
-    }
-
-    #menu-title {
-        text-align: center;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    #menu-content {
-        height: auto;
-    }
-
-    #status-bar {
-        dock: top;
-        height: 1;
-        background: $surface;
-        padding: 0 1;
-    }
-
-    #activity-title {
-        text-align: center;
-        text-style: bold;
-        margin-bottom: 1;
-    }
-
-    #activity-log {
-        height: 100%;
-    }
-
-    .menu-section-title {
-        color: cyan;
-        text-style: bold;
-        margin-top: 1;
-    }
-
-    .menu-item {
-        padding-left: 2;
-    }
-
-    Footer {
-        background: $surface;
-    }
-    """
-
+    # fmt: off
     BINDINGS = [
-        Binding("tab", "switch_view", "Switch View"),
+        # Navigation
+        Binding("tab", "switch_view", "Switch View", priority=True),
+        Binding("D", "show_device_selector", "Devices", priority=True),
         Binding("q", "quit", "Quit"),
-        # Forensic view bindings
-        Binding("r", "menu_action('record')", "Record", show=False),
-        Binding("p", "menu_action('play')", "Play", show=False),
-        Binding("x", "menu_action('export')", "Export", show=False),
-        Binding("i", "menu_action('import')", "Import", show=False),
-        Binding(
-            "c", "menu_action('spotlight_attach')", "Spotlight (Attach)", show=False
-        ),
-        Binding("C", "menu_action('spotlight_spawn')", "Spotlight (Spawn)", show=False),
-        Binding("d", "menu_action('dump_memory')", "Dump Memory", show=False),
-        Binding("l", "menu_action('list_files')", "List Files", show=False),
-        Binding("v", "menu_action('remove_file')", "Remove File", show=False),
-        Binding("u", "menu_action('pull_files')", "Pull Files", show=False),
-        Binding("o", "menu_action('fsmon')", "FSMon", show=False),
-        Binding("space", "menu_action('pull_spotlight')", "Pull Spotlight", show=False),
-        Binding("e", "menu_action('emulator_info')", "Emulator Info", show=False),
-        Binding("f", "menu_action('frida')", "Frida", show=False),
-        Binding("s", "menu_action('screenshot')", "Screenshot", show=False),
-        Binding("g", "menu_action('screenrecord')", "Screen Record", show=False),
-        # Malware view bindings
-        Binding("m", "menu_action('dexray')", "Dexray", show=False),
-        Binding("t", "menu_action('trigdroid')", "TrigDroid", show=False),
-        Binding("y", "menu_action('proxy')", "Proxy", show=False),
-        Binding("h", "menu_action('fritap')", "FriTap", show=False),
-        Binding("w", "menu_action('network_capture')", "Network Capture", show=False),
-        # Security view bindings
-        Binding("n", "menu_action('new_apk')", "New APK", show=False),
-        Binding("a", "menu_action('analyze')", "Analyze", show=False),
+        Binding("escape", "maybe_quit", "Back/Quit", priority=True),
+        Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
+        Binding("question_mark", "show_help", "Help", priority=True),
+        Binding("ctrl+p", "show_palette", "Commands", show=False),
+        # Vim-style scrolling
+        Binding("j", "scroll_down", "Down", show=False),
+        Binding("ctrl+j", "scroll_down", "Down", show=False),
+        Binding("ctrl+k", "scroll_up", "Up", show=False),
+        Binding("ctrl+d", "scroll_half_down", "Half Down", show=False),
+        Binding("ctrl+u", "scroll_half_up", "Half Up", show=False),
+        Binding("home", "scroll_top", "Top", show=False),
+        Binding("end", "scroll_bottom", "Bottom", show=False),
+        Binding("G", "handle_shift_g", "Bottom/Forensic APKs", show=False),
+        # Recording
+        Binding("r", "record", "Record", show=False),
+        Binding("p", "play", "Play", show=False),
+        Binding("x", "export_action", "Export", show=False),
+        Binding("i", "action_key('i')", "Import", show=False),
+        # Spotlight
+        Binding("c", "action_key('c')", "Spotlight Attach", show=False),
+        Binding("C", "action_key('C')", "Spotlight Spawn", show=False),
+        Binding("d", "action_key('d')", "Dump Memory", show=False),
+        # Files
+        Binding("l", "spotlight_files", "Spotlight Files", show=False),
+        Binding("v", "action_key('v')", "Remove File", show=False),
+        Binding("u", "action_key('u')", "Pull Files", show=False),
+        Binding("o", "fsmon", "FSMon", show=False),
+        Binding("space", "action_key(' ')", "Pull Spotlight DB", show=False),
+        # Emulator
+        Binding("e", "action_key('e')", "Emulator Info", show=False),
+        Binding("E", "action_key('E')", "Device Settings", show=False),
+        Binding("f", "action_key('f')", "Frida", show=False),
+        Binding("s", "screenshot", "Screenshot", show=False),
+        Binding("g", "action_key('g')", "Screen Record", show=False),
+        # Analysis
+        Binding("m", "action_key('m')", "Dexray", show=False),
+        Binding("t", "trigdroid", "TrigDroid", show=False),
+        Binding("k", "action_key('k')", "Reconfigure Hooks", show=False),
+        Binding("a", "action_key('a')", "Analyze", show=False),
+        Binding("b", "objection", "Objection", show=False),
+        Binding("O", "resume_objection", "Resume Objection", show=False),
+        Binding("F", "forensic_evidence", "Forensic Evidence", show=False),
+        # Network
+        Binding("y", "proxy", "Proxy", show=False),
+        Binding("h", "action_key('h')", "FriTap", show=False),
+        Binding("w", "network_capture", "Network Capture", show=False),
+        # Other
+        Binding("n", "install_apk", "Install APK", show=False),
+        # Snapshots
+        Binding("0", "action_key('0')", "Snapshots", show=False),
+        Binding("1", "action_key('1')", "Snapshot 1", show=False),
+        Binding("2", "action_key('2')", "Snapshot 2", show=False),
+        Binding("3", "action_key('3')", "Snapshot 3", show=False),
+        Binding("4", "action_key('4')", "Snapshot 4", show=False),
+        Binding("5", "action_key('5')", "Snapshot 5", show=False),
+        Binding("6", "action_key('6')", "Snapshot 6", show=False),
+        Binding("7", "action_key('7')", "Snapshot 7", show=False),
+        Binding("8", "action_key('8')", "Snapshot 8", show=False),
+        # Clipboard / Settings
+        Binding("Y", "copy_log", "Copy Log", show=False),
+        Binding("comma", "show_settings", "Settings", show=True),
     ]
+    # fmt: on
 
-    current_view = reactive("forensic")
-    view_cycle = ["forensic", "malware", "security"]
-
-    def __init__(self, action_queue=None, **kwargs):
+    def __init__(
+        self,
+        action_queue: "ActionQ" = None,
+        initial_theme: str = "default",
+        custom_css_path: Path | str | None = None,
+        startup_config: "SandroidConfig | None" = None,
+        **kwargs,
+    ):
         """Initialize the TUI.
 
         Args:
-            action_queue: Optional ActionQ instance for executing menu actions
+            action_queue: ActionQ instance for menu actions.
+            initial_theme: Name of the initial theme.
+            custom_css_path: Optional path to custom CSS file.
+            startup_config: Config to pass to StartupScreen for deferred init.
+                If None, initialization is assumed to have already happened.
         """
-        super().__init__(**kwargs)
+        logger.debug("start for real")
+        # Pre-super init (Textual may access attributes during __init__)
         self.action_queue = action_queue
-        self._event_handlers = []
+        self._startup_config = startup_config
+        self._controller = None
+        self._sandroid_config = self._load_config()
+        self._sandroid_css_path = resolve_css_path(
+            custom_css_path, self._sandroid_config
+        )
+        self._css_content: str | None = None
+        self._sandroid_theme_name = (
+            initial_theme if initial_theme in THEMES else "default"
+        )
+        self._sandroid_theme = get_theme(self._sandroid_theme_name)
+        self._modal_manager: ModalManager | None = None
+        self._sub_title = "Android Forensic Analysis"
 
-    def compose(self) -> ComposeResult:
-        """Create the UI layout."""
-        yield Header(show_clock=True)
+        super().__init__(**kwargs)
 
-        with Horizontal():
-            with Vertical(id="left-panel"):
-                yield StatusBar(id="status-bar")
-                yield MenuPanel(id="menu-panel")
+        # Post-super init
+        self._controller = MenuController.get()
+        self._activity_log = ActivityLogAdapter(self)
+        self._cb = self._build_callback_bundle()
+        self._init_controllers()
 
-            with Vertical(id="right-panel"):
-                yield Static("[bold]Background Activity[/bold]", id="activity-title")
-                yield BackgroundActivityLog(id="activity-log")
+    def _build_callback_bundle(self) -> TUICallbackBundle:
+        """Create the callback bundle used by controller initialisation."""
+        return TUICallbackBundle(
+            log_info=self._activity_log.log_info,
+            log_warning=self._activity_log.log_warning,
+            log_error=self._activity_log.log_error,
+            log_success=self._activity_log.log_success,
+            log_message=self._activity_log.log_message,
+            log_task_started=self._activity_log.log_task_started,
+            log_task_stopped=self._activity_log.log_task_stopped,
+            push_modal=self.push_screen,
+            run_worker=self.run_worker,
+            call_from_thread=self.call_from_thread,
+            force_ui_refresh=self._force_ui_refresh,
+            refresh_status_bar=self._refresh_status_bar,
+            get_current_view=self._get_current_view,
+            scroll_to_bottom=self._activity_log.scroll_to_bottom,
+        )
 
-        yield Footer()
+    def _init_controllers(self) -> None:
+        """Initialize all TUI controllers with UI callbacks."""
+        cb = self._cb
+
+        self._recording_controller = RecordingController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            run_worker=cb.run_worker,
+            call_from_thread=cb.call_from_thread,
+            force_ui_refresh=cb.force_ui_refresh,
+        )
+
+        self._fsmon_controller = FSMonController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            log_message=cb.log_message,
+            log_task_started=cb.log_task_started,
+            log_task_stopped=cb.log_task_stopped,
+            push_modal=cb.push_modal,
+            call_from_thread=cb.call_from_thread,
+            force_ui_refresh=cb.force_ui_refresh,
+            get_current_view=cb.get_current_view,
+            show_minimized_bar=self._show_minimized_bar,
+            hide_minimized_bar=self._hide_minimized_bar,
+        )
+
+        self._spotlight_controller = SpotlightController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            get_current_view=cb.get_current_view,
+        )
+
+        self._trigdroid_controller = TrigDroidController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            force_ui_refresh=cb.force_ui_refresh,
+        )
+
+        self._forensic_apk_controller = ForensicAPKController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            force_ui_refresh=cb.force_ui_refresh,
+            get_current_view=cb.get_current_view,
+            scroll_to_bottom=cb.scroll_to_bottom,
+        )
+
+        self._forensic_controller = ForensicController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            push_modal=cb.push_modal,
+        )
+
+        self._device_controller = DeviceController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            push_modal=cb.push_modal,
+            schedule_timer=self.set_timer,
+            refresh_ui=cb.force_ui_refresh,
+        )
+
+        self._widget_refresh_controller = WidgetRefreshController(
+            query_widget=self.query_one,
+            query_from_screen=lambda w_id, w_type: (
+                self.screen.query_one(w_id, w_type)
+                if isinstance(self.screen, MainScreen)
+                else None
+            ),
+            is_main_screen=lambda: isinstance(self.screen, MainScreen),
+            refresh_app=self.refresh,
+            refresh_screen=lambda: (
+                self.screen.refresh(layout=True)
+                if isinstance(self.screen, MainScreen)
+                else None
+            ),
+        )
+
+        self._quit_controller = QuitController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_task_stopped=cb.log_task_stopped,
+            push_modal=cb.push_modal,
+            get_running_tasks=get_task_service().get_running,
+            get_task=get_task_service().get_task,
+            stop_task=get_task_service().stop,
+            is_main_screen=lambda: isinstance(self.screen, MainScreen),
+            get_screen_stack=lambda: self.screen_stack,
+            get_current_screen=lambda: self.screen,
+            pop_screen=self.pop_screen,
+            exit_app=lambda: super(SandroidTUI, self).exit(),
+            force_ui_refresh=cb.force_ui_refresh,
+        )
+
+        self._network_capture_controller = NetworkCaptureController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            run_worker=cb.run_worker,
+            call_from_thread=cb.call_from_thread,
+        )
+
+        self._proxy_controller = ProxyController(
+            log_info=cb.log_info,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            refresh_status_bar=cb.refresh_status_bar,
+        )
+
+        self._screenshot_controller = ScreenshotController(
+            log_info=cb.log_info,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+        )
+
+        self._apk_install_controller = APKInstallController(
+            log_info=cb.log_info,
+            log_error=cb.log_error,
+            log_success=cb.log_success,
+            push_modal=cb.push_modal,
+            force_ui_refresh=cb.force_ui_refresh,
+        )
+
+        self._objection_resume_controller = ObjectionResumeController(
+            log_info=cb.log_info,
+            log_warning=cb.log_warning,
+            log_error=cb.log_error,
+            push_modal=cb.push_modal,
+        )
+
+    def _load_config(self):
+        """Load Sandroid config for TUI settings (returns None on failure)."""
+        try:
+            from sandroid.config.loader import ConfigLoader
+
+            loader = ConfigLoader()
+            return loader.load()
+        except Exception as e:
+            logger.debug(f"Could not load config: {e}")
+            return None
+
+    @property
+    def sandroid_config(self):
+        """Get the Sandroid config (for logo colors, etc.)."""
+        return self._sandroid_config
+
+    @property
+    def css(self) -> str:
+        """Get the CSS content (lazy-loaded, cached)."""
+        if self._css_content is None:
+            self._css_content = load_css_content(self._sandroid_css_path)
+            if not self._css_content:
+                logger.warning("CSS content empty, loading default")
+                self._css_content = load_css_content(DEFAULT_CSS_PATH)
+        return self._css_content
+
+    @property
+    def sandroid_css_path(self) -> Path:
+        """Get the path to the currently loaded CSS file."""
+        return self._sandroid_css_path
 
     def on_mount(self) -> None:
         """Called when the app is mounted."""
-        # Update menu with initial view
-        menu_panel = self.query_one("#menu-panel", MenuPanel)
-        menu_panel.update_menu(self.current_view)
+        global _current_tui_app
+        _current_tui_app = self
+        logger.debug("[APP MOUNT] Starting Sandroid TUI app mount")
+        self._modal_manager = ModalManager(self)
+        self._modal_manager.activate()
+        self._apply_theme(self._sandroid_theme)
 
-        # Subscribe to events
-        self._subscribe_to_events()
+        if self._startup_config is not None:
+            # Deferred init: show startup screen, run init in background
+            from sandroid.tui.screens.startup_screen import StartupScreen
 
-        # Log startup message
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        activity_log.write(
-            "[dim]Sandroid TUI started. Background activity will appear here.[/dim]"
-        )
-
-    def _subscribe_to_events(self) -> None:
-        """Subscribe to EventBus events."""
-        try:
-            from sandroid.core.events import EventBus, EventType
-
-            bus = EventBus.get()
-
-            # Task output handler
-            def on_task_output(event):
-                self.call_from_thread(self._handle_task_output, event)
-
-            bus.subscribe(EventType.TASK_OUTPUT, on_task_output)
-            self._event_handlers.append((EventType.TASK_OUTPUT, on_task_output))
-
-            # Task started handler
-            def on_task_started(event):
-                self.call_from_thread(self._handle_task_started, event)
-
-            bus.subscribe(EventType.TASK_STARTED, on_task_started)
-            self._event_handlers.append((EventType.TASK_STARTED, on_task_started))
-
-            # Task stopped handler
-            def on_task_stopped(event):
-                self.call_from_thread(self._handle_task_stopped, event)
-
-            bus.subscribe(EventType.TASK_STOPPED, on_task_stopped)
-            self._event_handlers.append((EventType.TASK_STOPPED, on_task_stopped))
-
-        except ImportError:
-            logger.warning(
-                "Events module not available, TUI will not receive background updates"
-            )
-
-    def _handle_task_output(self, event) -> None:
-        """Handle task output event."""
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        timestamp = event.data.get("timestamp", datetime.now().strftime("%H:%M:%S"))
-        task_name = event.data.get("task_name", "unknown")
-        message = event.data.get("message", "")
-        activity_log.write(
-            f"[dim]{timestamp}[/dim] [cyan]{task_name}:[/cyan] {message}"
-        )
-
-    def _handle_task_started(self, event) -> None:
-        """Handle task started event."""
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        display_name = event.data.get("display_name", event.data.get("name", "Unknown"))
-        app_name = event.data.get("app_name", "")
-        if app_name:
-            activity_log.write(
-                f"[green]>>> Task started: {display_name} on {app_name}[/green]"
-            )
+            self.push_screen(StartupScreen(config=self._startup_config))
         else:
-            activity_log.write(f"[green]>>> Task started: {display_name}[/green]")
+            # Already initialized (e.g. tests or Rich-mode fallback)
+            self._push_main_screen()
 
-    def _handle_task_stopped(self, event) -> None:
-        """Handle task stopped event."""
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        display_name = event.data.get("display_name", event.data.get("name", "Unknown"))
-        activity_log.write(f"[red]<<< Task stopped: {display_name}[/red]")
+    def on_startup_screen_init_complete(self, message) -> None:
+        """Handle successful initialization from StartupScreen."""
+        logger.debug(
+            "[APP] Received StartupScreen.InitComplete, switching to MainScreen"
+        )
+        self.call_later(self._transition_to_main_screen)
+
+    def _transition_to_main_screen(self) -> None:
+        """Replace StartupScreen with MainScreen via switch_screen.
+
+        Uses switch_screen (not push_screen) to remove StartupScreen from
+        the stack, stopping LoadingIndicator repaints that interfere with
+        MainScreen's mount chain.
+        """
+        logger.debug("[APP] Switching to MainScreen (replacing StartupScreen)")
+        try:
+            self.switch_screen(MainScreen(action_queue=self.action_queue))
+            logger.debug("[APP] MainScreen switched successfully")
+        except Exception as e:
+            logger.exception(f"[APP] Failed to switch to MainScreen: {e}")
+            return
+        self._post_main_screen_setup()
+
+    def _push_main_screen(self) -> None:
+        """Push MainScreen directly (used when no StartupScreen is shown)."""
+        logger.debug("[APP] Pushing MainScreen")
+        try:
+            self.push_screen(MainScreen(action_queue=self.action_queue))
+            logger.debug("[APP] MainScreen pushed successfully")
+        except Exception as e:
+            logger.exception(f"[APP] Failed to push MainScreen: {e}")
+            return
+        self._post_main_screen_setup()
+
+    def _post_main_screen_setup(self) -> None:
+        """Run common setup after MainScreen is installed."""
+        self._register_frida_device_change_callback()
+        logger.debug(
+            f"[APP MOUNT] Complete. Stack: {[type(s).__name__ for s in self.screen_stack]}"
+        )
+        self.call_later(self._check_devices_on_startup)
+        self.call_later(self._show_welcome_if_first_run)
+        # Pre-initialize command registry and package cache in background
+        self.run_worker(self._pre_init_commands, exclusive=False)
+        self.run_worker(self._pre_fetch_packages, exclusive=False)
+
+    async def _pre_init_commands(self) -> None:
+        """Eagerly initialize command registry so first keypress is fast."""
+        try:
+            from sandroid.core.actionq_commands import get_command_registry
+
+            get_command_registry()
+        except Exception as e:
+            logger.debug(f"Pre-init commands failed: {e}")
+
+    async def _pre_fetch_packages(self) -> None:
+        """Pre-populate package cache so app selection modal opens fast."""
+        try:
+            from sandroid.services import get_app_selection_service
+
+            get_app_selection_service().get_installed_packages(user_only=True)
+        except Exception as e:
+            logger.debug(f"Pre-fetch packages failed: {e}")
+
+    def _show_welcome_if_first_run(self) -> None:
+        """Show a welcome modal on the very first TUI launch.
+
+        Uses a marker file in the user config directory to track whether
+        the modal has already been displayed.
+        """
+        marker = self._get_user_config_dir() / ".tui_welcome_shown"
+        if marker.exists():
+            return
+
+        from sandroid.tui.modals.message_modal import MessageModal
+
+        def _on_dismiss(_result) -> None:
+            try:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+            except OSError as e:
+                logger.warning(f"Could not create welcome marker file: {e}")
+
+        self.push_screen(
+            MessageModal(
+                title="Welcome to Sandroid TUI",
+                message=(
+                    "This is the new default mode for Sandroid.\n"
+                    "\n"
+                    "For the legacy Rich interactive mode, use:\n"
+                    "  sandroid -i\n"
+                    "\n"
+                    "Press OK to continue."
+                ),
+            ),
+            _on_dismiss,
+        )
+
+    @staticmethod
+    def _get_user_config_dir() -> Path:
+        """Get the user config directory, respecting XDG_CONFIG_HOME."""
+        import os
+
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg:
+            return Path(xdg) / "sandroid"
+        return Path.home() / ".config" / "sandroid"
+
+    def _register_frida_device_change_callback(self) -> None:
+        """Register callback to invalidate Frida device cache on device change."""
+        try:
+            from sandroid.services import get_device_service, get_frida_session_service
+
+            device_service = get_device_service()
+            frida_service = get_frida_session_service()
+
+            def on_device_change(device) -> None:
+                """Handle device change - invalidate Frida device cache."""
+                frida_service.invalidate_frida_device_cache()
+                if device:
+                    logger.info(f"Device changed to: {device.serial}")
+                    frida_service.update_device_serial(device.serial)
+                else:
+                    logger.info("Device changed to: None")
+
+            device_service.register_device_change_callback(on_device_change)
+            logger.debug("Registered Frida device change callback")
+
+        except Exception as e:
+            logger.warning(f"Failed to register Frida device change callback: {e}")
+
+    def _check_devices_on_startup(self) -> None:
+        """Check for connected devices on startup - delegates to DeviceController."""
+        import threading
+
+        def _background_check():
+            self._device_controller.check_devices_on_startup()
+            self._run_deferred_setup_checks()
+
+        thread = threading.Thread(target=_background_check, daemon=True)
+        thread.start()
+
+    def _run_deferred_setup_checks(self) -> None:
+        """Run deferred (non-critical) setup checks in background."""
+        try:
+            from sandroid.services import get_setup_service
+
+            logger.debug("Running deferred setup checks in background")
+            get_setup_service().check_deferred_setup(publish_event=True)
+            logger.debug("Deferred setup checks completed")
+        except Exception as e:
+            logger.warning(f"Deferred setup checks failed: {e}")
+
+    def on_key(self, event) -> None:
+        """Debug handler to log key presses (only when DEBUG level is enabled)."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        screen_name = type(self.screen).__name__
+        stack_names = [type(s).__name__ for s in self.screen_stack]
+        logger.debug(
+            f"[KEY EVENT] key={event.key!r}, screen={screen_name}, stack={stack_names}"
+        )
+        if event.key == "escape":
+            logger.warning(
+                f"[ESCAPE PRESSED] screen={screen_name}, stack_len={len(self.screen_stack)}"
+            )
+
+    def _get_current_view(self) -> str:
+        """Get the current view from UIService."""
+        try:
+            return get_ui_service().get_current_view()
+        except Exception:
+            return ViewMode.FORENSIC.value
+
+    def action_request_quit(self) -> None:
+        """Show quit confirmation or stop running tasks."""
+        self._quit_controller.request_quit()
+
+    def action_maybe_quit(self) -> None:
+        """Handle ESC -- dismiss modal or show quit confirmation."""
+        self._quit_controller.maybe_quit()
+
+    def exit(self, result=None, return_code: int = 0) -> None:
+        """Exit with cleanup of sessions and workers."""
+        global _current_tui_app
+        _current_tui_app = None
+        self._quit_controller.force_exit()
+        try:
+            if hasattr(self, "workers") and self.workers:
+                self.workers.cancel_all()
+        except Exception:
+            pass
+        super().exit(result, return_code)
+
+    def _get_main_screen(self) -> MainScreen | None:
+        return self.screen if isinstance(self.screen, MainScreen) else None
 
     def action_switch_view(self) -> None:
         """Switch to the next view in the cycle."""
-        current_idx = self.view_cycle.index(self.current_view)
-        next_idx = (current_idx + 1) % len(self.view_cycle)
-        self.current_view = self.view_cycle[next_idx]
+        from textual.screen import ModalScreen
 
-        # Update menu
-        menu_panel = self.query_one("#menu-panel", MenuPanel)
-        menu_panel.update_menu(self.current_view)
+        if isinstance(self.screen, ModalScreen):
+            self.screen.focus_next()
+            return
 
-        # Update status bar
-        status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.current_view = self.current_view.upper()
+        main_screen = self._get_main_screen()
+        if main_screen:
+            main_screen.switch_view()
 
-        # Log the view change
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        activity_log.write(
-            f"[yellow]Switched to {self.current_view.upper()} view[/yellow]"
+    def action_show_help(self) -> None:
+        """Show the help overlay."""
+        current_view = self._get_current_view()
+        self.push_screen(HelpScreen(current_view=current_view))
+
+    def action_show_settings(self) -> None:
+        """Show the settings screen."""
+        from sandroid.tui.screens.settings_screen import SettingsScreen
+
+        def on_settings_result(result) -> None:
+            if result is not None:
+                self._sandroid_config = result
+                if hasattr(result, "tui") and result.tui:
+                    self._sandroid_theme_name = result.tui.theme
+                    self._sandroid_theme = get_theme(result.tui.theme)
+                self._activity_log.log_success("Settings saved")
+
+        self.push_screen(SettingsScreen(), on_settings_result)
+
+    def action_show_palette(self) -> None:
+        """Show the command palette."""
+        current_view = self._get_current_view()
+
+        def on_action_selected(action_name: str):
+            main_screen = self._get_main_screen()
+            if main_screen:
+                main_screen.execute_action(action_name)
+
+        self.push_screen(
+            CommandPalette(current_view=current_view, on_action=on_action_selected)
         )
 
-    def action_menu_action(self, action: str) -> None:
-        """Handle a menu action.
+    def action_show_device_selector(self) -> None:
+        """Show the device selection modal."""
+        from sandroid.core.toolbox import Toolbox
+        from sandroid.tui.modals import DeviceSelectionModal
 
-        Args:
-            action: The action identifier
-        """
-        activity_log = self.query_one("#activity-log", BackgroundActivityLog)
-        activity_log.write(f"[dim]Action triggered: {action}[/dim]")
+        dm = Toolbox.get_device_manager()
+        devices = dm.refresh_devices()
+        current_serial = dm.active_device.serial if dm.active_device else None
+        worker_kw = {
+            "run_worker": self.run_worker,
+            "call_from_thread": self.call_from_thread,
+            "notify": self.notify,
+        }
 
-        # If we have an action queue, delegate to it
-        if self.action_queue:
-            # Map action names to menu characters for compatibility
-            action_map = {
-                "record": "r",
-                "play": "p",
-                "export": "x",
-                "import": "i",
-                "spotlight_attach": "c",
-                "spotlight_spawn": "C",
-                "dump_memory": "d",
-                "list_files": "l",
-                "remove_file": "v",
-                "pull_files": "u",
-                "fsmon": "o",
-                "pull_spotlight": " ",
-                "emulator_info": "e",
-                "frida": "f",
-                "screenshot": "s",
-                "screenrecord": "g",
-                "dexray": "m",
-                "trigdroid": "t",
-                "proxy": "y",
-                "fritap": "h",
-                "network_capture": "w",
-                "new_apk": "n",
-                "analyze": "a",
-            }
-            char = action_map.get(action, action)
-            try:
-                self.action_queue.parse_interactive_char(char)
-            except Exception as e:
-                activity_log.write(f"[red]Error executing action: {e}[/red]")
+        def _parse_encoded_serial(serial: str):
+            """Parse ``__start_avd__`` / ``__restart_emulator__`` encoded serial."""
+            parts = serial.split("__")
+            if len(parts) >= 4:
+                snapshot = parts[4] if len(parts) > 4 and parts[4] else None
+                return parts[2], parts[3], snapshot
+            return None, None, None
 
-    def update_status(
-        self, frida_status: str = None, spotlight_app: str = None
-    ) -> None:
-        """Update the status bar.
+        def on_device_selected(serial: str | None) -> None:
+            if serial is None:
+                return
+            if serial.startswith("__start_avd__"):
+                name, mode, snap = _parse_encoded_serial(serial)
+                if name:
+                    self._device_controller.start_avd_with_boot_mode(
+                        name, mode, snap, **worker_kw
+                    )
+                return
+            if serial.startswith("__restart_emulator__"):
+                emu, mode, snap = _parse_encoded_serial(serial)
+                if emu:
+                    self._device_controller.restart_emulator_with_boot_mode(
+                        emu, mode, snap, **worker_kw
+                    )
+                return
+            if serial != current_serial:
+                if self._has_active_session():
+                    self._device_controller.show_device_switch_confirmation(
+                        serial, current_serial, on_confirm=self._perform_device_switch
+                    )
+                else:
+                    self._perform_device_switch(serial)
+            else:
+                self._update_status_bar()
 
-        Args:
-            frida_status: New frida status string
-            spotlight_app: New spotlight application name
-        """
-        status_bar = self.query_one("#status-bar", StatusBar)
-        if frida_status is not None:
-            status_bar.frida_status = frida_status
-        if spotlight_app is not None:
-            status_bar.spotlight_app = spotlight_app
+        self.push_screen(
+            DeviceSelectionModal(devices=devices, current_serial=current_serial),
+            on_device_selected,
+        )
 
-    def on_unmount(self) -> None:
-        """Clean up when the app is unmounted."""
-        # Unsubscribe from events
+    def _has_active_session(self) -> bool:
+        """True if background tasks or spotlight app are active."""
+        if get_task_service().get_running():
+            return True
+        spotlight = get_spotlight_service()
+        return bool(spotlight.get_app_tuple() or spotlight.get_spawn_package())
+
+    def _perform_device_switch(self, target_serial: str, cleanup: bool = False) -> None:
+        """Switch device and refresh UI."""
+        self._device_controller.switch_device(target_serial, cleanup=cleanup)
+        self.call_later(self._force_ui_refresh)
+
+    def _force_ui_refresh(self) -> None:
+        self._widget_refresh_controller.refresh_all()
+
+    def _update_status_bar(self) -> None:
+        self._widget_refresh_controller.refresh_status_bar()
+
+    def refresh_menu(self) -> None:
+        """Refresh the menu panel to reflect current state."""
+        self._widget_refresh_controller.refresh_menu()
+
+    def action_forensic_evidence(self) -> None:
+        """Run MVT forensic evidence scan."""
+        self._forensic_controller.show_forensic_evidence_modal(
+            get_current_view=self._get_current_view,
+            run_worker=self.run_worker,
+            call_from_thread=self.call_from_thread,
+            force_ui_refresh=self._force_ui_refresh,
+            on_mvt_result=self._handle_mvt_result,
+        )
+
+    def _handle_mvt_result(self, result) -> None:
+        self._forensic_apk_controller.handle_mvt_result(result)
+
+    def action_handle_shift_g(self) -> None:
+        self._forensic_apk_controller.handle_shift_g()
+
+    def action_manage_forensic_apks(self) -> None:
+        self._forensic_apk_controller.show_forensic_apk_modal()
+
+    def action_fsmon(self) -> None:
+        self._fsmon_controller.show_config_modal()
+
+    def _find_minimized_bar(self):
+        """Find the MinimizedTaskBar widget across the screen stack."""
+        from sandroid.tui.widgets import MinimizedTaskBar
+
+        for screen in self.screen_stack:
+            if isinstance(screen, MainScreen):
+                return screen.query_one("#minimized-task-bar", MinimizedTaskBar)
+        return None
+
+    def _show_minimized_bar(self, task_name: str, description: str) -> None:
+        """Show minimized task indicator in right panel."""
         try:
-            from sandroid.core.events import EventBus
-
-            bus = EventBus.get()
-            for event_type, handler in self._event_handlers:
-                bus.unsubscribe(event_type, handler)
-        except ImportError:
+            bar = self._find_minimized_bar()
+            if bar:
+                bar.show_minimized(task_name, description)
+        except Exception:
             pass
 
+    def _hide_minimized_bar(self) -> None:
+        """Hide minimized task indicator."""
+        try:
+            bar = self._find_minimized_bar()
+            if bar:
+                bar.hide()
+        except Exception:
+            pass
 
-def run_tui(action_queue=None):
-    """Run the Sandroid TUI application.
+    def action_spotlight_files(self) -> None:
+        self._spotlight_controller.show_spotlight_modal()
 
-    Args:
-        action_queue: Optional ActionQ instance for executing menu actions
+    def _apply_theme(self, theme) -> None:
+        """Apply a theme to the app."""
+        self.dark = theme.is_dark
+        try:
+            if hasattr(self, "theme"):
+                self.theme = "textual-dark" if theme.is_dark else "textual-light"
+        except Exception:
+            pass
+        logger.debug(f"Applied theme: {theme.display_name}")
 
-    Returns:
-        The exit code from the TUI application
-    """
-    app = SandroidTUI(action_queue=action_queue)
-    return app.run()
+    @property
+    def sandroid_theme_name(self) -> str:
+        return self._sandroid_theme_name
+
+    @property
+    def sandroid_theme(self):
+        return self._sandroid_theme
+
+    @property
+    def sub_title(self) -> str:
+        return self._sub_title
+
+    @sub_title.setter
+    def sub_title(self, value: str) -> None:
+        self._sub_title = value
+
+    def update_subtitle_for_view(self, view: str) -> None:
+        """Update subtitle based on view name."""
+        titles = {
+            "forensic": "Android Forensic Analysis",
+            "malware": "Android Malware Analysis",
+            "security": "Android Security Analysis",
+        }
+        self._sub_title = titles.get(view.lower(), "Android Forensic Analysis")
+
+    # -- Vim-style scrolling --------------------------------------------------
+
+    def _scroll_menu(self, method_name: str, *args, **kwargs) -> None:
+        try:
+            getattr(self.query_one("#menu-panel", MenuPanel), method_name)(
+                *args, **kwargs
+            )
+        except Exception:
+            pass
+
+    def action_scroll_down(self) -> None:
+        self._scroll_menu("scroll_down_line")
+
+    def action_scroll_up(self) -> None:
+        self._scroll_menu("scroll_up_line")
+
+    def action_scroll_half_down(self) -> None:
+        self._scroll_menu("scroll_relative", y=10)
+
+    def action_scroll_half_up(self) -> None:
+        self._scroll_menu("scroll_relative", y=-10)
+
+    def action_scroll_top(self) -> None:
+        self._scroll_menu("scroll_to_top")
+
+    def action_scroll_bottom(self) -> None:
+        self._scroll_menu("scroll_to_bottom")
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        return copy_to_clipboard(text, textual_copy_fn=self.copy_to_clipboard)
+
+    def action_copy_log(self) -> None:
+        """Copy activity log content to clipboard (Y key - vim yank)."""
+        try:
+            activity_log = None
+            for screen in self.screen_stack:
+                try:
+                    activity_log = screen.query_one("#activity-log", ActivityLog)
+                    break
+                except Exception:
+                    continue
+
+            if activity_log is None:
+                self.notify("Activity log not found", severity="warning")
+                return
+
+            text = activity_log.get_plain_text()
+
+            if not text.strip():
+                self.notify("Activity log is empty", severity="warning")
+                return
+
+            line_count = activity_log.get_line_count()
+
+            if self._copy_to_clipboard(text):
+                self.notify(
+                    f"Copied {line_count} lines to clipboard",
+                    severity="information",
+                )
+            else:
+                self.notify(
+                    "Copy failed - no clipboard tool available",
+                    severity="error",
+                )
+        except Exception as e:
+            logger.error(f"Copy log failed: {e}", exc_info=True)
+            self.notify(f"Copy failed: {type(e).__name__}", severity="error")
+
+    def action_install_apk(self) -> None:
+        self._apk_install_controller.show_install_modal()
+
+    def action_screenshot(self) -> None:
+        self._screenshot_controller.show_screenshot_modal()
+
+    def action_objection(self) -> None:
+        """Launch objection terminal for spotlight app."""
+        spotlight = get_spotlight_service()
+        if not spotlight.has_app():
+            self._activity_log.log_warning(
+                "No spotlight app selected. Press 'c' to choose an app first."
+            )
+            return
+
+        package_name = spotlight.get_app_tuple()[0]
+        from sandroid.tui.modals.objection_modal import (
+            ObjectionModal,
+            build_objection_command,
+        )
+        from sandroid.tui.screens.objection_terminal_screen import (
+            ObjectionTerminalScreen,
+        )
+
+        def on_config(config):
+            if config is None:
+                return
+            bypass_script = (
+                self._find_bypass_script() if config.use_bypass_script else None
+            )
+            cmd = build_objection_command(package_name, config, bypass_script)
+            self.push_screen(
+                ObjectionTerminalScreen(
+                    cmd=cmd, package_name=package_name, spawn_mode=config.spawn_mode
+                )
+            )
+
+        self.push_screen(ObjectionModal(package_name=package_name), on_config)
+
+    @staticmethod
+    def _find_bypass_script() -> str | None:
+        """Locate the TrigDroid bypass RPC script."""
+        try:
+            import importlib.resources as pkg_resources
+
+            ref = (
+                pkg_resources.files("trigdroid") / "scripts" / "trigdroid_bypass_rpc.js"
+            )
+            path = str(ref)
+            if Path(path).exists():
+                return path
+        except Exception:
+            pass
+        local = Path(__file__).parent.parent / "analysis" / "trigdroid_bypass_rpc.js"
+        return str(local) if local.exists() else None
+
+    def action_resume_objection(self) -> None:
+        self._objection_resume_controller.resume_session()
+
+    def action_record(self) -> None:
+        self._recording_controller.start_recording()
+
+    def action_play(self) -> None:
+        self._recording_controller.start_playback()
+
+    def action_export_action(self) -> None:
+        self._recording_controller.show_export_modal()
+
+    def action_proxy(self) -> None:
+        self._proxy_controller.show_proxy_modal()
+
+    def action_network_capture(self) -> None:
+        self._network_capture_controller.toggle_or_show_modal()
+
+    def action_trigdroid(self) -> None:
+        self._trigdroid_controller.toggle_trigdroid()
+
+    def _refresh_status_bar(self) -> None:
+        try:
+            ms = self._get_main_screen()
+            if ms:
+                bar = ms.query_one("#status-bar")
+                if hasattr(bar, "refresh_status"):
+                    bar.refresh_status()
+        except Exception:
+            pass
+
+    def action_action_key(self, key: str) -> None:
+        ms = self._get_main_screen()
+        if ms:
+            ms.execute_action_by_key(key)
+
+    def on_command_palette_action_selected(
+        self,
+        message: CommandPalette.ActionSelected,
+    ) -> None:
+        """Handle action selected from command palette."""
+        dispatch = {
+            "device_selector": self.action_show_device_selector,
+            "help": self.action_show_help,
+            "switch_view": self.action_switch_view,
+            "quit": self.action_quit,
+        }
+        handler = dispatch.get(message.action_name)
+        if handler:
+            handler()
+            return
+        ms = self._get_main_screen()
+        if ms:
+            ms.execute_action(message.action_name)

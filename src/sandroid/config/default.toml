@@ -1,6 +1,6 @@
 # Sandroid Default Configuration
 # This file contains default settings for Sandroid analysis framework
-# Copy this file to your config directory and customize as needed
+# Copy this file to ~/.config/sandroid/sandroid.toml and customize as needed
 
 # Core Settings
 log_level = "INFO"
@@ -10,7 +10,7 @@ environment = "production"
 
 [emulator]
 device_name = "Pixel_6_Pro_API_31"
-android_emulator_path = "~/Android/Sdk/emulator/emulator"
+# android_emulator_path = "~/Android/Sdk/emulator/emulator"  # Optional: auto-detected if not provided
 # sdk_path = "~/Android/Sdk"  # Optional: auto-detected if not provided
 # adb_path = "~/Android/Sdk/platform-tools/adb"  # Optional: auto-detected if not provided
 
@@ -62,6 +62,56 @@ include_screenshots = true
 # Theme preset for terminal colors
 # Available presets: default, dark, light, high_contrast
 preset = "default"
+
+[tui]
+# TUI (Terminal User Interface) settings
+# Theme for TUI mode
+# Available themes: default, dark, light, high_contrast, cyberpunk, nord, dracula, solarized
+theme = "default"
+# Show theme name in status bar (disabled by default)
+show_theme_indicator = false
+# Custom CSS file for TUI styling (optional)
+# If set, this file will be used instead of the default styles.tcss
+# You can copy the default styles.tcss as a starting point and customize it
+# custom_css_path = "~/.config/sandroid/custom-styles.tcss"
+
+# Logo color customization (optional)
+# These override the theme's default logo colors
+# Use hex colors like "#00ff00" or "ff00ff" (with or without #)
+# logo_color = "#00ff00"        # Main ASCII art color (bright green by default)
+# logo_text_color = "#ffffff"   # "Sandroid" text highlight color (white by default)
+
+# FSMon output buffer interval (seconds). Lower = faster, higher CPU. 0 = near-realtime.
+# fsmon_buffer_interval = 0.15
+# Maximum lines kept in FSMon observer (50-10000). Higher = more scrollback, more memory.
+# fsmon_max_lines = 500
+
+# Device Paths - Android device filesystem paths
+# Override these to match non-standard device setups
+[device_paths]
+# frida_install_dir = "/data/local/tmp/"
+# fsmon_binary_base = "/data/local/tmp/fsmon-{arch}"
+# default_monitor_path = "/data/"
+# scan_directories = ["/data", "/storage", "/sdcard"]
+# device_cert_path = "/data/local/tmp/cert-der.crt"
+# system_ca_path = "/system/etc/security/cacerts"
+
+# External URLs - Override for internal mirrors or alternative sources
+[external_urls]
+# frida_releases_url = "https://github.com/frida/frida/releases"
+# frida_api_url = "https://api.github.com/repos/frida/frida/releases/"
+# frida_download_url = "https://github.com/frida/frida/releases/download/"
+# mvt_github_base = "https://raw.githubusercontent.com/mvt-project/mvt/main/"
+# stalkerware_ioc_url = "https://raw.githubusercontent.com/AssoEchap/stalkerware-indicators/master/generated/stalkerware.stix2"
+
+# Display - Output formatting widths and limits
+[display]
+# section_width = 60
+# line_length_cutoff = 150
+# line_number_cutoff = 50
+# box_width = 60
+# spotlight_box_width = 70
+# fridump_max_size = 20971520
 
 # Custom settings (add your own as needed)
 [custom]

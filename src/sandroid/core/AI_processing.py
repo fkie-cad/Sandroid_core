@@ -11,13 +11,13 @@ except ImportError:
     genai = None
     GENAI_AVAILABLE = False
 
-from .toolbox import Toolbox
-
 logger = getLogger(__name__)
 
 
 def get_genai_client():
     """Get Google GenAI client with API key from configuration or environment."""
+    from .toolbox import Toolbox
+
     if not GENAI_AVAILABLE:
         raise ImportError(
             "Google GenAI is not available. To use AI features, install with: "
@@ -104,6 +104,8 @@ class AIProcessing:
 
     @staticmethod
     def summarize_video(path, prompt=video_summary_prompt):
+        from .toolbox import Toolbox
+
         client = get_genai_client()
         logger.info(
             "Summarizing recording, this may take a while depending on the video length"
@@ -148,36 +150,3 @@ class AIProcessing:
 
 if __name__ == "__main__":
     pass
-    # print(summarize_video("Your friend who studied abroad.mp4"))
-    # TODO: add automatic path finding
-
-# Example output made with 2.5 flash model
-"""
-Here is a detailed breakdown of the provided screen recording:
-
-*   00:00 The device's home screen is displayed. The wallpaper is a gradient from light pink at the top to a darker purple at the bottom, resembling a sunset or sunrise over mountains. At the very bottom, a Google search bar is visible with a "G" icon on the left and a microphone icon on the right. Above the search bar, a row of app icons includes: "Messages" (blue speech bubble icon) and "Chrome" (red, yellow, green, blue circular icon). Above this row, three more app icons are displayed: "Gmail" (red and white 'M' envelope icon), "Photos" (colorful pinwheel icon), and "YouTube" (red play button icon).
-*   00:00 - 00:03 An upward swipe gesture is performed on the screen.
-*   00:03 The app drawer is displayed. The background is a light grey. At the top, a search bar labeled "Search apps" is visible. Below it, app icons are arranged in a grid:
-    *   Row 1: "Calendar" (blue icon with "20"), "Camera" (green camera icon), "Chrome" (red, yellow, green, blue circular icon), "Clock" (blue clock icon).
-    *   Row 2: "Contacts" (blue person icon), "Drive" (green, yellow, blue triangle icon), "Files" (yellow folder icon), "Gmail" (red and white 'M' envelope icon).
-    *   Row 3: "Google" (colorful 'G' icon), "ground_truth" (green Android robot icon), "Maps" (colorful map pin icon), "Messages" (blue speech bubble icon).
-    *   Row 4: "NINA" (red radar waves icon), "Phone" (blue phone icon), "Photos" (colorful pinwheel icon), "Settings" (grey gear icon).
-    *   Row 5: "TMoble" (yellow gear icon with 'T'), "YouTube" (red play button icon), "YT Music" (red play button with white music note icon).
-*   00:08 The "Messages" app icon (blue speech bubble) is tapped.
-*   00:09 The Messages app is launched. The screen is white, displaying a large blue circular icon with a white speech bubble in its center. This is the app's loading splash screen or an initial visual element.
-*   00:10 The Messages app's empty state is displayed. The background is white. A blue outline illustration of a person with several chat bubbles around them is centered on the screen. Below the illustration, the text "Once you start a new conversation, you'll see it listed here" is visible. In the bottom-right corner, a blue floating action button (FAB) is present, labeled "Start chat" and containing a white speech bubble icon.
-*   00:11 The "Start chat" FAB is tapped.
-*   00:12 A new message composition screen appears. The background is white. At the top, there's a "To" label followed by an input field that reads "Type a name, phone number, or email". To the right of the input field, a grid icon (likely for accessing the full contact list) is present. Below the input field, suggested contacts or options are listed:
-    *   "Create group" with a blue person icon and a plus sign.
-    *   "M" (likely a section header for contacts starting with 'M').
-    *   "Max Mustermann" is listed with a blue circular icon containing a white 'M'. Below the name, "1 23" is displayed, likely a phone number snippet. To the right, "Mobile" is indicated.
-*   00:14 The input field "Type a name, phone number, or email" is tapped.
-*   00:15 The virtual QWERTY keyboard appears from the bottom of the screen. Above the keyboard, a suggestion bar is visible, along with icons for clipboard, settings, palette, and more.
-*   00:15 The contact "Max Mustermann" is tapped. A blue checkmark icon appears within the blue circle next to "Max Mustermann", indicating selection. The name "Max Mustermann" appears as a pill-shaped chip in the "To" input field at the top of the screen. The keyboard remains open.
-*   00:18 The "Done" or "Enter" key (represented by a checkmark within a grey square) on the bottom right of the keyboard is tapped. This action hides the virtual keyboard and transitions the view to the chat interface for the selected contact.
-*   00:19 The conversation screen with "Max Mustermann" is displayed. At the top left, the "To" field shows "Max Mustermann" as a chip. At the top right, an icon showing a person with a plus sign indicates the option to add more participants to the conversation. Below this, the text "Texting with Max Mustermann (SMS/MMS)" is displayed. Below this, an input field labeled "Text message" is visible. To its left, a plus icon (for attachments/options) and a gallery icon (for images) are present. To its right, a smiley face icon (for emojis) and a microphone icon (for voice input) are visible. The virtual QWERTY keyboard is again displayed at the bottom of the screen. The time "9:25 AM" is shown above the "Texting with..." line.
-*   00:22 The user begins typing "He" into the "Text message" input field. The text "He" appears in the input field. The send button (paper airplane icon) to the right of the input field changes from grey to blue, indicating it's active. The suggestion bar above the keyboard shows "He", "Hey", and "Hello".
-*   00:23 The user continues typing, and the text in the "Text message" input field now reads "Hey". The send button remains active (blue paper airplane). The suggestion bar now displays "Hey", "They", and a waving hand emoji.
-*   00:25 The screen content remains identical to 00:23. The text "Hey" is in the input field, the keyboard is visible, and the send button is active.
-
-"""

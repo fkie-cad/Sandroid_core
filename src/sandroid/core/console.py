@@ -4,8 +4,6 @@ This module provides a singleton console with theme support for
 consistent, terminal-independent color rendering throughout Sandroid.
 """
 
-from typing import Optional
-
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text

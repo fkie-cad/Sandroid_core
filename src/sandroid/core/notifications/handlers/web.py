@@ -11,58 +11,91 @@ Future Implementation:
     - Real-time notification push to connected clients
 """
 
-# TODO: Implement WebNotificationHandler
-# TODO: Add WebSocket connection handling
-# TODO: Add message serialization (JSON)
-# TODO: Add notification queue for multiple clients
-# TODO: Add session management
-
-"""
-Example Future Implementation:
-
 from .base import NotificationHandler
-import json
-import asyncio
+
 
 class WebNotificationHandler(NotificationHandler):
-    def __init__(self, websocket_manager):
+    """WebSocket-based notification handler for web interfaces.
+
+    Sends notifications to connected web clients via WebSocket messages
+    using JSON serialization.
+
+    This handler is a placeholder for future implementation when a web
+    interface is developed for Sandroid.
+
+    Planned features:
+        - WebSocket connection management
+        - JSON message serialization with notification types and levels
+        - Notification queue for multiple connected clients
+        - Session management and client tracking
+        - Browser Notification API integration
+    """
+
+    def __init__(self, websocket_manager=None):
+        """Initialize the web notification handler.
+
+        Args:
+            websocket_manager: WebSocket connection manager for broadcasting
+                messages to connected clients.
+        """
         self.websocket_manager = websocket_manager
-        self.pending_ack = {}
 
-    async def display_warning(self, title, message, action_hint=None):
-        payload = {
-            'type': 'notification',
-            'level': 'warning',
-            'title': title,
-            'message': message,
-            'action_hint': action_hint,
-            'timestamp': datetime.now().isoformat()
-        }
-        await self.websocket_manager.broadcast(json.dumps(payload))
+    def display_warning(self, title: str, message: str, action_hint: str | None = None):
+        """Send a warning notification to connected web clients.
 
-    async def display_modal(self, title, message, level='warning', action_hint=None):
-        notification_id = str(uuid.uuid4())
-        payload = {
-            'type': 'modal',
-            'id': notification_id,
-            'level': level,
-            'title': title,
-            'message': message,
-            'action_hint': action_hint,
-            'requires_ack': True
-        }
+        Should serialize the warning as a JSON payload and broadcast it
+        to all connected WebSocket clients.
 
-        # Create future for acknowledgment
-        self.pending_ack[notification_id] = asyncio.Future()
+        Args:
+            title: Warning title.
+            message: Warning message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "WebNotificationHandler.display_warning() requires a WebSocket manager. "
+            "Implement when web interface is developed."
+        )
 
-        # Send to all connected clients
-        await self.websocket_manager.broadcast(json.dumps(payload))
+    def display_error(self, title: str, message: str, action_hint: str | None = None):
+        """Send an error notification to connected web clients.
 
-        # Wait for any client to acknowledge
-        await self.pending_ack[notification_id]
-        del self.pending_ack[notification_id]
+        Should serialize the error as a JSON payload and broadcast it
+        to all connected WebSocket clients.
 
-    async def on_acknowledgment(self, notification_id):
-        if notification_id in self.pending_ack:
-            self.pending_ack[notification_id].set_result(True)
-"""
+        Args:
+            title: Error title.
+            message: Error message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "WebNotificationHandler.display_error() requires a WebSocket manager. "
+            "Implement when web interface is developed."
+        )
+
+    def display_info(self, title: str, message: str, action_hint: str | None = None):
+        """Send an informational notification to connected web clients.
+
+        Should serialize the info as a JSON payload and broadcast it
+        to all connected WebSocket clients.
+
+        Args:
+            title: Info title.
+            message: Info message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "WebNotificationHandler.display_info() requires a WebSocket manager. "
+            "Implement when web interface is developed."
+        )
+
+    def wait_for_acknowledgment(self):
+        """Wait for a connected web client to acknowledge the notification.
+
+        Should create an asyncio Future and wait for any client to send
+        an acknowledgment message via WebSocket. The notification ID should
+        be used to correlate acknowledgments with pending notifications.
+        """
+        raise NotImplementedError(
+            "WebNotificationHandler.wait_for_acknowledgment() requires a WebSocket "
+            "manager. Implement when web interface is developed."
+        )

@@ -45,7 +45,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,12 @@ class EventType(Enum):
     # System events
     APP_STARTING = auto()  # Application is starting up
     APP_SHUTTING_DOWN = auto()  # Application is shutting down
+
+    # Tool availability events (for deferred startup checks)
+    TOOL_AVAILABILITY_UPDATED = auto()  # Tool availability status changed
+
+    # Logging events (for TUI mode to display in ActivityLog)
+    LOG_MESSAGE = auto()  # Log message for display in ActivityLog
 
 
 @dataclass
@@ -169,7 +175,8 @@ class EventBus:
             if event_type not in self._handlers:
                 self._handlers[event_type] = []
             self._handlers[event_type].append(handler)
-            logger.debug(f"Handler subscribed to {event_type.name}")
+        # Log OUTSIDE the lock to prevent reentrant deadlock via TUILoggingHandler
+        logger.debug(f"Handler subscribed to {event_type.name}")
 
     def unsubscribe(self, event_type: EventType, handler: EventHandler) -> bool:
         """Unsubscribe a handler from an event type.
@@ -181,12 +188,15 @@ class EventBus:
         Returns:
             True if the handler was found and removed, False otherwise
         """
+        removed = False
         with self._handlers_lock:
             if event_type in self._handlers and handler in self._handlers[event_type]:
                 self._handlers[event_type].remove(handler)
-                logger.debug(f"Handler unsubscribed from {event_type.name}")
-                return True
-            return False
+                removed = True
+        if removed:
+            # Log OUTSIDE the lock to prevent reentrant deadlock via TUILoggingHandler
+            logger.debug(f"Handler unsubscribed from {event_type.name}")
+        return removed
 
     def publish(self, event: Event) -> None:
         """Publish an event to all subscribed handlers.
@@ -286,13 +296,81 @@ def unsubscribe(event_type: EventType, handler: EventHandler) -> bool:
     return EventBus.get().unsubscribe(event_type, handler)
 
 
+class TUILoggingHandler(logging.Handler):
+    """Custom logging handler that routes log messages to the EventBus.
+
+    This handler is used in TUI mode to redirect log messages to the ActivityLog
+    widget instead of printing to the console (which would corrupt the TUI display).
+
+    Usage:
+        handler = TUILoggingHandler()
+        logger.addHandler(handler)
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit a log record as an event to the EventBus.
+
+        Args:
+            record: The log record to emit
+        """
+        try:
+            # Format the message
+            msg = self.format(record)
+
+            # Publish to EventBus
+            EventBus.get().publish(
+                Event(
+                    type=EventType.LOG_MESSAGE,
+                    data={
+                        "message": msg,
+                        "level": record.levelname,
+                        "logger": record.name,
+                        "levelno": record.levelno,
+                    },
+                    source=record.name,
+                )
+            )
+        except Exception:
+            # Don't let logging errors crash the application
+            self.handleError(record)
+
+
+# Global flag to track if TUI mode is active
+_tui_mode_active: bool = False
+
+
+def set_tui_mode(active: bool) -> None:
+    """Set whether TUI mode is active.
+
+    When TUI mode is active, logging should be routed to the ActivityLog
+    instead of the console.
+
+    Args:
+        active: True if TUI mode is active, False otherwise
+    """
+    global _tui_mode_active
+    _tui_mode_active = active
+
+
+def is_tui_mode() -> bool:
+    """Check if TUI mode is currently active.
+
+    Returns:
+        True if TUI mode is active, False otherwise
+    """
+    return _tui_mode_active
+
+
 __version__ = "1.0.0"
 __all__ = [
     "Event",
     "EventBus",
     "EventHandler",
     "EventType",
+    "TUILoggingHandler",
+    "is_tui_mode",
     "publish",
+    "set_tui_mode",
     "subscribe",
     "unsubscribe",
 ]

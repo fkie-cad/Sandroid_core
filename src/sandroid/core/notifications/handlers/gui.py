@@ -11,65 +11,89 @@ Future Implementation:
     - Modal dialog management
 """
 
-# TODO: Implement GUINotificationHandler
-# TODO: Add platform-specific notification support
-# TODO: Add dialog box creation (Qt/GTK/tkinter)
-# TODO: Add system tray integration
-# TODO: Add notification sound support
-
-"""
-Example Future Implementation (using Qt):
-
 from .base import NotificationHandler
-from PyQt6.QtWidgets import QMessageBox, QSystemTrayIcon
-from PyQt6.QtCore import QTimer
+
 
 class GUINotificationHandler(NotificationHandler):
+    """Desktop GUI notification handler.
+
+    Displays notifications via native desktop UI elements such as Qt/GTK
+    dialog boxes, system tray popups, and modal windows.
+
+    This handler is a placeholder for future implementation when a desktop
+    GUI interface is developed for Sandroid.
+
+    Planned features:
+        - Qt/GTK/tkinter dialog boxes for modal notifications
+        - System tray integration for non-blocking notifications
+        - Native platform notification APIs (macOS, Windows, Linux)
+        - Notification sound support
+    """
+
     def __init__(self, main_window=None):
+        """Initialize the GUI notification handler.
+
+        Args:
+            main_window: Reference to the main application window (Qt/GTK widget).
+        """
         self.main_window = main_window
-        self.tray_icon = None
 
-    def display_warning(self, title, message, action_hint=None):
-        # Non-blocking notification
-        if self.tray_icon:
-            full_message = message
-            if action_hint:
-                full_message += f"\\n\\n{action_hint}"
-            self.tray_icon.showMessage(
-                title,
-                full_message,
-                QSystemTrayIcon.Warning,
-                5000  # 5 seconds
-            )
-        else:
-            # Fallback to message box
-            self.display_modal_warning(title, message, action_hint)
+    def display_warning(self, title: str, message: str, action_hint: str | None = None):
+        """Display a warning notification via a GUI dialog.
 
-    def display_modal_warning(self, title, message, action_hint=None):
-        full_message = message
-        if action_hint:
-            full_message += f"\\n\\n{action_hint}"
+        Should show a warning-level dialog box with an appropriate icon
+        and optional action hint.
 
-        msg_box = QMessageBox(self.main_window)
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(full_message)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec()
+        Args:
+            title: Warning title for the dialog window.
+            message: Warning message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "GUINotificationHandler.display_warning() requires a GUI toolkit "
+            "(Qt/GTK/tkinter). Implement when desktop GUI interface is developed."
+        )
 
-    def display_error(self, title, message, action_hint=None):
-        full_message = message
-        if action_hint:
-            full_message += f"\\n\\n{action_hint}"
+    def display_error(self, title: str, message: str, action_hint: str | None = None):
+        """Display an error notification via a GUI dialog.
 
-        msg_box = QMessageBox(self.main_window)
-        msg_box.setIcon(QMessageBox.Critical)
-        msg_box.setWindowTitle(title)
-        msg_box.setText(full_message)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec()
+        Should show a critical/error-level dialog box with an appropriate
+        icon and optional action hint.
+
+        Args:
+            title: Error title for the dialog window.
+            message: Error message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "GUINotificationHandler.display_error() requires a GUI toolkit "
+            "(Qt/GTK/tkinter). Implement when desktop GUI interface is developed."
+        )
+
+    def display_info(self, title: str, message: str, action_hint: str | None = None):
+        """Display an informational notification via a GUI dialog.
+
+        Should show an info-level dialog box with an appropriate icon
+        and optional action hint.
+
+        Args:
+            title: Info title for the dialog window.
+            message: Info message body.
+            action_hint: Optional hint about what action to take.
+        """
+        raise NotImplementedError(
+            "GUINotificationHandler.display_info() requires a GUI toolkit "
+            "(Qt/GTK/tkinter). Implement when desktop GUI interface is developed."
+        )
 
     def wait_for_acknowledgment(self):
-        # For GUI, acknowledgment is handled by dialog exec()
-        pass
-"""
+        """Wait for user to acknowledge the notification by closing the dialog.
+
+        In a GUI context, acknowledgment is typically handled by the dialog's
+        exec() or run() method blocking until the user clicks OK or closes
+        the window.
+        """
+        raise NotImplementedError(
+            "GUINotificationHandler.wait_for_acknowledgment() requires a GUI toolkit "
+            "(Qt/GTK/tkinter). Implement when desktop GUI interface is developed."
+        )

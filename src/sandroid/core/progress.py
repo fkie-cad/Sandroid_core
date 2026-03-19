@@ -4,7 +4,6 @@ Provides a simple, reusable progress indicator for terminal output.
 """
 
 import sys
-from typing import Optional
 
 
 class ProgressBar:

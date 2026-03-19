@@ -5,7 +5,8 @@ import platform
 import re
 import shutil
 import subprocess
-import tempfile
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,25 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 console = Console()
+
+
+@dataclass
+class SnapshotInfo:
+    """Information about an AVD snapshot.
+
+    Attributes:
+        name: Snapshot folder name (e.g., "default_boot", "snap_2024-07-09")
+        path: Full path to the snapshot directory
+        size_mb: Approximate size based on ram.bin file
+        modified_date: Last modified date from filesystem
+        mtime: Raw modification timestamp for sorting (0.0 if unknown)
+    """
+
+    name: str
+    path: Path
+    size_mb: float
+    modified_date: str
+    mtime: float = 0.0
 
 
 def is_windows() -> bool:
@@ -145,42 +165,38 @@ def find_existing_avd_home() -> Path | None:
     return None
 
 
-def find_adb_path() -> Path | None:
-    """Find ADB executable path."""
-    # Check PATH first
-    adb_cmd = shutil.which("adb")
-    if adb_cmd:
-        return Path(adb_cmd)
+def _find_sdk_tool(tool_name: str, sdk_subdir: str) -> Path | None:
+    """Find an Android SDK tool by name, checking PATH first then SDK locations.
 
-    # Try SDK-based locations
+    Args:
+        tool_name: Name of the tool executable (e.g., "adb", "emulator")
+        sdk_subdir: SDK subdirectory containing the tool (e.g., "platform-tools", "emulator")
+
+    Returns:
+        Path to the tool executable, or None if not found
+    """
+    found_in_path = shutil.which(tool_name)
+    if found_in_path:
+        return Path(found_in_path)
+
     sdk_path = find_existing_sdk()
     if sdk_path:
-        adb_in_sdk = (
-            sdk_path / "platform-tools" / ("adb.exe" if is_windows() else "adb")
-        )
-        if adb_in_sdk.exists():
-            return adb_in_sdk
+        exe_name = f"{tool_name}.exe" if is_windows() else tool_name
+        tool_in_sdk = sdk_path / sdk_subdir / exe_name
+        if tool_in_sdk.exists():
+            return tool_in_sdk
 
     return None
+
+
+def find_adb_path() -> Path | None:
+    """Find ADB executable path."""
+    return _find_sdk_tool("adb", "platform-tools")
 
 
 def find_emulator_path() -> Path | None:
     """Find Android emulator executable path."""
-    # Check PATH first
-    emulator_cmd = shutil.which("emulator")
-    if emulator_cmd:
-        return Path(emulator_cmd)
-
-    # Try SDK-based locations
-    sdk_path = find_existing_sdk()
-    if sdk_path:
-        emulator_in_sdk = (
-            sdk_path / "emulator" / ("emulator.exe" if is_windows() else "emulator")
-        )
-        if emulator_in_sdk.exists():
-            return emulator_in_sdk
-
-    return None
+    return _find_sdk_tool("emulator", "emulator")
 
 
 def validate_avd_name(name: str) -> bool:
@@ -200,7 +216,7 @@ def validate_avd_name(name: str) -> bool:
         console.print(f"[red]AVD name '{name}' too long - maximum 50 characters[/red]")
         return False
 
-    reserved_names = [
+    reserved_names = {
         "con",
         "prn",
         "aux",
@@ -211,7 +227,7 @@ def validate_avd_name(name: str) -> bool:
         "com4",
         "lpt1",
         "lpt2",
-    ]
+    }
     if name.lower() in reserved_names:
         console.print(
             f"[red]AVD name '{name}' is reserved - choose a different name[/red]"
@@ -229,7 +245,7 @@ def validate_api_level(api_str: str) -> int | None:
             console.print(
                 f"[yellow]Warning: API level {api_level} is very old and may not work properly[/yellow]"
             )
-        elif api_level > 35:
+        elif api_level > 36:
             console.print(
                 f"[yellow]Warning: API level {api_level} may not be available yet[/yellow]"
             )
@@ -243,7 +259,7 @@ def validate_path(
     path_str: str, description: str, must_exist: bool = True
 ) -> Path | None:
     """Validate and return Path object, with user-friendly error messages."""
-    if not path_str or path_str.strip() == "":
+    if not path_str or not path_str.strip():
         return None
 
     try:
@@ -298,11 +314,244 @@ def list_available_avds(
     return avds
 
 
+# API level to Android version mapping
+API_TO_ANDROID_VERSION = {
+    36: "16",
+    35: "15",
+    34: "14",
+    33: "13",
+    32: "12L",
+    31: "12",
+    30: "11",
+    29: "10",
+    28: "9 (Pie)",
+    27: "8.1 (Oreo)",
+    26: "8.0 (Oreo)",
+    25: "7.1 (Nougat)",
+    24: "7.0 (Nougat)",
+    23: "6.0 (Marshmallow)",
+    22: "5.1 (Lollipop)",
+    21: "5.0 (Lollipop)",
+}
+
+
+def get_avd_info(avd_name: str) -> dict[str, str]:
+    """Get detailed information about an AVD.
+
+    Reads the AVD's .ini file to resolve the actual .avd directory path
+    (which may differ from {name}.avd) and extract a fallback API level
+    from the target= field. Then reads config.ini for full details.
+
+    Args:
+        avd_name: Name of the AVD
+
+    Returns:
+        Dictionary with AVD info including android_version, api_level, device_name
+    """
+    info = {
+        "android_version": "Unknown",
+        "api_level": "?",
+        "device_name": "",
+    }
+
+    # Find AVD home directory
+    avd_home = find_existing_avd_home()
+    if not avd_home:
+        return info
+
+    # Try to read the .ini file first to get actual AVD path and target
+    ini_path = avd_home / f"{avd_name}.ini"
+    avd_dir = avd_home / f"{avd_name}.avd"  # default
+    target_api = None
+
+    if ini_path.exists():
+        try:
+            ini_content = ini_path.read_text(encoding="utf-8")
+            # Follow path= redirect to actual .avd directory
+            path_match = re.search(r"^path\s*=\s*(.+)$", ini_content, re.MULTILINE)
+            if path_match:
+                redirected = Path(path_match.group(1).strip())
+                if redirected.is_dir():
+                    avd_dir = redirected
+            # Extract target as fallback for API level
+            target_match = re.search(
+                r"^target\s*=\s*android-(\d+)$", ini_content, re.MULTILINE
+            )
+            if target_match:
+                target_api = int(target_match.group(1))
+        except (OSError, ValueError):
+            pass
+
+    # Read config.ini from the resolved AVD directory
+    config_path = avd_dir / "config.ini"
+    if config_path.exists():
+        try:
+            config_content = config_path.read_text(encoding="utf-8")
+
+            # Parse image.sysdir.1 to get API level
+            # Example: image.sysdir.1 = system-images/android-34/google_apis/arm64-v8a/
+            sysdir_match = re.search(
+                r"image\.sysdir\.1\s*=\s*.*android-(\d+)", config_content
+            )
+            if sysdir_match:
+                api_level = int(sysdir_match.group(1))
+                info["api_level"] = str(api_level)
+                info["android_version"] = API_TO_ANDROID_VERSION.get(
+                    api_level, f"API {api_level}"
+                )
+
+            # Get device name
+            device_match = re.search(r"hw\.device\.name\s*=\s*(.+)", config_content)
+            if device_match:
+                info["device_name"] = device_match.group(1).strip()
+
+        except (OSError, ValueError):
+            pass
+
+    # Fallback: use target= from .ini if config.ini didn't yield an API level
+    if info["api_level"] == "?" and target_api is not None:
+        info["api_level"] = str(target_api)
+        info["android_version"] = API_TO_ANDROID_VERSION.get(
+            target_api, f"API {target_api}"
+        )
+
+    return info
+
+
+def get_avd_snapshots_from_filesystem(avd_name: str) -> list[SnapshotInfo]:
+    """Get list of snapshots for an AVD by scanning the filesystem.
+
+    This works for AVDs that are not currently running (unlike telnet-based listing).
+
+    Args:
+        avd_name: Name of the AVD
+
+    Returns:
+        List of SnapshotInfo objects for available snapshots, sorted by modified date
+        (newest first), with default_boot always at the top if present.
+    """
+    snapshots: list[SnapshotInfo] = []
+
+    avd_home = find_existing_avd_home()
+    if not avd_home:
+        return snapshots
+
+    snapshots_dir = avd_home / f"{avd_name}.avd" / "snapshots"
+    if not snapshots_dir.exists():
+        return snapshots
+
+    for snapshot_path in snapshots_dir.iterdir():
+        if not snapshot_path.is_dir():
+            continue
+
+        # Check for valid snapshot (has snapshot.pb or hardware.ini)
+        has_snapshot_pb = (snapshot_path / "snapshot.pb").exists()
+        has_hardware_ini = (snapshot_path / "hardware.ini").exists()
+
+        if not (has_snapshot_pb or has_hardware_ini):
+            continue
+
+        # Calculate size from ram.bin if it exists
+        ram_bin = snapshot_path / "ram.bin"
+        size_mb = 0.0
+        if ram_bin.exists():
+            try:
+                size_mb = ram_bin.stat().st_size / (1024 * 1024)
+            except OSError:
+                pass
+
+        # Get modified date and raw mtime for sorting
+        mtime = 0.0
+        modified_date = "Unknown"
+        try:
+            mtime = snapshot_path.stat().st_mtime
+            modified_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            pass
+
+        snapshots.append(
+            SnapshotInfo(
+                name=snapshot_path.name,
+                path=snapshot_path,
+                size_mb=size_mb,
+                modified_date=modified_date,
+                mtime=mtime,
+            )
+        )
+
+    # Sort: default_boot first, then newest first by mtime
+    snapshots.sort(
+        key=lambda s: (
+            s.name != "default_boot",  # default_boot first (False < True)
+            -s.mtime,  # newest first
+        )
+    )
+
+    return snapshots
+
+
+def rename_avd(old_name: str, new_name: str) -> tuple[bool, str]:
+    """Rename an AVD.
+
+    Args:
+        old_name: Current name of the AVD
+        new_name: New name for the AVD
+
+    Returns:
+        Tuple of (success, message)
+    """
+    # Find AVD home directory
+    avd_home = find_existing_avd_home()
+    if not avd_home:
+        return False, "AVD home directory not found"
+
+    # Check source files exist
+    old_ini = avd_home / f"{old_name}.ini"
+    old_avd_dir = avd_home / f"{old_name}.avd"
+
+    if not old_ini.exists():
+        return False, f"AVD '{old_name}' not found (missing .ini file)"
+
+    if not old_avd_dir.exists():
+        return False, f"AVD '{old_name}' not found (missing .avd directory)"
+
+    # Check target doesn't exist
+    new_ini = avd_home / f"{new_name}.ini"
+    new_avd_dir = avd_home / f"{new_name}.avd"
+
+    if new_ini.exists() or new_avd_dir.exists():
+        return False, f"AVD '{new_name}' already exists"
+
+    # Validate new name (alphanumeric, underscores, hyphens)
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9_-]*$", new_name):
+        return (
+            False,
+            "Invalid AVD name. Use letters, numbers, underscores, and hyphens. Must start with a letter.",
+        )
+
+    try:
+        # Rename the .ini file
+        old_ini.rename(new_ini)
+
+        # Rename the .avd directory
+        old_avd_dir.rename(new_avd_dir)
+
+        # Update the path inside the .ini file
+        ini_content = new_ini.read_text()
+        ini_content = ini_content.replace(f"{old_name}.avd", f"{new_name}.avd")
+        new_ini.write_text(ini_content)
+
+        return True, f"Successfully renamed '{old_name}' to '{new_name}'"
+
+    except PermissionError:
+        return False, "Permission denied. Make sure the AVD is not running."
+    except Exception as e:
+        return False, f"Error renaming AVD: {e}"
+
+
 def detect_android_environment() -> dict[str, Any]:
     """Detect current Android development environment setup."""
-    console.print(
-        "[bold blue]Detecting Android development environment...[/bold blue]"
-    )
+    console.print("[bold blue]Detecting Android development environment...[/bold blue]")
 
     environment = {
         "sdk_path": None,
@@ -355,12 +604,12 @@ def detect_android_environment() -> dict[str, Any]:
 
     # Check if environment is ready
     environment["environment_ready"] = all(
-        [
+        (
             environment["sdk_path"],
             environment["adb_path"],
             environment["emulator_path"],
             environment["avd_home"],
-        ]
+        )
     )
 
     return environment

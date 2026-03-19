@@ -1,9 +1,12 @@
 """Adapted From https://github.com/jurasec/python-reportlab-example"""
 
 import json
+import logging
 import os
 
 from PIL import Image as PILImage
+
+logger = logging.getLogger(__name__)
 from reportlab.graphics.shapes import Drawing, Line
 from reportlab.lib.colors import Color
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
@@ -21,7 +24,6 @@ from reportlab.platypus import (
 )
 
 from . import timeline_generator
-from .toolbox import Toolbox
 
 
 class FooterCanvas(canvas.Canvas):
@@ -66,7 +68,6 @@ class FooterCanvas(canvas.Canvas):
             preserveAspectRatio=True,
             mask="auto",
         )
-        # self.line(30, 760, A4[0] - 50, 760)
         self.line(66, 58, A4[0] - 66, 58)
         self.setFont("Times-Roman", 10)
         self.drawString(A4[0] - x, 45, page)
@@ -76,12 +77,15 @@ class FooterCanvas(canvas.Canvas):
 class PDFReport:
     data = None
     inputFileName = ""
-    # logger = Toolbox.logger_factory("pdf_report")
 
     def __init__(self, path, result_file_to_parse):
         self.inputFileName = result_file_to_parse
-        inputFile = open(self.inputFileName, "rb")
-        self.data = json.loads(inputFile.read())
+        try:
+            with open(self.inputFileName, "rb") as inputFile:
+                self.data = json.loads(inputFile.read())
+        except OSError as e:
+            logger.error(f"Failed to open input file '{self.inputFileName}': {e}")
+            raise
 
         self.path = path
         self.styleSheet = getSampleStyleSheet()
@@ -136,8 +140,6 @@ class PDFReport:
         self.doc = SimpleDocTemplate(path, pagesize=A4)
         self.doc.multiBuild(self.elements, canvasmaker=FooterCanvas)
 
-        inputFile.close()
-
     def firstPage(self):
         img = Image("assets/Fraunhofer_Logo.jpg")
         img.drawHeight = 0.5 * inch
@@ -168,11 +170,6 @@ class PDFReport:
         )
         title = Paragraph(titleText, titleStyle)
         self.elements.append(title)
-
-        # self.draw_panel(x=300,y=350,width=200,height=100,
-        #        main_number="112",
-        #        title="High Severity",
-        #        symbol="\u26A0")
 
         spacer = Spacer(10, 200)
         self.elements.append(spacer)
@@ -380,14 +377,6 @@ class PDFReport:
             total += len(self.data["Other Data"][section][0])
         lineData.append(["Total number of artifacts found", str(total)])
 
-        # for row in lineData:
-        #     for item in row:
-        #         ptext = "<font size='%s'>%s</font>" % (fontSize-1, item)
-        #         p = Paragraph(ptext, centered)
-        #         formattedLineData.append(p)
-        #     data.append(formattedLineData)
-        #     formattedLineData = []
-
         table = Table(lineData, colWidths=[400, 100])
         table.setStyle(tStyle)
         self.elements.append(table)
@@ -395,6 +384,8 @@ class PDFReport:
         self.elements.append(PageBreak())
 
     def changedFilesTableMaker(self):
+        from .toolbox import Toolbox
+
         psHeaderText = ParagraphStyle(
             "Hed0",
             fontSize=12,
@@ -503,7 +494,6 @@ class PDFReport:
             formattedLineData = []
             lineNum = lineNum + 1
 
-        # print(data)
         table = Table(data, colWidths=[50, 250, 200])
         tStyle = TableStyle(
             [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
@@ -561,7 +551,6 @@ class PDFReport:
         self.elements.append(image_table)
 
     def convert_png_to_jpeg(self, filenames, img_dir):
-        # self.logger.info("Rendering Screenshots into PDF Report, might take some time.")
         for filename in filenames:
             if filename.endswith(".png"):
                 img = PILImage.open(img_dir + filename)
@@ -592,11 +581,6 @@ class PDFReport:
 
         # Initialize data list with headers
         table = [self.make_header(["No.", "File Name", "Hash"])]
-
-        # Populate data from JSON
-        # with open('hashes.json', 'r') as f:
-        #     json_data = json.load(f)
-        #     new_file_hashes = json_data.get("new_file_hashes")
 
         new_file_hashes = self.data["Other Data"]["Artifact Hashes"][0][
             "new_file_hashes"
@@ -662,10 +646,6 @@ class PDFReport:
             )
         ]
 
-        # Populate data from JSON
-        # with open('hashes.json', 'r') as f:
-        #     json_data = json.load(f)
-        #     changed_file_hashes = json_data.get("changed_file_hashes(old,new)")
         changed_file_hashes = self.data["Other Data"]["Artifact Hashes"][0][
             "changed_file_hashes(old,new)"
         ]

@@ -1,21 +1,52 @@
 """Textual-based TUI for Sandroid.
 
 This module provides a modern, interactive terminal user interface (TUI)
-built on the Textual framework. It offers a split-pane layout with:
-- Menu navigation on the left
-- Background activity output on the right
-- Real-time event updates
+built on the Textual framework. It offers a mitmproxy-like experience with:
+
+Features:
+- Split-pane layout with menu and activity log
+- Three view modes: Forensic, Malware, Security
+- Vim-style navigation (j/k/g/G)
+- Help overlay (?) showing all shortcuts
+- Command palette (Ctrl+P) for fuzzy search
+- Theme switching (Ctrl+T) with 8 themes
+- Native modal dialogs (no Rich mode switching)
+- Real-time background task monitoring
 - Keyboard-driven interaction
 
 Usage:
     from sandroid.tui import SandroidTUI
-    app = SandroidTUI()
+    app = SandroidTUI(action_queue=action_q)
     app.run()
 
-The TUI integrates with the event system to receive real-time updates
-from background tasks without blocking the menu interface.
+Or use the convenience function:
+    from sandroid.tui import run_tui
+    run_tui(action_queue=action_q)
+
+The TUI integrates with:
+- MenuController for unified action handling
+- EventBus for real-time background task updates
+- Toolbox for application state management
+- UIRequestBus for native modal dialogs
 """
 
-from sandroid.tui.app import SandroidTUI
+from sandroid.tui.app import SandroidTUI, run_tui
+from sandroid.tui.modal_manager import ModalManager
+from sandroid.tui.themes import (
+    THEME_ORDER,
+    THEMES,
+    Theme,
+    get_next_theme,
+    get_theme,
+)
 
-__all__ = ["SandroidTUI"]
+__all__ = [
+    "THEMES",
+    "THEME_ORDER",
+    "ModalManager",
+    "SandroidTUI",
+    "Theme",
+    "get_next_theme",
+    "get_theme",
+    "run_tui",
+]

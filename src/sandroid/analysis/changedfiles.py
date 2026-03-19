@@ -1,33 +1,29 @@
 import os
 from logging import getLogger
+from typing import Any
 
 from sandroid.core import file_diff
+from sandroid.core.events.events import FileChanged
 from sandroid.core.toolbox import Toolbox
 
-from .datagather import DataGather
+from .base_di import AdbProtocol, DataGatherBase, ForensicServiceProtocol
+from .filters import filter_noise_files, intersect_file_lists
 
 logger = getLogger(__name__)
 
 
-class Bcolors:
-    HEADER = "\033[95m"
-    OKBLUE = "\033[94m"
-    OKCYAN = "\033[96m"
-    OKGREEN = "\033[92m"
-    WARNING = "\033[93m"
-    FAIL = "\033[91m"
-    ENDC = "\033[0m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
+class ChangedFiles(DataGatherBase):
+    """A class to gather and process changed files, inheriting from DataGatherBase.
 
-
-class ChangedFiles(DataGather):
-    """A class to gather and process changed files, inheriting from DataGather.
+    This class supports optional dependency injection for testing while maintaining
+    backwards compatibility with the existing Toolbox-based approach.
 
     **Attributes:**
 
     - **fileListList** (*list*): List of lists containing changed files.
     - **logger** (*Logger*): Logger instance for logging information.
+    - **forensic_service** (*Optional[ForensicServiceProtocol]*): Injected forensic service for testing.
+    - **adb** (*Optional[AdbProtocol]*): Injected ADB interface for testing.
 
     **Methods:**
 
@@ -35,11 +31,45 @@ class ChangedFiles(DataGather):
     - **return_data()**: Returns a dictionary with the changed files and their diffs.
     - **pretty_print()**: Returns a formatted string of the changed files and their diffs.
     - **process_data()**: Processes the gathered data to filter out noise and whitelist files.
+
+    **Example (backwards compatible - no changes needed):**
+
+        changed_files = ChangedFiles()
+        changed_files.gather()
+        data = changed_files.return_data()
+
+    **Example (with dependency injection for testing):**
+
+        mock_forensic_service = Mock()
+        mock_forensic_service.get_baseline.return_value = {"/data/file.db": "hash1"}
+        mock_forensic_service.get_noise_files.return_value = {}
+
+        changed_files = ChangedFiles(forensic_service=mock_forensic_service)
+        changed_files.gather()
     """
 
-    fileListList = []
+    fileListList: list[list[str]] = []
 
-    def gather(self):
+    def __init__(
+        self,
+        forensic_service: ForensicServiceProtocol | None = None,
+        adb: AdbProtocol | None = None,
+        **kwargs,
+    ) -> None:
+        """Initialize ChangedFiles with optional dependency injection.
+
+        Args:
+            forensic_service: Optional forensic service for file tracking.
+                If None, falls back to Toolbox static methods/attributes.
+            adb: Optional ADB interface for device communication.
+                If None, falls back to global Adb class.
+            **kwargs: Additional arguments passed to DataGatherBase.
+        """
+        super().__init__(forensic_service=forensic_service, adb=adb, **kwargs)
+        # Reset fileListList for each instance to avoid state leakage
+        self.fileListList = []
+
+    def gather(self) -> None:
         """Gathers changed files and filters out new files.
 
         **Raises:**
@@ -51,26 +81,30 @@ class ChangedFiles(DataGather):
             + str(len(self.fileListList) + 1)
             + " dataset(s)"
         )
-        if Toolbox.is_dry_run():
-            Toolbox.noise_files = Toolbox.fetch_changed_files()
+        if self._get_toolbox().is_dry_run():
+            self._get_toolbox().noise_files = self._fetch_changed_files()
         else:
-            # self.fileListList.append(Toolbox.fetch_changed_files())
             # Filter out new files real quick
-            changed_and_new = Toolbox.fetch_changed_files()
+            changed_and_new = self._fetch_changed_files()
+            baseline = self._get_baseline()
             changed_files = []
             for file in changed_and_new:
-                if file in Toolbox.baseline:
+                if file in baseline:
                     changed_files.append(file)
+                    # Publish event for each changed file detected
+                    FileChanged(
+                        file_path=file, change_type="modified", source="changedfiles"
+                    ).publish()
             self.fileListList.append(changed_files)
 
-    def return_data(self):
+    def return_data(self) -> dict[str, list[Any]]:
         """Returns a dictionary with the changed files and their diffs.
 
         **Returns:**
 
         - **dict**: A dictionary with the key "Changed Files" and a list of changed files and their diffs.
         """
-        base_folder = os.getenv("RAW_RESULTS_PATH")
+        base_folder = self._get_raw_results_path()
         result = []
         files_from_all_pulls = self.process_data()
 
@@ -111,21 +145,19 @@ class ChangedFiles(DataGather):
                 result.append(file)
         return {"Changed Files": result}
 
-    def pretty_print(self):
+    def pretty_print(self) -> str:
         """Returns a formatted string of the changed files and their diffs.
 
         **Returns:**
 
         - **str**: A formatted string of the changed files and their diffs.
         """
-        base_folder = os.getenv("RAW_RESULTS_PATH")
+        base_folder = self._get_raw_results_path()
         files_from_all_pulls = self.process_data()
         result = (
-            Bcolors.OKBLUE
-            + Bcolors.BOLD
-            + "\n—————————————————CHANGED_FILES=(changed in all runs)——————————————————————————————————————————————————\n"
-            + Bcolors.ENDC
-            + Bcolors.OKBLUE
+            "[info bold]"
+            "\n—————————————————CHANGED_FILES=(changed in all runs)——————————————————————————————————————————————————\n"
+            "[/info bold][info]"
         )
         for file in files_from_all_pulls:
             try:
@@ -145,14 +177,12 @@ class ChangedFiles(DataGather):
                         path_to_file_noise_pull,
                     )
                     diff = (
-                        Toolbox.highlight_timestamps(
-                            Toolbox.truncate(diff), Bcolors.OKCYAN
-                        )
-                        + Bcolors.OKBLUE
+                        Toolbox.highlight_timestamps(Toolbox.truncate(diff), "accent")
+                        + "[info]"
                         + "\n"
                     )
                     if "ITS ALL NOISE" not in diff:
-                        result = result + (Bcolors.OKCYAN + file + "\n")
+                        result = result + ("[accent]" + file + "\n")
                         result = result + diff
                 elif file[-4:] == ".xml":
                     diff = (
@@ -164,31 +194,29 @@ class ChangedFiles(DataGather):
                                     f"{base_folder}noise_pull/{file}",
                                 )
                             ),
-                            Bcolors.OKCYAN,
+                            "accent",
                         )
-                        + Bcolors.OKBLUE
+                        + "[info]"
                         + "\n"
                     )
                     if "ITS ALL NOISE" not in diff:
-                        result = result + (Bcolors.OKCYAN + file + "\n")
+                        result = result + ("[accent]" + file + "\n")
                         result = result + diff
                 elif file[-4:] == ".txt":
                     diff = (
                         Toolbox.highlight_timestamps(
-                            Toolbox.truncate(file_diff.txt_diff(file)), Bcolors.OKCYAN
+                            Toolbox.truncate(file_diff.txt_diff(file)), "accent"
                         )
-                        + Bcolors.OKBLUE
+                        + "[info]"
                         + "\n"
                     )
                     if "ITS ALL NOISE" not in diff:
-                        result = result + (Bcolors.OKCYAN + file + "\n")
+                        result = result + ("[accent]" + file + "\n")
                         result = result + diff
                 else:
                     result = (
                         result
-                        + Toolbox.highlight_timestamps(
-                            Toolbox.truncate(file), Bcolors.OKBLUE
-                        )
+                        + Toolbox.highlight_timestamps(Toolbox.truncate(file), "info")
                         + "\n"
                     )
             except FileNotFoundError:
@@ -199,31 +227,25 @@ class ChangedFiles(DataGather):
                     + "\n"
                 )
         result = result + (
-            Bcolors.BOLD
-            + "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
-            + Bcolors.ENDC
+            "[bold]"
+            "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
+            "[/bold]"
         )
         return result
 
-    def process_data(self):
+    def process_data(self) -> list[str]:
         """Processes the gathered data to filter out noise and whitelist files.
 
         **Returns:**
 
         - **list**: A list of files that are in all lists and not in the noise list.
         """
-        # intersect the first list with all other lists, leaving only the files that are in all lists
-        files_from_all_pulls = self.fileListList[0]
-        noise = Toolbox.noise_files
-        for fileList in self.fileListList:
-            files_from_all_pulls = list(set(files_from_all_pulls) & set(fileList))
-        files_from_all_pulls = [
-            x
-            for x in files_from_all_pulls
-            if x not in noise
-            or file_diff.is_sqlite_from_device_path(x)
-            or x.endswith(".xml")
-        ]  # filter noise from files, ignore SQLite and .xml files
-
-        files_from_all_pulls = Toolbox.exclude_whitelist(files_from_all_pulls)
+        # Use shared filter utilities to reduce code duplication
+        files_from_all_pulls = intersect_file_lists(self.fileListList)
+        files_from_all_pulls = filter_noise_files(
+            files_from_all_pulls,
+            self._get_noise_files(),
+            preserve_sqlite_xml=True,
+        )
+        files_from_all_pulls = self._exclude_whitelist(files_from_all_pulls)
         return files_from_all_pulls

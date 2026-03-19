@@ -1,9 +1,7 @@
 import json
 import os
-import subprocess
 import time
 import warnings
-from dataclasses import asdict, is_dataclass
 
 import click
 
@@ -11,58 +9,30 @@ warnings.filterwarnings("ignore", category=ResourceWarning)  # it is what it is
 
 from logging import getLogger
 
-
-def _json_encoder(obj):
-    """Custom JSON encoder for non-serializable objects like NetworkEvent."""
-    # Handle Pydantic models (v2)
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    # Handle Pydantic models (v1)
-    if hasattr(obj, "dict"):
-        return obj.dict()
-    # Handle dataclasses
-    if is_dataclass(obj) and not isinstance(obj, type):
-        return asdict(obj)
-    # Handle objects with __dict__
-    if hasattr(obj, "__dict__"):
-        return obj.__dict__
-    # Handle datetime
-    if hasattr(obj, "isoformat"):
-        return obj.isoformat()
-    # Handle bytes
-    if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
-    # Handle sets
-    if isinstance(obj, set):
-        return list(obj)
-    # Fallback to string representation
-    return str(obj)
-
-
 from sandroid.analysis.changedfiles import ChangedFiles
 from sandroid.analysis.datagather import DataGather
 from sandroid.analysis.deletedfiles import DeletedFiles
-from sandroid.analysis.fritap import FriTap
-from sandroid.analysis.malwaremonitor import MalwareMonitor
 from sandroid.analysis.network import Network
 from sandroid.analysis.newfiles import NewFiles
 from sandroid.analysis.processes import Processes
 from sandroid.analysis.sockets import Sockets
-from sandroid.analysis.static_analysis import StaticAnalysis
+from sandroid.core.json_utils import json_encoder as _json_encoder
 from sandroid.features.functionality import Functionality
-from sandroid.features.player import Player
-from sandroid.features.recorder import Recorder
 
 # Screenshot temporarily excluded due to Toolbox.args initialization dependency
 from sandroid.features.trigdroid import Trigdroid
+from sandroid.services import (
+    get_emulator_service,
+    get_forensic_service,
+    get_frida_session_service,
+    get_network_capture_service,
+    get_spotlight_service,
+    get_task_service,
+    get_ui_service,
+)
 
 from .adb import Adb
-from .apk_downloader import ApkDownloader
 from .console import SandroidConsole
-from .file_diff import is_sqlite_file
-from .fridump import Fridump
-from .fsmon import FSMon
-from .toolbox import Toolbox
 
 
 class ActionQ:
@@ -83,6 +53,8 @@ class ActionQ:
 
     def assembleQ(self):
         """Assembles the initial action queue based on provided arguments."""
+        from .toolbox import Toolbox
+
         args = Toolbox.args
 
         if args.trigdroid_ccf:
@@ -96,7 +68,26 @@ class ActionQ:
             self.q.append(self.photographer)
 
         if args.trigdroid:
+            # Initialize SpotlightService with the package from CLI args
+            spotlight = get_spotlight_service()
+            spotlight.set_spawn_app(args.trigdroid, auto_resume=True)
+            self.logger.info(
+                f"SpotlightService initialized with package: {args.trigdroid}"
+            )
+
+            # Create Trigdroid action and queue it with full analysis pipeline
             action = Trigdroid()
+
+            # Create snapshot first (required by assembleQ_for_runs)
+            self.q.append("create_snapshot")
+
+            # Queue the full analysis pipeline
+            self.assembleQ_for_runs(action)
+
+            # Remove the "interactive" item that assembleQ_for_runs adds
+            # since we're running in automated CLI mode
+            if self.q and self.q[-1] == "interactive":
+                self.q.pop()
 
         if args.degrade_network:
             Adb.send_telnet_command("network delay umts")
@@ -107,7 +98,10 @@ class ActionQ:
 
         self.logger.debug("Our schedule for today: " + self.print_q())
 
-        self.q.append("interactive")
+        # NOTE: "interactive" is NOT appended here.
+        # - Rich mode adds it via _start_rich_interactive_mode()
+        # - TUI mode has its own event loop
+        # - Automated analysis should NOT have interactive menu
 
     def assembleQ_for_runs(self, action):
         """Assembles an action queue for a given action.
@@ -121,6 +115,8 @@ class ActionQ:
         :param action: The action to be performed and investigated.
         :type action: Functionality
         """
+        from .toolbox import Toolbox
+
         args = Toolbox.args
 
         changed_files_object = ChangedFiles()
@@ -193,10 +189,16 @@ class ActionQ:
 
             self.q.append("pull_dry_run")
 
+        # Save results and return to interactive menu after playback
+        self.q.append("save_results")
+        self.q.append("interactive")
+
         self.logger.debug("Our schedule for today: " + self.print_q())
 
     def do_next(self):
         """Executes the next action in the queue."""
+        from .toolbox import Toolbox
+
         if self.index >= len(self.q):
             self.finished = True
             return
@@ -210,7 +212,10 @@ class ActionQ:
         if isinstance(action, str):
             match action:
                 case "baseline":
-                    Toolbox.baseline = Toolbox.fetch_changed_files(fetch_all=True)
+                    from sandroid.services import get_forensic_service
+
+                    forensic = get_forensic_service()
+                    forensic.set_baseline(Toolbox.fetch_changed_files(fetch_all=True))
                 case "create_snapshot":
                     Toolbox.create_snapshot(b"tmp")
                 case "load_snapshot":
@@ -222,14 +227,22 @@ class ActionQ:
                 case "reboot":
                     Toolbox.restart_emulator()
                 case "pull0":
+                    from sandroid.services import get_forensic_service
+
+                    forensic = get_forensic_service()
+                    baseline = forensic.get_baseline()
                     changed_files = Toolbox.fetch_changed_files()
                     for file in changed_files:
-                        if file in Toolbox.baseline:
+                        if file in baseline:
                             Toolbox.pull_file("first", file)
                 case "pull1":
+                    from sandroid.services import get_forensic_service
+
+                    forensic = get_forensic_service()
+                    baseline = forensic.get_baseline()
                     changed_files = Toolbox.fetch_changed_files()
                     for file in changed_files:
-                        if file in Toolbox.baseline:
+                        if file in baseline:
                             Toolbox.pull_file("second", file)
                 case "new_run":
                     self.logger.info(f"Starting run #{Toolbox.get_run_counter()}")
@@ -250,6 +263,8 @@ class ActionQ:
                     changed_files = Toolbox.fetch_changed_files()
                     for file in changed_files:
                         Toolbox.pull_file("noise", file)
+                case "save_results":
+                    self._save_analysis_results()
                 case "interactive":
                     Toolbox.print_interactive_menu()
                     try:
@@ -260,9 +275,11 @@ class ActionQ:
                         console.print("\n[warning]Ctrl+C detected[/warning]")
 
                         # Check if there are any background tasks running
-                        has_background_tasks = bool(Toolbox._background_tasks)
-                        has_network_capture = Toolbox._network_capture_running
-                        has_screen_recording = Toolbox._screen_recording_running
+                        has_background_tasks = bool(get_task_service().get_running())
+                        has_network_capture = (
+                            get_network_capture_service().is_capturing()
+                        )
+                        has_screen_recording = get_emulator_service().is_recording()
 
                         if (
                             has_background_tasks
@@ -283,7 +300,7 @@ class ActionQ:
                                         console.print(
                                             "[accent]Stopping background tasks...[/accent]"
                                         )
-                                        Toolbox.stop_all_background_tasks()
+                                        get_task_service().stop_all()
                                         console.print(
                                             "[success]✓ Background tasks stopped[/success]"
                                         )
@@ -295,8 +312,7 @@ class ActionQ:
                                                 "[accent]Stopping network capture...[/accent]"
                                             )
                                             if Adb.stop_network_capture():
-                                                Toolbox._network_capture_running = False
-                                                Toolbox.set_network_capture_path(None)
+                                                get_network_capture_service().stop_capture()
                                                 console.print(
                                                     "[success]✓ Network capture stopped[/success]"
                                                 )
@@ -311,7 +327,7 @@ class ActionQ:
                                             console.print(
                                                 "[accent]Stopping screen recording...[/accent]"
                                             )
-                                            Toolbox.stop_screen_recording()
+                                            get_emulator_service().stop_recording()
                                             console.print(
                                                 "[success]✓ Screen recording stopped[/success]"
                                             )
@@ -391,10 +407,13 @@ class ActionQ:
         :returns: Collected data in JSON format.
         :rtype: str
         """
+        from .toolbox import Toolbox
+
+        forensic_service = get_forensic_service()
         data = {
             "Device Name": Toolbox.device_name,
-            "Emulator relative action timestamp": Toolbox.get_action_time(),
-            "Action Duration": Toolbox.get_action_duration(),
+            "Emulator relative action timestamp": forensic_service.get_action_time(),
+            "Action Duration": forensic_service.get_action_duration(),
         }
 
         data.update({"Other Data": Toolbox.other_output_data_collector})
@@ -409,11 +428,61 @@ class ActionQ:
                 already_looked_at_these.append(q_entry)
         return json.dumps(data, indent=4, default=_json_encoder)
 
+    def _save_analysis_results(self):
+        """Save current analysis results to output file.
+
+        This is called at the end of playback analysis to save results
+        and show a summary before returning to the interactive menu.
+        """
+        from .toolbox import Toolbox
+
+        try:
+            Toolbox.wrap_up()
+
+            # Determine output path
+            results_path = os.getenv("RESULTS_PATH", "./")
+            output_file = getattr(Toolbox.args, "file", "sandroid.json")
+            output_path = os.path.join(results_path, output_file)
+
+            # Ensure directory exists
+            os.makedirs(
+                os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+                exist_ok=True,
+            )
+
+            # Write results
+            with open(output_path, "w") as fd:
+                fd.write(self.get_data())
+
+            self.logger.info(f"Results saved to: {output_path}")
+
+            # Show summary in Rich mode
+            console = SandroidConsole.get()
+            console.print("\n[bold #58a6ff]═══ Analysis Summary ═══[/bold #58a6ff]\n")
+            console.print(self.get_pretty_print())
+            console.print(
+                f"\n[success]✓ Results saved to:[/success] [accent]{output_path}[/accent]\n"
+            )
+
+            # Pause for user to review
+            console.print("[dim]Press any key to return to menu...[/dim]")
+            try:
+                import click
+
+                click.getchar()
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+        except Exception as e:
+            self.logger.error(f"Failed to save results: {e}")
+
     def update_photographer(self):
         """Updates the screenshot utility with the current action.
 
         This allows screenshots to be labeled with the current action
         """
+        from .toolbox import Toolbox
+
         if Toolbox.args.screenshot:
             if self.index >= len(self.q):
                 self.photographer.stop()
@@ -431,1182 +500,149 @@ class ActionQ:
         :param char: The character input from the user.
         :type char: str
         """
-        if Toolbox.args.loglevel != "DEBUG":
+        # Check if TUI mode is active (skip screen clear and use modals instead of Rich prompts)
+        from sandroid.core.ui_request_bus import (
+            UIRequestBus,
+        )
+
+        from .toolbox import Toolbox
+
+        bus = UIRequestBus.get()
+        is_tui_mode = bus.has_active_handler()
+
+        # Only clear screen in Rich mode (TUI manages its own display)
+        if not is_tui_mode and Toolbox.args.loglevel != "DEBUG":
             os.system(  # nosec S605 # Safe terminal clear command
                 "cls" if os.name == "nt" else "clear"
             )  # Just to keep everything nice and clean
 
-        # Check if char is a digit between 0-8
+        # Check if char is a digit between 0-8 (Snapshot handling)
+        # Delegate to command system for snapshot operations
         if char.isdigit() and 0 <= int(char) <= 8:
-            if char == "0":  # Show available snapshots
-                snapshots = Adb.get_avd_snapshots()
-                if snapshots:
-                    # Create formatted list of snapshots
-                    console = SandroidConsole.get()
-                    snapshot_list = ""
-                    for idx, snapshot in enumerate(snapshots, 1):
-                        snapshot_list += f"[success]{snapshot['date']}[/success] - [primary]{snapshot['tag']}[/primary]\n"
-
-                    # Display snapshots in a Rich panel
-                    console.print()
-                    SandroidConsole.print_panel(
-                        snapshot_list.strip(), title="Available Snapshots"
-                    )
-
-                    # Ask user to select a snapshot
-                    selected_idx = 0
-                    try:
-                        while selected_idx < 1 or selected_idx > len(snapshots):
-                            try:
-                                console.print(
-                                    f"[primary]Select a snapshot to load ([accent]1[/accent]-[accent]{len(snapshots)}[/accent]): [/primary]",
-                                    end="",
-                                )
-                                char = click.getchar()
-                                if char.isdigit():
-                                    selected_idx = int(char)
-                                else:
-                                    selected_idx = 0  # Invalid input
-                                if selected_idx < 1 or selected_idx > len(snapshots):
-                                    console.print(
-                                        f"[error]Please enter a number between [accent]1[/accent] and [accent]{len(snapshots)}[/accent][/error]"
-                                    )
-                            except ValueError:
-                                console.print(
-                                    "[error]Please enter a valid number[/error]"
-                                )
-                    except KeyboardInterrupt:
-                        console.print(
-                            "\n[warning]Snapshot selection cancelled by user.[/warning]"
-                        )
-                        self.q.append("interactive")
-                        return
-
-                    # Load selected snapshot
-                    selected_snapshot = snapshots[selected_idx - 1]["tag"]
-                    # Add load snapshot command to the queue
-                    Toolbox.load_snapshot(selected_snapshot.encode())
-                else:
-                    self.logger.warning("No snapshots available.")
-
-                self.q.append("interactive")
-                return
-            # Keys 1-8 for creating snapshots
-            # Prompt for snapshot name
-            console = SandroidConsole.get()
-            try:
-                console.print(
-                    "[primary]Enter snapshot name (or press Enter for timestamp): [/primary]",
-                    end="",
-                )
-                snapshot_name = Toolbox.safe_input()
-                if not snapshot_name:
-                    from datetime import datetime
-
-                    snapshot_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-                # Create snapshot
-                Toolbox.create_snapshot(snapshot_name.encode())
-            except KeyboardInterrupt:
-                console.print(
-                    "\n[warning]Snapshot creation cancelled by user.[/warning]"
-                )
-
+            self._execute_snapshot_command(char)
             self.q.append("interactive")
             return
 
         # Handle TAB key for view switching
         if char == "\t":  # TAB key
-            Toolbox.cycle_view()
+            get_ui_service().cycle_view()
             self.q.append("interactive")
             return
 
-        # Validate key based on current view
-        current_view = Toolbox.get_current_view()
+        # Import MenuController for key validation and help
+        from sandroid.core.menu_controller import MenuController
 
-        # Define allowed keys for each view
-        forensic_keys = {
-            "r",
-            "p",
-            "x",
-            "i",
-            "c",
-            "C",
-            "d",
-            "l",
-            "v",
-            "u",
-            "o",
-            " ",
-            "e",
-            "s",
-            "g",
-            "n",
-            "f",
-            "0",
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "y",
-            "w",
-            "q",
-        }
-        malware_keys = {
-            "r",
-            "p",
-            "x",
-            "i",
-            "c",
-            "C",
-            "M",
-            "m",
-            "b",
-            "t",
-            "k",
-            "e",
-            "s",
-            "g",
-            "n",
-            "f",
-            "0",
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "y",
-            "w",
-            "h",
-            "q",
-        }
-        security_keys = {"c", "C", "n", "a", "e", "f", "q"}
+        # Handle '?' key for help overlay (Rich mode only)
+        # TUI mode has its own help screen that's triggered by the app bindings
+        if char == "?":
+            if is_tui_mode:
+                # TUI handles help via its own help screen - just return to interactive
+                self.q.append("interactive")
+                return
 
-        # Check if key is valid for current view
-        valid_keys = []
-        if current_view == "forensic":
-            valid_keys = forensic_keys
-        elif current_view == "malware":
-            valid_keys = malware_keys
-        elif current_view == "security":
-            valid_keys = security_keys
+            # Rich mode: Show help using console
+            console = SandroidConsole.get()
+            controller = MenuController.get()
+            current_view = get_ui_service().get_current_view()
 
-        if char not in valid_keys:
-            Toolbox.show_blocking_warning(
+            # Print help text using Rich formatting
+            help_text = controller.get_help_text(current_view)
+            console.print()
+            console.print(help_text)
+            console.print()
+            console.print("[dim]Press any key to return to menu...[/dim]")
+
+            # Wait for key press
+            try:
+                click.getchar()
+            except (KeyboardInterrupt, EOFError):
+                pass
+
+            self.q.append("interactive")
+            return
+
+        # Validate key based on current view using MenuController
+        current_view = get_ui_service().get_current_view()
+        controller = MenuController.get()
+
+        # Get action for this key in the current view
+        action = controller.get_action_by_key(char, current_view)
+
+        # Special case: 'q' is always valid (quit)
+        if char == "q":
+            pass  # Allow quit in all views
+        elif action is None:
+            # Key not found in current view
+            get_ui_service().show_blocking_warning(
                 title="Key Not Available",
                 message=f"Key '{char}' is not available in {current_view.upper()} view.",
-                action_hint="Press TAB to switch between views: Forensic → Malware → Security",
+                action_hint="Press TAB to switch between views: Forensic → Malware → Security\nPress ? for help or Ctrl+P for command palette",
             )
             self.q.append("interactive")
             return
 
-        # Original match/case statement continues here
-        match char:
-            case " ":
-                # Check if a spotlight file is set
-                spotlight_files = Toolbox.get_spotlight_files()
-                if not spotlight_files or len(spotlight_files) != 1:
-                    self.logger.warning(
-                        "Exactly one spotlight file must be set to use this functionality."
-                    )
-                    self.q.append("interactive")
-                    return
+        # === COMMAND SYSTEM DISPATCH ===
+        # Route to new command system if a handler is registered
+        # This allows gradual migration while preserving backward compatibility
+        from sandroid.core.actionq_commands import (
+            execute_command_from_actionq,
+            is_command_key,
+        )
 
-                spotlight_file = spotlight_files[0]
-                print(spotlight_file)
-                wal_file = spotlight_file + "-wal"
-                journal_file = spotlight_file + "-journal"
-
-                target_dir = os.getenv("RESULTS_PATH") + "spotlight_files"
-
-                # If the spotlight file path changed, reset previous pulls
-                if (
-                    hasattr(Toolbox, "_spotlight_last_file")
-                    and Toolbox._spotlight_last_file != spotlight_file
-                ):
-                    self.logger.info(
-                        "Spotlight file changed. Resetting previous versions."
-                    )
-                    Toolbox._spotlight_pull_one = None
-                    Toolbox._spotlight_pull_two = None
-
-                Toolbox._spotlight_last_file = spotlight_file
-
-                # Rotate the versions
-                if Toolbox._spotlight_pull_one and Toolbox._spotlight_pull_two:
-                    Toolbox._spotlight_pull_one = Toolbox._spotlight_pull_two
-                    Toolbox._spotlight_pull_two = None
-
-                # Generate timestamp
-                timestamp = str(int(time.time()))
-
-                # Determine target path
-                if not Toolbox._spotlight_pull_one:
-                    target_path = os.path.join(
-                        target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}"
-                    )
-                    Toolbox._spotlight_pull_one = target_path
-                else:
-                    target_path = os.path.join(
-                        target_dir, f"{os.path.basename(spotlight_file)}_{timestamp}"
-                    )
-                    Toolbox._spotlight_pull_two = target_path
-
-                # Pull the file from the device
-                output, error = Adb.send_adb_command(
-                    f"pull {spotlight_file} {target_path}"
-                )
-
-                if "failed to stat remote object" in str(
-                    output
-                ) or "failed to stat remote object" in str(error):
-                    Toolbox.show_blocking_warning(
-                        title="File Not Found",
-                        message=f"The spotlight file does not exist on the device:\n{spotlight_file}",
-                        action_hint="Check if the file path is correct or if the app has created the file yet",
-                    )
-                elif "Permission denied" in str(output):
-                    Toolbox.show_blocking_error(
-                        title="Permission Denied",
-                        message=f"Cannot pull file due to permission restrictions:\n{spotlight_file}",
-                        action_hint="The file may be in a protected directory. Try running as root or accessing a different location.",
-                    )
-                else:
-                    self.logger.info(f"Pulled {spotlight_file} to {target_path}")
-
-                # For SQLite database files, also pull WAL and journal files if they exist
-                if is_sqlite_file(target_path):
-                    # Pull the WAL file
-                    wal_target = target_path + "-wal"
-                    output, error = Adb.send_adb_command(
-                        f"pull {wal_file} {wal_target}"
-                    )
-                    if (
-                        "failed to stat remote object" not in str(output)
-                        and "Permission denied" not in str(output)
-                        and "failed to stat remote object" not in str(error)
-                        and "Permission denied" not in str(error)
-                    ):
-                        self.logger.info(f"Pulled WAL file: {wal_file}")
-
-                    # Pull the journal file
-                    journal_target = target_path + "-journal"
-                    output, error = Adb.send_adb_command(
-                        f"pull {journal_file} {journal_target}"
-                    )
-                    if (
-                        "failed to stat remote object" not in str(output)
-                        and "Permission denied" not in str(output)
-                        and "failed to stat remote object" not in str(error)
-                        and "Permission denied" not in str(error)
-                    ):
-                        self.logger.info(f"Pulled journal file: {journal_file}")
-                        self.logger.info(
-                            f"Pull completed for {spotlight_file} and its associated files."
-                        )
-
-                if Toolbox._spotlight_pull_one and Toolbox._spotlight_pull_two:
-                    # Perform diff
-                    from .file_diff import db_diff
-
-                    self.logger.info(
-                        f"Performing diff on spotlight files using paths {Toolbox._spotlight_pull_one} and {Toolbox._spotlight_pull_two}"
-                    )
-                    diff_result = db_diff(
-                        Toolbox._spotlight_pull_one, Toolbox._spotlight_pull_two
-                    )
-                    self.logger.info("Diff result:")
-                    print(diff_result)
-
+        if is_command_key(char):
+            result = execute_command_from_actionq(self, char)
+            if result.should_return_to_menu:
                 self.q.append("interactive")
-                return
-
-            case "s":
-                try:
-                    self.logger.info(
-                        "Enter filename for screenshot (or press ENTER for timestamp):"
-                    )
-                    filename = Toolbox.safe_input()
-                    Toolbox.take_screenshot(filename if filename else None)
-                except KeyboardInterrupt:
-                    self.logger.info("\nScreenshot cancelled")
-                self.q.append("interactive")
-            case "g":
-                if Toolbox._screen_recording_running:
-                    # Stop the recording
-                    if Toolbox.stop_screen_recording():
-                        self.logger.info("Screen recording stopped successfully")
-                    else:
-                        self.logger.error("Failed to stop screen recording")
-                else:
-                    # Ask for a filename
-                    try:
-                        self.logger.info(
-                            "Enter filename for screen recording (or press ENTER for timestamp):"
-                        )
-                        filename = Toolbox.safe_input()
-
-                        # Start the recording
-                        if Toolbox.start_screen_recording(
-                            filename if filename else None
-                        ):
-                            self.logger.info("Press 'g' again to stop the recording")
-                        else:
-                            self.logger.error("Failed to start screen recording")
-
-                    except KeyboardInterrupt:
-                        self.logger.info("\nScreen recording cancelled")
-
-                self.q.append("interactive")
-            case "r":
-                self.q.append("create_snapshot")
-                self.q.append(Recorder())
-                self.q.append("interactive")
-            case "p":
-                self.assembleQ_for_runs(Player())
-            case "t":
-                self.q.append("create_snapshot")
-                trigdroid_object = Trigdroid()
-                self.assembleQ_for_runs(trigdroid_object)
-            case "f":
-                if not Toolbox.frida_manager.is_frida_server_running():
-                    try:
-                        Toolbox.frida_manager.install_frida_server()
-                        Toolbox.frida_manager.run_frida_server()
-                        self.q.append("interactive")
-                    except Exception as e:
-                        self.logger.error(f"Error starting frida server: {e!s}")
-                        self.q.append("interactive")
-                else:
-                    Toolbox.show_blocking_info(
-                        title="Frida Already Running",
-                        message="Frida server is already running on the device.",
-                        action_hint="No action needed - Frida is ready to use",
-                    )
-                    self.q.append("interactive")
-            case "n":  # New APK installation
-                try:
-                    self.logger.info("Enter file path of APK or search term:")
-                    apk = Toolbox.safe_input()
-
-                    installed_package = None  # Track the installed package name
-
-                    # Expand user path (~) and convert to absolute path
-                    expanded_apk_path = os.path.abspath(os.path.expanduser(apk))
-
-                    if os.path.isfile(expanded_apk_path):
-                        self.logger.info(f"Found local APK file: {expanded_apk_path}")
-                        installed_package = Adb.install_apk(expanded_apk_path)
-                        if installed_package:
-                            self.logger.info(
-                                f"APK installation completed successfully: {installed_package}"
-                            )
-                        else:
-                            self.logger.info(
-                                "APK installation completed, but package name could not be determined"
-                            )
-                    else:
-                        self.logger.info(
-                            f"The path '{apk}' is not a valid file. Searching online for package."
-                        )
-                        try:
-                            app_id = ApkDownloader().search_for_name(apk)
-                            ApkDownloader().install_app_id(app_id)
-                            installed_package = app_id  # Online installers typically return package name
-                            self.logger.info(
-                                "Online APK installation completed successfully"
-                            )
-                        except Exception as e:
-                            self.logger.error(
-                                f"Online APK search/installation failed: {e}"
-                            )
-                            self.logger.info(
-                                "Please check the search term or try a different APK"
-                            )
-
-                    # Offer to set as spotlight spawn app
-                    if installed_package:
-                        # Store as recently installed for later use
-                        ActionQ.recently_installed_package = installed_package
-                        console = SandroidConsole.get()
-
-                        console.print(
-                            f"\n[success]✓ Successfully installed: [accent]{installed_package}[/accent][/success]"
-                        )
-                        console.print(
-                            "\n[primary]Would you like to set this app for spawning?[/primary]"
-                        )
-                        console.print(
-                            "[accent]\\[y][/accent] = Yes, set as spotlight spawn app"
-                        )
-                        console.print("[accent]\\[n][/accent] = No, return to menu")
-
-                        try:
-                            choice = click.getchar().lower()
-                            if choice == "y":
-                                Toolbox.set_spotlight_spawn_application(
-                                    installed_package
-                                )
-
-                                # Ask about auto-resume
-                                console.print(
-                                    "\n[primary]Auto-resume spawned app?[/primary]"
-                                )
-                                console.print(
-                                    "[accent]\\[y][/accent] = App starts immediately after spawn (recommended, default)"
-                                )
-                                console.print(
-                                    "[accent]\\[n][/accent] = App stays paused, resume manually"
-                                )
-                                console.print(
-                                    "\n[success]► Press y or n (Enter = yes):[/success] ",
-                                    end="",
-                                )
-
-                                resume_choice = click.getchar().lower()
-                                # Default to 'y' if Enter is pressed
-                                Toolbox.set_auto_resume_after_spawn(
-                                    resume_choice
-                                    != "n"  # Anything except 'n' means yes (including Enter)
-                                )
-
-                                resume_status = (
-                                    "enabled" if resume_choice != "n" else "disabled"
-                                )
-                                console.print(
-                                    f"\n[success]✓ Spotlight app configured:[/success]\n"
-                                    f"  Package: [accent]{installed_package}[/accent]\n"
-                                    f"  Mode: [primary]SPAWN[/primary]\n"
-                                    f"  Auto-resume: [accent]{resume_status}[/accent]\n"
-                                )
-                            else:
-                                self.logger.info("Returning to menu...")
-                        except (KeyboardInterrupt, EOFError):
-                            self.logger.info("\nReturning to menu...")
-
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                except Exception as e:
-                    self.logger.error(
-                        f"APK installation failed with unexpected error: {e}"
-                    )
-                    self.logger.info("Please check the file path or try again")
-                self.q.append("interactive")
-            case "c":
-                # ATTACH MODE: Set currently focused app as spotlight (existing behavior)
-                Toolbox.set_spotlight_application(Adb.get_focused_app())
-                spotlight_application_name = Toolbox.get_spotlight_application()[0]
-                spotlight_application_pid = Adb.get_pid_for_package_name(
-                    spotlight_application_name
-                )
-                Toolbox.set_spotlight_application_pid(spotlight_application_pid)
-                Toolbox.set_spawn_mode(False)  # Ensure attach mode
-                console = SandroidConsole.get()
-                console.print(
-                    f"[success]Spotlight app set in ATTACH mode: {spotlight_application_name}[/success]"
-                )
-                self.q.append("interactive")
-            case "C":
-                # SPAWN MODE: Select app to spawn with fuzzy search
-                console = SandroidConsole.get()
-                try:
-                    console.print(
-                        "\n[menu.section]=== Spawn Mode Selection ===[/menu.section]"
-                    )
-                    console.print(
-                        "Select an application to spawn when using Frida-based tools.\n"
-                        "The app will be launched fresh with hooks active from the start.\n"
-                    )
-
-                    # Use fuzzy search to select app (with recently installed as default)
-                    selected_package = Toolbox.select_app_with_fuzzy_search(
-                        recently_installed_package=ActionQ.recently_installed_package
-                    )
-
-                    if selected_package:
-                        Toolbox.set_spotlight_spawn_application(selected_package)
-
-                        # Ask about auto-resume preference with clear prompt
-                        console.print(
-                            "\n[menu.section]=== Auto-Resume Configuration ===[/menu.section]"
-                        )
-                        console.print(
-                            "[accent]\\[y][/accent] = App starts immediately after spawn (recommended, default)"
-                        )
-                        console.print(
-                            "[accent]\\[n][/accent] = App stays paused, resume manually"
-                        )
-                        console.print(
-                            "\n[success]► Press y or n (Enter = yes):[/success] ",
-                            end="",
-                        )
-
-                        resume_choice = click.getchar().lower()
-                        console.print(
-                            f"[accent]{resume_choice}[/accent]"
-                        )  # Echo the choice
-                        # Default to 'y' if Enter is pressed
-                        Toolbox.set_auto_resume_after_spawn(resume_choice != "n")
-
-                        resume_status = (
-                            "enabled" if resume_choice != "n" else "disabled"
-                        )
-                        console.print(
-                            f"\n[success]✓ Spotlight app configured:[/success]\n"
-                            f"  Package: [accent]{selected_package}[/accent]\n"
-                            f"  Mode: [primary]SPAWN[/primary]\n"
-                            f"  Auto-resume: [accent]{resume_status}[/accent]\n"
-                        )
-                    else:
-                        self.logger.info("Spawn mode selection cancelled")
-
-                except KeyboardInterrupt:
-                    self.logger.info("\nSpawn mode selection cancelled by user")
-                except Exception as e:
-                    self.logger.error(f"Error setting spawn mode: {e}")
-
-                self.q.append("interactive")
-            case "a":
-                try:
-                    # Check if spotlight app is set
-                    spotlight_app = Toolbox.get_spotlight_application()
-                    if spotlight_app is None:
-                        if Toolbox._spawn_mode and Toolbox._spotlight_spawn_application:
-                            package_name = Toolbox._spotlight_spawn_application
-                        else:
-                            Toolbox.show_blocking_error(
-                                title="Spotlight App Required",
-                                message="You need to set a spotlight application before running static analysis.",
-                                action_hint="Press [c] for ATTACH mode or [Shift+C] for SPAWN mode",
-                            )
-                            self.q.append("interactive")
-                            return
-                    else:
-                        package_name = spotlight_app[0]
-
-                    # Get the APK path from the device
-                    self.logger.info(f"Pulling APK for {package_name}...")
-                    stdout, stderr = Adb.send_adb_command(
-                        f"shell pm path {package_name}"
-                    )
-
-                    if not stdout or "package:" not in stdout:
-                        self.logger.error(f"Could not find APK path for {package_name}")
-                        self.q.append("interactive")
-                        return
-
-                    # Extract the APK path (format is "package:/path/to/apk")
-                    apk_path = stdout.strip().replace("package:", "")
-
-                    # Pull the APK to a temporary location
-                    import tempfile
-
-                    temp_dir = tempfile.gettempdir()
-                    local_apk_path = os.path.join(temp_dir, f"{package_name}.apk")
-
-                    self.logger.info("Downloading APK from device...")
-                    stdout, stderr = Adb.send_adb_command(
-                        f"pull {apk_path} {local_apk_path}"
-                    )
-
-                    if stderr and "error" in stderr.lower():
-                        self.logger.error(f"Failed to pull APK: {stderr}")
-                        self.q.append("interactive")
-                        return
-
-                    self.logger.info(f"APK saved to: {local_apk_path}")
-
-                    # Run static analysis with interactive menu
-                    static_analysis = StaticAnalysis()
-                    if not static_analysis.gather(interactive=True):
-                        # User cancelled from interactive menu
-                        self.q.append("interactive")
-                        return
-                    # static_analysis.pretty_print()
-                    # Toolbox.submit_other_data("static_analysis", static_analysis.return_data())
-
-                except Exception as e:
-                    self.logger.error(f"Error during static analysis: {e}")
-
-                self.q.append("interactive")
-            case "m":
-                try:
-                    if Toolbox.is_task_running("dexray-intercept"):
-                        # STOP Dexray-Intercept
-                        Toolbox.stop_task_with_prompt("dexray-intercept")
-
-                        # Collect results if available
-                        if (
-                            self.malwaremonitor
-                            and self.malwaremonitor.has_new_results()
-                        ):
-                            Toolbox.submit_other_data(
-                                "Dexray Intercept",
-                                self.malwaremonitor.return_data(),
-                            )
-
-                        # Reset spotlight app info as the app may have been closed
-                        Toolbox.reset_spotlight_application()
-                    else:
-                        # START Dexray-Intercept
-                        # Ensure spotlight app is set (prompts user if not)
-                        if not Toolbox.ensure_spotlight_app_for_tools(
-                            "Dexray-Intercept"
-                        ):
-                            self.q.append("interactive")
-                            return
-
-                        check_frida = self.check_frida_and_spotlight()
-                        if not check_frida:
-                            self.q.append("interactive")
-                            return
-
-                        spotlight_application_pid, spotlight_application_name = (
-                            check_frida
-                        )
-
-                        # Get debug mode from Toolbox args (set by CLI --debug flag)
-                        debug_mode = getattr(Toolbox.args, "debug", False)
-
-                        self.malwaremonitor = MalwareMonitor(
-                            path_filters=Toolbox.get_spotlight_files(),
-                            debug_mode=debug_mode,
-                        )
-
-                        # Start monitoring (non-blocking)
-                        if self.malwaremonitor.start_monitoring():
-                            # Register as background task with PID
-                            Toolbox.register_background_task(
-                                name="dexray-intercept",
-                                display_name="Dexray-Intercept",
-                                instance=self.malwaremonitor,
-                                stop_callback=self.malwaremonitor.stop_monitoring,
-                                app_name=spotlight_application_name,
-                                target_pid=spotlight_application_pid,
-                            )
-
-                            self.logger.info(
-                                "Dexray-Intercept started in background. Press 'm' again to stop."
-                            )
-                        # else: user cancelled from interactive menu
-
-                except Exception as e:
-                    self.logger.error(f"Error managing Dexray-Intercept: {e}")
-
-                self.q.append("interactive")  # Always return to menu
-            case "k":
-                # Reconfigure hooks (only available when dexray-intercept is running)
-                try:
-                    if Toolbox.is_task_running("dexray-intercept"):
-                        console = SandroidConsole.get()
-                        console.print(
-                            "\n[primary]Reconfiguring dexray-intercept hooks...[/primary]"
-                        )
-
-                        # Get current malwaremonitor instance
-                        dexray_task = Toolbox.get_task("dexray-intercept")
-                        if dexray_task and dexray_task.instance:
-                            current_monitor = dexray_task.instance
-                            current_app = dexray_task.app_name
-
-                            # Stop current monitoring (use stop_task for silent stop)
-                            console.print(
-                                "[accent]Stopping current monitoring...[/accent]"
-                            )
-                            Toolbox.stop_task("dexray-intercept")
-
-                            # Get debug mode from Toolbox args
-                            debug_mode = getattr(Toolbox.args, "debug", False)
-
-                            # Create new malwaremonitor with interactive config
-                            console.print(
-                                "[accent]Please configure new hook settings...[/accent]"
-                            )
-                            self.malwaremonitor = MalwareMonitor(
-                                path_filters=Toolbox.get_spotlight_files(),
-                                debug_mode=debug_mode,
-                            )
-
-                            # Start monitoring (will show config menu)
-                            if self.malwaremonitor.start_monitoring():
-                                # Get spotlight info for registration
-                                check_frida = self.check_frida_and_spotlight()
-                                if check_frida:
-                                    (
-                                        spotlight_application_pid,
-                                        spotlight_application_name,
-                                    ) = check_frida
-
-                                    # Register as background task
-                                    Toolbox.register_background_task(
-                                        name="dexray-intercept",
-                                        display_name="Dexray-Intercept",
-                                        instance=self.malwaremonitor,
-                                        stop_callback=self.malwaremonitor.stop_monitoring,
-                                        app_name=spotlight_application_name,
-                                        target_pid=spotlight_application_pid,
-                                    )
-                                    console.print(
-                                        "[success]Hooks reconfigured and monitoring restarted.[/success]"
-                                    )
-                                else:
-                                    console.print(
-                                        "[error]Failed to get spotlight app info.[/error]"
-                                    )
-                    else:
-                        console = SandroidConsole.get()
-                        console.print(
-                            "[warning]Dexray-intercept is not running. Start it first with 'm'.[/warning]"
-                        )
-
-                except Exception as e:
-                    self.logger.error(f"Error reconfiguring hooks: {e}")
-
-                self.q.append("interactive")
-            case "h":
-                try:
-                    if Toolbox.is_task_running("fritap"):
-                        # STOP FriTap with dependency prompt
-                        Toolbox.stop_task_with_prompt("fritap")
-                        # Reset spotlight app info if spawned
-                        if Toolbox.is_spawn_mode():
-                            Toolbox.reset_spotlight_application()
-                    else:
-                        # START FriTap
-                        # Check Frida is running
-                        if not Toolbox.frida_manager.is_frida_server_running():
-                            result = Toolbox.show_blocking_warning(
-                                title="Frida Server Required",
-                                message="No Frida server is running. This feature requires Frida to be installed and running.",
-                                action_hint="Press [f] to install and start Frida server",
-                                action_key="f",
-                            )
-                            if result == "f":
-                                # User pressed 'f' - install and start Frida
-                                try:
-                                    Toolbox.frida_manager.install_frida_server()
-                                    Toolbox.frida_manager.run_frida_server()
-                                    # Don't return - let the feature continue to execute
-                                except Exception as e:
-                                    self.logger.error(
-                                        f"Error starting frida server: {e!s}"
-                                    )
-                                    self.q.append("interactive")
-                                    return
-                            else:
-                                # User pressed Enter - return to menu
-                                self.q.append("interactive")
-                                return
-
-                        # Ensure spotlight app is set (prompts user if not)
-                        if not Toolbox.ensure_spotlight_app_for_tools("FriTap"):
-                            self.q.append("interactive")
-                            return
-
-                        # FriTap now handles both spawn/attach internally with interactive menu
-                        fritap = FriTap()  # No args needed, uses unified session getter
-                        if fritap.start(interactive=True):
-                            self.logger.info(
-                                "FriTap started in background. Press 'h' again to stop."
-                            )
-                        # else: user cancelled from interactive menu
-
-                except Exception as e:
-                    self.logger.error(f"Error managing FriTap: {e!s}")
-
-                self.q.append("interactive")  # Always return to menu
-            case "d":
-                try:
-                    # Check Frida is running
-                    if not Toolbox.frida_manager.is_frida_server_running():
-                        result = Toolbox.show_blocking_warning(
-                            title="Frida Server Required",
-                            message="No Frida server is running. This feature requires Frida to be installed and running.",
-                            action_hint="Press [f] to install and start Frida server",
-                            action_key="f",
-                        )
-                        if result == "f":
-                            # User pressed 'f' - install and start Frida
-                            try:
-                                Toolbox.frida_manager.install_frida_server()
-                                Toolbox.frida_manager.run_frida_server()
-                                # Don't return - let the feature continue to execute
-                            except Exception as e:
-                                self.logger.error(f"Error starting frida server: {e!s}")
-                                self.q.append("interactive")
-                                return
-                        else:
-                            # User pressed Enter - return to menu
-                            self.q.append("interactive")
-                            return
-
-                    # Fridump now handles both spawn/attach internally
-                    Fridump.dump_memory()  # Uses unified session getter
-
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                except Exception as e:
-                    self.logger.error(f"Error during memory dump: {e}")
-                self.q.append("interactive")
-
-            case "o":
-                try:
-                    FSMon.check_and_install_fsmon()
-
-                    # Get spotlight info (works with both spawn and attach modes)
-                    spotlight_data_path = Toolbox.get_spotlighted_app_data_path()
-                    process = None
-
-                    # Try to get PID from current spotlight settings
-                    console = SandroidConsole.get()
-                    if Toolbox.is_spawn_mode():
-                        # In spawn mode, app may not be running yet
-                        spawn_app = Toolbox.get_spotlight_spawn_application()
-                        if spawn_app:
-                            console.print(
-                                f"[warning]Spawn mode active for {spawn_app}.[/warning]"
-                            )
-                            click.echo(
-                                "FSMon requires a running process. Options:\n"
-                                "  1. Press ENTER to monitor app's data directory\n"
-                                "  2. Enter a custom path to monitor"
-                            )
-                            user_input = Toolbox.safe_input()
-
-                            if user_input:
-                                process = FSMon.run_fsmon_by_path(user_input)
-                            elif spotlight_data_path:
-                                process = FSMon.run_fsmon_by_path(spotlight_data_path)
-                            else:
-                                self.logger.warning("No valid path available.")
-                                self.q.append("interactive")
-                                return
-                        else:
-                            self.logger.info(
-                                "No spotlight app set. Enter a path to monitor:"
-                            )
-                            user_input = Toolbox.safe_input()
-                            if user_input:
-                                process = FSMon.run_fsmon_by_path(user_input)
-                            else:
-                                self.logger.warning("No path specified.")
-                                self.q.append("interactive")
-                                return
-                    else:
-                        # Attach mode or no mode - try to get PID
-                        spotlight_application_pid = (
-                            Toolbox.get_spotlight_application_pid()
-                        )
-
-                        if spotlight_application_pid:
-                            mode_str = (
-                                "[success]\\[ATTACH MODE][/success]"
-                                if Toolbox.get_spotlight_application()
-                                else ""
-                            )
-                            console.print(
-                                f"Press ENTER to monitor spotlight app {mode_str} (PID: {spotlight_application_pid}) or enter a path to monitor:"
-                            )
-                            user_input = Toolbox.safe_input()
-
-                            if user_input:
-                                process = FSMon.run_fsmon_by_path(user_input)
-                            else:
-                                process = FSMon.run_fsmon_by_pid(
-                                    spotlight_application_pid
-                                )
-                        else:
-                            self.logger.info(
-                                "No spotlight app is set. Enter a path to monitor:"
-                            )
-                            user_input = Toolbox.safe_input()
-
-                            if user_input:
-                                process = FSMon.run_fsmon_by_path(user_input)
-                            else:
-                                self.logger.warning(
-                                    "No path specified and no spotlight app available."
-                                )
-                                self.q.append("interactive")
-                                return
-
-                    if process is None:
-                        self.logger.warning("Failed to start FSMon monitoring.")
-                        self.q.append("interactive")
-                        return
-
-                    # Determine what we're monitoring for log message
-                    if "user_input" in locals() and user_input:
-                        monitor_target = f"path {user_input}"
-                    elif (
-                        "spotlight_application_pid" in locals()
-                        and spotlight_application_pid
-                    ):
-                        monitor_target = f"PID {spotlight_application_pid}"
-                    else:
-                        monitor_target = f"path {spotlight_data_path}"
-
-                    self.logger.info(
-                        f"Now fsmon output for {monitor_target} follows. End with CTRL-C"
-                    )
-
-                    while True:
-                        pass
-                except KeyboardInterrupt:
-                    self.logger.info("\nCTRL-C detected. Stopping FSMon monitoring.")
-                    if "process" in locals() and process is not None:
-                        process.terminate()
-                        self.logger.info("FSMon process terminated.")
-                self.q.append("interactive")
-
-            case "e":
-                Toolbox.print_emulator_information()
-                self.q.append("interactive")
-            case "x":
-                try:
-                    Toolbox.export_action()
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case "i":
-                try:
-                    self.logger.info("Feature not yet implemented: Import action")
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case "q":
-                self.finished = True
-            case "l":
-                try:
-                    spotlight_files = Toolbox.get_spotlight_files()
-                    if len(spotlight_files) > 1:
-                        self.logger.info("Current spotlight files:")
-                        for i, file_path in enumerate(spotlight_files):
-                            self.logger.info(f"{i + 1}. {file_path}")
-                    self.logger.info(
-                        "Enter the file path to add as a spotlight file (or press ENTER to skip):"
-                    )
-                    file_path = Toolbox.safe_input()
-                    if file_path:
-                        if file_path.endswith("-wal") or file_path.endswith("-journal"):
-                            self.logger.warning(
-                                "WAL and journal files are handled automatically with their DB file. Not adding directly."
-                            )
-                        else:
-                            Toolbox.add_spotlight_file(file_path)
-                    else:
-                        self.logger.warning("File path cannot be empty. No file added.")
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case "v":
-                try:
-                    spotlight_files = Toolbox.get_spotlight_files()
-                    if not spotlight_files:
-                        self.logger.warning("No spotlight files to remove.")
-                    elif len(spotlight_files) == 1:
-                        Toolbox.remove_spotlight_file()
-                    else:
-                        self.logger.info("Current spotlight files:")
-                        for i, file_path in enumerate(spotlight_files):
-                            self.logger.info(f"{i + 1}. {file_path}")
-
-                        self.logger.info(
-                            "Enter the file path to remove from spotlight files:"
-                        )
-                        file_path = Toolbox.safe_input()
-                        Toolbox.remove_spotlight_file(file_path)
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case "u":
-                try:
-                    self.logger.info(
-                        "Enter a short description of the action performed (or press ENTER to skip):"
-                    )
-                    description = Toolbox.safe_input()
-
-                    success = Toolbox.pull_spotlight_files(
-                        description=description if description else None
-                    )
-                    if success:
-                        self.logger.info("Spotlight files pulled successfully.")
-                    else:
-                        self.logger.warning("Failed to pull spotlight files.")
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case "y":
-                try:
-                    Toolbox.set_unset_proxy()
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-
-            case "b":
-                try:
-                    # Check Frida is running
-                    if not Toolbox.frida_manager.is_frida_server_running():
-                        result = Toolbox.show_blocking_warning(
-                            title="Frida Server Required",
-                            message="No Frida server is running. This feature requires Frida to be installed and running.",
-                            action_hint="Press [f] to install and start Frida server",
-                            action_key="f",
-                        )
-                        if result == "f":
-                            # User pressed 'f' - install and start Frida
-                            try:
-                                Toolbox.frida_manager.install_frida_server()
-                                Toolbox.frida_manager.run_frida_server()
-                                # Don't return - let the feature continue to execute
-                            except Exception as e:
-                                self.logger.error(f"Error starting frida server: {e!s}")
-                                self.q.append("interactive")
-                                return
-                        else:
-                            # User pressed Enter - return to menu
-                            self.q.append("interactive")
-                            return
-
-                    # Ensure spotlight app is set (prompts user if not)
-                    if not Toolbox.ensure_spotlight_app_for_tools("Objection"):
-                        self.q.append("interactive")
-                        return
-
-                    # Get session info using unified getter
-                    try:
-                        session, mode, app_info = (
-                            Toolbox.get_frida_session_for_spotlight()
-                        )
-                        package_name = app_info["package_name"]
-                        pid = app_info["pid"]
-
-                        self.logger.info(
-                            f"Launching objection interactive shell in {mode.upper()} mode for {package_name}"
-                        )
-
-                        # Build objection command based on mode
-                        if mode == "spawn":
-                            # For spawn mode, objection can handle spawning itself
-                            cmd = [
-                                "objection",
-                                "-g",
-                                package_name,
-                                "explore",
-                                "--startup-command",
-                                "android hooking watch class_method *.*",  # Example startup hook
-                            ]
-                            self.logger.info(
-                                f"Note: Objection will spawn a fresh instance of {package_name}"
-                            )
-                        else:
-                            # Attach mode (existing behavior)
-                            cmd = [
-                                "objection",
-                                "--gadget",
-                                str(pid),
-                                "explore",
-                            ]
-
-                        self.logger.info(f"Running command: {' '.join(cmd)}")
-
-                        process = subprocess.Popen(
-                            cmd,
-                            stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                        )  # nosec S603 # Launching objection security tool
-                        process.communicate()
-
-                        self.logger.info("Objection session ended")
-
-                        # Reset spotlight if spawned
-                        if mode == "spawn":
-                            Toolbox.reset_spotlight_application()
-
-                    except Exception as e:
-                        self.logger.error(f"Error getting spotlight session: {e}")
-
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                except Exception as e:
-                    self.logger.error(f"Error launching objection: {e!s}")
-                self.q.append("interactive")
-            case "w":
-                try:
-                    # If a capture is already running, stop it
-                    if Toolbox._network_capture_running or Toolbox.is_task_running(
-                        "network"
-                    ):
-                        self.logger.info(
-                            f"Stopping network capture: {Toolbox._network_capture_file}"
-                        )
-
-                        # If network was registered as background task, stop via that mechanism
-                        if Toolbox.is_task_running("network"):
-                            Toolbox.stop_task("network")
-                        elif Adb.stop_network_capture():
-                            self.logger.info("Network capture stopped successfully")
-                            Toolbox._network_capture_running = False
-                            Toolbox.set_network_capture_path(None)
-                        else:
-                            self.logger.error("Failed to stop network capture")
-                    else:
-                        # Ask for destination path
-                        self.logger.info(
-                            "Enter path for the network capture file (or press ENTER for default):"
-                        )
-                        user_path = Toolbox.safe_input()
-
-                        # Generate a default filename with timestamp if none provided
-                        if not user_path:
-                            timestamp = time.strftime("%Y%m%d-%H%M%S")
-                            user_path = f"{timestamp}.pcap"
-                            self.logger.info(f"Using default filename: {user_path}")
-
-                        # Ensure file has .pcap extension
-                        if not user_path.endswith(".pcap"):
-                            user_path += ".pcap"
-
-                        # Create network_captures directory if it doesn't exist
-                        network_captures_dir = os.path.join(
-                            os.getcwd(), "network_captures"
-                        )
-                        if not os.path.exists(network_captures_dir):
-                            os.makedirs(network_captures_dir)
-                            self.logger.info(
-                                f"Created directory: {network_captures_dir}"
-                            )
-
-                        # Combine path and filename
-                        user_path = os.path.join(
-                            network_captures_dir, os.path.basename(user_path)
-                        )
-                        self.logger.info(
-                            f"Network capture will be saved to: {user_path}"
-                        )
-                        # Start the capture
-                        if Adb.start_network_capture(user_path):
-                            Toolbox._network_capture_running = True
-                            Toolbox.set_network_capture_path(user_path)
-                            self.logger.info(f"Network capture started: {user_path}")
-                            self.logger.info("Press 'w' again to stop the capture")
-                        else:
-                            self.logger.error("Failed to start network capture")
-
-                except KeyboardInterrupt:
-                    self.logger.info("\nOperation cancelled")
-                self.q.append("interactive")
-            case _:
-                print(f"Invalid key: {char}.")
-                self.q.append("interactive")
+            return
+
+        # === LEGACY FALLBACK ===
+        # NOTE: All command keys are now handled by the command system above.
+        # This fallback handles any keys that weren't caught by:
+        # 1. Special keys (digits 0-8, TAB, ?)
+        # 2. Command keys (handled by CommandRegistry)
+        # 3. View-based key validation (shows "Key Not Available" warning)
+        #
+        # If we reach here, it's an unexpected key that passed view validation
+        # but isn't in the command system - this shouldn't normally happen.
+        self.logger.warning(
+            f"Unhandled key '{char}' reached legacy fallback - this shouldn't happen"
+        )
+        self.q.append("interactive")
+        return
+
+    def _execute_snapshot_command(self, char: str) -> None:
+        """Execute snapshot command through the command system.
+
+        Delegates snapshot operations (list/load for '0', create for '1'-'8')
+        to the SnapshotCommands in the command registry.
+
+        :param char: The digit character ('0'-'8')
+        :type char: str
+        """
+        from .toolbox import Toolbox
+
+        try:
+            from sandroid.commands import CommandRegistry
+            from sandroid.commands.context_factory import create_context_from_actionq
+
+            # Create command context
+            ctx = create_context_from_actionq(action_queue=self, toolbox=Toolbox)
+
+            # Get registry and execute
+            registry = CommandRegistry.get()
+            if not registry.has(char):
+                # Initialize commands if not already done
+                registry.initialize_default_commands()
+
+            if registry.has(char):
+                # Execute synchronously (async wrapper)
+                result = registry.execute_sync(char, ctx)
+                if not result.success:
+                    self.logger.warning(f"Snapshot command failed: {result.message}")
+            else:
+                self.logger.warning(f"No snapshot command registered for key '{char}'")
+        except Exception as e:
+            self.logger.error(f"Error executing snapshot command: {e}")
 
     def print_q(self):
         """Returns a string representation of the action queue.
@@ -1628,9 +664,13 @@ class ActionQ:
         Appends 'interactive' and returns None if the check fails.
         Returns (PID, app_name) if successful (for attach mode) or (None, package_name) for spawn mode.
         """
+        # Get FridaManager from FridaSessionService
+        frida_service = get_frida_session_service()
+        frida_manager = frida_service.get_frida_manager()
+
         # Check if the frida server is running
-        if not Toolbox.frida_manager.is_frida_server_running():
-            result = Toolbox.show_blocking_warning(
+        if not frida_manager.is_frida_server_running():
+            result = get_ui_service().show_blocking_warning(
                 title="Frida Server Required",
                 message="No Frida server is running. This feature requires Frida to be installed and running.",
                 action_hint="Press [f] to install and start Frida server",
@@ -1639,8 +679,8 @@ class ActionQ:
             if result == "f":
                 # User pressed 'f' - install and start Frida
                 try:
-                    Toolbox.frida_manager.install_frida_server()
-                    Toolbox.frida_manager.run_frida_server()
+                    frida_manager.install_frida_server()
+                    frida_manager.run_frida_server()
                     # Continue with the check - don't return None
                 except Exception as e:
                     self.logger.error(f"Error starting frida server: {e!s}")
@@ -1652,12 +692,13 @@ class ActionQ:
                 return None
 
         # Check for spawn mode first
-        if Toolbox.is_spawn_mode():
-            spawn_app = Toolbox.get_spotlight_spawn_application()
+        spotlight = get_spotlight_service()
+        if spotlight.is_spawn_mode():
+            spawn_app = spotlight.get_spawn_package()
             if spawn_app:
                 # Spawn mode is set with an app
                 return (None, spawn_app)
-            Toolbox.show_blocking_warning(
+            get_ui_service().show_blocking_warning(
                 title="Spotlight App Required",
                 message="Spawn mode is enabled but no spawn application is set.",
                 action_hint="Press [Shift+C] to set a spawn application",
@@ -1666,26 +707,26 @@ class ActionQ:
             return None
 
         # Check for attach mode
-        spotlight_application = Toolbox.get_spotlight_application()
+        spotlight_application = spotlight.get_app_tuple()
 
         if not spotlight_application:
-            Toolbox.show_blocking_info(
+            get_ui_service().show_blocking_info(
                 title="Auto-selecting Spotlight App",
                 message="No spotlight application was set. Automatically using the currently focused app.",
                 action_hint="To manually select an app, press [c] for ATTACH mode or [Shift+C] for SPAWN mode",
             )
-            Toolbox.set_spotlight_application(Adb.get_focused_app())
-            spotlight_application_name = Toolbox.get_spotlight_application()[0]
+            spotlight.set_app_from_tuple(Adb.get_focused_app())
+            spotlight_application_name = spotlight.get_app_tuple()[0]
             spotlight_application_pid = Adb.get_pid_for_package_name(
                 spotlight_application_name
             )
-            Toolbox.set_spotlight_application_pid(spotlight_application_pid)
+            spotlight.set_pid(spotlight_application_pid)
 
         # Check if a spotlight application is set
         try:
-            spotlight_application_pid = Toolbox.get_spotlight_application_pid()
-            spotlight_application_name = Toolbox.get_spotlight_application()[0]
-        except:
+            spotlight_application_pid = spotlight.get_pid()
+            spotlight_application_name = spotlight.get_app_tuple()[0]
+        except Exception:
             self.q.append("interactive")
             return None
 

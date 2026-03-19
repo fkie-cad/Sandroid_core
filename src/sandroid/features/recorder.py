@@ -1,6 +1,7 @@
-"""This code is an excerpt from "adb-event-record" by Tzutalin.
-(https://github.com/tzutalin/adb-event-record)
-The excerpt was modified to fit the needs of this project
+"""Event recorder based on adb-event-record by Tzutalin.
+
+Source: https://github.com/tzutalin/adb-event-record
+Modified to fit the needs of this project.
 """
 
 import math
@@ -11,6 +12,7 @@ from logging import getLogger
 
 from sandroid.core.adb import Adb
 from sandroid.core.toolbox import Toolbox
+from sandroid.services import get_emulator_service
 
 from .functionality import Functionality
 
@@ -18,30 +20,43 @@ logger = getLogger(__name__)
 
 
 class Recorder(Functionality):
-    """Represents a recorder functionality for capturing events.
+    """Records touch/input events from an Android device via ``adb shell getevent``.
 
-    This class handles recording events based on input data.
+    Events are written to a timestamped text file for later replay by :class:`Player`.
 
-    :cvar EVENT_LINE_RE: Regular expression pattern for parsing event lines.
-    :type EVENT_LINE_RE: re.Pattern
+    Attributes:
+        EVENT_LINE_RE: Pattern matching raw getevent output lines.
     """
 
     EVENT_LINE_RE = re.compile(r"(\S+): (\S+) (\S+) (\S+)$")
 
-    def __init__(self):
-        """Initialize the Recorder instance."""
+    def __init__(self) -> None:
+        """Initialize with the output file path derived from RAW_RESULTS_PATH."""
         self.output_file_name = f"{os.getenv('RAW_RESULTS_PATH')}recording.txt"
         self.output_file = None
-        # self.logger = Toolbox.logger_factory("recorder")
 
-    def perform(self):
-        """This method captures events and writes them to a file."""
+    def perform(self) -> None:
+        """Capture device events and write them to a file.
+
+        Raises:
+            RuntimeError: If the recording file cannot be opened or written to.
+        """
         if Toolbox.args.ai:
-            Toolbox.toggle_screen_record()
-        self.output_file = open(self.output_file_name, "w")
+            get_emulator_service().toggle_recording()
+
+        raw_path = os.getenv("RAW_RESULTS_PATH", "")
+        if raw_path:
+            os.makedirs(raw_path, exist_ok=True)
+
+        try:
+            self.output_file = open(self.output_file_name, "w")
+        except (FileNotFoundError, PermissionError, OSError) as e:
+            error_msg = f"Failed to open recording file '{self.output_file_name}': {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
+
         logger.info("Start recording, press Ctrl+C to stop")
-        record_command = "shell getevent"
-        adb = Adb.send_adb_command_popen(record_command)
+        adb = Adb.send_adb_command_popen("shell getevent")
 
         start_time = time.time()
         self.write_dummy_event()
@@ -49,13 +64,12 @@ class Recorder(Functionality):
         while adb.poll() is None:
             try:
                 line = adb.stdout.readline().decode("utf-8", "replace").strip()
-                match = Recorder.EVENT_LINE_RE.match(line.strip())
+                match = self.EVENT_LINE_RE.match(line)
                 if match is not None:
                     dev, etype, ecode, data = match.groups()
                     self.write_event(dev, etype, ecode, data)
 
             except KeyboardInterrupt:
-                # Add a dummy event at the end of the recording
                 self.write_dummy_event()
                 end_time = time.time()
                 duration = math.ceil(end_time - start_time)
@@ -64,31 +78,42 @@ class Recorder(Functionality):
             if len(line) == 0:
                 break
 
-        self.output_file.close()
+        try:
+            self.output_file.close()
+        except OSError as e:
+            logger.warning(
+                f"Error closing recording file '{self.output_file_name}': {e}"
+            )
+
         logger.info(f"End of recording. Recording took {duration} Seconds.")
         logger.info(f"Saved recording to file {self.output_file_name}.")
 
         if Toolbox.args.ai:
-            Toolbox.toggle_screen_record()
+            get_emulator_service().toggle_recording()
 
-    def write_event(self, dev, etype, ecode, data):
+    def write_event(self, dev: str, etype: str, ecode: str, data: str) -> None:
         """Write an input event to the output file.
 
-        :param dev: Device identifier.
-        :type dev: str
-        :param etype: Event type.
-        :type etype: str
-        :param ecode: Event code.
-        :type ecode: str
-        :param data: Event data.
-        :type data: str
+        Args:
+            dev: Device identifier (e.g. /dev/input/event1).
+            etype: Event type in hex.
+            ecode: Event code in hex.
+            data: Event data in hex.
+
+        Raises:
+            RuntimeError: If writing to the recording file fails.
         """
         millis = int(round(time.time() * 1000))
-        etype, ecode, data = int(etype, 16), int(ecode, 16), int(data, 16)
-        rline = "%s %s %s %s %s\n" % (millis, dev, etype, ecode, data)
-        logger.debug(rline.strip())
-        self.output_file.write(rline)
+        etype_int, ecode_int, data_int = int(etype, 16), int(ecode, 16), int(data, 16)
+        line = f"{millis} {dev} {etype_int} {ecode_int} {data_int}\n"
+        logger.debug(line.strip())
+        try:
+            self.output_file.write(line)
+        except OSError as e:
+            error_msg = f"Failed to write event to recording file '{self.output_file_name}': {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
 
-    def write_dummy_event(self):
-        """Write a dummy event to the output file."""
+    def write_dummy_event(self) -> None:
+        """Write a dummy synchronization event to the output file."""
         self.write_event("/dev/input/event1", "0", "0", "0")

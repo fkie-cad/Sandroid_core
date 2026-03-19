@@ -1,61 +1,63 @@
-"""Main CLI entry point for Sandroid."""
+"""Main CLI entry point for Sandroid.
+
+This module defines the Click command interface and dispatches to the
+appropriate mode handler in ``sandroid.cli_modes``. It is intentionally
+kept thin: Click decorators, config loading, and mode dispatch.
+"""
 
 import logging
 import os
 import sys
-from pathlib import Path
-from typing import TYPE_CHECKING
 
 import click
-from rich.logging import RichHandler
 
-# Import version first (no dependencies)
+from sandroid.services import get_ui_service
+
 from ._version import __version__
-
-# Import SandroidConfig for type hints (used in function signatures)
-from .config import SandroidConfig
+from .cli_modes.helpers import build_cli_overrides, setup_logging
 from .core.console import SandroidConsole
 
-# Type hints for heavy modules (runtime imports are lazy in main())
-if TYPE_CHECKING:
-    from .core.actionQ import ActionQ
-    from .core.adb import Adb
-    from .core.AI_processing import AIProcessing
-    from .core.pdf_report import PDFReport
-    from .core.toolbox import Toolbox
+logger = logging.getLogger(__name__)
 
 
-def setup_logging(config: SandroidConfig) -> logging.Logger:
-    """Setup logging with Rich handler."""
-    # Get the themed console
-    console = SandroidConsole.get()
-
-    # Configure root logger
-    logging.basicConfig(
-        level=config.log_level.value,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(console=console, rich_tracebacks=True)],
-    )
-
-    # Setup file logging
-    log_file = config.paths.results_path / "sandroid.log"
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-
-    logger = logging.getLogger("sandroid")
-    logger.addHandler(file_handler)
-
-    return logger
+# ---------------------------------------------------------------------------
+# Backward-compatible re-exports (tests and external code may import these
+# from sandroid.cli instead of sandroid.cli_modes)
+# ---------------------------------------------------------------------------
 
 
-def pretty_logo():
-    """Print the Sandroid logo using themed colors."""
+def pretty_logo() -> None:
+    """Display the Sandroid ASCII art logo in the terminal."""
     SandroidConsole.print_logo()
+
+
+# Lazy re-exports for mode dispatchers to avoid importing heavy modules at
+# module level (fritap, headless API, etc.).  The canonical location is now
+# ``sandroid.cli_modes.<module>``.
+def __getattr__(name: str):
+    _reexports = {
+        "start_interactive_mode": ".cli_modes.interactive",
+        "run_analysis": ".cli_modes.analysis",
+        "run_fritap_headless": ".cli_modes.fritap",
+        "run_dexray_headless": ".cli_modes.dexray",
+        "run_fridump_headless": ".cli_modes.fridump",
+        "run_network_headless": ".cli_modes.network",
+        "run_headless_analysis": ".cli_modes.headless",
+    }
+    if name in _reexports:
+        import importlib
+
+        mod = importlib.import_module(_reexports[name], package=__package__)
+        attr = getattr(mod, name)
+        # Cache on the module so __getattr__ is only called once per name
+        globals()[name] = attr
+        return attr
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# Click command definition
+# ---------------------------------------------------------------------------
 
 
 @click.command()
@@ -142,17 +144,127 @@ def pretty_logo():
     is_flag=True,
     help="Enable debug/verbose mode",
 )
-@click.option("--interactive", "-i", is_flag=True, help="Start in interactive mode")
 @click.option(
-    "--rich-mode",
+    "--log",
     is_flag=True,
-    help="Use classic Rich-based menu instead of the Textual TUI (default is TUI mode)",
+    help="Show log messages in terminal (useful for debugging TUI issues)",
+)
+@click.option(
+    "--interactive", "-i", is_flag=True, help="Start in legacy Rich interactive mode"
+)
+@click.option(
+    "--fresh",
+    is_flag=True,
+    help="Start as if running for the first time (reset welcome screen)",
 )
 @click.option(
     "--view",
     type=click.Choice(["forensic", "malware", "security"]),
     default=None,
     help="Set the initial view mode (forensic, malware, or security). Default: from config or forensic",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="Run in headless mode without interactive UI. Requires --trigdroid or --batch.",
+)
+@click.option(
+    "--batch",
+    type=click.Path(exists=True),
+    metavar="CONFIG_FILE",
+    help="Batch processing config JSON file with package list and options.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["forensic", "malware", "security", "network"]),
+    default="malware",
+    help="Analysis mode for headless operation. Default: malware",
+)
+@click.option(
+    "--dexray",
+    type=str,
+    metavar="PACKAGE",
+    default=None,
+    help="Start dexray-intercept malware monitoring for PACKAGE (headless mode). Runs until Ctrl+C.",
+)
+@click.option(
+    "--dexray-hooks",
+    type=str,
+    metavar="HOOKS",
+    default=None,
+    help="Comma-separated hook groups for dexray (default: all). Options: aes,web,socket,filesystem,database,dex,java_dex",
+)
+@click.option(
+    "--dexray-fritap",
+    is_flag=True,
+    help="Enable built-in FriTap during dexray monitoring",
+)
+@click.option(
+    "--proxy",
+    type=str,
+    metavar="IP:PORT",
+    default=None,
+    help="Set HTTP proxy on device (headless mode). Use --proxy-clear to remove.",
+)
+@click.option(
+    "--proxy-clear",
+    is_flag=True,
+    help="Clear HTTP proxy settings on device (headless mode)",
+)
+@click.option(
+    "--install-apk",
+    type=click.Path(exists=True),
+    metavar="PATH",
+    default=None,
+    help="Install APK on device (headless mode)",
+)
+@click.option(
+    "--import-action",
+    type=click.Path(exists=True),
+    metavar="PATH",
+    default=None,
+    help="Import action recording file (headless mode)",
+)
+@click.option(
+    "--device-settings",
+    type=click.Path(exists=True),
+    metavar="FILE",
+    default=None,
+    help="Apply device settings from JSON file (headless mode)",
+)
+@click.option(
+    "--preset",
+    type=str,
+    metavar="CODE",
+    default=None,
+    help="Apply country preset to device (e.g., de, us, ru, cn)",
+)
+@click.option(
+    "--fritap",
+    type=str,
+    metavar="PACKAGE",
+    default=None,
+    help="Start FriTap SSL/TLS key extraction for PACKAGE (headless mode). Runs until Ctrl+C.",
+)
+@click.option(
+    "--fridump",
+    type=str,
+    metavar="PACKAGE",
+    default=None,
+    help="Dump memory of PACKAGE using Fridump (headless mode). App must be running.",
+)
+@click.option(
+    "--duration",
+    type=click.IntRange(min=5),
+    default=60,
+    help="Network capture duration in seconds (headless network mode only). Default: 60",
+)
+@click.option(
+    "--with-fritap",
+    type=str,
+    metavar="PACKAGE",
+    default=None,
+    help="Combine network capture with FriTap SSL keylog for PACKAGE (headless network mode only)",
 )
 @click.version_option(version=__version__, prog_name="sandroid")
 def main(
@@ -176,24 +288,56 @@ def main(
     ai: bool,
     report: bool,
     debug: bool,
+    log: bool,
     interactive: bool,
-    rich_mode: bool,
+    fresh: bool,
     view: str | None,
-):
-    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices."""
-    # Initialize console with default theme (will be re-initialized with config theme later)
+    headless: bool,
+    batch: str | None,
+    mode: str,
+    dexray: str | None,
+    dexray_hooks: str | None,
+    dexray_fritap: bool,
+    proxy: str | None,
+    proxy_clear: bool,
+    install_apk: str | None,
+    import_action: str | None,
+    device_settings: str | None,
+    preset: str | None,
+    fritap: str | None,
+    fridump: str | None,
+    duration: int,
+    with_fritap: str | None,
+) -> None:
+    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
+
+    Main entry point for the Sandroid CLI application. Handles configuration
+    loading, logging setup, and dispatches to the appropriate execution mode:
+
+    1. Default mode: Textual TUI (when running just 'sandroid')
+    2. Legacy Rich mode (-i flag): Classic Rich-based interactive menu
+    3. Automated analysis: Command-line driven analysis with --trigdroid
+    4. Headless mode (--headless): Programmatic API-based analysis
+    """
+    # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()
 
-    # Lazy imports - only load heavy modules when actually running (not for --version)
-    from .config import ConfigLoader, SandroidConfig
+    # --- Fresh start: remove welcome marker so first-run screen appears ---
+    if fresh:
+        from sandroid.tui.app import SandroidTUI
 
-    # Check if user has run sandroid-config init
+        marker = SandroidTUI._get_user_config_dir() / ".tui_welcome_shown"
+        if marker.exists():
+            marker.unlink()
+            logger.debug("Removed welcome marker: %s", marker)
+
+    # --- Configuration bootstrap -------------------------------------------
+    from .config import ConfigLoader
+
     try:
         loader = ConfigLoader()
-        # Try to load config to see if it's been initialized
-        config_files = loader._config_files
-        if not config_files:
+        if not loader._config_files:
             console.print("[error]Error: No configuration found![/error]")
             console.print(
                 "[warning]Please run 'sandroid-config init' first to set up Sandroid.[/warning]"
@@ -207,40 +351,37 @@ def main(
         )
         sys.exit(1)
 
-    # Import analysis modules from modern package structure
+    # --- Import heavy modules (lazy, so --version stays fast) ---------------
     try:
-        # Initialize Toolbox args with CLI parameters
         import argparse
 
-        from .core.actionQ import (
-            ActionQ,  # Direct import to avoid circular dependencies
-        )
+        from .core.actionQ import ActionQ
         from .core.adb import Adb
         from .core.AI_processing import AIProcessing
         from .core.pdf_report import PDFReport
         from .core.toolbox import Toolbox
 
-        mock_args = argparse.Namespace()
-        mock_args.screenshot = screenshot
-        mock_args.number_of_runs = number if number else 2
-        mock_args.avoid_strong_noise_filter = avoid_strong_noise_filter
-        mock_args.network = network
-        mock_args.show_deleted = show_deleted
-        mock_args.no_processes = no_processes
-        mock_args.sockets = sockets
-        mock_args.trigdroid = trigdroid
-        mock_args.trigdroid_ccf = trigdroid_ccf
-        mock_args.hash = locals()["hash"]  # Avoid collision with builtin hash()
-        mock_args.apk = apk
-        mock_args.degrade_network = degrade_network
-        mock_args.whitelist = whitelist
-        mock_args.file = file if file else "sandroid.json"
-        mock_args.loglevel = loglevel if loglevel else "INFO"
-        mock_args.ai = ai
-        mock_args.report = report
-        mock_args.debug = debug  # Debug mode for dexray-intercept verbose output
-
-        # Set the args to satisfy dependencies
+        # Build legacy argparse namespace expected by Toolbox / ActionQ
+        mock_args = argparse.Namespace(
+            screenshot=screenshot,
+            number_of_runs=number if number else 2,
+            avoid_strong_noise_filter=avoid_strong_noise_filter,
+            network=network,
+            show_deleted=show_deleted,
+            processes=not no_processes,
+            sockets=sockets,
+            trigdroid=trigdroid,
+            trigdroid_ccf=trigdroid_ccf,
+            hash=locals()["hash"],  # Avoid collision with builtin hash()
+            apk=apk,
+            degrade_network=degrade_network,
+            whitelist=whitelist,
+            file=file if file else "sandroid.json",
+            loglevel=loglevel if loglevel else "INFO",
+            ai=ai,
+            report=report,
+            debug=debug,
+        )
         Toolbox.args = mock_args
 
     except ImportError as e:
@@ -249,65 +390,29 @@ def main(
         console.print("Try reinstalling with: pip install --upgrade sandroid")
         sys.exit(1)
 
+    # --- Load config with CLI overrides ------------------------------------
     try:
-        # We already have the loader from the config check above
+        cli_overrides = build_cli_overrides(
+            file=file,
+            debug=debug,
+            loglevel=loglevel,
+            number=number,
+            whitelist=whitelist,
+            avoid_strong_noise_filter=avoid_strong_noise_filter,
+            network=network,
+            show_deleted=show_deleted,
+            no_processes=no_processes,
+            sockets=sockets,
+            screenshot=screenshot,
+            hash_files=locals()["hash"],
+            apk=apk,
+            degrade_network=degrade_network,
+            trigdroid=trigdroid,
+            trigdroid_ccf=trigdroid_ccf,
+            ai=ai,
+            report=report,
+        )
 
-        # Build CLI overrides
-        cli_overrides = {}
-        if file:
-            cli_overrides["output_file"] = file
-        # Debug flag forces DEBUG log level (unless explicitly overridden by loglevel)
-        if debug and not loglevel:
-            cli_overrides["log_level"] = "DEBUG"
-        elif loglevel:
-            cli_overrides["log_level"] = loglevel
-        if number:
-            cli_overrides["analysis"] = {"number_of_runs": number}
-        if whitelist:
-            cli_overrides["whitelist_file"] = whitelist
-
-        # Analysis settings
-        analysis_overrides = {}
-        if avoid_strong_noise_filter:
-            analysis_overrides["avoid_strong_noise_filter"] = True
-        if network:
-            analysis_overrides["monitor_network"] = True
-        if show_deleted:
-            analysis_overrides["show_deleted_files"] = True
-        if no_processes:
-            analysis_overrides["monitor_processes"] = False
-        if sockets:
-            analysis_overrides["monitor_sockets"] = True
-        if screenshot:
-            analysis_overrides["screenshot_interval"] = screenshot
-        if hash:
-            analysis_overrides["hash_files"] = True
-        if apk:
-            analysis_overrides["list_apks"] = True
-        if degrade_network:
-            analysis_overrides["degrade_network"] = True
-
-        if analysis_overrides:
-            cli_overrides["analysis"] = analysis_overrides
-
-        # TrigDroid settings
-        if trigdroid or trigdroid_ccf:
-            trigdroid_overrides = {"enabled": True}
-            if trigdroid:
-                trigdroid_overrides["package_name"] = trigdroid
-            if trigdroid_ccf:
-                trigdroid_overrides["config_mode"] = trigdroid_ccf
-            cli_overrides["trigdroid"] = trigdroid_overrides
-
-        # AI settings
-        if ai:
-            cli_overrides["ai"] = {"enabled": True}
-
-        # Report settings
-        if report:
-            cli_overrides["report"] = {"generate_pdf": True}
-
-        # Load the configuration
         sandroid_config = loader.load(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
@@ -316,35 +421,119 @@ def main(
         SandroidConsole.initialize(sandroid_config.theme.preset)
         console = SandroidConsole.get()
 
-        # Set the initial view mode (use CLI view if provided, otherwise use config's default_view)
+        # Set the initial view mode
         initial_view = (
             view if view is not None else sandroid_config.analysis.default_view
         )
-        Toolbox.set_current_view(initial_view)
+        get_ui_service().set_current_view(initial_view)
+
+        # Determine if we're using TUI mode
+        use_tui = not interactive
 
         # Setup logging
-        logger = setup_logging(sandroid_config)
-
-        # Clear screen if not debug
-        if sandroid_config.log_level != "DEBUG":
-            os.system("cls" if os.name == "nt" else "clear")  # nosec S605 # Safe terminal clear command
-
-        # Show logo
-        pretty_logo()
+        active_logger = setup_logging(
+            sandroid_config,
+            tui_mode=use_tui,
+            show_terminal_log=log,
+        )
 
         # Setup environment variables for legacy code
         os.environ["RESULTS_PATH"] = str(sandroid_config.paths.results_path)
         os.environ["RAW_RESULTS_PATH"] = str(sandroid_config.paths.raw_results_path)
 
-        if interactive:
-            # Start interactive mode
-            start_interactive_mode(
-                sandroid_config, logger, Toolbox, Adb, use_tui=not rich_mode
+        # --- Mode dispatch -------------------------------------------------
+        from .cli_modes import (
+            run_analysis,
+            run_dexray_headless,
+            run_fridump_headless,
+            run_fritap_headless,
+            run_headless_analysis,
+            run_network_headless,
+            start_interactive_mode,
+        )
+
+        if device_settings or preset:
+            from .cli_modes.device_settings import run_device_settings_headless
+
+            run_device_settings_headless(
+                sandroid_config,
+                settings_file=device_settings,
+                preset=preset,
+            )
+        elif dexray:
+            run_dexray_headless(
+                sandroid_config=sandroid_config,
+                active_logger=active_logger,
+                package=dexray,
+                output_file=file,
+                hook_groups=dexray_hooks,
+                enable_fritap=dexray_fritap,
+            )
+        elif proxy:
+            _run_proxy_command(sandroid_config, proxy=proxy)
+        elif proxy_clear:
+            _run_proxy_command(sandroid_config, clear=True)
+        elif install_apk:
+            _run_install_apk(sandroid_config, install_apk)
+        elif import_action:
+            _run_import_action(sandroid_config, import_action)
+        elif fridump:
+            run_fridump_headless(
+                sandroid_config=sandroid_config,
+                active_logger=active_logger,
+                package=fridump,
+            )
+        elif fritap:
+            run_fritap_headless(
+                sandroid_config=sandroid_config,
+                active_logger=active_logger,
+                package=fritap,
+                output_file=file,
+            )
+        elif headless and mode == "network":
+            run_network_headless(
+                sandroid_config=sandroid_config,
+                active_logger=active_logger,
+                duration=duration,
+                with_fritap=with_fritap,
+                output_file=file,
+            )
+        elif headless or batch:
+            run_headless_analysis(
+                sandroid_config=sandroid_config,
+                active_logger=active_logger,
+                package=trigdroid,
+                batch_config=batch,
+                mode=mode,
+                runs=number or 2,
+                network=network,
+                hash_files=locals()["hash"],
+                show_deleted=show_deleted,
+                output_file=file,
+            )
+        elif bool(trigdroid):
+            # Automated analysis with --trigdroid flag
+            if sandroid_config.log_level.value != "DEBUG":
+                os.system("cls" if os.name == "nt" else "clear")  # nosec S605
+            SandroidConsole.print_logo()
+            run_analysis(
+                sandroid_config,
+                active_logger,
+                Toolbox,
+                Adb,
+                ActionQ,
+                AIProcessing,
+                PDFReport,
             )
         else:
-            # Run analysis
-            run_analysis(
-                sandroid_config, logger, Toolbox, Adb, ActionQ, AIProcessing, PDFReport
+            # Default: TUI mode (or legacy Rich mode with -i)
+            start_interactive_mode(
+                sandroid_config,
+                active_logger,
+                Toolbox,
+                Adb,
+                use_tui=use_tui,
+                show_terminal_log=log,
             )
 
     except Exception as e:
@@ -352,144 +541,72 @@ def main(
         sys.exit(1)
 
 
-def start_interactive_mode(
-    config: SandroidConfig, logger: logging.Logger, Toolbox, Adb, use_tui: bool = True
-):
-    """Start interactive menu mode.
-
-    Args:
-        config: Sandroid configuration
-        logger: Logger instance
-        Toolbox: Toolbox class
-        Adb: Adb class
-        use_tui: If True, use Textual TUI (default). If False, use classic Rich menu.
-    """
-    # Import and initialize legacy components
-    from sandroid.core.actionQ import ActionQ
-
-    # Initialize legacy systems with modern config
-    Toolbox.config = config  # Pass config to legacy code
-    Toolbox.init()
-    Adb.init()
-    Toolbox.check_setup()
+def _run_proxy_command(
+    sandroid_config,
+    proxy: str | None = None,
+    clear: bool = False,
+) -> None:
+    """Execute proxy set/clear in headless mode."""
+    from .core.initializer import initialize_core
+    from .services import get_proxy_service
 
     console = SandroidConsole.get()
+    initialize_core(sandroid_config)
+    proxy_service = get_proxy_service()
 
-    if use_tui:
-        # Try to start Textual TUI
-        try:
-            from sandroid.tui import SandroidTUI
-
-            console.print("[success bold]Starting Sandroid TUI mode...[/success bold]")
-            console.print("[dim]Use --rich-mode for classic menu interface[/dim]")
-
-            # Create action queue for the TUI to use
-            action_q = ActionQ()
-
-            # Run the TUI application
-            app = SandroidTUI(action_queue=action_q)
-            app.run()
-
-        except ImportError as e:
-            logger.warning(
-                f"Textual TUI not available: {e}. Falling back to Rich mode."
-            )
-            console.print(
-                "[warning]TUI not available, falling back to Rich mode...[/warning]"
-            )
-            # Fall back to classic Rich mode
-            _start_rich_interactive_mode(ActionQ, console)
-        except Exception as e:
-            logger.error(f"TUI failed to start: {e}. Falling back to Rich mode.")
-            console.print(f"[error]TUI error: {e}[/error]")
-            console.print("[warning]Falling back to Rich mode...[/warning]")
-            _start_rich_interactive_mode(ActionQ, console)
-    else:
-        # Use classic Rich-based menu
-        _start_rich_interactive_mode(ActionQ, console)
+    if clear:
+        if proxy_service.clear_proxy():
+            console.print("[success]Proxy cleared[/success]")
+        else:
+            console.print("[error]Failed to clear proxy[/error]")
+            sys.exit(1)
+    elif proxy:
+        if ":" not in proxy:
+            console.print("[error]Proxy must be in IP:PORT format[/error]")
+            sys.exit(1)
+        ip, port = proxy.rsplit(":", 1)
+        if proxy_service.set_proxy(ip, port):
+            console.print(f"[success]Proxy set to {ip}:{port}[/success]")
+        else:
+            console.print(f"[error]Failed to set proxy to {ip}:{port}[/error]")
+            sys.exit(1)
 
 
-def _start_rich_interactive_mode(ActionQ, console):
-    """Start the classic Rich-based interactive menu.
+def _run_install_apk(sandroid_config, apk_path: str) -> None:
+    """Install APK on device in headless mode."""
+    from .core.adb import Adb
+    from .core.initializer import initialize_core
 
-    Args:
-        ActionQ: ActionQ class
-        console: SandroidConsole instance
-    """
-    console.print(
-        "[success bold]Starting Sandroid interactive mode (Rich)...[/success bold]"
-    )
-    action_q = ActionQ()
-    action_q.q.append("interactive")  # Add interactive mode to queue
-    action_q.run()  # Run the interactive menu
+    console = SandroidConsole.get()
+    initialize_core(sandroid_config)
+
+    console.print(f"[accent]Installing APK: {apk_path}[/accent]")
+    _stdout, stderr = Adb.install_apk(apk_path)
+    if stderr and "success" not in stderr.lower():
+        console.print(f"[error]APK install failed: {stderr}[/error]")
+        sys.exit(1)
+    console.print("[success]APK installed successfully[/success]")
 
 
-def run_analysis(
-    config: SandroidConfig,
-    logger: logging.Logger,
-    Toolbox,
-    Adb,
-    ActionQ,
-    AIProcessing,
-    PDFReport,
-):
-    """Run forensic analysis."""
+def _run_import_action(sandroid_config, action_path: str) -> None:
+    """Import an action file in headless mode."""
+    import json
+
+    from .core.initializer import initialize_core
+
+    console = SandroidConsole.get()
+    initialize_core(sandroid_config)
+
     try:
-        # Initialize legacy components with new config
-        Toolbox.config = config  # Pass config to legacy code
-        Toolbox.init()
-        Adb.init()
-        Toolbox.check_setup()
-
-        # Create and assemble action queue
-        q = ActionQ()
-        q.assembleQ()
-
-        # Process action queue
-        while not q.finished:
-            q.do_next()
-
-        # Handle AI summarization if enabled
-        action = ""
-        if config.ai.enabled:
-            recording_path = config.paths.raw_results_path / "recording.webm"
-            if recording_path.exists():
-                action = AIProcessing.summarize_video(str(recording_path))
-
-        # Finalize
-        Toolbox.wrap_up()
-
-        # Write results
-        output_file = config.paths.results_path / config.output_file.name
-        with open(output_file, "w") as fd:
-            fd.write(q.get_data())
-
-        # Display results
-        console = SandroidConsole.get()
-        if config.ai.enabled and action:
-            console.print(
-                f"[success bold]Sandroid Results for the action: {action}[/success bold]"
-            )
-
-        print(q.get_pretty_print())
-
-        # Generate PDF report if enabled
-        if config.report.generate_pdf:
-            pdf_path = config.paths.results_path / "Sandroid_Forensic_Report.pdf"
-            PDFReport(str(pdf_path), str(output_file))
-            logger.info(f"PDF report generated: {pdf_path}")
-
-        logger.info("Analysis completed successfully")
-
-        # Stop all background tasks before exit
-        Toolbox.stop_all_background_tasks()
-
-        # Print exit summary with results folder and generated files
-        Toolbox.print_exit_summary()
-
-    except Exception as e:
-        logger.error(f"Analysis failed: {e}")
-        raise
+        with open(action_path) as f:
+            action_data = json.load(f)
+        console.print(f"[success]Action imported from: {action_path}[/success]")
+        console.print(
+            f"[dim]Actions loaded: {len(action_data) if isinstance(action_data, list) else 'N/A'}[/dim]"
+        )
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        console.print(f"[error]Failed to import action: {e}[/error]")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

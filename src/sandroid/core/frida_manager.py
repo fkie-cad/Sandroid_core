@@ -4,14 +4,20 @@ import logging
 import lzma
 import os
 import re
+import shlex
 import subprocess
 import tempfile
-import time
 
 import frida
 import requests
 
 from .adb import Adb
+
+# Import config with fallback for standalone usage
+try:
+    from sandroid.config import get_config
+except ImportError:
+    get_config = None
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
@@ -24,6 +30,7 @@ class FridaManager:
         socket="",
         verbose=False,
         frida_install_dst="/data/local/tmp/",
+        device_serial=None,
     ):
         """Constructor of the current FridaManager instance
 
@@ -35,6 +42,8 @@ class FridaManager:
         :type number: bool
         :param frida_install_dst: The path where the frida server should be installed. By default it will be installed to /data/local/tmp/.
         :type number: bool
+        :param device_serial: Serial number of the target device for multi-device support.
+        :type device_serial: str
 
         """
         self.is_remote = is_remote
@@ -44,33 +53,20 @@ class FridaManager:
         self.frida_install_dst = frida_install_dst
         self.frida_started_properly = False
         self.logger = logging.getLogger(__name__)
+        self.device_serial = device_serial  # For multi-device support
 
         if self.is_remote:
             frida.get_device_manager().add_remote_device(self.socket)
 
-    # def _setup_logging(self):
-    #     """
-    #     Setup logging for the current instance of FridaManager
-    #
-    #     """
-    #     logger = logging.getLogger()
-    #     logger.setLevel(logging.INFO)
-    #     color_formatter = ColoredFormatter(
-    #         "%(log_color)s[%(asctime)s] [%(levelname)-4s]%(reset)s - %(message)s",
-    #         datefmt='%d-%m-%y %H:%M:%S',
-    #         reset=True,
-    #         log_colors={
-    #             'DEBUG': 'cyan',
-    #             'INFO': 'green',
-    #             'WARNING': 'bold_yellow',
-    #             'ERROR': 'bold_red',
-    #             'CRITICAL': 'bold_red',
-    #         },
-    #         secondary_log_colors={},
-    #         style='%')
-    #     logging_handler = logging.StreamHandler()
-    #     logging_handler.setFormatter(color_formatter)
-    #     logger.addHandler(logging_handler)
+    def _get_adb_base_cmd(self) -> list:
+        """Get the base ADB command with device targeting if set.
+
+        Returns:
+            List starting with 'adb' and optionally '-s <serial>'
+        """
+        if self.device_serial:
+            return ["adb", "-s", self.device_serial]
+        return ["adb"]
 
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
         """This function is used to run the frida server on the connected device.
@@ -85,7 +81,7 @@ class FridaManager:
         # Check if frida-server is already running
         if self.is_frida_server_running():
             if self.verbose:
-                self.logger.info("[*] frida-server is already running, skipping start")
+                self.logger.debug("[*] frida-server is already running, skipping start")
             return True
 
         if frida_server_path is self.run_frida_server.__defaults__[0]:
@@ -93,18 +89,21 @@ class FridaManager:
         else:
             cmd = frida_server_path + "frida-server &"
 
+        # Build command with device targeting
+        adb_base = self._get_adb_base_cmd()
         if self.is_magisk_mode:
-            command = f"""adb shell "su -c 'sh -c \"{cmd}\"'" """
+            shell_cmd = f"su -c 'sh -c \"{cmd}\"'"
         else:
-            command = f"""adb shell "su 0 sh -c \\"{cmd}\\"\" """
+            shell_cmd = f'su 0 sh -c "{cmd}"'
+
+        full_cmd = adb_base + ["shell", shell_cmd]
 
         try:
             process = subprocess.Popen(
-                command,
-                shell=True,
+                full_cmd,
                 stdin=subprocess.DEVNULL,  # Prevent consuming terminal input
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.PIPE,
             )
             # Give it a moment to start and potentially fail
             import time
@@ -113,9 +112,9 @@ class FridaManager:
 
             # Check if process failed immediately
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
+                _stdout, stderr = process.communicate()
                 if "Address already in use" in stderr.decode():
-                    self.logger.info(
+                    self.logger.debug(
                         "[*] frida-server is already running on the device"
                     )
                     return True
@@ -124,7 +123,7 @@ class FridaManager:
                 return False
             # Process is still running (background), which is expected for frida-server
             if self.verbose:
-                self.logger.info("[*] frida-server started successfully in background")
+                self.logger.debug("[*] frida-server started successfully in background")
 
             if self.is_frida_server_running():
                 return True
@@ -133,36 +132,100 @@ class FridaManager:
             )
             return False
 
+        except OSError as e:
+            self.logger.error(f"Failed to start frida-server process: {e}")
+            return False
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Subprocess error starting frida-server: {e}")
+            return False
         except Exception as e:
-            self.logger.error(f"Error starting frida-server: {e}")
+            self.logger.error(f"Unexpected error starting frida-server: {e}")
             return False
 
-    def is_frida_server_running(self):
+    def _get_device_path(self, field: str, default: str) -> str:
+        """Read a device path from config with fallback.
+
+        Args:
+            field: Field name on DevicePathsConfig (e.g. 'pidof_binary')
+            default: Fallback value if config unavailable
+
+        Returns:
+            The configured value or the default.
+        """
+        try:
+            if get_config is not None:
+                return getattr(get_config().device_paths, field, default)
+        except Exception:
+            pass
+        return default
+
+    def _get_external_url(self, field: str, default: str) -> str:
+        """Read an external URL from config with fallback.
+
+        Args:
+            field: Field name on ExternalURLsConfig (e.g. 'frida_releases_url')
+            default: Fallback value if config unavailable
+
+        Returns:
+            The configured value or the default.
+        """
+        try:
+            if get_config is not None:
+                return getattr(get_config().external_urls, field, default)
+        except Exception:
+            pass
+        return default
+
+    def is_frida_server_running(self) -> bool:
         """Checks if on the connected device a frida server is running.
-        The test is done by the Android system command pidof and is looking for the string frida-server.
+
+        The test is done by the Android system command pidof and is looking for
+        the string frida-server. This method is safe to call on non-rooted devices
+        and will return False if the check cannot be performed.
 
         :return: True if a frida-server is running otherwise False.
         :rtype: bool
         """
-        stdout, stderr = Adb.send_adb_command("shell /system/bin/pidof frida-server")
+        try:
+            # Try pidof first (most reliable)
+            pidof_binary = self._get_device_path("pidof_binary", "/system/bin/pidof")
+            stdout, stderr = Adb.send_adb_command(f"shell {pidof_binary} frida-server")
 
-        if len(stdout) > 1:
-            return True
+            if stdout and len(stdout.strip()) > 0:
+                # pidof returns PID if process exists
+                try:
+                    int(stdout.strip().split()[0])  # Validate it's a number
+                    return True
+                except (ValueError, IndexError):
+                    pass
 
-        # Fallback to ps grep if pidof doesn't work
-        result = Adb.send_adb_command("shell ps | grep frida-server | grep -v grep")
-        if result.stdout.strip():
-            return True
+            # Fallback to ps grep if pidof doesn't work
+            stdout, stderr = Adb.send_adb_command(
+                "shell ps | grep frida-server | grep -v grep"
+            )
+            if stdout and stdout.strip():
+                return True
 
-        # Try alternative ps command format
-        result = Adb.send_adb_command("shell ps -A | grep frida-server | grep -v grep")
-        if result.stdout.strip():
-            return True
+            # Try alternative ps command format (newer Android versions)
+            stdout, _stderr = Adb.send_adb_command(
+                "shell ps -A | grep frida-server | grep -v grep"
+            )
+            if stdout and stdout.strip():
+                return True
 
-        return False
+            return False
+
+        except Exception as e:
+            # Log but don't crash - this is a status check, not a critical operation
+            self.logger.debug(
+                f"Could not check Frida server status: {e}. "
+                "This may happen on non-rooted devices."
+            )
+            return False
 
     def stop_frida_server(self):
-        self.run_adb_command_as_root("/system/bin/killall frida-server")
+        killall_binary = self._get_device_path("killall_binary", "/system/bin/killall")
+        self.run_adb_command_as_root(f"{killall_binary} frida-server")
 
     def remove_frida_server(self, frida_server_path="/data/local/tmp/"):
         if frida_server_path is self.remove_frida_server.__defaults__[0]:
@@ -215,22 +278,68 @@ class FridaManager:
         :rtype: string
         """
         url = self.get_frida_server_for_android_url(version)
-        with open(path + "/frida-server", "wb") as fsb:
-            res = requests.get(url, timeout=30)
-            fsb.write(res.content)
-            if self.verbose:
-                self.logger.info(f"[*] writing frida-server to {path}")
+        if url is None:
+            raise RuntimeError("Failed to get Frida server download URL")
+
+        # Get configurable timeout for Frida server download
+        try:
+            if get_config is not None:
+                config = get_config()
+                download_timeout = config.timeouts.frida_download
+            else:
+                download_timeout = 300  # Default fallback
+        except Exception:
+            download_timeout = 300  # Fallback if config unavailable
+
+        # Download with timeout, using context manager to close the response
+        try:
+            with requests.get(
+                url, timeout=download_timeout, allow_redirects=True
+            ) as res:
+                res.raise_for_status()
+
+                content = res.content
+                if not content:
+                    error_msg = (
+                        f"Frida server download returned empty content from {url}"
+                    )
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+
+                with open(path + "/frida-server", "wb") as fsb:
+                    fsb.write(content)
+                    if self.verbose:
+                        self.logger.debug(f"[*] writing frida-server to {path}")
+        except requests.Timeout:
+            error_msg = (
+                f"Frida server download timed out after {download_timeout}s -- "
+                "increase timeouts.frida_download in sandroid.toml"
+            )
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        except requests.RequestException as e:
+            error_msg = f"Failed to download Frida server from {url}: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
 
         return path + "/frida-server"
 
     def extract_frida_server_comp(self, file_path):
         if self.verbose:
-            self.logger.info(f"[*] extracting {file_path} ...")
+            self.logger.debug(f"[*] extracting {file_path} ...")
         # create a subdir for the specified filename
         frida_server_dir = file_path[:-3]
-        os.makedirs(frida_server_dir)
-        with lzma.open(file_path, "rb") as f:
-            decompressed_file = f.read()
+        try:
+            os.makedirs(frida_server_dir)
+        except OSError as e:
+            self.logger.error(f"Failed to create directory {frida_server_dir}: {e}")
+            raise
+        try:
+            with lzma.open(file_path, "rb") as f:
+                decompressed_file = f.read()
+        except lzma.LZMAError as e:
+            self.logger.error(f"Failed to decompress frida server archive {file_path}: {e}")
+            raise
         with open(frida_server_dir + "/frida-server", "wb") as f:
             f.write(decompressed_file)
 
@@ -249,7 +358,7 @@ class FridaManager:
         elif arch == "ia32":
             arch_str = "x86"
         elif arch == "x64":
-            arch_str == "x86_64"
+            arch_str = "x86_64"
         else:
             arch_str = "x86"
 
@@ -257,16 +366,42 @@ class FridaManager:
         return download_url
 
     def _get_frida_server_donwload_url(self, arch, version):
-        frida_download_prefix = "https://github.com/frida/frida/releases"
+        frida_download_prefix = self._get_external_url(
+            "frida_releases_url", "https://github.com/frida/frida/releases"
+        )
 
         if version == "latest":
-            url = "https://api.github.com/repos/frida/frida/releases/" + version
+            frida_api_url = self._get_external_url(
+                "frida_api_url",
+                "https://api.github.com/repos/frida/frida/releases/",
+            )
+            url = frida_api_url + version
 
+            # Get configurable timeout for API calls
             try:
-                res = requests.get(url, timeout=10)
-            except requests.exceptions.RequestException as e:
-                print("[-] error in doing requests: " + e)
-                exit(2)
+                if get_config is not None:
+                    config = get_config()
+                    api_timeout = config.timeouts.api_call
+                else:
+                    api_timeout = 10  # Default fallback
+            except Exception:
+                api_timeout = 10  # Fallback if config unavailable
+
+            # Make API request with timeout and proper error handling
+            try:
+                res = requests.get(url, timeout=api_timeout)
+                res.raise_for_status()
+            except requests.Timeout:
+                error_msg = (
+                    f"Frida API request timed out after {api_timeout}s -- "
+                    "check network or increase timeouts.api_call in sandroid.toml"
+                )
+                self.logger.error(error_msg)
+                return None
+            except requests.RequestException as e:
+                error_msg = f"Frida API request failed: {e}"
+                self.logger.error(error_msg)
+                return None
 
             frida_server_path = re.findall(
                 r"\/download\/\d+\.\d+\.\d+\/frida\-server\-\d+\.\d+\.\d+\-android\-"
@@ -274,11 +409,21 @@ class FridaManager:
                 + ".xz",
                 res.text,
             )  #'\.xz'
+
+            if not frida_server_path:
+                error_msg = f"Could not find Frida server for architecture {arch} in API response"
+                self.logger.error(error_msg)
+                return None
+
             final_url = frida_download_prefix + frida_server_path[0]
 
         else:
+            frida_download_url = self._get_external_url(
+                "frida_download_url",
+                "https://github.com/frida/frida/releases/download/",
+            )
             final_url = (
-                "https://github.com/frida/frida/releases/download/"
+                frida_download_url
                 + version
                 + "/frida-server-"
                 + version
@@ -298,88 +443,126 @@ class FridaManager:
         else:
             cmd = frida_server_path + "frida-server"
 
-        self.run_adb_command_as_root(f"chmod +x {cmd}")
+        self.run_adb_command_as_root(f"chmod +x {shlex.quote(cmd)}")
 
     ### some functions to work with adb ###
 
     def run_adb_command_as_root(self, command):
-        if self.adb_check_root() == False:
-            print(
-                "[-] none rooted device. Please root it before using FridaAndroidManager and ensure that you are able to run commands with the su-binary...."
+        if not self.adb_check_root():
+            error_msg = (
+                "Non-rooted device. Please root it before using FridaAndroidManager "
+                "and ensure that you are able to run commands with the su-binary."
             )
-            exit(2)
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
-        if self.is_magisk_mode:
-            output = subprocess.run(
-                ["adb", "shell", "su -c " + command],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        else:
-            output = subprocess.run(
-                ["adb", "shell", "su 0 " + command],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+        adb_base = self._get_adb_base_cmd()
+        try:
+            if self.is_magisk_mode:
+                output = subprocess.run(
+                    adb_base + ["shell", "su -c " + command],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            else:
+                output = subprocess.run(
+                    adb_base + ["shell", "su 0 " + command],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
 
-        return output
+            return output
+        except OSError as e:
+            self.logger.error(f"Failed to start ADB process: {e}")
+            return None
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Subprocess error running ADB command as root: {e}")
+            return None
 
     def _adb_push_file(self, file, dst):
-        output = subprocess.run(
-            ["adb", "push", file, dst], check=False, capture_output=True, text=True
-        )
-        return output
+        adb_base = self._get_adb_base_cmd()
+        try:
+            output = subprocess.run(
+                adb_base + ["push", file, dst],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return output
+        except OSError as e:
+            self.logger.error(f"Failed to start ADB push process: {e}")
+            return None
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Subprocess error pushing file via ADB: {e}")
+            return None
 
     def _adb_pull_file(self, src_file, dst):
-        output = subprocess.run(
-            ["adb", "pull", src_file, dst], check=False, capture_output=True, text=True
-        )
-        return output
+        adb_base = self._get_adb_base_cmd()
+        try:
+            output = subprocess.run(
+                adb_base + ["pull", src_file, dst],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return output
+        except OSError as e:
+            self.logger.error(f"Failed to start ADB pull process: {e}")
+            return None
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Subprocess error pulling file via ADB: {e}")
+            return None
 
     def _get_android_device_arch(self):
         if self.is_remote:
             frida_usb_json_data = frida.get_remote_device().query_system_parameters()
+        elif self.device_serial:
+            # Use specific device by serial for multi-device support
+            device = frida.get_device(self.device_serial)
+            frida_usb_json_data = device.query_system_parameters()
         else:
             frida_usb_json_data = frida.get_usb_device().query_system_parameters()
         return frida_usb_json_data["arch"]
 
     def _adb_make_binary_executable(self, path):
-        output = self.run_adb_command_as_root("chmod +x " + path)
+        output = self.run_adb_command_as_root("chmod +x " + shlex.quote(path))
 
     def _adb_does_file_exist(self, path):
-        output = self.run_adb_command_as_root("ls " + path)
+        output = self.run_adb_command_as_root("ls " + shlex.quote(path))
+        if output is None:
+            return False
         if len(output.stderr) > 1:
             return False
         return True
 
     def adb_check_root(self):
-        if bool(
-            subprocess.run(
-                ["adb", "shell", "su -v"], check=False, capture_output=True, text=True
-            ).stdout
-        ):
-            self.is_magisk_mode = True
-            return True
-
-        return bool(
-            subprocess.run(
-                ["adb", "shell", "su 0 id -u"],
+        adb_base = self._get_adb_base_cmd()
+        try:
+            result = subprocess.run(
+                adb_base + ["shell", "su -v"],
                 check=False,
                 capture_output=True,
                 text=True,
-            ).stdout
-        )
+            )
+            if bool(result.stdout):
+                self.is_magisk_mode = True
+                return True
+
+            result = subprocess.run(
+                adb_base + ["shell", "su 0 id -u"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return bool(result.stdout)
+        except OSError as e:
+            self.logger.error(f"Failed to start ADB process for root check: {e}")
+            return False
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Subprocess error checking root access: {e}")
+            return False
 
     def _adb_remove_file_if_exist(self, path="/data/local/tmp/frida-server"):
-        if self._adb_does_file_exist(path):
-            output = self.run_adb_command_as_root("rm " + path)
-
-
-# only there in order to do some tests will be removed soon
-# if __name__ == "__main__":
-#    afm_obj = FridaManager()
-#    afm_obj.install_frida_server()
-#    result = afm_obj.is_frida_server_running()
-#    print(result)
+        output = self.run_adb_command_as_root("rm -f " + shlex.quote(path))

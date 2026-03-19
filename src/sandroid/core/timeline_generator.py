@@ -44,7 +44,6 @@ def parse_timeline(output_file):
 
         id = tl_event["id"]
 
-        # print(f"Checking if {events_entry} is NOT in {events} ({events_entry not in events}),\nand making sure that {id} in {changed_files_id} ({id in changed_files_id})\n")
         if (
             events_entry not in events and id in changed_files_id
         ):  # add changed file to timeline (color is fine)
@@ -159,16 +158,5 @@ def create_timeline(events, filename, duration):
     return ax
 
 
-# Example events
-events = [
-    ("File Created", 1, "#C80036"),
-    ("File Modified", 2, "#7ABA78"),
-    ("Process Spawned", 6, "#322C2B"),
-    ("Network Socket Opened", 7, "r"),
-    ("File Modified", 6, "#0C1844"),
-]
-
-# Create the timeline and save it as a PNG file
-# create_timeline(events, "timeline.png", 12)
 if __name__ == "__main__":
     parse_timeline("sandroid.json")

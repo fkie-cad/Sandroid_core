@@ -6,6 +6,41 @@ from logging import getLogger
 
 logger = getLogger(__name__)
 
+# Keywords indicating emulator startup failure in stderr output
+EMULATOR_ERROR_KEYWORDS = ("PANIC", "ERROR", "WARNING", "Fatal")
+_STARTUP_GRACE_PERIOD = 3
+
+
+def check_emulator_startup(process: subprocess.Popen) -> tuple[bool, str]:
+    """Check whether an emulator process survived initial startup.
+
+    Waits briefly, then checks if the process is still running.
+    If it exited, reads stderr and filters for error keywords.
+
+    Args:
+        process: The emulator Popen process (must have stderr=PIPE).
+
+    Returns:
+        Tuple of (success, error_message). On success error_message is empty.
+    """
+    time.sleep(_STARTUP_GRACE_PERIOD)
+    exit_code = process.poll()
+    if exit_code is None:
+        return True, ""
+
+    stderr_output = ""
+    try:
+        stderr_output = process.stderr.read().decode(errors="replace")
+    except OSError:
+        pass
+    error_lines = [
+        line
+        for line in stderr_output.strip().splitlines()
+        if any(kw in line for kw in EMULATOR_ERROR_KEYWORDS)
+    ]
+    error_msg = "; ".join(error_lines) if error_lines else f"exit code {exit_code}"
+    return False, error_msg
+
 
 class Emulator:
     """Utility class for working with Android emulators."""
@@ -117,20 +152,35 @@ class Emulator:
                 ]
                 return avds
             return []
-        except Exception as e:
-            print(f"Error listing available AVDs: {e}")
+        except OSError as e:
+            logger.error(f"Failed to start emulator process: {e}")
+            return []
+        except subprocess.SubprocessError as e:
+            logger.error(f"Subprocess error listing AVDs: {e}")
             return []
 
     @classmethod
-    def start_avd(cls, avd_name: str, extra_args: list[str] = None) -> bool:
+    def start_avd(
+        cls,
+        avd_name: str,
+        extra_args: list[str] = None,
+        boot_mode: str = "default",
+        snapshot_name: str = None,
+    ) -> bool:
         """Starts the specified Android Virtual Device (AVD).
 
         Args:
-            avd_name (str): The name of the AVD to start.
-            extra_args (List[str], optional): Additional arguments for the emulator command. Defaults to None.
+            avd_name: The name of the AVD to start.
+            extra_args: Additional arguments for the emulator command.
+            boot_mode: How to boot the AVD:
+                - "default": Load default_boot snapshot (standard behavior)
+                - "cold": Don't load any snapshot (-no-snapshot-load)
+                - "snapshot": Load specific snapshot (requires snapshot_name)
+                - "wipe": Wipe all data and start fresh (-wipe-data)
+            snapshot_name: Name of snapshot to load (only when boot_mode="snapshot")
 
         Returns:
-            bool: True if the emulator process was started successfully, False otherwise.
+            True if the emulator process was started successfully, False otherwise.
         """
         emulator_path = cls.detect_emulator_path()
         if not emulator_path:
@@ -141,18 +191,43 @@ class Emulator:
         # Add common performance flags (adjust as needed)
         command.extend(["-feature", "-Vulkan", "-gpu", "host"])
 
+        # Add boot mode flags
+        if boot_mode == "cold":
+            command.append("-no-snapshot-load")
+        elif boot_mode == "wipe":
+            command.append("-wipe-data")
+        elif boot_mode == "snapshot" and snapshot_name:
+            command.extend(["-snapshot", snapshot_name])
+        # "default" mode: no additional flags (uses default_boot automatically)
+
         if extra_args:
             command.extend(extra_args)
 
         try:
-            print(f"Starting emulator '{avd_name}' with command: {' '.join(command)}")
+            logger.info(
+                f"Starting emulator '{avd_name}' with command: {' '.join(command)}"
+            )
             # Use Popen for non-blocking start
             # start_new_session=True isolates emulator from terminal signals (e.g., Ctrl+C)
-            subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-            print(f"Emulator '{avd_name}' is starting up. Please wait...")
-            # Note: A fixed sleep might not be reliable. Consider adding checks later.
-            time.sleep(10)
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+            logger.info(f"Emulator '{avd_name}' is starting up (PID {process.pid})...")
+
+            ok, error_msg = check_emulator_startup(process)
+            if not ok:
+                logger.error(
+                    f"Emulator '{avd_name}' crashed during startup: {error_msg}"
+                )
+                return False
+
             return True
-        except Exception as e:
-            print(f"Error starting emulator '{avd_name}': {e}")
+        except OSError as e:
+            logger.error(f"Failed to start emulator process '{avd_name}': {e}")
+            return False
+        except subprocess.SubprocessError as e:
+            logger.error(f"Subprocess error starting emulator '{avd_name}': {e}")
             return False

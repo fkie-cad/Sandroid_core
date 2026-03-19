@@ -29,9 +29,7 @@ class NotificationHandler(ABC):
     """
 
     @abstractmethod
-    def display_warning(
-        self, title: str, message: str, action_hint: Optional[str] = None
-    ):
+    def display_warning(self, title: str, message: str, action_hint: str | None = None):
         """Display a warning notification.
 
         Args:
@@ -39,12 +37,9 @@ class NotificationHandler(ABC):
             message: Warning message
             action_hint: Optional hint about what action to take
         """
-        pass
 
     @abstractmethod
-    def display_error(
-        self, title: str, message: str, action_hint: Optional[str] = None
-    ):
+    def display_error(self, title: str, message: str, action_hint: str | None = None):
         """Display an error notification.
 
         Args:
@@ -52,12 +47,9 @@ class NotificationHandler(ABC):
             message: Error message
             action_hint: Optional hint about what action to take
         """
-        pass
 
     @abstractmethod
-    def display_info(
-        self, title: str, message: str, action_hint: Optional[str] = None
-    ):
+    def display_info(self, title: str, message: str, action_hint: str | None = None):
         """Display an informational notification.
 
         Args:
@@ -65,7 +57,6 @@ class NotificationHandler(ABC):
             message: Info message
             action_hint: Optional hint about what action to take
         """
-        pass
 
     @abstractmethod
     def wait_for_acknowledgment(self):
@@ -75,4 +66,3 @@ class NotificationHandler(ABC):
         For web: Wait for button click
         For GUI: Wait for dialog close
         """
-        pass
