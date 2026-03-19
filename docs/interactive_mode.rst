@@ -6,72 +6,71 @@ Sandroid's interactive mode provides a user-friendly menu-driven interface for p
 Starting Interactive Mode
 --------------------------
 
-**Launch Interactive Mode**::
+Sandroid has two interactive modes:
+
+**Default: Textual TUI** (recommended)::
 
    sandroid
 
-or explicitly::
+The Textual TUI provides a modern terminal user interface with three specialized analysis views (Forensic, Malware, Security), a status bar, activity log, and keyboard-driven navigation.
 
+**Legacy: Rich Interactive Menu**::
+
+   sandroid -i
    sandroid --interactive
+
+The legacy Rich mode provides the classic single-page menu interface.
 
 **With Custom Configuration**::
 
-   sandroid --config my-analysis.toml --interactive
+   sandroid --config my-analysis.toml
+   sandroid --config my-analysis.toml -i   # For legacy mode
 
-The Interactive Menu
----------------------
+The Textual TUI
+-----------------
 
-When you start interactive mode, you'll see the main menu:
+When you start Sandroid (without ``-i``), the Textual TUI launches with:
 
-.. code-block:: text
+- **Header Bar**: Shows Sandroid logo and current view mode
+- **Status Bar**: Displays Frida server status, HTTP proxy, spotlight app, and spotlight files
+- **Menu Panel**: Lists available commands organized by category for the current view
+- **Activity Log**: Shows real-time command output and status messages
+- **Footer**: Keyboard shortcuts (TAB to switch views, Q to quit)
 
-   ┌───────────────────────────────────────────────────────────────────────┐
-   │                       Sandroid Interactive Menu                       │
-   ├───────────────────────────────────────────────────────────────────────┤
-   │Frida Server: [Not running]                                            │
-   │HTTP Proxy: [Not set]                                                  │
-   │Spotlight Application: [Not set]                                       │
-   │Spotlight Files: [Not set]                                             │
-   │                                                                       │
-   │    === Action Recording & Playback ===                                │
-   │    * [r]ecord an action                                               │
-   │    * [p]lay the currently loaded action                               │
-   │    * e[x]port currently loaded action                                 │
-   │    * [i]mport action                                                  │
-   │                                                                       │
-   │    === Spotlight Application ===                                      │
-   │    * set [c]urrent app in focus as spotlight app                      │
-   │    * [a]nalyze spotlight app with asam                                │
-   │    * [d]ump memory of spotlight app (using fridump)                   │
-   │    * start android [m]alware motion monitor (am3) on spotlight app    │
-   │    * start o[b]jection interactive shell for spotlight app            │
-   │    * run [t]rigdroid malware triggers                                 │
-   │                                                                       │
-   │    === Spotlight Files ===                                            │
-   │    * [l]ist/add spotlight file                                        │
-   │    * remo[v]e spotlight file                                          │
-   │    * p[u]ll spotlight files                                           │
-   │    * [o]bserve file system changes (fsmon)                            │
-   │                                                                       │
-   │    === Emulator Management ===                                        │
-   │    * show [e]mulator information                                      │
-   │    * keys [1-8] create snapshots, key [0] lists/loads snapshots       │
-   │    * take [s]creenshot of device                                      │
-   │    * [g]rab video of screen                                           │
-   │    * [n]ew APK installation                                           │
-   │    * run/install [f]rida server                                       │
-   │                                                                       │
-   │    === Network Management ===                                         │
-   │    * set/unset network prox[y]                                        │
-   │    * [h]ook encryption routines with friTap                           │
-   │    * [w]rite network capture file                                     │
-   │                                                                       │
-   │                                                                       │
-   │    * [q]uit                                                           │
-   └───────────────────────────────────────────────────────────────────────┘
+Three Analysis Views
+~~~~~~~~~~~~~~~~~~~~~
 
-Menu Sections Explained
-------------------------
+The TUI provides three specialized views, each with its own set of commands. Switch between views using the ``TAB`` key.
+
+**Forensic View**
+   Focus on forensic artifact extraction and file system analysis:
+   - Record and playback user actions
+   - File system monitoring with fsmon
+   - Spotlight file management
+   - Screenshot and video capture
+   - Forensic evidence scanning (MVT)
+   - Manage forensic APKs
+
+**Malware View**
+   Focus on malware behavioral analysis and instrumentation:
+   - Dexray-Intercept malware monitoring (formerly AM3)
+   - Dexray-Insight static analysis (formerly asam)
+   - Memory dumping with Fridump
+   - TrigDroid malware triggers
+   - Objection interactive shell
+   - FriTap SSL/TLS interception
+
+**Security View** *(Early Stage)*
+   Focus on vulnerability scanning and security testing:
+   - Network proxy management
+   - Device settings and presets
+   - Security-focused analysis tools
+
+   .. note::
+      The Security view is in early development. Features are functional but the command set is still expanding.
+
+Command Reference
+-------------------
 
 Action Recording & Playback
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -80,149 +79,102 @@ Action Recording & Playback
    Records user interactions and system changes:
 
    1. Takes a baseline snapshot of the system
-   2. Starts monitoring:
-      - File system changes
-      - Network connections
-      - Process activity
-      - Socket usage
+   2. Starts monitoring file system changes, network connections, processes, and sockets
    3. Waits for user interaction with the device
    4. Analyzes changes when you press Enter
-   5. Generates comprehensive results
-
-   **Usage Flow**:
-   - Press ``r`` to start recording
-   - Perform actions on your Android device/emulator
-   - Install apps, browse, use features
-   - Press Enter in Sandroid terminal when done
-   - Review the analysis results
 
 **[p] Play Currently Loaded Action**
-   Replays a previously recorded action sequence:
-
-   - Automated playback of recorded touch events
-   - Reproduces user interactions exactly
-   - Useful for regression testing and consistent analysis
+   Replays a previously recorded action sequence for regression testing.
 
 **[x] Export Currently Loaded Action**
-   Saves recorded actions to a file for sharing or backup
+   Saves recorded actions to a file for sharing or backup.
 
 **[i] Import Action**
-   Loads previously saved action recordings
+   Loads previously saved action recordings.
 
 Spotlight Application
 ~~~~~~~~~~~~~~~~~~~~~
 
-The "spotlight app" is the application currently being analyzed in detail.
+**[c] / [C] Set Spotlight App**
+   - ``c``: Detect and set the foreground application as spotlight
+   - ``C``: Spawn a new application as spotlight (select from installed apps)
 
-**[c] Set Current App as Spotlight**
-   - Automatically detects the foreground application
-   - Sets it as the target for detailed analysis
-   - Enables app-specific monitoring and analysis
+**[a] Analyze with Dexray-Insight**
+   Performs static analysis of the spotlight app's APK using Dexray-Insight (formerly asam).
 
-**[a] Analyze Spotlight App**
-   - Performs static analysis of the APK
-   - Extracts metadata, permissions, components
-   - Identifies potential security issues
+**[d] Dump Memory (Fridump)**
+   Uses Fridump to extract memory contents of the spotlight app.
 
-**[d] Dump Memory of Spotlight App**
-   - Uses Fridump to extract memory contents
-   - Captures heap, stack, and loaded libraries
-   - Useful for malware analysis and reverse engineering
+**[m] Dexray-Intercept Malware Monitor**
+   Start Dexray-Intercept dynamic hooking on the spotlight app (formerly Android Malware Motion Monitor / AM3). Intercepts sensitive data flows, network traffic, and runtime behaviors.
 
-**[m] Android Malware Motion Monitor (AM3)**
-   - Advanced malware behavior monitoring
-   - Tracks file system, network, and process activities
-   - Specialized for detecting malicious behaviors
+**[b] / [O] Objection Shell**
+   - ``b``: Launch objection interactive shell for the spotlight app
+   - ``O``: Resume a previous objection session
 
-**[b] Objection Interactive Shell**
-   - Launches objection for runtime manipulation
-   - Allows hooking functions, bypassing security
-   - Advanced dynamic analysis capabilities
+**[t] TrigDroid Malware Triggers**
+   Automatically execute malware trigger conditions for the spotlight app.
 
-**[t] Run TrigDroid Malware Triggers**
-   - Automatically executes malware trigger conditions
-   - Simulates user interactions that activate malware
-   - Comprehensive trigger pattern execution
-
-Spotlight Files
-~~~~~~~~~~~~~~~
-
-Monitor specific files of interest:
+Spotlight Files & Monitoring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **[l] List/Add Spotlight Files**
-   - Add files to monitor for changes
-   - Track configuration files, databases, logs
-   - Monitor sensitive file modifications
+   Add files on the device to monitor for changes.
 
 **[v] Remove Spotlight File**
-   - Remove files from monitoring list
-   - Clean up file watch list
+   Remove files from the monitoring list.
 
 **[u] Pull Spotlight Files**
-   - Download monitored files from device
-   - Compare versions before/after analysis
-   - Archive important artifacts
+   Download monitored files from the device.
 
 **[o] File System Monitor (fsmon)**
-   - Real-time file system change monitoring
-   - Tracks file creation, modification, deletion
-   - Detailed change logging with timestamps
+   Real-time file system change monitoring with timestamps.
 
-Emulator Management
-~~~~~~~~~~~~~~~~~~~
+**[F] Forensic Evidence Scan**
+   Run MVT (Mobile Verification Toolkit) forensic evidence scanning using configured IOCs.
 
-**[e] Show Emulator Information**
-   - Display device specifications
-   - Show running processes and services
-   - Network configuration and status
+**[G] Manage Forensic APKs**
+   Manage APKs used for forensic testing and analysis.
+
+Device & Emulator Management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**[e] / [E] Device Information & Settings**
+   - ``e``: Show emulator/device information
+   - ``E``: Apply device settings (locale, timezone, country presets)
 
 **[1-8] Create Snapshots**
-   - Save current emulator state
-   - Quick rollback to clean states
-   - Useful for repeatable analysis
+   Save current emulator state for quick rollback.
 
 **[0] List/Load Snapshots**
-   - Manage saved snapshots
-   - Restore previous states
-   - Clean baseline management
+   Manage and restore saved snapshots.
 
 **[s] Take Screenshot**
-   - Capture current device screen
-   - Document analysis progress
-   - Evidence collection
+   Capture the current device screen.
 
 **[g] Grab Video**
-   - Record screen activity
-   - Capture dynamic behaviors
-   - Create demonstration videos
+   Record screen activity.
 
 **[n] Install APK**
-   - Install applications for analysis
-   - Remote APK download and installation
-   - Automated installation process
+   Install applications for analysis.
 
 **[f] Frida Server Management**
-   - Download and install Frida server
-   - Start/stop Frida services
-   - Manage different Frida versions
+   Download, install, and manage the Frida server on the device.
+
+**[k] Reconfigure Hooks**
+   Reconfigure Frida hook settings for the current session.
 
 Network Management
 ~~~~~~~~~~~~~~~~~~
 
 **[y] Network Proxy**
-   - Configure HTTP/HTTPS proxy
-   - Route device traffic through proxy
-   - Enable traffic interception and analysis
+   Configure or clear HTTP/HTTPS proxy on the device.
 
-**[h] friTap SSL/TLS Hooking**
-   - Hook encryption routines
-   - Decrypt SSL/TLS traffic
-   - Monitor encrypted communications
+**[h] FriTap SSL/TLS Hooking**
+   Hook encryption routines for SSL/TLS traffic decryption.
 
 **[w] Write Network Capture**
-   - Save network traffic to PCAP files
-   - Preserve network evidence
-   - Enable offline analysis
+   Save network traffic to PCAP files.
 
 Step-by-Step Workflows
 ----------------------
@@ -373,14 +325,14 @@ Tips for Interactive Mode
 Keyboard Shortcuts
 ------------------
 
-All menu options use single-key shortcuts:
+All commands use single-key shortcuts. Available keys depend on the current view:
 
+- **Navigation**: ``TAB`` (switch views), ``q`` (quit)
 - **Recording**: ``r``, ``p``, ``x``, ``i``
-- **App Analysis**: ``c``, ``a``, ``d``, ``m``, ``b``, ``t``
-- **File Monitoring**: ``l``, ``v``, ``u``, ``o``
-- **Device Management**: ``e``, ``1-8``, ``0``, ``s``, ``g``, ``n``, ``f``
+- **App Analysis**: ``c``, ``C``, ``a``, ``d``, ``m``, ``b``, ``O``, ``t``
+- **File Monitoring**: ``l``, ``v``, ``u``, ``o``, ``F``, ``G``
+- **Device Management**: ``e``, ``E``, ``1-8``, ``0``, ``s``, ``g``, ``n``, ``f``, ``k``
 - **Network**: ``y``, ``h``, ``w``
-- **Exit**: ``q``
 
 Configuration in Interactive Mode
 ----------------------------------

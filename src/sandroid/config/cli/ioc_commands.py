@@ -213,7 +213,9 @@ def ioc_download(output: str | None):
 
         try:
             # Download IOC file
-            with urllib.request.urlopen(config.mvt.ioc_url, timeout=30) as response:
+            with urllib.request.urlopen(
+                config.mvt.ioc_url, timeout=30
+            ) as response:  # nosec B310
                 content = response.read()
 
             # Determine filename

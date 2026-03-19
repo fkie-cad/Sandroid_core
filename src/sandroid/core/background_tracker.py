@@ -303,9 +303,11 @@ class BackgroundWorkTracker:
                         UntrackedWork(
                             work_type="frida_job",
                             name=job_info.get("display_name", job_type),
-                            details=f"job_id={job_id[:8]}..."
-                            if len(job_id) > 8
-                            else f"job_id={job_id}",
+                            details=(
+                                f"job_id={job_id[:8]}..."
+                                if len(job_id) > 8
+                                else f"job_id={job_id}"
+                            ),
                             identifier=job_id,
                         )
                     )

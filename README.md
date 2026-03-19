@@ -22,6 +22,27 @@ By using this framework, you can:
 The framework is designed to simplify the process of **forensic investigations**, **mobile threat detection**, and **security testing** by providing a streamlined, automated environment for analysis.
 Whether you're investigating malicious apps, assessing security flaws, or collecting digital evidence, this solution helps you quickly identify and understand what happens inside Android applications.
 
+## Three Analysis Views
+
+Sandroid's TUI provides three specialized analysis views, each tailored to a different use case:
+
+| View | Purpose | Status |
+|------|---------|--------|
+| **Forensic** | Extract and analyze forensic artifacts from Android apps | Stable |
+| **Malware** | Behavioral analysis, hooking, and malware monitoring | Stable |
+| **Security** | Vulnerability scanning and security testing | Early Stage |
+
+Switch between views using the `TAB` key in the TUI, or launch directly with `--view`:
+
+```bash
+sandroid --view forensic    # Start in forensic view
+sandroid --view malware     # Start in malware view
+sandroid --view security    # Start in security view
+```
+
+<p align="center">
+  <img src="assets/screenshots/sandroid_tui.png" alt="Sandroid TUI" width="700"/>
+</p>
 
 ## Quick Start
 
@@ -39,38 +60,67 @@ sandroid
 See [SETUP.md](SETUP.md) for all installation possibilities.
 
 ## Usage
+
 ```
-usage: sandroid [-h] [-f FILENAME] [-ll LOGLEVEL] [-n NUMBER] [--avoid_strong_noise_filter] [--network] [-d] [--no-processes] [--sockets] [--screenshot INTERVAL] [--trigdroid PACKAGE NAME]
-                [--trigdroid_ccf {I,D}] [--hash] [--apk] [--degrade_network] [--whitelist FILE]
+Usage: sandroid [OPTIONS]
 
-Find forensic artefacts for any action on an AVD
+  Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
 
-options:
-  -h, --help            show this help message and exit
-  -f FILENAME, --file FILENAME
-                        Save output to the specified file, default is sandroid.json
-  -ll LOGLEVEL, --loglevel LOGLEVEL
-                        Set the log level. The logging file sandroid.log will always contain an expanded DEBUG level log.
-  -n NUMBER, --number_of_runs NUMBER
-                        Run action n times (Minimum and default is 2)
-  --avoid_strong_noise_filter
-                        Don't use a "Dry Run". This will catch more noise and disable intra file noise detection.
-  --network             Capture traffic and show connections. Connections are not necessarily in chronological order. Each connection will only show up once, even if it was made multiple times. For better
-                        results,  it is recommended to use at least -n 3  and to leave the strong noise filter on
-  -d, --show_deleted    Perform additional full filesystem checks to reveal deleted files
-  --no-processes        Do not monitor active processes during the action
-  --sockets             Monitor listening sockets during the action
-  --screenshot INTERVAL
-                        Take a screenshot each INTERVAL seconds
-  --trigdroid PACKAGE NAME
-                        Use the TrigDroid(tm) tool to execute malware triggers in package PACKAGE NAME
-  --trigdroid_ccf {I,D}
-                        Use the TrigDroid(tm) CCF utility to create a Trigdroid config file. I for interactive mode, D to create the default config file
-  --hash                Create before/after md5 hashes of all changed and new files and save them to hashes.json
-  --apk                 List all APKs from the emulator and their hashes in the output file
-  --degrade_network     Lower the emulators network speed and network latency to simulate and 'UMTS/3G' connection. For more fine grained control, use the emulator console
-  --whitelist FILE      Entries in the whitelist will be excluded from any outputs. Separate paths by commas, wildcards are supported
+Core Options:
+  -c, --config PATH               Configuration file path
+  -e, --environment TEXT           Environment name (development, testing, production)
+  -f, --file PATH                 Save output to the specified file
+  -ll, --loglevel [DEBUG|INFO|WARNING|ERROR|CRITICAL]
+                                  Set the log level
+  --view [forensic|malware|security]
+                                  Set the initial view mode
+  -i, --interactive               Start in legacy Rich interactive mode
+  --fresh                         Start as if running for the first time
+  --version                       Show the version and exit
 
+Analysis Options:
+  -n, --number INTEGER            Run action n times (minimum 2)
+  --avoid-strong-noise-filter     Disable dry run and intra-file noise detection
+  --network                       Capture traffic and show connections
+  -d, --show-deleted              Reveal deleted files via full filesystem checks
+  --no-processes                  Do not monitor active processes
+  --sockets                       Monitor listening sockets
+  --screenshot INTERVAL           Take a screenshot each INTERVAL seconds
+  --trigdroid PACKAGE_NAME        Execute malware triggers for PACKAGE_NAME
+  --trigdroid-ccf [I|D]           TrigDroid CCF utility (I=interactive, D=default)
+  --hash                          Create MD5 hashes of changed and new files
+  --apk                           List all APKs and their hashes
+  --degrade-network               Simulate UMTS/3G network conditions
+  --whitelist FILE                Exclude paths from outputs
+
+Headless Mode:
+  --headless                      Run without interactive UI
+  --batch CONFIG_FILE             Batch processing config (JSON)
+  --mode [forensic|malware|security|network]
+                                  Analysis mode for headless operation (default: malware)
+
+Dexray & Advanced Tools:
+  --dexray PACKAGE                Start Dexray-Intercept monitoring for PACKAGE
+  --dexray-hooks HOOKS            Comma-separated hook groups (aes,web,socket,filesystem,database,dex,java_dex)
+  --dexray-fritap                 Enable FriTap during dexray monitoring
+  --fritap PACKAGE                Start FriTap SSL/TLS key extraction for PACKAGE
+  --fridump PACKAGE               Dump memory of PACKAGE using Fridump
+  --duration SECONDS              Network capture duration (headless, default: 60)
+  --with-fritap PACKAGE           Combine network capture with FriTap keylog
+
+Device Management:
+  --proxy IP:PORT                 Set HTTP proxy on device
+  --proxy-clear                   Clear HTTP proxy settings
+  --install-apk PATH              Install APK on device
+  --import-action PATH            Import action recording file
+  --device-settings FILE          Apply device settings from JSON file
+  --preset CODE                   Apply country preset (e.g., de, us, ru, cn)
+
+Output & Debugging:
+  --ai                            Enable AI-powered analysis and summarization
+  --report                        Generate PDF report
+  --debug                         Enable debug/verbose mode
+  --log                           Show log messages in terminal
 ```
 
 
@@ -83,7 +133,7 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 
 | Project | Description | Status |
 |--------|------------|--------|
-| [**TrigDroid**](https://github.com/fkie-cad/Sandroid_TrigDroid) | Dynamic tracing and Frida-based interception for Android apps, enabling enhanced runtime analysis. | ⚠️ *Not fully integrated yet* |
+| [**TrigDroid**](https://github.com/fkie-cad/Sandroid_TrigDroid) | Dynamic tracing and Frida-based interception for Android apps, enabling enhanced runtime analysis. | ✅ Integrated |
 | [**Dexray Insight**](https://github.com/fkie-cad/Sandroid_Dexray-Insight) | A static analysis tool focused on DEX files, helping to uncover cryptographic usage, API patterns, and potential vulnerabilities. | ✅ Integrated |
 | [**Dexray Intercept**](https://github.com/fkie-cad/Sandroid_Dexray-Intercept) | Dynamic hooking framework for intercepting sensitive data flows, network traffic, and runtime behaviors in Android apps. | ✅ Integrated |
 | [**friTap**](https://github.com/fkie-cad/friTap) | TLS key extraction and decrypted traffic interception for Android, enabling advanced network analysis in sandboxed environments. | ✅ Integrated |
@@ -154,11 +204,54 @@ sandroid-config validate
 ```
 
 Configuration files are automatically discovered in standard locations:
-- `~/.config/sandroid/sandroid.yaml` (user config)
-- `./sandroid.yaml` (project-specific config)
+- `~/.config/sandroid/sandroid.toml` (user config)
+- `./sandroid.toml` (project-specific config)
 - Environment variables with `SANDROID_` prefix
 
-Supported formats: YAML, TOML, JSON (YAML preferred)
+Supported formats: TOML, YAML, JSON (TOML preferred)
+
+### sandroid-config Subcommands
+
+```bash
+# AVD Management
+sandroid-config avd list          # List available AVDs
+sandroid-config avd start         # Start an AVD (interactive or direct)
+sandroid-config avd stop          # Stop running AVDs
+sandroid-config avd rename        # Rename an AVD
+sandroid-config avd create        # Create a new AVD
+
+# TUI Theme
+sandroid-config theme list        # List available themes
+sandroid-config theme set <id>    # Set TUI theme
+sandroid-config theme show        # Show current theme
+
+# IOC Management (for MVT forensic scanning)
+sandroid-config ioc show          # Show IOC configuration
+sandroid-config ioc set-path <p>  # Set IOC file/directory path
+sandroid-config ioc set-url <url> # Set IOC download URL
+sandroid-config ioc download      # Download IOC files
+sandroid-config ioc validate      # Validate IOC files
+
+# Device Management
+sandroid-config devices           # List connected devices
+```
+
+## Screenshots
+
+<p align="center">
+  <img src="assets/screenshots/sandroid_forensic_view.png" alt="Forensic View" width="600"/>
+  <br><em>Forensic Analysis View</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/sandroid_malware_view.png" alt="Malware View" width="600"/>
+  <br><em>Malware Analysis View</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/sandroid_security_view.png" alt="Security View" width="600"/>
+  <br><em>Security View (Early Stage)</em>
+</p>
 
 ## Contributing
 

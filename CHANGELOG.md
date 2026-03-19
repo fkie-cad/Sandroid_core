@@ -5,13 +5,77 @@ All notable changes to the Sandroid project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-03-17
+
+### Complete Rewrite: Textual TUI, Click CLI, and Three Analysis Views
+
+This release represents a complete rewrite of Sandroid's user interface and CLI, introducing a modern terminal user interface, a new Click-based command-line interface, and three specialized analysis views.
+
+### Added
+
+#### Textual TUI
+- **Modern terminal user interface** using the Textual framework replacing the Rich-based menu
+- **Three analysis views**: Forensic, Malware, and Security (early stage) — switch with TAB
+- **Status bar** showing Frida server status, HTTP proxy, spotlight app, and spotlight files
+- **Activity log** with real-time command output and status messages
+- **Theme system** with 8 built-in themes (default, dark, light, high_contrast, cyberpunk, nord, dracula, solarized)
+- **Custom CSS support** for TUI customization
+- **Welcome dialog** for first-time users
+
+#### Click-Based CLI
+- **Migrated from argparse to Click** with hyphenated flags (e.g., `--avoid-strong-noise-filter`)
+- **View selection**: `--view forensic|malware|security`
+- **Headless mode**: `--headless` with `--batch` for batch processing
+- **Legacy mode**: `sandroid -i` for the classic Rich interactive menu
+
+#### New Analysis Tools
+- **Dexray-Intercept** integration for dynamic hooking and malware monitoring (`--dexray`)
+- **Dexray-Insight** integration for static analysis (replacing asam)
+- **Fridump** integration for memory dumping (`--fridump`)
+- **FriTap** headless mode for SSL/TLS key extraction (`--fritap`)
+- **Objection** integration with resume support
+- **MVT** (Mobile Verification Toolkit) forensic evidence scanning
+
+#### Device Management
+- **HTTP proxy management**: `--proxy`, `--proxy-clear`
+- **APK installation**: `--install-apk`
+- **Action import**: `--import-action`
+- **Device settings**: `--device-settings`, `--preset`
+- **Country presets** (de, us, ru, cn, etc.)
+
+#### Configuration Management
+- **AVD management commands**: `sandroid-config avd list|start|stop|rename|create`
+- **Theme management**: `sandroid-config theme list|set|show`
+- **IOC management**: `sandroid-config ioc show|set-path|set-url|download|validate`
+- **Device listing**: `sandroid-config devices`
+- **TOML as default** configuration format (replacing YAML)
+
+#### New TUI Commands
+- `C` — Spawn spotlight application
+- `E` — Device settings and presets
+- `F` — Forensic evidence scan (MVT)
+- `G` — Manage forensic APKs
+- `k` — Reconfigure Frida hooks
+- `O` — Resume objection session
+
+### Changed
+- **Default mode**: `sandroid` now launches the Textual TUI (previously Rich menu)
+- **Legacy mode**: Rich interactive menu available via `sandroid -i`
+- **TrigDroid**: Now fully integrated (previously marked as not fully integrated)
+- **Frida handling**: Smart per-command requirement with modal prompts instead of manual install-first workflow
+- **Command registry**: 12 command categories across 3 views replacing 5 static menu sections
+
+### Removed
+- **AM3 (Android Malware Motion Monitor)**: Replaced by Dexray-Intercept
+- **asam**: Renamed to Dexray-Insight
+
 ## [1.1.9] - 2025-09-15
 
 Updated Fridump class to work with frida >= 17.0
 
 ## [1.1.0] - 2025-08-27
 
-### 🚀 Complete Package Migration: PyPI Distribution Now Feature-Complete
+### Complete Package Migration: PyPI Distribution Now Feature-Complete
 
 This release resolves the critical "Legacy analysis modules not available" error and makes the PyPI installation fully feature-complete with the legacy version.
 

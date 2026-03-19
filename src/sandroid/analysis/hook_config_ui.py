@@ -328,9 +328,11 @@ class HookConfigurationUI:
             )
             console.print(f"    [primary]{group_info['description']}[/primary]")
             hooks_display = [
-                f"[success]{h.replace('_', ' ').title()}[/success]"
-                if hooks.get(h, False)
-                else f"[error]{h.replace('_', ' ').title()}[/error]"
+                (
+                    f"[success]{h.replace('_', ' ').title()}[/success]"
+                    if hooks.get(h, False)
+                    else f"[error]{h.replace('_', ' ').title()}[/error]"
+                )
                 for h in group_info["hooks"]
             ]
             console.print(f"    Hooks: {', '.join(hooks_display)}")

@@ -8,6 +8,7 @@ This module provides TUI-agnostic business logic for:
 
 import logging
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -303,7 +304,7 @@ class CAManager:
             Tuple of (success, message, output_path).
         """
         if der_path is None:
-            der_path = Path("/tmp") / "sandroid-ca-cert.der"
+            der_path = Path(tempfile.gettempdir()) / "sandroid-ca-cert.der"
 
         try:
             result = subprocess.run(
@@ -475,7 +476,7 @@ class CAManager:
         if cert_exists:
             try:
                 # Pull cert and get hash
-                local_temp = Path("/tmp/sandroid-device-cert.der")
+                local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.der"
                 Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
                 if local_temp.exists():
                     cert_hash = self.get_cert_hash(local_temp)

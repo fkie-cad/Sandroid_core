@@ -116,8 +116,7 @@ class Fridump:
         mem_access_viol = ""
         logger.info(f"Starting Memory dump of {process_name}")
 
-        script = cls.process.create_script(
-            """'use strict';
+        script = cls.process.create_script("""'use strict';
 
             rpc.exports = {
                 enumerateRanges: async function (prot) {
@@ -129,8 +128,7 @@ class Fridump:
                 }
             };
 
-            """
-        )
+            """)
         script.on("message", cls.on_message)
         script.load()
 

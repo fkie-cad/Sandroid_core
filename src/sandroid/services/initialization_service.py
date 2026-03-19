@@ -455,9 +455,9 @@ class InitializationService:
         with self._lock:
             return {
                 "has_session": self._current_session is not None,
-                "session": self._current_session.to_dict()
-                if self._current_session
-                else None,
+                "session": (
+                    self._current_session.to_dict() if self._current_session else None
+                ),
                 "base_path": str(self._base_path),
                 "folder_structure": {
                     "raw_folders": self._folder_structure.raw_folders,

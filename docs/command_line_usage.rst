@@ -45,6 +45,27 @@ Specify where to save analysis results (default: ``sandroid.json``).
 
 Set logging verbosity. Options: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``.
 
+**View Mode**::
+
+   sandroid --view forensic
+   sandroid --view malware
+   sandroid --view security
+
+Set the initial TUI view mode. Default is from config or forensic.
+
+**Interactive Mode**::
+
+   sandroid -i
+   sandroid --interactive
+
+Start in legacy Rich interactive mode. Without ``-i``, Sandroid launches the Textual TUI by default.
+
+**Fresh Start**::
+
+   sandroid --fresh
+
+Reset the welcome screen and start as if running for the first time.
+
 Analysis Options
 ----------------
 
@@ -164,6 +185,94 @@ Configure TrigDroid Component Coverage Framework:
 - ``I`` - Interactive configuration mode
 - ``D`` - Generate default configuration file
 
+Headless Mode
+-------------
+
+**Basic Headless Operation**::
+
+   sandroid --headless --trigdroid com.example.app
+   sandroid --headless --mode forensic --trigdroid com.example.app
+
+Run analysis without the interactive UI. Requires ``--trigdroid`` or ``--batch``.
+
+**Batch Processing**::
+
+   sandroid --batch batch_config.json
+   sandroid --batch batch_config.json --mode malware
+
+Process multiple packages from a JSON configuration file.
+
+**Analysis Mode**::
+
+   sandroid --headless --mode forensic
+   sandroid --headless --mode malware
+   sandroid --headless --mode security
+   sandroid --headless --mode network
+
+Set the analysis mode for headless operation. Default is ``malware``.
+
+Dexray & Advanced Tools
+-----------------------
+
+**Dexray-Intercept Monitoring**::
+
+   sandroid --dexray com.example.app
+   sandroid --dexray com.example.app --dexray-hooks aes,web,socket
+   sandroid --dexray com.example.app --dexray-fritap
+
+Start Dexray-Intercept malware monitoring in headless mode. Runs until Ctrl+C.
+
+Hook groups: ``aes``, ``web``, ``socket``, ``filesystem``, ``database``, ``dex``, ``java_dex``
+
+**FriTap SSL/TLS Extraction**::
+
+   sandroid --fritap com.example.app
+
+Start FriTap SSL/TLS key extraction in headless mode. Runs until Ctrl+C.
+
+**Fridump Memory Dump**::
+
+   sandroid --fridump com.example.app
+
+Dump memory of a running application using Fridump.
+
+**Network Capture (Headless)**::
+
+   sandroid --headless --mode network --duration 120
+   sandroid --headless --mode network --with-fritap com.example.app
+
+Capture network traffic in headless mode. Default duration is 60 seconds.
+
+Device Management
+-----------------
+
+**HTTP Proxy**::
+
+   sandroid --proxy 192.168.1.100:8080
+   sandroid --proxy-clear
+
+Set or clear HTTP proxy settings on the device.
+
+**APK Installation**::
+
+   sandroid --install-apk /path/to/app.apk
+
+Install an APK on the device in headless mode.
+
+**Action Import**::
+
+   sandroid --import-action /path/to/action.json
+
+Import a previously exported action recording file.
+
+**Device Settings**::
+
+   sandroid --device-settings settings.json
+   sandroid --preset de
+   sandroid --preset us
+
+Apply device settings from a JSON file or use a country preset code.
+
 Network Configuration
 ---------------------
 
@@ -211,12 +320,24 @@ Generate comprehensive PDF reports:
 - Visual analysis summaries
 - Exportable documentation
 
-**Interactive Mode**::
+**Debug Mode**::
+
+   sandroid --debug
+
+Enable debug/verbose mode for detailed output.
+
+**Terminal Log**::
+
+   sandroid --log
+
+Show log messages directly in the terminal. Useful for debugging TUI display issues.
+
+**Legacy Interactive Mode**::
 
    sandroid --interactive
    sandroid -i
 
-Start in interactive menu mode (same as running ``sandroid`` without options).
+Start in the legacy Rich interactive menu. Note: running ``sandroid`` without ``-i`` launches the modern Textual TUI instead.
 
 Common Usage Patterns
 ----------------------

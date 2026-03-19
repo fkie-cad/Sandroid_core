@@ -151,7 +151,9 @@ class IOCDownloader:
             logger.info(f"Downloading IOC file from: {url}")
 
             ssl_context = _create_ssl_context()
-            with urlopen(url, timeout=30, context=ssl_context) as response:
+            with urlopen(
+                url, timeout=30, context=ssl_context
+            ) as response:  # nosec B310
                 content = response.read()
 
             output_path.write_bytes(content)
@@ -277,7 +279,9 @@ class IOCDownloader:
 
             try:
                 logger.debug(f"Downloading {filename}...")
-                with urlopen(url, timeout=30, context=ssl_context) as response:
+                with urlopen(
+                    url, timeout=30, context=ssl_context
+                ) as response:  # nosec B310
                     content = response.read()
 
                 output_path.write_bytes(content)

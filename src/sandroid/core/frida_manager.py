@@ -338,7 +338,9 @@ class FridaManager:
             with lzma.open(file_path, "rb") as f:
                 decompressed_file = f.read()
         except lzma.LZMAError as e:
-            self.logger.error(f"Failed to decompress frida server archive {file_path}: {e}")
+            self.logger.error(
+                f"Failed to decompress frida server archive {file_path}: {e}"
+            )
             raise
         with open(frida_server_dir + "/frida-server", "wb") as f:
             f.write(decompressed_file)

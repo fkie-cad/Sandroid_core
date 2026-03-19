@@ -190,9 +190,11 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             yield Label("Log Level:", classes="setting-label")
             yield Select(
                 [(level.value, level.value) for level in LogLevel],
-                value=config.log_level.value
-                if isinstance(config.log_level, LogLevel)
-                else str(config.log_level),
+                value=(
+                    config.log_level.value
+                    if isinstance(config.log_level, LogLevel)
+                    else str(config.log_level)
+                ),
                 id="setting-log_level",
                 classes="setting-select",
             )

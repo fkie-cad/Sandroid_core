@@ -352,7 +352,14 @@ class AppSelectionService:
             parsed = self._parser.parse(output)
             if parsed.get("install_date"):
                 new_entry["install_date"] = parsed["install_date"]
-        except (OSError, ValueError, KeyError, AttributeError, TypeError, IndexError) as exc:
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            IndexError,
+        ) as exc:
             self._logger.debug(
                 f"Could not fetch install date for {package_name}: {exc}"
             )
@@ -491,7 +498,14 @@ class AppSelectionService:
 
             return info
 
-        except (OSError, ValueError, KeyError, AttributeError, TypeError, IndexError) as e:
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            IndexError,
+        ) as e:
             self._logger.error(f"Error getting package info for {package_name}: {e}")
             return None
 

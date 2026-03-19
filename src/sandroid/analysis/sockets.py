@@ -201,7 +201,7 @@ class Sockets(DataGatherBase):
             NetworkEvent(
                 event_type_name="listening",
                 protocol="tcp",  # netstat -tulp captures tcp listening sockets
-                dest_ip="0.0.0.0",  # listening sockets bind locally
+                dest_ip="0.0.0.0",  # listening sockets bind locally  # nosec B104
                 dest_port=int(port) if port.isdigit() else 0,
                 source="sockets",
                 data_size=0,

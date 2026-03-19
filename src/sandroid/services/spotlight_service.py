@@ -720,9 +720,9 @@ class SpotlightService:
             "spawn_mode": self._spawn_mode,
             "spawn_package": self._spawn_package,
             "auto_resume": self._auto_resume,
-            "set_at": self._current_app.set_at.isoformat()
-            if self._current_app
-            else None,
+            "set_at": (
+                self._current_app.set_at.isoformat() if self._current_app else None
+            ),
             # Toolbox-migrated state
             "spotlight_application": self._spotlight_application,
             "spotlight_application_pid": self._spotlight_application_pid,

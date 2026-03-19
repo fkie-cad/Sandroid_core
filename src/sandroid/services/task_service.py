@@ -341,6 +341,7 @@ class TaskService:
 
                 def prompt_func():
                     return click.getchar().lower()
+
             except ImportError:
 
                 def prompt_func():

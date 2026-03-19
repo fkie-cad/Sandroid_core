@@ -237,9 +237,9 @@ class SandroidHeadlessAPI(SandroidAPI):
                 success=True,
                 message="Headless API initialized",
                 data={
-                    "config_file": str(self._config_path)
-                    if self._config_path
-                    else "default",
+                    "config_file": (
+                        str(self._config_path) if self._config_path else "default"
+                    ),
                     "device_connected": await self.is_device_connected(),
                 },
             )

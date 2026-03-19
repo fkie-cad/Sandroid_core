@@ -128,7 +128,9 @@ class AbxReader:
     # Token handler helpers (extracted from read() to reduce nesting)
     # ------------------------------------------------------------------
 
-    def _handle_start_document(self, token: int, offset: int, document_opened: bool) -> bool:
+    def _handle_start_document(
+        self, token: int, offset: int, document_opened: bool
+    ) -> bool:
         """Handle a START_DOCUMENT token.
 
         Validates that the data type is TYPE_NULL and that the document
@@ -142,13 +144,16 @@ class AbxReader:
                 f"START_DOCUMENT with an invalid data type at offset {offset} - 1"
             )
         if document_opened:
-            raise AbxDecodeError(
-                f"Unexpected START_DOCUMENT at offset {offset}"
-            )
+            raise AbxDecodeError(f"Unexpected START_DOCUMENT at offset {offset}")
         return True
 
     def _handle_end_document(
-        self, token: int, offset: int, element_stack: list, document_opened: bool, is_multi_root: bool
+        self,
+        token: int,
+        offset: int,
+        element_stack: list,
+        document_opened: bool,
+        is_multi_root: bool,
     ) -> None:
         """Handle an END_DOCUMENT token.
 
@@ -161,10 +166,7 @@ class AbxReader:
             raise AbxDecodeError(
                 f"END_DOCUMENT with an invalid data type at offset {offset}"
             )
-        if not (
-            len(element_stack) == 0
-            or (len(element_stack) == 1 and is_multi_root)
-        ):
+        if not (len(element_stack) == 0 or (len(element_stack) == 1 and is_multi_root)):
             raise AbxDecodeError(
                 f"END_DOCUMENT with unclosed elements at offset {offset}"
             )
@@ -174,7 +176,12 @@ class AbxReader:
             )
 
     def _handle_start_tag(
-        self, token: int, offset: int, element_stack: list, document_opened: bool, root_closed: bool
+        self,
+        token: int,
+        offset: int,
+        element_stack: list,
+        document_opened: bool,
+        root_closed: bool,
     ) -> etree.Element:
         """Handle a START_TAG token.
 
@@ -219,9 +226,7 @@ class AbxReader:
             raise AbxDecodeError(
                 f"END_TAG with an invalid data type at offset {offset}"
             )
-        if len(element_stack) == 0 or (
-            is_multi_root and len(element_stack) == 1
-        ):
+        if len(element_stack) == 0 or (is_multi_root and len(element_stack) == 1):
             raise AbxDecodeError(
                 f"END_TAG without any elements left at offset {offset}"
             )
@@ -271,9 +276,7 @@ class AbxReader:
         Reads the attribute name and typed value, then sets it on the
         current element.
         """
-        if len(element_stack) == 0 or (
-            is_multi_root and len(element_stack) == 1
-        ):
+        if len(element_stack) == 0 or (is_multi_root and len(element_stack) == 1):
             raise AbxDecodeError(
                 f"ATTRIBUTE without any elements left at offset {offset}"
             )
@@ -329,9 +332,7 @@ class AbxReader:
             length = self._read_short()
             return base64.encodebytes(self._read_raw(length)).decode().strip()
 
-        raise AbxDecodeError(
-            f"Unexpected attribute datatype at offset: {offset}"
-        )
+        raise AbxDecodeError(f"Unexpected attribute datatype at offset: {offset}")
 
     # ------------------------------------------------------------------
     # Main public API
@@ -369,19 +370,27 @@ class AbxReader:
             xml_type = token & 0x0F
 
             if xml_type == XmlType.START_DOCUMENT:
-                document_opened = self._handle_start_document(token, offset, document_opened)
+                document_opened = self._handle_start_document(
+                    token, offset, document_opened
+                )
 
             elif xml_type == XmlType.END_DOCUMENT:
-                self._handle_end_document(token, offset, element_stack, document_opened, is_multi_root)
+                self._handle_end_document(
+                    token, offset, element_stack, document_opened, is_multi_root
+                )
                 break
 
             elif xml_type == XmlType.START_TAG:
-                element = self._handle_start_tag(token, offset, element_stack, document_opened, root_closed)
+                element = self._handle_start_tag(
+                    token, offset, element_stack, document_opened, root_closed
+                )
                 if root is None:
                     root = element
 
             elif xml_type == XmlType.END_TAG:
-                closed, last = self._handle_end_tag(token, offset, element_stack, is_multi_root)
+                closed, last = self._handle_end_tag(
+                    token, offset, element_stack, is_multi_root
+                )
                 if closed:
                     root_closed = True
                     root = last

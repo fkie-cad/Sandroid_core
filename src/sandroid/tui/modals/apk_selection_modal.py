@@ -152,7 +152,7 @@ class APKSelectionModal(ExtractionModal[APKSelectionResult]):
         with Vertical(classes="modal-container"):
             yield Label("Select APKs to Pull", classes="modal-title")
             yield Label(
-                f"{len(self.packages)} suspicious packages detected. "
+                f"{len(self.packages)} suspicious packages detected. "  # nosec B608
                 "Select which APKs to download from the device.",
                 id="apk-selection-description",
             )

@@ -30,45 +30,28 @@ Basic Usage
    # Verify connection
    adb devices
 
-**3. Run Sandroid (Interactive Mode)**::
+**3. Run Sandroid**::
 
    sandroid
 
-You'll see the Sandroid interactive menu:
+Sandroid launches in the Textual TUI by default, providing a modern terminal user interface with three analysis views:
 
-.. code-block:: text
+- **Forensic View**: File system analysis, artifact extraction, action recording
+- **Malware View**: Behavioral analysis, Dexray-Intercept monitoring, memory dumping
+- **Security View**: Vulnerability scanning and security testing (early stage)
 
-   ┌───────────────────────────────────────────────────────────────────────┐
-   │                       Sandroid Interactive Menu                       │
-   ├───────────────────────────────────────────────────────────────────────┤
-   │Frida Server: [Not running]                                            │
-   │HTTP Proxy: [Not set]                                                  │
-   │Spotlight Application: [Not set]                                       │
-   │                                                                       │
-   │    === Action Recording & Playback ===                                │
-   │    * [r]ecord an action                                               │
-   │    * [p]lay the currently loaded action                               │
-   │                                                                       │
-   │    === Spotlight Application ===                                      │
-   │    * set [c]urrent app in focus as spotlight app                      │
-   │    * [a]nalyze spotlight app                                          │
-   │    * [d]ump memory of spotlight app                                   │
-   │                                                                       │
-   │    === Emulator Management ===                                        │
-   │    * [e]mulator information                                           │
-   │    * [f]rida server installation/management                           │
-   │    * [s]creenshot of device                                           │
-   │                                                                       │
-   │    * [q]uit                                                           │
-   └───────────────────────────────────────────────────────────────────────┘
+Use ``TAB`` to switch between views and single-key shortcuts to execute commands.
+
+For the legacy Rich interactive menu, use::
+
+   sandroid -i
 
 First Analysis - Recording User Actions
 ---------------------------------------
 
-**1. Install Frida Server** (required for dynamic analysis)::
+**1. Install Frida Server** (if needed for dynamic analysis)
 
-   # In interactive mode, press 'f'
-   f
+   Sandroid will automatically prompt you to install Frida when a command requires it. You can also manually install it by pressing ``f`` in the TUI.
 
 **2. Record User Interactions**::
 

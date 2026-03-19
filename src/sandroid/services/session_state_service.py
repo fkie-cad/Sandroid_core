@@ -190,9 +190,11 @@ class SessionStateService:
             return {
                 "args": repr(self._args) if self._args is not None else None,
                 "logger": repr(self._logger) if self._logger is not None else None,
-                "frida_manager": repr(self._frida_manager)
-                if self._frida_manager is not None
-                else None,
+                "frida_manager": (
+                    repr(self._frida_manager)
+                    if self._frida_manager is not None
+                    else None
+                ),
                 "scan_directories": list(self._scan_directories),
                 "device_name": self._device_name,
                 "android_emulator_path": self._android_emulator_path,

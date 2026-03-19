@@ -183,7 +183,9 @@ def _show_config_format(config: SandroidConfig, fmt: str) -> None:
     import tempfile
 
     loader = ConfigLoader()
-    temp_path = Path(tempfile.mktemp(suffix=f".{fmt}"))
+    temp_file = tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False)
+    temp_path = Path(temp_file.name)
+    temp_file.close()
 
     try:
         loader.save_config(config, temp_path, fmt)

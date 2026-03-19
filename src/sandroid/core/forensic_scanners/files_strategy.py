@@ -154,7 +154,9 @@ class FilesScanStrategy(BaseScanStrategy):
                                     ),
                                 )
                             )
-                            logger.info(f"Hash IOC match: {pkg} matches MD5 {ioc['value']}")
+                            logger.info(
+                                f"Hash IOC match: {pkg} matches MD5 {ioc['value']}"
+                            )
 
             # Check SHA-256 if we have SHA-256 IOCs
             if sha256_iocs:
@@ -181,7 +183,8 @@ class FilesScanStrategy(BaseScanStrategy):
                                         source="apk_hash",
                                         severity=MatchSeverity.CRITICAL,
                                         description=ioc.get(
-                                            "description", f"SHA-256 hash match for {pkg}"
+                                            "description",
+                                            f"SHA-256 hash match for {pkg}",
                                         ),
                                     )
                                 )
