@@ -14,7 +14,7 @@ from .gui import GUINotificationHandler
 from .web import WebNotificationHandler
 
 __all__ = [
-    "NotificationHandler",
     "GUINotificationHandler",
+    "NotificationHandler",
     "WebNotificationHandler",
 ]

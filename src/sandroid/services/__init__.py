@@ -35,14 +35,14 @@ Usage:
 """
 
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 # ---------------------------------------------------------------------------
 # Service singleton registry & factory
 # ---------------------------------------------------------------------------
 
 # Maps factory function -> cached instance
-_service_instances: Dict[Callable, Any] = {}
+_service_instances: dict[Callable, Any] = {}
 _service_lock = threading.RLock()
 
 

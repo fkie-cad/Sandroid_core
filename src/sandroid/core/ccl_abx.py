@@ -207,7 +207,7 @@ class AbxReader:
 
     def _handle_end_tag(
         self, token: int, offset: int, element_stack: list, is_multi_root: bool
-    ) -> typing.Tuple[bool, etree.Element]:
+    ) -> tuple[bool, etree.Element]:
         """Handle an END_TAG token.
 
         Validates the token and tag name, pops the element from the stack.
