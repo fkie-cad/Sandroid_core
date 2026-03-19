@@ -182,8 +182,12 @@ class PDFReport:
             alignment=TA_LEFT,
             justifyLastLine=1,
         )
-        text = """SANDROID FORENSIC REPORT<br/>
-        Device Name: """ + str(self.data["Device Name"]) + """<br/>"""
+        text = (
+            """SANDROID FORENSIC REPORT<br/>
+        Device Name: """
+            + str(self.data["Device Name"])
+            + """<br/>"""
+        )
 
         if (
             "Other Data" in self.data
