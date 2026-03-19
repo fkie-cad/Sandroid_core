@@ -1,0 +1,558 @@
+/* Sandroid TUI Styles - Midnight Cyan Theme */
+
+/* ========== Midnight Cyan Color Variables ========== */
+/* These map to the theme colors:
+   background: #050811 (almost-black, slightly blue)
+   panel_background: #080c18 (slightly lighter)
+   header_background: #0b1628
+   header_text: #7dd3fc (bright cyan)
+   section_title: #38bdf8 (cyan)
+   menu_key: #38bdf8 (cyan)
+   menu_text: #cbd5f5 (slightly dimmed)
+   selection_background: #1f2937 (dark slate)
+   selection_text: #e5e9f0
+   border: #111827 (subtle)
+   log_info: #7dd3fc
+   log_warn: #facc15 (soft yellow)
+   log_error: #fb7185 (soft red)
+   log_success: #4ade80 (soft green)
+*/
+
+/* Main screen layout */
+Screen {
+    background: #050811;
+}
+
+MainScreen {
+    layout: horizontal;
+    background: #050811;
+}
+
+/* Left panel - Menu */
+#left-panel {
+    width: 45%;
+    height: 100%;
+    background: #080c18;
+    border: solid #111827;
+    border-title-color: #38bdf8;
+    padding: 0 1;
+}
+
+/* Right panel - Activity */
+#right-panel {
+    width: 55%;
+    height: 100%;
+    background: #080c18;
+    border: solid #111827;
+    border-title-color: #4ade80;
+    padding: 0 1;
+}
+
+/* Status bar at top */
+#status-bar {
+    dock: top;
+    height: 1;
+    background: #0b1628;
+    color: #7dd3fc;
+    padding: 0 1;
+}
+
+/* Menu panel styling */
+MenuPanel {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #080c18;
+}
+
+#menu-title {
+    text-align: center;
+    text-style: bold;
+    color: #38bdf8;
+    padding: 1 0;
+}
+
+.menu-category {
+    margin-top: 1;
+    color: #38bdf8;
+    text-style: bold;
+}
+
+.menu-item {
+    padding-left: 2;
+    color: #cbd5f5;
+}
+
+.menu-item:hover {
+    background: #1f2937;
+}
+
+.menu-item-key {
+    color: #ff00ff;
+    text-style: bold;
+}
+
+.menu-item-disabled {
+    color: #8f9bb3;
+}
+
+/* Activity log styling */
+ActivityLog {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #080c18;
+}
+
+#activity-title {
+    text-align: center;
+    text-style: bold;
+    color: #4ade80;
+    padding: 1 0;
+}
+
+/* Help screen overlay */
+HelpScreen {
+    align: center middle;
+    background: #080c18 60%;
+}
+
+#help-container {
+    width: 80%;
+    height: 80%;
+    background: #080c18;
+    border: solid #111827;
+    border-title-color: #38bdf8;
+    padding: 1 2;
+}
+
+#help-title {
+    text-align: center;
+    text-style: bold;
+    color: #38bdf8;
+    padding: 1 0;
+}
+
+#help-content {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #080c18;
+}
+
+.help-category {
+    margin-top: 1;
+    color: #38bdf8;
+    text-style: bold;
+}
+
+.help-item {
+    padding-left: 2;
+    color: #cbd5f5;
+}
+
+.help-footer {
+    dock: bottom;
+    height: 1;
+    text-align: center;
+    color: #8f9bb3;
+}
+
+/* Command palette screen */
+CommandPalette {
+    align: center top;
+    padding-top: 5;
+}
+
+#palette-container {
+    width: 60%;
+    max-height: 60%;
+    background: #080c18;
+    border: solid #111827;
+    padding: 1;
+}
+
+#palette-input {
+    dock: top;
+    width: 100%;
+    background: #050811;
+    border: solid #38bdf8;
+    color: #e5e9f0;
+    padding: 0 1;
+}
+
+#palette-results {
+    height: auto;
+    max-height: 20;
+    background: #080c18;
+}
+
+.palette-item {
+    padding: 0 1;
+    color: #cbd5f5;
+}
+
+.palette-item:hover {
+    background: #1f2937;
+}
+
+.palette-item-selected {
+    background: #1f2937;
+    color: #e5e9f0;
+}
+
+.palette-item-key {
+    color: #ff00ff;
+    text-style: bold;
+}
+
+.palette-item-name {
+    color: #e5e9f0;
+}
+
+.palette-item-description {
+    color: #8f9bb3;
+}
+
+/* Footer bindings */
+SandroidFooter {
+    background: #0b1628;
+    color: #7dd3fc;
+}
+
+/* Header */
+Header {
+    background: #0b1628;
+    color: #7dd3fc;
+}
+
+/* Scrollbar styling */
+ScrollableContainer > .scrollbar {
+    background: #050811;
+}
+
+ScrollableContainer > .scrollbar--bar {
+    background: #38bdf8;
+}
+
+/* View indicator colors - forensic uses teal, distinct from running green */
+.view-forensic {
+    color: #2dd4bf;
+}
+
+.view-malware {
+    color: #fb7185;
+}
+
+.view-security {
+    color: #facc15;
+}
+
+/* Status indicators */
+.status-running {
+    color: #00ff00;
+    text-style: bold;
+}
+
+.status-stopped {
+    color: #fb7185;
+}
+
+.status-warning {
+    color: #facc15;
+}
+
+/* ========== Modal Styles ========== */
+
+/* Base modal screen styling */
+ModalScreen {
+    align: center middle;
+    background: rgba(5, 8, 17, 0.8);
+}
+
+/* Common modal container styles */
+#input-modal-container,
+#selection-modal-container,
+#toggle-modal-container,
+#confirm-modal-container,
+#message-modal-container,
+#device-modal-container {
+    background: #080c18;
+    border: thick #111827;
+    padding: 1 2;
+    width: 60;
+    max-width: 80%;
+    max-height: 80%;
+}
+
+/* Modal titles */
+#input-title,
+#selection-title,
+#toggle-title,
+#confirm-title,
+#message-title,
+#device-title {
+    text-style: bold;
+    color: #38bdf8;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+/* Modal messages/descriptions */
+#input-message,
+#selection-message,
+#toggle-message,
+#confirm-message {
+    color: #8f9bb3;
+    margin-bottom: 1;
+}
+
+/* Input modal */
+#input-field {
+    margin: 1 0;
+    background: #050811;
+    border: solid #7dd3fc;
+    color: #e5e9f0;
+}
+
+#input-field:focus {
+    border: solid #38bdf8;
+}
+
+#input-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+/* Selection modal */
+#filter-input {
+    margin-bottom: 1;
+    background: #050811;
+    border: solid #7dd3fc;
+    color: #e5e9f0;
+}
+
+#filter-input:focus {
+    border: solid #38bdf8;
+}
+
+#option-list {
+    height: auto;
+    max-height: 15;
+    background: #050811;
+    border: solid #111827;
+    margin-bottom: 1;
+}
+
+OptionList > .option-list--option-highlighted {
+    background: #1f2937;
+    color: #e5e9f0;
+}
+
+OptionList > .option-list--option-hover {
+    background: #1f2937;
+}
+
+/* Toggle modal */
+#toggle-options {
+    max-height: 15;
+    margin-bottom: 1;
+}
+
+.toggle-row {
+    height: 3;
+    align: left middle;
+    padding: 0 1;
+}
+
+.toggle-row Switch {
+    margin-right: 2;
+}
+
+.toggle-label-container {
+    height: auto;
+}
+
+.toggle-label {
+    text-style: bold;
+    color: #e5e9f0;
+}
+
+.toggle-description {
+    color: #8f9bb3;
+}
+
+#toggle-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+/* Confirm modal */
+#confirm-modal-container {
+    width: 40;
+}
+
+#confirm-buttons {
+    margin-top: 2;
+    align: center middle;
+}
+
+/* Message modal */
+#message-content {
+    margin: 1 0;
+    max-height: 10;
+    color: #e5e9f0;
+}
+
+.message-info #message-title {
+    color: #7dd3fc;
+}
+
+.message-warning #message-title {
+    color: #facc15;
+}
+
+.message-error #message-title {
+    color: #fb7185;
+}
+
+.message-info {
+    border: thick #7dd3fc;
+}
+
+.message-warning {
+    border: thick #facc15;
+}
+
+.message-error {
+    border: thick #fb7185;
+}
+
+/* Device selection modal */
+#device-hint {
+    color: #8f9bb3;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#device-list {
+    height: auto;
+    max-height: 15;
+    background: #050811;
+    border: solid #111827;
+    margin-bottom: 1;
+}
+
+#device-footer {
+    color: #8f9bb3;
+    text-align: center;
+    margin-top: 1;
+}
+
+#no-devices-message {
+    color: #fb7185;
+    text-align: center;
+    margin: 2 0;
+}
+
+/* Button styling for modals */
+#input-buttons Button,
+#toggle-buttons Button,
+#confirm-buttons Button {
+    margin: 0 1;
+    min-width: 10;
+}
+
+/* Success/error button variants */
+Button.-success {
+    background: #4ade80;
+}
+
+Button.-error {
+    background: #fb7185;
+}
+
+/* Primary button */
+Button {
+    background: #38bdf8;
+    color: #050811;
+}
+
+Button:hover {
+    background: #7dd3fc;
+}
+
+Button.-primary {
+    background: #38bdf8;
+    color: #050811;
+}
+
+/* ========== Logo Styling ========== */
+/* Logo colors are defined in the theme and can be customized:
+   - logo_color: Main ASCII art color (default: #00ff00 bright green)
+   - logo_text_color: "Sandroid" text highlight color (default: #ffffff white)
+
+   To customize logo colors, either:
+   1. Select a different theme (each has unique logo colors)
+   2. Override in your custom CSS using these classes
+
+   Note: The logo uses Rich markup in the activity log, so these
+   CSS classes provide styling for any logo-related UI elements.
+*/
+
+/* Logo container in activity log */
+.logo-container {
+    color: #00ff00;
+    text-style: bold;
+}
+
+/* Sandroid text highlight */
+.logo-text {
+    color: #ffffff;
+    text-style: bold;
+}
+
+/* Version text below logo */
+.logo-version {
+    color: #38bdf8;
+    text-style: bold;
+}
+
+/* Logo subtitle */
+.logo-subtitle {
+    color: #8f9bb3;
+}
+
+/* ========== Theme-specific Logo Colors ========== */
+/* These document the logo colors for each theme.
+   Override these in your custom CSS to change logo appearance.
+
+   Default (Midnight Cyan):
+     .logo-container { color: #00ff00; }
+     .logo-text { color: #ffffff; }
+
+   Dark:
+     .logo-container { color: #03DAC6; }
+     .logo-text { color: #BB86FC; }
+
+   Light:
+     .logo-container { color: #1976D2; }
+     .logo-text { color: #0D47A1; }
+
+   High Contrast:
+     .logo-container { color: #00FF00; }
+     .logo-text { color: #FFFF00; }
+
+   Cyberpunk:
+     .logo-container { color: #FF00FF; }
+     .logo-text { color: #00FFFF; }
+
+   Nord:
+     .logo-container { color: #88C0D0; }
+     .logo-text { color: #ECEFF4; }
+
+   Dracula:
+     .logo-container { color: #BD93F9; }
+     .logo-text { color: #50FA7B; }
+
+   Solarized:
+     .logo-container { color: #2AA198; }
+     .logo-text { color: #268BD2; }
+*/

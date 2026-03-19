@@ -1,0 +1,467 @@
+/* Sandroid TUI Styles - Dracula Theme */
+/* Inspired by the popular Dracula color scheme */
+
+/* Color Palette:
+   primary: #BD93F9 (Purple)
+   secondary: #6272A4 (Comment blue)
+   accent: #50FA7B (Green)
+   background: #282A36 (Background)
+   surface: #44475A (Current line)
+   error: #FF5555 (Red)
+   warning: #FFB86C (Orange)
+   success: #50FA7B (Green)
+   text: #F8F8F2 (Foreground)
+   text_muted: #6272A4 (Comment)
+   forensic_color: #50FA7B (Green)
+   malware_color: #FF5555 (Red)
+   security_color: #FFB86C (Orange)
+   logo_color: #BD93F9 (Purple)
+   logo_text_color: #50FA7B (Green)
+*/
+
+/* Main screen layout */
+Screen {
+    background: #282A36;
+}
+
+MainScreen {
+    layout: horizontal;
+    background: #282A36;
+}
+
+/* Left panel - Menu */
+#left-panel {
+    width: 45%;
+    height: 100%;
+    background: #44475A;
+    border: solid #6272A4;
+    border-title-color: #BD93F9;
+    padding: 0 1;
+}
+
+/* Right panel - Activity */
+#right-panel {
+    width: 55%;
+    height: 100%;
+    background: #44475A;
+    border: solid #6272A4;
+    border-title-color: #50FA7B;
+    padding: 0 1;
+}
+
+/* Status bar at top */
+#status-bar {
+    dock: top;
+    height: 1;
+    background: #44475A;
+    color: #BD93F9;
+    padding: 0 1;
+}
+
+/* Menu panel styling */
+MenuPanel {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #44475A;
+}
+
+#menu-title {
+    text-align: center;
+    text-style: bold;
+    color: #BD93F9;
+    padding: 1 0;
+}
+
+.menu-category {
+    margin-top: 1;
+    color: #BD93F9;
+    text-style: bold;
+}
+
+.menu-item {
+    padding-left: 2;
+    color: #F8F8F2;
+}
+
+.menu-item:hover {
+    background: #6272A4;
+}
+
+.menu-item-key {
+    color: #FF79C6;
+    text-style: bold;
+}
+
+.menu-item-disabled {
+    color: #6272A4;
+}
+
+/* Activity log styling */
+ActivityLog {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #44475A;
+}
+
+#activity-title {
+    text-align: center;
+    text-style: bold;
+    color: #50FA7B;
+    padding: 1 0;
+}
+
+/* Help screen overlay */
+HelpScreen {
+    align: center middle;
+    background: #44475A 60%;
+}
+
+#help-container {
+    width: 80%;
+    height: 80%;
+    background: #44475A;
+    border: solid #6272A4;
+    border-title-color: #BD93F9;
+    padding: 1 2;
+}
+
+#help-title {
+    text-align: center;
+    text-style: bold;
+    color: #BD93F9;
+    padding: 1 0;
+}
+
+#help-content {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #44475A;
+}
+
+.help-category {
+    margin-top: 1;
+    color: #BD93F9;
+    text-style: bold;
+}
+
+.help-item {
+    padding-left: 2;
+    color: #F8F8F2;
+}
+
+.help-footer {
+    dock: bottom;
+    height: 1;
+    text-align: center;
+    color: #6272A4;
+}
+
+/* Command palette screen */
+CommandPalette {
+    align: center top;
+    padding-top: 5;
+}
+
+#palette-container {
+    width: 60%;
+    max-height: 60%;
+    background: #44475A;
+    border: solid #6272A4;
+    padding: 1;
+}
+
+#palette-input {
+    dock: top;
+    width: 100%;
+    background: #282A36;
+    border: solid #BD93F9;
+    color: #F8F8F2;
+    padding: 0 1;
+}
+
+#palette-results {
+    height: auto;
+    max-height: 20;
+    background: #44475A;
+}
+
+.palette-item {
+    padding: 0 1;
+    color: #F8F8F2;
+}
+
+.palette-item:hover {
+    background: #6272A4;
+}
+
+.palette-item-selected {
+    background: #6272A4;
+    color: #F8F8F2;
+}
+
+.palette-item-key {
+    color: #FF79C6;
+    text-style: bold;
+}
+
+.palette-item-name {
+    color: #F8F8F2;
+}
+
+.palette-item-description {
+    color: #6272A4;
+}
+
+/* Footer bindings */
+SandroidFooter {
+    background: #44475A;
+    color: #BD93F9;
+}
+
+/* Header */
+Header {
+    background: #44475A;
+    color: #BD93F9;
+}
+
+/* Scrollbar styling */
+ScrollableContainer > .scrollbar {
+    background: #282A36;
+}
+
+ScrollableContainer > .scrollbar--bar {
+    background: #BD93F9;
+}
+
+/* View indicator colors */
+.view-forensic {
+    color: #50FA7B;
+}
+
+.view-malware {
+    color: #FF5555;
+}
+
+.view-security {
+    color: #FFB86C;
+}
+
+/* Status indicators */
+.status-running {
+    color: #50FA7B;
+    text-style: bold;
+}
+
+.status-stopped {
+    color: #FF5555;
+}
+
+.status-warning {
+    color: #FFB86C;
+}
+
+/* ========== Modal Styles ========== */
+
+ModalScreen {
+    align: center middle;
+    background: rgba(40, 42, 54, 0.9);
+}
+
+#input-modal-container,
+#selection-modal-container,
+#toggle-modal-container,
+#confirm-modal-container,
+#message-modal-container {
+    background: #44475A;
+    border: thick #6272A4;
+    padding: 1 2;
+    width: 60;
+    max-width: 80%;
+    max-height: 80%;
+}
+
+#input-title,
+#selection-title,
+#toggle-title,
+#confirm-title,
+#message-title {
+    text-style: bold;
+    color: #BD93F9;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#input-message,
+#selection-message,
+#toggle-message,
+#confirm-message {
+    color: #6272A4;
+    margin-bottom: 1;
+}
+
+#input-field {
+    margin: 1 0;
+    background: #282A36;
+    border: solid #BD93F9;
+    color: #F8F8F2;
+}
+
+#input-field:focus {
+    border: solid #FF79C6;
+}
+
+#input-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#filter-input {
+    margin-bottom: 1;
+    background: #282A36;
+    border: solid #BD93F9;
+    color: #F8F8F2;
+}
+
+#filter-input:focus {
+    border: solid #FF79C6;
+}
+
+#option-list {
+    height: auto;
+    max-height: 15;
+    background: #282A36;
+    border: solid #6272A4;
+    margin-bottom: 1;
+}
+
+OptionList > .option-list--option-highlighted {
+    background: #6272A4;
+    color: #F8F8F2;
+}
+
+OptionList > .option-list--option-hover {
+    background: #6272A4;
+}
+
+#toggle-options {
+    max-height: 15;
+    margin-bottom: 1;
+}
+
+.toggle-row {
+    height: 3;
+    align: left middle;
+    padding: 0 1;
+}
+
+.toggle-row Switch {
+    margin-right: 2;
+}
+
+.toggle-label-container {
+    height: auto;
+}
+
+.toggle-label {
+    text-style: bold;
+    color: #F8F8F2;
+}
+
+.toggle-description {
+    color: #6272A4;
+}
+
+#toggle-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#confirm-modal-container {
+    width: 40;
+}
+
+#confirm-buttons {
+    margin-top: 2;
+    align: center middle;
+}
+
+#message-content {
+    margin: 1 0;
+    max-height: 10;
+    color: #F8F8F2;
+}
+
+.message-info #message-title {
+    color: #8BE9FD;
+}
+
+.message-warning #message-title {
+    color: #FFB86C;
+}
+
+.message-error #message-title {
+    color: #FF5555;
+}
+
+.message-info {
+    border: thick #8BE9FD;
+}
+
+.message-warning {
+    border: thick #FFB86C;
+}
+
+.message-error {
+    border: thick #FF5555;
+}
+
+#input-buttons Button,
+#toggle-buttons Button,
+#confirm-buttons Button {
+    margin: 0 1;
+    min-width: 10;
+}
+
+Button.-success {
+    background: #50FA7B;
+    color: #282A36;
+}
+
+Button.-error {
+    background: #FF5555;
+    color: #F8F8F2;
+}
+
+Button {
+    background: #BD93F9;
+    color: #282A36;
+}
+
+Button:hover {
+    background: #FF79C6;
+}
+
+Button.-primary {
+    background: #BD93F9;
+    color: #282A36;
+}
+
+/* Logo styling */
+.logo-container {
+    color: #BD93F9;
+    text-style: bold;
+}
+
+.logo-text {
+    color: #50FA7B;
+    text-style: bold;
+}
+
+.logo-version {
+    color: #BD93F9;
+    text-style: bold;
+}
+
+.logo-subtitle {
+    color: #6272A4;
+}

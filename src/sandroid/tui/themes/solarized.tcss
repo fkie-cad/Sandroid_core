@@ -1,0 +1,469 @@
+/* Sandroid TUI Styles - Solarized Dark Theme */
+/* Based on the classic Solarized color scheme by Ethan Schoonover */
+
+/* Color Palette:
+   primary: #268BD2 (Blue)
+   secondary: #2AA198 (Cyan)
+   accent: #859900 (Green)
+   background: #002B36 (Base03)
+   surface: #073642 (Base02)
+   error: #DC322F (Red)
+   warning: #B58900 (Yellow)
+   success: #859900 (Green)
+   text: #839496 (Base0)
+   text_muted: #586E75 (Base01)
+   forensic_color: #859900 (Green)
+   malware_color: #DC322F (Red)
+   security_color: #B58900 (Yellow)
+   logo_color: #2AA198 (Cyan)
+   logo_text_color: #268BD2 (Blue)
+*/
+
+/* Main screen layout */
+Screen {
+    background: #002B36;
+}
+
+MainScreen {
+    layout: horizontal;
+    background: #002B36;
+}
+
+/* Left panel - Menu */
+#left-panel {
+    width: 45%;
+    height: 100%;
+    background: #073642;
+    border: solid #586E75;
+    border-title-color: #268BD2;
+    padding: 0 1;
+}
+
+/* Right panel - Activity */
+#right-panel {
+    width: 55%;
+    height: 100%;
+    background: #073642;
+    border: solid #586E75;
+    border-title-color: #859900;
+    padding: 0 1;
+}
+
+/* Status bar at top */
+#status-bar {
+    dock: top;
+    height: 1;
+    background: #073642;
+    color: #268BD2;
+    padding: 0 1;
+}
+
+/* Menu panel styling */
+MenuPanel {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #073642;
+}
+
+#menu-title {
+    text-align: center;
+    text-style: bold;
+    color: #268BD2;
+    padding: 1 0;
+}
+
+.menu-category {
+    margin-top: 1;
+    color: #268BD2;
+    text-style: bold;
+}
+
+.menu-item {
+    padding-left: 2;
+    color: #839496;
+}
+
+.menu-item:hover {
+    background: #002B36;
+    color: #93A1A1;
+}
+
+.menu-item-key {
+    color: #D33682;
+    text-style: bold;
+}
+
+.menu-item-disabled {
+    color: #586E75;
+}
+
+/* Activity log styling */
+ActivityLog {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #073642;
+}
+
+#activity-title {
+    text-align: center;
+    text-style: bold;
+    color: #859900;
+    padding: 1 0;
+}
+
+/* Help screen overlay */
+HelpScreen {
+    align: center middle;
+    background: #073642 60%;
+}
+
+#help-container {
+    width: 80%;
+    height: 80%;
+    background: #073642;
+    border: solid #586E75;
+    border-title-color: #268BD2;
+    padding: 1 2;
+}
+
+#help-title {
+    text-align: center;
+    text-style: bold;
+    color: #268BD2;
+    padding: 1 0;
+}
+
+#help-content {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #073642;
+}
+
+.help-category {
+    margin-top: 1;
+    color: #268BD2;
+    text-style: bold;
+}
+
+.help-item {
+    padding-left: 2;
+    color: #839496;
+}
+
+.help-footer {
+    dock: bottom;
+    height: 1;
+    text-align: center;
+    color: #586E75;
+}
+
+/* Command palette screen */
+CommandPalette {
+    align: center top;
+    padding-top: 5;
+}
+
+#palette-container {
+    width: 60%;
+    max-height: 60%;
+    background: #073642;
+    border: solid #586E75;
+    padding: 1;
+}
+
+#palette-input {
+    dock: top;
+    width: 100%;
+    background: #002B36;
+    border: solid #268BD2;
+    color: #839496;
+    padding: 0 1;
+}
+
+#palette-results {
+    height: auto;
+    max-height: 20;
+    background: #073642;
+}
+
+.palette-item {
+    padding: 0 1;
+    color: #839496;
+}
+
+.palette-item:hover {
+    background: #002B36;
+    color: #93A1A1;
+}
+
+.palette-item-selected {
+    background: #002B36;
+    color: #93A1A1;
+}
+
+.palette-item-key {
+    color: #D33682;
+    text-style: bold;
+}
+
+.palette-item-name {
+    color: #839496;
+}
+
+.palette-item-description {
+    color: #586E75;
+}
+
+/* Footer bindings */
+SandroidFooter {
+    background: #073642;
+    color: #268BD2;
+}
+
+/* Header */
+Header {
+    background: #073642;
+    color: #268BD2;
+}
+
+/* Scrollbar styling */
+ScrollableContainer > .scrollbar {
+    background: #002B36;
+}
+
+ScrollableContainer > .scrollbar--bar {
+    background: #268BD2;
+}
+
+/* View indicator colors */
+.view-forensic {
+    color: #859900;
+}
+
+.view-malware {
+    color: #DC322F;
+}
+
+.view-security {
+    color: #B58900;
+}
+
+/* Status indicators */
+.status-running {
+    color: #859900;
+    text-style: bold;
+}
+
+.status-stopped {
+    color: #DC322F;
+}
+
+.status-warning {
+    color: #B58900;
+}
+
+/* ========== Modal Styles ========== */
+
+ModalScreen {
+    align: center middle;
+    background: rgba(0, 43, 54, 0.9);
+}
+
+#input-modal-container,
+#selection-modal-container,
+#toggle-modal-container,
+#confirm-modal-container,
+#message-modal-container {
+    background: #073642;
+    border: thick #586E75;
+    padding: 1 2;
+    width: 60;
+    max-width: 80%;
+    max-height: 80%;
+}
+
+#input-title,
+#selection-title,
+#toggle-title,
+#confirm-title,
+#message-title {
+    text-style: bold;
+    color: #268BD2;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#input-message,
+#selection-message,
+#toggle-message,
+#confirm-message {
+    color: #586E75;
+    margin-bottom: 1;
+}
+
+#input-field {
+    margin: 1 0;
+    background: #002B36;
+    border: solid #268BD2;
+    color: #839496;
+}
+
+#input-field:focus {
+    border: solid #2AA198;
+}
+
+#input-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#filter-input {
+    margin-bottom: 1;
+    background: #002B36;
+    border: solid #268BD2;
+    color: #839496;
+}
+
+#filter-input:focus {
+    border: solid #2AA198;
+}
+
+#option-list {
+    height: auto;
+    max-height: 15;
+    background: #002B36;
+    border: solid #586E75;
+    margin-bottom: 1;
+}
+
+OptionList > .option-list--option-highlighted {
+    background: #073642;
+    color: #93A1A1;
+}
+
+OptionList > .option-list--option-hover {
+    background: #073642;
+}
+
+#toggle-options {
+    max-height: 15;
+    margin-bottom: 1;
+}
+
+.toggle-row {
+    height: 3;
+    align: left middle;
+    padding: 0 1;
+}
+
+.toggle-row Switch {
+    margin-right: 2;
+}
+
+.toggle-label-container {
+    height: auto;
+}
+
+.toggle-label {
+    text-style: bold;
+    color: #839496;
+}
+
+.toggle-description {
+    color: #586E75;
+}
+
+#toggle-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#confirm-modal-container {
+    width: 40;
+}
+
+#confirm-buttons {
+    margin-top: 2;
+    align: center middle;
+}
+
+#message-content {
+    margin: 1 0;
+    max-height: 10;
+    color: #839496;
+}
+
+.message-info #message-title {
+    color: #2AA198;
+}
+
+.message-warning #message-title {
+    color: #B58900;
+}
+
+.message-error #message-title {
+    color: #DC322F;
+}
+
+.message-info {
+    border: thick #2AA198;
+}
+
+.message-warning {
+    border: thick #B58900;
+}
+
+.message-error {
+    border: thick #DC322F;
+}
+
+#input-buttons Button,
+#toggle-buttons Button,
+#confirm-buttons Button {
+    margin: 0 1;
+    min-width: 10;
+}
+
+Button.-success {
+    background: #859900;
+    color: #002B36;
+}
+
+Button.-error {
+    background: #DC322F;
+    color: #FDF6E3;
+}
+
+Button {
+    background: #268BD2;
+    color: #002B36;
+}
+
+Button:hover {
+    background: #2AA198;
+}
+
+Button.-primary {
+    background: #268BD2;
+    color: #002B36;
+}
+
+/* Logo styling */
+.logo-container {
+    color: #2AA198;
+    text-style: bold;
+}
+
+.logo-text {
+    color: #268BD2;
+    text-style: bold;
+}
+
+.logo-version {
+    color: #268BD2;
+    text-style: bold;
+}
+
+.logo-subtitle {
+    color: #586E75;
+}
