@@ -11,8 +11,8 @@ license = { file = "LICENSE" }
 requires-python = ">=3.10"
 
 authors = [
-    { name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de" },
     { name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de" },
+    { name = "Erik Nathrath", email = "erik.nathrath@fkie.fraunhofer.de" },
     { name = "Jan-Niclas Hilgert", email = "jan-niclas.hilgert@fkie.fraunhofer.de" }
 ]
 maintainers = [
@@ -47,6 +47,7 @@ classifiers = [
 # Core runtime dependencies
 dependencies = [
     "beautifulsoup4>=4.12.2",
+    "certifi>=2023.0.0",
     "click>=8.1.7",
     "colorama>=0.4.6",
     "frida>=17.0.0",
@@ -63,12 +64,12 @@ dependencies = [
     "reportlab>=4.0.0",
     "geopy>=2.3.0",
     "friTap>=1.3.1.4",
+    "mvt>=2.6.1",
     "colorlog>=6.7.0",
     "objection>=1.11.0,<2.0.0",
-    "AndroidFridaManager>=1.9.0",
-    "trigdroid[full]>=2.0.1",
-    "dexray-intercept>=1.0.1.3",
-    "dexray-insight>=1.0.0.3",
+    "AndroidFridaManager>=1.9.5",
+    "trigdroid[full]>=2.0.6",
+    "dexray-intercept>=1.0.1.9",
     "tomli>=2.0.1; python_version<'3.11'",
     "tomli-w>=1.0.0",
     "pyyaml>=6.0",
@@ -84,10 +85,14 @@ dependencies = [
 ai = [
     "google-generativeai>=0.3.0",
 ]
+static-analysis = [
+    "dexray-insight>=1.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
+    "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -101,6 +106,9 @@ docs = [
     "sphinx>=6.0.0",
     "sphinx-rtd-theme>=1.2.0",
     "myst-parser>=1.0.0",
+]
+full = [
+    "Sandroid[ai,static-analysis]",
 ]
 
 [project.scripts]
@@ -166,6 +174,17 @@ testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+    "requires_device: marks tests that require a connected Android device",
+    "requires_frida: marks tests that require Frida",
+    "smoke: marks tests as smoke tests (quick sanity checks)",
+    "smoke_device: marks smoke tests that require a connected device",
+    "smoke_frida: marks smoke tests that require Frida",
+]
 
 [tool.mypy]
 python_version = "3.10"
@@ -238,11 +257,16 @@ ignore = [
     "N803","N805","N801","N813","N817","N999",
     "ARG001","ARG002","ARG003","ARG004",
     "PLW0602","PLW0603","PLW2901","PLR0911",
-    "UP022","UP038","SIM102","SIM105","SIM113","SIM201",
+    "UP022","SIM102","SIM105","SIM113","SIM201",
     "B015","B904","TRY002","TRY301",
     "PTH109","PTH112","RUF013","RUF015",
     "PLC0206","PLR1714","PIE794","ICN001","S112",
     "EXE001","E741","S110","COM812","ISC001",
+    "S108","SIM117","FBT003","ARG005","PTH108",
+    "TRY401","PT019","PT011","PT012","UP035",
+    "RUF059","G201","DTZ001","PTH202","D417",
+    "B017","S310","S608","S604","S306","S104",
+    "RUF001","PLW1510","PLW1509","DTZ006","D414",
 ]
 
 exclude = [
@@ -265,8 +289,6 @@ exclude = [
 
 # Compatibility alias files - star imports are intentional for transparent re-export
 "src/utils/*.py" = ["F403"]
-"src/datagather/*.py" = ["F403"]
-"src/functionality/*.py" = ["F403"]
 "src/sandroid/core/__init__.py" = ["F403", "F405"]
 "src/utils/adb.py" = ["S602","S603","S607"]
 "src/utils/apk_downloader.py" = ["S603","S607"]
