@@ -348,7 +348,7 @@ class IOCDownloader:
                 try:
                     import json
 
-                    with open(stix_file) as f:
+                    with open(stix_file, encoding="utf-8") as f:
                         data = json.load(f)
                         # STIX2 bundles have "objects" array
                         if isinstance(data, dict) and "objects" in data:

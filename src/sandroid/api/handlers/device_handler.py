@@ -87,7 +87,7 @@ class DeviceHandler:
             import json as json_mod
 
             try:
-                with open(settings_file) as f:
+                with open(settings_file, encoding="utf-8") as f:
                     settings = json_mod.load(f)
             except FileNotFoundError:
                 return CommandResult(

@@ -300,7 +300,7 @@ def ioc_validate():
 
         for f in files:
             try:
-                with open(f) as fp:
+                with open(f, encoding="utf-8") as fp:
                     data = json.load(fp)
 
                 # Basic STIX2 validation

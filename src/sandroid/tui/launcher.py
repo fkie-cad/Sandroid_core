@@ -99,7 +99,8 @@ def run_tui(
 
     # Register signal handlers for external termination
     signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGHUP, signal_handler)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal_handler)
 
     # SIGINT handling: respect config for Ctrl+C behavior
     # If immediate_exit_on_ctrl_c is True, handle SIGINT for immediate exit
@@ -180,6 +181,17 @@ def run_tui_guarded(
         The exit code from the TUI application.
     """
     import os
+
+    if not hasattr(os, "fork"):
+        # Windows doesn't support fork; fall back to running TUI directly
+        logger.warning(
+            "Guardian process not available on this platform, running TUI directly"
+        )
+        return run_tui(
+            action_queue=action_queue,
+            initial_theme=initial_theme,
+            custom_css_path=custom_css_path,
+        )
 
     pid = os.fork()
 

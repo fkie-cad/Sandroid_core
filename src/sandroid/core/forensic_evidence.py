@@ -190,7 +190,7 @@ class IOCLoader:
             path: Path to the IOC file
         """
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
 
             # Handle STIX2 bundle format

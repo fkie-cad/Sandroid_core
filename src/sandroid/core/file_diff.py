@@ -535,14 +535,14 @@ def txt_diff(txt_file):
     new_path = os.path.join(raw_results, "second_pull", txt_file)
 
     try:
-        with open(old_path) as f:
+        with open(old_path, encoding="utf-8") as f:
             old_text = f.readlines()
     except OSError as e:
         logger.error(f"Failed to open old text file '{old_path}': {e}")
         return f"\tError: Could not open file {old_path}"
 
     try:
-        with open(new_path) as f:
+        with open(new_path, encoding="utf-8") as f:
             new_text = f.readlines()
     except OSError as e:
         logger.error(f"Failed to open new text file '{new_path}': {e}")

@@ -46,7 +46,7 @@ class Player(Functionality):
 
         # TODO: Improve replay of swiping motions
         try:
-            with open(recording_file) as fp:
+            with open(recording_file, encoding="utf-8") as fp:
                 for line in fp:
                     match = self.STORE_LINE_RE.match(line.strip())
                     if match is None:

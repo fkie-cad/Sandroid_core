@@ -12,7 +12,7 @@ import numpy as np
 
 
 def parse_timeline(output_file):
-    with open(output_file) as json_file:
+    with open(output_file, encoding="utf-8") as json_file:
         data = json.load(json_file)
         raw_timeline_data = data["Other Data"]["Timeline Data"][
             0

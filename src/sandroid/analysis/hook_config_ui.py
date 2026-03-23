@@ -10,6 +10,7 @@ compatibility.
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import click
@@ -615,7 +616,7 @@ class AppProfilerConfigUI:
         if script_count > 0:
             for i, script in enumerate(settings["custom_scripts"][:3], 1):
                 console.print(
-                    _box_line(f"    {i}. {script.split('/')[-1]}", _W, align="left")
+                    _box_line(f"    {i}. {Path(script).name}", _W, align="left")
                 )
             if script_count > 3:
                 console.print(

@@ -351,8 +351,8 @@ class InitializationService:
             self._current_session.raw_path = raw_path
 
             # Update environment variables for backwards compatibility
-            os.environ["RESULTS_PATH"] = str(device_path) + "/"
-            os.environ["RAW_RESULTS_PATH"] = str(raw_path) + "/"
+            os.environ["RESULTS_PATH"] = os.path.join(str(device_path), "")
+            os.environ["RAW_RESULTS_PATH"] = os.path.join(str(raw_path), "")
 
             self._logger.info(f"Created device folder: {device_path}")
             return device_path

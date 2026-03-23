@@ -361,7 +361,7 @@ class ForensicService:
             return self._whitelist_patterns
 
         try:
-            with open(self._whitelist_path) as f:
+            with open(self._whitelist_path, encoding="utf-8") as f:
                 patterns = [
                     line.strip()
                     for line in f

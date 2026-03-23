@@ -198,7 +198,7 @@ class Network(DataGatherBase):
             base_path = self._get_path()
             base_path_obj = Path(base_path)
             base_path_obj.mkdir(parents=True, exist_ok=True)
-            base_path = str(base_path_obj.resolve()) + "/"
+            base_path = str(base_path_obj.resolve()) + os.sep
 
             # Generate timestamp-based filename
             timestamp = time.strftime("%Y%m%d_%H%M%S")

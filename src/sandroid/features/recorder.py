@@ -49,7 +49,7 @@ class Recorder(Functionality):
             os.makedirs(raw_path, exist_ok=True)
 
         try:
-            self.output_file = open(self.output_file_name, "w")
+            self.output_file = open(self.output_file_name, "w", encoding="utf-8")
         except (FileNotFoundError, PermissionError, OSError) as e:
             error_msg = f"Failed to open recording file '{self.output_file_name}': {e}"
             logger.error(error_msg)

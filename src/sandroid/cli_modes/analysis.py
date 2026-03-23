@@ -110,7 +110,7 @@ def _write_results(q, output_file, config, console) -> None:
         console: SandroidConsole instance.
     """
     try:
-        with open(output_file, "w") as fd:
+        with open(output_file, "w", encoding="utf-8") as fd:
             fd.write(q.get_data())
     except FileNotFoundError:
         logger.error(f"Results directory does not exist: {config.paths.results_path}")

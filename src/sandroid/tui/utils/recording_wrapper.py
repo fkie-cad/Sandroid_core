@@ -95,7 +95,7 @@ class RecordingWrapper:
 
         # Open output file
         try:
-            self._output_file = open(self.output_file_path, "w")
+            self._output_file = open(self.output_file_path, "w", encoding="utf-8")
         except OSError as e:
             logger.error(f"Failed to open output file '{self.output_file_path}': {e}")
             return False

@@ -408,7 +408,7 @@ class RecordingController:
                 "Action Duration": self._get_forensic_service().get_action_duration(),
             }
 
-            with open(output_file, "w") as f:
+            with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
 
         except Exception as e:

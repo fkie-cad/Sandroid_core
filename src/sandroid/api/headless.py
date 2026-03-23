@@ -372,7 +372,7 @@ class SandroidHeadlessAPI(SandroidAPI):
             if output_file:
                 output_path = Path(output_file)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(output_path, "w") as f:
+                with open(output_path, "w", encoding="utf-8") as f:
                     json.dump(results, f, indent=2, default=str)
                 logger.info(f"Results saved to: {output_path}")
 

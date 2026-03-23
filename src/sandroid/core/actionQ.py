@@ -451,7 +451,7 @@ class ActionQ:
             )
 
             # Write results
-            with open(output_path, "w") as fd:
+            with open(output_path, "w", encoding="utf-8") as fd:
                 fd.write(self.get_data())
 
             self.logger.info(f"Results saved to: {output_path}")

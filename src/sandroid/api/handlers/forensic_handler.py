@@ -96,7 +96,7 @@ class ForensicHandler:
                 error="File does not exist",
             )
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             action_data = json.load(f)
 
         return CommandResult(
@@ -127,7 +127,7 @@ class ForensicHandler:
         forensic = get_forensic_service()
         changed_files = forensic.get_changed_files_cache() or {}
 
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             json.dump({"changed_files": changed_files}, f, indent=2, default=str)
 
         return CommandResult(

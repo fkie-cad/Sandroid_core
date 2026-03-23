@@ -60,7 +60,7 @@ class ConfigLoader:
         # Additional user directories from XDG_CONFIG_DIRS
         xdg_config_dirs = os.environ.get("XDG_CONFIG_DIRS", "")
         if xdg_config_dirs:
-            for config_dir in xdg_config_dirs.split(":"):
+            for config_dir in xdg_config_dirs.split(os.pathsep):
                 if config_dir.strip():
                     dirs.append(Path(config_dir.strip()) / self.app_name)
 
@@ -280,8 +280,8 @@ class ConfigLoader:
             Path where configuration was saved
         """
         if config_file is None:
-            # Use XDG-style path: ~/.config/sandroid/sandroid.toml
-            user_dir = Path.home() / ".config" / self.app_name
+            # Use platform-appropriate config directory
+            user_dir = Path(user_config_dir(self.app_name))
             user_dir.mkdir(parents=True, exist_ok=True)
             config_file = user_dir / f"sandroid.{format}"
         else:

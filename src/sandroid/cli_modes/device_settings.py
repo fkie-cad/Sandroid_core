@@ -40,7 +40,7 @@ def run_device_settings_headless(
 
     if settings_file:
         try:
-            with open(settings_file) as f:
+            with open(settings_file, encoding="utf-8") as f:
                 settings = json.load(f)
         except json.JSONDecodeError as e:
             console.print(f"[error]Invalid JSON in {settings_file}: {e}[/error]")

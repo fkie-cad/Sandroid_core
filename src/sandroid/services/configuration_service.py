@@ -224,12 +224,12 @@ class ConfigurationService:
                     os.makedirs(os.path.join(parent, folder), exist_ok=True)
 
             # Update environment variables
-            os.environ["RESULTS_PATH"] = device_path + "/"
-            os.environ["RAW_RESULTS_PATH"] = raw_path + "/"
+            os.environ["RESULTS_PATH"] = os.path.join(device_path, "")
+            os.environ["RAW_RESULTS_PATH"] = os.path.join(raw_path, "")
 
             # Update session config
-            self._session_config.results_path = device_path + "/"
-            self._session_config.raw_results_path = raw_path + "/"
+            self._session_config.results_path = os.path.join(device_path, "")
+            self._session_config.raw_results_path = os.path.join(raw_path, "")
             self._session_config.device_name = device_name
 
             self._logger.info(f"Switched to device folder: {device_path}")

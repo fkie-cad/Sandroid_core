@@ -27,7 +27,7 @@ connection_timeout = 30
 [paths]
 results_path = "./results/"
 raw_results_path = "./results/raw/"
-temp_path = "/tmp/sandroid/"
+temp_path = ""  # Empty = use system temp dir (platform-agnostic)
 cache_path = "~/.cache/sandroid/"
 
 [analysis]

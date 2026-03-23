@@ -193,7 +193,7 @@ async def _run_batch_analysis(
     console.print(f"[accent]Loading batch config from: {batch_config}[/accent]")
 
     try:
-        with open(batch_config) as f:
+        with open(batch_config, encoding="utf-8") as f:
             batch_cfg = json.load(f)
     except (json.JSONDecodeError, FileNotFoundError) as e:
         console.print(f"[error]Failed to load batch config: {e}[/error]")

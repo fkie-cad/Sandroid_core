@@ -35,7 +35,14 @@ def _write_reset_sequences() -> None:
 
 
 def _run_stty_sane() -> None:
-    """Run ``stty sane`` as a fallback for complete terminal mode reset."""
+    """Run ``stty sane`` as a fallback for complete terminal mode reset.
+
+    Only available on Unix-like systems; silently skipped on Windows.
+    """
+    import platform
+
+    if platform.system() == "Windows":
+        return
     try:
         subprocess.run(["stty", "sane"], timeout=1, check=False)
     except Exception:

@@ -7,17 +7,24 @@ terminal input/output.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
-import pty
-import select
 import signal
 import struct
 import subprocess
-import termios
 
 from typing_extensions import Self
+
+# PTY support is only available on Unix-like systems
+try:
+    import fcntl
+    import pty
+    import select
+    import termios
+
+    _PTY_AVAILABLE = True
+except ImportError:
+    _PTY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +58,12 @@ class PTYProcess:
             rows: Terminal rows (height)
             cols: Terminal columns (width)
         """
+        if not _PTY_AVAILABLE:
+            raise OSError(
+                "PTYProcess is not supported on Windows. "
+                "Interactive terminal sessions require a Unix-like operating system."
+            )
+
         self.cmd = cmd
         self.env = env or os.environ.copy()
         self.cwd = cwd

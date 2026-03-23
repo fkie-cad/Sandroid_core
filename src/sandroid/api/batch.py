@@ -78,7 +78,7 @@ async def batch_analyze(
 
             # Save individual result
             pkg_file = output_path / f"{package.replace('.', '_')}.json"
-            with open(pkg_file, "w") as f:
+            with open(pkg_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, default=str)
             logger.info(f"Results saved to: {pkg_file}")
 

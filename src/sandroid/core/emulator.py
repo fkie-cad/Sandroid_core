@@ -1,5 +1,6 @@
 import os
 import platform
+import shutil
 import subprocess
 import time
 from logging import getLogger
@@ -102,20 +103,10 @@ class Emulator:
                 ]
             )
 
-        # Try command which emulator if available (for Unix-like systems)
-        try:
-            result = subprocess.run(
-                ["which", "emulator"],
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                possible_paths.append(result.stdout.strip())
-        except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
-            logger.debug(f"Could not detect emulator using 'which' command: {e}")
-            # Continue with other detection methods
+        # Try to find emulator on PATH (cross-platform)
+        which_result = shutil.which("emulator")
+        if which_result:
+            possible_paths.append(which_result)
 
         # Check each path
         for path in possible_paths:

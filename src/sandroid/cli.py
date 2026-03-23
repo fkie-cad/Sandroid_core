@@ -598,7 +598,7 @@ def _run_import_action(sandroid_config, action_path: str) -> None:
     initialize_core(sandroid_config)
 
     try:
-        with open(action_path) as f:
+        with open(action_path, encoding="utf-8") as f:
             action_data = json.load(f)
         console.print(f"[success]Action imported from: {action_path}[/success]")
         console.print(

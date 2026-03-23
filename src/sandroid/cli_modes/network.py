@@ -92,7 +92,7 @@ def run_network_headless(
         if output_file:
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "w") as f:
+            with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2, default=str)
             console.print(f"[success]Results saved to: {output_file}[/success]")
         else:

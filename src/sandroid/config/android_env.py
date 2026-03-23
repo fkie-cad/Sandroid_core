@@ -128,10 +128,10 @@ def find_existing_sdk() -> Path | None:
     elif is_windows():
         local_appdata = os.environ.get("LOCALAPPDATA", "")
         appdata = os.environ.get("APPDATA", "")
-        candidates += [
-            Path(local_appdata) / "Android" / "Sdk",
-            Path(appdata) / "Android" / "Sdk",
-        ]
+        if local_appdata:
+            candidates.append(Path(local_appdata) / "Android" / "Sdk")
+        if appdata:
+            candidates.append(Path(appdata) / "Android" / "Sdk")
 
     # 3. Check if sdkmanager is on PATH
     sm = shutil.which("sdkmanager") or shutil.which("sdkmanager.bat")
