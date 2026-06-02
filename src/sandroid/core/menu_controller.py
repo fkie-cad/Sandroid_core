@@ -626,7 +626,8 @@ class MenuController:
             if not has_attach_app and not has_spawn_app:
                 return (
                     False,
-                    "No spotlight app set. Press [c] for ATTACH or [C] for SPAWN mode.",
+                    "No spotlight app set. Press [c] to attach to the focused app "
+                    "or [Shift+C] to pick an app to spawn.",
                 )
 
         if action.requires_dexray_running:

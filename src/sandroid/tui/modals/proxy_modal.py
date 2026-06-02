@@ -15,12 +15,14 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import Input, Label, RadioButton, RadioSet, Static
+from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
 from sandroid.core.proxy_manager import (
     CAInfo,
     CAManager,
     CASource,
+    InjectionResult,
+    InjectionStrategy,
     ProxyConfig,
     ProxyManager,
     ProxyStatus,
@@ -55,7 +57,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     DEFAULT_CSS = """
     ProxyModal .modal-container {
         width: 80;
-        max-height: 28;
+        max-height: 36;
         max-width: 90%;
     }
 
@@ -113,9 +115,40 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         width: 1fr;
     }
 
+    ProxyModal .device-info {
+        padding: 0 2;
+        background: $panel;
+    }
+
     ProxyModal .zygote-status {
         padding: 0 2;
         background: $panel;
+    }
+
+    ProxyModal .button-row {
+        height: auto;
+        padding: 0 2;
+        margin-top: 1;
+    }
+
+    ProxyModal Button.-primary {
+        background: $success;
+        color: #ffffff;
+    }
+
+    ProxyModal Button.-primary:hover {
+        background: $success-darken-1;
+    }
+
+    ProxyModal .button-row Button.-style-default.-primary,
+    ProxyModal .button-row Button.-style-default.-primary:hover,
+    ProxyModal .button-row Button.-style-default.-primary:focus {
+        background: $success;
+        color: #ffffff;
+    }
+
+    ProxyModal .button-row Button.-style-default.-primary:hover {
+        background: $success-darken-1;
     }
     """
 
@@ -176,9 +209,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     id="custom-path-input",
                 )
 
+            # Device Info Section
+            yield Label("Device Info", classes="section-header")
+            yield Static("Checking...", id="device-info", classes="device-info")
+
             # Zygote Injection Section
             yield Label("Zygote Injection", classes="section-header")
             yield Static("Checking...", id="zygote-status", classes="zygote-status")
+
+            # Action buttons
+            with Horizontal(classes="button-row"):
+                yield Button("Set Proxy", id="btn-set-proxy", classes="-primary")
+                yield Button("Unset", id="btn-unset-proxy", classes="-secondary")
+                yield Button("Inject CA", id="btn-inject-ca", classes="-primary")
 
             # Dynamic key hints via footer
             yield KeyHintFooter(
@@ -186,6 +229,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     "default": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Esc=Cancel[/dim]",
                     "input": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Tab=Next  Esc=Cancel[/dim]",
                     "radioset": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Space=Select  Esc=Cancel[/dim]",
+                    "button": "[dim]Enter=Activate  S=Set Proxy  U=Unset  I=Inject CA  Tab=Next  Esc=Cancel[/dim]",
                 }
             )
 
@@ -193,6 +237,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         """Initialize the modal with current status."""
         self._refresh_proxy_status()
         self._detect_certificates()
+        self._refresh_device_info()
         self._refresh_zygote_status()
 
         # Focus proxy input
@@ -218,6 +263,24 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             status_widget.update("[red]\u25cf[/red] Proxy not configured")
         else:
             status_widget.update("[yellow]\u25cf[/yellow] Error reading proxy status")
+
+    def _refresh_device_info(self) -> None:
+        """Refresh and display device API level and injection strategy."""
+        info_widget = self.query_one("#device-info", Static)
+        try:
+            strategy, api_level = self._ca_manager.determine_injection_strategy()
+            strategy_label = (
+                "Bind-mount (Android 14+)"
+                if strategy == InjectionStrategy.BIND_MOUNT
+                else "Legacy (pre-Android 14)"
+            )
+            api_str = str(api_level) if api_level is not None else "unknown"
+            info_widget.update(
+                f"API level: [bold]{api_str}[/bold]  "
+                f"Strategy: [bold]{strategy_label}[/bold]"
+            )
+        except Exception:
+            info_widget.update("[yellow]●[/yellow] Could not detect device info")
 
     def _detect_certificates(self) -> None:
         """Detect available CA certificates and populate radio buttons."""
@@ -253,7 +316,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
         if self._zygote_status.injected:
             status_widget.update(
-                f"[green]\u25cf[/green] CA injected (hash: {self._zygote_status.cert_hash})"
+                f"[green]\u25cf[/green] CA verified in Zygote namespace "
+                f"(hash: {self._zygote_status.cert_hash})"
             )
         else:
             pid_info = ""
@@ -344,9 +408,14 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     def action_inject_ca(self) -> None:
         """Inject the CA into Zygote."""
         ca_path = self._get_selected_ca_path()
-        success, message = self._ca_manager.inject_ca_into_zygote(ca_path)
-        if success:
+        result = self._ca_manager.inject_ca_into_zygote(ca_path)
+        if result.success:
             self._refresh_zygote_status()
+            # Also bypass Chrome Certificate Transparency
+            if ca_path and ca_path.exists():
+                ct_ok, ct_msg = self._ca_manager.bypass_chrome_ct(ca_path)
+                if ct_ok:
+                    self.notify(ct_msg, severity="information")
             self._dismiss_with_refresh(
                 ProxyModalResult(
                     cancelled=False,
@@ -354,8 +423,41 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     ca_path=ca_path,
                 )
             )
+        elif result.needs_root:
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            self.app.push_screen(
+                ConfirmModal(
+                    title="Enable ADB Root?",
+                    message=(
+                        "CA injection requires root access.\n"
+                        "Enable adb root now?"
+                    ),
+                ),
+                self._on_root_confirm,
+            )
         else:
-            self.notify(message, severity="error")
+            self.notify(result.message, severity="error")
+
+    def _on_root_confirm(self, confirmed: bool) -> None:
+        """Handle root confirmation result."""
+        if not confirmed:
+            return
+        success, msg = self._ca_manager.enable_adb_root()
+        if success:
+            self.notify("ADB root enabled", severity="information")
+            self.action_inject_ca()
+        else:
+            self.notify(f"Failed to enable root: {msg}", severity="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button clicks."""
+        if event.button.id == "btn-set-proxy":
+            self.action_set_proxy()
+        elif event.button.id == "btn-unset-proxy":
+            self.action_unset_proxy()
+        elif event.button.id == "btn-inject-ca":
+            self.action_inject_ca()
 
     def action_cancel(self) -> None:
         """Cancel and close the modal."""

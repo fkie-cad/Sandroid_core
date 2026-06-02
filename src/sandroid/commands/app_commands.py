@@ -445,8 +445,10 @@ class SetSpotlightSpawnCommand(CommandHandler):
     async def execute(self, ctx: CommandContext) -> CommandResult:
         """Select an app for spawn mode using fuzzy search.
 
-        Shows available apps and allows fuzzy search filtering.
-        After selection, asks about auto-resume behavior.
+        Shows available apps and allows fuzzy search filtering. Spawn-vs-attach
+        and resume behavior are now chosen per action in the spotlight panel
+        (Start / Restart / Attach / Start-paused), so this only records the
+        spawn target — no auto-resume prompt.
 
         Args:
             ctx: Command context with toolbox access
@@ -476,18 +478,13 @@ class SetSpotlightSpawnCommand(CommandHandler):
 
             logger.info(f"Selected app for spawn: {package_name}")
 
-            # Set as spotlight spawn application
+            # Set as spotlight spawn application. Keeps spawn mode + spawn
+            # package set so all existing readers keep working; how/when the
+            # app actually launches is chosen per action in the panel.
             spotlight = get_spotlight_service()
             spotlight.set_spawn_app(package_name)
 
-            # Ask about auto-resume behavior
-            auto_resume = await self._ask_auto_resume(ctx)
-            spotlight.set_auto_resume(auto_resume)
-
-            mode_desc = (
-                "auto-resume enabled" if auto_resume else "manual resume required"
-            )
-            result_message = f"Spotlight spawn app set to: {package_name} ({mode_desc})"
+            result_message = f"Spotlight spawn app set to: {package_name} (SPAWN mode)"
 
             logger.debug(result_message)
 
@@ -497,7 +494,6 @@ class SetSpotlightSpawnCommand(CommandHandler):
                 data={
                     "package_name": package_name,
                     "mode": "spawn",
-                    "auto_resume": auto_resume,
                 },
             )
 
@@ -508,43 +504,6 @@ class SetSpotlightSpawnCommand(CommandHandler):
                 message=f"Failed to set spotlight spawn app: {e!s}",
                 error=str(e),
             )
-
-    async def _ask_auto_resume(self, ctx: CommandContext) -> bool:
-        """Ask user about auto-resume preference.
-
-        When auto-resume is enabled, the spawned app will automatically
-        resume after Frida hooks are loaded. When disabled, the app
-        stays paused for manual control.
-
-        Args:
-            ctx: Command context
-
-        Returns:
-            True for auto-resume, False for manual resume
-        """
-        try:
-            if ctx.is_tui_mode and ctx.request_confirm:
-                return ctx.request_confirm(
-                    title="Auto-Resume After Spawn?",
-                    message="Automatically resume the app after hooks are loaded?\n"
-                    "(Yes = app runs immediately, No = app stays paused)",
-                )
-            # Rich console mode
-            logger.info(
-                "Auto-resume after spawn? (Y = app runs after hooks, N = stays paused) [Y/n]: "
-            )
-            if ctx.toolbox:
-                response = ctx.toolbox.safe_input("").lower()
-            else:
-                response = input("").lower()
-
-            # Default to Yes (auto-resume)
-            return response not in ("n", "no")
-
-        except Exception as e:
-            logger.warning(f"Error getting auto-resume preference: {e}")
-            # Default to auto-resume on error
-            return True
 
 
 def register_commands(registry) -> None:

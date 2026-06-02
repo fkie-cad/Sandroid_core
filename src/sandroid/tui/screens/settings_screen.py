@@ -6,6 +6,7 @@ Theme preview is applied live and reverted on Cancel.
 """
 
 import logging
+import threading
 from typing import Any
 
 from textual.app import ComposeResult
@@ -382,6 +383,67 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
+        # Frida Server Version
+        try:
+            import frida as _frida_mod
+
+            host_frida_ver = _frida_mod.__version__
+        except Exception:
+            host_frida_ver = "unknown"
+
+        saved = config.frida.server_version or "host"
+        # Legacy alias: 'auto' resolves to 'host' canonically
+        normalized = "host" if saved == "auto" else saved
+
+        options: list[tuple[str, str]] = [
+            (f"Match host ({host_frida_ver})", "host"),
+            ("Latest (fetching…)", "latest"),
+        ]
+        # If the saved value is a specific version, include it so the Select
+        # can pre-select it. The async populate will replace this with the
+        # full GitHub-fetched list.
+        if normalized not in ("host", "latest"):
+            options.append((normalized, normalized))
+        options.append(("Custom…", "__custom__"))
+
+        with Horizontal(classes="setting-row"):
+            yield Label("Server Version:", classes="setting-label")
+            yield Select(
+                options,
+                value=normalized,
+                id="setting-frida--server_version",
+                classes="setting-select",
+                allow_blank=False,
+            )
+
+        # Custom version input row — visibility is toggled in on_mount and
+        # via on_select_changed when "Custom…" is picked.
+        with Horizontal(classes="setting-row", id="frida-version-custom-row"):
+            yield Label("Custom version:", classes="setting-label")
+            yield Input(
+                value="",
+                placeholder="e.g. 17.9.11",
+                id="setting-frida--server_version_custom",
+                classes="setting-input",
+            )
+
+        # Info lines — Host / Latest / Installed. Updated by background thread.
+        yield Static(
+            f"[dim]Host frida:     {host_frida_ver}[/dim]",
+            id="frida-info-host",
+            classes="setting-label",
+        )
+        yield Static(
+            "[dim]Latest frida:   fetching…[/dim]",
+            id="frida-info-latest",
+            classes="setting-label",
+        )
+        yield Static(
+            "[dim]Installed:      checking…[/dim]",
+            id="frida-info-installed",
+            classes="setting-label",
+        )
+
         yield Static("Network", classes="section-header")
 
         # PCAP Buffer Size
@@ -542,6 +604,108 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     def on_mount(self) -> None:
         """Initialize controller after mount."""
         self._controller = SettingsController(self.app)
+        # Hide the custom-version input until the user picks "Custom…"
+        try:
+            select = self.query_one("#setting-frida--server_version", Select)
+            row = self.query_one("#frida-version-custom-row", Horizontal)
+            row.display = select.value == "__custom__"
+        except Exception:
+            pass
+        # Populate the Frida version dropdown asynchronously — fetching from
+        # GitHub on the UI thread would freeze the TUI for up to 10 seconds.
+        threading.Thread(
+            target=self._fetch_frida_versions,
+            name="settings-frida-versions",
+            daemon=True,
+        ).start()
+
+    def _fetch_frida_versions(self) -> None:
+        """Background worker: pull available + installed frida versions."""
+        tags: list[str] = []
+        installed: str | None = None
+        try:
+            from sandroid.services import get_frida_session_service
+
+            fm = get_frida_session_service().get_frida_manager()
+            if fm is not None:
+                try:
+                    tags = fm.list_available_versions(limit=15) or []
+                except Exception as e:
+                    logger.debug(f"list_available_versions failed: {e}")
+                try:
+                    installed = fm.get_installed_server_version()
+                except Exception as e:
+                    logger.debug(f"get_installed_server_version failed: {e}")
+        except Exception as e:
+            logger.debug(f"Could not access FridaSessionService: {e}")
+
+        try:
+            self.app.call_from_thread(
+                self._populate_frida_versions, tags, installed
+            )
+        except Exception:
+            # Screen already dismissed
+            pass
+
+    def _populate_frida_versions(
+        self, tags: list[str], installed: str | None
+    ) -> None:
+        """UI-thread callback: rebuild the version Select and info lines."""
+        try:
+            select = self.query_one("#setting-frida--server_version", Select)
+        except Exception:
+            return
+
+        host_ver = "unknown"
+        try:
+            import frida as _frida_mod
+
+            host_ver = _frida_mod.__version__
+        except Exception:
+            pass
+
+        latest_label = (
+            f"Latest ({tags[0]})" if tags else "Latest (offline)"
+        )
+        current = select.value
+        options: list[tuple[str, str]] = [
+            (f"Match host ({host_ver})", "host"),
+            (latest_label, "latest"),
+        ]
+        # Up to 10 recent specific versions after Latest
+        for tag in tags[:10]:
+            options.append((tag, tag))
+        # Preserve the currently-selected explicit version if it would
+        # otherwise disappear from the list
+        existing_values = {v for _, v in options}
+        if (
+            current
+            and current not in existing_values
+            and current != "__custom__"
+        ):
+            options.append((str(current), str(current)))
+        options.append(("Custom…", "__custom__"))
+
+        try:
+            select.set_options(options)
+            if current and current in {v for _, v in options}:
+                select.value = current
+        except Exception as e:
+            logger.debug(f"Could not update version Select: {e}")
+
+        # Update info lines
+        try:
+            self.query_one("#frida-info-latest", Static).update(
+                f"[dim]Latest frida:   {tags[0] if tags else 'offline'}[/dim]"
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#frida-info-installed", Static).update(
+                f"[dim]Installed:      {installed or 'not installed'}[/dim]"
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _id_to_key(widget_id: str) -> str:
@@ -564,28 +728,71 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     def on_select_changed(self, event: Select.Changed) -> None:
         """Track select changes."""
         widget_id = event.select.id
-        if widget_id and widget_id.startswith("setting-"):
-            key = self._id_to_key(widget_id)
-            self._pending[key] = event.value
+        if not widget_id or not widget_id.startswith("setting-"):
+            return
+        key = self._id_to_key(widget_id)
+
+        # Frida version Select uses a "__custom__" sentinel to reveal a
+        # free-text Input. Never persist the sentinel itself — store the
+        # custom Input's current text instead, and toggle the row's
+        # visibility based on the selection.
+        if key == "frida.server_version":
+            try:
+                custom_row = self.query_one(
+                    "#frida-version-custom-row", Horizontal
+                )
+                custom_input = self.query_one(
+                    "#setting-frida--server_version_custom", Input
+                )
+            except Exception:
+                custom_row = None
+                custom_input = None
+
+            if event.value == "__custom__":
+                if custom_row is not None:
+                    custom_row.display = True
+                if custom_input is not None:
+                    self._pending[key] = custom_input.value or "host"
+                return
+
+            if custom_row is not None:
+                custom_row.display = False
+
+        self._pending[key] = event.value
 
     def on_input_changed(self, event: Input.Changed) -> None:
         """Track input changes."""
         widget_id = event.input.id
-        if widget_id and widget_id.startswith("setting-"):
-            key = self._id_to_key(widget_id)
-            # Convert integer inputs
-            if event.input.type == "integer":
-                try:
-                    self._pending[key] = int(event.value)
-                except ValueError:
-                    pass  # Don't store invalid integers
-            elif event.input.type == "number":
-                try:
-                    self._pending[key] = float(event.value)
-                except ValueError:
-                    pass  # Don't store invalid floats
-            else:
-                self._pending[key] = event.value
+        if not widget_id or not widget_id.startswith("setting-"):
+            return
+
+        # Custom Frida version Input writes into frida.server_version (not
+        # its own key) so the saved config never contains "__custom__".
+        if widget_id == "setting-frida--server_version_custom":
+            try:
+                select = self.query_one(
+                    "#setting-frida--server_version", Select
+                )
+            except Exception:
+                select = None
+            if select is not None and select.value == "__custom__":
+                self._pending["frida.server_version"] = event.value
+            return
+
+        key = self._id_to_key(widget_id)
+        # Convert integer inputs
+        if event.input.type == "integer":
+            try:
+                self._pending[key] = int(event.value)
+            except ValueError:
+                pass  # Don't store invalid integers
+        elif event.input.type == "number":
+            try:
+                self._pending[key] = float(event.value)
+            except ValueError:
+                pass  # Don't store invalid floats
+        else:
+            self._pending[key] = event.value
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         """Track theme radio changes and preview."""

@@ -204,17 +204,13 @@ class MenuRenderer:
 
         spawn_package = spotlight.get_spawn_package()
         is_spawn = spotlight.is_spawn_mode()
-        auto_resume = spotlight.get_auto_resume()
         app_tuple = spotlight.get_app_tuple()
         app_pid = spotlight.get_pid()
 
         if is_spawn and spawn_package:
-            # SPAWN MODE
+            # SPAWN MODE. Resume behavior is chosen per action in the
+            # spotlight panel now, so no (auto-resume)/(manual resume) tag.
             spotlight_application_string = f"[warning]{spawn_package}[/warning]"
-            if auto_resume:
-                spotlight_application_string += " [success](auto-resume)[/success]"
-            else:
-                spotlight_application_string += " [warning](manual resume)[/warning]"
             spotlight_application_string = f"Spotlight Application: [{spotlight_application_string}] [mode.spawn]\\[SPAWN MODE][/mode.spawn]"
         elif app_tuple:
             # ATTACH MODE

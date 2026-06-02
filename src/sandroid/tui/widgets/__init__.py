@@ -7,7 +7,9 @@ from sandroid.tui.widgets.activity_log import ActivityLog
 from sandroid.tui.widgets.loading_spinner import LoadingSpinner
 from sandroid.tui.widgets.menu_panel import MenuPanel
 from sandroid.tui.widgets.minimized_task_bar import MinimizedTaskBar
+from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
 from sandroid.tui.widgets.sandroid_footer import SandroidFooter
+from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 from sandroid.tui.widgets.status_bar import StatusBar
 
 __all__ = [
@@ -15,6 +17,8 @@ __all__ = [
     "LoadingSpinner",
     "MenuPanel",
     "MinimizedTaskBar",
+    "MitmproxyPanel",
     "SandroidFooter",
+    "SpotlightPanel",
     "StatusBar",
 ]

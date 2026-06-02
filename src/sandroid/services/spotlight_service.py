@@ -126,6 +126,10 @@ class SpotlightService:
         """
         self._current_app: SpotlightApp | None = None
         self._spawn_package: str | None = None
+        # PID for a spawn-selected app (Shift+C), which has no _current_app.
+        # Lets the live running-state indicator surface a PID even before an
+        # attach record exists. Kept in sync by set_pid().
+        self._spawn_pid: int | None = None
         self._spawn_mode: bool = False
         self._auto_resume: bool = True
         self._event_bus = event_bus
@@ -221,20 +225,38 @@ class SpotlightService:
     def get_pid(self) -> int | None:
         """Get the current spotlight process ID.
 
+        Works for both attach-selected apps (``_current_app``) and
+        spawn-selected apps (only ``_spawn_package`` set).
+
         Returns:
             PID integer or None
         """
-        return self._current_app.pid if self._current_app else None
+        if self._current_app:
+            return self._current_app.pid
+        return self._spawn_pid
 
-    def set_pid(self, pid: int) -> None:
+    def set_pid(self, pid: int | None) -> None:
         """Update the PID of the current spotlight app.
 
+        Works whether the app was attach-selected (``_current_app``) or
+        spawn-selected (only ``_spawn_package`` set). Pass ``None`` to clear
+        the PID (e.g. after the app is killed).
+
+        Deliberately **non-publishing** (A5): it does not emit
+        ``STATE_CHANGED``. The panel's running-state poll calls this from a
+        worker thread on every tick; publishing here would create a
+        poll -> event -> refresh feedback loop.
+
         Args:
-            pid: New process ID
+            pid: New process ID, or None to clear it.
         """
         if self._current_app:
             self._current_app.pid = pid
-            self._logger.info(f"Updated spotlight PID to {pid}")
+        self._spawn_pid = pid
+        if pid:
+            self._logger.debug(f"Updated spotlight PID to {pid}")
+        else:
+            self._logger.debug("Cleared spotlight PID")
 
     def has_app(self) -> bool:
         """Check if a spotlight app is currently set.
@@ -282,6 +304,7 @@ class SpotlightService:
         """
         previous = self._spawn_package
         self._spawn_package = package_name
+        self._spawn_pid = None  # New spawn target -> any prior PID is stale
         self._spawn_mode = True
         self._auto_resume = auto_resume
 
@@ -512,6 +535,7 @@ class SpotlightService:
         self._spotlight_application = None
         self._spotlight_application_pid = None
         self._spawn_mode = False
+        self._spawn_pid = None
         self._spotlight_spawn_application = None
 
     def set_spawn_application(self, package_name: str) -> None:
@@ -656,6 +680,7 @@ class SpotlightService:
         previous_pkg = self.get_effective_package()
         self._current_app = None
         self._spawn_package = None
+        self._spawn_pid = None
         self._spawn_mode = False
         self._auto_resume = True
 

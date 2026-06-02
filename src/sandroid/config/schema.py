@@ -103,6 +103,15 @@ class FridaConfig(BaseModel):
     spawn_timeout: int = Field(
         default=30, description="Timeout for spawning processes (seconds)"
     )
+    server_version: str = Field(
+        default="host",
+        description=(
+            "Frida-server version to install. 'host' matches the installed "
+            "frida Python package (frida.__version__), 'latest' grabs the "
+            "newest from GitHub, or specify an explicit version like '17.9.11'. "
+            "Legacy 'auto' is accepted as an alias for 'host'."
+        ),
+    )
 
 
 class NetworkConfig(BaseModel):
@@ -464,6 +473,10 @@ class DevicePathsConfig(BaseModel):
         default="/system/etc/security/cacerts",
         description="System CA certificate directory on device",
     )
+    apex_ca_path: str = Field(
+        default="/apex/com.android.conscrypt/cacerts",
+        description="APEX CA certificate directory on device (Android 14+)",
+    )
     spotlight_data_path: str = Field(
         default="/data/data/{app}",
         description="Spotlight app data path template ({app} replaced at runtime)",
@@ -483,6 +496,7 @@ class DevicePathsConfig(BaseModel):
         "default_monitor_path",
         "device_cert_path",
         "system_ca_path",
+        "apex_ca_path",
         "spotlight_data_path",
         "pidof_binary",
         "killall_binary",

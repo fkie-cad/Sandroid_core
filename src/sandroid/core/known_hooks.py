@@ -172,16 +172,12 @@ TRIGDROID_HOOKS = ToolHookInfo(
     categories=[
         HookCategory.SENSORS,
         HookCategory.BUILD_PROPERTIES,
-        HookCategory.SSL_TLS,
         HookCategory.ROOT_DETECTION,
         HookCategory.EMULATOR_DETECTION,
         HookCategory.FRIDA_DETECTION,
         HookCategory.DEBUG_DETECTION,
     ],
-    native_hooks=[
-        # Sensor manipulation (if enabled)
-        # These are Java-based mostly
-    ],
+    native_hooks=[],
     java_hooks=[
         # Sensor hooks
         "android.hardware.Sensor.getPower",
@@ -193,10 +189,6 @@ TRIGDROID_HOOKS = ToolHookInfo(
         "android.os.Build.BRAND",
         "android.os.Build.DEVICE",
         "android.os.Build.FINGERPRINT",
-        # SSL Unpinning (if enabled)
-        "javax.net.ssl.SSLContext.init",
-        "okhttp3.CertificatePinner.check",
-        "com.android.org.conscrypt.TrustManagerImpl.verifyChain",
         # Root Detection Bypass (if enabled)
         "java.io.File.exists",
         "java.lang.Runtime.exec",
@@ -205,9 +197,115 @@ TRIGDROID_HOOKS = ToolHookInfo(
         "android.os.Debug.isDebuggerConnected",
     ],
     description="Automated malware trigger execution and analysis",
-    dynamic_hooks=True,  # Depends on bypass configuration
+    dynamic_hooks=True,
     notes="TrigDroid has its own API and session management. "
-    "Bypass hooks are configurable via TUI modal.",
+    "SSL unpinning delegated to SSLUnpinManager (ssl_unpin).",
+)
+
+# ============================================================================
+# SSL PINNING BYPASS
+# ============================================================================
+SSL_UNPIN_TOOL = ToolHookInfo(
+    name="ssl_unpin",
+    display_name="SSL Pinning Bypass",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[HookCategory.SSL_TLS],
+    native_hooks=[
+        "SSL_CTX_set_verify",
+    ],
+    java_hooks=[
+        "javax.net.ssl.SSLContext.init",
+        "javax.net.ssl.HttpsURLConnection.setHostnameVerifier",
+        "javax.net.ssl.HttpsURLConnection.setDefaultHostnameVerifier",
+        "javax.net.ssl.HttpsURLConnection.setSSLSocketFactory",
+        "javax.net.ssl.HttpsURLConnection.setDefaultSSLSocketFactory",
+        "okhttp3.CertificatePinner.check",
+        "okhttp3.CertificatePinner.check$okhttp",
+        "com.squareup.okhttp.CertificatePinner.check",
+        "android.webkit.WebViewClient.onReceivedSslError",
+        "com.android.org.conscrypt.TrustManagerImpl.verifyChain",
+        "com.android.org.conscrypt.TrustManagerImpl.checkTrustedRecursive",
+        "com.android.org.conscrypt.CertPinManager.isChainValid",
+        "android.net.http.X509TrustManagerExtensions.checkServerTrusted",
+        "com.datatheorem.android.trustkit.pinning.PinningTrustManager.checkServerTrusted",
+    ],
+    description="Comprehensive SSL/TLS pinning bypass for mitmproxy interception",
+    dynamic_hooks=False,
+    notes="Used by mitmproxy panel (Ctrl+P) and TrigDroid (ssl_unpinning). "
+    "Shares session with other JobManager-based tools.",
+)
+
+# ============================================================================
+# NATIVE DETECTION BYPASSES (Sandroid built-in, BypassService)
+# ============================================================================
+# Self-contained Frida bypasses owned by BypassService — no trigdroid bundle
+# required. Hook scopes are disjoint *among these three* so the AFM runtime
+# registry does not flag false intra-set conflicts. Native libc hooks may
+# still stack with Dexray/MalwareMonitor (Frida tolerates that); those
+# overlaps are advisory, not fatal.
+FRIDA_DETECTION_BYPASS_TOOL = ToolHookInfo(
+    name="frida_detection_bypass",
+    display_name="Frida Detection Bypass",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[HookCategory.FRIDA_DETECTION, HookCategory.PROCESS],
+    native_hooks=[
+        "open",
+        "openat",
+        "read",
+        "close",
+        "strstr",
+        "exit",
+        "_exit",
+        "abort",
+    ],
+    java_hooks=[
+        "android.os.Process.killProcess",
+        "java.lang.Runtime.exit",
+        "java.lang.System.exit",
+    ],
+    description="Anti-anti-Frida prelude: self-kill suppression, /proc scan "
+    "filtering, frida-needle strstr nulling",
+    dynamic_hooks=False,
+    notes="Does NOT hook Debug.isDebuggerConnected (lives in the Debug "
+    "detection bypass). Load first / in spawn mode for hardened apps.",
+)
+
+ROOT_DETECTION_BYPASS_TOOL = ToolHookInfo(
+    name="root_detection_bypass",
+    display_name="Root Detection Bypass",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[HookCategory.ROOT_DETECTION, HookCategory.BUILD_PROPERTIES],
+    native_hooks=[
+        "__system_property_get",
+    ],
+    java_hooks=[
+        "java.io.File.exists",
+        "java.io.File.<init>",
+        "java.lang.Runtime.exec",
+        "java.lang.ProcessBuilder.start",
+        "android.app.ApplicationPackageManager.getPackageInfo",
+        "android.os.Build.TAGS",
+    ],
+    description="Hide su/magisk/busybox paths, block su exec, hide root apps, "
+    "release-keys build tags, ro.debuggable/ro.secure spoofing",
+    dynamic_hooks=False,
+)
+
+DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
+    name="debug_detection_bypass",
+    display_name="Debug Detection Bypass",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[HookCategory.DEBUG_DETECTION],
+    native_hooks=[
+        "read",  # /proc/self/status TracerPid filter (stacks with frida bypass)
+    ],
+    java_hooks=[
+        "android.os.Debug.isDebuggerConnected",
+        "android.os.Debug.waitingForDebugger",
+    ],
+    description="Defeat debugger-attached checks: isDebuggerConnected, "
+    "waitingForDebugger, TracerPid filtering",
+    dynamic_hooks=False,
 )
 
 # ============================================================================
@@ -410,6 +508,10 @@ KNOWN_TOOLS: dict[str, ToolHookInfo] = {
     "fritap": FRITAP_HOOKS,
     "objection": OBJECTION_HOOKS,
     "trigdroid": TRIGDROID_HOOKS,
+    "ssl_unpin": SSL_UNPIN_TOOL,
+    "frida_detection_bypass": FRIDA_DETECTION_BYPASS_TOOL,
+    "root_detection_bypass": ROOT_DETECTION_BYPASS_TOOL,
+    "debug_detection_bypass": DEBUG_DETECTION_BYPASS_TOOL,
     "malwaremonitor": MALWARE_MONITOR_HOOKS,
 }
 

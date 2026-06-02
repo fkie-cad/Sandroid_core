@@ -463,12 +463,77 @@ class Adb:
         """
         return _pkg.get_focused_app(cls.send_adb_command, max_retries, retry_delay)
 
+    @classmethod
+    def launch_app(
+        cls, package_name: str, activity_name: str | None = None
+    ) -> tuple[bool, str]:
+        """Launch an app on the device.
+
+        Uses ``am start -n <package>/<activity>`` when an activity is known,
+        otherwise falls back to the monkey launcher intent.
+
+        Args:
+            package_name: The package to launch (e.g. ``com.example.app``).
+            activity_name: Optional launchable activity. May be a short
+                (``.MainActivity``) or fully-qualified name.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        if activity_name:
+            component = f"{package_name}/{activity_name}"
+            stdout, stderr = cls.send_adb_command(f"shell am start -n {component}")
+        else:
+            stdout, stderr = cls.send_adb_command(
+                f"shell monkey -p {package_name} "
+                "-c android.intent.category.LAUNCHER 1"
+            )
+
+        combined = f"{stdout or ''}\n{stderr or ''}".strip()
+        lc = combined.lower()
+        if (
+            "error" in lc
+            or "exception" in lc
+            or "does not exist" in lc
+            or "no activities found" in lc
+        ):
+            logger.warning(f"launch_app failed for {package_name}: {combined}")
+            return False, combined or "launch failed"
+        return True, f"Launched {package_name}"
+
+    @classmethod
+    def force_stop(cls, package_name: str) -> tuple[bool, str]:
+        """Force-stop a running app via ``am force-stop``.
+
+        Used by the spotlight Kill/Restart actions to tear the target app
+        down before respawning it with hooks. ``am force-stop`` is a no-op if
+        the app is not running, so this is safe to call unconditionally.
+
+        Args:
+            package_name: The package to stop (e.g. ``com.example.app``).
+
+        Returns:
+            Tuple of (success, message).
+        """
+        stdout, stderr = cls.send_adb_command(f"shell am force-stop {package_name}")
+        combined = f"{stdout or ''}\n{stderr or ''}".strip()
+        lc = combined.lower()
+        if "error" in lc or "exception" in lc:
+            logger.warning(f"force_stop failed for {package_name}: {combined}")
+            return False, combined or "force-stop failed"
+        return True, f"Force-stopped {package_name}"
+
     # ------------------------------------------------------------------
     # Delegated: Process identification  (adb_process)
     # ------------------------------------------------------------------
 
     @classmethod
-    def get_pid_for_package_name(cls, package_name: str) -> int | None:
+    def get_pid_for_package_name(
+        cls,
+        package_name: str,
+        use_frida_fallback: bool = True,
+        quiet: bool = False,
+    ) -> int | None:
         """Get the process ID (PID) for a given package name.
 
         Tries multiple methods in order of preference:
@@ -479,11 +544,23 @@ class Adb:
 
         Args:
             package_name: The fully qualified package name (e.g., 'com.example.app').
+            use_frida_fallback: When True (default), try Frida's
+                enumerate_processes if the ADB strategies fail. Set False for
+                hot paths (periodic polls) where the Frida round-trip is too
+                heavy.
+            quiet: When True, log a final miss at debug instead of warning —
+                for paths where "not running" is an expected outcome (e.g. the
+                running-state poll on a stopped app).
 
         Returns:
             The process ID if the app is running and found, None otherwise.
         """
-        return _proc.get_pid_for_package_name(cls.send_adb_command, package_name)
+        return _proc.get_pid_for_package_name(
+            cls.send_adb_command,
+            package_name,
+            use_frida_fallback=use_frida_fallback,
+            quiet=quiet,
+        )
 
     # ------------------------------------------------------------------
     # Delegated: Emulator operations  (adb_emulator)

@@ -88,6 +88,24 @@ class ZygoteStatus:
     error_message: str | None = None
 
 
+class InjectionStrategy(Enum):
+    """Strategy for CA injection based on Android version."""
+
+    LEGACY = "legacy"
+    BIND_MOUNT = "bind_mount"
+
+
+@dataclass
+class InjectionResult:
+    """Result of a CA injection attempt."""
+
+    success: bool
+    message: str
+    strategy: InjectionStrategy | None = None
+    api_level: int | None = None
+    needs_root: bool = False
+
+
 class ProxyManager:
     """Manages HTTP proxy configuration for Android devices via ADB."""
 
@@ -225,6 +243,7 @@ class CAManager:
     # Default device paths (kept as fallbacks)
     _DEFAULT_DEVICE_CERT_PATH = "/data/local/tmp/cert-der.crt"
     _DEFAULT_SYSTEM_CA_PATH = "/system/etc/security/cacerts"
+    _DEFAULT_APEX_CA_PATH = "/apex/com.android.conscrypt/cacerts"
 
     @property
     def DEVICE_CERT_PATH(self) -> str:
@@ -246,6 +265,16 @@ class CAManager:
             pass
         return self._DEFAULT_SYSTEM_CA_PATH
 
+    @property
+    def APEX_CA_PATH(self) -> str:
+        """Get APEX CA path from config with fallback."""
+        try:
+            if get_config is not None:
+                return get_config().device_paths.apex_ca_path
+        except Exception:
+            pass
+        return self._DEFAULT_APEX_CA_PATH
+
     # Display names for CA sources
     SOURCE_NAMES = {
         CASource.MITMPROXY: "mitmproxy",
@@ -261,6 +290,7 @@ class CAManager:
             adb: Optional Adb instance. If not provided, creates a new one.
         """
         self._adb = adb
+        self._use_su: bool = True
 
     @property
     def adb(self) -> Adb:
@@ -417,6 +447,56 @@ class CAManager:
             logger.error(f"Error pushing certificate: {e}")
             return False, f"Error pushing certificate: {e}"
 
+    def push_cert_for_injection(self, local_path: Path) -> tuple[bool, str]:
+        """Push a certificate to the device in PEM format for system store injection.
+
+        Unlike push_cert_to_device() which converts to DER, this ensures PEM
+        format since Android's system CA store expects PEM.
+
+        Args:
+            local_path: Path to the local certificate file (PEM or DER).
+
+        Returns:
+            Tuple of (success, message).
+        """
+        try:
+            push_path = local_path
+
+            # If DER, convert to PEM first
+            if local_path.suffix.lower() in (".der", ".cer"):
+                pem_path = Path(tempfile.gettempdir()) / "sandroid-ca-cert.pem"
+                result = subprocess.run(
+                    [
+                        "openssl", "x509",
+                        "-inform", "DER",
+                        "-in", str(local_path),
+                        "-outform", "PEM",
+                        "-out", str(pem_path),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    error = result.stderr or "Unknown error"
+                    return False, f"OpenSSL DER→PEM conversion error: {error}"
+                push_path = pem_path
+
+            Adb.send_adb_command(f"push {push_path} {self.DEVICE_CERT_PATH}")
+
+            check_stdout, _ = Adb.send_adb_command(
+                f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
+            )
+            if self.DEVICE_CERT_PATH in (check_stdout or ""):
+                return True, f"Certificate (PEM) pushed to {self.DEVICE_CERT_PATH}"
+            return False, "Certificate was not pushed correctly"
+
+        except FileNotFoundError:
+            return False, "OpenSSL not found. Please install OpenSSL."
+        except Exception as e:
+            logger.error(f"Error pushing certificate for injection: {e}")
+            return False, f"Error pushing certificate: {e}"
+
     def get_zygote_pids(self) -> tuple[int | None, int | None]:
         """Get the PIDs of Zygote processes.
 
@@ -450,43 +530,489 @@ class CAManager:
 
         return zygote_pid, zygote64_pid
 
+    def get_device_api_level(self) -> int | None:
+        """Get the API level of the connected Android device.
+
+        Tries DeviceManager first, falls back to ADB shell query.
+
+        Returns:
+            API level as int, or None if unavailable.
+        """
+        try:
+            from sandroid.core.device_manager import DeviceManager
+
+            dm = DeviceManager.get_instance()
+            if dm.active_device and dm.active_device.api_level:
+                return int(dm.active_device.api_level)
+        except Exception:
+            pass
+
+        try:
+            stdout, _ = Adb.send_adb_command(
+                "shell getprop ro.build.version.sdk"
+            )
+            if stdout and stdout.strip().isdigit():
+                return int(stdout.strip())
+        except Exception:
+            pass
+
+        return None
+
+    def determine_injection_strategy(
+        self,
+    ) -> tuple[InjectionStrategy, int | None]:
+        """Determine which CA injection strategy to use.
+
+        Uses API level (>= 34 → BIND_MOUNT) with a fallback check for
+        the APEX cacerts directory existence.
+
+        Returns:
+            Tuple of (strategy, api_level).
+        """
+        api_level = self.get_device_api_level()
+
+        if api_level is not None and api_level >= 34:
+            return InjectionStrategy.BIND_MOUNT, api_level
+
+        # Fallback: check if APEX cacerts dir exists on device
+        if api_level is None or api_level >= 33:
+            try:
+                stdout, _ = Adb.send_adb_command(
+                    f"shell '[ -d {self.APEX_CA_PATH} ] && echo EXISTS'"
+                )
+                if "EXISTS" in (stdout or ""):
+                    return InjectionStrategy.BIND_MOUNT, api_level
+            except Exception:
+                pass
+
+        return InjectionStrategy.LEGACY, api_level
+
+    def _check_root_access(self) -> bool:
+        """Verify root access on the device.
+
+        Tries direct shell (adb root mode) first, then falls back to su binary.
+        Sets `_use_su` flag so subsequent commands use the right method.
+        """
+        # Try direct shell first (adb root mode — shell already runs as root)
+        try:
+            stdout, _ = Adb.send_adb_command("shell id")
+            if "uid=0" in (stdout or ""):
+                self._use_su = False
+                return True
+        except Exception:
+            pass
+        # Fall back to su binary (Magisk, SuperSU, etc.)
+        try:
+            stdout, _ = Adb.send_adb_command("shell su -c id")
+            if "uid=0" in (stdout or ""):
+                self._use_su = True
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _root_cmd(self, cmd: str) -> str:
+        """Wrap a command for root execution on the device.
+
+        Always single-quotes the command so shell metacharacters (&&, *, etc.)
+        are interpreted by the device shell, not the host shell.
+        Uses `su -c '...'` when root is via su binary, or plain quoting
+        when the shell is already root (adb root).
+        """
+        if self._use_su:
+            return f"su -c '{cmd}'"
+        return f"'{cmd}'"
+
+    def enable_adb_root(self) -> tuple[bool, str]:
+        """Enable ADB root access on the device.
+
+        Runs `adb root` to restart adbd as root, then verifies.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        import time
+
+        try:
+            stdout, stderr = Adb.send_adb_command("root")
+            combined = (stdout or "") + (stderr or "")
+
+            if "adbd cannot run as root" in combined:
+                return False, (
+                    "Device does not support adb root. "
+                    "Please ensure the device is rooted."
+                )
+
+            if "restarting" in combined.lower():
+                time.sleep(0.5)
+
+            stdout, _ = Adb.send_adb_command("shell id")
+            if "uid=0" in (stdout or ""):
+                self._use_su = False
+                logger.info("ADB root enabled successfully")
+                return True, "ADB root enabled successfully"
+
+            return False, "ADB root command did not grant root access"
+
+        except Exception as e:
+            logger.error(f"Error enabling ADB root: {e}")
+            return False, f"Error enabling root: {e}"
+
+    def _get_cert_hash_from_device(self) -> str | None:
+        """Pull cert from device and compute its hash."""
+        try:
+            local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.pem"
+            Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
+            if local_temp.exists():
+                cert_hash = self.get_cert_hash(local_temp)
+                local_temp.unlink()
+                return cert_hash
+        except Exception:
+            pass
+        return None
+
+    def _inject_legacy(
+        self, cert_name: str, zygote_pids: list[int]
+    ) -> tuple[bool, str]:
+        """Pre-Android-14 injection: copy cert into Zygote mount namespaces.
+
+        Args:
+            cert_name: Certificate filename (e.g. "a1b2c3d4.0").
+            zygote_pids: List of Zygote PIDs to inject into.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        injected_count = 0
+        for pid in zygote_pids:
+            try:
+                inner = (
+                    f"nsenter --mount=/proc/{pid}/ns/mnt -- sh -c \""
+                    f"cp {self.DEVICE_CERT_PATH} {self.SYSTEM_CA_PATH}/{cert_name} && "
+                    f"chown root:root {self.SYSTEM_CA_PATH}/{cert_name} && "
+                    f"chmod 644 {self.SYSTEM_CA_PATH}/{cert_name} && "
+                    f"chcon u:object_r:system_file:s0 {self.SYSTEM_CA_PATH}/{cert_name}"
+                    f"\""
+                )
+                Adb.send_adb_command(f"shell {self._root_cmd(inner)}")
+
+                # Verify
+                verify_inner = (
+                    f"nsenter --mount=/proc/{pid}/ns/mnt -- "
+                    f"ls {self.SYSTEM_CA_PATH}/{cert_name}"
+                )
+                stdout, _ = Adb.send_adb_command(
+                    f"shell {self._root_cmd(verify_inner)}"
+                )
+                if cert_name in (stdout or ""):
+                    injected_count += 1
+                    logger.info(f"Legacy inject succeeded for PID {pid}")
+                else:
+                    logger.warning(f"Legacy inject verification failed for PID {pid}")
+            except Exception as e:
+                logger.error(f"Legacy inject failed for PID {pid}: {e}")
+
+        if injected_count > 0:
+            return True, f"Legacy: injected into {injected_count}/{len(zygote_pids)} Zygote(s)"
+        return False, "Legacy injection failed for all Zygote processes"
+
+    def _inject_bind_mount(
+        self, cert_name: str, zygote_pids: list[int]
+    ) -> tuple[bool, str]:
+        """Android 14+ injection: tmpfs overlay + bind-mount into APEX.
+
+        Args:
+            cert_name: Certificate filename (e.g. "a1b2c3d4.0").
+            zygote_pids: List of Zygote PIDs to inject into.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        staging = "/data/local/tmp/sandroid-cacerts"
+        sys_ca = self.SYSTEM_CA_PATH
+        apex_ca = self.APEX_CA_PATH
+
+        try:
+            # 1. Prepare staging directory with APEX certs + our cert
+            setup_cmds = [
+                self._root_cmd(f"rm -rf {staging} && mkdir -p {staging}"),
+                self._root_cmd(f"cp {apex_ca}/* {staging}/"),
+                self._root_cmd(f"cp {self.DEVICE_CERT_PATH} {staging}/{cert_name}"),
+                self._root_cmd(f"mount -t tmpfs tmpfs {sys_ca}"),
+                self._root_cmd(f"cp {staging}/* {sys_ca}/"),
+                self._root_cmd(f"chown root:root {sys_ca}/*"),
+                self._root_cmd(f"chmod 644 {sys_ca}/*"),
+                self._root_cmd(f"chcon -R u:object_r:system_file:s0 {sys_ca}/"),
+            ]
+
+            for cmd in setup_cmds:
+                stdout, stderr = Adb.send_adb_command(f"shell {cmd}")
+                if stderr:
+                    logger.debug(f"Bind-mount setup stderr: {stderr}")
+
+            # Bind-mount into init namespace (PID 1) so newly spawned
+            # processes (including restarted Zygote) inherit the mount.
+            init_mount = (
+                f"nsenter --mount=/proc/1/ns/mnt -- "
+                f"/bin/mount --rbind {sys_ca} {apex_ca}"
+            )
+            Adb.send_adb_command(f"shell {self._root_cmd(init_mount)}")
+
+            # Verify init namespace
+            init_verify = (
+                f"nsenter --mount=/proc/1/ns/mnt -- "
+                f"ls {apex_ca}/{cert_name}"
+            )
+            stdout, _ = Adb.send_adb_command(
+                f"shell {self._root_cmd(init_verify)}"
+            )
+            if cert_name not in (stdout or ""):
+                return False, "Bind-mount into init namespace failed"
+            logger.info("Bind-mount into init namespace (PID 1) succeeded")
+
+            # Kill Zygote so init restarts it. The new Zygote inherits
+            # init's mount namespace and Conscrypt reads the updated certs.
+            import time
+
+            for pid in zygote_pids:
+                try:
+                    Adb.send_adb_command(
+                        f"shell {self._root_cmd(f'kill {pid}')}"
+                    )
+                except Exception:
+                    pass
+            time.sleep(3)
+
+            # Get new Zygote PIDs after restart
+            new_zyg, new_zyg64 = self.get_zygote_pids()
+            new_pids = [p for p in [new_zyg, new_zyg64] if p is not None]
+
+            # Verify new Zygote sees the cert
+            verified = 0
+            for pid in new_pids:
+                try:
+                    verify_inner = (
+                        f"nsenter --mount=/proc/{pid}/ns/mnt -- "
+                        f"ls {apex_ca}/{cert_name}"
+                    )
+                    stdout, _ = Adb.send_adb_command(
+                        f"shell {self._root_cmd(verify_inner)}"
+                    )
+                    if cert_name in (stdout or ""):
+                        verified += 1
+                except Exception:
+                    pass
+
+            if verified == 0:
+                return False, "Cert not visible in restarted Zygote"
+
+            return True, (
+                f"Bind-mount: injected into init + "
+                f"{verified} restarted Zygote(s)"
+            )
+
+        except Exception as e:
+            logger.error(f"Bind-mount injection error: {e}")
+            return False, f"Bind-mount injection error: {e}"
+        finally:
+            # Cleanup staging
+            try:
+                Adb.send_adb_command(
+                    f"shell {self._root_cmd(f'rm -rf {staging}')}"
+                )
+            except Exception:
+                pass
+
+    def _inject_into_app_processes(
+        self, zygote_pids: list[int], sys_ca: str, apex_ca: str
+    ) -> int:
+        """Bind-mount CA certs into already-running app processes.
+
+        Sweeps children of all Zygote processes.
+
+        Returns:
+            Number of app processes successfully injected.
+        """
+        count = 0
+        for zpid in zygote_pids:
+            try:
+                stdout, _ = Adb.send_adb_command(
+                    f"shell {self._root_cmd(f'ps -o PID -P {zpid}')}"
+                )
+                if not stdout:
+                    continue
+                for line in stdout.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "PID" in line:
+                        continue
+                    try:
+                        app_pid = int(line.strip())
+                    except ValueError:
+                        continue
+                    try:
+                        mount_inner = (
+                            f"nsenter --mount=/proc/{app_pid}/ns/mnt -- "
+                            f"/bin/mount --rbind {sys_ca} {apex_ca}"
+                        )
+                        Adb.send_adb_command(f"shell {self._root_cmd(mount_inner)}")
+                        count += 1
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"Error sweeping children of Zygote {zpid}: {e}")
+        return count
+
+    def get_cert_spki_hash(self, cert_path: Path) -> str | None:
+        """Get the SPKI (Subject Public Key Info) SHA-256 hash of a certificate.
+
+        Used by Chrome's --ignore-certificate-errors-spki-list flag.
+
+        Returns:
+            Base64-encoded SPKI hash, or None on error.
+        """
+        try:
+            import base64
+
+            pubkey = subprocess.run(
+                ["openssl", "x509", "-in", str(cert_path), "-pubkey", "-noout"],
+                check=True, capture_output=True,
+            )
+            der = subprocess.run(
+                ["openssl", "pkey", "-pubin", "-outform", "der"],
+                input=pubkey.stdout, check=True, capture_output=True,
+            )
+            dgst = subprocess.run(
+                ["openssl", "dgst", "-sha256", "-binary"],
+                input=der.stdout, check=True, capture_output=True,
+            )
+            return base64.b64encode(dgst.stdout).decode("ascii")
+        except Exception as e:
+            logger.error(f"Failed to compute SPKI hash: {e}")
+            return None
+
+    def bypass_chrome_ct(self, cert_path: Path) -> tuple[bool, str]:
+        """Bypass Chrome Certificate Transparency enforcement for a CA cert.
+
+        Chrome 99+ enforces CT for system CAs, rejecting mitmproxy certs.
+        Writes chrome-command-line files with --ignore-certificate-errors-spki-list
+        to skip CT for our specific cert. Covers Chrome, WebView, and
+        content-shell variants (same approach as HTTP Toolkit).
+
+        Args:
+            cert_path: Path to the CA certificate (PEM).
+
+        Returns:
+            Tuple of (success, message).
+        """
+        spki_hash = self.get_cert_spki_hash(cert_path)
+        if not spki_hash:
+            return False, "Could not compute SPKI hash (is OpenSSL installed?)"
+
+        flag_line = (
+            f"chrome --ignore-certificate-errors-spki-list={spki_hash}"
+        )
+        logger.info(f"Chrome CT bypass SPKI: {spki_hash}")
+
+        try:
+            local_tmp = Path(tempfile.gettempdir()) / "chrome-command-line"
+            local_tmp.write_text(flag_line)
+
+            # All 8 locations matching HTTP Toolkit's approach:
+            # 4 variants x 2 paths (/data/local + /data/local/tmp)
+            variants = [
+                "chrome-command-line",
+                "android-webview-command-line",
+                "webview-command-line",
+                "content-shell-command-line",
+            ]
+            for variant in variants:
+                for base in ["/data/local", "/data/local/tmp"]:
+                    target = f"{base}/{variant}"
+                    try:
+                        Adb.send_adb_command(f"push {local_tmp} {target}")
+                        Adb.send_adb_command(
+                            f"shell {self._root_cmd(f'chmod 744 {target}')}"
+                        )
+                        Adb.send_adb_command(
+                            f"shell {self._root_cmd(f'chcon u:object_r:shell_data_file:s0 {target}')}"
+                        )
+                    except Exception:
+                        pass
+
+            local_tmp.unlink(missing_ok=True)
+
+            # On user builds, Chrome only reads flags if set as debug app
+            Adb.send_adb_command(
+                "shell settings put global debug_app com.android.chrome"
+            )
+
+            # Force-stop Chrome so it picks up the new flags on next launch
+            Adb.send_adb_command("shell am force-stop com.android.chrome")
+
+            logger.info("Chrome CT bypass flags installed (8 locations)")
+            return True, f"Chrome CT bypass installed (SPKI: {spki_hash[:12]}...)"
+
+        except Exception as e:
+            logger.error(f"Chrome CT bypass failed: {e}")
+            return False, f"Chrome CT bypass failed: {e}"
+
     def check_zygote_injection_status(self) -> ZygoteStatus:
-        """Check the current status of Zygote CA injection.
+        """Check whether the CA cert is present inside Zygote's mount namespace.
+
+        Verifies by actually looking inside the namespace, not just checking
+        the staging path.
 
         Returns:
             ZygoteStatus with current state.
         """
         zygote_pid, zygote64_pid = self.get_zygote_pids()
+        target_pid = zygote64_pid or zygote_pid
 
         # Check if cert exists on device
         try:
-            stdout, stderr = Adb.send_adb_command(
+            stdout, _ = Adb.send_adb_command(
                 f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
             )
-            if stderr:
-                logger.warning(
-                    f"ADB command warning while checking device certificate: {stderr}"
-                )
             cert_exists = self.DEVICE_CERT_PATH in (stdout or "")
         except Exception:
             cert_exists = False
 
-        # Get cert hash if exists
         cert_hash = None
         if cert_exists:
+            cert_hash = self._get_cert_hash_from_device()
+
+        # Verify cert inside Zygote namespace
+        injected = False
+        if cert_hash and target_pid:
+            cert_name = f"{cert_hash}.0"
+            # Check system CA path in namespace
             try:
-                # Pull cert and get hash
-                local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.der"
-                Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
-                if local_temp.exists():
-                    cert_hash = self.get_cert_hash(local_temp)
-                    local_temp.unlink()  # Clean up
+                verify_inner = (
+                    f"nsenter --mount=/proc/{target_pid}/ns/mnt -- "
+                    f"ls {self.SYSTEM_CA_PATH}/{cert_name} 2>/dev/null"
+                )
+                stdout, _ = Adb.send_adb_command(
+                    f"shell {self._root_cmd(verify_inner)}"
+                )
+                if cert_name in (stdout or ""):
+                    injected = True
             except Exception:
                 pass
 
-        # Check if CA appears in system trust store (via Zygote namespace)
-        # This would require injecting and checking - for now just report what we know
-        injected = cert_exists and cert_hash is not None
+            # Also check APEX path for Android 14+
+            if not injected:
+                try:
+                    verify_inner = (
+                        f"nsenter --mount=/proc/{target_pid}/ns/mnt -- "
+                        f"ls {self.APEX_CA_PATH}/{cert_name} 2>/dev/null"
+                    )
+                    stdout, _ = Adb.send_adb_command(
+                        f"shell {self._root_cmd(verify_inner)}"
+                    )
+                    if cert_name in (stdout or ""):
+                        injected = True
+                except Exception:
+                    pass
 
         return ZygoteStatus(
             injected=injected,
@@ -495,77 +1021,89 @@ class CAManager:
             zygote64_pid=zygote64_pid,
         )
 
-    def inject_ca_into_zygote(self, cert_path: Path | None = None) -> tuple[bool, str]:
+    def inject_ca_into_zygote(
+        self, cert_path: Path | None = None
+    ) -> InjectionResult:
         """Inject CA certificate into Zygote namespace for system-wide trust.
 
-        This requires root access and works by:
-        1. Pushing cert to device
-        2. Using nsenter to access Zygote's mount namespace
-        3. Adding cert to the system CA store within that namespace
+        Version-aware: uses legacy cp for API < 34, tmpfs + bind-mount for
+        API >= 34 (or when APEX cacerts dir is detected).
 
         Args:
             cert_path: Path to local certificate. Uses device cert if not provided.
 
         Returns:
-            Tuple of (success, message).
+            InjectionResult with outcome details.
         """
         try:
-            # Ensure cert is on device
-            if cert_path and cert_path.exists():
-                success, message = self.push_cert_to_device(cert_path)
-                if not success:
-                    return False, message
+            # 1. Check root access
+            if not self._check_root_access():
+                return InjectionResult(
+                    success=False,
+                    message="Root access required. Is the device rooted with 'su'?",
+                    needs_root=True,
+                )
 
-            # Check device cert exists
-            stdout, stderr = Adb.send_adb_command(
+            # 2. Push cert to device in PEM format
+            if cert_path and cert_path.exists():
+                success, message = self.push_cert_for_injection(cert_path)
+                if not success:
+                    return InjectionResult(success=False, message=message)
+
+            # Verify cert is on device
+            stdout, _ = Adb.send_adb_command(
                 f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
             )
-            if stderr:
-                logger.warning(
-                    f"ADB command warning while checking device certificate before injection: {stderr}"
-                )
             if self.DEVICE_CERT_PATH not in (stdout or ""):
-                return False, "No certificate on device. Push certificate first."
+                return InjectionResult(
+                    success=False,
+                    message="No certificate on device. Push certificate first.",
+                )
 
-            # Get Zygote PID
+            # 3. Get Zygote PIDs
             zygote_pid, zygote64_pid = self.get_zygote_pids()
-            target_pid = zygote64_pid or zygote_pid
-            if not target_pid:
-                return False, "Could not find Zygote process. Is device rooted?"
+            zygote_pids = [
+                p for p in [zygote_pid, zygote64_pid] if p is not None
+            ]
+            if not zygote_pids:
+                return InjectionResult(
+                    success=False,
+                    message="Could not find Zygote process. Is device running?",
+                )
 
-            # Get certificate hash for naming
-            status = self.check_zygote_injection_status()
-            if not status.cert_hash:
-                return False, "Could not determine certificate hash"
+            # 4. Get cert hash
+            cert_hash = self._get_cert_hash_from_device()
+            if not cert_hash:
+                return InjectionResult(
+                    success=False,
+                    message="Could not determine certificate hash (is OpenSSL installed?)",
+                )
+            cert_name = f"{cert_hash}.0"
 
-            cert_name = f"{status.cert_hash}.0"
-
-            # Inject into Zygote namespace
-            # This requires root access
-            inject_cmd = (
-                f"su -c 'nsenter --mount=/proc/{target_pid}/ns/mnt -- "
-                f"cp {self.DEVICE_CERT_PATH} {self.SYSTEM_CA_PATH}/{cert_name} && "
-                f"chmod 644 {self.SYSTEM_CA_PATH}/{cert_name}'"
+            # 5. Determine strategy
+            strategy, api_level = self.determine_injection_strategy()
+            logger.info(
+                f"Using {strategy.value} injection (API level: {api_level})"
             )
 
-            Adb.send_adb_command(f"shell {inject_cmd}")
+            # 6. Dispatch
+            if strategy == InjectionStrategy.BIND_MOUNT:
+                success, message = self._inject_bind_mount(cert_name, zygote_pids)
+            else:
+                success, message = self._inject_legacy(cert_name, zygote_pids)
 
-            # Verify injection
-            verify_cmd = f"su -c 'nsenter --mount=/proc/{target_pid}/ns/mnt -- ls {self.SYSTEM_CA_PATH}/{cert_name}'"
-            verify_stdout, verify_stderr = Adb.send_adb_command(f"shell {verify_cmd}")
-            if verify_stderr:
-                logger.error(
-                    f"ADB command error while verifying CA injection: {verify_stderr}"
-                )
-
-            if cert_name in (verify_stdout or ""):
-                logger.info(f"CA injected into Zygote namespace: {cert_name}")
-                return True, f"CA certificate injected as {cert_name}"
-            return False, "Injection may have failed. Verify root access."
+            return InjectionResult(
+                success=success,
+                message=message,
+                strategy=strategy,
+                api_level=api_level,
+            )
 
         except Exception as e:
             logger.error(f"Error injecting CA: {e}")
-            return False, f"Error injecting CA: {e}"
+            return InjectionResult(
+                success=False, message=f"Error injecting CA: {e}"
+            )
 
 
 # Convenience functions for use without class instantiation

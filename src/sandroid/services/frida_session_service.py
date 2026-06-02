@@ -123,7 +123,11 @@ class FridaSessionService:
             event_bus: Optional EventBus for publishing events.
             spotlight_service: Optional SpotlightService for app state.
         """
-        self._lock = threading.Lock()
+        # Reentrant: get_job_manager() holds this lock while bootstrapping the
+        # DeviceManager, which calls back into update_device_serial() (which
+        # also takes this lock) on the same thread. A plain Lock self-deadlocks
+        # there; an RLock makes that — and any other reentrant path — safe.
+        self._lock = threading.RLock()
         self._event_bus = event_bus
         self._spotlight_service = spotlight_service
         self._logger = logger
@@ -225,12 +229,20 @@ class FridaSessionService:
         Returns:
             JobManager instance for Frida job coordination.
         """
+        # Resolve the device serial BEFORE taking _lock. On first access
+        # _get_device_serial_from_manager() bootstraps the DeviceManager, which
+        # re-enters update_device_serial() (also guarded by _lock) on this same
+        # thread. Doing it outside the lock keeps the reentrant chain from ever
+        # contending (and the RLock above covers any path we missed).
+        resolved_serial = self._device_serial
+        if resolved_serial is None:
+            resolved_serial = self._get_device_serial_from_manager()
+
         with self._lock:
             if self._job_manager is None:
-                # Get device serial from DeviceManager if not already set
-                device_serial = self._device_serial
-                if device_serial is None:
-                    device_serial = self._get_device_serial_from_manager()
+                # The bootstrap above may have set _device_serial via
+                # update_device_serial(); prefer it, else the resolved value.
+                device_serial = self._device_serial or resolved_serial
 
                 try:
                     from AndroidFridaManager import JobManager
@@ -501,6 +513,18 @@ class FridaSessionService:
         """
         import time
 
+        # Idempotency guard (A2): ``is_paused()`` is the single source of truth
+        # for whether a resume is needed. ``JobManager.start_job`` already
+        # resumes the first job of a freshly spawned session, so callers that
+        # unconditionally call this after a tool loads (friTap, MalwareMonitor)
+        # would otherwise issue a second, redundant ``device.resume`` on an
+        # already-running process. Skip when nothing is paused.
+        if not self.is_paused():
+            self._logger.debug(
+                f"Process {pid} is not paused; skipping resume (already running)"
+            )
+            return
+
         spotlight = self._spotlight
         auto_resume = True
         if spotlight:
@@ -510,6 +534,13 @@ class FridaSessionService:
             self._logger.debug(f"Resuming spawned process {pid}")
             device.resume(pid)
             time.sleep(1)  # CRITICAL: Prevents Java.perform from silently failing
+            # device.resume() bypasses JobManager.resume_app() (used directly
+            # here to keep the ProcessNotFoundError anti-Frida diagnostic), so
+            # clear the paused flag ourselves — otherwise is_paused() would
+            # stay True and later live bundle ops would wrongly rebuild-merge.
+            jm = self._job_manager
+            if jm is not None:
+                jm.mark_resumed()
         else:
             self._logger.info(
                 f"Process {pid} remains PAUSED. Resume manually when ready."

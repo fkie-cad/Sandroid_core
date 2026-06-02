@@ -84,10 +84,21 @@ class FridaManager:
                 self.logger.debug("[*] frida-server is already running, skipping start")
             return True
 
+        # Extract BOOTCLASSPATH and DEX2OATBOOTCLASSPATH from Zygote's environment
+        # before launching frida-server. This fixes a crash on Android 15+ where ART
+        # requires these env vars but they aren't inherited by `adb shell` sessions.
+        env_setup = (
+            'ZPID=$(pidof zygote64 || pidof zygote); '
+            'if [ -n "$ZPID" ]; then '
+            'export BOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr "\\0" "\\n" | grep "^BOOTCLASSPATH=" | cut -d= -f2-); '
+            'export DEX2OATBOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr "\\0" "\\n" | grep "^DEX2OATBOOTCLASSPATH=" | cut -d= -f2-); '
+            'fi; '
+        )
+
         if frida_server_path is self.run_frida_server.__defaults__[0]:
-            cmd = self.frida_install_dst + "frida-server &"
+            cmd = env_setup + self.frida_install_dst + "frida-server &"
         else:
-            cmd = frida_server_path + "frida-server &"
+            cmd = env_setup + frida_server_path + "frida-server &"
 
         # Build command with device targeting
         adb_base = self._get_adb_base_cmd()
@@ -108,28 +119,37 @@ class FridaManager:
             # Give it a moment to start and potentially fail
             import time
 
-            time.sleep(1)
+            time.sleep(2)
 
-            # Check if process failed immediately
+            # Use is_frida_server_running() as authoritative check
+            if self.is_frida_server_running():
+                if self.verbose:
+                    self.logger.debug(
+                        "[*] frida-server started successfully"
+                    )
+                return True
+
+            # frida-server not detected - try to get error info
             if process.poll() is not None:
                 _stdout, stderr = process.communicate()
-                if "Address already in use" in stderr.decode():
+                stderr_text = stderr.decode(errors="replace")
+                if "Address already in use" in stderr_text:
                     self.logger.debug(
                         "[*] frida-server is already running on the device"
                     )
                     return True
-                self.logger.error(f"Failed to start frida-server: {stderr.decode()}")
-                process.kill()
-                return False
-            # Process is still running (background), which is expected for frida-server
-            if self.verbose:
-                self.logger.debug("[*] frida-server started successfully in background")
-
-            if self.is_frida_server_running():
-                return True
-            self.logger.error(
-                "frida-server process started but not detected as running"
-            )
+                if stderr_text.strip():
+                    self.logger.error(
+                        f"Failed to start frida-server: {stderr_text}"
+                    )
+                else:
+                    self.logger.error(
+                        "frida-server process started but not detected as running"
+                    )
+            else:
+                self.logger.error(
+                    "frida-server process started but not detected as running"
+                )
             return False
 
         except OSError as e:
@@ -236,7 +256,7 @@ class FridaManager:
         self.stop_frida_server()
         self._adb_remove_file_if_exist(cmd)
 
-    def install_frida_server(self, dst_dir="/data/local/tmp/", version="latest"):
+    def install_frida_server(self, dst_dir="/data/local/tmp/", version=None):
         """Install the frida server binary on the Android device.
         This includes downloading the frida-server, decompress it and pushing it to the Android device.
         By default it is pushed into the /data/local/tmp/ directory.
@@ -244,11 +264,27 @@ class FridaManager:
 
         :param dst_dir: The destination folder where the frida-server binary should be installed (pushed).
         :type number: string
-        :param version: The version. By default the latest version will be used.
+        :param version: The version. None reads from config ('auto' matches host, 'latest' gets newest).
         :type number: string
 
         """
-        self.logger.info("Installing frida-server now...")
+        if version is None:
+            try:
+                if get_config is not None:
+                    configured = get_config().frida.server_version
+                    # 'host' is canonical; 'auto' is legacy alias kept for
+                    # backwards-compat with older sandroid.yaml configs.
+                    if configured in ("host", "auto"):
+                        import frida
+
+                        version = frida.__version__
+                    elif configured:
+                        version = configured
+            except Exception:
+                pass
+            if version is None:
+                version = "latest"
+        self.logger.info(f"Installing frida-server (version={version}) now...")
         if dst_dir is self.install_frida_server.__defaults__[0]:
             frida_dir = self.frida_install_dst
         else:

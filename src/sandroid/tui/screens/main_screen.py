@@ -4,18 +4,48 @@ import logging
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Header, Static
+from textual.widgets import ContentSwitcher, Header, Static
 
 from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
-from sandroid.tui.widgets import ActivityLog, MenuPanel, SandroidFooter, StatusBar
+from sandroid.tui.widgets import (
+    ActivityLog,
+    MenuPanel,
+    MitmproxyPanel,
+    SandroidFooter,
+    SpotlightPanel,
+    StatusBar,
+)
 
 if TYPE_CHECKING:
     from sandroid.core.actionQ import ActionQ
 
 logger = logging.getLogger(__name__)
+
+
+class _BottomPanel(Vertical):
+    """Wrapper for the collapsible bottom strip.
+
+    Owns Left/Right tab-switching bindings. Because they live here (an
+    ancestor of the focused inner panel) they only fire when focus is inside
+    the open strip — Left/Right are never stolen from the menu or activity
+    log, which keep their normal behaviour. The inner panels are plain
+    focusable Widgets with no arrow bindings, so Left/Right bubble up to here.
+    """
+
+    BINDINGS = [
+        Binding("left", "prev_tab", "Prev tab", show=False),
+        Binding("right", "next_tab", "Next tab", show=False),
+    ]
+
+    def action_prev_tab(self) -> None:
+        self.screen.cycle_bottom_tab(-1)
+
+    def action_next_tab(self) -> None:
+        self.screen.cycle_bottom_tab(1)
 
 
 class MainScreen(Screen):
@@ -30,6 +60,62 @@ class MainScreen(Screen):
     """
 
     BINDINGS = []  # Bindings are handled by the main app
+
+    # Defined here (not in styles.tcss) so it applies under every theme — the
+    # app loads exactly one theme-specific .tcss and none of them define
+    # #bottom-panel, while app CSS always beats Screen DEFAULT_CSS. Putting the
+    # rules here keeps them unopposed and theme-independent.
+    #
+    # The strip is `dock: bottom` so it always reserves space at the bottom of
+    # #left-panel (just like the dock:top status bar) — that is why the menu's
+    # height:100% can coexist with a permanently visible tab bar. Collapsed
+    # (default): a single-row bar — an ▴/▾ arrow plus the Spotlight/Mitmproxy
+    # tabs — with the body hidden. Expanded (.-visible, via the arrow, a tab
+    # click, or Ctrl+B / Ctrl+M): grows to 45% and reveals the active body.
+    DEFAULT_CSS = """
+    #bottom-panel {
+        dock: bottom;
+        height: 2;
+        background: #080c18;
+        border-top: solid #111827;
+    }
+    #bottom-panel.-visible {
+        height: 45%;
+    }
+    #bottom-tabbar {
+        height: 1;
+        background: #0b1628;
+    }
+    #bottom-arrow {
+        width: 4;
+        content-align: center middle;
+        color: #7dd3fc;
+        text-style: bold;
+    }
+    #bottom-arrow:hover {
+        background: #1f2937;
+    }
+    .bottom-tab {
+        width: auto;
+        padding: 0 2;
+        color: #8f9bb3;
+    }
+    .bottom-tab:hover {
+        background: #1f2937;
+    }
+    .bottom-tab.-active {
+        color: #7dd3fc;
+        text-style: bold;
+        background: #1f2937;
+    }
+    #bottom-body {
+        display: none;
+    }
+    #bottom-panel.-visible #bottom-body {
+        display: block;
+        height: 1fr;
+    }
+    """
 
     def __init__(
         self,
@@ -62,6 +148,24 @@ class MainScreen(Screen):
             with Vertical(id="left-panel"):
                 yield StatusBar(id="status-bar")
                 yield MenuPanel(id="menu-panel")
+                # Persistent collapsible bottom strip. A single-row bar (an
+                # ▴/▾ arrow + the Spotlight/Mitmproxy tabs) is always visible
+                # so the panels are discoverable. Ctrl+B (or clicking the
+                # arrow) toggles show/hide; Left/Right (or clicking a tab)
+                # switch tabs once it is open. A ContentSwitcher holds the two
+                # bodies (shown only when expanded).
+                with _BottomPanel(id="bottom-panel"):
+                    with Horizontal(id="bottom-tabbar"):
+                        yield Static("▴", id="bottom-arrow")
+                        yield Static(
+                            "Spotlight", id="tab-spotlight", classes="bottom-tab -active"
+                        )
+                        yield Static(
+                            "Mitmproxy", id="tab-mitm", classes="bottom-tab"
+                        )
+                    with ContentSwitcher(initial="spotlight-panel", id="bottom-body"):
+                        yield SpotlightPanel(id="spotlight-panel")
+                        yield MitmproxyPanel(id="mitm-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
@@ -102,6 +206,127 @@ class MainScreen(Screen):
         self.call_later(self._deferred_mount_updates)
         logger.debug("[MAIN_SCREEN] on_mount complete, deferred updates scheduled")
 
+    # Clickable tab id -> ContentSwitcher child id (the panel widget's id).
+    _BOTTOM_TABS = {
+        "tab-spotlight": "spotlight-panel",
+        "tab-mitm": "mitm-panel",
+    }
+
+    def on_click(self, event) -> None:
+        """Route clicks on the bottom tab bar.
+
+        The arrow toggles show/hide; a tab name switches to that panel and
+        opens the strip. Clicks elsewhere are ignored (event is not stopped,
+        so normal handling continues).
+        """
+        wid = getattr(getattr(event, "widget", None), "id", None)
+        if wid == "bottom-arrow":
+            self._toggle_bottom_strip()
+        elif wid in self._BOTTOM_TABS:
+            self._select_bottom_tab(self._BOTTOM_TABS[wid], reveal=True)
+        elif wid and wid.startswith("act-"):
+            # Spotlight panel action cells (#act-start, #act-restart, …).
+            try:
+                self.query_one("#spotlight-panel", SpotlightPanel).dispatch_action_cell(
+                    wid
+                )
+            except Exception:
+                pass
+
+    def _bottom_panel(self):
+        """Return the #bottom-panel wrapper, or None if not mounted."""
+        try:
+            return self.query_one("#bottom-panel")
+        except Exception:
+            return None
+
+    def _bottom_current(self) -> str | None:
+        """Return the id of the currently selected bottom body, if any."""
+        try:
+            return self.query_one("#bottom-body", ContentSwitcher).current
+        except Exception:
+            return None
+
+    def _select_bottom_tab(self, panel_id: str, reveal: bool = False) -> None:
+        """Switch the active bottom tab; optionally expand the strip."""
+        panel = self._bottom_panel()
+        if panel is None:
+            return
+        try:
+            self.query_one("#bottom-body", ContentSwitcher).current = panel_id
+        except Exception:
+            pass
+        # Reflect the active tab in the bar.
+        for tab_id, pid in self._BOTTOM_TABS.items():
+            try:
+                self.query_one(f"#{tab_id}").set_class(pid == panel_id, "-active")
+            except Exception:
+                pass
+        if reveal:
+            panel.add_class("-visible")
+        self._refresh_bottom_indicator()
+        if panel.has_class("-visible"):
+            try:
+                self.query_one(f"#{panel_id}").focus()
+            except Exception:
+                pass
+
+    def _toggle_bottom_strip(self) -> None:
+        """Expand/collapse the strip without changing the active tab."""
+        panel = self._bottom_panel()
+        if panel is None:
+            return
+        if panel.has_class("-visible"):
+            panel.remove_class("-visible")
+            self._refresh_bottom_indicator()
+            try:
+                self.query_one("#menu-panel").focus()
+            except Exception:
+                pass
+        else:
+            panel.add_class("-visible")
+            self._refresh_bottom_indicator()
+            current = self._bottom_current()
+            if current:
+                try:
+                    self.query_one(f"#{current}").focus()
+                except Exception:
+                    pass
+
+    def toggle_bottom_panel(self) -> None:
+        """Single show/hide toggle for the strip (Ctrl+B).
+
+        Keeps the currently active tab; use Left/Right to switch tabs once
+        the strip is open and focused.
+        """
+        self._toggle_bottom_strip()
+
+    def cycle_bottom_tab(self, delta: int) -> None:
+        """Switch the active tab by *delta* (Left/Right while the strip is open).
+
+        Bound on the strip wrapper so it only fires when focus is inside the
+        open panel; never steals Left/Right from the menu or activity log.
+        """
+        order = list(self._BOTTOM_TABS.values())
+        current = self._bottom_current() or order[0]
+        try:
+            idx = order.index(current)
+        except ValueError:
+            idx = 0
+        self._select_bottom_tab(order[(idx + delta) % len(order)], reveal=True)
+
+    def _refresh_bottom_indicator(self) -> None:
+        """Flip the arrow glyph to reflect collapsed (▴) / expanded (▾) state."""
+        panel = self._bottom_panel()
+        if panel is None:
+            return
+        try:
+            self.query_one("#bottom-arrow", Static).update(
+                "▾" if panel.has_class("-visible") else "▴"
+            )
+        except Exception:
+            pass
+
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.
 
@@ -122,6 +347,9 @@ class MainScreen(Screen):
         # Display any buffered startup messages that were logged before TUI started
         # These were stored in EventBus history since no subscribers existed yet
         self._display_buffered_logs()
+
+        # Set the bottom strip's arrow to its initial (collapsed ▴) state.
+        self._refresh_bottom_indicator()
 
     def _update_from_toolbox(self) -> None:
         """Update UI state from Toolbox."""

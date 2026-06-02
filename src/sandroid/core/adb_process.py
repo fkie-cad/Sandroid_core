@@ -153,6 +153,8 @@ def _try_frida(package_name: str) -> int | None:
 def get_pid_for_package_name(
     send_command: Callable[[str], tuple[str, str]],
     package_name: str,
+    use_frida_fallback: bool = True,
+    quiet: bool = False,
 ) -> int | None:
     """Get the process ID (PID) for a given package name.
 
@@ -167,6 +169,14 @@ def get_pid_for_package_name(
         send_command: Callable that sends an ADB command and returns
             (stdout, stderr).
         package_name: The fully qualified package name.
+        use_frida_fallback: When True (default), fall back to Frida's
+            ``enumerate_processes`` if the ADB strategies all fail. Set to
+            False for latency-sensitive hot paths (e.g. a periodic
+            running-state poll) where the Frida round-trip is too heavy.
+        quiet: When True, a final miss is logged at debug instead of warning.
+            Set this for paths where "not running" is an expected, frequent
+            outcome (e.g. the running-state poll on a stopped app) so the log
+            isn't spammed with misleading warnings.
 
     Returns:
         The process ID if found, *None* otherwise.
@@ -175,13 +185,19 @@ def get_pid_for_package_name(
         lambda: _try_pidof(send_command, package_name),
         lambda: _try_ps_a(send_command, package_name),
         lambda: _try_ps_o(send_command, package_name),
-        lambda: _try_frida(package_name),
     ]
+    if use_frida_fallback:
+        strategies.append(lambda: _try_frida(package_name))
 
     for strategy in strategies:
         pid = strategy()
         if pid is not None:
             return pid
 
-    logger.warning(f"Could not find PID for package {package_name} using any method")
+    if quiet:
+        logger.debug(f"No PID for package {package_name} (not running)")
+    else:
+        logger.warning(
+            f"Could not find PID for package {package_name} using any method"
+        )
     return None

@@ -13,6 +13,8 @@ For authorized security testing and research purposes only.
 import logging
 import os
 
+import frida
+
 from sandroid.core.enums import SpawnMode
 from sandroid.core.events import Event, EventBus, EventType
 from sandroid.core.toolbox import Toolbox
@@ -134,7 +136,17 @@ class TrigDroidBypass:
         self.enabled_bypasses = {}
         self.show_in_activity_log = False
         self._activity_log_handler = None
+        # Categories delegated to the native BypassService (so stop() can tear
+        # down exactly what this instance enabled).
+        self._delegated_categories: set[str] = set()
         self._script_path = self._find_script_path()
+
+    @staticmethod
+    def _bypass_service():
+        """Lazy accessor for the process-wide BypassService singleton."""
+        from sandroid.analysis.detection_bypass import get_bypass_service
+
+        return get_bypass_service()
 
     def _find_script_path(self) -> str | None:
         """Find the compiled bypass script path.
@@ -202,12 +214,17 @@ class TrigDroidBypass:
             logger.removeHandler(self._activity_log_handler)
             self._activity_log_handler = None
 
-    def _message_handler(self, message, data):
-        """Handle messages from the Frida script.
+    def _message_handler(self, job, message, data):
+        """Handle messages from the Frida (RPC bundle) script.
+
+        ``Job.wrap_custom_hooking_handler_with_job_id`` always invokes the
+        handler as ``handler(job, message, data)`` — this 4-arg signature
+        matches it (B2 fix; the old 3-arg form raised TypeError at runtime).
 
         Args:
-            message: Frida message object
-            data: Optional binary data
+            job: The originating Job instance.
+            message: Frida message object.
+            data: Optional binary data.
         """
         msg_type = message.get("type", "")
 
@@ -325,71 +342,78 @@ class TrigDroidBypass:
     def start(self, config: dict = None, interactive: bool = False) -> bool:
         """Start TrigDroid bypass hooks.
 
+        The common bypass categories (ssl/root/frida/debug) run through the
+        native :class:`BypassService` and need NO external trigdroid bundle —
+        this is what makes Sandroid self-sufficient for interception. Only
+        ``emulator_detection`` still uses TrigDroid's compiled RPC
+        device-profile bundle (there is no coherent native equivalent).
+
         Args:
             config: Bypass configuration dict with keys:
-                - ssl_unpinning: bool or dict with SSLUnpinningConfig options
-                - root_detection: bool or dict with RootDetectionConfig options
-                - frida_detection: bool or dict with FridaDetectionConfig options
-                - emulator_detection: bool or dict with EmulatorDetectionConfig options
-                - debug_detection: bool or dict with DebugDetectionConfig options
+                - ssl_unpinning / root_detection / frida_detection /
+                  debug_detection: truthy to enable (native BypassService)
+                - emulator_detection: truthy to enable (RPC bundle)
                 - show_in_activity_log: bool - Show output in TUI activity log
-            interactive: If True, show interactive configuration (uses TrigDroidModal)
+            interactive: Unused (kept for API compatibility).
 
         Returns:
-            True if started successfully, False otherwise.
+            True if at least one bypass category was enabled.
         """
-        if self._script_path is None:
-            logger.error(
-                "TrigDroid bypass script not found. "
-                "Run 'npm run build:bypass' in the TrigDroid frida_hooks directory."
-            )
-            return False
-
         config = config or {}
 
+        self.show_in_activity_log = config.get("show_in_activity_log", False)
+        if self.show_in_activity_log:
+            self._setup_activity_log()
+
+        # Reflect the spotlight target for the coordinator task display.
+        spotlight = get_spotlight_service()
+        app_tuple = spotlight.get_app_tuple()
+        if app_tuple:
+            self.app_package = app_tuple[0]
+            self.process_id = spotlight.get_pid()
+            self.mode = "spawn" if spotlight.is_spawn_mode() else "attach"
+
         try:
-            # Set up session if not already done
-            if self.process_id is None:
-                self._setup_session(config)
+            any_enabled = False
 
-            # Check for hook conflicts
-            conflicts = Toolbox.check_frida_hook_conflicts(self.HOOKS_REGISTRY)
-            if conflicts:
-                conflict_details = ", ".join(
-                    f"{hook} (job: {job_id[:8]}...)"
-                    for hook, job_id in conflicts.items()
-                )
-                logger.warning(
-                    f"TrigDroid Bypass may conflict with existing hooks: {conflict_details}"
-                )
+            # Native categories — self-contained via BypassService, applied as
+            # ONE bundle op (start_many) so we don't trigger N sequential
+            # rebuilds (each rebuild could otherwise blink the others off).
+            native_map = {
+                "ssl_unpinning": "ssl",
+                "root_detection": "root",
+                "frida_detection": "frida",
+                "debug_detection": "debug",
+            }
+            requested = [cat for key, cat in native_map.items() if config.get(key)]
+            if requested:
+                svc = self._bypass_service()
+                # Frida bypass works best in spawn mode (advisory).
+                if "frida" in requested and self.mode not in (
+                    SpawnMode.SPAWN,
+                    SpawnMode.SPAWN.value,
+                ):
+                    logger.warning(
+                        "Frida bypass works best in SPAWN mode. Some detection "
+                        "methods may trigger before hooks are installed."
+                    )
+                svc.start_many(requested)
+                for key, cat in native_map.items():
+                    if config.get(key) and svc.is_active(cat):
+                        self.enabled_bypasses[key] = True
+                        self._delegated_categories.add(cat)
+                        any_enabled = True
 
-            # Start the job
-            job = self.job_manager.start_job(
-                self._script_path,
-                custom_hooking_handler_name=self._message_handler,
-                job_type="trigdroid_bypass",
-                display_name="TrigDroid Bypass",
-                hooks_registry=self.HOOKS_REGISTRY,
-                priority=5,  # Lower priority than FriTap
-            )
+            # Emulator — still needs TrigDroid's RPC device-profile bundle.
+            if config.get("emulator_detection") and self._start_emulator_rpc(config):
+                any_enabled = True
 
-            self.job_id = job.get_id() if job else None
-            self.script = job.get_script_of_job() if job else None
+            if not any_enabled:
+                logger.error("TrigDroid Bypass: no bypass categories enabled")
+                return False
 
-            if self.job_id:
-                Toolbox.register_frida_hooks(self.job_id, self.HOOKS_REGISTRY)
-
-            # Enable bypasses via RPC
-            if self.script:
-                self._enable_bypasses(config)
-
-            # Resume spawned process now that hooks are installed
-            if self.mode == SpawnMode.SPAWN or self.mode == SpawnMode.SPAWN.value:
-                Toolbox.resume_spawned_process_after_hooks(
-                    self.frida_device, self.process_id
-                )
-
-            # Register as background task
+            # Coordinator task so the TUI toggle (is_running / stop) works even
+            # though the actual jobs are owned by BypassService managers.
             get_task_service().register(
                 name="trigdroid_bypass",
                 display_name="TrigDroid Bypass",
@@ -398,183 +422,152 @@ class TrigDroidBypass:
                 app_name=self.app_package,
                 target_pid=self.process_id,
             )
-
-            # Mark tool as used
             get_tool_usage_service().mark_used("trigdroid_bypass", files=[])
 
-            logger.info(f"TrigDroid Bypass job started with ID: {self.job_id}")
+            logger.info("TrigDroid Bypass started")
             return True
 
         except Exception as e:
             logger.error(f"Failed to start TrigDroid Bypass: {e}")
             return False
 
-    def _enable_bypasses(self, config: dict):
-        """Enable bypass hooks via RPC based on configuration.
+    def _start_emulator_rpc(self, config: dict) -> bool:
+        """Load the RPC bundle and enable emulator-detection bypass.
 
-        Args:
-            config: Bypass configuration dict
+        Emulator spoofing has no native manager (incoherent field spoofing
+        gives false confidence), so it stays on TrigDroid's compiled bundle.
+
+        Returns:
+            True if the emulator bypass job loaded.
         """
-        if not self.script:
-            logger.error("No script available for RPC calls")
-            return
+        if self._script_path is None:
+            logger.error(
+                "Emulator detection bypass requires the TrigDroid bundle "
+                "(install the trigdroid package or run 'npm run build:bypass'). "
+                "Other bypass categories run natively without it."
+            )
+            return False
 
         try:
-            # Prepare batch configuration
-            batch_config = {}
+            created = not self.job_manager.has_active_session()
+            self._setup_session(config)
 
-            if config.get("ssl_unpinning"):
-                ssl_config = (
-                    config["ssl_unpinning"]
-                    if isinstance(config["ssl_unpinning"], dict)
-                    else {}
+            conflicts = Toolbox.check_frida_hook_conflicts(self.HOOKS_REGISTRY)
+            if conflicts:
+                conflict_details = ", ".join(
+                    f"{hook} (job: {job_id[:8]}...)"
+                    for hook, job_id in conflicts.items()
                 )
-                batch_config["ssl"] = ssl_config or True
-                self.enabled_bypasses["ssl_unpinning"] = True
-
-            if config.get("root_detection"):
-                root_config = (
-                    config["root_detection"]
-                    if isinstance(config["root_detection"], dict)
-                    else {}
+                logger.warning(
+                    f"TrigDroid Bypass may conflict with existing hooks: "
+                    f"{conflict_details}"
                 )
-                batch_config["root"] = root_config or True
-                self.enabled_bypasses["root_detection"] = True
 
-            if config.get("frida_detection"):
-                frida_config = (
-                    config["frida_detection"]
-                    if isinstance(config["frida_detection"], dict)
-                    else {}
-                )
-                batch_config["frida"] = frida_config or True
-                self.enabled_bypasses["frida_detection"] = True
+            job = self.job_manager.start_job(
+                self._script_path,
+                custom_hooking_handler_name=self._message_handler,
+                job_type="trigdroid_bypass",
+                display_name="TrigDroid Bypass (emulator)",
+                hooks_registry=self.HOOKS_REGISTRY,
+                priority=5,
+            )
+            self.job_id = job.get_id() if job else None
+            self.script = job.get_script_of_job() if job else None
+            if self.job_id:
+                Toolbox.register_frida_hooks(self.job_id, self.HOOKS_REGISTRY)
 
-            if config.get("emulator_detection"):
+            if self.script:
                 emu_config = (
                     config["emulator_detection"]
                     if isinstance(config["emulator_detection"], dict)
                     else {}
                 )
-                batch_config["emulator"] = emu_config or True
-                self.enabled_bypasses["emulator_detection"] = True
+                self.enable_emulator_bypass(emu_config)
 
-            if config.get("debug_detection"):
-                debug_config = (
-                    config["debug_detection"]
-                    if isinstance(config["debug_detection"], dict)
-                    else {}
-                )
-                batch_config["debug"] = debug_config or True
-                self.enabled_bypasses["debug_detection"] = True
+            # Resume gate: only resume a process we created that is still
+            # paused (mirrors BypassManagerBase; avoids double-resume).
+            if created and self.job_manager.is_paused():
+                try:
+                    Toolbox.resume_spawned_process_after_hooks(
+                        self.frida_device, self.process_id
+                    )
+                except (frida.ProcessNotFoundError, frida.InvalidOperationError) as exc:
+                    logger.warning(f"Emulator bypass resume skipped: {exc}")
 
-            # Call batch enable via RPC
-            if batch_config:
-                results = self.script.exports_sync.enableBypasses(batch_config)
-                for result in results:
-                    status = result.get("status", "unknown")
-                    bypass_type = result.get("type", "unknown")
-                    if status == "enabled":
-                        logger.info(f"Enabled {bypass_type} bypass")
-                    elif status == "error":
-                        logger.error(
-                            f"Failed to enable {bypass_type}: {result.get('message')}"
-                        )
+            return self.job_id is not None
 
         except Exception as e:
-            logger.error(f"Failed to enable bypasses via RPC: {e}")
+            logger.error(f"Failed to start emulator RPC bypass: {e}")
+            return False
+
+    def _delegate_to_bypass_service(
+        self, category: str, enabled_key: str, label: str
+    ) -> bool:
+        """Enable a native bypass category via the BypassService.
+
+        Self-contained — no RPC bundle required (that's the point: Sandroid
+        intercepts hardened apps without the external trigdroid package).
+
+        Args:
+            category: BypassService category key ("ssl", "root", "frida", "debug").
+            enabled_key: Key recorded in ``self.enabled_bypasses``.
+            label: Human-readable label for log messages.
+
+        Returns:
+            True if the bypass is now active.
+        """
+        try:
+            svc = self._bypass_service()
+            if svc.is_active(category):
+                logger.info(f"{label} already active")
+                self.enabled_bypasses[enabled_key] = True
+                self._delegated_categories.add(category)
+                return True
+
+            success, msg = svc.start(category, on_message=None)
+            if success:
+                self.enabled_bypasses[enabled_key] = True
+                self._delegated_categories.add(category)
+                logger.info(f"{label} enabled: {msg}")
+                return True
+            logger.error(f"Failed to enable {label}: {msg}")
+            return False
+        except Exception as e:
+            logger.error(f"{label} failed: {e}")
+            return False
 
     def enable_ssl_unpinning(self, config: dict = None) -> bool:
-        """Enable SSL unpinning bypass at runtime.
-
-        Args:
-            config: Optional SSL unpinning configuration
-
-        Returns:
-            True if enabled successfully
-        """
-        if not self.script:
-            logger.error("Script not loaded - call start() first")
-            return False
-
-        try:
-            result = self.script.exports_sync.enableSSLUnpinning(config or {})
-            if result.get("status") == "enabled":
-                self.enabled_bypasses["ssl_unpinning"] = True
-                logger.info("SSL unpinning bypass enabled")
-                return True
-            if result.get("status") == "already_enabled":
-                logger.info("SSL unpinning bypass already enabled")
-                return True
-            logger.error(f"Failed to enable SSL unpinning: {result.get('message')}")
-            return False
-        except Exception as e:
-            logger.error(f"RPC call failed: {e}")
-            return False
+        """Enable SSL unpinning via the native BypassService ("ssl")."""
+        return self._delegate_to_bypass_service(
+            "ssl", "ssl_unpinning", "SSL unpinning bypass"
+        )
 
     def enable_root_bypass(self, config: dict = None) -> bool:
-        """Enable root detection bypass at runtime.
-
-        Args:
-            config: Optional root detection bypass configuration
-
-        Returns:
-            True if enabled successfully
-        """
-        if not self.script:
-            logger.error("Script not loaded - call start() first")
-            return False
-
-        try:
-            result = self.script.exports_sync.enableRootBypass(config or {})
-            if result.get("status") == "enabled":
-                self.enabled_bypasses["root_detection"] = True
-                logger.info("Root detection bypass enabled")
-                return True
-            if result.get("status") == "already_enabled":
-                logger.info("Root detection bypass already enabled")
-                return True
-            logger.error(f"Failed to enable root bypass: {result.get('message')}")
-            return False
-        except Exception as e:
-            logger.error(f"RPC call failed: {e}")
-            return False
+        """Enable root detection bypass via the native BypassService ("root")."""
+        return self._delegate_to_bypass_service(
+            "root", "root_detection", "Root detection bypass"
+        )
 
     def enable_frida_bypass(self, config: dict = None) -> bool:
-        """Enable Frida detection bypass at runtime.
+        """Enable Frida detection bypass via the native BypassService ("frida").
 
-        NOTE: For best results, this should be enabled in SPAWN mode.
-
-        Args:
-            config: Optional Frida detection bypass configuration
-
-        Returns:
-            True if enabled successfully
+        NOTE: For best results, this should be enabled in SPAWN mode so the
+        anti-anti-Frida hooks install before the app starts running.
         """
-        if not self.script:
-            logger.error("Script not loaded - call start() first")
-            return False
-
         if self.mode != SpawnMode.SPAWN and self.mode != SpawnMode.SPAWN.value:
             logger.warning(
                 "Frida bypass works best in SPAWN mode. "
                 "Some detection methods may trigger before hooks are installed."
             )
+        return self._delegate_to_bypass_service(
+            "frida", "frida_detection", "Frida detection bypass"
+        )
 
-        try:
-            result = self.script.exports_sync.enableFridaBypass(config or {})
-            if result.get("status") == "enabled":
-                self.enabled_bypasses["frida_detection"] = True
-                logger.info("Frida detection bypass enabled")
-                return True
-            if result.get("status") == "already_enabled":
-                logger.info("Frida detection bypass already enabled")
-                return True
-            logger.error(f"Failed to enable Frida bypass: {result.get('message')}")
-            return False
-        except Exception as e:
-            logger.error(f"RPC call failed: {e}")
-            return False
+    def enable_debug_bypass(self, config: dict = None) -> bool:
+        """Enable debug detection bypass via the native BypassService ("debug")."""
+        return self._delegate_to_bypass_service(
+            "debug", "debug_detection", "Debug detection bypass"
+        )
 
     def enable_emulator_bypass(self, config: dict = None) -> bool:
         """Enable emulator detection bypass at runtime.
@@ -606,64 +599,36 @@ class TrigDroidBypass:
             logger.error(f"RPC call failed: {e}")
             return False
 
-    def enable_debug_bypass(self, config: dict = None) -> bool:
-        """Enable debug detection bypass at runtime.
-
-        Args:
-            config: Optional debug detection bypass configuration
-
-        Returns:
-            True if enabled successfully
-        """
-        if not self.script:
-            logger.error("Script not loaded - call start() first")
-            return False
-
-        try:
-            result = self.script.exports_sync.enableDebugBypass(config or {})
-            if result.get("status") == "enabled":
-                self.enabled_bypasses["debug_detection"] = True
-                logger.info("Debug detection bypass enabled")
-                return True
-            if result.get("status") == "already_enabled":
-                logger.info("Debug detection bypass already enabled")
-                return True
-            logger.error(f"Failed to enable debug bypass: {result.get('message')}")
-            return False
-        except Exception as e:
-            logger.error(f"RPC call failed: {e}")
-            return False
-
     def get_status(self) -> dict:
         """Get status of all bypass hooks.
+
+        Reports both the RPC bundle state (if loaded, used by emulator
+        profiles) and the live state of any categories delegated to the
+        native BypassService.
 
         Returns:
             Dict with bypass status information
         """
-        if not self.script:
-            return {
-                "loaded": False,
-                "enabled_bypasses": {},
-            }
-
-        try:
-            rpc_status = self.script.exports_sync.getStatus()
-            return {
-                "loaded": True,
-                "job_id": self.job_id,
-                "app_package": self.app_package,
-                "process_id": self.process_id,
-                "mode": self.mode,
-                "rpc_status": rpc_status,
-                "enabled_bypasses": self.enabled_bypasses,
-            }
-        except Exception as e:
-            logger.error(f"Failed to get status: {e}")
-            return {
-                "loaded": True,
-                "error": str(e),
-                "enabled_bypasses": self.enabled_bypasses,
-            }
+        svc = self._bypass_service()
+        status = {
+            "loaded": self.script is not None,
+            "job_id": self.job_id,
+            "app_package": self.app_package,
+            "process_id": self.process_id,
+            "mode": self.mode,
+            "enabled_bypasses": self.enabled_bypasses,
+            "delegated_bypasses": {
+                cat: svc.is_active(cat)
+                for cat in sorted(self._delegated_categories)
+            },
+        }
+        if self.script:
+            try:
+                status["rpc_status"] = self.script.exports_sync.getStatus()
+            except Exception as e:
+                logger.error(f"Failed to get RPC status: {e}")
+                status["error"] = str(e)
+        return status
 
     def stop(self):
         """Stop TrigDroid bypass hooks.
@@ -672,11 +637,20 @@ class TrigDroidBypass:
         """
         self._remove_activity_log()
 
-        if self.job_id:
-            # Unregister hooks
-            Toolbox.unregister_frida_hooks(self.job_id)
+        # Tear down native bypasses this instance delegated to BypassService.
+        if self._delegated_categories:
+            svc = self._bypass_service()
+            for category in list(self._delegated_categories):
+                try:
+                    svc.stop(category)
+                except Exception as e:
+                    logger.warning(
+                        f"Error stopping delegated {category} bypass: {e}"
+                    )
+            self._delegated_categories.clear()
 
-            # Stop the job
+        if self.job_id:
+            Toolbox.unregister_frida_hooks(self.job_id)
             try:
                 self.job_manager.stop_job_with_id(self.job_id)
                 logger.info("TrigDroid Bypass stopped (app still running)")

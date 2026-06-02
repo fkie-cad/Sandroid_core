@@ -5,6 +5,7 @@ import threading
 
 from textual.widgets import Static
 
+from sandroid.core.adb import Adb
 from sandroid.core.enums import ViewMode
 from sandroid.services import (
     get_frida_session_service,
@@ -59,6 +60,8 @@ class StatusBar(Static):
         self.sqldiff_available = False
         self.objection_available = False
         self.frida_available_check = False
+        self._frida_version_mismatch: bool | None = None  # None = not checked yet
+        self._frida_last_status: str = ""  # Track status transitions
         super().__init__(**kwargs)
 
     def on_mount(self) -> None:
@@ -178,7 +181,10 @@ class StatusBar(Static):
 
         # Frida status with FIXED colors (always same green/red regardless of theme)
         if self.frida_status == "Running":
-            frida_display = f"[{FIXED_COLORS['running']} bold]Running[/]"
+            if self._frida_version_mismatch:
+                frida_display = f"[#facc15 bold]Running ⚠ mismatch[/]"
+            else:
+                frida_display = f"[{FIXED_COLORS['running']} bold]Running[/]"
         else:
             frida_display = f"[{FIXED_COLORS['stopped']}]Not running[/]"
 
@@ -418,5 +424,47 @@ class StatusBar(Static):
         Args:
             status: The Frida status string
         """
+        prev_status = self._frida_last_status
+        self._frida_last_status = status
         self.frida_status = status
+
+        # Check version mismatch only on transition to Running
+        if status == "Running" and prev_status != "Running":
+            self._frida_version_mismatch = None  # Reset until checked
+            self._schedule_frida_version_check()
+        elif status != "Running":
+            self._frida_version_mismatch = None
+
+        self.refresh()
+
+    def _schedule_frida_version_check(self) -> None:
+        """Check frida-server version against host frida in background."""
+
+        def _check_version():
+            try:
+                import frida as _frida_mod
+
+                host_version = _frida_mod.__version__
+                stdout, _stderr = Adb.send_adb_command(
+                    "shell /data/local/tmp/frida-server --version"
+                )
+                if stdout and stdout.strip():
+                    server_version = stdout.strip()
+                    mismatch = server_version != host_version
+                else:
+                    mismatch = False  # Can't determine, assume OK
+            except Exception:
+                mismatch = False  # Can't determine, assume OK
+
+            try:
+                self.app.call_from_thread(self._apply_version_mismatch, mismatch)
+            except Exception:
+                pass
+
+        thread = threading.Thread(target=_check_version, daemon=True)
+        thread.start()
+
+    def _apply_version_mismatch(self, mismatch: bool) -> None:
+        """Apply version mismatch result from background thread."""
+        self._frida_version_mismatch = mismatch
         self.refresh()
