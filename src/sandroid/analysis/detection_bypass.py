@@ -1145,11 +1145,31 @@ class BypassService:
                 if info and info.get("pid"):
                     process_id = info["pid"]
         else:
-            logger.debug("Reusing existing Frida session")
-            if not process_id:
-                info = jm.get_session_info()
-                if info and info.get("pid"):
-                    process_id = info["pid"]
+            session_pkg = jm.package_name
+            if session_pkg and session_pkg != self._app_package:
+                logger.info(
+                    "Session targets %s but spotlight is %s — resetting",
+                    session_pkg,
+                    self._app_package,
+                )
+                jm.reset_session()
+                target = self._app_package if should_spawn else process_id
+                jm.setup_frida_session(
+                    target,
+                    self._message_handler,
+                    should_spawn=should_spawn,
+                )
+                if should_spawn:
+                    created_spawn = True
+                    info = jm.get_session_info()
+                    if info and info.get("pid"):
+                        process_id = info["pid"]
+            else:
+                logger.debug("Reusing existing Frida session")
+                if not process_id:
+                    info = jm.get_session_info()
+                    if info and info.get("pid"):
+                        process_id = info["pid"]
 
         self._process_id = process_id
         # Surface the resolved PID so the spotlight panel shows it (non-
@@ -1223,6 +1243,8 @@ class BypassService:
         if job is None or self._script is None:
             return False
         try:
+            if getattr(self._script, "is_destroyed", False):
+                return False
             if getattr(job, "state", None) != "running":
                 return False
             if not jm.has_active_session():
@@ -1381,14 +1403,15 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
+            jm = Toolbox.get_frida_job_manager()
             with self._lock:
                 if on_message is not None:
                     self._on_message = on_message
-                # Early-return if nothing changes — prevents spurious work
-                # (e.g. a post-resume apply_armed re-requesting the live set).
-                if target == self._active:
+                # Early-return if nothing changes AND the script is still live.
+                # Without the liveness check, a stale _active (app self-died
+                # without Kill) would skip hook installation on the new process.
+                if target == self._active and self._is_job_live(jm):
                     return True, "No bypass change"
-                jm = Toolbox.get_frida_job_manager()
                 # Never load a live combined script while the session is still
                 # paused unless this IS the paused-spawn load (paused=True):
                 # a 2nd create_script on a paused spawn SIGSEGVs the agent
@@ -1429,10 +1452,9 @@ class BypassService:
 
             # On a fresh load the baked FLAGS already equal `target`, so skip
             # the RPC — this also avoids a set_flags RPC on a still-paused
-            # spawn. When reusing a live script, flip its flags to `target`. On
-            # RPC failure drop the handle so the NEXT toggle reloads (first
-            # toggle after a session death fails once, then reloads — no inline
-            # retry).
+            # spawn. When reusing a live script, flip its flags to `target`.
+            # On RPC failure (e.g. script destroyed by a process restart),
+            # reload transparently — one automatic retry.
             if not fresh:
                 with self._lock:
                     script = self._script
@@ -1441,29 +1463,36 @@ class BypassService:
                 try:
                     script.exports_sync.set_flags(flags)
                 except Exception as exc:
-                    logger.warning("[Bypass] set_flags failed: %s", exc)
+                    logger.warning(
+                        "[Bypass] set_flags failed: %s — reloading", exc
+                    )
                     self._reset_script_state()
-                    return False, f"Failed to apply bypass flags: {exc}"
+                    ok2, msg2, _ = self._ensure_loaded(
+                        paused=paused, initial_flags=flags
+                    )
+                    if not ok2:
+                        return False, f"Bypass reload failed: {msg2}"
 
-            # Reconcile _active against any category whose IIFE reported a
-            # merge_error, so is_active() never lies to the TUI header or the
-            # headless trigdroid path.
-            with self._lock:
-                failed = set(self._merge_errors)
-                self._active = target - failed
-                active_now = set(self._active)
-
-            if active_now:
-                display = "Bypass: " + ", ".join(
-                    self.display_name(c)
-                    for c in self._categories_by_priority(active_now)
-                )
-                self._register_task(display)
-                return True, display
-            self._unregister_task()
-            return True, "All bypasses off"
+            return self._reconcile_and_register(target)
         finally:
             self._mutate_lock.release()
+
+    def _reconcile_and_register(self, target) -> tuple[bool, str]:
+        """Reconcile ``_active`` against merge errors and update TaskService."""
+        with self._lock:
+            failed = set(self._merge_errors)
+            self._active = target - failed
+            active_now = set(self._active)
+
+        if active_now:
+            display = "Bypass: " + ", ".join(
+                self.display_name(c)
+                for c in self._categories_by_priority(active_now)
+            )
+            self._register_task(display)
+            return True, display
+        self._unregister_task()
+        return True, "All bypasses off"
 
     # -- armed set (user intent, independent of live state) ---------------
 
@@ -1785,13 +1814,11 @@ class BypassService:
     def _register_task(self, display: str) -> None:
         try:
             svc = get_task_service()
-            # Keep the entry's display accurate as categories change, but avoid
-            # the "already registered, overwriting" warning on every toggle:
-            # only (re)register when the display actually changes, unregistering
-            # first so register() never sees an existing entry.
-            if not (svc.is_running("bypass") and self._task_display == display):
-                if svc.is_running("bypass"):
-                    svc.unregister("bypass")
+            if svc.is_running("bypass"):
+                if self._task_display != display:
+                    svc.update_display("bypass", display)
+                    self._task_display = display
+            else:
                 svc.register(
                     name="bypass",
                     display_name=display,
