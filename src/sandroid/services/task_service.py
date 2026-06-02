@@ -182,6 +182,20 @@ class TaskService:
         self._publish_task_stopped(task, success=True)
         return True
 
+    def update_display(self, name: str, display_name: str) -> bool:
+        """Update a task's display name in-place.
+
+        Fires a TASK_UPDATED event (not Started/Stopped) so the activity
+        log can announce the change without implying a restart.
+        """
+        with self._lock:
+            task = self._tasks.get(name)
+            if task is None:
+                return False
+            task.display_name = display_name
+        self._publish_task_updated(task)
+        return True
+
     def is_running(self, name: str) -> bool:
         """Check if a specific task is currently running.
 
@@ -489,6 +503,24 @@ class TaskService:
                     "display_name": task.display_name,
                     "app_name": task.app_name,
                     "target_pid": task.target_pid,
+                },
+                source="task_service",
+            )
+        )
+
+    def _publish_task_updated(self, task: BackgroundTask) -> None:
+        """Publish a TASK_UPDATED event (display changed, task still running)."""
+        if self._event_bus is None:
+            return
+
+        from sandroid.core.events import Event, EventType
+
+        self._event_bus.publish(
+            Event(
+                type=EventType.TASK_UPDATED,
+                data={
+                    "task_name": task.name,
+                    "display_name": task.display_name,
                 },
                 source="task_service",
             )

@@ -57,6 +57,7 @@ class EventType(Enum):
     TASK_OUTPUT = auto()  # Output/message from a background task
     TASK_STARTED = auto()  # A background task has started
     TASK_STOPPED = auto()  # A background task has stopped
+    TASK_UPDATED = auto()  # A background task's display changed
     TASK_ERROR = auto()  # An error occurred in a background task
 
     # UI events

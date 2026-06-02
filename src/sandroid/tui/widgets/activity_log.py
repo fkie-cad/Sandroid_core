@@ -190,6 +190,12 @@ class ActivityLog(RichLog):
         else:
             self.write(f"[{FIXED_COLORS['running']} bold]>>> Started: {task_name}[/]")
 
+    def log_task_updated(self, task_name: str) -> None:
+        """Log a task display-name change (not a restart)."""
+        self.write(
+            f"[{FIXED_COLORS['running']}][~] {task_name}[/]"
+        )
+
     def log_task_stopped(self, task_name: str) -> None:
         """Log a task stopped event.
 

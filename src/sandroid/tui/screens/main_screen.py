@@ -418,6 +418,7 @@ class MainScreen(Screen):
                 EventType.TASK_OUTPUT: self._handle_task_output,
                 EventType.TASK_STARTED: self._handle_task_started,
                 EventType.TASK_STOPPED: self._handle_task_stopped,
+                EventType.TASK_UPDATED: self._handle_task_updated,
                 EventType.LOG_MESSAGE: self._handle_log_message,
                 EventType.FILE_CHANGED: self._handle_file_changed,
                 EventType.HOOK_TRIGGERED: self._handle_hook_triggered,
@@ -486,6 +487,18 @@ class MainScreen(Screen):
             menu_panel.update_menu()
         except Exception:
             pass
+
+    def _handle_task_updated(self, event) -> None:
+        """Handle task display-name change (not a lifecycle event)."""
+        try:
+            activity_log = self.query_one("#activity-log", ActivityLog)
+            display_name = event.data.get(
+                "display_name", event.data.get("name", "Unknown")
+            )
+            activity_log.log_task_updated(display_name)
+        except Exception:
+            pass
+        self._safe_refresh_status_bar()
 
     def _handle_log_message(self, event) -> None:
         """Handle log message event (from TUILoggingHandler)."""
