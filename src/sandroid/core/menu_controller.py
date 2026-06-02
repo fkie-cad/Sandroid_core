@@ -31,6 +31,7 @@ class ActionCategory(Enum):
     EMULATOR = auto()
     ANALYSIS = auto()
     NETWORK = auto()
+    SNAPSHOTS = auto()
     NAVIGATION = auto()
 
 
@@ -454,26 +455,41 @@ class MenuController:
         )
 
         # ===== Snapshot Actions (Emulator-only) =====
+        # Slot memory: keys [1-8] LOAD the snapshot assigned to a slot, and
+        # [Ctrl+1-8] SAVE the current state into a slot. Assignments live per-AVD
+        # in config (tui.snapshot_slots) and are managed from the Snapshots tab.
         self._register(
             "show_snapshots",
-            "Show/load snapshots",
+            "Open snapshots",
             "0",
-            ActionCategory.EMULATOR,
+            ActionCategory.SNAPSHOTS,
             ["forensic", "malware"],
-            description="Display and load AVD snapshots",
-            inline_text="keys [1-8] create snapshots, key [0] lists/loads snapshots",
+            description="Open the Snapshots tab",
+            inline_text="key [0] opens snapshots, [1-8] load slots, [Ctrl+1-8] save",
             required_capabilities=[DeviceCapability.SNAPSHOTS],
             unavailable_reason="Snapshots only available on emulators",
         )
         for i in range(1, 9):
             self._register(
-                f"create_snapshot_{i}",
-                f"Create snapshot {i}",
+                f"load_slot_{i}",
+                f"Load slot {i}",
                 str(i),
-                ActionCategory.EMULATOR,
+                ActionCategory.SNAPSHOTS,
                 ["forensic", "malware"],
-                description=f"Create snapshot in slot {i}",
-                inline_text=f"create snapshot [{i}]",
+                description=f"Load the snapshot assigned to slot {i}",
+                inline_text=f"load slot [{i}]",
+                required_capabilities=[DeviceCapability.SNAPSHOTS],
+                unavailable_reason="Snapshots only available on emulators",
+            )
+        for i in range(1, 9):
+            self._register(
+                f"save_slot_{i}",
+                f"Save to slot {i}",
+                f"ctrl+{i}",
+                ActionCategory.SNAPSHOTS,
+                ["forensic", "malware"],
+                description=f"Snapshot the current state into slot {i}",
+                inline_text=f"save to slot [Ctrl+{i}]",
                 required_capabilities=[DeviceCapability.SNAPSHOTS],
                 unavailable_reason="Snapshots only available on emulators",
             )
@@ -556,6 +572,18 @@ class MenuController:
                 return action
         return None
 
+    def find_action_by_key(self, key: str) -> Action | None:
+        """Get action by keyboard shortcut, ignoring view membership.
+
+        View-agnostic lookup for the flat TUI catalog (modes removed; see
+        TODO(modes-as-presets)). Keys are globally unique across the registry,
+        so the first match is unambiguous.
+        """
+        for action in self._actions.values():
+            if action.key == key:
+                return action
+        return None
+
     def get_action_by_name(self, name: str) -> Action | None:
         """Get action by name."""
         return self._actions.get(name)
@@ -564,14 +592,21 @@ class MenuController:
         """Get all registered actions."""
         return list(self._actions.values())
 
-    def validate_action(self, action_name: str, view: str) -> tuple[bool, str]:
+    def validate_action(
+        self, action_name: str, view: str | None = None
+    ) -> tuple[bool, str]:
         """Validate if action can be executed.
 
         Checks:
-        - View availability
+        - View availability (only when ``view`` is provided)
         - Device capabilities (for emulator-only features)
         - Frida server requirement
         - Spotlight app requirement
+
+        Args:
+            action_name: Name of the action to validate.
+            view: View to check membership against. When ``None`` (the flat
+                TUI catalog), the view-membership check is skipped entirely.
 
         Returns:
             Tuple of (valid, error_message)
@@ -580,10 +615,14 @@ class MenuController:
         if not action:
             return False, f"Unknown action: {action_name}"
 
-        if view not in action.views:
+        # TODO(modes-as-presets): The flat TUI catalog passes view=None to
+        # bypass this membership check (modes removed). Modes will return as
+        # user-selectable presets, at which point callers can pass a view again.
+        if view is not None and view not in action.views:
             return (
                 False,
-                f"Action '{action.display_name}' not available in {view.upper()} view. Press TAB to switch views.",
+                f"Action '{action.display_name}' is not available "
+                f"in the {view.upper()} view.",
             )
 
         # Import here to avoid circular dependency

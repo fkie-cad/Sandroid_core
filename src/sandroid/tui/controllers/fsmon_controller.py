@@ -35,8 +35,6 @@ from typing import Any
 
 from rich.markup import escape
 
-from sandroid.core.enums import ViewMode
-
 logger = logging.getLogger(__name__)
 
 
@@ -193,15 +191,6 @@ class FSMonController:
         Returns:
             Tuple of (can_start, reason_if_not)
         """
-        # Check view mode
-        if self._get_current_view:
-            current_view = self._get_current_view()
-            if current_view not in (ViewMode.FORENSIC, ViewMode.FORENSIC.value):
-                return (
-                    False,
-                    "FSMon is only available in FORENSIC view. Press TAB to switch.",
-                )
-
         # Check if already running
         if self.is_running():
             # If observer is minimized, allow restore

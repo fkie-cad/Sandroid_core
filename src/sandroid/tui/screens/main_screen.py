@@ -16,6 +16,7 @@ from sandroid.tui.widgets import (
     MenuPanel,
     MitmproxyPanel,
     SandroidFooter,
+    SnapshotsPanel,
     SpotlightPanel,
     StatusBar,
 )
@@ -71,7 +72,7 @@ class MainScreen(Screen):
     # height:100% can coexist with a permanently visible tab bar. Collapsed
     # (default): a single-row bar — an ▴/▾ arrow plus the Spotlight/Mitmproxy
     # tabs — with the body hidden. Expanded (.-visible, via the arrow, a tab
-    # click, or Ctrl+B / Ctrl+M): grows to 45% and reveals the active body.
+    # click, or Ctrl+B / Ctrl+M): grows to 60% and reveals the active body.
     DEFAULT_CSS = """
     #bottom-panel {
         dock: bottom;
@@ -80,7 +81,7 @@ class MainScreen(Screen):
         border-top: solid #111827;
     }
     #bottom-panel.-visible {
-        height: 45%;
+        height: 60%;
     }
     #bottom-tabbar {
         height: 1;
@@ -158,14 +159,18 @@ class MainScreen(Screen):
                     with Horizontal(id="bottom-tabbar"):
                         yield Static("▴", id="bottom-arrow")
                         yield Static(
-                            "Spotlight", id="tab-spotlight", classes="bottom-tab -active"
+                            "Spotlight",
+                            id="tab-spotlight",
+                            classes="bottom-tab -active",
                         )
+                        yield Static("Mitmproxy", id="tab-mitm", classes="bottom-tab")
                         yield Static(
-                            "Mitmproxy", id="tab-mitm", classes="bottom-tab"
+                            "Snapshots", id="tab-snapshots", classes="bottom-tab"
                         )
                     with ContentSwitcher(initial="spotlight-panel", id="bottom-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
+                        yield SnapshotsPanel(id="snapshots-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
@@ -210,6 +215,7 @@ class MainScreen(Screen):
     _BOTTOM_TABS = {
         "tab-spotlight": "spotlight-panel",
         "tab-mitm": "mitm-panel",
+        "tab-snapshots": "snapshots-panel",
     }
 
     def on_click(self, event) -> None:
@@ -224,14 +230,18 @@ class MainScreen(Screen):
             self._toggle_bottom_strip()
         elif wid in self._BOTTOM_TABS:
             self._select_bottom_tab(self._BOTTOM_TABS[wid], reveal=True)
-        elif wid and wid.startswith("act-"):
-            # Spotlight panel action cells (#act-start, #act-restart, …).
-            try:
-                self.query_one("#spotlight-panel", SpotlightPanel).dispatch_action_cell(
-                    wid
-                )
-            except Exception:
-                pass
+        elif wid and wid.startswith(("act-", "snap-")):
+            # Bottom-panel action cells. Route to the ACTIVE bottom child
+            # (spotlight uses act-*, snapshots uses snap-*). The hasattr guard
+            # keeps panels without a dispatcher (e.g. MitmproxyPanel) safe.
+            current = self._bottom_current()
+            if current:
+                try:
+                    panel = self.query_one(f"#{current}")
+                    if hasattr(panel, "dispatch_action_cell"):
+                        panel.dispatch_action_cell(wid)
+                except Exception:
+                    pass
 
     def _bottom_panel(self):
         """Return the #bottom-panel wrapper, or None if not mounted."""
@@ -270,6 +280,18 @@ class MainScreen(Screen):
                 self.query_one(f"#{panel_id}").focus()
             except Exception:
                 pass
+            # Let a freshly-activated panel refresh itself immediately (e.g.
+            # the Snapshots tab fetches its list as soon as it is shown).
+            try:
+                panel_widget = self.query_one(f"#{panel_id}")
+                if hasattr(panel_widget, "refresh_snapshots"):
+                    panel_widget.refresh_snapshots()
+            except Exception:
+                pass
+
+    def open_snapshots_tab(self) -> None:
+        """Reveal the bottom strip and switch to the Snapshots tab (key 0)."""
+        self._select_bottom_tab("snapshots-panel", reveal=True)
 
     def _toggle_bottom_strip(self) -> None:
         """Expand/collapse the strip without changing the active tab."""
@@ -360,9 +382,8 @@ class MainScreen(Screen):
             status_bar = self.query_one("#status-bar", StatusBar)
             status_bar.update_from_toolbox()
 
-            # Update menu panel with current view
+            # Refresh the menu panel (view modes removed; flat catalog).
             menu_panel = self.query_one("#menu-panel", MenuPanel)
-            menu_panel.current_view = get_ui_service().get_current_view()
 
             # Force menu refresh to re-validate actions with current device state
             # This ensures Shift+F/G highlighting reflects actual device capabilities
@@ -599,35 +620,12 @@ class MainScreen(Screen):
             logger.debug(f"Error displaying buffered logs: {e}")
 
     def switch_view(self) -> None:
-        """Switch to the next view in the cycle."""
-        try:
-            ui_service = get_ui_service()
-            ui_service.cycle_view()
-            new_view = ui_service.get_current_view()
+        """No-op: view modes were removed from the TUI.
 
-            # Update UI components
-            status_bar = self.query_one("#status-bar", StatusBar)
-            status_bar.current_view = new_view.upper()
-            status_bar.refresh()
-
-            menu_panel = self.query_one("#menu-panel", MenuPanel)
-            menu_panel.current_view = new_view
-
-            activity_log = self.query_one("#activity-log", ActivityLog)
-            activity_log.log_view_change(new_view)
-
-            # Update subtitle for new view
-            self.app.update_subtitle_for_view(new_view)
-
-            # Refresh header to show new subtitle
-            try:
-                header = self.query_one(Header)
-                header.refresh(repaint=True)
-            except Exception:
-                pass
-
-        except ImportError:
-            logger.warning("Toolbox not available")
+        TODO(modes-as-presets): Kept as a safe no-op so any lingering caller
+        does not break. View modes (FORENSIC/MALWARE/SECURITY) will return as
+        user-selectable presets in a later feature.
+        """
 
     def execute_action(self, action_name: str) -> None:
         """Execute an action by name.
@@ -641,11 +639,8 @@ class MainScreen(Screen):
         """
         activity_log = self.query_one("#activity-log", ActivityLog)
 
-        # Get current view
-        current_view = get_ui_service().get_current_view()
-
-        # Validate action
-        valid, error_msg = self._controller.validate_action(action_name, current_view)
+        # Validate action (view-agnostic flat catalog; modes removed)
+        valid, error_msg = self._controller.validate_action(action_name)
         if not valid:
             activity_log.log_validation_error(error_msg)
             # Show modal for validation errors so user gets clear feedback
@@ -875,9 +870,7 @@ class MainScreen(Screen):
         Returns:
             True if an action was executed, False otherwise
         """
-        current_view = get_ui_service().get_current_view()
-
-        action = self._controller.get_action_by_key(key, current_view)
+        action = self._controller.find_action_by_key(key)
         if action:
             # Check if action requires Frida and Frida isn't running
             if action.requires_frida:

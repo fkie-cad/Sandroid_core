@@ -171,18 +171,10 @@ class StatusBar(Static):
         """
         colors = self._get_theme_colors()
 
-        # View indicator with theme-specific view colors
-        view_colors = {
-            ViewMode.FORENSIC.value.upper(): colors[ViewMode.FORENSIC],
-            ViewMode.MALWARE.value.upper(): colors[ViewMode.MALWARE],
-            ViewMode.SECURITY.value.upper(): colors[ViewMode.SECURITY],
-        }
-        view_color = view_colors.get(self.current_view, colors["primary"])
-
         # Frida status with FIXED colors (always same green/red regardless of theme)
         if self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida_display = f"[#facc15 bold]Running ⚠ mismatch[/]"
+                frida_display = "[#facc15 bold]Running ⚠ mismatch[/]"
             else:
                 frida_display = f"[{FIXED_COLORS['running']} bold]Running[/]"
         else:
@@ -211,7 +203,6 @@ class StatusBar(Static):
 
         # Build status bar - theme indicator is optional
         status_parts = [
-            f"[{view_color} bold]{self.current_view}[/]",
             f"Device: {device_display}",
             f"Frida: {frida_display}",
             f"App: {app_display}",
@@ -238,11 +229,8 @@ class StatusBar(Static):
         if self.background_tasks_count > 0 and self.background_tasks_display:
             status_parts.append(f"Tasks: {self.background_tasks_display}")
 
-        # Add forensic APKs indicator in FORENSIC view when APKs exist
-        if (
-            self.current_view == ViewMode.FORENSIC.value.upper()
-            and self.forensic_apks_count > 0
-        ):
+        # Add forensic APKs indicator when APKs exist (view modes removed)
+        if self.forensic_apks_count > 0:
             status_parts.append(
                 f"[{FIXED_COLORS['warning_status']}]APKs: {self.forensic_apks_count}[/] [{colors['text_muted']}](Shift+G)[/]"
             )

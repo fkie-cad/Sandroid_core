@@ -155,8 +155,16 @@ class CommandPalette(ModalScreen):
         Args:
             query: Search query string
         """
-        # Get all actions for current view
-        all_actions = self._controller.get_actions_for_view(self.current_view)
+        # Get all actions (flat catalog; view modes removed). Hide the retired
+        # switch_view action and the per-slot load/save actions (those are
+        # hotkey- and Snapshots-tab-driven; dispatching them by name here would
+        # bypass the slot handling). TODO(modes-as-presets): re-surface presets.
+        all_actions = [
+            a
+            for a in self._controller.get_all_actions()
+            if a.name != "switch_view"
+            and not a.name.startswith(("load_slot_", "save_slot_"))
+        ]
 
         # Filter by query (fuzzy match on name, display_name, description)
         query_lower = query.lower().strip()
@@ -189,10 +197,8 @@ class CommandPalette(ModalScreen):
             for i, action in enumerate(self._filtered_actions[:15]):
                 key_display = _format_key_display(action.key)
 
-                # Check availability
-                valid, _ = self._controller.validate_action(
-                    action.name, self.current_view
-                )
+                # Check availability (view-agnostic; flat catalog)
+                valid, _ = self._controller.validate_action(action.name)
 
                 # Build line - single brackets with magenta for keys
                 if i == self._selected_index:
@@ -250,10 +256,8 @@ class CommandPalette(ModalScreen):
         if 0 <= self._selected_index < len(self._filtered_actions):
             action = self._filtered_actions[self._selected_index]
 
-            # Check if action is available
-            valid, error_msg = self._controller.validate_action(
-                action.name, self.current_view
-            )
+            # Check if action is available (view-agnostic; flat catalog)
+            valid, error_msg = self._controller.validate_action(action.name)
 
             if not valid:
                 # Show error but don't dismiss

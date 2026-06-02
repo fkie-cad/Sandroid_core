@@ -577,6 +577,45 @@ class EmulatorService:
             self._logger.error(f"Failed to load snapshot: {e}")
             return False
 
+    def delete_snapshot(self, name: str) -> bool:
+        """Delete a previously created snapshot.
+
+        Mirrors :meth:`create_snapshot` exactly, changing only the console
+        verb. Blocking call (no worker); callers wrap it off the UI thread.
+
+        NOTE: ``avd snapshot del`` is the documented emulator-console verb but
+        has no in-repo precedent (create/load use ``save``/``load``). It must
+        be confirmed on a live emulator.
+
+        Args:
+            name: Name of the snapshot to delete.
+
+        Returns:
+            True if the snapshot was deleted successfully.
+        """
+        self._logger.info(f"Deleting snapshot: {name}")
+        adb = self._get_adb()
+
+        try:
+            # Handle both string and bytes for name
+            if isinstance(name, str):
+                command = f"avd snapshot del {name}"
+            else:
+                command = b"avd snapshot del " + name
+
+            _stdout, stderr = adb.send_telnet_command(command)
+
+            if stderr:
+                self._logger.error(f"Failed to delete snapshot: {stderr}")
+                return False
+
+            self._logger.info(f"Snapshot '{name}' deleted successfully")
+            return True
+
+        except Exception as e:
+            self._logger.error(f"Failed to delete snapshot: {e}")
+            return False
+
     def list_snapshots(self) -> list[SnapshotInfo]:
         """List available snapshots.
 

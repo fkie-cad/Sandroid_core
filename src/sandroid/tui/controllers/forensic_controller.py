@@ -128,15 +128,12 @@ class ForensicController:
         """Check if forensic scan can run.
 
         Args:
-            view: Current view name or ViewMode enum
+            view: Current view name or ViewMode enum (retained for caller
+                compatibility; no longer used now that view modes are removed).
 
         Returns:
             Tuple of (can_run, reason_if_not)
         """
-        # Check view
-        if view != ViewMode.FORENSIC:
-            return False, "Forensic Evidence scan is only available in FORENSIC view."
-
         # Check device type
         toolbox = self._get_toolbox()
         if toolbox.is_emulator_device():

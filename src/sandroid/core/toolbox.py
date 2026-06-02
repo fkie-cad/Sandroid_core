@@ -499,6 +499,18 @@ class Toolbox(metaclass=_ToolboxMeta):
             name if isinstance(name, str) else name.decode("utf-8")
         )
 
+    @classmethod
+    def delete_snapshot(cls, name) -> bool:
+        """Delegates to EmulatorService.delete_snapshot().
+
+        Unlike create/load, the success ``bool`` is propagated so callers can
+        surface a real failure — delete is destructive and the ``avd snapshot
+        del`` verb has no in-repo precedent, so masking a rejection is unsafe.
+        """
+        return _service("get_emulator_service").delete_snapshot(
+            name if isinstance(name, str) else name.decode("utf-8")
+        )
+
     # ==================== Forensic Analysis ====================
 
     @classmethod

@@ -58,6 +58,10 @@ from .scan_progress_modal import ScanProgressModal, ScanProgressResult
 from .screen_recording_modal import ScreenRecordingModal, ScreenRecordingResult
 from .screenshot_modal import ScreenshotModal, ScreenshotResult
 from .selection_modal import SelectionModal
+from .snapshot_save_choice_modal import (
+    SnapshotSaveChoiceModal,
+    SnapshotSaveChoiceResult,
+)
 from .spawn_mode_modal import SpawnModeModal
 from .spotlight_files_modal import SpotlightFilesAction, SpotlightFilesModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
@@ -130,6 +134,8 @@ __all__ = [
     "ScreenshotResult",
     "SelectionModal",
     "SnapshotInfo",
+    "SnapshotSaveChoiceModal",
+    "SnapshotSaveChoiceResult",
     "SnapshotSelectionModal",
     "SnapshotSelectionResult",
     "SpawnMode",

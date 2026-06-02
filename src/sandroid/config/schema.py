@@ -305,6 +305,39 @@ class TUIConfig(BaseModel):
         description="Maximum lines kept in FSMon observer log. "
         "Higher values use more memory but allow scrolling back further.",
     )
+    keybindings: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Override keys: maps a binding id (the MenuController action name) to "
+            "a key string, e.g. {'proxy': 'ctrl+y'}. Edited by the in-app ? "
+            "keybinding editor or by hand."
+        ),
+    )
+    snapshot_slots: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-AVD snapshot slot memory: maps an AVD name to a slot table "
+            "{slot_number: snapshot_tag}, e.g. "
+            "{'Pixel_6_API_33': {'1': 'clean-boot', '3': 'post-install'}}. "
+            "Edited via the Snapshots tab (assign/save to slot)."
+        ),
+    )
+    snapshot_save_mode: str = Field(
+        default="ask",
+        description="Save to an occupied slot: 'ask' (prompt), 'overwrite' "
+        "(re-save in place), 'fresh' (new timestamped snapshot + re-point).",
+    )
+
+    @validator("snapshot_save_mode")
+    def validate_snapshot_save_mode(cls, v):
+        """Validate snapshot save mode setting."""
+        valid = {"ask", "overwrite", "fresh"}
+        if v not in valid:
+            raise ValueError(
+                f"Invalid snapshot_save_mode: {v}. Must be one of: "
+                f"{', '.join(sorted(valid))}"
+            )
+        return v
 
     @validator("custom_css_path", pre=True)
     def expand_css_path(cls, v):

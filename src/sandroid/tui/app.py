@@ -83,7 +83,6 @@ class SandroidTUI(App):
     # fmt: off
     BINDINGS = [
         # Navigation
-        Binding("tab", "switch_view", "Switch View", priority=True),
         Binding("D", "show_device_selector", "Devices", priority=True),
         Binding("q", "quit", "Quit"),
         Binding("escape", "maybe_quit", "Back/Quit", priority=True),
@@ -100,52 +99,100 @@ class SandroidTUI(App):
         Binding("ctrl+u", "scroll_half_up", "Half Up", show=False),
         Binding("home", "scroll_top", "Top", show=False),
         Binding("end", "scroll_bottom", "Bottom", show=False),
-        Binding("G", "handle_shift_g", "Bottom/Forensic APKs", show=False),
+        Binding("G", "handle_shift_g", "Forensic APKs", show=False),
         # Recording
-        Binding("r", "record", "Record", show=False),
-        Binding("p", "play", "Play", show=False),
-        Binding("x", "export_action", "Export", show=False),
-        Binding("i", "action_key('i')", "Import", show=False),
+        Binding("r", "record", "Record", show=False, id="record"),
+        Binding("p", "play", "Play", show=False, id="play"),
+        Binding("x", "export_action", "Export", show=False, id="export"),
+        Binding("i", "action_key('i')", "Import", show=False, id="import"),
         # Spotlight
-        Binding("c", "action_key('c')", "Spotlight Attach", show=False),
-        Binding("C", "action_key('C')", "Spotlight Spawn", show=False),
-        Binding("d", "action_key('d')", "Dump Memory", show=False),
+        Binding(
+            "c", "action_key('c')", "Spotlight Attach", show=False,
+            id="spotlight_attach",
+        ),
+        Binding(
+            "C", "action_key('C')", "Spotlight Spawn", show=False,
+            id="spotlight_spawn",
+        ),
+        Binding("d", "action_key('d')", "Dump Memory", show=False, id="dump_memory"),
         # Files
-        Binding("l", "spotlight_files", "Spotlight Files", show=False),
-        Binding("v", "action_key('v')", "Remove File", show=False),
-        Binding("u", "action_key('u')", "Pull Files", show=False),
-        Binding("o", "fsmon", "FSMon", show=False),
-        Binding("space", "action_key(' ')", "Pull Spotlight DB", show=False),
+        Binding("l", "spotlight_files", "Spotlight Files", show=False, id="list_files"),
+        Binding("v", "action_key('v')", "Remove File", show=False, id="remove_file"),
+        Binding("u", "action_key('u')", "Pull Files", show=False, id="pull_files"),
+        Binding("o", "fsmon", "FSMon", show=False, id="fsmon"),
+        Binding(
+            "space", "action_key(' ')", "Pull Spotlight DB", show=False,
+            id="pull_spotlight_db",
+        ),
         # Emulator
-        Binding("e", "action_key('e')", "Emulator Info", show=False),
-        Binding("E", "action_key('E')", "Device Settings", show=False),
-        Binding("f", "action_key('f')", "Frida", show=False),
-        Binding("s", "screenshot", "Screenshot", show=False),
-        Binding("g", "action_key('g')", "Screen Record", show=False),
+        Binding(
+            "e", "action_key('e')", "Emulator Info", show=False, id="emulator_info"
+        ),
+        Binding(
+            "E", "action_key('E')", "Device Settings", show=False, id="device_settings"
+        ),
+        Binding("f", "action_key('f')", "Frida", show=False, id="frida"),
+        Binding("s", "screenshot", "Screenshot", show=False, id="screenshot"),
+        Binding("g", "action_key('g')", "Screen Record", show=False, id="screenrecord"),
         # Analysis
-        Binding("m", "action_key('m')", "Dexray", show=False),
-        Binding("t", "trigdroid", "TrigDroid", show=False),
-        Binding("k", "action_key('k')", "Reconfigure Hooks", show=False),
-        Binding("a", "action_key('a')", "Analyze", show=False),
-        Binding("b", "objection", "Objection", show=False),
-        Binding("O", "resume_objection", "Resume Objection", show=False),
-        Binding("F", "forensic_evidence", "Forensic Evidence", show=False),
+        Binding("m", "action_key('m')", "Dexray", show=False, id="dexray"),
+        Binding("t", "trigdroid", "TrigDroid", show=False, id="trigdroid"),
+        Binding(
+            "k", "action_key('k')", "Reconfigure Hooks", show=False,
+            id="reconfigure_hooks",
+        ),
+        Binding("a", "action_key('a')", "Analyze", show=False, id="static_analysis"),
+        Binding("b", "objection", "Objection", show=False, id="objection"),
+        Binding(
+            "O", "resume_objection", "Resume Objection", show=False,
+            id="objection_resume",
+        ),
+        Binding(
+            "F", "forensic_evidence", "Forensic Evidence", show=False,
+            id="forensic_evidence",
+        ),
         # Network
-        Binding("y", "proxy", "Proxy", show=False),
-        Binding("h", "action_key('h')", "FriTap", show=False),
-        Binding("w", "network_capture", "Network Capture", show=False),
+        Binding("y", "proxy", "Proxy", show=False, id="proxy"),
+        Binding("h", "action_key('h')", "FriTap", show=False, id="fritap"),
+        Binding(
+            "w", "network_capture", "Network Capture", show=False, id="network_capture"
+        ),
         # Other
-        Binding("n", "install_apk", "Install APK", show=False),
-        # Snapshots
-        Binding("0", "action_key('0')", "Snapshots", show=False),
-        Binding("1", "action_key('1')", "Snapshot 1", show=False),
-        Binding("2", "action_key('2')", "Snapshot 2", show=False),
-        Binding("3", "action_key('3')", "Snapshot 3", show=False),
-        Binding("4", "action_key('4')", "Snapshot 4", show=False),
-        Binding("5", "action_key('5')", "Snapshot 5", show=False),
-        Binding("6", "action_key('6')", "Snapshot 6", show=False),
-        Binding("7", "action_key('7')", "Snapshot 7", show=False),
-        Binding("8", "action_key('8')", "Snapshot 8", show=False),
+        Binding("n", "install_apk", "Install APK", show=False, id="new_apk"),
+        # Snapshots — [0] opens the tab, [1-8] load slots, [Ctrl+1-8] save to slots.
+        Binding("0", "open_snapshots", "Snapshots", show=False, id="show_snapshots"),
+        Binding("1", "load_slot('1')", "Load slot 1", show=False, id="load_slot_1"),
+        Binding("2", "load_slot('2')", "Load slot 2", show=False, id="load_slot_2"),
+        Binding("3", "load_slot('3')", "Load slot 3", show=False, id="load_slot_3"),
+        Binding("4", "load_slot('4')", "Load slot 4", show=False, id="load_slot_4"),
+        Binding("5", "load_slot('5')", "Load slot 5", show=False, id="load_slot_5"),
+        Binding("6", "load_slot('6')", "Load slot 6", show=False, id="load_slot_6"),
+        Binding("7", "load_slot('7')", "Load slot 7", show=False, id="load_slot_7"),
+        Binding("8", "load_slot('8')", "Load slot 8", show=False, id="load_slot_8"),
+        Binding(
+            "ctrl+1", "save_slot('1')", "Save slot 1", show=False, id="save_slot_1"
+        ),
+        Binding(
+            "ctrl+2", "save_slot('2')", "Save slot 2", show=False, id="save_slot_2"
+        ),
+        Binding(
+            "ctrl+3", "save_slot('3')", "Save slot 3", show=False, id="save_slot_3"
+        ),
+        Binding(
+            "ctrl+4", "save_slot('4')", "Save slot 4", show=False, id="save_slot_4"
+        ),
+        Binding(
+            "ctrl+5", "save_slot('5')", "Save slot 5", show=False, id="save_slot_5"
+        ),
+        Binding(
+            "ctrl+6", "save_slot('6')", "Save slot 6", show=False, id="save_slot_6"
+        ),
+        Binding(
+            "ctrl+7", "save_slot('7')", "Save slot 7", show=False, id="save_slot_7"
+        ),
+        Binding(
+            "ctrl+8", "save_slot('8')", "Save slot 8", show=False, id="save_slot_8"
+        ),
         # Clipboard / Settings
         Binding("Y", "copy_log", "Copy Log", show=False),
         Binding("comma", "show_settings", "Settings", show=True),
@@ -184,7 +231,7 @@ class SandroidTUI(App):
         )
         self._sandroid_theme = get_theme(self._sandroid_theme_name)
         self._modal_manager: ModalManager | None = None
-        self._sub_title = "Android Forensic Analysis"
+        self._sub_title = "Android Analysis"
 
         super().__init__(**kwargs)
 
@@ -446,6 +493,13 @@ class SandroidTUI(App):
     def _post_main_screen_setup(self) -> None:
         """Run common setup after MainScreen is installed."""
         self._register_frida_device_change_callback()
+        # Apply user keybinding overrides from the static config (live).
+        try:
+            cfg = self._sandroid_config
+            if cfg is not None and getattr(cfg, "tui", None) is not None:
+                self.set_keymap(cfg.tui.keybindings or {})
+        except Exception as exc:
+            logger.debug(f"Failed to apply keybindings: {exc}")
         logger.debug(
             f"[APP MOUNT] Complete. Stack: {[type(s).__name__ for s in self.screen_stack]}"
         )
@@ -606,22 +660,47 @@ class SandroidTUI(App):
     def _get_main_screen(self) -> MainScreen | None:
         return self.screen if isinstance(self.screen, MainScreen) else None
 
-    def action_switch_view(self) -> None:
-        """Switch to the next view in the cycle."""
-        from textual.screen import ModalScreen
-
-        if isinstance(self.screen, ModalScreen):
-            self.screen.focus_next()
-            return
-
-        main_screen = self._get_main_screen()
-        if main_screen:
-            main_screen.switch_view()
-
     def action_show_help(self) -> None:
-        """Show the help overlay."""
-        current_view = self._get_current_view()
-        self.push_screen(HelpScreen(current_view=current_view))
+        """Toggle the help & keybindings overlay.
+
+        ``?`` is an app-level priority binding, so it fires before the editor's
+        own ``?``-to-close binding. Toggle here so pressing ``?`` inside Help
+        closes it instead of stacking a second copy.
+        """
+        if isinstance(self.screen, HelpScreen):
+            self.pop_screen()
+            return
+        self.push_screen(HelpScreen())
+
+    def _snapshots_panel(self):
+        """The SnapshotsPanel on the main screen, or None if unavailable."""
+        screen = self._get_main_screen()
+        if screen is None:
+            return None
+        try:
+            from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+            return screen.query_one("#snapshots-panel", SnapshotsPanel)
+        except Exception:
+            return None
+
+    def action_load_slot(self, slot: str) -> None:
+        """Load the snapshot assigned to ``slot`` (keys 1-8)."""
+        panel = self._snapshots_panel()
+        if panel is not None:
+            panel.load_slot(slot)
+
+    def action_save_slot(self, slot: str) -> None:
+        """Save the current state into ``slot`` (keys Ctrl+1-8)."""
+        panel = self._snapshots_panel()
+        if panel is not None:
+            panel.save_slot(slot)
+
+    def action_open_snapshots(self) -> None:
+        """Open the Snapshots tab in the bottom strip (key 0)."""
+        screen = self._get_main_screen()
+        if screen is not None:
+            screen.open_snapshots_tab()
 
     def action_show_settings(self) -> None:
         """Show the settings screen."""
@@ -710,9 +789,7 @@ class SandroidTUI(App):
             # now_active=False and must NOT render as an error.
             def _report() -> None:
                 if was_active:
-                    self.notify(
-                        "SSL pinning bypass stopped", severity="information"
-                    )
+                    self.notify("SSL pinning bypass stopped", severity="information")
                 elif ok:
                     self.notify(msg, severity="information")
                 else:
@@ -890,13 +967,13 @@ class SandroidTUI(App):
         self._sub_title = value
 
     def update_subtitle_for_view(self, view: str) -> None:
-        """Update subtitle based on view name."""
-        titles = {
-            "forensic": "Android Forensic Analysis",
-            "malware": "Android Malware Analysis",
-            "security": "Android Security Analysis",
-        }
-        self._sub_title = titles.get(view.lower(), "Android Forensic Analysis")
+        """Set the fixed app subtitle.
+
+        TODO(modes-as-presets): View modes were removed, so the subtitle is now
+        fixed. The ``view`` argument is retained for caller compatibility and
+        will drive presets again in a later feature.
+        """
+        self._sub_title = "Android Analysis"
 
     # -- Vim-style scrolling --------------------------------------------------
 
@@ -1069,7 +1146,6 @@ class SandroidTUI(App):
         dispatch = {
             "device_selector": self.action_show_device_selector,
             "help": self.action_show_help,
-            "switch_view": self.action_switch_view,
             "quit": self.action_quit,
         }
         handler = dispatch.get(message.action_name)

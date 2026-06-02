@@ -32,8 +32,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sandroid.core.enums import ViewMode
-
 logger = logging.getLogger(__name__)
 
 
@@ -399,25 +397,15 @@ class ForensicAPKController:
         return len(self.get_forensic_apks()) > 0
 
     def handle_shift_g(self) -> bool:
-        """Handle Shift+G key press.
+        """Handle Shift+G key press by opening the forensic APK manager.
 
-        In FORENSIC view, opens forensic APK manager.
-        In other views, scrolls to bottom.
+        TODO(modes-as-presets): The view-mode branch was removed (view modes
+        dropped from the TUI), so this always opens the forensic APK manager.
 
         Returns:
-            True if action was handled
+            True if the modal was shown
         """
-        if self._get_current_view:
-            current_view = self._get_current_view()
-            if current_view in (ViewMode.FORENSIC, ViewMode.FORENSIC.value):
-                return self.show_forensic_apk_modal()
-
-        # Not in forensic view - scroll to bottom
-        if self._scroll_to_bottom:
-            self._scroll_to_bottom()
-            return True
-
-        return False
+        return self.show_forensic_apk_modal()
 
     def show_forensic_apk_modal(self) -> bool:
         """Show forensic APK management modal.

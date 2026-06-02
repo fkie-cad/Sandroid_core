@@ -26,8 +26,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sandroid.core.enums import ViewMode
-
 logger = logging.getLogger(__name__)
 
 
@@ -109,17 +107,13 @@ class SpotlightController:
     def can_show_modal(self) -> tuple[bool, str]:
         """Check if spotlight modal can be shown.
 
+        TODO(modes-as-presets): The FORENSIC-view gate was removed (view modes
+        dropped from the TUI). Modes will return as user-selectable presets,
+        at which point a gate may be reintroduced here.
+
         Returns:
             Tuple of (can_show, reason_if_not)
         """
-        if self._get_current_view:
-            current_view = self._get_current_view()
-            if current_view not in (ViewMode.FORENSIC, ViewMode.FORENSIC.value):
-                return (
-                    False,
-                    "Spotlight Files is only available in FORENSIC view. Press TAB to switch.",
-                )
-
         return True, ""
 
     def get_spotlight_files(self) -> list[str]:

@@ -9,6 +9,7 @@ from sandroid.tui.widgets.menu_panel import MenuPanel
 from sandroid.tui.widgets.minimized_task_bar import MinimizedTaskBar
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
 from sandroid.tui.widgets.sandroid_footer import SandroidFooter
+from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
 from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 from sandroid.tui.widgets.status_bar import StatusBar
 
@@ -19,6 +20,7 @@ __all__ = [
     "MinimizedTaskBar",
     "MitmproxyPanel",
     "SandroidFooter",
+    "SnapshotsPanel",
     "SpotlightPanel",
     "StatusBar",
 ]
