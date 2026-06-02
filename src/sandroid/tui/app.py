@@ -11,6 +11,7 @@ Extracted modules:
 """
 
 import atexit
+import concurrent.futures
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -88,7 +89,9 @@ class SandroidTUI(App):
         Binding("escape", "maybe_quit", "Back/Quit", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
-        Binding("ctrl+p", "show_palette", "Commands", show=False),
+        Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
+        Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
+        Binding("ctrl+b", "toggle_bottom_panel", "Panel", show=True),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -647,6 +650,91 @@ class SandroidTUI(App):
             CommandPalette(current_view=current_view, on_action=on_action_selected)
         )
 
+    #: Bounded watchdog for the off-thread SSL toggle (> the BypassService's
+    #: 15s readiness wait + session-setup overhead), so a wedged Frida call can
+    #: never leave the toggle silent.
+    _SSL_UNPIN_TIMEOUT = 30.0
+
+    def action_toggle_ssl_unpin(self) -> None:
+        """Toggle SSL pinning bypass for the spotlight app.
+
+        Works from anywhere in the TUI — delegates to MitmproxyService which
+        owns the SSLUnpinManager instance. The toggle can block on Frida script
+        readiness, so it runs on a worker thread (under a bounded watchdog) and
+        results are marshalled back to the UI thread. Does not require mitmweb;
+        SSL unpin is purely a Frida operation.
+        """
+        from sandroid.services import get_spotlight_service
+        from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+        svc = get_mitmproxy_service()
+
+        if not svc.ssl_unpin_is_active():
+            try:
+                spotlight = get_spotlight_service()
+                if not spotlight.get_app_tuple():
+                    self.notify(
+                        "No spotlight app. Press C (attach) or Shift+C "
+                        "(spawn) first.",
+                        severity="warning",
+                    )
+                    return
+            except Exception as exc:
+                logger.warning("SSL unpin spotlight check failed: %s", exc)
+                self.notify(f"SSL unpin: {exc}", severity="error")
+                return
+
+        # Snapshot intent on the UI thread; the worker only does the toggle.
+        was_active = svc.ssl_unpin_is_active()
+
+        def _job() -> None:
+            ok, msg = False, ""
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                future = executor.submit(svc.toggle_ssl_unpin)
+                try:
+                    ok, msg = future.result(timeout=self._SSL_UNPIN_TIMEOUT)
+                except concurrent.futures.TimeoutError:
+                    ok, msg = False, "SSL unpin timed out — see logs"
+                    logger.error(
+                        "SSL unpin toggle exceeded %.0fs watchdog; abandoning",
+                        self._SSL_UNPIN_TIMEOUT,
+                    )
+            except Exception as exc:
+                ok, msg = False, str(exc)
+                logger.warning("SSL unpin toggle failed: %s", exc)
+            finally:
+                executor.shutdown(wait=False)
+
+            # Preserve the three-way branch: a successful turn-OFF returns
+            # now_active=False and must NOT render as an error.
+            def _report() -> None:
+                if was_active:
+                    self.notify(
+                        "SSL pinning bypass stopped", severity="information"
+                    )
+                elif ok:
+                    self.notify(msg, severity="information")
+                else:
+                    self.notify(f"SSL unpin failed: {msg}", severity="error")
+
+            try:
+                self.call_from_thread(_report)
+            except Exception:
+                pass
+
+        self.run_worker(_job, name="ssl_unpin_toggle", thread=True)
+
+    def action_toggle_bottom_panel(self) -> None:
+        """Toggle the bottom strip open/closed (Ctrl+B).
+
+        Use Left/Right to switch tabs once it is open. All strip logic lives
+        on MainScreen (which owns the widgets); the app just forwards the key.
+        """
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.toggle_bottom_panel()
+
     def action_show_device_selector(self) -> None:
         """Show the device selection modal."""
         from sandroid.core.toolbox import Toolbox
@@ -969,6 +1057,9 @@ class SandroidTUI(App):
         ms = self._get_main_screen()
         if ms:
             ms.execute_action_by_key(key)
+        # Spotlight selection (C attach / Shift+C spawn) does NOT force the
+        # panel open — it stays minimized by default. The panel live-updates
+        # via the EventBus whether shown or hidden; press Ctrl+B to view it.
 
     def on_command_palette_action_selected(
         self,

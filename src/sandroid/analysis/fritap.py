@@ -413,6 +413,25 @@ class FriTap(DataGatherBase):
                     f"FriTap may conflict with existing hooks: {conflict_details}"
                 )
 
+            # Guard against frida-java-bridge #218: loading friTap's agent (a
+            # 2nd Java bridge) onto a STILL-PAUSED spawn that already carries
+            # another Java-bridge script (e.g. a detection bypass) SIGSEGVs the
+            # agent. The natural flow avoids this — bypasses load paused, the app
+            # is resumed, THEN friTap attaches live — so refuse with guidance
+            # rather than crash. friTap as the first/only script on a paused
+            # spawn is fine (one bridge); only refuse when other jobs are
+            # already loaded on the still-paused process.
+            if self.job_manager.is_paused() and self.job_manager.running_jobs():
+                msg = (
+                    "Resume the app before loading friTap on a paused spawn — "
+                    "it attaches live, and stacking a 2nd Frida script on a "
+                    "still-paused spawn can crash the agent "
+                    "(frida-java-bridge #218). Press Enter/Resume first, then "
+                    "start friTap."
+                )
+                logger.error(msg)
+                raise RuntimeError(msg)
+
             # Start the job with metadata for job coordination
             # Use wrapped handler that forwards to activity log if enabled
             logger.debug(
