@@ -34,6 +34,20 @@ class ConfigLoader:
         self._config_dirs = self._get_config_directories()
         self._config_files = self._discover_config_files()
 
+    def _preferred_user_config_dir(self) -> Path:
+        """Preferred user config directory (XDG ``~/.config/<app>``).
+
+        This is the directory ``load()`` searches first and that the docs point
+        users to. ``save_config()`` writes here by default rather than the
+        platformdirs location (``~/Library/Application Support`` on macOS),
+        which ``load()`` only treats as a fallback.
+        """
+        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config_home:
+            return Path(xdg_config_home) / self.app_name
+        # Default to ~/.config/<app> on all platforms (including macOS)
+        return Path.home() / ".config" / self.app_name
+
     def _get_config_directories(self) -> list[Path]:
         """Get configuration directories following XDG specification.
 
@@ -42,14 +56,9 @@ class ConfigLoader:
         """
         dirs = []
 
-        # User config directory - prefer XDG style (~/.config/sandroid) on all platforms
-        # This is more consistent and expected by users
-        xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
-        if xdg_config_home:
-            user_dir = Path(xdg_config_home) / self.app_name
-        else:
-            # Default to ~/.config/sandroid on all platforms (including macOS)
-            user_dir = Path.home() / ".config" / self.app_name
+        # User config directory - prefer XDG style (~/.config/sandroid) on all
+        # platforms. This is more consistent and expected by users.
+        user_dir = self._preferred_user_config_dir()
         dirs.append(user_dir)
 
         # Also check platformdirs location as fallback (e.g., ~/Library/Application Support on macOS)
@@ -280,8 +289,10 @@ class ConfigLoader:
             Path where configuration was saved
         """
         if config_file is None:
-            # Use platform-appropriate config directory
-            user_dir = Path(user_config_dir(self.app_name))
+            # Write to the preferred XDG dir (~/.config/sandroid) — the location
+            # load() searches first and the docs document — not the platformdirs
+            # path, which load() only treats as a fallback.
+            user_dir = self._preferred_user_config_dir()
             user_dir.mkdir(parents=True, exist_ok=True)
             config_file = user_dir / f"sandroid.{format}"
         else:
