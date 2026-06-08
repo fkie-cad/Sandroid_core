@@ -22,23 +22,19 @@ By using this framework, you can:
 The framework is designed to simplify the process of **forensic investigations**, **mobile threat detection**, and **security testing** by providing a streamlined, automated environment for analysis.
 Whether you're investigating malicious apps, assessing security flaws, or collecting digital evidence, this solution helps you quickly identify and understand what happens inside Android applications.
 
-## Three Analysis Views
+## Interactive TUI
 
-Sandroid's TUI provides three specialized analysis views, each tailored to a different use case:
+Sandroid's default interface is an interactive terminal UI. Instead of separate analysis "views", it presents a **flat catalog of single-key actions** alongside three companion surfaces:
 
-| View | Purpose | Status |
-|------|---------|--------|
-| **Forensic** | Extract and analyze forensic artifacts from Android apps | Stable |
-| **Malware** | Behavioral analysis, hooking, and malware monitoring | Stable |
-| **Security** | Vulnerability scanning and security testing | Early Stage |
+- **`?` — Keybinding editor / action catalog.** Browse every action grouped by category and rebind any key (including `Ctrl` combinations) with live conflict detection. Bindings are persisted and applied immediately.
+- **`Ctrl+Shift+P` — Command palette.** Fuzzy-search and run any action by name.
+- **`Ctrl+B` — Bottom panel.** A collapsible strip with three tabs — **Spotlight**, **Mitmproxy**, and **Snapshots** — switched with `←`/`→`.
 
-Switch between views using the `TAB` key in the TUI, or launch directly with `--view`:
+Common operations are a single keypress (run an analysis, set the proxy, attach to or spawn a target app, toggle SSL unpinning with `Ctrl+P`, …). Press `?` at any time to see and customise the full list.
 
-```bash
-sandroid --view forensic    # Start in forensic view
-sandroid --view malware     # Start in malware view
-sandroid --view security    # Start in security view
-```
+The **Snapshots** tab keeps an 8-slot snapshot memory per AVD: `1`–`8` load a slot, `Ctrl+1`–`Ctrl+8` save into a slot, and `a` assigns the highlighted snapshot to a slot.
+
+> A legacy Rich interface is still available via `sandroid -i`, and fully non-interactive runs via `--headless`.
 
 <p align="center">
   <img src="assets/screenshots/sandroid_tui.png" alt="Sandroid TUI" width="700"/>
@@ -123,6 +119,37 @@ Output & Debugging:
   --log                           Show log messages in terminal
 ```
 
+> **Note:** `--view` and `--mode` only affect the legacy Rich interface (`sandroid -i`) and headless runs. The default TUI uses a flat, customisable action catalog (press `?`) rather than switchable views.
+
+
+## Network Interception & Bypass
+
+Sandroid can route a target app's traffic through an embedded **mitmproxy** instance and defeat the common defences that get in the way of inspection.
+
+**mitmproxy capture.** Open the **Mitmproxy** tab (`Ctrl+B`) and press `Enter` to start `mitmweb`; this automatically points the device's HTTP proxy at the host. The proxy listens on `:8080` and the web UI is served at `http://127.0.0.1:8081/` (`Ctrl+O` opens it). The panel tails every flow and TLS failure live. Requires `mitmweb` on `PATH` (`pip install mitmproxy`).
+
+**CA certificate injection.** Press `y` to open the proxy dialog. Sandroid auto-detects the host CA certificate from mitmproxy (`~/.mitmproxy/mitmproxy-ca-cert.pem`), HTTP Toolkit, or Burp Suite (a custom path is also accepted) and injects it into the device's system trust store. On Android 14+ (API ≥ 34) it bind-mounts the certificate into the Conscrypt APEX trust store; on older releases it copies into the Zygote mount namespace. It also writes the Chrome command-line flags needed to bypass Certificate Transparency enforcement.
+
+**Certificate-pinning & detection bypass.** Sandroid ships a Frida-based bypass suite with four categories — **SSL** unpinning, **Root**, **Frida**, and **Debug** detection — toggled from the **Spotlight** tab (`Ctrl+P` is a global shortcut for SSL unpinning). SSL unpinning covers `SSLContext`, OkHttp `CertificatePinner`, Conscrypt, WebView, TrustKit, Certificate Transparency, and native BoringSSL. All four categories live in a single resident Frida script that is flag-gated at runtime, so toggling one is instant and never leaves the app momentarily un-hooked.
+
+> These bypasses require a rooted AVD with `frida-server` running and a target app attached or spawned first.
+
+**Custom mitmproxy addons.** You can load your own [mitmproxy addons](https://docs.mitmproxy.org/stable/addons-overview/) alongside Sandroid's built-in traffic logger. An addon is a standard mitmproxy script — a Python file that defines event hooks like `def response(flow): ...`, optionally a class exposing `addons = [...]`. Sandroid scans two drop-in folders for top-level `*.py` files (an `examples/` subdirectory is ignored):
+
+- `~/.config/sandroid/mitm_addons/` — per-user; created on first run with a `README.md` and an `examples/example_logger.py` template.
+- `./mitm_addons/` in the current working directory — handy for shipping addons together with a project.
+
+To enable addons, open the **Mitmproxy** tab (`Ctrl+B`) and press `Ctrl+A` for the addon manager — a checklist of every discovered addon. Tick the ones to load (or type a custom path directly); the selection is saved to your config under `mitmproxy.enabled_addons` and restored on the next run. A minimal addon looks like this:
+
+```python
+# ~/.config/sandroid/mitm_addons/log_urls.py
+def response(flow):
+    print(f"[my-addon] {flow.request.pretty_url} -> {flow.response.status_code}")
+```
+
+Editing an already-loaded addon file **hot-reloads** it live — no restart, no dropped traffic. Changing *which* addons are enabled restarts `mitmweb` (which briefly resets the live flow counters).
+
+> Addons run as arbitrary, unsandboxed Python with the proxy process's privileges. Only enable scripts you trust.
 
 With its modular architecture, Sandroid integrates multiple companion tools to cover a wide range of analysis capabilities — from cryptographic key extraction to TLS interception and network traffic decryption.
 
@@ -239,18 +266,18 @@ sandroid-config devices           # List connected devices
 ## Screenshots
 
 <p align="center">
-  <img src="assets/screenshots/sandroid_forensic_view.png" alt="Forensic View" width="600"/>
-  <br><em>Forensic Analysis View</em>
+  <img src="assets/screenshots/sandroid_welcome.png" alt="Sandroid welcome screen" width="600"/>
+  <br><em>Welcome screen</em>
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/sandroid_malware_view.png" alt="Malware View" width="600"/>
-  <br><em>Malware Analysis View</em>
+  <img src="assets/screenshots/sandroid_malware_spawn.png" alt="Spawning a target app" width="600"/>
+  <br><em>Spawning a target app for instrumentation</em>
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/sandroid_security_view.png" alt="Security View" width="600"/>
-  <br><em>Security View (Early Stage)</em>
+  <img src="assets/screenshots/sandroid_malware_attach.png" alt="Attaching to a running app" width="600"/>
+  <br><em>Attaching to a running app</em>
 </p>
 
 ## Contributing
