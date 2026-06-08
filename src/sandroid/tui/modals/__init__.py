@@ -48,6 +48,7 @@ from .install_warning_modal import InstallWarningModal, InstallWarningResult
 from .ioc_choice_modal import IOCChoiceModal, IOCChoiceResult
 from .ioc_setup_modal import IOCSetupModal, IOCSetupResult
 from .message_modal import ErrorModal, MessageModal
+from .mitmproxy_addons_modal import MitmproxyAddonsModal, MitmproxyAddonsResult
 from .mvt_results_modal import MVTResultsAction, MVTResultsModal
 from .network_capture_modal import NetworkCaptureModal, NetworkCaptureResult
 from .objection_modal import ObjectionConfig, ObjectionModal, build_objection_command
@@ -117,6 +118,8 @@ __all__ = [
     "MVTResultsAction",
     "MVTResultsModal",
     "MessageModal",
+    "MitmproxyAddonsModal",
+    "MitmproxyAddonsResult",
     "NetworkCaptureModal",
     "NetworkCaptureResult",
     "ObjectionConfig",

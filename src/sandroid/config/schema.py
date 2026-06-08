@@ -463,6 +463,37 @@ class MVTConfig(BaseModel):
         return v
 
 
+class MitmproxyConfig(BaseModel):
+    """mitmproxy (mitmweb) integration configuration.
+
+    Controls the embedded mitmweb subprocess used for network interception
+    and the user-supplied addon scripts loaded into it.
+    """
+
+    proxy_port: int = Field(
+        default=8080, description="Listen port for the mitmproxy HTTP proxy"
+    )
+    web_port: int = Field(default=8081, description="Port for the mitmweb web UI")
+    web_host: str = Field(
+        default="127.0.0.1", description="Bind host for the mitmweb web UI"
+    )
+    addons_dir: Path = Field(
+        default=Path("~/.config/sandroid/mitm_addons/").expanduser(),
+        description="Directory scanned for user-supplied mitmproxy addons",
+    )
+    enabled_addons: list[str] = Field(
+        default_factory=list,
+        description=("Resolved absolute path strings of addons to load into mitmweb"),
+    )
+
+    @validator("addons_dir", pre=True)
+    def expand_addons_dir(cls, v):
+        """Expand user path/env for the addons directory."""
+        if isinstance(v, (str, Path)) and v:
+            return Path(str(v)).expanduser()
+        return v
+
+
 class DevicePathsConfig(BaseModel):
     """Android device filesystem paths.
 
@@ -785,6 +816,7 @@ class SandroidConfig(BaseModel):
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
+    mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     device_paths: DevicePathsConfig = Field(default_factory=DevicePathsConfig)
     external_urls: ExternalURLsConfig = Field(default_factory=ExternalURLsConfig)

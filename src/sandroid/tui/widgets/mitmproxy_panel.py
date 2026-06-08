@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
+import subprocess
+import sys
 import threading
 import webbrowser
+from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.widget import Widget
@@ -57,6 +61,7 @@ class MitmproxyPanel(Widget):
         ("ctrl+l", "clear_log", "Clear log"),
         ("ctrl+v", "toggle_verbose", "Verbose plumbing"),
         ("ctrl+p", "toggle_ssl_unpin", "SSL Unpin"),
+        ("ctrl+a", "manage_addons", "Addons"),
     ]
 
     #: Bounded watchdog for the off-thread SSL toggle (> the BypassService's
@@ -243,6 +248,12 @@ class MitmproxyPanel(Widget):
             extras.append(f"[#fb7185]tls✗ {st.tls_failures}[/]")
         if running:
             extras.append(f"flows [b]{st.flows_seen}[/]")
+        try:
+            addon_count = len(self._service.get_enabled_addons())
+        except Exception:
+            addon_count = 0
+        if addon_count:
+            extras.append(f"[#a78bfa]addons {addon_count}[/]")
         if st.verbose:
             extras.append("[#facc15]verbose[/]")
         extra_str = ("   " + "  ".join(extras)) if extras else ""
@@ -291,9 +302,7 @@ class MitmproxyPanel(Widget):
         if app:
             # Use [~] not [i] — RichLog markup parses [i] as an italic tag and
             # swallows it.
-            self._append_line(
-                f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS"
-            )
+            self._append_line(f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS")
 
     def _kick_state_refresh(self) -> None:
         """Probe real device setup state in a daemon thread, then apply."""
@@ -305,9 +314,7 @@ class MitmproxyPanel(Widget):
             except Exception:
                 pass
 
-        threading.Thread(
-            target=_run, name="mitm-setup-probe", daemon=True
-        ).start()
+        threading.Thread(target=_run, name="mitm-setup-probe", daemon=True).start()
 
     def _apply_setup_state(
         self, proxy_state: str, proxy_addr: str, ca_ok: bool, ct_ok: bool
@@ -341,15 +348,10 @@ class MitmproxyPanel(Widget):
                 try:
                     from sandroid.services import get_proxy_service
 
-                    host_ip = (
-                        get_proxy_service()._get_setup_service().get_host_ip()
-                    )
+                    host_ip = get_proxy_service()._get_setup_service().get_host_ip()
                 except Exception:
                     host_ip = ProxyManager.get_host_ip()
-                ours = (
-                    cfg.ip == host_ip
-                    and cfg.port == self._service.state.proxy_port
-                )
+                ours = cfg.ip == host_ip and cfg.port == self._service.state.proxy_port
                 proxy_state = "ours" if ours else "other"
         except Exception as exc:
             logger.debug("proxy state probe failed: %s", exc)
@@ -440,9 +442,7 @@ class MitmproxyPanel(Widget):
 
             # Find mitmproxy cert
             certs = ca_mgr.detect_ca_certificates()
-            mitm_cert = next(
-                (c for c in certs if c.source == CASource.MITMPROXY), None
-            )
+            mitm_cert = next((c for c in certs if c.source == CASource.MITMPROXY), None)
             if not mitm_cert:
                 self._append_line(
                     "[INFO] No mitmproxy CA cert found. Start mitmproxy once "
@@ -450,15 +450,11 @@ class MitmproxyPanel(Widget):
                 )
                 return
 
-            self._append_line(
-                f"[INFO] Injecting CA cert: {mitm_cert.path.name}"
-            )
+            self._append_line(f"[INFO] Injecting CA cert: {mitm_cert.path.name}")
             result = ca_mgr.inject_ca_into_zygote(mitm_cert.path)
             if result.success:
                 self._ca_ok = True
-                strategy_label = (
-                    result.strategy.value if result.strategy else "unknown"
-                )
+                strategy_label = result.strategy.value if result.strategy else "unknown"
                 self._append_line(
                     f"[INFO] [OK] CA injected ({strategy_label}, "
                     f"API {result.api_level}): {result.message}"
@@ -471,9 +467,7 @@ class MitmproxyPanel(Widget):
                     self._ct_ok = True
                     self._append_line(f"[INFO] {ct_msg}")
                 else:
-                    self._append_line(
-                        f"[INFO] Chrome CT bypass skipped: {ct_msg}"
-                    )
+                    self._append_line(f"[INFO] Chrome CT bypass skipped: {ct_msg}")
             elif result.needs_root:
                 from sandroid.tui.modals.confirm_modal import ConfirmModal
 
@@ -481,8 +475,7 @@ class MitmproxyPanel(Widget):
                     ConfirmModal(
                         title="Enable ADB Root?",
                         message=(
-                            "CA injection requires root access.\n"
-                            "Enable adb root now?"
+                            "CA injection requires root access.\nEnable adb root now?"
                         ),
                     ),
                     self._on_root_confirm,
@@ -536,8 +529,7 @@ class MitmproxyPanel(Widget):
                     self._refresh_header()
                     return
                 self._append_line(
-                    f"[INFO] Starting SSL unpin for "
-                    f"{spotlight.get_app_tuple()[0]}..."
+                    f"[INFO] Starting SSL unpin for {spotlight.get_app_tuple()[0]}..."
                 )
             except Exception as exc:
                 self._append_line(f"[ERROR] {exc}")
@@ -626,3 +618,57 @@ class MitmproxyPanel(Widget):
     def action_toggle_verbose(self) -> None:
         self._service.set_verbose(not self._service.state.verbose)
         self._refresh_header()
+
+    def action_manage_addons(self) -> None:
+        """Open the custom-addons checklist modal."""
+        from sandroid.tui.modals.mitmproxy_addons_modal import (
+            MitmproxyAddonsModal,
+        )
+
+        self.app.push_screen(
+            MitmproxyAddonsModal(service=self._service),
+            self._on_addons_selected,
+        )
+
+    def _on_addons_selected(self, result) -> None:
+        """Apply the addon selection returned by the modal.
+
+        Runs on the UI thread (push_screen dismiss callback), so it touches
+        the log directly — no ``call_from_thread`` needed.
+
+        Args:
+            result: A ``MitmproxyAddonsResult`` (or ``None`` if dismissed
+                without a value).
+        """
+        if result is None or result.cancelled:
+            return
+
+        restarted = self._service.set_enabled_addons(result.enabled_paths)
+        count = len(self._service.get_enabled_addons())
+        suffix = " — restarted mitmweb" if restarted else ""
+        self._append_line(f"[INFO] {count} addon(s) enabled{suffix}")
+
+        if result.open_folder:
+            self._open_addons_folder()
+
+        self._refresh_header()
+
+    def _open_addons_folder(self) -> None:
+        """Open the user addons directory in the OS file manager.
+
+        Best-effort: a raw ``webbrowser.open()`` on a folder is unreliable
+        (macOS opens a browser tab), so use a platform opener and fall back
+        to a ``file://`` URI.
+        """
+        target = self._service.user_addons_dir
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            elif sys.platform.startswith("win"):
+                os.startfile(str(target))  # type: ignore[attr-defined]  # noqa: S606
+            elif sys.platform.startswith("linux"):
+                subprocess.Popen(["xdg-open", str(target)])
+            else:
+                webbrowser.open(Path(target).as_uri())
+        except Exception as exc:
+            logger.warning("Failed to open addons folder %s: %s", target, exc)
