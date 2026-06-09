@@ -76,7 +76,18 @@ class FridaServerCommand(CommandHandler):
             ctx.toolbox.frida_manager.install_frida_server()
 
             logger.info("Starting Frida server on device")
-            ctx.toolbox.frida_manager.run_frida_server()
+            started = ctx.toolbox.frida_manager.run_frida_server()
+
+            if not started:
+                logger.error("Frida server failed to start")
+                return CommandResult(
+                    success=False,
+                    message="Frida server failed to start",
+                    error=(
+                        "run_frida_server() reported the server is not reachable. "
+                        "Check the log / `adb logcat` for an ART/SIGABRT tombstone."
+                    ),
+                )
 
             logger.info("Frida server started successfully")
             return CommandResult(

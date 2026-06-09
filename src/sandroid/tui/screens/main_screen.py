@@ -958,12 +958,20 @@ class MainScreen(Screen):
             frida_manager = frida_service.get_frida_manager()
             if frida_manager:
                 frida_manager.install_frida_server()
-                frida_manager.run_frida_server()
+                started = frida_manager.run_frida_server()
 
-                # Log success
-                self.app.call_from_thread(
-                    lambda: self._log_to_activity("Frida server installed and started")
-                )
+                if started:
+                    # Log success
+                    self.app.call_from_thread(
+                        lambda: self._log_to_activity("Frida server installed and started")
+                    )
+                else:
+                    self.app.call_from_thread(
+                        lambda: self._log_to_activity(
+                            "Frida server failed to start (see log / adb logcat)",
+                            error=True,
+                        )
+                    )
 
                 # Now execute the original action
                 if self.action_queue:
