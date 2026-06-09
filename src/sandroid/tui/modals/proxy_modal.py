@@ -173,6 +173,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._ca_manager = CAManager()
         self._detected_cas: list[CAInfo] = []
         self._zygote_status: ZygoteStatus | None = None
+        self._pending_ca_path = None
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -406,8 +407,40 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             self.notify("Please select a valid CA certificate", severity="warning")
 
     def action_inject_ca(self) -> None:
-        """Inject the CA into Zygote."""
+        """Confirm Zygote restart, then inject the CA into Zygote."""
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
         ca_path = self._get_selected_ca_path()
+        self._pending_ca_path = ca_path
+        self.app.push_screen(
+            ConfirmModal(
+                title="Restart Zygote to install CA?",
+                message=(
+                    "Installing the CA certificate requires restarting Zygote, "
+                    "the process every Android app is forked from.\n\n"
+                    "All running apps will close and the screen may flicker for "
+                    "a few seconds. The device does NOT reboot; it recovers on "
+                    "its own.\n\n"
+                    "Continue?"
+                ),
+                yes_label="Restart Zygote",
+                no_label="Cancel",
+            ),
+            self._on_restart_confirm,
+        )
+
+    def _on_restart_confirm(self, confirmed: bool) -> None:
+        """Handle Zygote restart confirmation result."""
+        if not confirmed:
+            self.notify(
+                "CA injection cancelled — Zygote not restarted",
+                severity="warning",
+            )
+            return
+        self._do_inject_ca(self._pending_ca_path)
+
+    def _do_inject_ca(self, ca_path) -> None:
+        """Inject the CA into Zygote."""
         result = self._ca_manager.inject_ca_into_zygote(ca_path)
         if result.success:
             self._refresh_zygote_status()
@@ -446,7 +479,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         success, msg = self._ca_manager.enable_adb_root()
         if success:
             self.notify("ADB root enabled", severity="information")
-            self.action_inject_ca()
+            self._do_inject_ca(self._pending_ca_path)
         else:
             self.notify(f"Failed to enable root: {msg}", severity="error")
 

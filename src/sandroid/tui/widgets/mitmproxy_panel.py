@@ -80,6 +80,7 @@ class MitmproxyPanel(Widget):
         self._ca_ok = False
         self._ct_ok = False
         self._unpin_hint_shown = False
+        self._pending_mitm_cert = None
         self.can_focus = True
 
     def compose(self) -> ComposeResult:
@@ -286,8 +287,10 @@ class MitmproxyPanel(Widget):
         """
         self._service.start()
         self._set_device_proxy()
+        # _auto_inject_ca owns the unpin nudge — it fires it on each of its
+        # exit paths (already-injected, no-cert, and the inject continuation)
+        # so the hint shows exactly once.
         self._auto_inject_ca()
-        self._nudge_unpin()
 
     def _nudge_unpin(self) -> None:
         """Hint at Ctrl+P when a spotlight app is set but unpin is off."""
@@ -438,6 +441,7 @@ class MitmproxyPanel(Widget):
                     if ct_ok:
                         self._ct_ok = True
                         self._append_line(f"[INFO] {ct_msg}")
+                self._nudge_unpin()
                 return
 
             # Find mitmproxy cert
@@ -448,10 +452,52 @@ class MitmproxyPanel(Widget):
                     "[INFO] No mitmproxy CA cert found. Start mitmproxy once "
                     "to generate it (~/.mitmproxy/), then restart."
                 )
+                self._nudge_unpin()
                 return
 
             self._append_line(f"[INFO] Injecting CA cert: {mitm_cert.path.name}")
-            result = ca_mgr.inject_ca_into_zygote(mitm_cert.path)
+            # Injection restarts Zygote — confirm before proceeding.
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            self._pending_mitm_cert = mitm_cert.path
+            self.app.push_screen(
+                ConfirmModal(
+                    title="Restart Zygote to install CA?",
+                    message=(
+                        "Installing the CA certificate requires restarting Zygote, "
+                        "the process every Android app is forked from.\n\n"
+                        "All running apps will close and the screen may flicker for "
+                        "a few seconds. The device does NOT reboot; it recovers on "
+                        "its own.\n\n"
+                        "Continue?"
+                    ),
+                    yes_label="Restart Zygote",
+                    no_label="Cancel",
+                ),
+                self._on_restart_confirm,
+            )
+            return
+        except Exception as exc:
+            logger.warning("Auto CA injection failed: %s", exc)
+            self._append_line(f"[ERROR] CA injection: {exc}")
+            self._nudge_unpin()
+
+    def _on_restart_confirm(self, confirmed: bool) -> None:
+        """Handle Zygote restart confirmation from the ConfirmModal."""
+        if not confirmed:
+            self._append_line("[INFO] CA injection cancelled — Zygote not restarted")
+            self._refresh_header()
+            self._nudge_unpin()
+            return
+        self._do_inject_ca(self._pending_mitm_cert)
+
+    def _do_inject_ca(self, cert_path) -> None:
+        """Inject the CA cert into Zygote (after restart confirmation)."""
+        try:
+            from sandroid.core.proxy_manager import CAManager
+
+            ca_mgr = CAManager()
+            result = ca_mgr.inject_ca_into_zygote(cert_path)
             if result.success:
                 self._ca_ok = True
                 strategy_label = result.strategy.value if result.strategy else "unknown"
@@ -459,10 +505,9 @@ class MitmproxyPanel(Widget):
                     f"[INFO] [OK] CA injected ({strategy_label}, "
                     f"API {result.api_level}): {result.message}"
                 )
-                self._refresh_header()
 
                 # Bypass Chrome Certificate Transparency enforcement
-                ct_ok, ct_msg = ca_mgr.bypass_chrome_ct(mitm_cert.path)
+                ct_ok, ct_msg = ca_mgr.bypass_chrome_ct(cert_path)
                 if ct_ok:
                     self._ct_ok = True
                     self._append_line(f"[INFO] {ct_msg}")
@@ -480,16 +525,22 @@ class MitmproxyPanel(Widget):
                     ),
                     self._on_root_confirm,
                 )
+                return
             else:
                 self._append_line(f"[ERROR] CA injection failed: {result.message}")
         except Exception as exc:
             logger.warning("Auto CA injection failed: %s", exc)
             self._append_line(f"[ERROR] CA injection: {exc}")
 
+        self._refresh_header()
+        self._kick_state_refresh()
+        self._nudge_unpin()
+
     def _on_root_confirm(self, confirmed: bool) -> None:
         """Handle root confirmation from the ConfirmModal."""
         if not confirmed:
             self._append_line("[INFO] Root not enabled — CA injection skipped")
+            self._nudge_unpin()
             return
         try:
             from sandroid.core.proxy_manager import CAManager
@@ -498,12 +549,14 @@ class MitmproxyPanel(Widget):
             success, msg = ca_mgr.enable_adb_root()
             if success:
                 self._append_line("[INFO] ADB root enabled, retrying CA injection")
-                self._auto_inject_ca()
+                self._do_inject_ca(self._pending_mitm_cert)
             else:
                 self._append_line(f"[ERROR] Failed to enable root: {msg}")
+                self._nudge_unpin()
         except Exception as exc:
             logger.warning("Root enable failed: %s", exc)
             self._append_line(f"[ERROR] Root enable: {exc}")
+            self._nudge_unpin()
 
     def action_toggle_ssl_unpin(self) -> None:
         """Toggle SSL pinning bypass via the service.

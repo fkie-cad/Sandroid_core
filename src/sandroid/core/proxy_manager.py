@@ -518,9 +518,13 @@ class CAManager:
                     if len(parts) >= 2:
                         try:
                             pid = int(parts[1])
-                            if "zygote64" in line:
+                            # Classify on the EXACT process name (last field)
+                            # so webview_zygote / usap32 / usap64 etc. are
+                            # ignored and not misassigned to zygote_pid.
+                            name = parts[-1]
+                            if name == "zygote64":
                                 zygote64_pid = pid
-                            elif "zygote" in line:
+                            elif name == "zygote":
                                 zygote_pid = pid
                         except ValueError:
                             continue
@@ -671,10 +675,133 @@ class CAManager:
             pass
         return None
 
+    def _inject_tmpfs_overlay(
+        self,
+        cert_name: str,
+        zygote_pids: list[int],
+        seed_dir: str,
+        rbind_to_apex: bool,
+    ) -> tuple[bool, str]:
+        """Shared tmpfs-overlay CA injection for legacy and bind-mount paths.
+
+        Stages the existing CA certs plus our cert, mounts a tmpfs over the
+        system cacerts dir, then makes the overlay visible to newly spawned
+        processes via the init (PID 1) mount namespace. On Android 14+
+        (``rbind_to_apex=True``) the overlay is r-bound into the APEX cacerts
+        dir; on Android 10-13 the system cacerts dir is read directly.
+
+        Args:
+            cert_name: Certificate filename (e.g. "a1b2c3d4.0").
+            zygote_pids: List of Zygote PIDs to restart.
+            seed_dir: Directory whose existing certs seed the overlay.
+            rbind_to_apex: Whether to r-bind the overlay into APEX cacerts.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        staging = "/data/local/tmp/sandroid-cacerts"
+        sys_ca = self.SYSTEM_CA_PATH
+        apex_ca = self.APEX_CA_PATH
+
+        try:
+            setup_cmds = [
+                self._root_cmd(f"rm -rf {staging} && mkdir -p {staging}"),
+                # Seed BEFORE the tmpfs mount hides the underlying dir.
+                self._root_cmd(f"cp {seed_dir}/* {staging}/"),
+                self._root_cmd(f"cp {self.DEVICE_CERT_PATH} {staging}/{cert_name}"),
+                self._root_cmd(f"mount -t tmpfs tmpfs {sys_ca}"),
+                self._root_cmd(f"cp {staging}/* {sys_ca}/"),
+                self._root_cmd(f"chown root:root {sys_ca}/*"),
+                self._root_cmd(f"chmod 644 {sys_ca}/*"),
+                self._root_cmd(f"chcon -R u:object_r:system_file:s0 {sys_ca}/"),
+            ]
+            for cmd in setup_cmds:
+                stdout, stderr = Adb.send_adb_command(f"shell {cmd}")
+                if stderr:
+                    logger.debug(f"tmpfs-overlay setup stderr: {stderr}")
+
+            verify_path = apex_ca if rbind_to_apex else sys_ca
+
+            if rbind_to_apex:
+                init_mount = (
+                    f"nsenter --mount=/proc/1/ns/mnt -- "
+                    f"/bin/mount --rbind {sys_ca} {apex_ca}"
+                )
+                Adb.send_adb_command(f"shell {self._root_cmd(init_mount)}")
+                init_verify = (
+                    f"nsenter --mount=/proc/1/ns/mnt -- ls {apex_ca}/{cert_name}"
+                )
+                stdout, _ = Adb.send_adb_command(
+                    f"shell {self._root_cmd(init_verify)}"
+                )
+                if cert_name not in (stdout or ""):
+                    return False, "Bind-mount into init namespace failed"
+                logger.info("Bind-mount into init namespace (PID 1) succeeded")
+            else:
+                init_verify = (
+                    f"nsenter --mount=/proc/1/ns/mnt -- ls {sys_ca}/{cert_name}"
+                )
+                stdout, _ = Adb.send_adb_command(
+                    f"shell {self._root_cmd(init_verify)}"
+                )
+                if cert_name not in (stdout or ""):
+                    return False, "tmpfs overlay not visible in init namespace"
+                logger.info("tmpfs CA overlay visible in init namespace (PID 1)")
+
+            # Kill Zygote so init restarts it. The new Zygote inherits
+            # init's mount namespace and Conscrypt reads the updated certs.
+            import time
+
+            for pid in zygote_pids:
+                try:
+                    Adb.send_adb_command(f"shell {self._root_cmd(f'kill {pid}')}")
+                except Exception:
+                    pass
+            time.sleep(3)
+
+            new_zyg, new_zyg64 = self.get_zygote_pids()
+            new_pids = [p for p in [new_zyg, new_zyg64] if p is not None]
+
+            verified = 0
+            for pid in new_pids:
+                try:
+                    verify_inner = (
+                        f"nsenter --mount=/proc/{pid}/ns/mnt -- "
+                        f"ls {verify_path}/{cert_name}"
+                    )
+                    stdout, _ = Adb.send_adb_command(
+                        f"shell {self._root_cmd(verify_inner)}"
+                    )
+                    if cert_name in (stdout or ""):
+                        verified += 1
+                except Exception:
+                    pass
+
+            if verified == 0:
+                return False, "Cert not visible in restarted Zygote"
+
+            label = "Bind-mount" if rbind_to_apex else "Legacy (tmpfs)"
+            return True, (
+                f"{label}: injected into init + {verified} restarted Zygote(s)"
+            )
+
+        except Exception as e:
+            logger.error(f"tmpfs-overlay injection error: {e}")
+            return False, f"Injection error: {e}"
+        finally:
+            # Cleanup staging
+            try:
+                Adb.send_adb_command(f"shell {self._root_cmd(f'rm -rf {staging}')}")
+            except Exception:
+                pass
+
     def _inject_legacy(
         self, cert_name: str, zygote_pids: list[int]
     ) -> tuple[bool, str]:
-        """Pre-Android-14 injection: copy cert into Zygote mount namespaces.
+        """Pre-Android-14 injection via a tmpfs overlay on system cacerts.
+
+        Seeds the overlay from the existing system cacerts dir and makes it
+        visible to restarted Zygotes through the init mount namespace.
 
         Args:
             cert_name: Certificate filename (e.g. "a1b2c3d4.0").
@@ -683,38 +810,12 @@ class CAManager:
         Returns:
             Tuple of (success, message).
         """
-        injected_count = 0
-        for pid in zygote_pids:
-            try:
-                inner = (
-                    f"nsenter --mount=/proc/{pid}/ns/mnt -- sh -c \""
-                    f"cp {self.DEVICE_CERT_PATH} {self.SYSTEM_CA_PATH}/{cert_name} && "
-                    f"chown root:root {self.SYSTEM_CA_PATH}/{cert_name} && "
-                    f"chmod 644 {self.SYSTEM_CA_PATH}/{cert_name} && "
-                    f"chcon u:object_r:system_file:s0 {self.SYSTEM_CA_PATH}/{cert_name}"
-                    f"\""
-                )
-                Adb.send_adb_command(f"shell {self._root_cmd(inner)}")
-
-                # Verify
-                verify_inner = (
-                    f"nsenter --mount=/proc/{pid}/ns/mnt -- "
-                    f"ls {self.SYSTEM_CA_PATH}/{cert_name}"
-                )
-                stdout, _ = Adb.send_adb_command(
-                    f"shell {self._root_cmd(verify_inner)}"
-                )
-                if cert_name in (stdout or ""):
-                    injected_count += 1
-                    logger.info(f"Legacy inject succeeded for PID {pid}")
-                else:
-                    logger.warning(f"Legacy inject verification failed for PID {pid}")
-            except Exception as e:
-                logger.error(f"Legacy inject failed for PID {pid}: {e}")
-
-        if injected_count > 0:
-            return True, f"Legacy: injected into {injected_count}/{len(zygote_pids)} Zygote(s)"
-        return False, "Legacy injection failed for all Zygote processes"
+        return self._inject_tmpfs_overlay(
+            cert_name,
+            zygote_pids,
+            seed_dir=self.SYSTEM_CA_PATH,
+            rbind_to_apex=False,
+        )
 
     def _inject_bind_mount(
         self, cert_name: str, zygote_pids: list[int]
@@ -728,100 +829,12 @@ class CAManager:
         Returns:
             Tuple of (success, message).
         """
-        staging = "/data/local/tmp/sandroid-cacerts"
-        sys_ca = self.SYSTEM_CA_PATH
-        apex_ca = self.APEX_CA_PATH
-
-        try:
-            # 1. Prepare staging directory with APEX certs + our cert
-            setup_cmds = [
-                self._root_cmd(f"rm -rf {staging} && mkdir -p {staging}"),
-                self._root_cmd(f"cp {apex_ca}/* {staging}/"),
-                self._root_cmd(f"cp {self.DEVICE_CERT_PATH} {staging}/{cert_name}"),
-                self._root_cmd(f"mount -t tmpfs tmpfs {sys_ca}"),
-                self._root_cmd(f"cp {staging}/* {sys_ca}/"),
-                self._root_cmd(f"chown root:root {sys_ca}/*"),
-                self._root_cmd(f"chmod 644 {sys_ca}/*"),
-                self._root_cmd(f"chcon -R u:object_r:system_file:s0 {sys_ca}/"),
-            ]
-
-            for cmd in setup_cmds:
-                stdout, stderr = Adb.send_adb_command(f"shell {cmd}")
-                if stderr:
-                    logger.debug(f"Bind-mount setup stderr: {stderr}")
-
-            # Bind-mount into init namespace (PID 1) so newly spawned
-            # processes (including restarted Zygote) inherit the mount.
-            init_mount = (
-                f"nsenter --mount=/proc/1/ns/mnt -- "
-                f"/bin/mount --rbind {sys_ca} {apex_ca}"
-            )
-            Adb.send_adb_command(f"shell {self._root_cmd(init_mount)}")
-
-            # Verify init namespace
-            init_verify = (
-                f"nsenter --mount=/proc/1/ns/mnt -- "
-                f"ls {apex_ca}/{cert_name}"
-            )
-            stdout, _ = Adb.send_adb_command(
-                f"shell {self._root_cmd(init_verify)}"
-            )
-            if cert_name not in (stdout or ""):
-                return False, "Bind-mount into init namespace failed"
-            logger.info("Bind-mount into init namespace (PID 1) succeeded")
-
-            # Kill Zygote so init restarts it. The new Zygote inherits
-            # init's mount namespace and Conscrypt reads the updated certs.
-            import time
-
-            for pid in zygote_pids:
-                try:
-                    Adb.send_adb_command(
-                        f"shell {self._root_cmd(f'kill {pid}')}"
-                    )
-                except Exception:
-                    pass
-            time.sleep(3)
-
-            # Get new Zygote PIDs after restart
-            new_zyg, new_zyg64 = self.get_zygote_pids()
-            new_pids = [p for p in [new_zyg, new_zyg64] if p is not None]
-
-            # Verify new Zygote sees the cert
-            verified = 0
-            for pid in new_pids:
-                try:
-                    verify_inner = (
-                        f"nsenter --mount=/proc/{pid}/ns/mnt -- "
-                        f"ls {apex_ca}/{cert_name}"
-                    )
-                    stdout, _ = Adb.send_adb_command(
-                        f"shell {self._root_cmd(verify_inner)}"
-                    )
-                    if cert_name in (stdout or ""):
-                        verified += 1
-                except Exception:
-                    pass
-
-            if verified == 0:
-                return False, "Cert not visible in restarted Zygote"
-
-            return True, (
-                f"Bind-mount: injected into init + "
-                f"{verified} restarted Zygote(s)"
-            )
-
-        except Exception as e:
-            logger.error(f"Bind-mount injection error: {e}")
-            return False, f"Bind-mount injection error: {e}"
-        finally:
-            # Cleanup staging
-            try:
-                Adb.send_adb_command(
-                    f"shell {self._root_cmd(f'rm -rf {staging}')}"
-                )
-            except Exception:
-                pass
+        return self._inject_tmpfs_overlay(
+            cert_name,
+            zygote_pids,
+            seed_dir=self.APEX_CA_PATH,
+            rbind_to_apex=True,
+        )
 
     def _inject_into_app_processes(
         self, zygote_pids: list[int], sys_ca: str, apex_ca: str

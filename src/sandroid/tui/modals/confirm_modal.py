@@ -26,6 +26,7 @@ class ConfirmModal(ForensicModal[bool]):
     }
 
     ConfirmModal .modal-message {
+        width: 100%;
         padding-bottom: 1;
     }
 
