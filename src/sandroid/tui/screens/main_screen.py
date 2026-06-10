@@ -73,24 +73,29 @@ class MainScreen(Screen):
     DEFAULT_CSS = """
     #tool-tabbar {
         height: 1;
-        background: #0b1628;
+        background: #0a1124;
+        padding: 0 0 0 1;
     }
     .tool-tab {
         width: auto;
         padding: 0 2;
+        margin: 0 1 0 0;
         color: #8f9bb3;
+        background: #11203a;
     }
     .tool-tab:hover {
+        color: #cbd5e1;
         background: #1f2937;
     }
     .tool-tab.-active {
-        color: #7dd3fc;
+        color: #06121f;
         text-style: bold;
-        background: #1f2937;
+        background: #38bdf8;
     }
     #tool-body {
         display: block;
         height: 1fr;
+        border-top: solid #1f2d4d;
     }
     """
 

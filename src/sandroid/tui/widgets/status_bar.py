@@ -3,6 +3,11 @@
 import os
 import threading
 
+from rich.box import ROUNDED
+from rich.console import RenderableType
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 from textual.widgets import Static
 
 from sandroid.core.adb import Adb
@@ -171,55 +176,58 @@ class StatusBar(Static):
 
         return colors
 
-    def render(self) -> str:
-        r"""Render the multi-row glance band.
+    def render(self) -> RenderableType:
+        r"""Render the glance band as an aligned label/value grid.
 
-        Uses FIXED_COLORS for status indicators (running/stopped, spawn/attach)
-        so they remain consistent across all themes for instant recognition.
-        View colors and text colors come from the active theme. The band is a
-        ``\n``-joined set of rows (Device · Frida · App · Hooks+Bypass ·
-        Proxy+Net); per-task detail still lives in the footer's task bar.
+        Returns a borderless Rich grid: right-justified muted labels, a faint
+        gutter rule, then the value column. FIXED_COLORS drive the status
+        glyphs (running/stopped, spawn/attach) so they read identically across
+        themes; theme colors drive labels and primary text. Multi-part items
+        (Device, App) use a continuation row (blank label) for their detail
+        line. Per-task detail still lives in the footer's task bar.
         """
         colors = self._get_theme_colors()
         muted = colors["text_muted"]
+        primary = colors["primary"]
+        run = FIXED_COLORS["running"]
+        stop = FIXED_COLORS["stopped"]
 
-        rows: list[str] = []
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(justify="right", style=muted, no_wrap=True)  # label
+        grid.add_column(style=muted, no_wrap=True)  # gutter rule
+        grid.add_column(overflow="fold")  # value
 
-        # -- Device row ---------------------------------------------------
-        # Name + cached Android version / API level / root (no ADB on render).
+        def row(label: str, value_markup: str) -> None:
+            grid.add_row(label, "│", Text.from_markup(value_markup))
+
+        # -- Device specs (the device NAME rides the panel's top border) --
+        # All specs are cached on the Device object — no ADB on render.
         if self.active_device:
-            parts = [
-                f"[{colors['primary']}]{self.device_type} {self.active_device}[/]"
-            ]
+            specs = []
             if self.device_android_version or self.device_api_level:
                 ver = self.device_android_version or "?"
                 api = self.device_api_level or "?"
-                parts.append(
-                    f"[{muted}]Android[/] {ver} [{muted}](API {api})[/]"
-                )
-            # Root: FIXED colors so it reads instantly across themes.
+                specs.append(f"Android {ver} [{muted}]· API {api}[/]")
             if self.device_rooted is True:
-                parts.append(f"[{FIXED_COLORS['running']}]root ✓[/]")
+                specs.append(f"[{run}]root ✓[/]")
             elif self.device_rooted is False:
-                parts.append(f"[{FIXED_COLORS['stopped']}]root ✗[/]")
-            device_display = f" [{muted}]·[/] ".join(parts)
-        else:
-            device_display = f"[{muted}]None[/]"
-        rows.append(f"[{muted}]Device[/]  {device_display}")
+                specs.append(f"[{stop}]root ✗[/]")
+            if specs:
+                row("OS", f" [{muted}]·[/] ".join(specs))
 
-        # -- Frida row (FIXED colors; version-mismatch logic untouched) ---
+        # -- Frida (FIXED colors; version-mismatch logic untouched) -------
         if self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida_display = "[#facc15 bold]● Running ⚠ mismatch[/]"
+                frida_display = "[#facc15 bold]● Running[/] [#facc15]⚠ mismatch[/]"
             else:
-                frida_display = f"[{FIXED_COLORS['running']} bold]● Running[/]"
+                frida_display = f"[{run} bold]● Running[/]"
         elif self.frida_status == "Checking...":
             frida_display = f"[{muted}]○ Checking…[/]"
         else:
-            frida_display = f"[{FIXED_COLORS['stopped']}]○ Not running[/]"
-        rows.append(f"[{muted}]Frida[/]   {frida_display}")
+            frida_display = f"[{stop}]○ Not running[/]"
+        row("Frida", frida_display)
 
-        # -- App row (package + SPAWN/ATTACH + pid + running/paused) ------
+        # -- App: package + mode, then pid/state continuation line --------
         if self.spotlight_app and self.spotlight_app != "None":
             mode = "SPAWN" if self.spawn_mode else "ATTACH"
             mode_color = (
@@ -227,66 +235,79 @@ class StatusBar(Static):
                 if self.spawn_mode
                 else FIXED_COLORS["attach_mode"]
             )
-            app_parts = [
-                f"[{colors['primary']}]{self.spotlight_app}[/]",
+            row(
+                "App",
+                f"[{primary}]{self.spotlight_app}[/] "
                 f"[{mode_color} bold]\\[{mode}][/]",
-            ]
-            if self.spotlight_pid:
-                app_parts.append(f"[{muted}]pid[/] [b]{self.spotlight_pid}[/]")
-            if self.spotlight_paused and self.spotlight_pid:
-                app_parts.append("[#fbbf24]◐ paused[/]")
+            )
+            if self.spotlight_pid and self.spotlight_paused:
+                state = "[#fbbf24]◐ paused[/]"
             elif self.spotlight_pid:
-                app_parts.append(f"[{FIXED_COLORS['running']}]● running[/]")
+                state = f"[{run}]● running[/]"
             else:
-                app_parts.append(f"[{FIXED_COLORS['stopped']}]○ not running[/]")
-            app_display = " ".join(app_parts)
+                state = f"[{stop}]○ not running[/]"
+            pid_part = (
+                f"[{muted}]pid[/] [b]{self.spotlight_pid}[/]  "
+                if self.spotlight_pid
+                else ""
+            )
+            row("", f"{pid_part}{state}")
         else:
-            app_display = f"[{muted}]None[/]"
-        rows.append(f"[{muted}]App[/]     {app_display}")
+            row("App", f"[{muted}]None[/]")
 
-        # -- Hooks + Bypass row -------------------------------------------
+        # -- Hooks + Bypass -----------------------------------------------
         on = set(self.bypass_categories)
-        bypass_cells = []
-        for category, label in (
-            ("ssl", "SSL"),
-            ("root", "Root"),
-            ("frida", "Frida"),
-            ("debug", "Debug"),
-        ):
-            if category in on:
-                bypass_cells.append(f"[{FIXED_COLORS['running']}]●[/] {label}")
+        bypass_cells = [
+            f"[{run}]●[/] {label}"
+            for category, label in (
+                ("ssl", "SSL"),
+                ("root", "Root"),
+                ("frida", "Frida"),
+                ("debug", "Debug"),
+            )
+            if category in on
+        ]
         bypass_display = " ".join(bypass_cells) if bypass_cells else f"[{muted}]none[/]"
-        rows.append(
-            f"[{muted}]Hooks[/]   [b]{self.hook_count}[/]"
-            f" [{muted}]· Bypass[/] {bypass_display}"
+        row(
+            "Hooks",
+            f"[b]{self.hook_count}[/] [{muted}]active · bypass[/] {bypass_display}",
         )
 
-        # -- Proxy + Net row ----------------------------------------------
+        # -- Proxy / Net --------------------------------------------------
         if self.proxy_address:
-            proxy_display = f"[{FIXED_COLORS['running']}]● {self.proxy_address}[/]"
+            row("Proxy", f"[{run}]● {self.proxy_address}[/]")
         else:
-            proxy_display = f"[{muted}]○ none[/]"
+            row("Proxy", f"[{muted}]○ none[/]")
         if self.network_capture_running:
             filename = (
                 os.path.basename(self.network_capture_file)
                 if self.network_capture_file
                 else "capture.pcap"
             )
-            net_display = f"[{FIXED_COLORS['running']}]● {filename}[/]"
+            row("Net", f"[{run}]● {filename}[/]")
         else:
-            net_display = f"[{muted}]○ idle[/]"
-        proxy_row = (
-            f"[{muted}]Proxy[/]   {proxy_display}  [{muted}]Net[/] {net_display}"
-        )
+            row("Net", f"[{muted}]○ idle[/]")
 
-        # Append the optional theme indicator to the Proxy/Net row's tail.
+        # Optional theme indicator as its own row.
         if self.show_theme_indicator:
-            proxy_row += (
-                f"   [{muted}]^t[/] [{colors['primary']}]{self.current_theme}[/]"
-            )
-        rows.append(proxy_row)
+            row("Theme", f"[{primary}]{self.current_theme}[/] [{muted}](^t)[/]")
 
-        return "\n".join(rows)
+        # Wrap the grid in a titled box; the device name rides the top border.
+        if self.active_device:
+            title = Text.from_markup(
+                f"[{primary} bold] {self.device_type} {self.active_device} [/]"
+            )
+        else:
+            title = Text.from_markup(f"[{muted}] No device [/]")
+        return Panel(
+            grid,
+            title=title,
+            title_align="left",
+            border_style=primary,
+            box=ROUNDED,
+            padding=(0, 1),
+            expand=True,
+        )
 
     def update_from_toolbox(self) -> None:
         """Update status from Toolbox state."""
