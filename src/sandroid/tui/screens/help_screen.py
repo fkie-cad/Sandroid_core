@@ -68,9 +68,11 @@ _CATEGORY_ORDER: list[ActionCategory] = [
 ]
 
 # Column widths for the aligned row layout (command / description / key).
-_NAME_W = 18
-_DESC_W = 38
-_KEY_W = 12
+# Sized for the wide modal so rows rarely truncate; the detail pane below the
+# list always shows the highlighted row's full, untruncated text regardless.
+_NAME_W = 32
+_DESC_W = 50
+_KEY_W = 14
 
 
 def _format_key_display(key: str) -> str:
@@ -119,11 +121,11 @@ class HelpScreen(ModalScreen):
     }
 
     #kb-container {
-        width: 92;
-        height: auto;
-        max-height: 40;
+        width: 110;
+        height: 90%;
+        max-height: 48;
         background: #0d1117;
-        border: solid #2f81f7;
+        border: round #2f81f7;
         padding: 1 2;
     }
 
@@ -136,14 +138,22 @@ class HelpScreen(ModalScreen):
     }
 
     #kb-list {
-        height: auto;
-        max-height: 30;
+        height: 1fr;
         background: #161b22;
         border: solid #30363d;
     }
 
     #kb-list:focus {
         border: solid #2f81f7;
+    }
+
+    #kb-detail {
+        height: auto;
+        min-height: 6;
+        background: #161b22;
+        border: solid #30363d;
+        padding: 0 1;
+        margin-top: 1;
     }
 
     #kb-footer {
@@ -230,6 +240,7 @@ class HelpScreen(ModalScreen):
                 id="kb-title",
             )
             yield OptionList(id="kb-list")
+            yield Static("", id="kb-detail")
             yield Static(self._footer_text(), id="kb-footer")
 
     def on_mount(self) -> None:
@@ -360,6 +371,74 @@ class HelpScreen(ModalScreen):
             option_list.highlighted = previous
         elif first_enabled is not None:
             option_list.highlighted = first_enabled
+
+        self._refresh_detail()
+
+    # -- Detail pane ----------------------------------------------------------
+
+    def on_option_list_option_highlighted(
+        self, event: OptionList.OptionHighlighted
+    ) -> None:
+        """Show the highlighted action's full detail in the pane below the list."""
+        oid = getattr(event.option, "id", None)
+        self._set_detail(self._detail_markup(oid) if oid else "")
+
+    def _refresh_detail(self) -> None:
+        """Re-render the detail pane for the currently highlighted row."""
+        try:
+            option_list = self.query_one("#kb-list", OptionList)
+            highlighted = option_list.highlighted
+            if highlighted is None:
+                self._set_detail("")
+                return
+            option = option_list.get_option_at_index(highlighted)
+        except Exception:
+            return
+        oid = getattr(option, "id", None)
+        self._set_detail(self._detail_markup(oid) if oid else "")
+
+    def _set_detail(self, markup: str) -> None:
+        """Update the detail-pane text, tolerating a not-yet-mounted widget."""
+        try:
+            self.query_one("#kb-detail", Static).update(markup)
+        except Exception:
+            pass
+
+    def _detail_markup(self, action_id: str) -> str:
+        """Full, untruncated detail for one action: name · category, description, key."""
+        action = self._controller.get_action_by_name(action_id)
+        if action is None:
+            return ""
+        rebindable = action.name in self._defaults
+        full_desc = action.description or action.display_name
+        # Slot rows: append the assigned snapshot tag (cheap config read).
+        if action.name.startswith("load_slot_"):
+            tag = self._slot_assignments().get(action.name.rsplit("_", 1)[-1])
+            full_desc += f"  [dim]({('→ ' + tag) if tag else 'empty'})[/]"
+        cat = action.category.name.title()
+        cur = self._effective_key(action.name) if rebindable else action.key
+        cur_disp = _format_key_display(cur)
+
+        head = f"[bold #58a6ff]{action.display_name}[/]  [dim]·  {cat}[/]"
+        body = f"[#c9d1d9]{full_desc}[/]"
+        if rebindable:
+            default = self._defaults.get(action.name)
+            key_line = f"[dim]Key[/]  [bold #ff79c6]\\[{cur_disp}][/]"
+            if cur != default:
+                key_line += (
+                    f"   [dim]default[/] "
+                    f"[#8b949e]\\[{_format_key_display(default)}][/]"
+                    f" [yellow](overridden)[/]"
+                )
+            else:
+                key_line += "   [dim](default)[/]"
+            key_line += "   [dim]· Enter to rebind[/]"
+        else:
+            key_line = (
+                f"[dim]Key[/]  [#8b949e]\\[{cur_disp}][/]"
+                "   [dim](fixed — cannot be rebound)[/]"
+            )
+        return f"{head}\n\n{body}\n\n{key_line}"
 
     # -- Capture mode ---------------------------------------------------------
 
