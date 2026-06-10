@@ -29,6 +29,7 @@ For authorized security testing, forensic analysis, and research only.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -51,6 +52,42 @@ logger = logging.getLogger(__name__)
 # on the Job's own thread; start_job returns before it completes). Generous to
 # tolerate slow emulators loading large hook sets.
 _READINESS_TIMEOUT = 15.0
+
+
+@functools.lru_cache(maxsize=1)
+def _java_bridge_prelude() -> str:
+    """JS that defines global ``Java`` from frida_tools' version-matched bundle.
+
+    frida 17 no longer auto-injects the global ``Java`` (and ``ObjC``) into the
+    agent runtime, so every hook-set that references the bare global ``Java``
+    throws ``ReferenceError: 'Java' is not defined``. We restore it by reusing
+    the prebuilt ``frida_tools/bridges/java.js`` bundle — the exact one the
+    frida REPL loads on v17, so it stays version-synced with the installed
+    frida. Mirrors repl_agent.js. ``ObjC`` is intentionally NOT injected: the
+    hook-sets are Android-only and reference only ``Java``.
+    """
+    try:
+        from pathlib import Path
+
+        import frida_tools
+
+        src = (
+            Path(frida_tools.__file__).parent / "bridges" / "java.js"
+        ).read_text("utf-8")
+        # java.js evaluates to `var bridge = (function () { ... })();`; scope it
+        # in an IIFE and publish the result as the global `Java`.
+        return (
+            "(function () {\n"
+            + src
+            + "\nObject.defineProperty(globalThis, 'Java', { value: bridge });\n"
+            + "})();\n"
+        )
+    except Exception as exc:
+        logger.warning(
+            "Java bridge prelude unavailable (%s); hook-sets may fail on frida 17",
+            exc,
+        )
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1199,9 +1236,14 @@ class BypassService:
         keeps its own leading ``'use strict';`` which is a harmless no-op string
         once nested inside the IIFE's ``try`` block.
         """
+        # 'use strict' MUST stay first (it is only a directive at the very top).
+        # The Java bridge prelude runs next so globalThis.Java exists before any
+        # hook-set IIFE references it (frida 17 no longer auto-injects `Java`).
+        # ObjC is intentionally omitted — the hook-sets are Android-only.
         preamble = (
             "'use strict';\n"
-            "var FLAGS = " + json.dumps(initial_flags) + ";\n"
+            + _java_bridge_prelude()
+            + "var FLAGS = " + json.dumps(initial_flags) + ";\n"
             "rpc.exports = {\n"
             "    setFlags: function (f) {\n"
             "        if (f) {\n"

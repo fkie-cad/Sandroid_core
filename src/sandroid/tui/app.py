@@ -800,7 +800,35 @@ class SandroidTUI(App):
             except Exception:
                 pass
 
-        self.run_worker(_job, name="ssl_unpin_toggle", thread=True)
+        def _dispatch() -> None:
+            self.run_worker(_job, name="ssl_unpin_toggle", thread=True)
+
+        # Turning ON against a live (non-paused) spotlight process attaches
+        # Frida — gate on frida-server being up so the cryptic frida-core
+        # "need Gadget to attach on jailed Android" error never surfaces; show
+        # the install modal instead. Turning OFF (detach) and a not-running or
+        # paused app never attach, so dispatch directly.
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            app_running = get_bypass_service()._spotlight_running()
+        except Exception:
+            app_running = False
+
+        if not was_active and app_running:
+            from sandroid.tui.modals import ensure_frida_running
+
+            ensure_frida_running(
+                self,
+                "SSL unpin",
+                on_ready=_dispatch,
+                on_cancel=lambda: self.notify(
+                    "SSL unpin requires frida-server — cancelled.",
+                    severity="warning",
+                ),
+            )
+        else:
+            _dispatch()
 
     def action_toggle_bottom_panel(self) -> None:
         """Toggle the bottom strip open/closed (Ctrl+B).

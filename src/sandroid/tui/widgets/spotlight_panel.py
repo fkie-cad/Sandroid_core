@@ -466,7 +466,26 @@ class SpotlightPanel(Widget):
             _now_on, msg = self._bypass().toggle(category)
             return True, msg
 
-        self._run_action_bg(_work, f"toggle {category}")
+        label = f"toggle {category}"
+        # Only an ON toggle against a live (non-paused) process attaches Frida.
+        # OFF, arm-only (app stopped, applied on Start), and paused-spawn
+        # toggles keep the fast path; Start is already frida-gated by
+        # _run_frida_action. turning_on mirrors toggle()'s armed-or-active check
+        # (on_categories); needs_frida mirrors BypassService._spotlight_running.
+        turning_on = category not in self._bypass().on_categories()
+        needs_frida = turning_on and (
+            self._safe_pid() is not None and not self._is_paused()
+        )
+        if needs_frida and not self._frida_server_running():
+            # frida-server is down — prompt to install/start it via the shared
+            # modal instead of letting the attach fail with the cryptic
+            # frida-core "need Gadget to attach on jailed Android" error.
+            self._prompt_install_frida(
+                self._bypass().display_name(category),
+                lambda: self._run_action_bg(_work, label),
+            )
+        else:
+            self._run_action_bg(_work, label)
 
     # -- lifecycle actions (main-thread entry points) ---------------------
 
@@ -781,8 +800,11 @@ class SpotlightPanel(Widget):
 
         def on_result(result: FridaInstallResult | None) -> None:
             if not result or not result.install:
+                # Derived from ``feature`` so the wording fits every caller
+                # (spawn/restart/attach AND the bypass toggle) instead of always
+                # saying "spawn". Mirrors the modal's own "{feature} requires…".
                 self._notify(
-                    "frida-server is required to spawn — cancelled.", "warning"
+                    f"{feature} requires frida-server — cancelled.", "warning"
                 )
                 return
             self._install_frida_then(then)

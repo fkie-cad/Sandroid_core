@@ -40,7 +40,11 @@ from .folder_select_modal import (
     get_default_forensic_apks_folder,
 )
 from .forensic_apk_modal import ForensicAPKAction, ForensicAPKModal
-from .frida_install_modal import FridaInstallModal, FridaInstallResult
+from .frida_install_modal import (
+    FridaInstallModal,
+    FridaInstallResult,
+    ensure_frida_running,
+)
 from .fsmon_display_choice_modal import FSMonDisplayChoice, FSMonDisplayChoiceModal
 from .fsmon_modal import FSMonConfigModal, FSMonRunningModal
 from .input_modal import InputModal
@@ -150,5 +154,6 @@ __all__ = [
     "TrigDroidConfig",
     "TrigDroidModal",
     "build_objection_command",
+    "ensure_frida_running",
     "get_default_forensic_apks_folder",
 ]

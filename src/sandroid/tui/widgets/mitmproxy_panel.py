@@ -628,7 +628,38 @@ class MitmproxyPanel(Widget):
             except Exception:
                 pass
 
-        self.run_worker(_job, name="mitm_ssl_unpin_toggle", thread=True)
+        def _dispatch() -> None:
+            self.run_worker(_job, name="mitm_ssl_unpin_toggle", thread=True)
+
+        # Turning ON against a live (non-paused) spotlight process attaches
+        # Frida — gate on frida-server being up so the cryptic frida-core
+        # "need Gadget to attach on jailed Android" error never surfaces; show
+        # the install modal instead. Turning OFF (detach) and a not-running or
+        # paused app never attach, so dispatch directly.
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            app_running = get_bypass_service()._spotlight_running()
+        except Exception:
+            app_running = False
+
+        if not was_active and app_running:
+            from sandroid.tui.modals import ensure_frida_running
+
+            def _on_cancel() -> None:
+                self._append_line(
+                    "[INFO] SSL unpin cancelled — frida-server required"
+                )
+                self._refresh_header()
+
+            ensure_frida_running(
+                self.app,
+                "SSL unpin",
+                on_ready=_dispatch,
+                on_cancel=_on_cancel,
+            )
+        else:
+            _dispatch()
 
     def _on_unpin_message(self, payload) -> None:
         """Handle messages from the SSL unpin Frida script.
