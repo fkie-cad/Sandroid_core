@@ -50,12 +50,21 @@ class StatusBar(Static):
         self.active_device = ""
         self.device_type = ""
         self.device_count = 0
+        # Cached device metadata (populated at discovery — no ADB on refresh):
+        self.device_android_version = ""
+        self.device_api_level = 0
+        self.device_rooted: bool | None = None  # None = unknown
         self.background_tasks_count = 0
         self.background_tasks_display = ""
         self.forensic_apks_count = 0
         self.proxy_address = ""
         self.network_capture_running = False
         self.network_capture_file = ""
+        # Glance-band datums (cheap, in-process reads — no ADB):
+        self.spotlight_pid: int | None = None
+        self.spotlight_paused = False
+        self.hook_count = 0  # running hook tasks for the spotlight app
+        self.bypass_categories: list[str] = []  # 0-4 of ssl/root/frida/debug
         self.tools_checking = True
         self.sqldiff_available = False
         self.objection_available = False
@@ -163,25 +172,54 @@ class StatusBar(Static):
         return colors
 
     def render(self) -> str:
-        """Render the status bar content.
+        r"""Render the multi-row glance band.
 
         Uses FIXED_COLORS for status indicators (running/stopped, spawn/attach)
         so they remain consistent across all themes for instant recognition.
-        View colors and text colors come from the active theme.
+        View colors and text colors come from the active theme. The band is a
+        ``\n``-joined set of rows (Device · Frida · App · Hooks+Bypass ·
+        Proxy+Net); per-task detail still lives in the footer's task bar.
         """
         colors = self._get_theme_colors()
+        muted = colors["text_muted"]
 
-        # Frida status with FIXED colors (always same green/red regardless of theme)
+        rows: list[str] = []
+
+        # -- Device row ---------------------------------------------------
+        # Name + cached Android version / API level / root (no ADB on render).
+        if self.active_device:
+            parts = [
+                f"[{colors['primary']}]{self.device_type} {self.active_device}[/]"
+            ]
+            if self.device_android_version or self.device_api_level:
+                ver = self.device_android_version or "?"
+                api = self.device_api_level or "?"
+                parts.append(
+                    f"[{muted}]Android[/] {ver} [{muted}](API {api})[/]"
+                )
+            # Root: FIXED colors so it reads instantly across themes.
+            if self.device_rooted is True:
+                parts.append(f"[{FIXED_COLORS['running']}]root ✓[/]")
+            elif self.device_rooted is False:
+                parts.append(f"[{FIXED_COLORS['stopped']}]root ✗[/]")
+            device_display = f" [{muted}]·[/] ".join(parts)
+        else:
+            device_display = f"[{muted}]None[/]"
+        rows.append(f"[{muted}]Device[/]  {device_display}")
+
+        # -- Frida row (FIXED colors; version-mismatch logic untouched) ---
         if self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida_display = "[#facc15 bold]Running ⚠ mismatch[/]"
+                frida_display = "[#facc15 bold]● Running ⚠ mismatch[/]"
             else:
-                frida_display = f"[{FIXED_COLORS['running']} bold]Running[/]"
+                frida_display = f"[{FIXED_COLORS['running']} bold]● Running[/]"
+        elif self.frida_status == "Checking...":
+            frida_display = f"[{muted}]○ Checking…[/]"
         else:
-            frida_display = f"[{FIXED_COLORS['stopped']}]Not running[/]"
+            frida_display = f"[{FIXED_COLORS['stopped']}]○ Not running[/]"
+        rows.append(f"[{muted}]Frida[/]   {frida_display}")
 
-        # Spotlight with attach/spawn indicator using FIXED mode colors
-        # SPAWN = cyan (launching fresh), ATTACH = green (connected to running)
+        # -- App row (package + SPAWN/ATTACH + pid + running/paused) ------
         if self.spotlight_app and self.spotlight_app != "None":
             mode = "SPAWN" if self.spawn_mode else "ATTACH"
             mode_color = (
@@ -189,58 +227,66 @@ class StatusBar(Static):
                 if self.spawn_mode
                 else FIXED_COLORS["attach_mode"]
             )
-            app_display = f"[{colors['primary']}]{self.spotlight_app}[/] [{mode_color} bold]\\[{mode}][/]"
+            app_parts = [
+                f"[{colors['primary']}]{self.spotlight_app}[/]",
+                f"[{mode_color} bold]\\[{mode}][/]",
+            ]
+            if self.spotlight_pid:
+                app_parts.append(f"[{muted}]pid[/] [b]{self.spotlight_pid}[/]")
+            if self.spotlight_paused and self.spotlight_pid:
+                app_parts.append("[#fbbf24]◐ paused[/]")
+            elif self.spotlight_pid:
+                app_parts.append(f"[{FIXED_COLORS['running']}]● running[/]")
+            else:
+                app_parts.append(f"[{FIXED_COLORS['stopped']}]○ not running[/]")
+            app_display = " ".join(app_parts)
         else:
-            app_display = f"[{colors['text_muted']}]None[/]"
+            app_display = f"[{muted}]None[/]"
+        rows.append(f"[{muted}]App[/]     {app_display}")
 
-        # Device indicator - keep it simple, footer shows [D] shortcut
-        if self.active_device:
-            device_display = (
-                f"[{colors['primary']}]{self.device_type} {self.active_device}[/]"
-            )
-        else:
-            device_display = f"[{colors['text_muted']}]None[/]"
+        # -- Hooks + Bypass row -------------------------------------------
+        on = set(self.bypass_categories)
+        bypass_cells = []
+        for category, label in (
+            ("ssl", "SSL"),
+            ("root", "Root"),
+            ("frida", "Frida"),
+            ("debug", "Debug"),
+        ):
+            if category in on:
+                bypass_cells.append(f"[{FIXED_COLORS['running']}]●[/] {label}")
+        bypass_display = " ".join(bypass_cells) if bypass_cells else f"[{muted}]none[/]"
+        rows.append(
+            f"[{muted}]Hooks[/]   [b]{self.hook_count}[/]"
+            f" [{muted}]· Bypass[/] {bypass_display}"
+        )
 
-        # Build status bar - theme indicator is optional
-        status_parts = [
-            f"Device: {device_display}",
-            f"Frida: {frida_display}",
-            f"App: {app_display}",
-        ]
-
-        # Add proxy status if configured
+        # -- Proxy + Net row ----------------------------------------------
         if self.proxy_address:
-            status_parts.append(
-                f"Proxy: [{FIXED_COLORS['running']}]{self.proxy_address}[/]"
-            )
-
-        # Add network capture indicator when capturing
+            proxy_display = f"[{FIXED_COLORS['running']}]● {self.proxy_address}[/]"
+        else:
+            proxy_display = f"[{muted}]○ none[/]"
         if self.network_capture_running:
             filename = (
                 os.path.basename(self.network_capture_file)
                 if self.network_capture_file
                 else "capture.pcap"
             )
-            status_parts.append(
-                f"[{FIXED_COLORS['running']}]NET ●[/] [{colors['text_muted']}]{filename}[/]"
-            )
+            net_display = f"[{FIXED_COLORS['running']}]● {filename}[/]"
+        else:
+            net_display = f"[{muted}]○ idle[/]"
+        proxy_row = (
+            f"[{muted}]Proxy[/]   {proxy_display}  [{muted}]Net[/] {net_display}"
+        )
 
-        # Add background tasks if any are running
-        if self.background_tasks_count > 0 and self.background_tasks_display:
-            status_parts.append(f"Tasks: {self.background_tasks_display}")
-
-        # Add forensic APKs indicator when APKs exist (view modes removed)
-        if self.forensic_apks_count > 0:
-            status_parts.append(
-                f"[{FIXED_COLORS['warning_status']}]APKs: {self.forensic_apks_count}[/] [{colors['text_muted']}](Shift+G)[/]"
-            )
-
-        # Only add theme indicator if enabled in config
+        # Append the optional theme indicator to the Proxy/Net row's tail.
         if self.show_theme_indicator:
-            theme_display = f"[{colors['text_muted']}]^t[/] [{colors['primary']}]{self.current_theme}[/]"
-            status_parts.append(theme_display)
+            proxy_row += (
+                f"   [{muted}]^t[/] [{colors['primary']}]{self.current_theme}[/]"
+            )
+        rows.append(proxy_row)
 
-        return " | ".join(status_parts)
+        return "\n".join(rows)
 
     def update_from_toolbox(self) -> None:
         """Update status from Toolbox state."""
@@ -279,8 +325,44 @@ class StatusBar(Static):
             else:
                 self.spotlight_app = "None"
 
+            # PID + paused state (cheap, cached — no ADB on the hot path).
+            try:
+                self.spotlight_pid = spotlight.get_pid()
+            except Exception:
+                self.spotlight_pid = None
+            try:
+                self.spotlight_paused = bool(spotlight.is_app_paused())
+            except Exception:
+                self.spotlight_paused = False
+
+            # Hook count: running hook tasks bound to the spotlight package.
+            # Mirrors SpotlightPanel._hooks_for_app — this is the HOOK count,
+            # which is a different datum from the bypass-category list below.
+            try:
+                package = spotlight.get_effective_package()
+            except Exception:
+                package = None
+            try:
+                tasks = get_task_service().get_running_tasks()
+                self.hook_count = sum(
+                    1
+                    for t in tasks
+                    if package and getattr(t, "app_name", None) == package
+                )
+            except Exception:
+                self.hook_count = 0
+
         except Exception:
             pass
+
+        # Bypass categories armed/active (0-4 of ssl/root/frida/debug).
+        # In-process read — NOT the hook count above.
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            self.bypass_categories = list(get_bypass_service().on_categories())
+        except Exception:
+            self.bypass_categories = []
 
         # Update device info (separate try to ensure it always runs)
         # Use Toolbox.get_device_manager() to ensure auto-refresh on first access
@@ -290,9 +372,27 @@ class StatusBar(Static):
             if device:
                 self.active_device = device.short_name
                 self.device_type = "\\[E]" if device.is_emulator else "\\[P]"
+                # android_version / api_level are cached on the Device at
+                # discovery (ro.build.version.*); root is a cached capability
+                # flag — all cheap in-memory reads, no ADB on this path.
+                self.device_android_version = getattr(
+                    device, "android_version", ""
+                ) or ""
+                self.device_api_level = getattr(device, "api_level", 0) or 0
+                try:
+                    from sandroid.core.device import DeviceCapability
+
+                    self.device_rooted = device.has_capability(
+                        DeviceCapability.ADB_ROOT
+                    )
+                except Exception:
+                    self.device_rooted = None
             else:
                 self.active_device = ""
                 self.device_type = ""
+                self.device_android_version = ""
+                self.device_api_level = 0
+                self.device_rooted = None
             self.device_count = dm.device_count
         except Exception:
             pass

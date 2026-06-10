@@ -56,7 +56,7 @@ from sandroid.tui.screens.help_screen import HelpScreen
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.themes import THEMES, get_theme
 from sandroid.tui.utils import copy_to_clipboard
-from sandroid.tui.widgets import ActivityLog, MenuPanel
+from sandroid.tui.widgets import ActivityLog
 
 if TYPE_CHECKING:
     from sandroid.config import SandroidConfig
@@ -90,7 +90,7 @@ class SandroidTUI(App):
         Binding("question_mark", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
-        Binding("ctrl+b", "toggle_bottom_panel", "Panel", show=True),
+        Binding("ctrl+b", "focus_tools", "Tools", show=True),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -830,15 +830,24 @@ class SandroidTUI(App):
         else:
             _dispatch()
 
-    def action_toggle_bottom_panel(self) -> None:
-        """Toggle the bottom strip open/closed (Ctrl+B).
+    def action_focus_tools(self) -> None:
+        """Focus the active tool panel (Ctrl+B).
 
-        Use Left/Right to switch tabs once it is open. All strip logic lives
-        on MainScreen (which owns the widgets); the app just forwards the key.
+        The tool strip is always visible now; this just moves focus into it so
+        Left/Right tab-cycling and per-panel keys work. All tool logic lives on
+        MainScreen (which owns the widgets); the app just forwards the key.
         """
         ms = self._get_main_screen()
-        if ms is not None:
-            ms.toggle_bottom_panel()
+        if ms is None:
+            return
+        try:
+            from textual.widgets import ContentSwitcher
+
+            current = ms.query_one("#tool-body", ContentSwitcher).current
+            if current:
+                ms.query_one(f"#{current}").focus()
+        except Exception:
+            pass
 
     def action_show_device_selector(self) -> None:
         """Show the device selection modal."""
@@ -1005,31 +1014,31 @@ class SandroidTUI(App):
 
     # -- Vim-style scrolling --------------------------------------------------
 
-    def _scroll_menu(self, method_name: str, *args, **kwargs) -> None:
+    def _scroll_log(self, method_name: str, *args, **kwargs) -> None:
         try:
-            getattr(self.query_one("#menu-panel", MenuPanel), method_name)(
+            getattr(self.query_one("#activity-log", ActivityLog), method_name)(
                 *args, **kwargs
             )
         except Exception:
             pass
 
     def action_scroll_down(self) -> None:
-        self._scroll_menu("scroll_down_line")
+        self._scroll_log("scroll_down_line")
 
     def action_scroll_up(self) -> None:
-        self._scroll_menu("scroll_up_line")
+        self._scroll_log("scroll_up_line")
 
     def action_scroll_half_down(self) -> None:
-        self._scroll_menu("scroll_relative", y=10)
+        self._scroll_log("scroll_relative", y=10)
 
     def action_scroll_half_up(self) -> None:
-        self._scroll_menu("scroll_relative", y=-10)
+        self._scroll_log("scroll_relative", y=-10)
 
     def action_scroll_top(self) -> None:
-        self._scroll_menu("scroll_to_top")
+        self._scroll_log("scroll_to_top")
 
     def action_scroll_bottom(self) -> None:
-        self._scroll_menu("scroll_to_bottom")
+        self._scroll_log("scroll_to_bottom")
 
     def _copy_to_clipboard(self, text: str) -> bool:
         return copy_to_clipboard(text, textual_copy_fn=self.copy_to_clipboard)

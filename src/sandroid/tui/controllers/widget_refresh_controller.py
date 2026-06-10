@@ -5,7 +5,6 @@ monolithic app.py to follow Single Responsibility Principle.
 
 Responsibilities:
 - Refresh status bar with current state
-- Refresh menu panel with current items
 - Perform full UI refresh
 
 Usage:
@@ -124,10 +123,9 @@ class WidgetRefreshController:
     def refresh_all(self) -> None:
         """Force a complete UI refresh after state changes.
 
-        Updates status bar, menu panel, footer, and forces layout refresh.
+        Updates status bar, footer, and forces layout refresh.
         """
         self.refresh_status_bar()
-        self.refresh_menu()
         self.refresh_footer()
 
         try:
@@ -145,14 +143,12 @@ class WidgetRefreshController:
         self._update_widget("#status-bar", StatusBar, "update_from_toolbox")
 
     def refresh_menu(self) -> None:
-        """Refresh the menu panel to reflect current state.
+        """No-op: the menu panel was removed.
 
-        This method updates the menu to show/hide dynamic items like
-        'resume objection session' based on current state.
+        Kept as a safe stub because external callers (e.g.
+        ``objection_terminal_screen``) still call ``app.refresh_menu()`` behind
+        a ``hasattr`` guard. The menu panel widget no longer exists.
         """
-        from sandroid.tui.widgets import MenuPanel
-
-        self._update_widget("#menu-panel", MenuPanel, "update_menu")
 
     def refresh_footer(self) -> None:
         """Refresh the SandroidFooter widget to restore it after modal dismissal."""

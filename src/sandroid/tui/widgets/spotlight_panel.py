@@ -26,7 +26,7 @@ import time
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import ContentSwitcher, Static
 
 logger = logging.getLogger(__name__)
 
@@ -381,29 +381,30 @@ class SpotlightPanel(Widget):
 
     # -- live running-state poll (slow fallback) --------------------------
 
-    def _strip_visible(self) -> bool:
-        """True if the collapsible bottom strip is currently expanded."""
+    def _is_active_child(self) -> bool:
+        """True if this panel is the active tool-body ContentSwitcher child."""
         try:
-            return self.screen.query_one("#bottom-panel").has_class("-visible")
+            switcher = self.screen.query_one("#tool-body", ContentSwitcher)
+            return switcher.current == "spotlight-panel"
         except Exception:
             return False
 
     def _poll_running_state(self) -> None:
         """Timer tick (main thread): re-check the app's PID off-thread.
 
-        No-op when nothing is selected, the strip is collapsed, or a
-        lifecycle action is in flight (Start/Restart/Kill own the PID while
-        they run — the poll must not clobber their set_pid with a stale
-        sample taken during the force-stop window). A single in-flight guard
-        also skips the tick if the previous worker is still running so a slow
-        ADB call can never stack up.
+        No-op when nothing is selected, the Spotlight tab is not the shown
+        one, or a lifecycle action is in flight (Start/Restart/Kill own the
+        PID while they run — the poll must not clobber their set_pid with a
+        stale sample taken during the force-stop window). A single in-flight
+        guard also skips the tick if the previous worker is still running so a
+        slow ADB call can never stack up.
         """
         if self._poll_inflight or self._action_inflight:
             return
         package = self._current_package()
         if not package:
             return
-        if not self._strip_visible():
+        if not self._is_active_child():
             return
         self._poll_inflight = True
         self.run_worker(

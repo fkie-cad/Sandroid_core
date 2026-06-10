@@ -52,49 +52,10 @@ MainScreen {
 /* Status bar at top */
 #status-bar {
     dock: top;
-    height: 1;
+    height: auto;
     background: #000000;
     color: #FFFF00;
     padding: 0 1;
-}
-
-/* Menu panel styling */
-MenuPanel {
-    height: 100%;
-    scrollbar-size: 1 1;
-    background: #000000;
-}
-
-#menu-title {
-    text-align: center;
-    text-style: bold;
-    color: #FFFF00;
-    padding: 1 0;
-}
-
-.menu-category {
-    margin-top: 1;
-    color: #FFFF00;
-    text-style: bold;
-}
-
-.menu-item {
-    padding-left: 2;
-    color: #FFFFFF;
-}
-
-.menu-item:hover {
-    background: #333333;
-    color: #FFFF00;
-}
-
-.menu-item-key {
-    color: #00FFFF;
-    text-style: bold;
-}
-
-.menu-item-disabled {
-    color: #666666;
 }
 
 /* Activity log styling */

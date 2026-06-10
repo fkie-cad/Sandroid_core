@@ -13,7 +13,6 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
-    MenuPanel,
     MitmproxyPanel,
     SandroidFooter,
     SnapshotsPanel,
@@ -27,14 +26,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class _BottomPanel(Vertical):
-    """Wrapper for the collapsible bottom strip.
+class _ToolPanel(Vertical):
+    """Wrapper for the permanent tool area (tab strip + tool body).
 
     Owns Left/Right tab-switching bindings. Because they live here (an
     ancestor of the focused inner panel) they only fire when focus is inside
-    the open strip — Left/Right are never stolen from the menu or activity
-    log, which keep their normal behaviour. The inner panels are plain
-    focusable Widgets with no arrow bindings, so Left/Right bubble up to here.
+    the tool area — Left/Right are never stolen from the activity log, which
+    keeps its normal behaviour. The inner panels are plain focusable Widgets
+    with no arrow bindings, so Left/Right bubble up to here.
     """
 
     BINDINGS = [
@@ -63,56 +62,33 @@ class MainScreen(Screen):
     BINDINGS = []  # Bindings are handled by the main app
 
     # Defined here (not in styles.tcss) so it applies under every theme — the
-    # app loads exactly one theme-specific .tcss and none of them define
-    # #bottom-panel, while app CSS always beats Screen DEFAULT_CSS. Putting the
-    # rules here keeps them unopposed and theme-independent.
+    # app loads exactly one theme-specific .tcss and none of them define these
+    # ids, while app CSS always beats Screen DEFAULT_CSS. Putting the rules
+    # here keeps them unopposed and theme-independent.
     #
-    # The strip is `dock: bottom` so it always reserves space at the bottom of
-    # #left-panel (just like the dock:top status bar) — that is why the menu's
-    # height:100% can coexist with a permanently visible tab bar. Collapsed
-    # (default): a single-row bar — an ▴/▾ arrow plus the Spotlight/Mitmproxy
-    # tabs — with the body hidden. Expanded (.-visible, via the arrow, a tab
-    # click, or Ctrl+B / Ctrl+M): grows to 60% and reveals the active body.
+    # #tool-panel is a plain Vertical that fills the space below the dock:top
+    # status band: a single-row tab strip (#tool-tabbar) on top and the active
+    # tool body (#tool-body, a ContentSwitcher) filling the rest. The tool area
+    # is permanently visible — nothing collapses or pops up.
     DEFAULT_CSS = """
-    #bottom-panel {
-        dock: bottom;
-        height: 2;
-        background: #080c18;
-        border-top: solid #111827;
-    }
-    #bottom-panel.-visible {
-        height: 60%;
-    }
-    #bottom-tabbar {
+    #tool-tabbar {
         height: 1;
         background: #0b1628;
     }
-    #bottom-arrow {
-        width: 4;
-        content-align: center middle;
-        color: #7dd3fc;
-        text-style: bold;
-    }
-    #bottom-arrow:hover {
-        background: #1f2937;
-    }
-    .bottom-tab {
+    .tool-tab {
         width: auto;
         padding: 0 2;
         color: #8f9bb3;
     }
-    .bottom-tab:hover {
+    .tool-tab:hover {
         background: #1f2937;
     }
-    .bottom-tab.-active {
+    .tool-tab.-active {
         color: #7dd3fc;
         text-style: bold;
         background: #1f2937;
     }
-    #bottom-body {
-        display: none;
-    }
-    #bottom-panel.-visible #bottom-body {
+    #tool-body {
         display: block;
         height: 1fr;
     }
@@ -148,26 +124,21 @@ class MainScreen(Screen):
         with Horizontal():
             with Vertical(id="left-panel"):
                 yield StatusBar(id="status-bar")
-                yield MenuPanel(id="menu-panel")
-                # Persistent collapsible bottom strip. A single-row bar (an
-                # ▴/▾ arrow + the Spotlight/Mitmproxy tabs) is always visible
-                # so the panels are discoverable. Ctrl+B (or clicking the
-                # arrow) toggles show/hide; Left/Right (or clicking a tab)
-                # switch tabs once it is open. A ContentSwitcher holds the two
-                # bodies (shown only when expanded).
-                with _BottomPanel(id="bottom-panel"):
-                    with Horizontal(id="bottom-tabbar"):
-                        yield Static("▴", id="bottom-arrow")
+                # Permanent tool area: a single-row tab strip + the active
+                # tool body. Nothing collapses; Left/Right (or clicking a tab)
+                # switch tabs. A ContentSwitcher holds the three bodies.
+                with _ToolPanel(id="tool-panel"):
+                    with Horizontal(id="tool-tabbar"):
                         yield Static(
                             "Spotlight",
                             id="tab-spotlight",
-                            classes="bottom-tab -active",
+                            classes="tool-tab -active",
                         )
-                        yield Static("Mitmproxy", id="tab-mitm", classes="bottom-tab")
+                        yield Static("Mitmproxy", id="tab-mitm", classes="tool-tab")
                         yield Static(
-                            "Snapshots", id="tab-snapshots", classes="bottom-tab"
+                            "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
-                    with ContentSwitcher(initial="spotlight-panel", id="bottom-body"):
+                    with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
@@ -212,26 +183,23 @@ class MainScreen(Screen):
         logger.debug("[MAIN_SCREEN] on_mount complete, deferred updates scheduled")
 
     # Clickable tab id -> ContentSwitcher child id (the panel widget's id).
-    _BOTTOM_TABS = {
+    _TOOL_TABS = {
         "tab-spotlight": "spotlight-panel",
         "tab-mitm": "mitm-panel",
         "tab-snapshots": "snapshots-panel",
     }
 
     def on_click(self, event) -> None:
-        """Route clicks on the bottom tab bar.
+        """Route clicks on the tool tab bar.
 
-        The arrow toggles show/hide; a tab name switches to that panel and
-        opens the strip. Clicks elsewhere are ignored (event is not stopped,
-        so normal handling continues).
+        A tab name switches to that panel. Clicks elsewhere are ignored
+        (event is not stopped, so normal handling continues).
         """
         wid = getattr(getattr(event, "widget", None), "id", None)
-        if wid == "bottom-arrow":
-            self._toggle_bottom_strip()
-        elif wid in self._BOTTOM_TABS:
-            self._select_bottom_tab(self._BOTTOM_TABS[wid], reveal=True)
+        if wid in self._TOOL_TABS:
+            self._select_bottom_tab(self._TOOL_TABS[wid])
         elif wid and wid.startswith(("act-", "snap-")):
-            # Bottom-panel action cells. Route to the ACTIVE bottom child
+            # Tool-panel action cells. Route to the ACTIVE tool child
             # (spotlight uses act-*, snapshots uses snap-*). The hasattr guard
             # keeps panels without a dispatcher (e.g. MitmproxyPanel) safe.
             current = self._bottom_current()
@@ -243,111 +211,55 @@ class MainScreen(Screen):
                 except Exception:
                     pass
 
-    def _bottom_panel(self):
-        """Return the #bottom-panel wrapper, or None if not mounted."""
-        try:
-            return self.query_one("#bottom-panel")
-        except Exception:
-            return None
-
     def _bottom_current(self) -> str | None:
-        """Return the id of the currently selected bottom body, if any."""
+        """Return the id of the currently selected tool body, if any."""
         try:
-            return self.query_one("#bottom-body", ContentSwitcher).current
+            return self.query_one("#tool-body", ContentSwitcher).current
         except Exception:
             return None
 
-    def _select_bottom_tab(self, panel_id: str, reveal: bool = False) -> None:
-        """Switch the active bottom tab; optionally expand the strip."""
-        panel = self._bottom_panel()
-        if panel is None:
-            return
+    def _select_bottom_tab(self, panel_id: str) -> None:
+        """Switch the active tool tab and focus its panel."""
         try:
-            self.query_one("#bottom-body", ContentSwitcher).current = panel_id
+            self.query_one("#tool-body", ContentSwitcher).current = panel_id
         except Exception:
-            pass
+            return
         # Reflect the active tab in the bar.
-        for tab_id, pid in self._BOTTOM_TABS.items():
+        for tab_id, pid in self._TOOL_TABS.items():
             try:
                 self.query_one(f"#{tab_id}").set_class(pid == panel_id, "-active")
             except Exception:
                 pass
-        if reveal:
-            panel.add_class("-visible")
-        self._refresh_bottom_indicator()
-        if panel.has_class("-visible"):
-            try:
-                self.query_one(f"#{panel_id}").focus()
-            except Exception:
-                pass
-            # Let a freshly-activated panel refresh itself immediately (e.g.
-            # the Snapshots tab fetches its list as soon as it is shown).
-            try:
-                panel_widget = self.query_one(f"#{panel_id}")
-                if hasattr(panel_widget, "refresh_snapshots"):
-                    panel_widget.refresh_snapshots()
-            except Exception:
-                pass
+        try:
+            self.query_one(f"#{panel_id}").focus()
+        except Exception:
+            pass
+        # Let a freshly-activated panel refresh itself immediately (e.g.
+        # the Snapshots tab fetches its list as soon as it is shown).
+        try:
+            panel_widget = self.query_one(f"#{panel_id}")
+            if hasattr(panel_widget, "refresh_snapshots"):
+                panel_widget.refresh_snapshots()
+        except Exception:
+            pass
 
     def open_snapshots_tab(self) -> None:
-        """Reveal the bottom strip and switch to the Snapshots tab (key 0)."""
-        self._select_bottom_tab("snapshots-panel", reveal=True)
-
-    def _toggle_bottom_strip(self) -> None:
-        """Expand/collapse the strip without changing the active tab."""
-        panel = self._bottom_panel()
-        if panel is None:
-            return
-        if panel.has_class("-visible"):
-            panel.remove_class("-visible")
-            self._refresh_bottom_indicator()
-            try:
-                self.query_one("#menu-panel").focus()
-            except Exception:
-                pass
-        else:
-            panel.add_class("-visible")
-            self._refresh_bottom_indicator()
-            current = self._bottom_current()
-            if current:
-                try:
-                    self.query_one(f"#{current}").focus()
-                except Exception:
-                    pass
-
-    def toggle_bottom_panel(self) -> None:
-        """Single show/hide toggle for the strip (Ctrl+B).
-
-        Keeps the currently active tab; use Left/Right to switch tabs once
-        the strip is open and focused.
-        """
-        self._toggle_bottom_strip()
+        """Switch to the Snapshots tab (key 0)."""
+        self._select_bottom_tab("snapshots-panel")
 
     def cycle_bottom_tab(self, delta: int) -> None:
-        """Switch the active tab by *delta* (Left/Right while the strip is open).
+        """Switch the active tab by *delta* (Left/Right while focus is inside).
 
-        Bound on the strip wrapper so it only fires when focus is inside the
-        open panel; never steals Left/Right from the menu or activity log.
+        Bound on the tool-panel wrapper so it only fires when focus is inside
+        the tool area; never steals Left/Right from the activity log.
         """
-        order = list(self._BOTTOM_TABS.values())
+        order = list(self._TOOL_TABS.values())
         current = self._bottom_current() or order[0]
         try:
             idx = order.index(current)
         except ValueError:
             idx = 0
-        self._select_bottom_tab(order[(idx + delta) % len(order)], reveal=True)
-
-    def _refresh_bottom_indicator(self) -> None:
-        """Flip the arrow glyph to reflect collapsed (▴) / expanded (▾) state."""
-        panel = self._bottom_panel()
-        if panel is None:
-            return
-        try:
-            self.query_one("#bottom-arrow", Static).update(
-                "▾" if panel.has_class("-visible") else "▴"
-            )
-        except Exception:
-            pass
+        self._select_bottom_tab(order[(idx + delta) % len(order)])
 
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.
@@ -370,25 +282,21 @@ class MainScreen(Screen):
         # These were stored in EventBus history since no subscribers existed yet
         self._display_buffered_logs()
 
-        # Set the bottom strip's arrow to its initial (collapsed ▴) state.
-        self._refresh_bottom_indicator()
+        # Land focus in the tool area (Spotlight tab) on startup rather than
+        # wherever Textual's tab order happens to pick.
+        try:
+            self.query_one("#spotlight-panel").focus()
+        except Exception:
+            pass
 
     def _update_from_toolbox(self) -> None:
         """Update UI state from Toolbox."""
         try:
-            from sandroid.core.toolbox import Toolbox
-
-            # Update status bar
+            # Update status bar (refresh_status = update_from_toolbox + repaint;
+            # the multi-row glance band needs an explicit refresh() or it would
+            # update its attributes without re-rendering on this path).
             status_bar = self.query_one("#status-bar", StatusBar)
-            status_bar.update_from_toolbox()
-
-            # Refresh the menu panel (view modes removed; flat catalog).
-            menu_panel = self.query_one("#menu-panel", MenuPanel)
-
-            # Force menu refresh to re-validate actions with current device state
-            # This ensures Shift+F/G highlighting reflects actual device capabilities
-            menu_panel.update_menu()
-
+            status_bar.refresh_status()
         except ImportError:
             logger.warning("Toolbox not available")
         except Exception as e:
@@ -486,11 +394,6 @@ class MainScreen(Screen):
         except Exception:
             pass
         self._safe_refresh_status_bar()
-        try:
-            menu_panel = self.query_one("#menu-panel", MenuPanel)
-            menu_panel.update_menu()
-        except Exception:
-            pass
 
     def _handle_task_stopped(self, event) -> None:
         """Handle task stopped event."""
@@ -503,11 +406,6 @@ class MainScreen(Screen):
         except Exception:
             pass
         self._safe_refresh_status_bar()
-        try:
-            menu_panel = self.query_one("#menu-panel", MenuPanel)
-            menu_panel.update_menu()
-        except Exception:
-            pass
 
     def _handle_task_updated(self, event) -> None:
         """Handle task display-name change (not a lifecycle event)."""
@@ -854,13 +752,6 @@ class MainScreen(Screen):
         """Refresh UI state after action (called from main thread)."""
         self._update_from_toolbox()
 
-        # Force refresh of menu panel to reflect any state changes
-        try:
-            menu_panel = self.query_one("#menu-panel", MenuPanel)
-            menu_panel.update_menu()
-        except Exception:
-            pass
-
     def execute_action_by_key(self, key: str) -> bool:
         """Execute an action by keyboard shortcut.
 
@@ -1004,10 +895,15 @@ class MainScreen(Screen):
             pass
 
     def _safe_refresh_status_bar(self) -> None:
-        """Refresh the status bar, tolerating missing widget."""
+        """Refresh the status bar, tolerating missing widget.
+
+        Uses refresh_status() (update + repaint) so the glance band re-renders
+        on event-driven paths (task started/stopped/output) — important now
+        that the band shows live hooks/bypass/pid that change on those events.
+        """
         try:
             status_bar = self.query_one("#status-bar", StatusBar)
-            status_bar.update_from_toolbox()
+            status_bar.refresh_status()
         except Exception:
             pass
 
@@ -1016,9 +912,12 @@ class MainScreen(Screen):
         self._safe_refresh_status_bar()
 
     def refresh_menu(self) -> None:
-        """Refresh the menu panel."""
-        menu_panel = self.query_one("#menu-panel", MenuPanel)
-        menu_panel.update_menu()
+        """No-op: the menu panel was removed. Kept for caller compatibility.
+
+        Refreshes the status bar instead so external callers still get a
+        sensible UI update.
+        """
+        self._safe_refresh_status_bar()
 
     def on_unmount(self) -> None:
         """Clean up when the screen is unmounted."""

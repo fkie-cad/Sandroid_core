@@ -1,6 +1,6 @@
 """TUI panel for listing / creating / loading / deleting AVD snapshots.
 
-The Snapshots tab lives in the collapsible bottom strip alongside the
+The Snapshots tab lives in the permanent tool area alongside the
 spotlight and mitmproxy panels. It surfaces the AVD's saved snapshots and
 offers the four lifecycle actions (Create / Load / Delete / Refresh).
 
@@ -43,8 +43,8 @@ _ACTION_CELLS = {
 }
 
 # How often the slow fallback poll re-checks the snapshot list (seconds).
-# Telnet ``list`` is slow, so this stays lazy: each tick is a no-op unless the
-# strip is visible AND this panel is the active ContentSwitcher child.
+# Telnet ``list`` is slow, so this stays lazy: each tick is a no-op unless this
+# panel is the active tool-body ContentSwitcher child.
 _POLL_INTERVAL = 9.0
 
 
@@ -63,9 +63,9 @@ class SnapshotsPanel(Widget):
     uppercase ``D`` here would be dead. Lowercase c/l/d/r map to non-priority
     app bindings, and a focused descendant's ancestor (this panel) wins the
     non-priority pass — so these shadow the globals only while the snapshots
-    strip is focused. ``OptionList`` binds only navigation keys (up/down/enter/
+    panel is focused. ``OptionList`` binds only navigation keys (up/down/enter/
     home/end/pageup/pagedown), so the letter keys never clash with it nor with
-    ``_BottomPanel``'s Left/Right tab cycling. The action row is also clickable.
+    ``_ToolPanel``'s Left/Right tab cycling. The action row is also clickable.
     """
 
     can_focus = True
@@ -182,7 +182,7 @@ class SnapshotsPanel(Widget):
         self._refresh_if_visible()
         # Event-driven refresh (STATE_CHANGED) covers most cases; this slow
         # poll is the safety net. Stopped in on_unmount; each tick is a no-op
-        # unless the strip is visible and this panel is the active child.
+        # unless this panel is the active tool-body child.
         self._poll_timer = self.set_interval(_POLL_INTERVAL, self._poll)
 
     def on_unmount(self) -> None:
@@ -497,24 +497,17 @@ class SnapshotsPanel(Widget):
 
     # -- live poll (slow fallback) ----------------------------------------
 
-    def _strip_visible(self) -> bool:
-        """True if the collapsible bottom strip is currently expanded."""
-        try:
-            return self.screen.query_one("#bottom-panel").has_class("-visible")
-        except Exception:
-            return False
-
     def _is_active_child(self) -> bool:
-        """True if this panel is the active ContentSwitcher child."""
+        """True if this panel is the active tool-body ContentSwitcher child."""
         try:
-            switcher = self.screen.query_one("#bottom-body", ContentSwitcher)
+            switcher = self.screen.query_one("#tool-body", ContentSwitcher)
             return switcher.current == "snapshots-panel"
         except Exception:
             return False
 
     def _is_on_screen(self) -> bool:
-        """True if the snapshots tab is expanded AND the active child."""
-        return self._strip_visible() and self._is_active_child()
+        """True if the Snapshots tab is the shown tool-body child."""
+        return self._is_active_child()
 
     def _refresh_if_visible(self) -> None:
         """Refresh only when the tab is on screen (main thread).
