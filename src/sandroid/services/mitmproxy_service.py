@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -37,16 +37,67 @@ _ADDON_SOURCE = r'''
 """Sandroid TUI logging addon for mitmweb.
 
 Tag format on stdout:
-    [FLOW]|HH:MM:SS|protocol|status|method|host_and_path|size_str
-    [TLS_FAIL]|HH:MM:SS|host_or_sni|short_reason
+    [FLOW]|HH:MM:SS|protocol|status|method|host_and_path|size_str|app
+    [TLS_FAIL]|HH:MM:SS|host_or_sni|short_reason|app
 
 `protocol` is a compact token like "HTTPS/2", "HTTP/1.1", "WS", "WSS".
+`app` is the focused package the flow was attributed to (empty when not in a
+Focus lane). Attribution uses the lane's SOCKS5 listen port as the key into a
+sidecar map written by FocusManager and pointed to by SANDROID_FOCUS_MAP.
 """
 from __future__ import annotations
 
+import json
+import os
 import time
 from mitmproxy import http
 from mitmproxy import tls as _tls
+
+
+# Cache of the sidecar lane→app map, re-read only when the file's mtime
+# changes. Shape: {"8082": {"package": "com.foo", "marker": ":green_circle:"}}.
+_FOCUS_MAP: dict = {}
+_FOCUS_MTIME: float = -1.0
+
+
+def _focus_map() -> dict:
+    """Return the lane→app map, re-reading the sidecar file on mtime change.
+
+    Tolerates a missing/unset path and invalid JSON by returning an empty map.
+    """
+    global _FOCUS_MAP, _FOCUS_MTIME
+    path = os.environ.get("SANDROID_FOCUS_MAP")
+    if not path:
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _FOCUS_MAP = {}
+        _FOCUS_MTIME = -1.0
+        return _FOCUS_MAP
+    if mtime != _FOCUS_MTIME:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            _FOCUS_MAP = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _FOCUS_MAP = {}
+        _FOCUS_MTIME = mtime
+    return _FOCUS_MAP
+
+
+def _lane_entry(proxy_mode) -> dict | None:
+    """Map a connection's proxy_mode to its sidecar entry, or None.
+
+    Defensive: a flow on a non-lane mode (e.g. regular) or any attribute/lookup
+    error yields None so the caller degrades to app="" and never throws.
+    """
+    try:
+        port = proxy_mode.listen_port()
+    except Exception:
+        return None
+    entry = _focus_map().get(str(port))
+    return entry if isinstance(entry, dict) else None
 
 
 def _ts() -> str:
@@ -89,6 +140,20 @@ class SandroidLogger:
         if flow.response is None:
             return
         body_len = len(flow.response.raw_content) if flow.response.raw_content else 0
+
+        # Per-flow app attribution via the arrival SOCKS lane port. Any failure
+        # degrades to app="" and never breaks emission.
+        app = ""
+        try:
+            entry = _lane_entry(flow.client_conn.proxy_mode)
+            if entry is not None:
+                app = entry.get("package") or ""
+                flow.comment = app
+                flow.metadata["sandroid_app"] = app
+                flow.marked = entry.get("marker") or ""
+        except Exception:
+            app = ""
+
         line = "|".join((
             "[FLOW]",
             _ts(),
@@ -97,11 +162,13 @@ class SandroidLogger:
             (flow.request.method or "?")[:4],
             _host_path(flow.request),
             _size(body_len),
+            app,
         ))
         print(line, flush=True)
 
     def tls_failed_client(self, data: _tls.TlsData) -> None:
         host = "?"
+        app = ""
         try:
             client = data.context.client
             host = getattr(client, "sni", None) or "?"
@@ -109,6 +176,10 @@ class SandroidLogger:
                 addr = getattr(client, "peername", None) or getattr(client, "address", None)
                 if addr:
                     host = addr[0] if isinstance(addr, tuple) else str(addr)
+            # No flow exists here, so we can only label the emitted line.
+            entry = _lane_entry(getattr(client, "proxy_mode", None))
+            if entry is not None:
+                app = entry.get("package") or ""
         except Exception:
             pass
         reason = "tls"
@@ -121,7 +192,7 @@ class SandroidLogger:
                 reason = "ver"
         except Exception:
             pass
-        print(f"[TLS_FAIL]|{_ts()}|{host}|{reason}", flush=True)
+        print(f"[TLS_FAIL]|{_ts()}|{host}|{reason}|{app}", flush=True)
 
 
 addons = [SandroidLogger()]
@@ -220,6 +291,10 @@ class MitmproxyState:
     last_error: str | None = None
     ssl_unpin_active: bool = False
     ssl_unpin_app: str | None = None
+    socks_base: int = 8082
+    focus_lanes: int = 5
+    capture_scope: str = "none"
+    focus_apps: list[str] = field(default_factory=list)
 
 
 class MitmproxyService:
@@ -287,6 +362,26 @@ class MitmproxyService:
                 seen.add(p)
                 resolved.append(p)
         self._enabled_addons = resolved
+        # Focus capture-scope settings (lane pool is allocated at start()).
+        # ``focus_apps`` is intentionally left empty at load — FocusManager is
+        # authoritative for live lane assignments.
+        self._state.socks_base = cfg.socks_base
+        self._state.focus_lanes = cfg.focus_lanes
+        self._state.capture_scope = cfg.capture_scope
+
+    @staticmethod
+    def _focus_sidecar_path() -> str:
+        """Resolve the expanded Focus sidecar map path from config.
+
+        Falls back to the default cache location if config is unavailable.
+        """
+        default = os.path.expanduser("~/.cache/sandroid/focus_lanes.json")
+        if get_config is None:
+            return default
+        try:
+            return os.path.expanduser(get_config().focus.sidecar_path)
+        except Exception:  # pragma: no cover - defensive
+            return default
 
     def _ensure_addons_dir(self) -> None:
         """First-run scaffold for the user addons directory.
@@ -391,6 +486,67 @@ class MitmproxyService:
         with self._lock:
             return self._proc is not None and self._proc.poll() is None
 
+    def capture_view(self) -> dict:
+        """Snapshot both proxy layers from ground truth (NOT the stored mode).
+
+        Returns the Device Proxy and App Proxies derived from reality:
+
+            {
+                "mitmweb_running": bool,
+                "mitmweb_addr": "host_ip:port",      # our proxy, even if stopped
+                "device": {
+                    "state": "ours" | "external" | "none",
+                    "addr":  "ip:port" | "",         # set unless "none"
+                },
+                "apps": {package: "ours" | "http://ip:port", ...},
+            }
+
+        The device classification mirrors the panel's ``_probe_proxy_state``:
+        ``ours`` iff the device http_proxy ip == our host IP AND port == our
+        proxy port; any other set value is ``external``; unset is ``none``.
+
+        WARNING: reads the device http_proxy over ADB (blocking). Call this OFF
+        the UI thread. The app layer (``app_proxies``) is a cheap in-process
+        read; this method bundles both so callers get a consistent snapshot.
+        """
+        from sandroid.core.proxy_manager import (
+            ProxyManager,
+            ProxyStatus,
+            get_focus_manager,
+        )
+
+        try:
+            host_ip = ProxyManager.get_host_ip()
+        except Exception:
+            host_ip = ""
+        proxy_port = self.state.proxy_port
+        mitmweb_addr = f"{host_ip}:{proxy_port}" if host_ip else ""
+
+        device = {"state": "none", "addr": ""}
+        try:
+            status, cfg = ProxyManager().get_proxy_settings()
+            if status == ProxyStatus.SET and cfg is not None:
+                ours = cfg.ip == host_ip and cfg.port == proxy_port
+                device = {
+                    "state": "ours" if ours else "external",
+                    "addr": cfg.address,
+                }
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("capture_view device probe failed: %s", exc)
+
+        try:
+            apps = get_focus_manager().app_proxies()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("capture_view app probe failed: %s", exc)
+            apps = {}
+
+        return {
+            "mitmweb_running": self.is_running(),
+            "mitmweb_addr": mitmweb_addr,
+            "device": device,
+            "apps": apps,
+        }
+
     def add_listener(self, callback: Callable[[str], None]) -> None:
         self._listeners.append(callback)
 
@@ -467,6 +623,17 @@ class MitmproxyService:
                     self._emit(f"[INFO] Skipping missing addon: {addon}")
                     logger.warning("Skipping missing addon: %s", addon)
 
+            # Allocate the Focus lane pool: one regular listener plus one SOCKS5
+            # listener per lane. mitmweb accepts multiple --mode at once; the
+            # arrival SOCKS port is the per-app attribution key (see addon).
+            cmd += ["--mode", "regular"]
+            for i in range(self._state.focus_lanes):
+                cmd += ["--mode", f"socks5@{self._state.socks_base + i}"]
+
+            # The addon reads the lane→app sidecar map from this env var; the
+            # path is stable even as the map contents change at runtime.
+            sidecar_path = self._focus_sidecar_path()
+
             try:
                 self._proc = subprocess.Popen(
                     cmd,
@@ -474,6 +641,7 @@ class MitmproxyService:
                     stderr=subprocess.STDOUT,
                     bufsize=1,
                     text=True,
+                    env={**os.environ, "SANDROID_FOCUS_MAP": sidecar_path},
                 )
             except Exception as exc:
                 self._state.last_error = f"spawn failed: {exc}"
@@ -514,6 +682,17 @@ class MitmproxyService:
             # but only the bypass *we* started, not one toggled elsewhere.
             if self._ssl_via_mitm:
                 self.stop_ssl_unpin()
+
+            # Tear down any active Focus lanes so stopping the proxy never
+            # leaves an app's network redirected at a dead SOCKS port. Lazy
+            # import avoids a proxy_manager↔service import cycle. disable_focus()
+            # with no active lanes is a harmless no-op.
+            try:
+                from sandroid.core.proxy_manager import get_focus_manager
+
+                get_focus_manager().disable_focus()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Focus teardown on stop failed: %s", exc)
 
             self._state.running = False
             self._emit("[INFO] Stopping mitmweb...")

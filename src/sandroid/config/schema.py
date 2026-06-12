@@ -463,6 +463,79 @@ class MVTConfig(BaseModel):
         return v
 
 
+class FocusConfig(BaseModel):
+    """Per-app proxy ("App Proxies") lane configuration.
+
+    Each app proxy scopes traffic for one app by redirecting it (by Linux UID,
+    via an iptables ``owner`` match REDIRECT) into its own on-device ``gost``
+    redirector. gost's ``red://`` listener reads ``SO_ORIGINAL_DST`` and
+    forwards to the lane's upstream — either our mitmproxy SOCKS5 port (the
+    default) or an external HTTP proxy (Burp/ZAP). For our-mitmproxy lanes the
+    arrival SOCKS port *is* the app identity used to label flows.
+
+    The gost binary is downloaded at runtime, cached, and sha256-verified
+    (mirrors the frida-server pattern); it is not bundled in the wheel. The
+    release ships ``.tar.gz`` assets, so the download path extracts the ``gost``
+    member and verifies the **extracted ELF** sha256 (see ``gost_assets``).
+    """
+
+    redirect_base: int = Field(
+        default=60080,
+        description="Base on-device REDIRECT port for app-proxy lanes",
+    )
+    gost_binary_dst: str = Field(
+        default="/data/local/tmp/gost",
+        description="On-device path for the gost binary",
+    )
+    host_ip_override: str = Field(
+        default="",
+        description=(
+            "Force the host IP our-mitmproxy lanes forward to "
+            "(blank = auto, 10.0.2.2 on emulator)"
+        ),
+    )
+    gost_version: str = Field(
+        default="v3.2.6",
+        description="gost release tag whose assets are downloaded",
+    )
+    sidecar_path: str = Field(
+        default="~/.cache/sandroid/focus_lanes.json",
+        description=(
+            "Path to the lane→app sidecar map (consumers must expanduser() it)"
+        ),
+    )
+    gost_assets: dict[str, dict[str, str]] = Field(
+        default_factory=lambda: {
+            "arm64":  {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_arm64.tar.gz", "sha256": "343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7"},
+            "arm":    {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_armv7.tar.gz", "sha256": "ad5b0979f452b07c23e90d566c632b0ffe228ef0e1021085e8c4e2f164824151"},
+            "x86":    {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_386.tar.gz",   "sha256": "c4c4156acda43caa2ccc71ccf025662699cdea05ae9e6e763c07588d893bfb45"},
+            "x86_64": {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz", "sha256": "a2aea24efb4597b5f57b35b8e1bbcc59f439b80723854d4371f6828b46682ffb"},
+        },
+        description=(
+            "Per-ABI gost download URLs and sha256 checksums. NOTE: assets are "
+            ".tar.gz archives; the sha256 is of the EXTRACTED `gost` ELF, not "
+            "the tarball (the download path extracts before checksumming)."
+        ),
+    )
+
+    # ── DEPRECATED (ipt2socks era) ────────────────────────────────────
+    # Retained so existing configs still validate after the gost migration.
+    # No longer read by FocusManager; safe to remove once all configs are
+    # regenerated. See gost_binary_dst/gost_version/gost_assets above.
+    binary_dst: str = Field(
+        default="/data/local/tmp/ipt2socks",
+        description="DEPRECATED (ipt2socks): superseded by gost_binary_dst",
+    )
+    ipt2socks_version: str = Field(
+        default="v1.1.4",
+        description="DEPRECATED (ipt2socks): superseded by gost_version",
+    )
+    ipt2socks_assets: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="DEPRECATED (ipt2socks): superseded by gost_assets",
+    )
+
+
 class MitmproxyConfig(BaseModel):
     """mitmproxy (mitmweb) integration configuration.
 
@@ -485,6 +558,26 @@ class MitmproxyConfig(BaseModel):
         default_factory=list,
         description=("Resolved absolute path strings of addons to load into mitmweb"),
     )
+    capture_scope: str = Field(
+        default="none",
+        description=(
+            "DEPRECATED: vestigial mode field. The proxy UI now derives display "
+            "and control from ground truth (device http_proxy + live app-proxy "
+            "lanes), not this stored mode. Kept (with its validator) so existing "
+            "configs validate; no longer drives behavior."
+        ),
+    )
+    socks_base: int = Field(
+        default=8082,
+        description="Base host SOCKS5 port for our-mitmproxy app-proxy lanes",
+    )
+    focus_lanes: int = Field(
+        default=5,
+        description=(
+            "Number of app-proxy lanes (each = 1 on-device redirector + 1 "
+            "mitmproxy SOCKS port for our-mitmproxy lanes)"
+        ),
+    )
 
     @validator("addons_dir", pre=True)
     def expand_addons_dir(cls, v):
@@ -492,6 +585,35 @@ class MitmproxyConfig(BaseModel):
         if isinstance(v, (str, Path)) and v:
             return Path(str(v)).expanduser()
         return v
+
+    @validator("capture_scope", pre=True)
+    def validate_capture_scope(cls, v):
+        """Lowercase and restrict the capture mechanism to the known values.
+
+        Legacy ``"off"`` is deliberately migrated to ``"none"`` (the unarmed
+        status) rather than falling through the catch-all.
+        """
+        if isinstance(v, str):
+            v = v.strip().lower()
+        if v == "off":
+            return "none"
+        if v not in {"none", "device", "focus"}:
+            return "none"
+        return v
+
+    @validator("focus_lanes", pre=True)
+    def clamp_focus_lanes(cls, v):
+        """Clamp the lane-pool size to a sane 1..16 range.
+
+        Runs ``pre`` so a non-integer config value (e.g. a hand-edited
+        ``focus_lanes: "x"``) falls back to the default instead of raising a
+        ValidationError that would crash config load.
+        """
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 5
+        return max(1, min(16, v))
 
 
 class DevicePathsConfig(BaseModel):
@@ -817,6 +939,7 @@ class SandroidConfig(BaseModel):
     tui: TUIConfig = Field(default_factory=TUIConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
     mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
+    focus: FocusConfig = Field(default_factory=FocusConfig)
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     device_paths: DevicePathsConfig = Field(default_factory=DevicePathsConfig)
     external_urls: ExternalURLsConfig = Field(default_factory=ExternalURLsConfig)

@@ -466,6 +466,25 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
+        yield Static("mitmproxy", classes="section-header")
+
+        # App-proxy lanes (per-app proxy pool size; config key stays focus_lanes).
+        with Horizontal(classes="setting-row"):
+            yield Label("App proxy lanes:", classes="setting-label")
+            yield Input(
+                value=str(config.mitmproxy.focus_lanes),
+                id="setting-mitmproxy--focus_lanes",
+                type="integer",
+                classes="setting-input",
+            )
+        yield Static(
+            "[dim]Max number of apps that can have their own proxy at once. "
+            "Each lane = one on-device redirector + one mitmproxy SOCKS port; "
+            "higher = more device/host resources. Takes effect on next "
+            "mitmproxy start.[/dim]",
+            classes="setting-label",
+        )
+
     def _compose_appearance_tab(self, config: SandroidConfig) -> ComposeResult:
         """Compose the Appearance settings tab."""
         current_theme = config.tui.theme if config.tui else "default"

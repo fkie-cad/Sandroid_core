@@ -6,12 +6,23 @@ This module provides TUI-agnostic business logic for:
 - Zygote CA injection for system-wide SSL interception
 """
 
+import atexit
+import hashlib
+import io
 import logging
+import os
+import re
+import socket
 import subprocess
+import tarfile
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+
+import requests
 
 from sandroid.core.adb import Adb
 
@@ -1117,6 +1128,1050 @@ class CAManager:
             return InjectionResult(
                 success=False, message=f"Error injecting CA: {e}"
             )
+
+
+class FocusManager:
+    """Per-app proxy ("App Proxies") lane pool.
+
+    Each app proxy gets its own *lane*: a full vertical slice of app UID →
+    on-device iptables REDIRECT port → its own ``gost`` redirector. gost's
+    ``red://`` listener forwards to the lane's upstream — our host mitmproxy
+    SOCKS5 port (the default; the arrival SOCKS port *is* the app identity the
+    mitmproxy addon reads to label flows) or an external HTTP proxy (Burp/ZAP).
+
+    App Proxies coexist with the global Device Proxy: the per-UID REDIRECT
+    short-circuits in the kernel before the userspace ``http_proxy`` is read, so
+    a proxied app follows its lane and everyone else follows the device proxy —
+    no double-capture.
+
+    Composition (not inheritance): the reused root/host helpers live on two
+    different classes, so this class holds a :class:`CAManager` (for
+    ``_check_root_access``/``_root_cmd``/``_use_su`` root-command wrapping) and
+    uses :meth:`ProxyManager.get_host_ip`.
+
+    Lane ``i`` (0-based) uses fixed ports:
+        host SOCKS5 port   = ``mitmproxy.socks_base + i`` (our-mitmproxy lanes)
+        device REDIRECT port = ``focus.redirect_base + i``
+
+    The pool size ``N`` is ``mitmproxy.focus_lanes``. All mutating public
+    methods are guarded by a single :class:`threading.Lock`. (The class and its
+    ``enable_focus``/``focused_apps`` API keep their internal names for
+    continuity; user-facing surfaces say "App Proxies".)
+    """
+
+    # Valid mitmproxy ``flow.marked`` emoji keys (any other non-empty string
+    # collapses to a single red dot, so the per-app palette must use these).
+    PALETTE = [
+        ":green_circle:",
+        ":large_blue_circle:",
+        ":purple_circle:",
+        ":orange_circle:",
+        ":yellow_circle:",
+        ":brown_circle:",
+        ":red_circle:",
+        ":black_circle:",
+    ]
+
+    _RULE_TAG = "sandroid-focus"
+
+    def __init__(self) -> None:
+        """Initialize the lane pool and register crash-safe cleanup."""
+        self._lock = threading.Lock()
+        self._ca = CAManager()
+        # lane index 0..N-1 → package or None (free). Sized lazily from config.
+        self._lanes: dict[int, str | None] = {}
+        # Per-lane upstream target chosen by the user: "ours" (our mitmproxy,
+        # the default) or an external "http://host:port". Parallel to _lanes;
+        # session-ephemeral (never persisted — lanes are live state).
+        self._lane_targets: dict[int, str] = {}
+        # Per-lane exact iptables rule specs to delete on teardown (populated
+        # when xt_comment is unavailable and we fall back to tuple-match).
+        self._lane_rule_specs: dict[int, list[tuple[str, str]]] = {}
+        self._binary_pushed = False
+        # cleanup_stale() runs once at the first enable of a session.
+        self._cleaned_this_session = False
+        # Tri-state cache: is the ip6tables `nat` table usable? Probed once
+        # (IPv4-only emulators lack it); when False we skip all ip6tables ops
+        # so we don't spam "Table does not exist" warnings on every rule.
+        self._ip6_ok: bool | None = None
+        atexit.register(self._atexit_cleanup)
+
+    # ── config helpers ────────────────────────────────────────────────
+
+    @property
+    def _pool_size(self) -> int:
+        """Number of lanes (``mitmproxy.focus_lanes``)."""
+        try:
+            if get_config is not None:
+                return int(get_config().mitmproxy.focus_lanes)
+        except Exception:
+            pass
+        return 5
+
+    @property
+    def _socks_base(self) -> int:
+        try:
+            if get_config is not None:
+                return int(get_config().mitmproxy.socks_base)
+        except Exception:
+            pass
+        return 8082
+
+    @property
+    def _redirect_base(self) -> int:
+        try:
+            if get_config is not None:
+                return int(get_config().focus.redirect_base)
+        except Exception:
+            pass
+        return 60080
+
+    @property
+    def _binary_dst(self) -> str:
+        try:
+            if get_config is not None:
+                return get_config().focus.gost_binary_dst
+        except Exception:
+            pass
+        return "/data/local/tmp/gost"
+
+    def _socks_port(self, lane: int) -> int:
+        return self._socks_base + lane
+
+    def _redirect_port(self, lane: int) -> int:
+        return self._redirect_base + lane
+
+    def _marker(self, lane: int) -> str:
+        return self.PALETTE[lane % len(self.PALETTE)]
+
+    def _ensure_lanes(self) -> None:
+        """Materialize the lane dict to the current pool size (free slots)."""
+        n = self._pool_size
+        for i in range(n):
+            self._lanes.setdefault(i, None)
+        # Drop any lanes beyond the (possibly shrunk) pool that are free.
+        for i in list(self._lanes):
+            if i >= n and self._lanes[i] is None:
+                self._lanes.pop(i, None)
+                self._lane_rule_specs.pop(i, None)
+                self._lane_targets.pop(i, None)
+
+    # ── public API ────────────────────────────────────────────────────
+
+    def enable_focus(
+        self, package: str | None = None, target: str | None = None
+    ) -> tuple[bool, str]:
+        """Assign an app-proxy lane to ``package`` (listener-first, rules-last).
+
+        Resolves the package (falling back to the spotlight app), allocates a
+        free lane, downloads/pushes/launches gost for that lane, confirms it is
+        listening, then installs the iptables OUTPUT redirect rules. Fails loud
+        at each capability gate without leaving a half-applied lane.
+
+        Args:
+            package: Target package, or None to use the spotlight app.
+            target: Lane upstream — ``None`` routes to our mitmproxy (default);
+                an ``http://host:port`` (or bare ``host:port``) string routes the
+                app to an external HTTP proxy (Burp/ZAP). The host is resolved to
+                an IP host-side before gost launches.
+
+        Returns:
+            ``(ok, message)``.
+        """
+        with self._lock:
+            self._ensure_lanes()
+
+            # 1. Resolve package.
+            if not package:
+                package = self._spotlight_package()
+            if not package:
+                return False, "No spotlight app set — pick one first."
+
+            # 2. Already proxied / pool exhausted.
+            if package in self._lanes.values():
+                return True, f"{package} already proxied"
+            free = self._first_free_lane()
+            if free is None:
+                n = self._pool_size
+                return False, (
+                    f"All {n} app-proxy lanes in use — remove an app or raise "
+                    "mitmproxy.focus_lanes."
+                )
+
+            # 3. Root probe (sets _use_su, required by every device command
+            #    below — including the stale-rule cleanup, which must wrap with
+            #    the right su/non-su form to actually clear leftovers).
+            if not self._ca._check_root_access():
+                return False, "Focus requires root (su)."
+
+            # 4. Housekeeping: clear stale rules/processes once per session.
+            if not self._cleaned_this_session:
+                self._cleanup_stale_locked()
+                self._cleaned_this_session = True
+
+            # 5. owner-match capability probe.
+            ok, msg = self._probe_owner_match()
+            if not ok:
+                return False, msg
+
+            # 6. Resolve UID.
+            uid = self._resolve_uid(package)
+            if uid is None:
+                return False, f"Could not resolve Linux UID for {package}."
+
+            # 7. Ensure the gost binary is present (once per session).
+            ok, msg = self._ensure_binary()
+            if not ok:
+                return False, msg
+
+            lane = free
+            redirect_port = self._redirect_port(lane)
+
+            # 8. Resolve the lane's upstream host-side BEFORE launching, so a bad
+            #    external target fails loud without leaving a half-applied lane.
+            ok, upstream = self._build_upstream(target, lane)
+            if not ok:
+                return False, upstream  # upstream holds the error message
+            lane_target = "ours" if target is None else upstream
+
+            # 9. Launch the lane's gost redirector backgrounded as root.
+            self._launch_gost(redirect_port, upstream)
+
+            # 10. Confirm it is listening before touching iptables.
+            if not self._wait_listening(redirect_port):
+                self._kill_lane_process(redirect_port)
+                return False, f"gost failed to bind port {redirect_port}."
+
+            # 11. Install the redirect rules LAST (v4 + v6). The IPv4 table is
+            #     fatal: on a genuine add failure, roll back (drop any partial
+            #     rules + kill the lane's gost) so we never leave a redirector
+            #     running with no working rule while claiming success.
+            ok, msg = self._add_rules(lane, uid, redirect_port)
+            if not ok:
+                self._remove_lane_rules(lane)
+                self._kill_lane_process(redirect_port)
+                return False, msg
+
+            # 12. Commit lane state, target, sidecar, and shared MitmproxyState.
+            self._lanes[lane] = package
+            self._lane_targets[lane] = lane_target
+            self._write_sidecar()
+            self._add_to_state(package)
+            dest = "our mitmproxy" if target is None else upstream
+            logger.warning(
+                "App proxy lane %d → %s (uid %s) upstream %s",
+                lane,
+                package,
+                uid,
+                dest,
+            )
+            label = package if target is None else f"{package} → {upstream}"
+            return True, f"App proxy → {label} (lane {lane})"
+
+    def disable_focus(self, package: str | None = None) -> tuple[bool, str]:
+        """Free one lane (by package) or ALL lanes (``package=None``).
+
+        Rules-first removal then process kill, so iptables never points at a
+        dead port. Idempotent: freeing an already-free lane / disabling when
+        nothing is active is a harmless no-op.
+
+        Args:
+            package: Package to unfocus, or None to free every lane.
+
+        Returns:
+            ``(ok, message)``.
+        """
+        with self._lock:
+            self._ensure_lanes()
+            if package is None:
+                targets = [i for i, p in self._lanes.items() if p is not None]
+                if not targets:
+                    return True, "No app proxies to disable"
+                for lane in targets:
+                    self._teardown_lane(lane)
+                self._write_sidecar()
+                return True, "App proxies disabled (all lanes freed)"
+
+            lane = self._lane_index_for(package)
+            if lane is None:
+                return True, f"{package} has no app proxy"
+            self._teardown_lane(lane)
+            self._write_sidecar()
+            return True, f"App proxy removed for {package}"
+
+    def focused_apps(self) -> list[str]:
+        """Return the packages currently assigned to a lane."""
+        with self._lock:
+            return [p for p in self._lanes.values() if p]
+
+    def app_proxies(self) -> dict[str, str]:
+        """Return ``{package: "ours" | "http://ip:port"}`` for live lanes.
+
+        ``"ours"`` means the app routes to our mitmproxy; an ``http://`` value is
+        the resolved external HTTP-proxy upstream (Burp/ZAP). In-process read.
+        """
+        with self._lock:
+            return {
+                pkg: self._lane_targets.get(lane, "ours")
+                for lane, pkg in self._lanes.items()
+                if pkg
+            }
+
+    def lane_for(self, package: str) -> int | None:
+        """Return the host SOCKS port serving ``package``, or None."""
+        with self._lock:
+            lane = self._lane_index_for(package)
+            return None if lane is None else self._socks_port(lane)
+
+    def is_focus_active(self) -> bool:
+        """Whether any lane is currently assigned."""
+        with self._lock:
+            return any(p for p in self._lanes.values())
+
+    def cleanup_stale(self) -> None:
+        """Remove every tagged rule + stray gost/ipt2socks and clear lane state.
+
+        Self-heals after a SIGKILL'd prior run that would otherwise blackhole
+        apps. Probes root first so the su/non-su command wrapping is correct
+        when called standalone (e.g. at app startup). Swallows all errors.
+        """
+        with self._lock:
+            try:
+                self._ca._check_root_access()
+            except Exception:
+                pass
+            self._cleanup_stale_locked()
+
+    # ── internals (assume lock held unless noted) ─────────────────────
+
+    def _spotlight_package(self) -> str | None:
+        """Resolve the effective spotlight package (lazy import)."""
+        try:
+            from sandroid.services import get_spotlight_service
+
+            return get_spotlight_service().get_effective_package()
+        except Exception:
+            return None
+
+    def _first_free_lane(self) -> int | None:
+        for i in range(self._pool_size):
+            if self._lanes.get(i) is None:
+                return i
+        return None
+
+    def _lane_index_for(self, package: str) -> int | None:
+        for i, p in self._lanes.items():
+            if p == package:
+                return i
+        return None
+
+    def _resolve_uid(self, package: str) -> int | None:
+        """Resolve the app's Linux UID, robust across Android versions.
+
+        Strategy 1 (authoritative, version-independent): the owner UID of the
+        app's private data dir via ``stat -c %u /data/data/<pkg>`` as root
+        (Focus already requires root). The data dir is chowned to the app's UID
+        on every Android release, so this needs no per-version parsing.
+
+        Strategy 2 (fallback): parse ``dumpsys package``. The field name drifts
+        across versions — older builds print ``userId=<n>`` while Android 15
+        (API 35) prints ``appId=<n>`` (== the per-user-0 UID) and dropped
+        ``userId=`` entirely — so match either. The previous code matched only
+        ``userId=`` and so returned None (and "Could not resolve UID") on 15.
+        """
+        # 1. Data-dir owner — the exact Linux UID, no version dependence.
+        try:
+            out, _ = Adb.send_adb_command(
+                "shell "
+                + self._ca._root_cmd(f"stat -c %u /data/data/{package}")
+            )
+            val = (out or "").strip()
+            if val.isdigit():
+                return int(val)
+        except Exception:
+            pass
+
+        # 2. dumpsys fallback (userId= pre-15, appId= on API 35+).
+        try:
+            out, _ = Adb.send_adb_command(f"shell dumpsys package {package}")
+        except Exception:
+            return None
+        m = re.search(r"\b(?:userId|appId)=(\d+)", out or "")
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+
+    #: UID well outside Android's entire allocation space (system <10000,
+    #: apps 10000-19999, isolated 90000-99999, +100000*userId per profile),
+    #: so the probe rule matches no real process for its brief lifetime.
+    _PROBE_UID = "2000000000"
+
+    def _probe_owner_match(self) -> tuple[bool, str]:
+        """Probe that the kernel supports the per-app lane rule shape.
+
+        Probes by installing the feature's EXACT rule (UID ``_PROBE_UID``,
+        which matches no real process) and immediately deleting it — NOT
+        ``iptables -C``. The legacy backend (iptables 1.8.x) reports the
+        generic "No chain/target/match by that name" for a *non-existent*
+        nat/REDIRECT rule even when the owner match AND the REDIRECT target
+        are both compiled in, so a ``-C`` probe false-negatives and wrongly
+        disabled App Proxies on perfectly capable kernels (e.g. Android 15).
+        An add that loads the modules either succeeds or fails for an
+        unrelated reason; only a missing-module error on the add is
+        conclusive. ip6tables absence is a warning only.
+        """
+        ok, _ = self._probe_lane_rule("iptables")
+        if not ok:
+            return False, (
+                "iptables owner/REDIRECT rule unavailable on this kernel "
+                "(netfilter module missing) — Focus can't scope by app UID."
+            )
+        # IPv6 is best-effort. Only probe when the ip6tables nat table even
+        # exists (cached + stderr-suppressed via _ip6_available); otherwise the
+        # add/delete spew "Table does not exist" on IPv4-only kernels
+        # (CONFIG_IP6_NF_NAT off), which is exactly what _add_rules skips too.
+        if self._ip6_available() and not self._probe_lane_rule("ip6tables")[0]:
+            logger.warning(
+                "ip6tables owner/REDIRECT unavailable — Focus will only "
+                "scope IPv4 traffic on this device."
+            )
+        return True, "owner match available"
+
+    def _probe_lane_rule(self, binary: str) -> tuple[bool, str]:
+        """Add the feature's exact lane rule (bogus UID), then delete it.
+
+        Returns ``(supported, add_output)``. ``supported`` is False only when
+        the ADD failed with a missing-module error; the DELETE is best-effort
+        cleanup that runs regardless. A probe that can't run at all (ADB
+        error) is treated as supported so a transient failure never disables
+        the feature. Appends (``-A``) so the throwaway rule is evaluated last.
+        """
+        add = (
+            f"{binary} -t nat -A OUTPUT -m owner --uid-owner {self._PROBE_UID} "
+            "-p tcp -j REDIRECT --to-ports 1"
+        )
+        dele = (
+            f"{binary} -t nat -D OUTPUT -m owner --uid-owner {self._PROBE_UID} "
+            "-p tcp -j REDIRECT --to-ports 1"
+        )
+        try:
+            out, err = Adb.send_adb_command(f"shell {self._ca._root_cmd(add)}")
+        except Exception:
+            return True, ""
+        # Clean up whether or not the add reported success (a failed add just
+        # makes the delete a harmless no-op).
+        try:
+            Adb.send_adb_command(f"shell {self._ca._root_cmd(dele)}")
+        except Exception:
+            pass
+        return (not self._is_missing_match(f"{out}\n{err}")), err
+
+    @staticmethod
+    def _is_missing_match(err: str) -> bool:
+        # iptables phrases a missing extension/module several ways: "Couldn't
+        # load match `owner'" (kernel module absent), "Couldn't find match
+        # `…'" (userspace extension absent), or the generic "No chain/target/
+        # match by that name." Match any so a real capability gap is caught.
+        text = err or ""
+        return bool(
+            re.search(r"Couldn't (load|find) (match|target)", text)
+            or "No chain/target/match" in text
+        )
+
+    # ── binary acquisition ────────────────────────────────────────────
+
+    def _ensure_binary(self) -> tuple[bool, str]:
+        """Download (cached, sha256-verified), then push gost to device.
+
+        Idempotent across a session: the host cache download is skipped when a
+        matching file already exists; the device push always runs (the binary
+        is tiny) so a wiped /data/local/tmp self-heals.
+        """
+        from sandroid.core.fsmon import FSMon
+
+        abi = FSMon.get_device_architecture()
+        try:
+            assets = get_config().focus.gost_assets
+            asset = assets[abi]
+        except Exception:
+            return False, f"No gost asset configured for ABI '{abi}'."
+
+        url = asset.get("url", "")
+        sha256 = asset.get("sha256", "")
+        if not url:
+            return False, f"No gost URL configured for ABI '{abi}'."
+
+        cache_dir = os.path.expanduser("~/.cache/sandroid/gost/")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError as exc:
+            return False, f"Cannot create gost cache dir: {exc}"
+        cached = os.path.join(cache_dir, f"gost-{abi}")
+
+        # Reuse a cached file only if it is non-empty and (when a hash is
+        # configured) matches it. The cached file is the EXTRACTED ELF.
+        need_download = True
+        if os.path.exists(cached) and os.path.getsize(cached) > 0:
+            if not sha256 or self._file_sha256(cached) == sha256:
+                need_download = False
+
+        if need_download:
+            ok, msg = self._download_binary(url, cached, sha256)
+            if not ok:
+                return False, msg
+
+        # Push to the device (rm -f first, then push, then chmod 755 as root).
+        dst = self._binary_dst
+        try:
+            Adb.send_adb_command(
+                f"shell {self._ca._root_cmd(f'rm -f {dst}')}"
+            )
+            push_out = subprocess.run(
+                ["adb", "push", cached, dst],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if push_out.returncode != 0:
+                return False, (
+                    "Failed to push gost: "
+                    f"{(push_out.stderr or push_out.stdout or '').strip()}"
+                )
+            Adb.send_adb_command(
+                f"shell {self._ca._root_cmd(f'chmod 755 {dst}')}"
+            )
+        except Exception as exc:
+            return False, f"Failed to install gost: {exc}"
+
+        self._binary_pushed = True
+        return True, "gost installed"
+
+    def _download_binary(
+        self, url: str, dst: str, sha256: str
+    ) -> tuple[bool, str]:
+        """Download the gost ``.tar.gz``, extract the ``gost`` ELF to ``dst``.
+
+        The gost release ships gzip tarballs (``LICENSE``, ``README*``, and a
+        ``gost`` binary), so we read the archive from memory, ``extractfile`` the
+        member whose basename is ``gost`` (NOT ``extractall`` — that is path-
+        traversal-safe and avoids writing the docs), write only that ELF, then
+        verify the sha256 of the EXTRACTED file. Mirrors the frida-server
+        cached-download pattern otherwise.
+        """
+        try:
+            with requests.get(url, timeout=300, allow_redirects=True) as res:
+                res.raise_for_status()
+                content = res.content
+            if not content:
+                return False, f"gost download returned empty content: {url}"
+        except requests.RequestException as exc:
+            return False, f"Failed to download gost from {url}: {exc}"
+
+        # Extract only the `gost` member (traversal-safe: never extractall).
+        try:
+            with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
+                member = next(
+                    (
+                        m
+                        for m in tf.getmembers()
+                        if m.isfile() and os.path.basename(m.name) == "gost"
+                    ),
+                    None,
+                )
+                if member is None:
+                    return False, (
+                        f"gost archive has no 'gost' member: {url}"
+                    )
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    return False, "Could not read 'gost' member from archive."
+                data = extracted.read()
+        except (tarfile.TarError, OSError, EOFError) as exc:
+            return False, f"Failed to extract gost from {url}: {exc}"
+
+        try:
+            with open(dst, "wb") as f:
+                f.write(data)
+        except OSError as exc:
+            return False, f"Failed to write gost binary: {exc}"
+
+        if sha256:
+            actual = self._file_sha256(dst)
+            if actual != sha256:
+                try:
+                    os.unlink(dst)
+                except OSError:
+                    pass
+                return False, (
+                    "gost sha256 mismatch "
+                    f"(expected {sha256[:12]}…, got {actual[:12]}…). "
+                    "Note: the checksum is of the extracted ELF, not the tarball."
+                )
+        else:
+            logger.warning(
+                "No sha256 configured for gost asset — skipping "
+                "verification (configure focus.gost_assets)."
+            )
+        return True, "gost downloaded"
+
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    # ── upstream resolution ───────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_to_ip(host: str) -> tuple[bool, str]:
+        """Resolve ``host`` to an IPv4 address host-side (gost stays IP-only).
+
+        gost is kept IP-only (never ``?sniffing``) and the device's resolv.conf
+        can't be relied on, so any external-proxy hostname is resolved HERE. A
+        numeric IP is returned unchanged. ``gethostbyname`` is v4-only — switch
+        to ``getaddrinfo`` if IPv6 upstreams are ever needed.
+
+        Returns ``(ok, ip_or_error)``.
+        """
+        host = (host or "").strip()
+        if not host:
+            return False, "External proxy host is empty."
+        try:
+            return True, socket.gethostbyname(host)
+        except OSError as exc:
+            return False, f"Could not resolve external proxy host '{host}': {exc}"
+
+    def _build_upstream(
+        self, target: str | None, lane: int
+    ) -> tuple[bool, str]:
+        """Build the gost ``-F`` upstream for a lane (host-side resolved).
+
+        ``target=None`` ⇒ our mitmproxy: ``socks5://<host_ip>:<socks_port>`` (the
+        lane's SOCKS port is the app identity the addon reads). Otherwise
+        ``target`` is an external HTTP proxy as ``http://host:port`` or bare
+        ``host:port``; the host is resolved to an IP here, yielding
+        ``http://<ip>:<port>``. Non-http schemes are rejected and a resolve
+        failure fails loud (returned as the message) before gost launches.
+
+        Returns ``(ok, upstream_or_error)``.
+        """
+        if target is None:
+            host_ip = self._resolve_host_ip()
+            return True, f"socks5://{host_ip}:{self._socks_port(lane)}"
+
+        spec = (target or "").strip()
+        if "://" in spec:
+            scheme, spec = spec.split("://", 1)
+            if scheme.lower() != "http":
+                return False, (
+                    f"Unsupported proxy scheme '{scheme}://' — external app "
+                    "proxies must be http://host:port (Burp/ZAP)."
+                )
+        if ":" not in spec:
+            return False, (
+                f"External proxy '{target}' must include a port (host:port)."
+            )
+        host, port_str = spec.rsplit(":", 1)
+        # Strip brackets from a bracketed host; note _resolve_to_ip uses
+        # gethostbyname (IPv4-only), so a real IPv6 literal still fails loud.
+        host = host.strip().strip("[]")
+        try:
+            port = int(port_str)
+        except ValueError:
+            return False, f"External proxy port not a number: '{port_str}'."
+        ok, ip_or_err = self._resolve_to_ip(host)
+        if not ok:
+            return False, ip_or_err
+        return True, f"http://{ip_or_err}:{port}"
+
+    # ── gost process lifecycle ────────────────────────────────────────
+
+    def _resolve_host_ip(self) -> str:
+        """Host IP our-mitmproxy lanes forward SOCKS traffic to.
+
+        ``focus.host_ip_override`` wins; else ``10.0.2.2`` on an emulator
+        (SLIRP loopback alias); else the auto-detected host LAN IP.
+        """
+        try:
+            if get_config is not None:
+                override = (get_config().focus.host_ip_override or "").strip()
+                if override:
+                    return override
+        except Exception:
+            pass
+        if self._is_emulator():
+            return "10.0.2.2"
+        return ProxyManager.get_host_ip()
+
+    @staticmethod
+    def _is_emulator() -> bool:
+        serial = Adb.get_target_device()
+        if serial and serial.startswith("emulator-"):
+            return True
+        try:
+            out, _ = Adb.send_adb_command("shell getprop ro.boot.qemu")
+            if (out or "").strip() == "1":
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _launch_gost(self, redirect_port: int, upstream: str) -> None:
+        """Launch one gost redirector backgrounded as root.
+
+        ``gost -L red://:<redirect_port> -F <upstream>``: the ``red://`` listener
+        reads ``SO_ORIGINAL_DST`` from the existing iptables REDIRECT rule and
+        forwards to the lane's upstream (our mitmproxy SOCKS5, or an external
+        HTTP proxy). The args carry no shell metacharacters so they are passed
+        unquoted — keeping the exact ``su ... sh -c "<cmd> &"`` backgrounding via
+        a detached Popen (mirrors ``frida_manager.run_frida_server``).
+        """
+        inner = (
+            f"{self._binary_dst} -L red://:{redirect_port} -F {upstream} &"
+        )
+        if self._ca._use_su:
+            shell_cmd = f"su -c 'sh -c \"{inner}\"'"
+        else:
+            shell_cmd = f'sh -c "{inner}"'
+        adb_path = Adb.ADB_PATH or "adb"
+        full_cmd = [adb_path]
+        serial = Adb.get_target_device()
+        if serial:
+            full_cmd += ["-s", serial]
+        full_cmd += ["shell", shell_cmd]
+        try:
+            subprocess.Popen(
+                full_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.warning("Failed to launch gost: %s", exc)
+
+    def _wait_listening(self, redirect_port: int) -> bool:
+        """Poll ~2s for gost to be running and bound to ``redirect_port``."""
+        needle = f":{redirect_port}"
+        for _ in range(10):
+            try:
+                pid_out, _ = Adb.send_adb_command(
+                    f"shell {self._ca._root_cmd('pidof gost')}"
+                )
+            except Exception:
+                pid_out = ""
+            if (pid_out or "").strip():
+                listening = self._port_listening(redirect_port, needle)
+                if listening:
+                    return True
+            time.sleep(0.2)
+        return False
+
+    def _port_listening(self, redirect_port: int, needle: str) -> bool:
+        for tool in ("ss -ltn", "netstat -ltn"):
+            try:
+                out, _ = Adb.send_adb_command(
+                    f"shell {self._ca._root_cmd(tool)}"
+                )
+            except Exception:
+                continue
+            if needle in (out or ""):
+                return True
+        return False
+
+    def _kill_lane_process(self, redirect_port: int) -> None:
+        """Kill the gost instance bound to ``redirect_port``."""
+        pat = f"gost .*red://:{redirect_port}"
+        inner = 'pkill -f "' + pat + '"'
+        try:
+            Adb.send_adb_command(f"shell {self._ca._root_cmd(inner)}")
+        except Exception:
+            pass
+
+    # ── iptables rule management ──────────────────────────────────────
+
+    def _ip6_available(self) -> bool:
+        """Whether the device has a usable ip6tables ``nat`` table (cached).
+
+        IPv4-only emulators lack it. We probe once with stderr suppressed (so
+        the probe itself is quiet) and decide from stdout: a working table
+        always lists at least the chain's default policy (``-P OUTPUT ...``).
+        When absent, all ip6tables operations are skipped.
+        """
+        if self._ip6_ok is None:
+            try:
+                out, _ = Adb.send_adb_command(
+                    "shell "
+                    + self._ca._root_cmd(
+                        "ip6tables -t nat -S OUTPUT 2>/dev/null"
+                    )
+                )
+                self._ip6_ok = "OUTPUT" in (out or "")
+            except Exception:
+                self._ip6_ok = False
+            if not self._ip6_ok:
+                logger.info(
+                    "ip6tables nat unavailable — IPv6 redirect rules skipped "
+                    "(IPv4-only device)."
+                )
+        return self._ip6_ok
+
+    def _rule_body(self, uid: int, redirect_port: int, tagged: bool) -> str:
+        comment = (
+            f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
+        )
+        return (
+            f"-t nat {{op}} OUTPUT -m owner --uid-owner {uid} -p tcp "
+            f"{comment}-j REDIRECT --to-ports {redirect_port}"
+        )
+
+    def _add_rules(
+        self, lane: int, uid: int, redirect_port: int
+    ) -> tuple[bool, str]:
+        """Add the v4+v6 redirect rules for a lane (delete-then-add, tagged).
+
+        Falls back to an untagged exact-tuple rule if ``xt_comment`` is
+        unavailable, recording the spec so disable can delete it precisely.
+        The IPv4 table is fatal — a genuine add failure there is returned so the
+        caller can roll back, because a redirector with no rule would silently
+        capture nothing. ip6tables failure is a warning only (emulator is
+        IPv4-only).
+
+        Returns:
+            ``(ok, message)`` reflecting the fatal IPv4 table.
+        """
+        self._lane_rule_specs.pop(lane, None)
+        specs: list[tuple[str, str]] = []
+        v4_ok = True
+        v4_err = ""
+        tables = [("iptables", True)]
+        if self._ip6_available():
+            tables.append(("ip6tables", False))
+        for tbl, fatal in tables:
+            body = self._rule_body(uid, redirect_port, tagged=True)
+            # Idempotent delete of any existing identical rule first.
+            self._delete_rule_loop(tbl, body)
+            add_cmd = f"{tbl} {body.format(op='-A')}"
+            try:
+                _, err = Adb.send_adb_command(
+                    f"shell {self._ca._root_cmd(add_cmd)}"
+                )
+            except Exception as exc:
+                err = str(exc)
+            if self._is_comment_error(err):
+                # Retry without the comment match.
+                body = self._rule_body(uid, redirect_port, tagged=False)
+                self._delete_rule_loop(tbl, body)
+                add_cmd = f"{tbl} {body.format(op='-A')}"
+                try:
+                    _, err = Adb.send_adb_command(
+                        f"shell {self._ca._root_cmd(add_cmd)}"
+                    )
+                except Exception as exc:
+                    err = str(exc)
+            # Record the spec we actually used so teardown can delete it,
+            # even if this add failed (delete of a missing rule is harmless).
+            specs.append((tbl, body))
+            if err and err.strip():
+                if fatal:
+                    v4_ok = False
+                    v4_err = err.strip()
+                else:
+                    logger.warning(
+                        "ip6tables rule add warning: %s", err.strip()
+                    )
+        self._lane_rule_specs[lane] = specs
+        if not v4_ok:
+            return False, f"iptables redirect rule failed: {v4_err}"
+        return True, "rules added"
+
+    def _delete_rule_loop(self, tbl: str, body: str) -> None:
+        """Delete every copy of a rule (ignore errors)."""
+        del_cmd = f"{tbl} {body.format(op='-D')}"
+        for _ in range(10):
+            try:
+                _, err = Adb.send_adb_command(
+                    f"shell {self._ca._root_cmd(del_cmd)}"
+                )
+            except Exception:
+                return
+            if err and ("No chain/target/match" in err or "does a matching" in err):
+                return
+            if err and err.strip():
+                # Any other error (e.g. bad rule) — stop trying.
+                return
+
+    @staticmethod
+    def _is_comment_error(err: str) -> bool:
+        text = (err or "").lower()
+        return "comment" in text and (
+            "couldn't load" in text or "no chain/target/match" in text
+        )
+
+    def _remove_lane_rules(self, lane: int) -> None:
+        """Delete the recorded rule specs for a lane (v4+v6), ignoring errors."""
+        specs = self._lane_rule_specs.get(lane, [])
+        for tbl, body in specs:
+            self._delete_rule_loop(tbl, body)
+        self._lane_rule_specs.pop(lane, None)
+
+    # ── lane teardown / cleanup ───────────────────────────────────────
+
+    def _teardown_lane(self, lane: int) -> None:
+        """Rules-first removal, then kill the lane's gost; free the slot."""
+        package = self._lanes.get(lane)
+        self._remove_lane_rules(lane)
+        self._kill_lane_process(self._redirect_port(lane))
+        self._lanes[lane] = None
+        self._lane_targets.pop(lane, None)
+        if package:
+            self._remove_from_state(package)
+
+    def _cleanup_stale_locked(self) -> None:
+        """Remove every tagged nat-OUTPUT rule + stray gost; clear lane state.
+
+        Also kills/removes any leftover ipt2socks (the pre-gost redirector) so a
+        device transitioned from the old build self-heals.
+        """
+        tbls = ["iptables"]
+        if self._ip6_available():
+            tbls.append("ip6tables")
+        for tbl in tbls:
+            try:
+                out, _ = Adb.send_adb_command(
+                    f"shell {self._ca._root_cmd(f'{tbl} -t nat -S OUTPUT')}"
+                )
+            except Exception:
+                continue
+            for line in (out or "").splitlines():
+                if self._RULE_TAG not in line:
+                    continue
+                spec = line.strip()
+                if not spec.startswith("-A "):
+                    continue
+                del_spec = "-D " + spec[len("-A "):]
+                del_cmd = f"{tbl} -t nat {del_spec}"
+                try:
+                    Adb.send_adb_command(
+                        f"shell {self._ca._root_cmd(del_cmd)}"
+                    )
+                except Exception:
+                    pass
+        # Kill any stray gost redirectors (current) and ipt2socks (legacy),
+        # then remove the legacy ipt2socks binary so transitioned devices
+        # self-heal. Runs once per session (mount/atexit/stop), not per-lane.
+        for kill in (f"pkill -f {self._binary_dst}", "pkill -f ipt2socks"):
+            try:
+                Adb.send_adb_command(f"shell {self._ca._root_cmd(kill)}")
+            except Exception:
+                pass
+        try:
+            Adb.send_adb_command(
+                f"shell {self._ca._root_cmd('rm -f /data/local/tmp/ipt2socks')}"
+            )
+        except Exception:
+            pass
+        self._lanes.clear()
+        self._lane_targets.clear()
+        self._lane_rule_specs.clear()
+        try:
+            self._write_sidecar()
+        except Exception:
+            pass
+
+    def _atexit_cleanup(self) -> None:
+        try:
+            self.disable_focus()
+        except Exception:
+            pass
+
+    # ── sidecar map ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _sidecar_path() -> str:
+        default = os.path.expanduser("~/.cache/sandroid/focus_lanes.json")
+        try:
+            if get_config is not None:
+                return os.path.expanduser(get_config().focus.sidecar_path)
+        except Exception:
+            pass
+        return default
+
+    def _write_sidecar(self) -> None:
+        """Atomically write the lane→app sidecar map (string SOCKS-port keys).
+
+        Shape: ``{"8082": {"package": "com.foo", "marker": ":green_circle:"}}``.
+        Empty when no lane is assigned.
+        """
+        import json
+
+        data: dict[str, dict[str, str]] = {}
+        for lane, package in self._lanes.items():
+            if not package:
+                continue
+            # External lanes forward to an HTTP proxy (Burp/ZAP) and never reach
+            # our mitmweb SOCKS listener, so there is no arrival port to key on —
+            # the addon can't (and shouldn't) attribute them. Skip them; only
+            # our-mitmproxy lanes get a sidecar entry.
+            if self._lane_targets.get(lane, "ours") != "ours":
+                continue
+            data[str(self._socks_port(lane))] = {
+                "package": package,
+                "marker": self._marker(lane),
+            }
+        path = self._sidecar_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(
+                prefix="focus_lanes_", suffix=".json", dir=os.path.dirname(path)
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            Path(tmp).replace(path)
+        except OSError as exc:
+            logger.warning("Failed to write Focus sidecar map: %s", exc)
+
+    # ── shared MitmproxyState mirroring ───────────────────────────────
+
+    @staticmethod
+    def _mitm_state():
+        try:
+            from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+            return get_mitmproxy_service().state
+        except Exception:
+            return None
+
+    def _add_to_state(self, package: str) -> None:
+        state = self._mitm_state()
+        if state is not None and package not in state.focus_apps:
+            state.focus_apps.append(package)
+
+    def _remove_from_state(self, package: str) -> None:
+        state = self._mitm_state()
+        if state is not None and package in state.focus_apps:
+            try:
+                state.focus_apps.remove(package)
+            except ValueError:
+                pass
+
+
+_FOCUS_INSTANCE: FocusManager | None = None
+_FOCUS_INSTANCE_LOCK = threading.Lock()
+
+
+def get_focus_manager() -> FocusManager:
+    """Module-level accessor for the singleton FocusManager."""
+    global _FOCUS_INSTANCE
+    if _FOCUS_INSTANCE is None:
+        with _FOCUS_INSTANCE_LOCK:
+            if _FOCUS_INSTANCE is None:
+                _FOCUS_INSTANCE = FocusManager()
+    return _FOCUS_INSTANCE
 
 
 # Convenience functions for use without class instantiation

@@ -1,19 +1,27 @@
-"""Proxy configuration modal for Sandroid TUI.
+"""Unified proxy-settings modal for the Sandroid TUI.
 
-Provides a modal dialog for:
-- Setting/unsetting HTTP proxy
-- Managing CA certificates for SSL interception
-- Zygote CA injection status and controls
+One modal with three stacked sections:
 
-Styled to match ObjectionModal with keyboard-only navigation.
+- **Device Proxy** — point the whole device at no proxy, Sandroid's own
+  mitmproxy, or an external HTTP proxy (Burp/ZAP/remote mitmproxy).
+- **App Proxies** — per-app redirectors, each routing one app at our
+  mitmproxy (default) or an external HTTP proxy.
+- **CA Certificate** — detect/push/inject the interception CA, with Zygote
+  injection status.
+
+Device Proxy and App Proxies are applied together via "Apply" (Ctrl+S). The
+CA section keeps its own Push / Inject controls. Styled to match the other
+forensic modals with keyboard-first navigation.
 """
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
@@ -21,44 +29,64 @@ from sandroid.core.proxy_manager import (
     CAInfo,
     CAManager,
     CASource,
-    InjectionResult,
     InjectionStrategy,
     ProxyConfig,
     ProxyManager,
     ProxyStatus,
     ZygoteStatus,
+    get_focus_manager,
 )
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
 
 @dataclass
 class ProxyModalResult:
-    """Result returned from the ProxyModal."""
+    """Result returned from the :class:`ProxyModal`.
+
+    Attributes:
+        cancelled: Whether the dialog was dismissed without applying.
+        action: What happened — ``"applied"`` (Device + App proxies applied),
+            ``"push_ca"``, ``"inject_ca"``, or ``"close"``.
+        proxy_config: The device proxy config that was applied, if any.
+        ca_path: The CA path involved in a CA action, if any.
+        ca_source: The CA source involved in a CA action, if any.
+    """
 
     cancelled: bool = True
-    action: str = "close"  # "set_proxy", "unset_proxy", "push_ca", "inject_ca"
+    action: str = "close"
     proxy_config: ProxyConfig | None = None
     ca_path: Path | None = None
     ca_source: CASource | None = None
 
 
 class ProxyModal(ForensicModal[ProxyModalResult]):
-    """Modal for configuring proxy and CA certificates.
+    """Unified modal for Device Proxy, App Proxies, and the CA certificate.
 
     Features:
-    - Current proxy status display
-    - IP:PORT input with default (host IP:8080)
-    - Auto-detect CA certs (mitmproxy, http-toolkit, burp suite)
-    - Radio buttons for CA selection + custom path option
-    - Zygote injection status
-    - Keyboard shortcuts for all actions (no buttons)
+    - Device Proxy radio (Off / our mitmproxy / external) with a live
+      ground-truth status line probed off the UI thread.
+    - App Proxies: dynamic per-app rows, each with a target input (empty =
+      our mitmproxy, or an ``http://host:port`` for an external proxy).
+    - CA Certificate: detect/push/inject controls and Zygote injection status.
+    - Apply (Ctrl+S) commits Device + App proxies together; CA keeps its own
+      Push / Inject controls.
     """
 
     DEFAULT_CSS = """
     ProxyModal .modal-container {
-        width: 80;
-        max-height: 36;
-        max-width: 90%;
+        width: 84;
+        height: 90%;
+        max-width: 95%;
+    }
+
+    /* 1fr (not auto) so the body fills the gap between the title and the
+       pinned button row and SCROLLS its overflow internally. With auto the
+       body grows to its full content height and pushes the action buttons
+       off the bottom of the clipped container — they vanished entirely. */
+    ProxyModal #proxy-body {
+        width: 100%;
+        height: 1fr;
+        scrollbar-size: 1 1;
     }
 
     ProxyModal .section-header {
@@ -73,19 +101,73 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         background: $panel;
     }
 
-    ProxyModal #proxy-input-row {
+    ProxyModal #device-radio-set {
+        width: 100%;
         height: auto;
         padding: 0 2;
     }
 
-    ProxyModal #proxy-input-row Label {
+    ProxyModal #device-ext-row {
+        height: auto;
+        padding: 0 2;
+    }
+
+    ProxyModal #device-ext-row Label {
         width: 10;
         padding-top: 1;
         color: $foreground;
     }
 
-    ProxyModal #proxy-input {
+    ProxyModal #device-ext-input {
         width: 1fr;
+    }
+
+    ProxyModal #app-proxy-list {
+        width: 100%;
+        height: auto;
+        max-height: 10;
+        padding: 0 2;
+        scrollbar-size: 1 1;
+    }
+
+    ProxyModal .app-proxy-row {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+    }
+
+    ProxyModal .app-proxy-name {
+        width: 24;
+        padding-top: 1;
+        color: $foreground;
+    }
+
+    ProxyModal .app-proxy-target {
+        width: 1fr;
+    }
+
+    ProxyModal .app-proxy-remove {
+        min-width: 10;
+    }
+
+    ProxyModal #app-proxy-empty {
+        color: $text-muted;
+        padding: 0 2;
+    }
+
+    ProxyModal #app-proxy-lanes-line {
+        color: $foreground;
+        padding: 0 2;
+    }
+
+    ProxyModal #app-proxy-note {
+        color: $text-muted;
+        padding: 0 2;
+    }
+
+    ProxyModal .app-proxy-buttons {
+        height: auto;
+        padding: 0 2;
     }
 
     ProxyModal #ca-section {
@@ -153,8 +235,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     """
 
     BINDINGS = [
-        Binding("s", "set_proxy", "Set Proxy", show=False),
-        Binding("u", "unset_proxy", "Unset Proxy", show=False),
+        Binding("ctrl+s", "apply", "Apply", show=False),
+        Binding("a", "add_app", "Add app", show=False),
         Binding("p", "push_ca", "Push CA", show=False),
         Binding("i", "inject_ca", "Inject CA", show=False),
     ]
@@ -174,96 +256,369 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._detected_cas: list[CAInfo] = []
         self._zygote_status: ZygoteStatus | None = None
         self._pending_ca_path = None
+        self._pending_device_config: ProxyConfig | None = None
+        # Working state for App Proxies: (package, target_string) where
+        # target_string == "" routes the app at our mitmproxy.
+        self._app_rows: list[tuple[str, str]] = []
+        # Last ground-truth device proxy snapshot from the threaded probe.
+        self._device_truth: dict = {"state": "none", "addr": ""}
+
+    # ------------------------------------------------------------------ #
+    # Layout                                                             #
+    # ------------------------------------------------------------------ #
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
         with Vertical(classes="modal-container"):
-            yield Label("Proxy & CA Configuration", classes="modal-title")
+            yield Label("Proxy Settings", classes="modal-title")
 
-            # Proxy Status Section
-            yield Label("Proxy Status", classes="section-header")
-            yield Static("Checking...", id="proxy-status", classes="status-line")
+            with VerticalScroll(id="proxy-body"):
+                # ----- Section 1: Device Proxy ----- #
+                yield Label("Device Proxy", classes="section-header")
+                yield Static(
+                    "Checking…", id="device-status", classes="status-line"
+                )
+                with RadioSet(id="device-radio-set"):
+                    yield RadioButton(
+                        "Off — no device proxy",
+                        value=True,
+                        id="device-radio-off",
+                    )
+                    yield RadioButton(
+                        f"Our mitmproxy ({self._mitmweb_addr()})",
+                        id="device-radio-ours",
+                    )
+                    yield RadioButton("External proxy", id="device-radio-external")
+                with Horizontal(id="device-ext-row"):
+                    yield Label("External:")
+                    yield Input(
+                        placeholder="host:port",
+                        value=self._default_external_addr(),
+                        id="device-ext-input",
+                    )
 
-            # Proxy Input Section
-            yield Label("Proxy Settings", classes="section-header")
-            with Horizontal(id="proxy-input-row"):
-                yield Label("Address:")
-                default = self._proxy_manager.get_default_config()
-                yield Input(
-                    placeholder=f"{default.ip}:{default.port}",
-                    value=f"{default.ip}:{default.port}",
-                    id="proxy-input",
+                # ----- Section 2: App Proxies ----- #
+                yield Label("App Proxies", classes="section-header")
+                yield VerticalScroll(id="app-proxy-list")
+                yield Static("", id="app-proxy-lanes-line")
+                yield Static(
+                    "[dim]Each app proxy = one on-device redirector.[/dim]",
+                    id="app-proxy-note",
+                )
+                with Horizontal(classes="app-proxy-buttons"):
+                    yield Button("Add app", id="app-add-btn", classes="-primary")
+
+                # ----- Section 3: CA Certificate ----- #
+                yield Label("CA Certificate", classes="section-header")
+                with VerticalScroll(id="ca-section"):
+                    with RadioSet(id="ca-radio-set"):
+                        # Populated on mount.
+                        pass
+                with Horizontal(id="custom-path-row"):
+                    yield Label("Custom:")
+                    yield Input(
+                        placeholder="Path to custom certificate...",
+                        id="custom-path-input",
+                    )
+                yield Label("Device Info", classes="section-header")
+                yield Static("Checking...", id="device-info", classes="device-info")
+                yield Label("Zygote Injection", classes="section-header")
+                yield Static(
+                    "Checking...", id="zygote-status", classes="zygote-status"
                 )
 
-            # CA Certificate Section
-            yield Label("CA Certificate", classes="section-header")
-            with VerticalScroll(id="ca-section"):
-                with RadioSet(id="ca-radio-set"):
-                    # Will be populated on mount
-                    pass
-
-            # Custom Path Input
-            with Horizontal(id="custom-path-row"):
-                yield Label("Custom:")
-                yield Input(
-                    placeholder="Path to custom certificate...",
-                    id="custom-path-input",
-                )
-
-            # Device Info Section
-            yield Label("Device Info", classes="section-header")
-            yield Static("Checking...", id="device-info", classes="device-info")
-
-            # Zygote Injection Section
-            yield Label("Zygote Injection", classes="section-header")
-            yield Static("Checking...", id="zygote-status", classes="zygote-status")
-
-            # Action buttons
+            # ----- Action buttons ----- #
             with Horizontal(classes="button-row"):
-                yield Button("Set Proxy", id="btn-set-proxy", classes="-primary")
-                yield Button("Unset", id="btn-unset-proxy", classes="-secondary")
-                yield Button("Inject CA", id="btn-inject-ca", classes="-primary")
+                yield Button("Apply", id="btn-apply", classes="-primary")
+                yield Button("Push CA", id="btn-push-ca", classes="-secondary")
+                yield Button("Inject CA", id="btn-inject-ca", classes="-secondary")
 
-            # Dynamic key hints via footer
             yield KeyHintFooter(
                 hints={
-                    "default": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Esc=Cancel[/dim]",
-                    "input": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Tab=Next  Esc=Cancel[/dim]",
-                    "radioset": "[dim]S=Set Proxy  U=Unset  P=Push CA  I=Inject CA  Space=Select  Esc=Cancel[/dim]",
-                    "button": "[dim]Enter=Activate  S=Set Proxy  U=Unset  I=Inject CA  Tab=Next  Esc=Cancel[/dim]",
+                    "default": (
+                        "[dim]Ctrl+S=Apply  A=Add app  P=Push CA  "
+                        "I=Inject CA  Esc=Cancel[/dim]"
+                    ),
+                    "input": (
+                        "[dim]Ctrl+S=Apply  P=Push CA  I=Inject CA  "
+                        "Tab=Next  Esc=Cancel[/dim]"
+                    ),
+                    "radioset": (
+                        "[dim]Ctrl+S=Apply  Space=Select  P=Push CA  "
+                        "I=Inject CA  Esc=Cancel[/dim]"
+                    ),
+                    "button": (
+                        "[dim]Enter=Activate  Ctrl+S=Apply  A=Add app  "
+                        "Tab=Next  Esc=Cancel[/dim]"
+                    ),
                 }
             )
 
     def on_mount(self) -> None:
         """Initialize the modal with current status."""
-        self._refresh_proxy_status()
+        self._refresh_device_proxy_status()
+        self._init_app_rows()
+        self._rebuild_app_list()
         self._detect_certificates()
         self._refresh_device_info()
         self._refresh_zygote_status()
 
-        # Focus proxy input
-        proxy_input = self.query_one("#proxy-input", Input)
-        proxy_input.focus()
+        try:
+            self.query_one("#device-radio-set", RadioSet).focus()
+        except NoMatches:
+            pass
 
-    def _refresh_proxy_status(self) -> None:
-        """Refresh and display current proxy status."""
-        status, config = self._proxy_manager.get_proxy_settings()
-        self.proxy_status = status
-        self.current_proxy = config
+    # ------------------------------------------------------------------ #
+    # Section 1 — Device Proxy                                           #
+    # ------------------------------------------------------------------ #
 
-        status_widget = self.query_one("#proxy-status", Static)
-        if status == ProxyStatus.SET and config:
+    def _mitmweb_addr(self) -> str:
+        """The ``host_ip:port`` Sandroid's own mitmproxy listens on."""
+        from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+        host_ip = ProxyManager.get_host_ip()
+        port = get_mitmproxy_service().state.proxy_port
+        return f"{host_ip}:{port}"
+
+    def _default_external_addr(self) -> str:
+        """A sensible default external address (``host_ip:8080``)."""
+        try:
+            return f"{ProxyManager.get_host_ip()}:8080"
+        except Exception:
+            return "127.0.0.1:8080"
+
+    def _refresh_device_proxy_status(self) -> None:
+        """Probe the device's current proxy off the UI thread.
+
+        ``capture_view`` reads the device ``http_proxy`` over ADB (blocking),
+        so it runs on a daemon thread and marshals the result back with
+        ``call_from_thread``.
+        """
+        status_widget = self.query_one("#device-status", Static)
+        status_widget.update("[dim]Checking…[/dim]")
+
+        def worker() -> None:
+            try:
+                from sandroid.services.mitmproxy_service import (
+                    get_mitmproxy_service,
+                )
+
+                view = get_mitmproxy_service().capture_view()
+            except Exception as exc:  # pragma: no cover - defensive
+                self.app.call_from_thread(
+                    self._on_device_probe_failed, str(exc)
+                )
+                return
+            self.app.call_from_thread(self._on_device_probe_done, view)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_device_probe_failed(self, _exc: str) -> None:
+        """Render a fallback when the device proxy probe could not run."""
+        try:
+            self.query_one("#device-status", Static).update(
+                "[yellow]●[/yellow] Device proxy status unavailable"
+            )
+        except NoMatches:
+            pass
+
+    def _on_device_probe_done(self, view: dict) -> None:
+        """Render the probed device proxy state and pre-select the radio."""
+        device = view.get("device", {}) if isinstance(view, dict) else {}
+        state = device.get("state", "none")
+        addr = device.get("addr", "")
+        self._device_truth = {"state": state, "addr": addr}
+
+        try:
+            status_widget = self.query_one("#device-status", Static)
+        except NoMatches:
+            return
+
+        if state == "ours":
             status_widget.update(
-                f"[green]\u25cf[/green] Proxy set to: [bold]{config.address}[/bold]"
+                f"[green]●[/green] Device points at our mitmproxy "
+                f"— [bold]{addr}[/bold]"
+            )
+            self._select_device_radio("device-radio-ours")
+        elif state == "external":
+            status_widget.update(
+                f"[#6ba3ff]●[/] Device points at external proxy "
+                f"— [bold]{addr}[/bold]"
+            )
+            try:
+                self.query_one("#device-ext-input", Input).value = addr
+            except NoMatches:
+                pass
+            self._select_device_radio("device-radio-external")
+        else:
+            status_widget.update(
+                "[#5b6479]○[/] No device proxy configured"
+            )
+            self._select_device_radio("device-radio-off")
+
+    def _select_device_radio(self, radio_id: str) -> None:
+        """Pre-select one device-proxy radio button by id."""
+        try:
+            self.query_one(f"#{radio_id}", RadioButton).value = True
+        except NoMatches:
+            pass
+
+    def _selected_device_choice(self) -> str:
+        """Return the selected device radio: ``off`` / ``ours`` / ``external``."""
+        try:
+            radio_set = self.query_one("#device-radio-set", RadioSet)
+        except NoMatches:
+            return "off"
+        pressed = radio_set.pressed_button
+        if pressed is not None and pressed.id:
+            return pressed.id[len("device-radio-") :]
+        return "off"
+
+    # ------------------------------------------------------------------ #
+    # Section 2 — App Proxies                                            #
+    # ------------------------------------------------------------------ #
+
+    def _max_lanes(self) -> int:
+        """Lane-pool size (upper bound on app proxies) from service state."""
+        try:
+            from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+            return max(1, int(get_mitmproxy_service().state.focus_lanes))
+        except Exception:
+            return 5
+
+    def _init_app_rows(self) -> None:
+        """Seed the working app-proxy rows from the live lane assignments.
+
+        Maps ``"ours"`` to an empty target string; any ``http://`` upstream is
+        kept verbatim as the row's target.
+        """
+        try:
+            proxies = get_focus_manager().app_proxies()
+        except Exception:
+            proxies = {}
+        rows: list[tuple[str, str]] = []
+        for pkg, target in proxies.items():
+            rows.append((pkg, "" if target == "ours" else target))
+        self._app_rows = rows
+
+    def _rebuild_app_list(self) -> None:
+        """Redraw the app-proxy rows and the lanes-used line."""
+        try:
+            container = self.query_one("#app-proxy-list", VerticalScroll)
+        except NoMatches:
+            return
+        container.remove_children()
+        if self._app_rows:
+            for idx, (pkg, target) in enumerate(self._app_rows):
+                row = Horizontal(classes="app-proxy-row")
+                container.mount(row)
+                row.mount(Static(pkg, classes="app-proxy-name"))
+                row.mount(
+                    Input(
+                        value=target,
+                        placeholder="mitmproxy (default) — or http://host:port",
+                        id=f"app-target-{idx}",
+                        classes="app-proxy-target",
+                    )
+                )
+                row.mount(
+                    Button(
+                        "Remove",
+                        id=f"app-remove-{idx}",
+                        classes="-secondary app-proxy-remove",
+                    )
+                )
+        else:
+            container.mount(
+                Static("[dim]No app proxies yet.[/dim]", id="app-proxy-empty")
+            )
+        try:
+            line = self.query_one("#app-proxy-lanes-line", Static)
+            line.update(f"{len(self._app_rows)}/{self._max_lanes()} app proxies")
+        except NoMatches:
+            pass
+
+    def _sync_app_targets_from_inputs(self) -> None:
+        """Pull the current per-app target inputs back into ``_app_rows``."""
+        for idx, (pkg, _target) in enumerate(self._app_rows):
+            try:
+                value = self.query_one(f"#app-target-{idx}", Input).value
+            except NoMatches:
+                continue
+            self._app_rows[idx] = (pkg, value.strip())
+
+    def action_add_app(self) -> None:
+        """Push the reused single-select picker to add an app proxy."""
+        self._sync_app_targets_from_inputs()
+        max_lanes = self._max_lanes()
+        if len(self._app_rows) >= max_lanes:
+            self.notify(
+                f"All {max_lanes} app proxies in use — remove one first.",
+                severity="warning",
+            )
+            return
+        try:
+            from sandroid.services import (
+                get_app_selection_service,
+                get_spotlight_service,
+            )
+            from sandroid.tui.modals.app_selection_modal import AppSelectionModal
+        except Exception as exc:  # pragma: no cover - defensive
+            self.notify(f"App picker unavailable: {exc}", severity="error")
+            return
+
+        app_svc = get_app_selection_service()
+
+        try:
+            default_package = get_spotlight_service().get_effective_package()
+        except Exception:
+            default_package = None
+
+        def load_packages(show_all_user: bool, include_system: bool) -> list:
+            return app_svc.get_installed_packages_with_fallback(
+                prefer_user_only=not include_system
             )
 
-            # Update input with current value
-            proxy_input = self.query_one("#proxy-input", Input)
-            proxy_input.value = config.address
-        elif status == ProxyStatus.NOT_SET:
-            status_widget.update("[red]\u25cf[/red] Proxy not configured")
-        else:
-            status_widget.update("[yellow]\u25cf[/yellow] Error reading proxy status")
+        def initial_loader(on_status=None) -> list:
+            return app_svc.get_installed_packages_with_fallback(
+                prefer_user_only=True,
+                on_status=on_status,
+            )
+
+        self.app.push_screen(
+            AppSelectionModal(
+                title="Select App to Proxy",
+                packages=[],
+                default_package=default_package,
+                package_loader=load_packages,
+                include_system_apps=False,
+                initial_loader=initial_loader,
+            ),
+            self._on_app_selected,
+        )
+
+    def _on_app_selected(self, result) -> None:
+        """Append the chosen package (dedup; respect the lane cap)."""
+        if result is None or result.cancelled or not result.package_name:
+            return
+        pkg = result.package_name
+        if any(p == pkg for p, _ in self._app_rows):
+            self.notify(f"{pkg} already has an app proxy.", severity="information")
+            return
+        max_lanes = self._max_lanes()
+        if len(self._app_rows) >= max_lanes:
+            self.notify(
+                f"All {max_lanes} app proxies in use — remove one first.",
+                severity="warning",
+            )
+            return
+        self._app_rows.append((pkg, ""))
+        self._rebuild_app_list()
+
+    # ------------------------------------------------------------------ #
+    # Section 3 — CA Certificate (unchanged behavior)                    #
+    # ------------------------------------------------------------------ #
 
     def _refresh_device_info(self) -> None:
         """Refresh and display device API level and injection strategy."""
@@ -317,7 +672,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
         if self._zygote_status.injected:
             status_widget.update(
-                f"[green]\u25cf[/green] CA verified in Zygote namespace "
+                f"[green]●[/green] CA verified in Zygote namespace "
                 f"(hash: {self._zygote_status.cert_hash})"
             )
         else:
@@ -326,7 +681,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 pid_info = f" [dim](zygote64: {self._zygote_status.zygote64_pid})[/dim]"
             elif self._zygote_status.zygote_pid:
                 pid_info = f" [dim](zygote: {self._zygote_status.zygote_pid})[/dim]"
-            status_widget.update(f"[yellow]\u25cf[/yellow] Not injected{pid_info}")
+            status_widget.update(f"[yellow]●[/yellow] Not injected{pid_info}")
 
     def _get_selected_ca_path(self) -> Path | None:
         """Get the currently selected CA certificate path."""
@@ -351,47 +706,6 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 continue
 
         return None
-
-    def _get_proxy_config(self) -> ProxyConfig | None:
-        """Get the proxy configuration from input."""
-        proxy_input = self.query_one("#proxy-input", Input)
-        try:
-            return ProxyConfig.from_string(proxy_input.value)
-        except ValueError:
-            return None
-
-    def action_set_proxy(self) -> None:
-        """Set the proxy with current configuration."""
-        config = self._get_proxy_config()
-        if config:
-            success, message = self._proxy_manager.set_proxy(config)
-            if success:
-                self._refresh_proxy_status()
-                self._dismiss_with_refresh(
-                    ProxyModalResult(
-                        cancelled=False,
-                        action="set_proxy",
-                        proxy_config=config,
-                    )
-                )
-            else:
-                self.notify(message, severity="error")
-        else:
-            self.notify("Invalid proxy address format", severity="error")
-
-    def action_unset_proxy(self) -> None:
-        """Unset/remove the current proxy."""
-        success, message = self._proxy_manager.unset_proxy()
-        if success:
-            self._refresh_proxy_status()
-            self._dismiss_with_refresh(
-                ProxyModalResult(
-                    cancelled=False,
-                    action="unset_proxy",
-                )
-            )
-        else:
-            self.notify(message, severity="error")
 
     def action_push_ca(self) -> None:
         """Push the selected CA certificate to the device."""
@@ -483,15 +797,200 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         else:
             self.notify(f"Failed to enable root: {msg}", severity="error")
 
+    # ------------------------------------------------------------------ #
+    # Apply (Device Proxy + App Proxies)                                 #
+    # ------------------------------------------------------------------ #
+
+    def action_apply(self) -> None:
+        """Apply the Device Proxy and App Proxies (CA stays separate).
+
+        Determines the desired device action from the radio, confirms first if
+        it would overwrite a foreign device proxy, then runs the device + app
+        reconciliation in :meth:`_apply_commit`.
+        """
+        self._sync_app_targets_from_inputs()
+        choice = self._selected_device_choice()
+
+        desired_config: ProxyConfig | None = None
+        if choice == "ours":
+            desired_config = ProxyConfig.from_string(self._mitmweb_addr())
+        elif choice == "external":
+            ext = self.query_one("#device-ext-input", Input).value.strip()
+            try:
+                desired_config = ProxyConfig.from_string(ext)
+            except ValueError:
+                self.notify(
+                    "Invalid external proxy address (use host:port)",
+                    severity="error",
+                )
+                return
+        # choice == "off" => desired_config stays None (unset).
+
+        # Confirm before overwriting/clearing a foreign device proxy.
+        truth = self._device_truth or {}
+        live_state = truth.get("state", "none")
+        live_addr = truth.get("addr", "")
+        desired_addr = desired_config.address if desired_config else ""
+        overwriting_foreign = (
+            live_state == "external" and live_addr != desired_addr
+        )
+        if overwriting_foreign:
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            if desired_config is None:
+                msg = (
+                    f"The device proxy currently points to {live_addr} — "
+                    "clear it?"
+                )
+            else:
+                msg = (
+                    f"The device proxy currently points to {live_addr} — "
+                    f"switch it to {desired_addr}?"
+                )
+            self._pending_device_config = desired_config
+            self.app.push_screen(
+                ConfirmModal(
+                    title="Change device proxy?",
+                    message=msg,
+                    yes_label="Change",
+                    no_label="Cancel",
+                ),
+                self._on_device_overwrite_confirm,
+            )
+            return
+
+        self._apply_commit(desired_config)
+
+    def _on_device_overwrite_confirm(self, confirmed: bool) -> None:
+        """Continue Apply after the foreign-device-proxy confirmation."""
+        if not confirmed:
+            self.notify(
+                "Device proxy left unchanged", severity="warning"
+            )
+            return
+        self._apply_commit(self._pending_device_config)
+
+    def _apply_commit(self, desired_config: ProxyConfig | None) -> None:
+        """Apply the device proxy then reconcile the app proxies, then dismiss.
+
+        Synchronous — matches the panel's existing device-setup precedent.
+        """
+        # 1. Device proxy.
+        if desired_config is None:
+            ok, message = self._proxy_manager.unset_proxy()
+            if ok:
+                self._set_glance_device_proxy("")
+            else:
+                self.notify(message, severity="error")
+        else:
+            ok, message = self._proxy_manager.set_proxy(desired_config)
+            if ok:
+                self._set_glance_device_proxy(desired_config.address)
+            else:
+                self.notify(message, severity="error")
+
+        # 2. App proxies — diff working rows against the live lane set.
+        self._reconcile_app_proxies()
+
+        self._dismiss_with_refresh(
+            ProxyModalResult(
+                cancelled=False,
+                action="applied",
+                proxy_config=desired_config,
+            )
+        )
+
+    def _reconcile_app_proxies(self) -> None:
+        """Diff ``_app_rows`` against the live app proxies and apply deltas."""
+        try:
+            fm = get_focus_manager()
+        except Exception as exc:
+            self.notify(f"App proxies unavailable: {exc}", severity="error")
+            return
+
+        try:
+            live = fm.app_proxies()  # {pkg: "ours" | "http://ip:port"}
+        except Exception:
+            live = {}
+        # Normalize live targets to the working-state convention ("" == ours).
+        live_norm = {
+            pkg: ("" if target == "ours" else target)
+            for pkg, target in live.items()
+        }
+        desired = dict(self._app_rows)
+
+        results: list[tuple[bool, str]] = []
+
+        # Removed packages.
+        for pkg in set(live_norm) - set(desired):
+            results.append(fm.disable_focus(pkg))
+
+        # Added or changed packages.
+        for pkg, target in desired.items():
+            target_arg = None if target == "" else target
+            if pkg not in live_norm:
+                results.append(fm.enable_focus(pkg, target_arg))
+            elif live_norm[pkg] != target:
+                fm.disable_focus(pkg)
+                results.append(fm.enable_focus(pkg, target_arg))
+
+        if not results:
+            return
+        failures = [msg for ok, msg in results if not ok]
+        if failures:
+            summary = "; ".join(failures[:3])
+            self.notify(
+                f"Some app proxies failed: {summary}", severity="error"
+            )
+        else:
+            self.notify(
+                f"App proxies updated ({len(results)} change"
+                f"{'s' if len(results) != 1 else ''})",
+                severity="information",
+            )
+
+    def _set_glance_device_proxy(self, address: str) -> None:
+        """Push the just-applied device proxy straight into the glance band.
+
+        We already know the address we set, so write it to the status bar
+        directly instead of relying on the post-dismiss ADB re-read that lags
+        or races (the glance "Device" line and the mitmproxy tab read the same
+        device proxy — they must never disagree). The modal sits on its own
+        screen, so reach the status bar on whichever screen below hosts it.
+        ``address`` is "ip:port", or "" when cleared. Best-effort.
+        """
+        for screen in self.app.screen_stack:
+            try:
+                screen.query_one("#status-bar").set_device_proxy(address)
+                return
+            except Exception:
+                continue
+
+    # ------------------------------------------------------------------ #
+    # Buttons / dismiss                                                  #
+    # ------------------------------------------------------------------ #
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button clicks."""
-        if event.button.id == "btn-set-proxy":
-            self.action_set_proxy()
-        elif event.button.id == "btn-unset-proxy":
-            self.action_unset_proxy()
-        elif event.button.id == "btn-inject-ca":
+        """Handle button clicks (Apply / CA / Add app / per-row Remove)."""
+        btn_id = event.button.id or ""
+        if btn_id == "btn-apply":
+            self.action_apply()
+        elif btn_id == "btn-push-ca":
+            self.action_push_ca()
+        elif btn_id == "btn-inject-ca":
             self.action_inject_ca()
+        elif btn_id == "app-add-btn":
+            self.action_add_app()
+        elif btn_id.startswith("app-remove-"):
+            try:
+                idx = int(btn_id[len("app-remove-") :])
+            except ValueError:
+                return
+            self._sync_app_targets_from_inputs()
+            if 0 <= idx < len(self._app_rows):
+                self._app_rows.pop(idx)
+                self._rebuild_app_list()
 
     def action_cancel(self) -> None:
-        """Cancel and close the modal."""
+        """Cancel and close the modal (sync — required for ESC)."""
         self._dismiss_with_refresh(ProxyModalResult(cancelled=True))

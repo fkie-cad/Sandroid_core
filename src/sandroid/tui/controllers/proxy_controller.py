@@ -1,11 +1,11 @@
 """Proxy Controller for TUI.
 
-This controller manages proxy configuration, extracted from the
+This controller manages proxy settings, extracted from the
 monolithic app.py to follow Single Responsibility Principle.
 
 Responsibilities:
-- Show proxy modal for configuration
-- Handle proxy set/unset/inject CA results
+- Show the proxy settings modal
+- Handle the modal result (proxy settings applied / CA injected)
 - Refresh status bar after proxy changes
 
 Usage:
@@ -73,30 +73,31 @@ class ProxyController:
         logger.info(message)
 
     def show_proxy_modal(self) -> None:
-        """Show proxy configuration modal.
+        """Show the proxy settings modal.
 
-        Opens the ProxyModal and handles the result callback for
-        set_proxy, unset_proxy, and inject_ca actions.
+        Opens the ProxyModal and handles its result. The modal applies the
+        Device Proxy and App Proxies together (``"applied"``) and keeps a
+        separate CA-injection action (``"inject_ca"``).
         """
         from sandroid.tui.modals import ProxyModal, ProxyModalResult
 
         def on_proxy_result(result: ProxyModalResult) -> None:
             if result is None or result.cancelled:
-                self._log_info("Proxy configuration cancelled")
+                self._log_info("Proxy settings unchanged")
                 return
 
-            if result.action == "set_proxy" and result.proxy_config:
-                self._log_success(f"Proxy set to {result.proxy_config.address}")
-                if self._refresh_status_bar:
-                    self._refresh_status_bar()
-
-            elif result.action == "unset_proxy":
-                self._log_info("Proxy cleared")
-                if self._refresh_status_bar:
-                    self._refresh_status_bar()
-
-            elif result.action == "inject_ca":
+            if result.action == "inject_ca":
                 self._log_success("CA certificate injected into Zygote")
+            elif result.proxy_config is not None:
+                self._log_success(
+                    f"Proxy settings applied — device at "
+                    f"{result.proxy_config.address}"
+                )
+            else:
+                self._log_success("Proxy settings applied")
+
+            if self._refresh_status_bar:
+                self._refresh_status_bar()
 
         if self._push_modal:
             self._push_modal(ProxyModal(), on_proxy_result)

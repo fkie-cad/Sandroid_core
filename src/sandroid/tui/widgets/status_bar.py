@@ -63,6 +63,14 @@ class StatusBar(Static):
         self.background_tasks_display = ""
         self.forensic_apks_count = 0
         self.proxy_address = ""
+        # Per-app proxy lanes managed by FocusManager: pkg -> "ours"|"http://…".
+        # Replaces the retired mutually-exclusive capture_scope/focus_apps model.
+        self.app_proxies: dict = {}
+        # mitmweb (our bundled proxy) status, distinct from where the device
+        # points: ``mitmweb_address`` is our canonical host:port even when
+        # stopped, so the Proxy row can tell "ours" from a foreign proxy.
+        self.mitmweb_running = False
+        self.mitmweb_address = ""
         self.network_capture_running = False
         self.network_capture_file = ""
         # Glance-band datums (cheap, in-process reads — no ADB):
@@ -95,6 +103,11 @@ class StatusBar(Static):
         # Defer EventBus subscription to avoid deadlocks during mount chain
         # (same pattern as MainScreen lines 81-84)
         self.call_later(self._subscribe_to_tool_events)
+
+        # The glance band has no other periodic refresh, so mitmproxy
+        # start/stop (and device→mitmproxy linkage) would lag until some
+        # unrelated event repaints. A cheap in-process poll keeps it honest.
+        self._capture_poll_timer = self.set_interval(1.5, self._poll_capture_state)
 
     def _subscribe_to_tool_events(self) -> None:
         """Subscribe to TOOL_AVAILABILITY_UPDATED event from SetupService."""
@@ -189,6 +202,7 @@ class StatusBar(Static):
         colors = self._get_theme_colors()
         muted = colors["text_muted"]
         primary = colors["primary"]
+        warn = colors["warning"]
         run = FIXED_COLORS["running"]
         stop = FIXED_COLORS["stopped"]
 
@@ -273,11 +287,68 @@ class StatusBar(Static):
             f"[b]{self.hook_count}[/] [{muted}]active · bypass[/] {bypass_display}",
         )
 
-        # -- Proxy / Net --------------------------------------------------
-        if self.proxy_address:
-            row("Proxy", f"[{run}]● {self.proxy_address}[/]")
+        # -- Proxy: mitmproxy engine + its two coexisting routing layers --
+        # One "Proxy" label group (Device/Apps ride continuation rows, like
+        # the App row above) so the band reads as a single proxy category.
+        # All three derive from ground truth: mitmproxy's own liveness, the
+        # device's global http_proxy, and the per-app proxy lanes. A device
+        # http_proxy at our own mitmproxy address is "ours"; any other host is
+        # external. "Device"/"Apps" are dim inline sub-labels in the value col.
+        pointed_at_us = bool(self.proxy_address) and (
+            self.proxy_address == self.mitmweb_address
+        )
+
+        # Line 1 (label "Proxy") — mitmproxy's own engine status. The address
+        # shows even when stopped (mitmweb_address is the configured host:port
+        # regardless of liveness), so you can always see where our proxy is —
+        # or would be — without having to start it.
+        if self.mitmweb_running:
+            row("Proxy", f"[{run}]● mitmproxy {self.mitmweb_address or '?'}[/]")
+        elif self.mitmweb_address:
+            row(
+                "Proxy",
+                f"[{stop}]○ mitmproxy {self.mitmweb_address}[/] "
+                f"[{muted}](stopped)[/]",
+            )
         else:
-            row("Proxy", f"[{muted}]○ none[/]")
+            row("Proxy", f"[{stop}]○ mitmproxy stopped[/]")
+
+        # Line 2 (continuation) — where the global device http_proxy points.
+        # When the device points at our address but the engine is stopped,
+        # green "our mitmproxy" reads as "all good" while traffic actually
+        # goes nowhere — flag it amber as a dead route, not a live one.
+        if pointed_at_us:
+            if self.mitmweb_running:
+                device_val = f"[{run}]● our mitmproxy[/]"
+            else:
+                device_val = (
+                    f"[{warn}]● our mitmproxy[/] [{muted}](stopped)[/]"
+                )
+        elif self.proxy_address:
+            device_val = (
+                f"[{primary}]● {self.proxy_address}[/] [{muted}](external)[/]"
+            )
+        else:
+            device_val = f"[{muted}]○ none[/]"
+        row("", f"[{muted}]Device[/]  {device_val}")
+
+        # Line 3 (continuation) — per-app lanes: N at our mitmproxy, M external.
+        proxied = list(self.app_proxies.values())
+        n_ours = sum(1 for v in proxied if v == "ours")
+        m_ext = len(proxied) - n_ours
+        if n_ours + m_ext == 0:
+            apps_val = f"[{muted}]○ none[/]"
+        else:
+            parts = []
+            if n_ours:
+                parts.append(f"[{run}]{n_ours} → mitmproxy[/]")
+            if m_ext:
+                dot = "· " if parts else ""
+                parts.append(f"[{muted}]{dot}{m_ext} → ext[/]")
+            apps_val = " ".join(parts)
+        row("", f"[{muted}]Apps[/]    {apps_val}")
+
+        # -- Net ----------------------------------------------------------
         if self.network_capture_running:
             filename = (
                 os.path.basename(self.network_capture_file)
@@ -471,6 +542,11 @@ class StatusBar(Static):
         except Exception:
             self.proxy_address = ""
 
+        # Mitmproxy service status + per-app proxy lanes. Cheap in-process
+        # reads, factored out so the on_mount poll can keep them live without
+        # re-running the ADB-backed checks above.
+        self._read_capture_state()
+
         # Update network capture status (separate try to ensure it always runs)
         try:
             network_service = get_network_capture_service()
@@ -479,6 +555,71 @@ class StatusBar(Static):
         except Exception:
             self.network_capture_running = False
             self.network_capture_file = ""
+
+    def _read_capture_state(self) -> None:
+        """Read mitmproxy + per-app proxy state from the singletons (no ADB).
+
+        Only cheap in-process reads (process liveness + config + host IP +
+        FocusManager's lane map), so this is safe to call on a short poll. The
+        device's *actual* global proxy address is ADB-sourced and refreshed
+        separately in update_from_toolbox.
+        """
+        try:
+            from sandroid.core.proxy_manager import (
+                ProxyManager,
+                get_focus_manager,
+            )
+            from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+            svc = get_mitmproxy_service()
+            self.mitmweb_running = svc.is_running()
+            port = getattr(svc.state, "proxy_port", "")
+            self.mitmweb_address = (
+                f"{ProxyManager.get_host_ip()}:{port}" if port else ""
+            )
+            self.app_proxies = dict(get_focus_manager().app_proxies())
+        except Exception:
+            self.mitmweb_running = False
+            self.mitmweb_address = ""
+            self.app_proxies = {}
+
+    def _poll_capture_state(self) -> None:
+        """Keep the Mitmproxy/Proxy glance rows live.
+
+        The glance band has no other periodic refresh, so a mitmproxy
+        start/stop would otherwise not show until some unrelated event
+        repaints the bar. Repaints only when the cheap state actually
+        changed, so an idle band does no work.
+        """
+        before = (
+            self.mitmweb_running,
+            self.mitmweb_address,
+            tuple(sorted(self.app_proxies.items())),
+        )
+        self._read_capture_state()
+        after = (
+            self.mitmweb_running,
+            self.mitmweb_address,
+            tuple(sorted(self.app_proxies.items())),
+        )
+        if after != before:
+            self.refresh()
+
+    def set_device_proxy(self, address: str) -> None:
+        """Set the device-proxy address shown in the glance directly.
+
+        Called by whoever just changed the device's global ``http_proxy`` —
+        the mitmproxy panel's Ctrl+D and the Proxy modal's Apply — so the
+        glance reflects the new value the instant it is set, with no ADB
+        re-read to lag behind or race. The glance "Device" line and the
+        mitmproxy tab read the *same* ground truth, so they must never
+        disagree; writing the just-set value here keeps them in lockstep.
+
+        Args:
+            address: The new proxy "ip:port", or "" when the proxy is cleared.
+        """
+        self.proxy_address = address
+        self.refresh()
 
     def refresh_status(self) -> None:
         """Refresh all status bar information.
