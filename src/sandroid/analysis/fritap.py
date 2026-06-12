@@ -303,7 +303,8 @@ class FriTap(DataGatherBase):
         )
 
         # Get the Frida script path from SSL_Logger
-        self.frida_script_path = self.ssl_log.get_fritap_frida_script_path()
+        # (friTap 2.0 renamed get_fritap_frida_script_path() -> get_agent_script_path())
+        self.frida_script_path = self.ssl_log.get_agent_script_path()
 
         # Register with JobManager using setup_frida_session (old proven pattern).
         # setup_frida_session(should_spawn=False) will:
