@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    FriTapPanel,
     MitmproxyPanel,
     SandroidFooter,
     SnapshotsPanel,
@@ -140,12 +141,14 @@ class MainScreen(Screen):
                             classes="tool-tab -active",
                         )
                         yield Static("Mitmproxy", id="tab-mitm", classes="tool-tab")
+                        yield Static("friTap", id="tab-fritap", classes="tool-tab")
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
+                        yield FriTapPanel(id="fritap-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
 
             with Vertical(id="right-panel"):
@@ -191,6 +194,7 @@ class MainScreen(Screen):
     _TOOL_TABS = {
         "tab-spotlight": "spotlight-panel",
         "tab-mitm": "mitm-panel",
+        "tab-fritap": "fritap-panel",
         "tab-snapshots": "snapshots-panel",
     }
 
@@ -240,17 +244,24 @@ class MainScreen(Screen):
         except Exception:
             pass
         # Let a freshly-activated panel refresh itself immediately (e.g.
-        # the Snapshots tab fetches its list as soon as it is shown).
+        # the Snapshots tab fetches its list as soon as it is shown; the
+        # friTap header reads live TaskService state so it isn't stale).
         try:
             panel_widget = self.query_one(f"#{panel_id}")
             if hasattr(panel_widget, "refresh_snapshots"):
                 panel_widget.refresh_snapshots()
+            if hasattr(panel_widget, "refresh_header"):
+                panel_widget.refresh_header()
         except Exception:
             pass
 
     def open_snapshots_tab(self) -> None:
         """Switch to the Snapshots tab (key 0)."""
         self._select_bottom_tab("snapshots-panel")
+
+    def open_fritap_tab(self) -> None:
+        """Switch to the friTap tab (key h)."""
+        self._select_bottom_tab("fritap-panel")
 
     def cycle_bottom_tab(self, delta: int) -> None:
         """Switch the active tab by *delta* (Left/Right while focus is inside).

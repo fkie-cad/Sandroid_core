@@ -1171,6 +1171,10 @@ class SandroidTUI(App):
         ms = self._get_main_screen()
         if ms:
             ms.execute_action_by_key(key)
+            # friTap (h) gets a first-class tab — jump to it so the toggle has
+            # a visible home (mirrors 0 → open_snapshots_tab).
+            if key == "h":
+                ms.open_fritap_tab()
         # Spotlight selection (C attach / Shift+C spawn) does NOT force the
         # panel open — it stays minimized by default. The panel live-updates
         # via the EventBus whether shown or hidden; press Ctrl+B to view it.
