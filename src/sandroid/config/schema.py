@@ -494,6 +494,11 @@ class FocusConfig(BaseModel):
             "(blank = auto, 10.0.2.2 on emulator)"
         ),
     )
+    block_quic: bool = Field(
+        default=True,
+        description="REJECT UDP/443 (QUIC) for proxied apps so they fall back to "
+        "interceptable TCP/TLS. Off = QUIC bypasses the app proxy.",
+    )
     gost_version: str = Field(
         default="v3.2.6",
         description="gost release tag whose assets are downloaded",

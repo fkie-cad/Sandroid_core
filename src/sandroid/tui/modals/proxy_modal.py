@@ -23,8 +23,19 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    Label,
+    RadioButton,
+    RadioSet,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 
+from sandroid.config import get_config
 from sandroid.core.proxy_manager import (
     CAInfo,
     CAManager,
@@ -79,13 +90,23 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         max-width: 95%;
     }
 
-    /* 1fr (not auto) so the body fills the gap between the title and the
-       pinned button row and SCROLLS its overflow internally. With auto the
-       body grows to its full content height and pushes the action buttons
-       off the bottom of the clipped container — they vanished entirely. */
-    ProxyModal #proxy-body {
+    /* 1fr (not auto) so the tabs fill the gap between the title and the
+       pinned Apply row and SCROLL their overflow internally. .modal-container
+       is a fixed 90% height; with auto the content would grow to its full
+       height and push the Apply button off the bottom of the clipped
+       container — it would vanish entirely (why the old #proxy-body used 1fr,
+       and why TabPane here is 1fr, not the `auto` device_settings uses). */
+    ProxyModal TabbedContent {
         width: 100%;
         height: 1fr;
+    }
+
+    ProxyModal TabPane {
+        padding: 1;
+        height: 1fr;
+    }
+
+    ProxyModal .tab-scroll {
         scrollbar-size: 1 1;
     }
 
@@ -134,12 +155,20 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         width: 100%;
         height: auto;
         margin-bottom: 1;
+        border: round $panel;
+        padding: 0 1;
     }
 
     ProxyModal .app-proxy-name {
-        width: 24;
-        padding-top: 1;
+        width: 100%;
+        height: 1;
+        text-style: bold;
         color: $foreground;
+    }
+
+    ProxyModal .app-proxy-controls {
+        width: 100%;
+        height: auto;
     }
 
     ProxyModal .app-proxy-target {
@@ -148,6 +177,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
     ProxyModal .app-proxy-remove {
         min-width: 10;
+        margin-left: 1;
     }
 
     ProxyModal #app-proxy-empty {
@@ -168,6 +198,10 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     ProxyModal .app-proxy-buttons {
         height: auto;
         padding: 0 2;
+    }
+
+    ProxyModal .app-proxy-buttons Button {
+        margin: 0 1;
     }
 
     ProxyModal #ca-section {
@@ -237,6 +271,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     BINDINGS = [
         Binding("ctrl+s", "apply", "Apply", show=False),
         Binding("a", "add_app", "Add app", show=False),
+        Binding("f", "add_spotlight", "Proxy spotlight app", show=False),
         Binding("p", "push_ca", "Push CA", show=False),
         Binding("i", "inject_ca", "Inject CA", show=False),
     ]
@@ -272,76 +307,106 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         with Vertical(classes="modal-container"):
             yield Label("Proxy Settings", classes="modal-title")
 
-            with VerticalScroll(id="proxy-body"):
-                # ----- Section 1: Device Proxy ----- #
-                yield Label("Device Proxy", classes="section-header")
-                yield Static(
-                    "Checking…", id="device-status", classes="status-line"
-                )
-                with RadioSet(id="device-radio-set"):
-                    yield RadioButton(
-                        "Off — no device proxy",
-                        value=True,
-                        id="device-radio-off",
+            with TabbedContent(id="proxy-tabs"):
+                # ----- Tab 1: Device Proxy ----- #
+                with (
+                    TabPane("Device", id="tab-device"),
+                    VerticalScroll(classes="tab-scroll"),
+                ):
+                    yield Static(
+                        "Checking…", id="device-status", classes="status-line"
                     )
-                    yield RadioButton(
-                        f"Our mitmproxy ({self._mitmweb_addr()})",
-                        id="device-radio-ours",
-                    )
-                    yield RadioButton("External proxy", id="device-radio-external")
-                with Horizontal(id="device-ext-row"):
-                    yield Label("External:")
-                    yield Input(
-                        placeholder="host:port",
-                        value=self._default_external_addr(),
-                        id="device-ext-input",
-                    )
+                    with RadioSet(id="device-radio-set"):
+                        yield RadioButton(
+                            "Off — no device proxy",
+                            value=True,
+                            id="device-radio-off",
+                        )
+                        yield RadioButton(
+                            f"Our mitmproxy ({self._mitmweb_addr()})",
+                            id="device-radio-ours",
+                        )
+                        yield RadioButton(
+                            "External proxy", id="device-radio-external"
+                        )
+                    with Horizontal(id="device-ext-row"):
+                        yield Label("External:")
+                        yield Input(
+                            placeholder="host:port",
+                            value=self._default_external_addr(),
+                            id="device-ext-input",
+                        )
 
-                # ----- Section 2: App Proxies ----- #
-                yield Label("App Proxies", classes="section-header")
-                yield VerticalScroll(id="app-proxy-list")
-                yield Static("", id="app-proxy-lanes-line")
-                yield Static(
-                    "[dim]Each app proxy = one on-device redirector.[/dim]",
-                    id="app-proxy-note",
-                )
-                with Horizontal(classes="app-proxy-buttons"):
-                    yield Button("Add app", id="app-add-btn", classes="-primary")
-
-                # ----- Section 3: CA Certificate ----- #
-                yield Label("CA Certificate", classes="section-header")
-                with VerticalScroll(id="ca-section"):
-                    with RadioSet(id="ca-radio-set"):
-                        # Populated on mount.
-                        pass
-                with Horizontal(id="custom-path-row"):
-                    yield Label("Custom:")
-                    yield Input(
-                        placeholder="Path to custom certificate...",
-                        id="custom-path-input",
+                # ----- Tab 2: App Proxies ----- #
+                with (
+                    TabPane("App Proxies", id="tab-apps"),
+                    VerticalScroll(classes="tab-scroll"),
+                ):
+                    yield VerticalScroll(id="app-proxy-list")
+                    yield Static("", id="app-proxy-lanes-line")
+                    yield Static(
+                        "[dim]Each app proxy = one on-device redirector.[/dim]",
+                        id="app-proxy-note",
                     )
-                yield Label("Device Info", classes="section-header")
-                yield Static("Checking...", id="device-info", classes="device-info")
-                yield Label("Zygote Injection", classes="section-header")
-                yield Static(
-                    "Checking...", id="zygote-status", classes="zygote-status"
-                )
+                    yield Checkbox(
+                        "Block QUIC (UDP 443) — force apps onto interceptable "
+                        "TCP/TLS",
+                        value=get_config().focus.block_quic,
+                        id="block-quic-checkbox",
+                    )
+                    with Horizontal(classes="app-proxy-buttons"):
+                        yield Button(
+                            "Add app", id="app-add-btn", classes="-secondary"
+                        )
+                        yield Button(
+                            "Proxy spotlight app",
+                            id="app-add-spotlight-btn",
+                            classes="-secondary",
+                        )
 
-            # ----- Action buttons ----- #
+                # ----- Tab 3: CA Certificate ----- #
+                with (
+                    TabPane("Certificate", id="tab-ca"),
+                    VerticalScroll(classes="tab-scroll"),
+                ):
+                    with VerticalScroll(id="ca-section"):
+                        with RadioSet(id="ca-radio-set"):
+                            # Populated on mount.
+                            pass
+                    with Horizontal(id="custom-path-row"):
+                        yield Label("Custom:")
+                        yield Input(
+                            placeholder="Path to custom certificate...",
+                            id="custom-path-input",
+                        )
+                    yield Label("Device Info", classes="section-header")
+                    yield Static(
+                        "Checking...", id="device-info", classes="device-info"
+                    )
+                    yield Label("Zygote Injection", classes="section-header")
+                    yield Static(
+                        "Checking...", id="zygote-status", classes="zygote-status"
+                    )
+                    with Horizontal(classes="button-row"):
+                        yield Button(
+                            "Push CA", id="btn-push-ca", classes="-secondary"
+                        )
+                        yield Button(
+                            "Inject CA", id="btn-inject-ca", classes="-secondary"
+                        )
+
+            # ----- Global action button ----- #
             with Horizontal(classes="button-row"):
                 yield Button("Apply", id="btn-apply", classes="-primary")
-                yield Button("Push CA", id="btn-push-ca", classes="-secondary")
-                yield Button("Inject CA", id="btn-inject-ca", classes="-secondary")
 
             yield KeyHintFooter(
                 hints={
                     "default": (
-                        "[dim]Ctrl+S=Apply  A=Add app  P=Push CA  "
-                        "I=Inject CA  Esc=Cancel[/dim]"
+                        "[dim]Ctrl+S=Apply  A=Add app  F=Spotlight  "
+                        "P=Push CA  I=Inject CA  Esc=Cancel[/dim]"
                     ),
                     "input": (
-                        "[dim]Ctrl+S=Apply  P=Push CA  I=Inject CA  "
-                        "Tab=Next  Esc=Cancel[/dim]"
+                        "[dim]Ctrl+S=Apply  Tab=Next  Esc=Cancel[/dim]"
                     ),
                     "radioset": (
                         "[dim]Ctrl+S=Apply  Space=Select  P=Push CA  "
@@ -349,7 +414,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     ),
                     "button": (
                         "[dim]Enter=Activate  Ctrl+S=Apply  A=Add app  "
-                        "Tab=Next  Esc=Cancel[/dim]"
+                        "F=Spotlight  Tab=Next  Esc=Cancel[/dim]"
                     ),
                 }
             )
@@ -511,10 +576,15 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         container.remove_children()
         if self._app_rows:
             for idx, (pkg, target) in enumerate(self._app_rows):
-                row = Horizontal(classes="app-proxy-row")
+                # Stacked "card": the full-width package name on its own line
+                # above a controls row (target Input + Remove), so long package
+                # names no longer wrap and squeeze the input.
+                row = Vertical(classes="app-proxy-row")
                 container.mount(row)
                 row.mount(Static(pkg, classes="app-proxy-name"))
-                row.mount(
+                controls = Horizontal(classes="app-proxy-controls")
+                row.mount(controls)
+                controls.mount(
                     Input(
                         value=target,
                         placeholder="mitmproxy (default) — or http://host:port",
@@ -522,7 +592,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         classes="app-proxy-target",
                     )
                 )
-                row.mount(
+                controls.mount(
                     Button(
                         "Remove",
                         id=f"app-remove-{idx}",
@@ -575,7 +645,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         except Exception:
             default_package = None
 
-        def load_packages(show_all_user: bool, include_system: bool) -> list:
+        def load_packages(include_system: bool) -> list:
             return app_svc.get_installed_packages_with_fallback(
                 prefer_user_only=not include_system
             )
@@ -599,10 +669,15 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         )
 
     def _on_app_selected(self, result) -> None:
-        """Append the chosen package (dedup; respect the lane cap)."""
+        """Append the package chosen in the picker (dedup; respect the cap)."""
         if result is None or result.cancelled or not result.package_name:
             return
-        pkg = result.package_name
+        self._add_app_row(result.package_name)
+
+    def _add_app_row(self, pkg: str) -> None:
+        """Add an app-proxy row for ``pkg`` (dedup; respect the lane cap)."""
+        if not pkg:
+            return
         if any(p == pkg for p, _ in self._app_rows):
             self.notify(f"{pkg} already has an app proxy.", severity="information")
             return
@@ -615,6 +690,21 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             return
         self._app_rows.append((pkg, ""))
         self._rebuild_app_list()
+
+    def action_add_spotlight(self) -> None:
+        """Add an app proxy for the spotlight app directly (no picker)."""
+        try:
+            from sandroid.services import get_spotlight_service
+
+            pkg = get_spotlight_service().get_effective_package()
+        except Exception as exc:  # pragma: no cover - defensive
+            self.notify(f"Spotlight app unavailable: {exc}", severity="error")
+            return
+        if not pkg:
+            self.notify("No spotlight app set.", severity="warning")
+            return
+        self._sync_app_targets_from_inputs()
+        self._add_app_row(pkg)
 
     # ------------------------------------------------------------------ #
     # Section 3 — CA Certificate (unchanged behavior)                    #
@@ -889,8 +979,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             else:
                 self.notify(message, severity="error")
 
-        # 2. App proxies — diff working rows against the live lane set.
+        # 2. App proxies. Read the QUIC-block setting and commit it to the
+        #    shared config BEFORE reconciling, so lanes newly enabled by the
+        #    reconcile pick it up; then sync any pre-existing lanes.
+        try:
+            block_quic = self.query_one("#block-quic-checkbox", Checkbox).value
+        except NoMatches:
+            block_quic = get_config().focus.block_quic
+        get_config().focus.block_quic = block_quic
         self._reconcile_app_proxies()
+        try:
+            get_focus_manager().set_quic_blocking(block_quic)
+        except Exception as exc:  # pragma: no cover - defensive
+            self.notify(f"QUIC-block sync failed: {exc}", severity="warning")
 
         self._dismiss_with_refresh(
             ProxyModalResult(
@@ -981,6 +1082,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             self.action_inject_ca()
         elif btn_id == "app-add-btn":
             self.action_add_app()
+        elif btn_id == "app-add-spotlight-btn":
+            self.action_add_spotlight()
         elif btn_id.startswith("app-remove-"):
             try:
                 idx = int(btn_id[len("app-remove-") :])

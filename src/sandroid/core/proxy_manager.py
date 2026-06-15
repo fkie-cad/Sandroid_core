@@ -1187,6 +1187,15 @@ class FocusManager:
         # Per-lane exact iptables rule specs to delete on teardown (populated
         # when xt_comment is unavailable and we fall back to tuple-match).
         self._lane_rule_specs: dict[int, list[tuple[str, str]]] = {}
+        # Per-lane app UID, recorded at enable so set_quic_blocking() can
+        # add/remove the QUIC REJECT for a live lane without re-resolving it.
+        # Tracked/cleared exactly like _lane_rule_specs/_lane_targets so a
+        # freed or reused lane never carries a stale uid.
+        self._lane_uids: dict[int, int] = {}
+        # Per-lane filter-table QUIC-block (UDP/443 REJECT) rule specs, kept
+        # separate from _lane_rule_specs (which are nat REDIRECT rules) so the
+        # toggle can add/remove just the QUIC rules.
+        self._lane_quic_specs: dict[int, list[tuple[str, str]]] = {}
         self._binary_pushed = False
         # cleanup_stale() runs once at the first enable of a session.
         self._cleaned_this_session = False
@@ -1235,6 +1244,15 @@ class FocusManager:
             pass
         return "/data/local/tmp/gost"
 
+    def _quic_blocking_enabled(self) -> bool:
+        """Whether new lanes should REJECT QUIC (``focus.block_quic``)."""
+        try:
+            if get_config is not None:
+                return bool(get_config().focus.block_quic)
+        except Exception:
+            pass
+        return True
+
     def _socks_port(self, lane: int) -> int:
         return self._socks_base + lane
 
@@ -1255,6 +1273,8 @@ class FocusManager:
                 self._lanes.pop(i, None)
                 self._lane_rule_specs.pop(i, None)
                 self._lane_targets.pop(i, None)
+                self._lane_uids.pop(i, None)
+                self._lane_quic_specs.pop(i, None)
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -1355,6 +1375,12 @@ class FocusManager:
             # 12. Commit lane state, target, sidecar, and shared MitmproxyState.
             self._lanes[lane] = package
             self._lane_targets[lane] = lane_target
+            self._lane_uids[lane] = uid
+            # Block QUIC (UDP/443) so the app falls back to interceptable
+            # TCP/TLS — the TCP-only nat REDIRECT can't touch HTTP/3. Tracked
+            # even when off so set_quic_blocking() can toggle it later.
+            if self._quic_blocking_enabled():
+                self._add_quic_block(lane, uid)
             self._write_sidecar()
             self._add_to_state(package)
             dest = "our mitmproxy" if target is None else upstream
@@ -1427,6 +1453,35 @@ class FocusManager:
         """Whether any lane is currently assigned."""
         with self._lock:
             return any(p for p in self._lanes.values())
+
+    def set_quic_blocking(self, enabled: bool) -> None:
+        """Add/remove the QUIC (UDP/443) REJECT across all session lanes.
+
+        Public, so it takes the lock itself and calls ONLY the lock-free
+        internals (``_add_quic_block``/``_delete_rule_loop``) — never the public
+        ``enable_focus``/``disable_focus``, which would re-acquire the
+        non-reentrant ``self._lock`` and deadlock. Re-syncs the session-tracked
+        lanes in ``_lanes`` via ``_lane_uids``: enabling adds the block to lanes
+        that lack it; disabling deletes the rules and drops the tracked specs.
+
+        Only affects lanes created this session — there is no cross-restart
+        ``_lanes`` rebuild, which is consistent with the modal (after a restart
+        the app rows are empty, so re-adding an app re-runs ``enable_focus`` and
+        reapplies QUIC fresh).
+        """
+        with self._lock:
+            for lane, package in self._lanes.items():
+                if not package:
+                    continue
+                if enabled:
+                    uid = self._lane_uids.get(lane)
+                    if uid is None or lane in self._lane_quic_specs:
+                        continue  # unknown uid, or already blocked.
+                    self._add_quic_block(lane, uid)
+                else:
+                    for tbl, body in self._lane_quic_specs.get(lane, []):
+                        self._delete_rule_loop(tbl, body)
+                    self._lane_quic_specs.pop(lane, None)
 
     def cleanup_stale(self) -> None:
         """Remove every tagged rule + stray gost/ipt2socks and clear lane state.
@@ -1989,6 +2044,86 @@ class FocusManager:
             return False, f"iptables redirect rule failed: {v4_err}"
         return True, "rules added"
 
+    def _quic_rule_body(
+        self, uid: int, tagged: bool, target: str = "REJECT"
+    ) -> str:
+        """A filter-table OUTPUT rule REJECTing the UID's QUIC (UDP/443).
+
+        No ``-t nat`` ⇒ the (default) filter table, kept separate from the nat
+        REDIRECT rules. ``uid``/``comment``/``target`` are interpolated now and
+        ONLY ``{{op}}`` is left for ``.format(op=...)`` — so the stored spec is
+        directly delete-able via the shared ``_delete_rule_loop`` (if ``{uid}``
+        survived into the spec, ``body.format(op='-D')`` would raise KeyError).
+        """
+        comment = (
+            f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
+        )
+        return (
+            f"{{op}} OUTPUT -m owner --uid-owner {uid} -p udp --dport 443 "
+            f"{comment}-j {target}"
+        )
+
+    def _add_quic_block(self, lane: int, uid: int) -> None:
+        """Best-effort REJECT of the lane UID's QUIC (UDP/443), v4 (+v6).
+
+        Forces the app off HTTP/3 — which the TCP-only nat REDIRECT can't
+        intercept — back onto interceptable TCP/TLS. Filter-table OUTPUT rules,
+        tracked in ``_lane_quic_specs`` (separate from the nat redirect specs)
+        so the toggle/teardown can delete just them. Mirrors ``_add_rules``'
+        delete-then-add + tagged/untagged-comment fallback, plus a REJECT→DROP
+        fallback if the kernel lacks the REJECT target. Non-fatal: a failure
+        leaves the TCP redirect working, so we log and move on.
+        """
+        self._lane_quic_specs.pop(lane, None)
+        specs: list[tuple[str, str]] = []
+        tbls = ["iptables"]
+        if self._ip6_available():
+            tbls.append("ip6tables")
+        for tbl in tbls:
+            tagged, target, err, body = True, "REJECT", "", ""
+            # At most 4 passes: REJECT±comment, then DROP±comment.
+            for _ in range(4):
+                body = self._quic_rule_body(uid, tagged=tagged, target=target)
+                self._delete_rule_loop(tbl, body)
+                add_cmd = f"{tbl} {body.format(op='-A')}"
+                try:
+                    _, err = Adb.send_adb_command(
+                        f"shell {self._ca._root_cmd(add_cmd)}"
+                    )
+                except Exception as exc:
+                    err = str(exc)
+                if self._is_comment_error(err) and tagged:
+                    tagged = False
+                    continue
+                if self._is_reject_error(err) and target == "REJECT":
+                    target = "DROP"
+                    continue
+                break
+            specs.append((tbl, body))
+            if err and err.strip():
+                logger.warning(
+                    "%s QUIC-block (uid %s) add warning: %s",
+                    tbl,
+                    uid,
+                    err.strip(),
+                )
+        self._lane_quic_specs[lane] = specs
+
+    @staticmethod
+    def _is_reject_error(err: str) -> bool:
+        """Whether a REJECT add failed because the target isn't loadable.
+
+        Legacy iptables names it (``Couldn't load target `REJECT'``), but
+        nf_tables kernels (Android 10+) emit a bare ``No chain/target/match by
+        that name`` with no target token. The caller checks this ONLY on a
+        REJECT add and ONLY after the xt_comment fallback, so any load/match
+        failure that reaches here means REJECT is unavailable → fall back to
+        DROP (matching only the legacy ``reject`` token would silently skip the
+        fallback on nf_tables and leave QUIC unblocked).
+        """
+        text = (err or "").lower()
+        return "couldn't load" in text or "no chain/target/match" in text
+
     def _delete_rule_loop(self, tbl: str, body: str) -> None:
         """Delete every copy of a rule (ignore errors)."""
         del_cmd = f"{tbl} {body.format(op='-D')}"
@@ -2013,11 +2148,17 @@ class FocusManager:
         )
 
     def _remove_lane_rules(self, lane: int) -> None:
-        """Delete the recorded rule specs for a lane (v4+v6), ignoring errors."""
-        specs = self._lane_rule_specs.get(lane, [])
-        for tbl, body in specs:
+        """Delete a lane's recorded rule specs (v4+v6), ignoring errors.
+
+        Removes both the nat REDIRECT specs and the filter-table QUIC-block
+        specs, so disabling an app proxy leaves no stray rule in either table.
+        """
+        for tbl, body in self._lane_rule_specs.get(lane, []):
             self._delete_rule_loop(tbl, body)
         self._lane_rule_specs.pop(lane, None)
+        for tbl, body in self._lane_quic_specs.get(lane, []):
+            self._delete_rule_loop(tbl, body)
+        self._lane_quic_specs.pop(lane, None)
 
     # ── lane teardown / cleanup ───────────────────────────────────────
 
@@ -2028,11 +2169,19 @@ class FocusManager:
         self._kill_lane_process(self._redirect_port(lane))
         self._lanes[lane] = None
         self._lane_targets.pop(lane, None)
+        self._lane_uids.pop(lane, None)
         if package:
             self._remove_from_state(package)
 
     def _cleanup_stale_locked(self) -> None:
-        """Remove every tagged nat-OUTPUT rule + stray gost; clear lane state.
+        """Remove every tagged OUTPUT rule + stray gost; clear lane state.
+
+        Sweeps the tagged ``-A OUTPUT`` rules out of BOTH the ``nat`` table
+        (REDIRECT rules) and the ``filter`` table (QUIC-block REJECT rules) so a
+        SIGKILL'd prior run self-heals in either table. The table flag is
+        parameterized per pass — ``-t nat`` for the nat pass, omitted for the
+        filter pass — and the reconstructed ``-D`` delete reuses the SAME flag
+        it listed (a stale ``-t nat`` copied into the filter delete would miss).
 
         Also kills/removes any leftover ipt2socks (the pre-gost redirector) so a
         device transitioned from the old build self-heals.
@@ -2040,27 +2189,30 @@ class FocusManager:
         tbls = ["iptables"]
         if self._ip6_available():
             tbls.append("ip6tables")
-        for tbl in tbls:
-            try:
-                out, _ = Adb.send_adb_command(
-                    f"shell {self._ca._root_cmd(f'{tbl} -t nat -S OUTPUT')}"
-                )
-            except Exception:
-                continue
-            for line in (out or "").splitlines():
-                if self._RULE_TAG not in line:
-                    continue
-                spec = line.strip()
-                if not spec.startswith("-A "):
-                    continue
-                del_spec = "-D " + spec[len("-A "):]
-                del_cmd = f"{tbl} -t nat {del_spec}"
+        # ("-t nat ", "") — trailing space so f"{tbl} {flag}-S OUTPUT" stays
+        # well-formed; "" targets the default (filter) table.
+        for table_flag in ("-t nat ", ""):
+            for tbl in tbls:
                 try:
-                    Adb.send_adb_command(
-                        f"shell {self._ca._root_cmd(del_cmd)}"
+                    out, _ = Adb.send_adb_command(
+                        f"shell {self._ca._root_cmd(f'{tbl} {table_flag}-S OUTPUT')}"
                     )
                 except Exception:
-                    pass
+                    continue
+                for line in (out or "").splitlines():
+                    if self._RULE_TAG not in line:
+                        continue
+                    spec = line.strip()
+                    if not spec.startswith("-A "):
+                        continue
+                    del_spec = "-D " + spec[len("-A "):]
+                    del_cmd = f"{tbl} {table_flag}{del_spec}"
+                    try:
+                        Adb.send_adb_command(
+                            f"shell {self._ca._root_cmd(del_cmd)}"
+                        )
+                    except Exception:
+                        pass
         # Kill any stray gost redirectors (current) and ipt2socks (legacy),
         # then remove the legacy ipt2socks binary so transitioned devices
         # self-heal. Runs once per session (mount/atexit/stop), not per-lane.
@@ -2078,6 +2230,8 @@ class FocusManager:
         self._lanes.clear()
         self._lane_targets.clear()
         self._lane_rule_specs.clear()
+        self._lane_uids.clear()
+        self._lane_quic_specs.clear()
         try:
             self._write_sidecar()
         except Exception:
