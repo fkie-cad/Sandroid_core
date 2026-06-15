@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import time
 from logging import getLogger
@@ -114,7 +115,10 @@ def install_apk(
     apk_file = os.path.basename(apk_path)
     logger.info(f"Installing local APK {apk_file}")
 
-    stdout, stderr = send_command(f"install -r {apk_path}")
+    # The command string is ultimately executed via a shell, so the path must
+    # be quoted to survive spaces and other shell-special characters (e.g. a
+    # results directory living under ".../2024 fritap issues/...").
+    stdout, stderr = send_command(f"install -r {shlex.quote(apk_path)}")
 
     if stderr:
         stderr_lower = stderr.lower()

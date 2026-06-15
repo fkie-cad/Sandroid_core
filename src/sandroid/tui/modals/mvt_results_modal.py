@@ -7,7 +7,12 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Label, Static
 
-from sandroid.core.forensic_evidence import IOCMatch, MatchSeverity, ScanResult
+from sandroid.core.forensic_evidence import (
+    IOCMatch,
+    MatchSeverity,
+    ScanResult,
+    extract_matched_packages,
+)
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
 
@@ -113,22 +118,14 @@ class MVTResultsModal(ForensicModal[MVTResultsAction]):
         self._extract_matched_packages()
 
     def _extract_matched_packages(self) -> None:
-        """Extract package names from scan results that had IOC matches."""
-        for result in self.results:
-            for match in result.matches:
-                if (
-                    match.source != "installed_apps"
-                    and match.indicator_type != "package"
-                ):
-                    continue
-                pkg = match.matched_data
-                if not pkg:
-                    continue
-                if pkg not in self.matched_packages:
-                    self.matched_packages.append(pkg)
-                if pkg not in self.matches_by_package:
-                    self.matches_by_package[pkg] = []
-                self.matches_by_package[pkg].append(match)
+        """Extract pullable package names from scan results that had IOC matches.
+
+        Delegates to the shared core extractor so the modal and the Forensic
+        panel agree — including packages detected only via an APK hash match.
+        """
+        self.matched_packages, self.matches_by_package = extract_matched_packages(
+            self.results
+        )
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""

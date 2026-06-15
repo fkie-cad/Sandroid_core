@@ -25,16 +25,21 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import RichLog, Static
 
 from sandroid.services import get_network_capture_service, get_task_service
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +73,7 @@ class FriTapPanel(Widget):
 
     BINDINGS = [
         ("enter", "toggle_running", "Start/Stop"),
+        ("r", "replay_capture", "Replay capture"),
         ("ctrl+o", "open_output", "Open output"),
         ("ctrl+l", "clear_log", "Clear log"),
     ]
@@ -100,7 +106,8 @@ class FriTapPanel(Widget):
         self._subscribe_events()
         try:
             self.query_one("#fritap-log", RichLog).write(
-                "[#5b6479]Enter: start/stop · Ctrl+O: open output · Ctrl+L: clear[/]"
+                "[#5b6479]Enter: start/stop · r: replay capture · "
+                "Ctrl+O: open output · Ctrl+L: clear[/]"
             )
         except Exception:
             pass
@@ -349,7 +356,135 @@ class FriTapPanel(Widget):
             return
         self._open_folder(folder)
 
+    def action_replay_capture(self) -> None:
+        """Open a captured pcap with ``fritap -r`` in a NEW terminal (``r`` key).
+
+        Replay (offline) friTap analysis runs in its own terminal, independent
+        of the TUI — Sandroid only resolves the capture + the ``fritap``
+        executable and launches the terminal. The capture defaults to the newest
+        ``*.pcap`` under the device results folder; the user can override it.
+        """
+        from sandroid.tui.modals import InputModal
+
+        default = self._latest_capture() or ""
+
+        def on_result(value: str | None) -> None:
+            if value is None:
+                return
+            path = value.strip()
+            if not path:
+                try:
+                    self.app.notify("No capture path provided.", severity="warning")
+                except Exception:
+                    pass
+                return
+            self._launch_fritap_replay(Path(path).expanduser())
+
+        self.app.push_screen(
+            InputModal(
+                title="Replay friTap capture",
+                message="Open a .pcap with `fritap -r` in a new terminal window.",
+                default=default,
+                placeholder="/path/to/capture.pcap",
+            ),
+            on_result,
+        )
+
     # -- helpers ----------------------------------------------------------
+
+    def _latest_capture(self) -> str | None:
+        """Newest ``*.pcap`` under the device results folder, or None.
+
+        Searches the device root (covers both ``fritap/`` and
+        ``network_trace_pull/``); the results tree is small so rglob is cheap.
+        """
+        folder = self._output_folder()
+        if folder is None:
+            return None
+        root = folder.parent if (folder.parent and folder.parent.exists()) else folder
+        candidates: list[Path] = []
+        try:
+            if root.exists():
+                candidates = list(root.rglob("*.pcap"))
+        except Exception:
+            return None
+        if not candidates:
+            return None
+        try:
+            return str(max(candidates, key=lambda p: p.stat().st_mtime))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _resolve_fritap() -> list[str]:
+        """Resolve a runnable ``fritap`` command with an ABSOLUTE path.
+
+        The spawned terminal uses the user's login shell, which may not have the
+        venv on PATH — so resolve to the absolute executable rather than relying
+        on a bare ``fritap`` lookup there.
+        """
+        exe = shutil.which("fritap")
+        if exe:
+            return [exe]
+        candidate = Path(sys.executable).parent / "fritap"
+        if candidate.exists():
+            return [str(candidate)]
+        return [sys.executable, "-m", "friTap"]
+
+    def _launch_fritap_replay(self, capture: Path) -> None:
+        if not capture.exists():
+            try:
+                self.app.notify(f"Capture not found: {capture}", severity="error")
+            except Exception:
+                pass
+            return
+        argv = self._resolve_fritap() + ["-r", str(capture)]
+        try:
+            self._open_terminal_with_command(argv)
+            self.app.notify(
+                f"Opening fritap -r in a new terminal: {capture.name}",
+            )
+        except Exception as exc:
+            logger.warning("Failed to launch fritap replay: %s", exc)
+            try:
+                self.app.notify(f"Failed to open terminal: {exc}", severity="error")
+            except Exception:
+                pass
+
+    def _open_terminal_with_command(self, argv: list[str]) -> None:
+        """Open a new OS terminal window running ``argv`` (cross-platform).
+
+        Mirrors :meth:`_open_folder`'s platform-dispatch shape. macOS uses
+        ``osascript`` to drive Terminal.app; Linux tries the common emulators
+        and keeps the window open after the command exits; Windows uses
+        ``start cmd /k``.
+        """
+        cmd = " ".join(shlex.quote(a) for a in argv)
+        if sys.platform == "darwin":
+            # Escape for the AppleScript double-quoted string literal.
+            ascript_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
+            script = (
+                'tell application "Terminal"\n'
+                f'    do script "{ascript_cmd}"\n'
+                "    activate\n"
+                "end tell"
+            )
+            subprocess.Popen(["osascript", "-e", script])
+        elif sys.platform.startswith("win"):
+            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd])
+        else:
+            keep = f"{cmd}; exec bash"
+            for term in ("x-terminal-emulator", "gnome-terminal", "konsole", "xterm"):
+                path = shutil.which(term)
+                if not path:
+                    continue
+                if term == "gnome-terminal":
+                    subprocess.Popen([path, "--", "bash", "-c", keep])
+                else:
+                    subprocess.Popen([path, "-e", f"bash -c {shlex.quote(keep)}"])
+                return
+            # No terminal emulator found — run detached so it still executes.
+            subprocess.Popen(argv)
 
     def _output_folder(self) -> Path | None:
         """Resolve the friTap results folder via PUBLIC paths only.

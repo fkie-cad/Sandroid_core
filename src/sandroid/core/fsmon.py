@@ -179,7 +179,7 @@ class FSMon:
 
             # Push fsmon to device
             cls.logger.debug(f"Copying FSMon binary to device at {binary_path}...")
-            Adb.send_adb_command(f"push {local_fsmon_path} {binary_path}")
+            Adb.push_file(local_fsmon_path, binary_path)
 
             # Make fsmon executable
             Adb.send_adb_command(f"shell chmod +x {binary_path}")

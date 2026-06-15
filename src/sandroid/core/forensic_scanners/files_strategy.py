@@ -107,13 +107,20 @@ class FilesScanStrategy(BaseScanStrategy):
         ioc_loader: "IOCLoader",
         sha256_iocs: list,
     ) -> list[IOCMatch]:
-        """Scan a single package for hash matches."""
+        """Scan every APK of a package for hash matches.
+
+        A split app reports several APKs via ``pm path`` (a ``base.apk`` plus
+        one ``split_config.*`` per density/abi/locale) — each on its own
+        ``package:`` line. They must be hashed individually: collapsing the
+        multi-line output into one path produced a malformed ``md5sum`` command
+        whose embedded newlines made the device shell try to *execute* the
+        trailing split paths ("can't execute: Permission denied").
+        """
         from sandroid.core.adb import Adb
 
-        matches = []
+        matches: list[IOCMatch] = []
 
         try:
-            # Get APK path
             path_stdout, path_stderr = Adb.send_adb_command(f"shell pm path {pkg}")
             log_adb_result(f"shell pm path {pkg}", path_stdout, path_stderr)
             if path_stderr and is_adb_error_actionable(path_stderr):
@@ -121,27 +128,76 @@ class FilesScanStrategy(BaseScanStrategy):
             if not path_stdout or "package:" not in path_stdout:
                 return matches
 
-            apk_path = path_stdout.strip().replace("package:", "")
+            apk_paths = [
+                line.replace("package:", "").strip()
+                for line in path_stdout.strip().splitlines()
+                if line.strip().startswith("package:")
+            ]
+            for apk_path in apk_paths:
+                if apk_path:
+                    matches.extend(
+                        self._scan_apk_file(pkg, apk_path, ioc_loader, sha256_iocs)
+                    )
+        except Exception as e:
+            logger.debug(f"Error checking hashes for {pkg}: {e}")
 
-            # Check MD5
-            hash_stdout, hash_stderr = Adb.send_adb_command(
-                f"shell md5sum '{apk_path}'"
+        return matches
+
+    def _scan_apk_file(
+        self,
+        pkg: str,
+        apk_path: str,
+        ioc_loader: "IOCLoader",
+        sha256_iocs: list,
+    ) -> list[IOCMatch]:
+        """Hash a single APK file and compare it against the hash IOCs."""
+        from sandroid.core.adb import Adb
+
+        matches: list[IOCMatch] = []
+
+        # MD5 (always — covers MD5 IOCs and untyped hashes).
+        hash_stdout, hash_stderr = Adb.send_adb_command(f"shell md5sum '{apk_path}'")
+        log_adb_result(f"shell md5sum '{apk_path}'", hash_stdout, hash_stderr)
+        if hash_stderr and is_adb_error_actionable(hash_stderr):
+            logger.warning(f"ADB command warning (md5sum {apk_path}): {hash_stderr}")
+        if hash_stdout and not hash_stdout.startswith("md5sum:"):
+            parts = hash_stdout.split()
+            if parts:
+                file_md5 = parts[0].strip().lower()
+                for ioc in ioc_loader.hashes:
+                    ioc_value = ioc["value"].lower()
+                    ioc_type = ioc.get("type", "").upper()
+                    if ioc_type in ("MD5", "") and file_md5 == ioc_value:
+                        matches.append(
+                            IOCMatch(
+                                indicator_type="file_hash",
+                                indicator_value=ioc["value"],
+                                matched_data=f"{pkg} ({apk_path})",
+                                source="apk_hash",
+                                severity=MatchSeverity.CRITICAL,
+                                description=ioc.get(
+                                    "description", f"MD5 hash match for {pkg}"
+                                ),
+                            )
+                        )
+                        logger.info(f"Hash IOC match: {pkg} matches MD5 {ioc['value']}")
+
+        # SHA-256 only when there are SHA-256 IOCs to compare against.
+        if sha256_iocs:
+            sha_stdout, sha_stderr = Adb.send_adb_command(
+                f"shell sha256sum '{apk_path}'"
             )
-            log_adb_result(f"shell md5sum '{apk_path}'", hash_stdout, hash_stderr)
-            if hash_stderr and is_adb_error_actionable(hash_stderr):
+            log_adb_result(f"shell sha256sum '{apk_path}'", sha_stdout, sha_stderr)
+            if sha_stderr and is_adb_error_actionable(sha_stderr):
                 logger.warning(
-                    f"ADB command warning (md5sum {apk_path}): {hash_stderr}"
+                    f"ADB command warning (sha256sum {apk_path}): {sha_stderr}"
                 )
-            if hash_stdout and not hash_stdout.startswith("md5sum:"):
-                parts = hash_stdout.split()
-                if parts:
-                    file_md5 = parts[0].strip().lower()
-
-                    for ioc in ioc_loader.hashes:
-                        ioc_value = ioc["value"].lower()
-                        ioc_type = ioc.get("type", "").upper()
-
-                        if ioc_type in ("MD5", "") and file_md5 == ioc_value:
+            if sha_stdout and not sha_stdout.startswith("sha256sum:"):
+                sha_parts = sha_stdout.split()
+                if sha_parts:
+                    file_sha256 = sha_parts[0].strip().lower()
+                    for ioc in sha256_iocs:
+                        if file_sha256 == ioc["value"].lower():
                             matches.append(
                                 IOCMatch(
                                     indicator_type="file_hash",
@@ -150,50 +206,13 @@ class FilesScanStrategy(BaseScanStrategy):
                                     source="apk_hash",
                                     severity=MatchSeverity.CRITICAL,
                                     description=ioc.get(
-                                        "description", f"MD5 hash match for {pkg}"
+                                        "description", f"SHA-256 hash match for {pkg}"
                                     ),
                                 )
                             )
                             logger.info(
-                                f"Hash IOC match: {pkg} matches MD5 {ioc['value']}"
+                                f"Hash IOC match: {pkg} matches SHA-256 {ioc['value']}"
                             )
-
-            # Check SHA-256 if we have SHA-256 IOCs
-            if sha256_iocs:
-                sha_stdout, sha_stderr = Adb.send_adb_command(
-                    f"shell sha256sum '{apk_path}'"
-                )
-                log_adb_result(f"shell sha256sum '{apk_path}'", sha_stdout, sha_stderr)
-                if sha_stderr and is_adb_error_actionable(sha_stderr):
-                    logger.warning(
-                        f"ADB command warning (sha256sum {apk_path}): {sha_stderr}"
-                    )
-                if sha_stdout and not sha_stdout.startswith("sha256sum:"):
-                    sha_parts = sha_stdout.split()
-                    if sha_parts:
-                        file_sha256 = sha_parts[0].strip().lower()
-
-                        for ioc in sha256_iocs:
-                            if file_sha256 == ioc["value"].lower():
-                                matches.append(
-                                    IOCMatch(
-                                        indicator_type="file_hash",
-                                        indicator_value=ioc["value"],
-                                        matched_data=f"{pkg} ({apk_path})",
-                                        source="apk_hash",
-                                        severity=MatchSeverity.CRITICAL,
-                                        description=ioc.get(
-                                            "description",
-                                            f"SHA-256 hash match for {pkg}",
-                                        ),
-                                    )
-                                )
-                                logger.info(
-                                    f"Hash IOC match: {pkg} matches SHA-256 {ioc['value']}"
-                                )
-
-        except Exception as e:
-            logger.debug(f"Error checking hash for {pkg}: {e}")
 
         return matches
 

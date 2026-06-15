@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    ForensicPanel,
     FriTapPanel,
     MitmproxyPanel,
     SandroidFooter,
@@ -93,6 +94,10 @@ class MainScreen(Screen):
         text-style: bold;
         background: #38bdf8;
     }
+    /* The Forensic tab is physical-device-only; hidden otherwise. */
+    .tool-tab.-hidden {
+        display: none;
+    }
     #tool-body {
         display: block;
         height: 1fr;
@@ -145,11 +150,19 @@ class MainScreen(Screen):
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
+                        # Physical-device-only; hidden by default so it never
+                        # flashes before the first device check.
+                        yield Static(
+                            "Forensic",
+                            id="tab-forensic",
+                            classes="tool-tab -hidden",
+                        )
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield FriTapPanel(id="fritap-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
+                        yield ForensicPanel(id="forensic-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
@@ -196,6 +209,7 @@ class MainScreen(Screen):
         "tab-mitm": "mitm-panel",
         "tab-fritap": "fritap-panel",
         "tab-snapshots": "snapshots-panel",
+        "tab-forensic": "forensic-panel",
     }
 
     def on_click(self, event) -> None:
@@ -207,10 +221,11 @@ class MainScreen(Screen):
         wid = getattr(getattr(event, "widget", None), "id", None)
         if wid in self._TOOL_TABS:
             self._select_bottom_tab(self._TOOL_TABS[wid])
-        elif wid and wid.startswith(("act-", "snap-")):
+        elif wid and wid.startswith(("act-", "snap-", "forensic-")):
             # Tool-panel action cells. Route to the ACTIVE tool child
-            # (spotlight uses act-*, snapshots uses snap-*). The hasattr guard
-            # keeps panels without a dispatcher (e.g. MitmproxyPanel) safe.
+            # (spotlight uses act-*, snapshots uses snap-*, forensic uses
+            # forensic-*). The hasattr guard keeps panels without a dispatcher
+            # (e.g. MitmproxyPanel) safe.
             current = self._bottom_current()
             if current:
                 try:
@@ -267,15 +282,68 @@ class MainScreen(Screen):
         """Switch the active tab by *delta* (Left/Right while focus is inside).
 
         Bound on the tool-panel wrapper so it only fires when focus is inside
-        the tool area; never steals Left/Right from the activity log.
+        the tool area; never steals Left/Right from the activity log. Hidden
+        tabs (e.g. Forensic on an emulator) are skipped.
         """
-        order = list(self._TOOL_TABS.values())
+        order = [
+            pid
+            for tab_id, pid in self._TOOL_TABS.items()
+            if self._is_tab_visible(tab_id)
+        ]
+        if not order:
+            return
         current = self._bottom_current() or order[0]
         try:
             idx = order.index(current)
         except ValueError:
             idx = 0
         self._select_bottom_tab(order[(idx + delta) % len(order)])
+
+    # -- Forensic tab visibility (physical-device-only) -------------------
+
+    def _is_tab_visible(self, tab_id: str) -> bool:
+        """True if the given tab Static is not hidden."""
+        try:
+            return not self.query_one(f"#{tab_id}").has_class("-hidden")
+        except Exception:
+            return False
+
+    def _forensic_tab_should_show(self) -> bool:
+        """True only when the active device is physical (False for emulator/none)."""
+        try:
+            from sandroid.core.device_manager import DeviceManager
+
+            return bool(DeviceManager.get().is_physical_device())
+        except Exception:
+            return False
+
+    def open_forensic_tab(self) -> None:
+        """Switch to the Forensic tab (Shift+F), if it is visible."""
+        if self._is_tab_visible("tab-forensic"):
+            self._select_bottom_tab("forensic-panel")
+        else:
+            try:
+                self.app.notify(
+                    "Forensic Evidence requires a physical device.",
+                    severity="warning",
+                )
+            except Exception:
+                pass
+
+    def _update_forensic_tab_visibility(self) -> None:
+        """Show/hide the Forensic tab from the live device type.
+
+        Called once after mount and on every device change. If the tab is the
+        active one when it gets hidden (device unplugged / switched to an
+        emulator), fall back to the Spotlight tab.
+        """
+        show = self._forensic_tab_should_show()
+        try:
+            self.query_one("#tab-forensic").set_class(not show, "-hidden")
+        except Exception:
+            return
+        if not show and self._bottom_current() == "forensic-panel":
+            self._select_bottom_tab("spotlight-panel")
 
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.
@@ -304,6 +372,31 @@ class MainScreen(Screen):
             self.query_one("#spotlight-panel").focus()
         except Exception:
             pass
+
+        # The Forensic tab is physical-device-only: gate its visibility on the
+        # live device type and keep it in sync on every device change.
+        self._register_forensic_visibility()
+
+    def _register_forensic_visibility(self) -> None:
+        """Set initial Forensic-tab visibility and subscribe to device changes."""
+        try:
+            from sandroid.core.device_manager import DeviceManager
+
+            dm = DeviceManager.get()
+
+            def _on_device_event(*_args) -> None:
+                # Device refresh/selection can run off the main thread; marshal
+                # the visibility toggle onto the UI loop.
+                try:
+                    self.app.call_later(self._update_forensic_tab_visibility)
+                except Exception:
+                    pass
+
+            dm.on_device_change(_on_device_event)
+            dm.on_devices_updated(_on_device_event)
+        except Exception as exc:
+            logger.debug(f"Could not register forensic visibility callbacks: {exc}")
+        self._update_forensic_tab_visibility()
 
     def _update_from_toolbox(self) -> None:
         """Update UI state from Toolbox."""

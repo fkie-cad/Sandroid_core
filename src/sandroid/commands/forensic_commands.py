@@ -167,7 +167,7 @@ class PullSpotlightFileCommand(CommandHandler):
         logger.info(f"Pulling spotlight file: {file_to_pull} -> {target}")
 
         # Pull the main file
-        output, error = Adb.send_adb_command(f"pull {file_to_pull} {target}")
+        output, error = Adb.pull_file(file_to_pull, target)
 
         # Check for errors
         combined_output = str(output) + str(error)
@@ -199,8 +199,8 @@ class PullSpotlightFileCommand(CommandHandler):
             for suffix in ("-wal", "-journal"):
                 companion_source = file_to_pull + suffix
                 companion_target = target + suffix
-                comp_output, comp_error = Adb.send_adb_command(
-                    f"pull {companion_source} {companion_target}"
+                comp_output, comp_error = Adb.pull_file(
+                    companion_source, companion_target
                 )
                 if not _adb_pull_has_error(comp_output, comp_error):
                     logger.info(f"Pulled {suffix} file: {companion_source}")

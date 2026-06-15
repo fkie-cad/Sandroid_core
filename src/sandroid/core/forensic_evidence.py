@@ -129,6 +129,58 @@ class ScanResult:
         }
 
 
+def _package_from_match(match: IOCMatch) -> str | None:
+    """Best-effort device package name from a match, or None if it has none.
+
+    Two match shapes carry a pullable package:
+    - Direct app/package matches (``AppsScanStrategy``): ``matched_data`` IS the
+      package name (``source == "installed_apps"`` / ``indicator_type == "package"``).
+    - APK hash matches (``FilesScanStrategy``): ``matched_data`` is formatted as
+      ``"<package> (<apk_path>)"`` (``source == "apk_hash"`` /
+      ``indicator_type == "file_hash"``) — so a hash-only detection is still
+      pullable by parsing the leading package token.
+
+    SMS/CALLS matches (phone numbers, domains, URLs) have no APK and return None.
+    """
+    data = (match.matched_data or "").strip()
+    if not data:
+        return None
+    if match.source == "installed_apps" or match.indicator_type == "package":
+        pkg = data
+    elif match.source == "apk_hash" or match.indicator_type == "file_hash":
+        # "de.fkie.ground_truth (/data/app/~~…/base.apk)" -> "de.fkie.ground_truth"
+        pkg = data.split(" (", 1)[0].strip()
+    else:
+        return None
+    # Reject anything that doesn't look like a package id (paths, free text).
+    if not pkg or "/" in pkg or " " in pkg:
+        return None
+    return pkg
+
+
+def extract_matched_packages(
+    results: list["ScanResult"],
+) -> tuple[list[str], dict[str, list[IOCMatch]]]:
+    """Collect device packages with IOC matches, for APK pulling.
+
+    Returns ``(ordered_unique_packages, matches_by_package)``. Handles both
+    direct package matches and APK hash matches (see :func:`_package_from_match`),
+    so a package detected only by hash can still be pulled. The pull pipeline
+    resolves each package's APK path via ``pm path`` at pull time.
+    """
+    packages: list[str] = []
+    by_package: dict[str, list[IOCMatch]] = {}
+    for result in results:
+        for match in result.matches:
+            pkg = _package_from_match(match)
+            if not pkg:
+                continue
+            if pkg not in packages:
+                packages.append(pkg)
+            by_package.setdefault(pkg, []).append(match)
+    return packages, by_package
+
+
 class IOCLoader:
     """Loads and parses STIX2 IOC files."""
 

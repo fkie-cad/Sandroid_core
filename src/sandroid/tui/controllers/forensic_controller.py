@@ -33,6 +33,28 @@ from sandroid.core.enums import ViewMode
 logger = logging.getLogger(__name__)
 
 
+class _ScanAborted(BaseException):
+    """Unwinds a running forensic scan when the user requests cancellation.
+
+    Subclasses ``BaseException`` (not ``Exception``) deliberately: the scan
+    strategies wrap their per-item loops in ``except Exception``, so a plain
+    exception raised from the progress callback would be swallowed and the scan
+    would keep going. ``BaseException`` bypasses those handlers and unwinds the
+    strategy cleanly, so cancellation actually stops the work in progress.
+    """
+
+
+# Run the scan one stage at a time (each dict enables exactly one strategy via
+# ForensicEvidence.run_scan's flags). Lets the inline runner check for cancel
+# between stages and keep results from the stages that already finished.
+_SCAN_STAGES = (
+    {"scan_apps": True, "scan_sms": False, "scan_calls": False, "scan_files": False},
+    {"scan_apps": False, "scan_sms": True, "scan_calls": False, "scan_files": False},
+    {"scan_apps": False, "scan_sms": False, "scan_calls": True, "scan_files": False},
+    {"scan_apps": False, "scan_sms": False, "scan_calls": False, "scan_files": True},
+)
+
+
 @dataclass
 class ScanProgress:
     """Progress update from a forensic scan."""
@@ -105,6 +127,10 @@ class ForensicController:
         self._on_scan_complete = on_scan_complete
         self._toolbox = toolbox
         self._scan_in_progress = False
+        # Set by cancel_scan(); checked by the inline-scan progress callback so a
+        # running scan stops feeding the UI. Best-effort: the in-flight strategy
+        # still finishes (the engine has no mid-strategy cancellation).
+        self._cancel_event = threading.Event()
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -347,17 +373,120 @@ class ForensicController:
         return True
 
     def cancel_scan(self) -> bool:
-        """Cancel running scan if possible.
+        """Request cancellation of a running scan (cooperative, best-effort).
+
+        Sets the cancel event so the inline-scan progress callback stops feeding
+        the UI and the completion is reported as cancelled. The engine has no
+        mid-strategy cancellation, so the currently-running scan stage still
+        finishes before the scan thread exits.
 
         Returns:
-            True if scan was cancelled
+            True if a scan was in progress and cancellation was requested.
         """
         if not self._scan_in_progress:
             return False
 
-        # Note: Actual cancellation would need to be implemented
-        # in ForensicEvidence class with cooperative cancellation
+        self._cancel_event.set()
         self._log_warning("Scan cancellation requested (may not stop immediately)")
+        return True
+
+    def run_forensic_scan_inline(
+        self,
+        run_worker: Callable,
+        call_from_thread: Callable,
+        on_progress: Callable,
+        on_complete: Callable,
+        on_error: Callable,
+    ) -> bool:
+        """Run a forensic scan, streaming progress to in-tab callbacks (no modals).
+
+        This is the non-modal sibling of ``_run_forensic_scan_workflow``: it
+        loads IOCs and runs ``ForensicEvidence.run_scan`` on a worker thread, but
+        routes progress/results to the Forensic panel instead of
+        ``ScanProgressModal`` / ``MVTResultsModal``.
+
+        Thread-safety: ``ForensicEvidence.run_scan``'s progress callback fires on
+        the scan worker thread, so ``on_progress`` / ``on_complete`` / ``on_error``
+        are marshalled onto the Textual main thread via ``call_from_thread`` (the
+        same proven path the modal workflow uses). The scan worker is the only
+        producer thread, so ``call_from_thread`` here never deadlocks.
+
+        Args:
+            run_worker: App.run_worker (used with thread=True).
+            call_from_thread: App.call_from_thread (worker -> main marshaller).
+            on_progress: Called (main thread) with a core ``ScanProgress``.
+            on_complete: Called (main thread) with (results, cancelled).
+            on_error: Called (main thread) with an error message string.
+
+        Returns:
+            True if the scan was started.
+        """
+        can_run, reason = self.can_run_forensic_scan()
+        if not can_run:
+            self._log_warning(reason)
+            on_error(reason)
+            return False
+
+        from sandroid.core.forensic_evidence import ForensicEvidence
+
+        fe = ForensicEvidence.get()
+        if not fe.load_iocs():
+            msg = "Failed to load IOC indicators"
+            self._log_error(msg)
+            on_error(msg)
+            return False
+
+        self._scan_in_progress = True
+        self._cancel_event.clear()
+        self._log_info(f"Loaded {fe.total_indicators} IOC indicators")
+
+        def progress_callback(progress) -> None:
+            # Cancellation is cooperative: raise out of the scan so the running
+            # strategy (e.g. the long FILES hashing loop) actually stops instead
+            # of merely going quiet. _ScanAborted subclasses BaseException so the
+            # strategies' ``except Exception`` blocks do not swallow it.
+            if self._cancel_event.is_set():
+                raise _ScanAborted
+            call_from_thread(on_progress, progress)
+
+        def work() -> None:
+            results: list = []
+            aborted = False
+            error: str | None = None
+            try:
+                # Run one stage at a time (via run_scan's per-stage flags) so a
+                # cancel is honoured between stages AND mid-stage, while matches
+                # already found in completed stages are preserved.
+                for flags in _SCAN_STAGES:
+                    if self._cancel_event.is_set():
+                        aborted = True
+                        break
+                    try:
+                        results.extend(
+                            fe.run_scan(progress_callback=progress_callback, **flags)
+                        )
+                    except _ScanAborted:
+                        aborted = True
+                        break
+            except Exception as exc:
+                logger.exception(f"Inline forensic scan failed: {exc}")
+                error = str(exc)
+            finally:
+                # Clear the guard BEFORE delivering the outcome so the panel
+                # renders the completed state (not a stuck "scanning" header).
+                self._scan_in_progress = False
+
+            if error is not None:
+                try:
+                    call_from_thread(on_error, error)
+                except Exception:
+                    pass
+            else:
+                cancelled = aborted or self._cancel_event.is_set()
+                call_from_thread(on_complete, results, cancelled)
+
+        run_worker(work, name="forensic_scan_inline", exclusive=False, thread=True)
+        self._log_info("Forensic evidence scan started")
         return True
 
     # =========================================================================
@@ -391,12 +520,6 @@ class ForensicController:
         Returns:
             True if workflow was started
         """
-        from sandroid.core.forensic_evidence import ForensicEvidence
-        from sandroid.tui.modals import (
-            IOCChoiceModal,
-            IOCSetupModal,
-        )
-
         # Check prerequisites
         current_view = get_current_view()
         can_run, reason = self.can_run_forensic_scan(current_view)
@@ -411,54 +534,75 @@ class ForensicController:
             )
             return True
 
-        # Check for cached IOCs
+        # Present the IOC choice/setup modals, then run the scan once a usable
+        # IOC source is selected. The modal routing is shared with the Forensic
+        # tab's "configure" action via _present_ioc_config.
+        self._present_ioc_config(
+            push_modal=self._push_modal,
+            then=lambda: self._run_forensic_scan_workflow(
+                run_worker, call_from_thread, force_ui_refresh, on_mvt_result
+            ),
+        )
+        return True
+
+    def configure_iocs_only(self, push_modal: Callable, on_done: Callable) -> None:
+        """Show the IOC choice/setup modals WITHOUT starting a scan.
+
+        Used by the Forensic tab's "configure" (c) action so an analyst can
+        inspect or switch the IOC source independently of running a scan.
+        ``on_done`` runs (main thread) only after a usable IOC source has been
+        selected/saved — never on cancel.
+
+        Args:
+            push_modal: Callback to push a modal screen with a result callback.
+            on_done: Called after IOCs are configured (e.g. refresh the header).
+        """
+        self._present_ioc_config(push_modal=push_modal, then=on_done)
+
+    def _present_ioc_config(self, push_modal: Callable, then: Callable) -> None:
+        """Drive the IOC choice/setup modal flow, then call ``then``.
+
+        Shared by ``show_forensic_evidence_modal`` (then = run the scan) and
+        ``configure_iocs_only`` (then = refresh the panel). ``then`` is invoked
+        only after the user selects cached IOCs or saves a new source; it is
+        never called when the user cancels.
+        """
+        from sandroid.core.forensic_evidence import ForensicEvidence
+        from sandroid.tui.modals import IOCChoiceModal, IOCSetupModal
+
+        if not push_modal:
+            return
+
         cached_info = self.has_cached_iocs()
 
-        # Setup modal callback
         def on_ioc_setup(setup_result) -> None:
             if setup_result.cancelled:
                 return
-
-            # Save configuration
             self._save_ioc_config_from_setup(setup_result)
-
-            # Reset and run scan
             self.reset_forensic_evidence()
-            self._run_forensic_scan_workflow(
-                run_worker, call_from_thread, force_ui_refresh, on_mvt_result
-            )
+            then()
 
         if cached_info is None:
-            # No cached IOCs - go directly to IOC setup modal
-            if self._push_modal:
-                self._push_modal(IOCSetupModal(), on_ioc_setup)
-            return True
+            # No cached IOCs - go directly to IOC setup modal.
+            push_modal(IOCSetupModal(), on_ioc_setup)
+            return
 
-        # Show IOC choice modal
         def on_ioc_choice(result) -> None:
             if result.cancelled:
                 return
-
-            # Save preference if user checked "remember"
             if result.remember_choice:
                 self._save_ioc_preference(result.use_cached)
-
             if result.use_cached:
-                # Use cached IOCs - ensure ForensicEvidence is configured
+                # Use cached IOCs - ensure ForensicEvidence is configured.
                 fe = ForensicEvidence.get()
                 if not fe.is_configured():
                     self._save_cached_ioc_path(cached_info.get("path"))
                     self.reset_forensic_evidence()
-                self._run_forensic_scan_workflow(
-                    run_worker, call_from_thread, force_ui_refresh, on_mvt_result
-                )
-            # Configure new IOCs
-            elif self._push_modal:
-                self._push_modal(IOCSetupModal(), on_ioc_setup)
+                then()
+            else:
+                push_modal(IOCSetupModal(), on_ioc_setup)
 
-        if self._push_modal:
-            self._push_modal(IOCChoiceModal(cached_info=cached_info), on_ioc_choice)
-        return True
+        push_modal(IOCChoiceModal(cached_info=cached_info), on_ioc_choice)
 
     def _load_and_update_mvt_config(self, updates: dict[str, Any]) -> bool:
         """Load config, apply MVT section updates, and save.
@@ -485,7 +629,17 @@ class ForensicController:
             updates: dict[str, Any] = {"enabled": True}
 
             if setup_result.source_type == "path":
-                updates["ioc_path"] = setup_result.value
+                # Absolutize relative paths now (CWD is correct at save time) so
+                # the scan still finds the IOCs if the working dir later changes.
+                from pathlib import Path
+
+                raw = Path(str(setup_result.value)).expanduser()
+                try:
+                    if raw.exists():
+                        raw = raw.resolve()
+                except OSError:
+                    pass
+                updates["ioc_path"] = str(raw)
             elif setup_result.source_type == "url":
                 from sandroid.core.ioc_downloader import IOCDownloader
 

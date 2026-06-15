@@ -87,6 +87,11 @@ class AdbProtocol(Protocol):
         ...
 
     @staticmethod
+    def pull_file(remote_path: Any, local_path: Any) -> tuple[str, str]:
+        """Pull a file from the device (paths are shell-quoted internally)."""
+        ...
+
+    @staticmethod
     def get_avd_snapshots() -> list[dict]:
         """Get list of available snapshots."""
         ...
@@ -310,7 +315,7 @@ class EmulatorService:
         # Pull the recording from device
         try:
             adb = self._get_adb()
-            _stdout, stderr = adb.send_adb_command(f"pull {device_path} {local_path}")
+            _stdout, stderr = adb.pull_file(device_path, local_path)
 
             if stderr and "error" in stderr.lower():
                 self._logger.error(f"Failed to pull recording: {stderr}")

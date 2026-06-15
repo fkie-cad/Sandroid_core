@@ -268,7 +268,7 @@ class MonitoringHandler:
         raw_path = os.getenv("RAW_RESULTS_PATH", ".")
         local_path = os.path.join(raw_path, "capture.pcap")
 
-        self._api._adb.send_adb_command(f"pull /sdcard/capture.pcap {local_path}")
+        self._api._adb.pull_file("/sdcard/capture.pcap", local_path)
         self._api._adb.send_adb_command("shell rm /sdcard/capture.pcap")
 
         return CommandResult(

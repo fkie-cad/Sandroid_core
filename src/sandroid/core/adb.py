@@ -13,7 +13,9 @@ All public methods remain accessible on the ``Adb`` class so that callers
 do not need any changes.
 """
 
+import os
 import re
+import shlex
 import shutil
 import subprocess
 from logging import getLogger
@@ -254,6 +256,48 @@ class Adb:
             logger.error(f"Root shell command failed: {stderr}")
 
         return stdout, stderr
+
+    @classmethod
+    def push_file(cls, local_path: str | os.PathLike, remote_path: str | os.PathLike) -> tuple[str, str]:
+        """Push a local file to the device via ``adb push``.
+
+        Both paths are shell-quoted so that spaces and other shell-special
+        characters survive the shell that ultimately executes the command
+        (``send_adb_command`` runs with ``shell=True``). Prefer this over
+        building a ``push ...`` string by hand. ``Path`` objects are accepted
+        and coerced to strings.
+
+        Args:
+            local_path: Path to the local file to push.
+            remote_path: Destination path on the device.
+
+        Returns:
+            A tuple of (stdout, stderr) from the ADB command.
+        """
+        return cls.send_adb_command(
+            f"push {shlex.quote(str(local_path))} {shlex.quote(str(remote_path))}"
+        )
+
+    @classmethod
+    def pull_file(cls, remote_path: str | os.PathLike, local_path: str | os.PathLike) -> tuple[str, str]:
+        """Pull a file from the device to the local filesystem via ``adb pull``.
+
+        Both paths are shell-quoted so that spaces and other shell-special
+        characters survive the shell that ultimately executes the command
+        (``send_adb_command`` runs with ``shell=True``). Prefer this over
+        building a ``pull ...`` string by hand. ``Path`` objects are accepted
+        and coerced to strings.
+
+        Args:
+            remote_path: Path to the file on the device.
+            local_path: Destination path on the local filesystem.
+
+        Returns:
+            A tuple of (stdout, stderr) from the ADB command.
+        """
+        return cls.send_adb_command(
+            f"pull {shlex.quote(str(remote_path))} {shlex.quote(str(local_path))}"
+        )
 
     # ------------------------------------------------------------------
     # Delegated: Device property queries  (adb_queries)

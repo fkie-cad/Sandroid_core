@@ -48,8 +48,12 @@ class CallsScanStrategy(BaseScanStrategy):
         self._report_progress(progress_callback, 0, 0, "", "Reading call logs...")
 
         try:
+            # No --projection: the `content` tool's projection parsing is
+            # version-dependent (it rejected "number,date,type" as a single
+            # column → IllegalArgumentException). We match IOCs by substring on
+            # the whole row anyway, so query all columns and parse line by line.
             stdout, _stderr = Adb.send_adb_command(
-                "shell content query --uri content://call_log/calls --projection number,date,type"
+                "shell content query --uri content://call_log/calls"
             )
 
             if stdout and "Error" not in stdout:

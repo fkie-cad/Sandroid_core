@@ -926,14 +926,23 @@ class SandroidTUI(App):
         self._widget_refresh_controller.refresh_menu()
 
     def action_forensic_evidence(self) -> None:
-        """Run MVT forensic evidence scan."""
-        self._forensic_controller.show_forensic_evidence_modal(
-            get_current_view=self._get_current_view,
-            run_worker=self.run_worker,
-            call_from_thread=self.call_from_thread,
-            force_ui_refresh=self._force_ui_refresh,
-            on_mvt_result=self._handle_mvt_result,
-        )
+        """Shift+F — open the Forensic tab (physical-device-only).
+
+        The forensic IOC scan now lives in a dedicated tab; this shortcut simply
+        routes the analyst there. The tab's own Enter binding drives configure →
+        run. The legacy modal workflow (show_forensic_evidence_modal) remains on
+        the controller for reuse but is no longer the entry point.
+        """
+        screen = self._get_main_screen()
+        if screen is None:
+            return
+        if not screen._forensic_tab_should_show():
+            self.notify(
+                "Forensic Evidence requires a physical device.",
+                severity="warning",
+            )
+            return
+        screen.open_forensic_tab()
 
     def _handle_mvt_result(self, result) -> None:
         self._forensic_apk_controller.handle_mvt_result(result)

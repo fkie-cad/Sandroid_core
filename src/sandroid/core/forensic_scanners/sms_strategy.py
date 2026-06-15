@@ -52,8 +52,12 @@ class SMSScanStrategy(BaseScanStrategy):
         self._report_progress(progress_callback, 0, 0, "", "Reading SMS messages...")
 
         try:
+            # No --projection (see CallsScanStrategy): the `content` tool's
+            # projection parsing is version-dependent and rejected the
+            # comma-joined columns as one invalid column. We substring-match the
+            # whole row, so query all columns and parse line by line.
             stdout, _stderr = Adb.send_adb_command(
-                "shell content query --uri content://sms/inbox --projection address,body"
+                "shell content query --uri content://sms/inbox"
             )
 
             if stdout and "Error" not in stdout:

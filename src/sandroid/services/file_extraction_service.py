@@ -68,6 +68,11 @@ class AdbProtocol(Protocol):
         """Send an ADB command and return (stdout, stderr)."""
         ...
 
+    @staticmethod
+    def pull_file(remote_path, local_path) -> tuple[str, str]:
+        """Pull a file from the device (paths are shell-quoted internally)."""
+        ...
+
 
 def is_sqlite_file(file_path: str) -> bool:
     r"""Check if a file is a SQLite database by reading its magic header.
@@ -201,7 +206,7 @@ class FileExtractionService:
         local_dir.mkdir(parents=True, exist_ok=True)
 
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {remote_path} {local_path}")
+        output, error = adb.pull_file(remote_path, local_path)
 
         # Check for common errors in combined output
         combined = str(output) + str(error)
@@ -380,7 +385,7 @@ class FileExtractionService:
         local_dir.mkdir(parents=True, exist_ok=True)
 
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {remote_path} {local_path}")
+        output, error = adb.pull_file(remote_path, local_path)
 
         # Check if file exists
         from sandroid.core.adb_utils import detect_adb_pull_error
@@ -643,7 +648,7 @@ class FileExtractionService:
 
         # Pull the file
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {file_to_pull} {target_path}")
+        output, error = adb.pull_file(file_to_pull, target_path)
 
         # Handle common errors
         from sandroid.core.adb_utils import detect_adb_pull_error
@@ -767,7 +772,7 @@ class FileExtractionService:
             package_path = package_path[8:-1]
             apk_file = base_folder / f"{package}.apk"
 
-            adb.send_adb_command(f"pull {package_path} {apk_file}")
+            adb.pull_file(package_path, apk_file)
 
             if apk_file.exists():
                 data = apk_file.read_bytes()

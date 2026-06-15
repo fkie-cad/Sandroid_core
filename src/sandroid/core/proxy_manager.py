@@ -439,7 +439,7 @@ class CAManager:
                 local_path = der_path
 
             # Push to device
-            Adb.send_adb_command(f"push {local_path} {self.DEVICE_CERT_PATH}")
+            Adb.push_file(local_path, self.DEVICE_CERT_PATH)
 
             # Verify
             check_stdout, check_stderr = Adb.send_adb_command(
@@ -493,7 +493,7 @@ class CAManager:
                     return False, f"OpenSSL DER→PEM conversion error: {error}"
                 push_path = pem_path
 
-            Adb.send_adb_command(f"push {push_path} {self.DEVICE_CERT_PATH}")
+            Adb.push_file(push_path, self.DEVICE_CERT_PATH)
 
             check_stdout, _ = Adb.send_adb_command(
                 f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
@@ -677,7 +677,7 @@ class CAManager:
         """Pull cert from device and compute its hash."""
         try:
             local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.pem"
-            Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
+            Adb.pull_file(self.DEVICE_CERT_PATH, local_temp)
             if local_temp.exists():
                 cert_hash = self.get_cert_hash(local_temp)
                 local_temp.unlink()
@@ -953,7 +953,7 @@ class CAManager:
                 for base in ["/data/local", "/data/local/tmp"]:
                     target = f"{base}/{variant}"
                     try:
-                        Adb.send_adb_command(f"push {local_tmp} {target}")
+                        Adb.push_file(local_tmp, target)
                         Adb.send_adb_command(
                             f"shell {self._root_cmd(f'chmod 744 {target}')}"
                         )
