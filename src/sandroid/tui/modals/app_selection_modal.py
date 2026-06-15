@@ -27,13 +27,11 @@ class AppSelectionResult:
     Attributes:
         cancelled: Whether the dialog was cancelled.
         package_name: Selected package name (None if cancelled).
-        show_all_user_apps: State of the 'all user apps' toggle.
         include_system_apps: State of the 'include system apps' toggle.
     """
 
     cancelled: bool = True
     package_name: str | None = None
-    show_all_user_apps: bool = False
     include_system_apps: bool = False
 
 
@@ -41,8 +39,7 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
     """Modal for selecting an Android application.
 
     Features:
-    - Toggle to show all user apps (not just recently installed)
-    - Toggle to include system apps
+    - Toggle to include system apps (click or press Ctrl+S)
     - Real-time filter as you type
     - Keyboard navigation (j/k or arrow keys)
     - Enter to select, Escape to cancel
@@ -67,6 +64,11 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         width: auto;
         height: 1;
         margin-right: 3;
+    }
+
+    AppSelectionModal .toggle-option:hover {
+        background: $boost;
+        text-style: bold;
     }
 
     AppSelectionModal .toggle-option.enabled {
@@ -101,8 +103,9 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
 
     BINDINGS = [
         Binding("enter", "select", "Select", priority=True),
-        Binding("a", "toggle_all_user", "All User Apps", show=False),
-        Binding("s", "toggle_system", "System Apps", show=False),
+        # ctrl+s (not bare "s") so the shortcut still works while the filter
+        # Input is focused — a literal "s" is consumed as filter text.
+        Binding("ctrl+s", "toggle_system", "System Apps", show=False, priority=True),
         Binding("j", "next", "Next", show=False),
         Binding("k", "prev", "Previous", show=False),
         Binding("down", "next", "Next", show=False),
@@ -116,7 +119,7 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         title: str = "Select Application",
         packages: list[dict] | None = None,
         default_package: str | None = None,
-        package_loader: Callable[[bool, bool], list[dict]] | None = None,
+        package_loader: Callable[[bool], list[dict]] | None = None,
         include_system_apps: bool = False,
         initial_loader: Callable[..., list[dict]] | None = None,
         name: str = None,
@@ -129,8 +132,8 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             title: Dialog title.
             packages: Initial list of packages (each dict has 'package_name', 'install_date').
             default_package: Package to pre-select/highlight.
-            package_loader: Optional callback to reload packages when toggles change.
-                           Signature: (show_all_user: bool, include_system: bool) -> List[dict]
+            package_loader: Optional callback to reload packages when the toggle changes.
+                           Signature: (include_system: bool) -> List[dict]
             include_system_apps: Initial state of the system apps toggle.
             initial_loader: Optional callback to load packages asynchronously on mount.
                            When provided and packages is empty, the modal shows a loading
@@ -148,8 +151,7 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         self.package_loader = package_loader
         self.initial_loader = initial_loader
 
-        # Toggle states
-        self.show_all_user_apps = False
+        # Toggle state
         self.include_system_apps = include_system_apps
 
         # Loading state
@@ -160,21 +162,17 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         with Vertical(classes="modal-container"):
             yield Label(self.title_text, classes="modal-title")
 
-            # Toggle row
+            # Toggle row (click or press Ctrl+S)
             with Horizontal(id="toggle-row"):
                 yield Static(
                     self._format_toggle(
-                        "A", "Show all user apps", self.show_all_user_apps
-                    ),
-                    id="toggle-all-user",
-                    classes="toggle-option disabled",
-                )
-                yield Static(
-                    self._format_toggle(
-                        "S", "Include system apps", self.include_system_apps
+                        "^S", "Include system apps", self.include_system_apps
                     ),
                     id="toggle-system",
-                    classes="toggle-option disabled",
+                    classes=(
+                        "toggle-option "
+                        + ("enabled" if self.include_system_apps else "disabled")
+                    ),
                 )
 
             yield Input(placeholder="Type to filter...", id="filter-input")
@@ -188,9 +186,16 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
 
             yield KeyHintFooter(
                 hints={
-                    "input": "[dim]A/S=Toggle  Enter=Select  Esc=Cancel[/dim]",
-                    "list": "[dim]A/S=Toggle  Enter=Select  Esc=Cancel  j/k=Navigate[/dim]",
-                    "default": "[dim]A/S=Toggle  Enter=Select  Esc=Cancel[/dim]",
+                    "input": (
+                        "[dim]Click/Ctrl+S=System apps  Enter=Select  Esc=Cancel[/dim]"
+                    ),
+                    "list": (
+                        "[dim]Ctrl+S=System apps  Enter=Select  Esc=Cancel  "
+                        "j/k=Navigate[/dim]"
+                    ),
+                    "default": (
+                        "[dim]Click/Ctrl+S=System apps  Enter=Select  Esc=Cancel[/dim]"
+                    ),
                 }
             )
 
@@ -329,17 +334,19 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
     def _update_toggles(self) -> None:
         """Update toggle display."""
         self._update_toggle_widget(
-            "toggle-all-user", "A", "Show all user apps", self.show_all_user_apps
-        )
-        self._update_toggle_widget(
-            "toggle-system", "S", "Include system apps", self.include_system_apps
+            "toggle-system", "^S", "Include system apps", self.include_system_apps
         )
 
-    def action_toggle_all_user(self) -> None:
-        """Toggle 'show all user apps' option."""
-        self.show_all_user_apps = not self.show_all_user_apps
-        self._update_toggles()
-        self._reload_packages()
+    def on_click(self, event) -> None:
+        """Toggle the system-apps filter when its row is clicked.
+
+        Clicking is the mouse-driven alternative to the ``Ctrl+S`` binding;
+        a bare ``s`` can't be used because the auto-focused filter ``Input``
+        swallows the literal keystroke as filter text.
+        """
+        wid = getattr(getattr(event, "widget", None), "id", None)
+        if wid == "toggle-system":
+            self.action_toggle_system()
 
     def action_toggle_system(self) -> None:
         """Toggle 'include system apps' option."""
@@ -348,26 +355,42 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         self._reload_packages()
 
     def _reload_packages(self) -> None:
-        """Reload packages based on current toggle states."""
+        """Reload packages based on current toggle states.
+
+        Hides the (now stale) list and shows the spinner before launching the
+        worker, so the toggle gives immediate feedback even on first toggle,
+        when the underlying ADB enumeration is slow and uncached.
+        """
         if not self.package_loader:
             return
 
+        self.query_one("#app-list", OptionList).add_class("hidden")
         spinner = self.query_one("#loading-indicator", LoadingSpinner)
-        spinner.update_message("Loading packages...")
+        spinner.update_message(
+            "Enumerating all installed apps..."
+            if self.include_system_apps
+            else "Enumerating user-installed apps..."
+        )
         spinner.update_hint("")
         spinner.remove_class("hidden")
         self.run_worker(self._load_packages_async, exclusive=True)
 
     async def _load_packages_async(self) -> None:
-        """Load packages asynchronously."""
+        """Load packages asynchronously.
+
+        Runs the (blocking) package_loader in a real thread so the event loop
+        stays responsive and the spinner animates while ADB enumerates apps.
+        """
+        import asyncio
+
         try:
             if self.package_loader:
-                # Call the loader with current toggle states
-                new_packages = self.package_loader(
-                    self.show_all_user_apps, self.include_system_apps
+                # Run the blocking loader off the event-loop thread.
+                new_packages = await asyncio.to_thread(
+                    self.package_loader, self.include_system_apps
                 )
-                self.all_packages = new_packages
-                self.filtered_packages = new_packages.copy()
+                self.all_packages = new_packages or []
+                self.filtered_packages = self.all_packages.copy()
 
                 # Clear filter
                 filter_input = self.query_one("#filter-input", Input)
@@ -377,6 +400,7 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
                 self._update_option_list()
         finally:
             self.query_one("#loading-indicator", LoadingSpinner).add_class("hidden")
+            self.query_one("#app-list", OptionList).remove_class("hidden")
 
     def action_select(self) -> None:
         """Select the currently highlighted option."""
@@ -392,7 +416,6 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             result = AppSelectionResult(
                 cancelled=False,
                 package_name=selected_pkg.get("package_name"),
-                show_all_user_apps=self.show_all_user_apps,
                 include_system_apps=self.include_system_apps,
             )
             self._dismiss_with_refresh(result)

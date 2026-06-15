@@ -629,7 +629,7 @@ class AppSelectionService:
             from sandroid.core.ui_request_bus import request_modal, show_warning
             from sandroid.tui.modals.app_selection_modal import AppSelectionModal
 
-            def load_packages(show_all_user: bool, include_system: bool) -> list:
+            def load_packages(include_system: bool) -> list:
                 return self.get_installed_packages_with_fallback(
                     prefer_user_only=not include_system
                 )
