@@ -579,9 +579,16 @@ class MitmproxyPanel(Widget):
         self._refresh_status_bar()
 
     def _refresh_status_bar(self) -> None:
-        """Re-render the app's glance band (main thread only; best-effort)."""
+        """Re-render the app's glance band (main thread only; best-effort).
+
+        Resolve via ``self.screen`` (the panel's owning MainScreen), NOT
+        ``self.app`` — ``App.query_one`` searches the default screen, not the
+        pushed MainScreen, so it raises ``NoMatches`` here and the glance never
+        updates. ``self.screen`` is the panel's ancestor screen even when a
+        modal is on top, so this always finds the status bar.
+        """
         try:
-            self.app.query_one("#status-bar").refresh_status()
+            self.screen.query_one("#status-bar").refresh_status()
         except Exception:
             pass
 
@@ -593,9 +600,13 @@ class MitmproxyPanel(Widget):
         (the glance "Device" line and this tab read the same device proxy —
         they must never disagree). ``address`` is "ip:port", or "" when
         cleared. Main thread only; best-effort.
+
+        Resolve via ``self.screen`` (the owning MainScreen): ``App.query_one``
+        searches the default screen and raises ``NoMatches`` from a panel, so
+        the value would silently never reach the glance.
         """
         try:
-            self.app.query_one("#status-bar").set_device_proxy(address)
+            self.screen.query_one("#status-bar").set_device_proxy(address)
         except Exception:
             pass
 

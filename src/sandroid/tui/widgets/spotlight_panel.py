@@ -864,9 +864,14 @@ class SpotlightPanel(Widget):
         )
 
     def _refresh_status_bar(self) -> None:
-        """Nudge the status bar to re-check frida status (main thread only)."""
+        """Nudge the status bar to re-check frida status (main thread only).
+
+        Resolve via ``self.screen`` (the panel's owning MainScreen), not
+        ``self.app`` — ``App.query_one`` searches the default screen and raises
+        ``NoMatches`` from a panel, so the refresh would silently never fire.
+        """
         try:
-            self.app.query_one("#status-bar").update_from_toolbox()
+            self.screen.query_one("#status-bar").update_from_toolbox()
         except Exception:
             pass
 
