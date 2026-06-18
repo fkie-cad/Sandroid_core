@@ -441,10 +441,75 @@ class SpotlightPanel(Widget):
         except Exception:
             pass
 
+        # Self-heal a stale "paused" indicator against the live process.
+        self._reconcile_paused_flag(pid)
+
         running = pid is not None
         if running != self._last_running_state:
             self._last_running_state = running
             self._post(self.refresh_panel)
+
+    @staticmethod
+    def _parse_proc_status_resumed(status_text: str) -> bool:
+        """True if a ``/proc/<pid>/status`` dump shows a live, untraced process.
+
+        A spawn held at the Frida gate is stopped/traced (``State`` ``T``/``t``
+        and/or a nonzero ``TracerPid``); a resumed one is ``S``/``R``/``D`` with
+        ``TracerPid 0``. Conservative — any parse doubt returns False so a
+        genuinely paused app is never mislabeled as running.
+        """
+        if not status_text:
+            return False
+        state: str | None = None
+        tracer: int | None = None
+        for line in status_text.splitlines():
+            if line.startswith("State:"):
+                state = line.split(":", 1)[1].strip()[:1]
+            elif line.startswith("TracerPid:"):
+                try:
+                    tracer = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    tracer = None
+        return state in ("S", "R", "D") and tracer == 0
+
+    def _proc_resumed(self, pid: int) -> bool:
+        """Worker-thread: read ``/proc/<pid>/status`` and classify. Blocking ADB."""
+        try:
+            from sandroid.core.adb import Adb
+
+            out, _ = Adb.send_adb_command(f"shell cat /proc/{pid}/status")
+            return self._parse_proc_status_resumed(out)
+        except Exception:
+            logger.debug("proc-status read failed", exc_info=True)
+            return False
+
+    def _reconcile_paused_flag(self, pid: int | None) -> None:
+        """Clear a stale AFM ``_paused`` flag when the process is actually running.
+
+        Some AFM resume paths (e.g. ``JobManager.run_last_created_job``) resume
+        the spawned process without clearing the in-memory ``_paused`` flag, so
+        the header would show "◐ paused" forever though the app runs. When the
+        flag says paused but ``/proc`` says the process is live and untraced,
+        clear it at the source (``mark_resumed``) so every reader — header,
+        status bar, primary label — self-corrects. Worker-thread only (does a
+        blocking ADB read); never call from the UI thread.
+        """
+        if pid is None:
+            return
+        try:
+            if not self._spotlight().is_app_paused():
+                return
+            if not self._proc_resumed(pid):
+                return
+            from sandroid.core.toolbox import Toolbox
+
+            jm = Toolbox.get_frida_job_manager()
+            if jm is not None:
+                jm.mark_resumed()
+                logger.info("Cleared stale paused flag for pid %s (resumed)", pid)
+                self._post(self.refresh_panel)
+        except Exception:
+            logger.debug("paused-state reconciliation failed", exc_info=True)
 
     # -- bypass toggles ---------------------------------------------------
 
