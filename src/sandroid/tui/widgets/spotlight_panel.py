@@ -36,6 +36,7 @@ _BYPASS_TOGGLES = [
     ("2", "root", "Root"),
     ("3", "frida", "Frida"),
     ("4", "debug", "Debug"),
+    ("5", "integrity", "Integ"),
 ]
 
 # Clickable action-cell id -> panel action method. Routed from
@@ -109,6 +110,7 @@ class SpotlightPanel(Widget):
         ("2", "toggle_bypass('root')", "Root"),
         ("3", "toggle_bypass('frida')", "Frida"),
         ("4", "toggle_bypass('debug')", "Debug"),
+        ("5", "toggle_bypass('integrity')", "Integ"),
         ("enter", "primary", "Start/Resume"),
         ("R", "restart_app", "Restart"),
         ("A", "attach_app", "Attach"),
@@ -349,7 +351,7 @@ class SpotlightPanel(Widget):
         on = set(self._on_categories())
         lines.append(
             "[#7dd3fc bold]Bypass[/] "
-            "[#5b6479](1-4 toggle · armed applies on Start)[/]"
+            "[#5b6479](1-5 toggle · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:

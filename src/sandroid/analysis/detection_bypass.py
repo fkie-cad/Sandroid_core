@@ -958,6 +958,183 @@ class DebugDetectionBypassManager(BypassManagerBase):
 
 
 # ---------------------------------------------------------------------------
+# Google Play check bypass (PairIP licensing)
+# ---------------------------------------------------------------------------
+
+# Apps protected by Google Play App Signing ship the PairIP license-check
+# wrapper (``com.pairip.licensecheck.*``). On a sideloaded / emulator install
+# the on-device licensing service ("com.android.vending") cannot fulfil the
+# license request, so ``LicenseClient.handleError`` fires with
+# ``LicenseCheckException: Licensing service could not process request.`` and
+# starts ``LicenseActivity``, which shows the blocking dialog "Something went
+# wrong - Check that Google Play is enabled on your device ..." and then exits
+# the app. This is NOT a ``GoogleApiAvailability`` /
+# ``isGooglePlayServicesAvailable`` check (those SDK classes are usually
+# absent) - the gate is purely PairIP's license verdict. Confirmed on-device
+# against ``com.deepseek.chat``: swallowing ``LicenseClient.handleError`` alone
+# drops the dialog and the real first screen renders. The ``LicenseActivity``
+# neutralisers are belt-and-suspenders in case the error activity is already
+# in flight.
+_INTEGRITY_SCRIPT = r"""
+'use strict';
+
+// Flag-gated Google Play / PairIP license-check bypass. Every hook body early-
+// checks FLAGS.integrity (a shared object from the combined-script preamble) and
+// passes through to the original method when the integrity category is toggled off —
+// so this single resident script can be armed/disarmed at runtime via the
+// set_flags RPC with no reload and no gap. Each Java.use is wrapped in try/catch
+// so an app lacking the PairIP classes simply skips the block (totally inert).
+
+Java.perform(function () {
+    // 1. Swallow the license-check failure at the source so it never starts the
+    //    error-dialog activity nor schedules an app shutdown. This is the
+    //    decisive hook (confirmed on-device).
+    try {
+        var LicenseClient = Java.use('com.pairip.licensecheck.LicenseClient');
+        try {
+            LicenseClient.handleError.implementation = function (ex) {
+                if (!FLAGS.integrity) return this.handleError(ex);
+                send({type: 'info', hook: 'integrity:LicenseClient.handleError(swallowed)'});
+                // do nothing -> no error dialog, no shutdown
+            };
+        } catch (e) {}
+        try {
+            LicenseClient.startErrorDialogActivity.implementation = function () {
+                if (!FLAGS.integrity) return this.startErrorDialogActivity();
+                send({type: 'info', hook: 'integrity:LicenseClient.startErrorDialogActivity(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseClient.scheduleAppShutdown.implementation = function () {
+                if (!FLAGS.integrity) return this.scheduleAppShutdown();
+                send({type: 'info', hook: 'integrity:LicenseClient.scheduleAppShutdown(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseClient.retryOrThrow.overload(
+                'com.pairip.licensecheck.LicenseCheckException'
+            ).implementation = function (ex) {
+                if (!FLAGS.integrity) return this.retryOrThrow(ex);
+                send({type: 'info', hook: 'integrity:LicenseClient.retryOrThrow(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseClient.retryOrThrow.overload(
+                'com.pairip.licensecheck.LicenseCheckException', 'boolean'
+            ).implementation = function (ex, b) {
+                if (!FLAGS.integrity) return this.retryOrThrow(ex, b);
+                send({type: 'info', hook: 'integrity:LicenseClient.retryOrThrow2(swallowed)'});
+            };
+        } catch (e) {}
+        send({type: 'info', hook: 'integrity:LicenseClient'});
+    } catch (e) {
+        send({type: 'debug', hook: 'integrity:LicenseClient', error: e.message});
+    }
+
+    // 2. Belt-and-suspenders: neutralise LicenseActivity's error/exit UI so even
+    //    if the error activity is launched it never shows the dialog or closes
+    //    the app. onStart -> finish() so the activity dismisses immediately.
+    try {
+        var LicenseActivity = Java.use('com.pairip.licensecheck.LicenseActivity');
+        try {
+            LicenseActivity.showErrorDialog.implementation = function () {
+                if (!FLAGS.integrity) return this.showErrorDialog();
+                send({type: 'info', hook: 'integrity:LicenseActivity.showErrorDialog(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.logAndShowErrorDialog.overload(
+                'java.lang.String'
+            ).implementation = function (s) {
+                if (!FLAGS.integrity) return this.logAndShowErrorDialog(s);
+                send({type: 'info', hook: 'integrity:LicenseActivity.logAndShowErrorDialog(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.logAndShowErrorDialog.overload(
+                'java.lang.String', 'java.lang.Exception'
+            ).implementation = function (s, ex) {
+                if (!FLAGS.integrity) return this.logAndShowErrorDialog(s, ex);
+                send({type: 'info', hook: 'integrity:LicenseActivity.logAndShowErrorDialog2(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.closeApp.implementation = function () {
+                if (!FLAGS.integrity) return this.closeApp();
+                send({type: 'info', hook: 'integrity:LicenseActivity.closeApp(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.exitApp.implementation = function () {
+                if (!FLAGS.integrity) return this.exitApp();
+                send({type: 'info', hook: 'integrity:LicenseActivity.exitApp(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.closeAllTasks.implementation = function () {
+                if (!FLAGS.integrity) return this.closeAllTasks();
+                send({type: 'info', hook: 'integrity:LicenseActivity.closeAllTasks(swallowed)'});
+            };
+        } catch (e) {}
+        try {
+            LicenseActivity.onStart.implementation = function () {
+                if (!FLAGS.integrity) return this.onStart();
+                send({type: 'info', hook: 'integrity:LicenseActivity.onStart->finish'});
+                try { this.finish(); } catch (e) {}
+            };
+        } catch (e) {}
+        send({type: 'info', hook: 'integrity:LicenseActivity'});
+    } catch (e) {
+        send({type: 'debug', hook: 'integrity:LicenseActivity', error: e.message});
+    }
+
+    // 3. Defensive: if an app DOES use the GMS availability SDK as part of its
+    //    Play gate, force isGooglePlayServicesAvailable -> 0 (SUCCESS). Inert on
+    //    apps lacking these classes (the common case, incl. deepseek).
+    ['com.google.android.gms.common.GoogleApiAvailability',
+     'com.google.android.gms.common.GoogleApiAvailabilityLight',
+     'com.google.android.gms.common.GooglePlayServicesUtil'].forEach(function (clsName) {
+        try {
+            var C = Java.use(clsName);
+            C.isGooglePlayServicesAvailable.overloads.forEach(function (ov) {
+                try {
+                    ov.implementation = function () {
+                        if (!FLAGS.integrity) return ov.apply(this, arguments);
+                        send({type: 'info', hook: 'integrity:' + clsName + '.isGooglePlayServicesAvailable=0'});
+                        return 0;  // ConnectionResult.SUCCESS
+                    };
+                } catch (e) {}
+            });
+        } catch (e) {}
+    });
+
+    send({type: 'ready', message: 'Integrity / attestation bypass hooks loaded'});
+});
+"""
+
+INTEGRITY_HOOKS = [
+    "com.pairip.licensecheck.LicenseClient.handleError",
+    "com.pairip.licensecheck.LicenseClient.startErrorDialogActivity",
+    "com.pairip.licensecheck.LicenseClient.scheduleAppShutdown",
+    "com.pairip.licensecheck.LicenseClient.retryOrThrow",
+    "com.pairip.licensecheck.LicenseActivity.showErrorDialog",
+    "com.pairip.licensecheck.LicenseActivity.logAndShowErrorDialog",
+    "com.pairip.licensecheck.LicenseActivity.onStart",
+    "com.google.android.gms.common.GoogleApiAvailability.isGooglePlayServicesAvailable",
+]
+
+
+class IntegrityBypassManager(BypassManagerBase):
+    """Bypass the Google Play / PairIP license check ("Something went wrong")."""
+
+    TOOL_NAME = "integrity_bypass"
+    DISPLAY_NAME = "Integrity / Attestation Bypass"
+    HOOKS_REGISTRY = INTEGRITY_HOOKS
+    FRIDA_SCRIPT = _INTEGRITY_SCRIPT
+    PRIORITY = 10
+
+
+# ---------------------------------------------------------------------------
 # Bypass service (singleton owning all managers)
 # ---------------------------------------------------------------------------
 
@@ -969,6 +1146,7 @@ _CATEGORY_DISPLAY = {
     "frida": "Frida Detection Bypass",
     "root": "Root Detection Bypass",
     "debug": "Debug Detection Bypass",
+    "integrity": "Integrity / Attestation Bypass",
 }
 
 
@@ -1033,11 +1211,12 @@ class BypassService:
             "frida": FridaDetectionBypassManager,
             "root": RootDetectionBypassManager,
             "debug": DebugDetectionBypassManager,
+            "integrity": IntegrityBypassManager,
         }.get(category)
 
     def categories(self) -> list[str]:
         """All known category keys, in display order."""
-        return ["ssl", "root", "frida", "debug"]
+        return ["ssl", "root", "frida", "debug", "integrity"]
 
     def display_name(self, category: str) -> str:
         return _CATEGORY_DISPLAY.get(category, category)

@@ -77,7 +77,7 @@ class StatusBar(Static):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
         self.hook_count = 0  # running hook tasks for the spotlight app
-        self.bypass_categories: list[str] = []  # 0-4 of ssl/root/frida/debug
+        self.bypass_categories: list[str] = []  # 0-5 of ssl/root/frida/debug/integrity
         self.tools_checking = True
         self.sqldiff_available = False
         self.objection_available = False
@@ -278,6 +278,7 @@ class StatusBar(Static):
                 ("root", "Root"),
                 ("frida", "Frida"),
                 ("debug", "Debug"),
+                ("integrity", "Integ"),
             )
             if category in on
         ]
@@ -447,7 +448,7 @@ class StatusBar(Static):
         except Exception:
             pass
 
-        # Bypass categories armed/active (0-4 of ssl/root/frida/debug).
+        # Bypass categories armed/active (0-5 of ssl/root/frida/debug/integrity).
         # In-process read — NOT the hook count above.
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
