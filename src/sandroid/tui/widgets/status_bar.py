@@ -322,13 +322,9 @@ class StatusBar(Static):
             if self.mitmweb_running:
                 device_val = f"[{run}]● our mitmproxy[/]"
             else:
-                device_val = (
-                    f"[{warn}]● our mitmproxy[/] [{muted}](stopped)[/]"
-                )
+                device_val = f"[{warn}]● our mitmproxy[/] [{muted}](stopped)[/]"
         elif self.proxy_address:
-            device_val = (
-                f"[{primary}]● {self.proxy_address}[/] [{muted}](external)[/]"
-            )
+            device_val = f"[{primary}]● {self.proxy_address}[/] [{muted}](external)[/]"
         else:
             device_val = f"[{muted}]○ none[/]"
         row("", f"[{muted}]Device[/]  {device_val}")
@@ -468,9 +464,9 @@ class StatusBar(Static):
                 # android_version / api_level are cached on the Device at
                 # discovery (ro.build.version.*); root is a cached capability
                 # flag — all cheap in-memory reads, no ADB on this path.
-                self.device_android_version = getattr(
-                    device, "android_version", ""
-                ) or ""
+                self.device_android_version = (
+                    getattr(device, "android_version", "") or ""
+                )
                 self.device_api_level = getattr(device, "api_level", 0) or 0
                 try:
                     from sandroid.core.device import DeviceCapability
@@ -531,13 +527,20 @@ class StatusBar(Static):
         except Exception:
             self.forensic_apks_count = 0
 
-        # Update proxy status (separate try to ensure it always runs)
+        # Update proxy status (separate try to ensure it always runs).
+        # get_proxy_settings() does a synchronous ADB read (30s timeout);
+        # skip it entirely when no device is active — a proxy can't be set on
+        # an absent device, and on a just-disconnected device this would block
+        # the UI thread when the status-bar refresh is marshaled here.
         try:
             from sandroid.core.proxy_manager import ProxyManager, ProxyStatus
 
-            status, config = ProxyManager().get_proxy_settings()
-            if status == ProxyStatus.SET and config:
-                self.proxy_address = config.address
+            if self.active_device:
+                status, config = ProxyManager().get_proxy_settings()
+                if status == ProxyStatus.SET and config:
+                    self.proxy_address = config.address
+                else:
+                    self.proxy_address = ""
             else:
                 self.proxy_address = ""
         except Exception:

@@ -595,7 +595,11 @@ class DeviceController:
             from sandroid.services import get_task_service
 
             task_service = get_task_service()
-            for task_name in list(task_service.get_running().keys()):
+            # get_running() returns a list[str] of task names — snapshot it
+            # with list() since stop() mutates the underlying task registry.
+            # (Calling .keys() here was a latent bug: list has no .keys(),
+            # so the AttributeError was swallowed and NO task was stopped.)
+            for task_name in list(task_service.get_running()):
                 task_service.stop(task_name)
                 self._log_info(f"Stopped task: {task_name}")
 

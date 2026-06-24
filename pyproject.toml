@@ -278,6 +278,9 @@ exclude = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+# Test files are collected by pytest, not imported as an application package,
+# so they intentionally have no __init__.py (INP001).
+"tests/**/*.py" = ["INP001"]
 "set_avd_location.py" = ["S603","S607"]
 "deploy/create_avd.py" = [
     "S603","S607","S310","S110","BLE001","TRY300","FBT002","PLC0415",

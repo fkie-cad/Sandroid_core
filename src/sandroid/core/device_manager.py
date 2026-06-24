@@ -5,6 +5,7 @@ selection, and switching with proper state management.
 """
 
 import logging
+import threading
 from collections.abc import Callable
 
 from .device import Device, DeviceCapability
@@ -33,6 +34,9 @@ class DeviceManager:
         self._active_device: Device | None = None
         self._on_device_change_callbacks: list[Callable[[Device], None]] = []
         self._on_devices_updated_callbacks: list[Callable[[list[Device]], None]] = []
+        # Serializes refresh_devices() across background poll threads; must be
+        # reentrant (a callback chain may re-enter on the same thread).
+        self._lock = threading.RLock()
 
     @classmethod
     def get(cls) -> "DeviceManager":
@@ -60,85 +64,165 @@ class DeviceManager:
         """
         from .adb import Adb
 
-        output, error = Adb.send_adb_command("devices -l")
+        # The ADB enumeration + parsing + state mutation must be serialized
+        # across background poll threads, so it runs under the lock. The
+        # callbacks and auto-select are deliberately deferred until AFTER the
+        # lock is released (see the deadlock-avoidance note below).
+        device_lost = False
+        need_auto_select = False
+        # Set to the active Device when its android_version/api_level get
+        # (re)populated this pass without a disconnect or auto-select, so the
+        # post-lock notify section can fire a one-off repaint (see part B below).
+        active_metadata_device: Device | None = None
 
-        if error and "error" in error.lower():
-            logger.error(f"Failed to enumerate devices: {error}")
-            return list(self._devices.values())
+        with self._lock:
+            output, error = Adb.send_adb_command("devices -l")
 
-        new_devices: dict[str, Device] = {}
+            # Bail on a FAILED enumeration so a transient ADB error or 30s
+            # timeout is never misread as "all devices gone" (which would
+            # spuriously disconnect a healthy active device — flapping). A
+            # timeout returns ("", "Command timed out after 30 seconds"),
+            # whose message has no "error" substring, so we also bail whenever
+            # there is an error AND no output. A *successful* enumeration always
+            # carries the "List of devices attached" header, so a genuine empty
+            # device list still has non-empty output and proceeds normally.
+            if error and ("error" in error.lower() or not output.strip()):
+                logger.warning(f"Skipping device refresh — ADB failed: {error}")
+                # Returning from within `with` releases the lock correctly.
+                return list(self._devices.values())
 
-        # Parse "adb devices -l" output
-        # Format: serial state [key:value ...]
-        # Example: emulator-5554 device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:1
-        for line in output.strip().split("\n")[
-            1:
-        ]:  # Skip header "List of devices attached"
-            if not line.strip():
-                continue
+            new_devices: dict[str, Device] = {}
 
-            parts = line.split()
-            if len(parts) < 2:
-                continue
+            # Parse "adb devices -l" output
+            # Format: serial state [key:value ...]
+            # Example: emulator-5554 device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64 device:emu64xa transport_id:1
+            for line in output.strip().split("\n")[
+                1:
+            ]:  # Skip header "List of devices attached"
+                if not line.strip():
+                    continue
 
-            serial = parts[0]
-            state = parts[1]
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
 
-            # Parse additional device info
-            model = ""
-            product = ""
-            device_name = ""
-            transport_id = ""
+                serial = parts[0]
+                state = parts[1]
 
-            for part in parts[2:]:
-                if ":" in part:
-                    key, value = part.split(":", 1)
-                    if key == "model":
-                        model = value
-                    elif key == "product":
-                        product = value
-                    elif key == "device":
-                        device_name = value
-                    elif key == "transport_id":
-                        transport_id = value
+                # Parse additional device info
+                model = ""
+                product = ""
+                device_name = ""
+                transport_id = ""
 
-            # Check if device already exists
-            if serial in self._devices:
-                device = self._devices[serial]
-                device.state = state
-                # Update model/name if we got new info
-                if model and not device.model:
-                    device.model = model
-                if product and not device.name:
-                    device.name = product
-            else:
-                device = Device(
-                    serial=serial,
-                    name=product or device_name or "",
-                    state=state,
-                    model=model,
+                for part in parts[2:]:
+                    if ":" in part:
+                        key, value = part.split(":", 1)
+                        if key == "model":
+                            model = value
+                        elif key == "product":
+                            product = value
+                        elif key == "device":
+                            device_name = value
+                        elif key == "transport_id":
+                            transport_id = value
+
+                # Check if device already exists
+                if serial in self._devices:
+                    device = self._devices[serial]
+                    device.state = state
+                    # Update model/name if we got new info
+                    if model and not device.model:
+                        device.model = model
+                    if product and not device.name:
+                        device.name = product
+                    # A device first seen while offline/booting couldn't answer
+                    # getprop, so its android_version/api_level are still empty.
+                    # Re-read them once it is ready. Idempotent: skips as soon as
+                    # android_version is set, so there is no per-refresh ADB churn
+                    # on a healthy device.
+                    if state == "device" and not device.android_version:
+                        self._populate_device_info(device)
+                        if device is self._active_device and device.android_version:
+                            active_metadata_device = device
+                else:
+                    device = Device(
+                        serial=serial,
+                        name=product or device_name or "",
+                        state=state,
+                        model=model,
+                    )
+                    # Populate additional info for new devices
+                    self._populate_device_info(device)
+
+                new_devices[serial] = device
+
+            # Disconnect trigger: the active serial is ABSENT from the new
+            # listing. This is intentionally absent-only -- a killed emulator
+            # drops out of `adb devices` entirely, whereas offline/unauthorized
+            # transitions during a normal boot keep the serial present and must
+            # NOT null the device (broadening to "present but state != device"
+            # would flap on every boot). We may note a lingering non-ready
+            # state but never act on it.
+            if self._active_device and self._active_device.serial not in new_devices:
+                logger.warning(
+                    f"Active device {self._active_device.serial} disconnected"
                 )
-                # Populate additional info for new devices
-                self._populate_device_info(device)
+                self._active_device = None
+                # Clear the ADB target so later `adb -s <dead-serial>` calls
+                # don't block on the 30s transport timeout.
+                Adb.set_target_device(None)
+                device_lost = True
+            elif (
+                self._active_device
+                and new_devices[self._active_device.serial].state != "device"
+            ):
+                logger.debug(
+                    "Active device %s present but in non-ready state %r; "
+                    "not acting (avoids boot flapping)",
+                    self._active_device.serial,
+                    new_devices[self._active_device.serial].state,
+                )
 
-            new_devices[serial] = device
+            self._devices = new_devices
 
-        # Check if active device was disconnected
-        if self._active_device and self._active_device.serial not in new_devices:
-            logger.warning(f"Active device {self._active_device.serial} disconnected")
-            self._active_device = None
+            # Auto-select if there are devices but no active device.
+            need_auto_select = not self._active_device and len(self._devices) > 0
 
-        self._devices = new_devices
+        # DEADLOCK AVOIDANCE: enumerate/mutate under the lock above, then
+        # notify/auto-select OUTSIDE it. The app's registered change handler
+        # calls Textual's blocking call_from_thread; if these callbacks fired
+        # while holding the lock, a UI-thread refresh_devices() (e.g.
+        # action_show_device_selector) waiting on the lock would deadlock the
+        # event loop.
 
-        # Notify listeners
+        # Notify list listeners.
         for callback in self._on_devices_updated_callbacks:
             try:
                 callback(list(self._devices.values()))
             except Exception as e:
                 logger.warning(f"Device update callback failed: {e}")
 
-        # Auto-select if only one device and no active device
-        if not self._active_device and len(self._devices) > 0:
+        # Notify change listeners of the disconnect (active device -> None).
+        if device_lost:
+            for callback in self._on_device_change_callbacks:
+                try:
+                    callback(None)
+                except Exception as e:
+                    logger.warning(f"Device change callback failed: {e}")
+        elif active_metadata_device is not None:
+            # The still-active device just had its android_version/api_level
+            # (re)populated after a reconnect/boot — no disconnect and no
+            # auto-select fired, so fire a one-off change to repaint the glance.
+            # Fires at most once per reconnect (the guard above is false once the
+            # version is set), and is mutually exclusive with device_lost.
+            for callback in self._on_device_change_callbacks:
+                try:
+                    callback(active_metadata_device)
+                except Exception as e:
+                    logger.warning(f"Device change callback failed: {e}")
+
+        if need_auto_select:
             self.auto_select_device()
 
         return list(self._devices.values())

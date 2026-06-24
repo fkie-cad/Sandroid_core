@@ -23,6 +23,7 @@ from sandroid.tui.terminal_reset import reset_terminal
 
 atexit.register(reset_terminal)
 
+from sandroid.core.adb_device_monitor import AdbDeviceMonitor
 from sandroid.core.enums import ViewMode
 from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_spotlight_service, get_task_service, get_ui_service
@@ -63,6 +64,13 @@ if TYPE_CHECKING:
     from sandroid.core.actionQ import ActionQ
 
 logger = logging.getLogger(__name__)
+
+# Interval (seconds) for the periodic background device-state poll. This is
+# now a safety-net BACKSTOP behind the real-time AdbDeviceMonitor fast path
+# (host:track-devices); it covers adb-server-restart windows and any stream
+# failure, so a slower cadence keeps fallback latency acceptable with minimal
+# churn.
+DEVICE_POLL_SECONDS = 10.0
 
 # Module-level reference for cross-thread access (ContextVars don't work across threads).
 _current_tui_app: Optional["SandroidTUI"] = None
@@ -500,6 +508,29 @@ class SandroidTUI(App):
                 self.set_keymap(cfg.tui.keybindings or {})
         except Exception as exc:
             logger.debug(f"Failed to apply keybindings: {exc}")
+        # Start the periodic background device-state poll (detects an active
+        # device shutting down mid-session). Guard flag prevents stacking
+        # workers when a poll is blocked on a dying device's ADB. This is the
+        # safety-net BACKSTOP behind the real-time monitor started below.
+        self._device_poll_in_flight = False
+        # Trailing-debounce flag: set when a poll arrives while one is already
+        # in flight, re-triggered once on completion so a boot/reconnect burst
+        # leaves the final ready state observed even with a slow backstop.
+        self._device_poll_pending = False
+        self.set_interval(DEVICE_POLL_SECONDS, self._poll_device_state)
+        # Fast path: stream adb's host:track-devices so a connect/disconnect is
+        # reflected near-instantly (sub-second) instead of waiting for the poll
+        # backstop. It's a pure edge trigger that re-uses _poll_device_state, so
+        # the stream and timer paths converge and share every guard. A monitor
+        # failure must never break app setup, so guard the whole thing.
+        self._adb_device_monitor: AdbDeviceMonitor | None = None
+        try:
+            self._adb_device_monitor = AdbDeviceMonitor(
+                on_change=self._on_adb_devices_changed
+            )
+            self._adb_device_monitor.start()
+        except Exception as exc:
+            logger.debug(f"Failed to start adb device monitor: {exc}")
         logger.debug(
             f"[APP MOUNT] Complete. Stack: {[type(s).__name__ for s in self.screen_stack]}"
         )
@@ -588,11 +619,108 @@ class SandroidTUI(App):
                 else:
                     logger.info("Device changed to: None")
 
+                # This callback now also fires on disconnect (from the device
+                # poll worker thread). Marshal UI work to the main thread and
+                # guard against teardown races (same convention as status_bar).
+                try:
+                    self.call_from_thread(self._update_status_bar)
+                except Exception:
+                    pass
+
+                # Disconnect-only reactions. A normal device *switch* (device is
+                # not None) already runs _reset_device_state() in
+                # set_active_device(), so only act on the None branch here.
+                if device is None:
+                    try:
+                        if get_task_service().get_running():
+                            self._device_controller.stop_all_tasks()
+                    except Exception as exc:
+                        logger.debug(f"stop_all_tasks on disconnect failed: {exc}")
+                    try:
+                        self.call_from_thread(
+                            self.notify,
+                            "Device disconnected — stopped running tasks. "
+                            "Press D to reconnect.",
+                            severity="warning",
+                        )
+                    except Exception:
+                        pass
+
             device_service.register_device_change_callback(on_device_change)
             logger.debug("Registered Frida device change callback")
 
         except Exception as e:
             logger.warning(f"Failed to register Frida device change callback: {e}")
+
+    def _on_adb_devices_changed(self) -> None:
+        """Fast-path edge trigger from the adb host:track-devices stream.
+
+        Invoked on the monitor's reader thread on every streamed device-list
+        block. Marshals to the app thread and re-uses the existing guarded
+        ``_poll_device_state`` so the stream and timer paths converge and share
+        every guard (_device_poll_in_flight, is_polling(), MainScreen). Firing
+        while a modal is open is skipped (same as the timer) — a known, accepted
+        limitation that the backstop / modal-close covers.
+        """
+        try:
+            self.call_from_thread(self._poll_device_state)
+        except Exception:
+            pass
+
+    def _poll_device_state(self) -> None:
+        """Periodically refresh device state off the UI thread.
+
+        Detects an active-device shutdown (emu kill / unplug / crash) within a
+        few seconds. The ADB enumeration can block up to 30s on a dying device,
+        so it must never run on the Textual event loop — offload to a worker
+        thread. The DeviceManager's change callback does the reaction.
+        """
+        # Avoid piling up workers if a prior poll is still blocked on ADB.
+        if getattr(self, "_device_poll_in_flight", False):
+            # Remember to run once more after the in-flight poll finishes so a
+            # burst (offline→authorizing→device) doesn't leave the final ready
+            # state unobserved now the backstop is a slow 10s.
+            self._device_poll_pending = True
+            return
+        try:
+            # DeviceController polls refresh_devices() itself during AVD boot;
+            # and a modal / device selector owns device interactions.
+            if self._device_controller.is_polling():
+                return
+            if not isinstance(self.screen, MainScreen):
+                return
+        except Exception:
+            return
+        self._device_poll_in_flight = True
+        try:
+            self.run_worker(
+                self._refresh_devices_bg, name="device_state_poll", thread=True
+            )
+        except Exception:
+            # If dispatch fails synchronously (e.g. during teardown), reset the
+            # guard so the poll isn't wedged "in flight" for the rest of the run.
+            self._device_poll_in_flight = False
+
+    def _refresh_devices_bg(self) -> None:
+        """Worker body: refresh the device list (may block on ADB)."""
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            Toolbox.get_device_manager().refresh_devices()
+        except Exception as e:
+            logger.debug(f"Device state poll failed: {e}")
+        finally:
+            self._device_poll_in_flight = False
+            # Trailing debounce: if a poll arrived while this one was running,
+            # run once more so the latest state is read (coalesces a burst into
+            # "run now + once more after"). Re-arming is bounded — the trailing
+            # poll re-checks _device_poll_in_flight, it is not an unbounded loop.
+            if getattr(self, "_device_poll_pending", False):
+                self._device_poll_pending = False
+                try:
+                    self.call_from_thread(self._poll_device_state)
+                except Exception:
+                    pass
 
     def _check_devices_on_startup(self) -> None:
         """Check for connected devices on startup - delegates to DeviceController."""
@@ -650,12 +778,38 @@ class SandroidTUI(App):
         global _current_tui_app
         _current_tui_app = None
         self._quit_controller.force_exit()
+        # Stop the real-time device monitor before cancelling workers. Guard
+        # getattr (the monitor may never have been created if the app exits
+        # during StartupScreen) and the call (stop() is idempotent).
+        monitor = getattr(self, "_adb_device_monitor", None)
+        if monitor is not None:
+            try:
+                monitor.stop()
+            except Exception:
+                pass
         try:
             if hasattr(self, "workers") and self.workers:
                 self.workers.cancel_all()
         except Exception:
             pass
         super().exit(result, return_code)
+
+    def on_unmount(self) -> None:
+        """Stop the real-time device monitor on teardown.
+
+        Belt-and-suspenders for teardown paths that bypass the overridden
+        exit(). Runs on the app thread, so stop() (which only sets an Event,
+        shuts down/closes the socket, and joins the reader thread) is safe to
+        call directly. No super() call is needed — Textual dispatches both
+        Widget._on_unmount and this public on_unmount, so worker cleanup is
+        unaffected (matches every other on_unmount in this repo).
+        """
+        monitor = getattr(self, "_adb_device_monitor", None)
+        if monitor is not None:
+            try:
+                monitor.stop()
+            except Exception:
+                pass
 
     def _get_main_screen(self) -> MainScreen | None:
         return self.screen if isinstance(self.screen, MainScreen) else None
