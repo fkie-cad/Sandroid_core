@@ -96,6 +96,12 @@ class MitmproxyPanel(Widget):
         self._ct_ok = False
         self._unpin_hint_shown = False
         self._pending_mitm_cert = None
+        # Set on Enter-start so the next ground-truth probe announces CA status
+        # once (already injected vs. press Ctrl+N); cleared after it fires.
+        self._announce_ca_on_start = False
+        # Re-entrancy guard: an injection runs in a worker thread, so a second
+        # Ctrl+N confirm must not spawn a parallel Zygote-kill.
+        self._injecting = False
         self.can_focus = True
 
     def compose(self) -> ComposeResult:
@@ -386,6 +392,8 @@ class MitmproxyPanel(Widget):
         else:
             self._service.start()
             self._append_line("[INFO] running")
+            # Let the upcoming ground-truth probe report CA status once.
+            self._announce_ca_on_start = True
         # Reconcile the checklist with real device state off the UI thread.
         self._kick_state_refresh()
         self._refresh_header()
@@ -571,6 +579,16 @@ class MitmproxyPanel(Widget):
         self._proxy_addr = proxy_addr
         self._ca_ok = ca_ok
         self._ct_ok = ct_ok
+        if self._announce_ca_on_start:
+            self._announce_ca_on_start = False
+            if self._service.is_running():
+                if ca_ok:
+                    self._append_line("[INFO] [OK] CA already injected (Zygote)")
+                else:
+                    self._append_line(
+                        "[INFO] [~] no CA in trust store yet — press Ctrl+N to "
+                        "install it for HTTPS"
+                    )
         self._refresh_header()
         # The glance band reads proxy state off ground truth, but nothing else
         # nudges it on a device-proxy change. This callback fires only at
@@ -777,12 +795,50 @@ class MitmproxyPanel(Widget):
         self._do_inject_ca(self._pending_mitm_cert)
 
     def _do_inject_ca(self, cert_path) -> None:
-        """Inject the CA cert into Zygote (after restart confirmation)."""
+        """Inject the CA off the UI thread; results land in _apply_inject_result.
+
+        The injection kills + waits on Zygote (up to ~20s of polling), so it
+        must not block the event loop. Mirror _kick_state_refresh's
+        daemon-thread + call_from_thread pattern; all UI work (messages, modals)
+        stays on the main thread in _apply_inject_result.
+        """
+        if self._injecting:
+            return  # an injection is already in flight — ignore re-entry
+        self._injecting = True
+        self._append_line(
+            "[INFO] [~] installing CA — waiting for Zygote to restart (up to ~20s)…"
+        )
+
+        def _run() -> None:
+            try:
+                from sandroid.core.proxy_manager import CAManager
+
+                result = CAManager().inject_ca_into_zygote(cert_path)
+            except Exception as exc:  # marshal the failure to the UI thread
+                result = exc
+            try:
+                self.app.call_from_thread(self._apply_inject_result, result, cert_path)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mitm-ca-inject", daemon=True).start()
+
+    def _apply_inject_result(self, result, cert_path) -> None:
+        """Handle the injection outcome on the UI thread (messages + modals)."""
+        # The worker has finished by the time this runs, so the in-flight guard
+        # is cleared here — including before the needs_root modal so its
+        # _on_root_confirm -> _do_inject_ca re-entry can proceed.
+        self._injecting = False
+        if isinstance(result, Exception):
+            logger.warning("Auto CA injection failed: %s", result)
+            self._append_line(f"[ERROR] CA injection: {result}")
+            self._refresh_header()
+            self._kick_state_refresh()
+            self._nudge_unpin()
+            return
         try:
             from sandroid.core.proxy_manager import CAManager
 
-            ca_mgr = CAManager()
-            result = ca_mgr.inject_ca_into_zygote(cert_path)
             if result.success:
                 self._ca_ok = True
                 strategy_label = result.strategy.value if result.strategy else "unknown"
@@ -792,7 +848,7 @@ class MitmproxyPanel(Widget):
                 )
 
                 # Bypass Chrome Certificate Transparency enforcement
-                ct_ok, ct_msg = ca_mgr.bypass_chrome_ct(cert_path)
+                ct_ok, ct_msg = CAManager().bypass_chrome_ct(cert_path)
                 if ct_ok:
                     self._ct_ok = True
                     self._append_line(f"[INFO] {ct_msg}")

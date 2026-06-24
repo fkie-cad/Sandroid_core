@@ -768,25 +768,37 @@ class CAManager:
                     Adb.send_adb_command(f"shell {self._root_cmd(f'kill {pid}')}")
                 except Exception:
                     pass
-            time.sleep(3)
 
-            new_zyg, new_zyg64 = self.get_zygote_pids()
-            new_pids = [p for p in [new_zyg, new_zyg64] if p is not None]
-
+            # The kill -> init-respawn -> Conscrypt-reload cycle routinely takes
+            # well over the old fixed 3s on a busy device. Poll until a deadline
+            # before declaring failure, re-reading PIDs each round since init
+            # assigns a fresh Zygote PID as it respawns.
+            verify_timeout = 20.0
+            poll_interval = 1.0
             verified = 0
-            for pid in new_pids:
-                try:
-                    verify_inner = (
-                        f"nsenter --mount=/proc/{pid}/ns/mnt -- "
-                        f"ls {verify_path}/{cert_name}"
-                    )
-                    stdout, _ = Adb.send_adb_command(
-                        f"shell {self._root_cmd(verify_inner)}"
-                    )
-                    if cert_name in (stdout or ""):
-                        verified += 1
-                except Exception:
-                    pass
+            deadline = time.monotonic() + verify_timeout
+            while time.monotonic() < deadline:
+                time.sleep(poll_interval)
+                new_zyg, new_zyg64 = self.get_zygote_pids()
+                new_pids = [p for p in [new_zyg, new_zyg64] if p is not None]
+                if not new_pids:
+                    continue  # init hasn't respawned Zygote yet
+                verified = 0
+                for pid in new_pids:
+                    try:
+                        verify_inner = (
+                            f"nsenter --mount=/proc/{pid}/ns/mnt -- "
+                            f"ls {verify_path}/{cert_name}"
+                        )
+                        stdout, _ = Adb.send_adb_command(
+                            f"shell {self._root_cmd(verify_inner)}"
+                        )
+                        if cert_name in (stdout or ""):
+                            verified += 1
+                    except Exception:
+                        pass
+                if verified:
+                    break
 
             if verified == 0:
                 return False, "Cert not visible in restarted Zygote"
