@@ -256,6 +256,54 @@ class Adb:
         return stdout, stderr
 
     # ------------------------------------------------------------------
+    # Port reversing (host port reachable from the device at 127.0.0.1)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def reverse(cls, remote: str, local: str) -> tuple[str, str]:
+        """Forward a device-side socket spec to a host-side one (``adb reverse``).
+
+        ``adb reverse <remote> <local>`` makes connections the device opens to
+        ``<remote>`` (e.g. ``tcp:8080`` on the device's ``127.0.0.1``) land on
+        the host's ``<local>`` socket. This is transport-independent of the
+        device's network, so it reaches the host even when the auto-detected
+        host LAN IP is unreachable (e.g. on a physical device over USB).
+
+        Args:
+            remote: Device-side spec, e.g. ``"tcp:8080"``.
+            local: Host-side spec, e.g. ``"tcp:8080"``.
+
+        Returns:
+            A tuple of (stdout, stderr) from the ADB command.
+        """
+        return cls.send_adb_command(f"reverse {remote} {local}")
+
+    @classmethod
+    def reverse_remove(cls, remote: str) -> tuple[str, str]:
+        """Remove a single reverse binding (per-port, never ``--remove-all``).
+
+        Args:
+            remote: Device-side spec to remove, e.g. ``"tcp:8080"``.
+
+        Returns:
+            A tuple of (stdout, stderr) from the ADB command.
+        """
+        return cls.send_adb_command(f"reverse --remove {remote}")
+
+    @classmethod
+    def reverse_list(cls) -> tuple[str, str]:
+        """List active reverse bindings (``adb reverse --list``).
+
+        Live output carries a transport-id prefix per line, e.g.
+        ``host-16 tcp:8080 tcp:8080`` — callers must match by substring, never
+        exact-line equality.
+
+        Returns:
+            A tuple of (stdout, stderr) from the ADB command.
+        """
+        return cls.send_adb_command("reverse --list")
+
+    # ------------------------------------------------------------------
     # Delegated: Device property queries  (adb_queries)
     # ------------------------------------------------------------------
 

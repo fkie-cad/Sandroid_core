@@ -36,6 +36,7 @@ from textual.widgets import (
 )
 
 from sandroid.config import get_config
+from sandroid.core.adb import Adb
 from sandroid.core.proxy_manager import (
     CAInfo,
     CAManager,
@@ -292,6 +293,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._zygote_status: ZygoteStatus | None = None
         self._pending_ca_path = None
         self._pending_device_config: ProxyConfig | None = None
+        self._pending_via_reverse: bool = False
         # Working state for App Proxies: (package, target_string) where
         # target_string == "" routes the app at our mitmproxy.
         self._app_rows: list[tuple[str, str]] = []
@@ -328,6 +330,16 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         )
                         yield RadioButton(
                             "External proxy", id="device-radio-external"
+                        )
+                        yield RadioButton(
+                            "Our mitmproxy via adb reverse (127.0.0.1)",
+                            id="device-radio-reverse",
+                        )
+                        yield Static(
+                            "[dim]reach the host through adbd — for physical "
+                            "devices or when the host IP isn't directly "
+                            "reachable.[/dim]",
+                            id="device-reverse-caption",
                         )
                     with Horizontal(id="device-ext-row"):
                         yield Label("External:")
@@ -504,7 +516,10 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 f"[green]●[/green] Device points at our mitmproxy "
                 f"— [bold]{addr}[/bold]"
             )
-            self._select_device_radio("device-radio-ours")
+            if addr.startswith("127.0.0.1:"):
+                self._select_device_radio("device-radio-reverse")
+            else:
+                self._select_device_radio("device-radio-ours")
         elif state == "external":
             status_widget.update(
                 f"[#6ba3ff]●[/] Device points at external proxy "
@@ -902,6 +917,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         choice = self._selected_device_choice()
 
         desired_config: ProxyConfig | None = None
+        via_reverse = False
         if choice == "ours":
             desired_config = ProxyConfig.from_string(self._mitmweb_addr())
         elif choice == "external":
@@ -914,6 +930,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     severity="error",
                 )
                 return
+        elif choice == "reverse":
+            from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+            port = get_mitmproxy_service().state.proxy_port
+            desired_config = ProxyConfig.from_string(f"127.0.0.1:{port}")
+            via_reverse = True
         # choice == "off" => desired_config stays None (unset).
 
         # Confirm before overwriting/clearing a foreign device proxy.
@@ -938,6 +960,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     f"switch it to {desired_addr}?"
                 )
             self._pending_device_config = desired_config
+            self._pending_via_reverse = via_reverse
             self.app.push_screen(
                 ConfirmModal(
                     title="Change device proxy?",
@@ -949,7 +972,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             )
             return
 
-        self._apply_commit(desired_config)
+        self._apply_commit(desired_config, via_reverse=via_reverse)
 
     def _on_device_overwrite_confirm(self, confirmed: bool) -> None:
         """Continue Apply after the foreign-device-proxy confirmation."""
@@ -958,21 +981,62 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 "Device proxy left unchanged", severity="warning"
             )
             return
-        self._apply_commit(self._pending_device_config)
+        self._apply_commit(
+            self._pending_device_config,
+            via_reverse=getattr(self, "_pending_via_reverse", False),
+        )
 
-    def _apply_commit(self, desired_config: ProxyConfig | None) -> None:
+    def _apply_commit(
+        self, desired_config: ProxyConfig | None, via_reverse: bool = False
+    ) -> None:
         """Apply the device proxy then reconcile the app proxies, then dismiss.
 
         Synchronous — matches the panel's existing device-setup precedent.
+
+        Args:
+            desired_config: The device proxy to set, or ``None`` to clear it.
+            via_reverse: When ``True``, set up an ``adb reverse`` tunnel for our
+                proxy port before pointing the device at ``127.0.0.1:<port>``.
+                When ``False`` and a reverse binding for our port is live, it is
+                torn down first so switching away cleans up after itself.
         """
+        from sandroid.core.proxy_manager import _reverse_registered
+        from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+        port = get_mitmproxy_service().state.proxy_port
+
+        def _teardown_reverse() -> None:
+            """Drop our reverse tunnel when switching away (best-effort)."""
+            try:
+                if _reverse_registered(port):
+                    Adb.reverse_remove(f"tcp:{port}")
+            except Exception as exc:  # pragma: no cover - defensive
+                self.notify(
+                    f"adb reverse teardown failed: {exc}", severity="warning"
+                )
+
         # 1. Device proxy.
         if desired_config is None:
+            _teardown_reverse()
             ok, message = self._proxy_manager.unset_proxy()
             if ok:
                 self._set_glance_device_proxy("")
             else:
                 self.notify(message, severity="error")
         else:
+            if via_reverse:
+                # Establish the tunnel BEFORE pointing the proxy at it; a
+                # failure here means 127.0.0.1 would be a dead address, so
+                # surface it and apply nothing rather than set a broken proxy.
+                try:
+                    Adb.reverse(f"tcp:{port}", f"tcp:{port}")
+                except Exception as exc:
+                    self.notify(
+                        f"adb reverse failed: {exc}", severity="error"
+                    )
+                    return
+            else:
+                _teardown_reverse()
             ok, message = self._proxy_manager.set_proxy(desired_config)
             if ok:
                 self._set_glance_device_proxy(desired_config.address)

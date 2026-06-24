@@ -35,6 +35,90 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _is_emulator() -> bool:
+    """Whether the current target device is an Android emulator.
+
+    True when the ADB serial starts with ``emulator-`` or the device reports
+    ``ro.boot.qemu == 1``. Shared by both proxy paths so the device proxy and
+    app proxies resolve the host IP the same way.
+    """
+    serial = Adb.get_target_device()
+    if serial and serial.startswith("emulator-"):
+        return True
+    try:
+        out, _ = Adb.send_adb_command("shell getprop ro.boot.qemu")
+        if (out or "").strip() == "1":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def resolve_proxy_host_ip() -> str:
+    """Host IP the device should route proxy traffic to (emulator-aware).
+
+    One resolver shared by the Device Proxy and the App Proxies so they never
+    disagree on where the host is:
+
+    * ``focus.host_ip_override`` wins (one knob, no new config key);
+    * else ``10.0.2.2`` on an emulator (the SLIRP loopback alias);
+    * else the auto-detected host LAN IP (``ProxyManager.get_host_ip()``).
+
+    NOTE: this is the *reachability* IP. ``device_info.get_host_ip()`` stays the
+    display IP for system_info and is intentionally left unchanged.
+    """
+    try:
+        if get_config is not None:
+            override = (get_config().focus.host_ip_override or "").strip()
+            if override:
+                return override
+    except Exception:
+        pass
+    if _is_emulator():
+        return "10.0.2.2"
+    return ProxyManager.get_host_ip()
+
+
+def _reverse_registered(proxy_port: int) -> bool:
+    """Whether an ``adb reverse tcp:<proxy_port> tcp:<proxy_port>`` is active.
+
+    Live ``adb reverse --list`` output carries a transport-id prefix per line
+    (e.g. ``host-16 tcp:8080 tcp:8080``), so match by SUBSTRING, never exact
+    line. Best-effort: any error reads as "not registered".
+    """
+    needle = f"tcp:{proxy_port} tcp:{proxy_port}"
+    try:
+        out, _ = Adb.reverse_list()
+    except Exception:
+        return False
+    return needle in (out or "")
+
+
+def classify_device_proxy(cfg_ip: str, cfg_port: int, proxy_port: int) -> str:
+    """Classify a device http_proxy as ``"ours"`` / ``"other"``.
+
+    The single shared rule used by every "is this our proxy?" call site (the
+    panel's three classifiers and ``MitmproxyService.capture_view``) so they
+    never disagree:
+
+    * port must equal our ``proxy_port``; AND
+    * ``cfg_ip`` is the resolved host IP (emulator-aware), OR ``127.0.0.1``
+      *only when* an ``adb reverse tcp:<proxy_port>`` binding is registered
+      (our circumvention tunnel). A loopback proxy without that binding is a
+      foreign proxy, not ours.
+
+    Returns ``"ours"`` or ``"other"`` (callers handle the ``"none"`` /
+    unset case before calling).
+    """
+    if cfg_port != proxy_port:
+        return "other"
+    if cfg_ip == resolve_proxy_host_ip():
+        return "ours"
+    if cfg_ip == "127.0.0.1" and _reverse_registered(proxy_port):
+        return "ours"
+    return "other"
+
+
 class ProxyStatus(Enum):
     """Status of the HTTP proxy configuration."""
 
@@ -1374,6 +1458,29 @@ class FocusManager:
                 self._kill_lane_process(redirect_port)
                 return False, f"gost failed to bind port {redirect_port}."
 
+            # 10b. For our-mitmproxy lanes, confirm gost's UPSTREAM (our SOCKS
+            #      port at host_ip) is actually reachable from the device — the
+            #      same host-IP-reachability blind spot the device proxy hits,
+            #      one layer down. gost binds the listener fine even when its
+            #      upstream blackholes, so a listening port is NOT proof of a
+            #      working lane. Fail loud with a remedy hint rather than report
+            #      a half-working "App proxy → <pkg>". Only a real connect
+            #      failure aborts: an "unknown" verdict (no toybox nc) is
+            #      tolerated.
+            if target is None:
+                host_ip = self._resolve_host_ip()
+                socks_port = self._socks_port(lane)
+                verdict = self._device_tcp_reachable(host_ip, socks_port)
+                if verdict == "unreachable":
+                    self._kill_lane_process(redirect_port)
+                    return False, (
+                        f"App proxy upstream {host_ip}:{socks_port} is "
+                        "unreachable from the device — gost is listening but "
+                        "can't reach our mitmproxy. Set focus.host_ip_override, "
+                        "or route the device proxy via adb reverse "
+                        "(Proxy Settings)."
+                    )
+
             # 11. Install the redirect rules LAST (v4 + v6). The IPv4 table is
             #     fatal: on a genuine add failure, roll back (drop any partial
             #     rules + kill the lane's gost) so we never leave a redirector
@@ -1861,32 +1968,16 @@ class FocusManager:
     def _resolve_host_ip(self) -> str:
         """Host IP our-mitmproxy lanes forward SOCKS traffic to.
 
+        Delegates to the module-level :func:`resolve_proxy_host_ip` so the
+        Device Proxy and App Proxies share one resolver:
         ``focus.host_ip_override`` wins; else ``10.0.2.2`` on an emulator
         (SLIRP loopback alias); else the auto-detected host LAN IP.
         """
-        try:
-            if get_config is not None:
-                override = (get_config().focus.host_ip_override or "").strip()
-                if override:
-                    return override
-        except Exception:
-            pass
-        if self._is_emulator():
-            return "10.0.2.2"
-        return ProxyManager.get_host_ip()
+        return resolve_proxy_host_ip()
 
     @staticmethod
     def _is_emulator() -> bool:
-        serial = Adb.get_target_device()
-        if serial and serial.startswith("emulator-"):
-            return True
-        try:
-            out, _ = Adb.send_adb_command("shell getprop ro.boot.qemu")
-            if (out or "").strip() == "1":
-                return True
-        except Exception:
-            pass
-        return False
+        return _is_emulator()
 
     def _launch_gost(self, redirect_port: int, upstream: str) -> None:
         """Launch one gost redirector backgrounded as root.
@@ -1949,6 +2040,55 @@ class FocusManager:
             if needle in (out or ""):
                 return True
         return False
+
+    @staticmethod
+    def _device_tcp_reachable(host: str, port: int, *, timeout: int = 4) -> str:
+        r"""Open a SOCKS5 handshake from the device to ``host:port``.
+
+        Used by the App-Proxy lane to confirm gost's *upstream* (our mitmproxy
+        SOCKS5 port) is actually reachable from the device — the same host-IP-
+        reachability blind spot the device proxy hits, one layer down. Sends
+        the SOCKS5
+        greeting ``\\x05\\x01\\x00`` and treats a 2-byte ``\\x05\\x00`` reply as
+        proof the upstream answered.
+
+        QUOTING: ``Adb.send_adb_command`` runs the whole string through the host
+        shell (``shell=True``), so the device-side pipe and ``printf`` byte
+        escapes are wrapped in a single double-quoted ``shell "..."`` argument so
+        the *device* shell interprets them — a bare pipe would be split by the
+        *host* shell. ``toybox nc`` closes the socket on stdin EOF before the
+        reply arrives, so we hold stdin open with ``{ ...; sleep N; }`` — do NOT
+        simplify it back to a bare pipe or stdout comes back empty.
+
+        Returns:
+            ``"reachable"`` (got the SOCKS5 reply), ``"unreachable"`` (a real
+            connect failure), or ``"unknown"`` (``toybox nc`` missing/errored —
+            never report a false ``"unreachable"`` on a device without the tool).
+        """
+        inner = (
+            f"{{ printf '\\x05\\x01\\x00'; sleep 2; }} | "
+            f"toybox nc -w {timeout} {host} {port} | "
+            "toybox xxd -p"
+        )
+        try:
+            out, err = Adb.send_adb_command(f'shell "{inner}"')
+        except Exception:
+            return "unknown"
+        text = (out or "").strip().lower()
+        if "0500" in text:
+            return "reachable"
+        # Distinguish "tool missing" from "connect failed": toybox reports the
+        # absent applet / a usage error on stderr without ever connecting
+        # (toybox's own wording for a missing applet is "Unknown command nc").
+        blob = (err or "").lower()
+        if (
+            "not found" in blob
+            or "no such" in blob
+            or "usage" in blob
+            or "unknown command" in blob
+        ):
+            return "unknown"
+        return "unreachable"
 
     def _kill_lane_process(self, redirect_port: int) -> None:
         """Kill the gost instance bound to ``redirect_port``."""

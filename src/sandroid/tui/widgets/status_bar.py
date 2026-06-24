@@ -297,6 +297,9 @@ class StatusBar(Static):
         # external. "Device"/"Apps" are dim inline sub-labels in the value col.
         pointed_at_us = bool(self.proxy_address) and (
             self.proxy_address == self.mitmweb_address
+            # A loopback proxy is our adb-reverse route, never a foreign
+            # proxy — treat it as ours so the glance matches the panel.
+            or self.proxy_address.startswith("127.0.0.1:")
         )
 
         # Line 1 (label "Proxy") — mitmproxy's own engine status. The address
@@ -570,16 +573,19 @@ class StatusBar(Static):
         """
         try:
             from sandroid.core.proxy_manager import (
-                ProxyManager,
                 get_focus_manager,
+                resolve_proxy_host_ip,
             )
             from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
             svc = get_mitmproxy_service()
             self.mitmweb_running = svc.is_running()
             port = getattr(svc.state, "proxy_port", "")
+            # Emulator-aware (10.0.2.2 on an emulator), so the glance agrees with
+            # the Mitmproxy panel on which device proxy is "ours" — NOT the raw
+            # host LAN/VPN IP, which the device can't reach.
             self.mitmweb_address = (
-                f"{ProxyManager.get_host_ip()}:{port}" if port else ""
+                f"{resolve_proxy_host_ip()}:{port}" if port else ""
             )
             self.app_proxies = dict(get_focus_manager().app_proxies())
         except Exception:

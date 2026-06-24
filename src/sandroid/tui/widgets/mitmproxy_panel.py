@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -95,6 +96,15 @@ class MitmproxyPanel(Widget):
         self._ca_ok = False
         self._ct_ok = False
         self._unpin_hint_shown = False
+        # Last device→mitmproxy reachability verdict, set off-thread by the
+        # reachability probe and rendered in the header / log. Distinct from
+        # _proxy_state: the proxy can be "ours" yet the device can't reach it.
+        self._reach_state = "unknown"  # "ok" | "unreachable" | "suspect" | "unknown"
+        # When the device proxy was last armed (for the steady-state 0-flows
+        # soft signal) and a one-shot guard so that hint logs only once. Its
+        # OWN flag — never reuse _unpin_hint_shown (taken by the TLS hint).
+        self._armed_at = None
+        self._zero_flow_hint_shown = False
         self._pending_mitm_cert = None
         # Set on Enter-start so the next ground-truth probe announces CA status
         # once (already injected vs. press Ctrl+N); cleared after it fires.
@@ -121,12 +131,14 @@ class MitmproxyPanel(Widget):
             log = self.query_one("#mitm-log", RichLog)
             log.write(
                 "[#5b6479]Enter: start/stop · Ctrl+D: device proxy · "
-                "Ctrl+N: install CA · Ctrl+P: SSL unpin · y: proxy settings[/]"
+                "Ctrl+N: install CA · Ctrl+P: SSL unpin · "
+                "y: proxy settings[/]"
             )
         except Exception:
             pass
         self._kick_state_refresh()
         self._kick_focus_cleanup()
+        self._kick_reverse_cleanup()
 
     def _kick_focus_cleanup(self) -> None:
         """Self-heal leftover Focus rules/redirectors from a crashed prior run.
@@ -148,6 +160,30 @@ class MitmproxyPanel(Widget):
             target=_run, name="mitm-focus-cleanup", daemon=True
         ).start()
 
+    def _kick_reverse_cleanup(self) -> None:
+        """Drop a SIGKILL'd prior run's stale ``adb reverse`` tunnel at mount.
+
+        Runs once at mount in a daemon thread (touches adbd, so never on the UI
+        thread); swallows all errors. Mirrors ``_kick_focus_cleanup``: only the
+        proxy-port binding we ever create is removed (per-port ``--remove``,
+        never ``--remove-all``), matched by substring against the transport-id-
+        prefixed ``adb reverse --list`` output.
+        """
+
+        def _run() -> None:
+            try:
+                from sandroid.core.adb import Adb
+
+                port = self._service.state.proxy_port
+                needle = f"tcp:{port} tcp:{port}"
+                out, _ = Adb.reverse_list()
+                if needle in (out or ""):
+                    Adb.reverse_remove(f"tcp:{port}")
+            except Exception as exc:
+                logger.debug("Reverse stale-cleanup skipped: %s", exc)
+
+        threading.Thread(target=_run, name="mitm-reverse-cleanup", daemon=True).start()
+
     def on_unmount(self) -> None:
         try:
             self._service.remove_listener(self._on_service_line)
@@ -162,6 +198,8 @@ class MitmproxyPanel(Widget):
                 get_focus_manager().disable_focus()
         except Exception:
             pass
+        # Best-effort: drop our adb-reverse tunnel so it doesn't leak.
+        self._remove_our_reverse()
 
     def _on_service_line(self, line: str) -> None:
         # Reader thread → marshal to Textual's main thread
@@ -300,7 +338,13 @@ class MitmproxyPanel(Widget):
             return ""
 
         # Device part.
-        if self._proxy_state == "ours":
+        if self._proxy_state == "ours" and self._reach_state == "unreachable":
+            # The load-bearing fix: the proxy IS set to ours, but the device
+            # can't reach it — show red instead of a lying green.
+            device = (
+                f"[#fb7185]✗ Device → mitmproxy {self._proxy_addr} (unreachable)[/]"
+            )
+        elif self._proxy_state == "ours":
             device = f"[#4ade80]● Device → our mitmproxy {self._proxy_addr}[/]"
         elif self._proxy_state == "other":
             device = f"[#7dd3fc]● Device → {self._proxy_addr} [#5b6479](external)[/][/]"
@@ -367,15 +411,52 @@ class MitmproxyPanel(Widget):
             extras.append(f"[#a78bfa]addons {addon_count}[/]")
         if st.verbose:
             extras.append("[#facc15]verbose[/]")
+        # Steady-state soft signal: armed at our mitmproxy but no flows after a
+        # grace period — likely a reachability problem OR a QUIC-only app.
+        if self._zero_flow_soft_signal():
+            extras.append(
+                "[#5b6479]0 flows — device reaching proxy? QUIC app? "
+                "(use App Proxy + block_quic)[/]"
+            )
         extra_str = ("   " + "  ".join(extras)) if extras else ""
 
         return f"{head}   {checks}{extra_str}"
+
+    def _zero_flow_soft_signal(self) -> bool:
+        """Whether the steady-state 0-flows soft signal should show.
+
+        True when running + device proxy is ours + ``flows_seen == 0`` + the
+        proxy was armed more than ~20s ago. Free (no extra I/O) — it reads only
+        in-process state. Does NOT distinguish a broken path from a QUIC-only
+        app; the active reachability probe does that. The wording stays neutral.
+        """
+        st = self._service.state
+        return (
+            self._service.is_running()
+            and self._proxy_state == "ours"
+            and st.flows_seen == 0
+            and self._armed_at is not None
+            and (time.monotonic() - self._armed_at) > 20.0
+        )
 
     def _refresh_header(self) -> None:
         try:
             self.query_one("#mitm-header", Static).update(self._render_header())
         except Exception:
             pass
+        # Emit the steady-state 0-flows hint once (this method is the per-line
+        # chokepoint). Guarded by its OWN flag so it never spams the log.
+        if self._zero_flow_soft_signal() and not self._zero_flow_hint_shown:
+            self._zero_flow_hint_shown = True
+            try:
+                log = self.query_one("#mitm-log", RichLog)
+                log.write(
+                    "[#5b6479][~] 0 flows since arming — is the device "
+                    "reaching the proxy? A QUIC-only app (YouTube) won't show "
+                    "here; use an App Proxy with block_quic.[/]"
+                )
+            except Exception:
+                pass
 
     def action_toggle_running(self) -> None:
         """Enter — bare Start/Stop of the mitmweb process.
@@ -486,10 +567,18 @@ class MitmproxyPanel(Widget):
         isn't in yet, the header's ``CA ✗`` flags it and ``_nudge_ca`` hints
         the key. ``_set_device_proxy`` sets ``_proxy_state="ours"``
         synchronously so the header doesn't flicker before the async probe.
+
+        After pointing the proxy, fires an off-thread reachability probe to
+        catch a silent failure (proxy set but the device can't reach it).
         """
         self._set_device_proxy()
         self._nudge_ca()
+        # Mark the arm time and reset the 0-flow hint guard so the steady-state
+        # soft signal can fire once for this fresh arm.
+        self._armed_at = time.monotonic()
+        self._zero_flow_hint_shown = False
         self._kick_state_refresh()
+        self._kick_reachability_probe()
         self._refresh_header()
 
     def _ensure_running(self) -> None:
@@ -499,13 +588,22 @@ class MitmproxyPanel(Widget):
             self._append_line("[INFO] running")
 
     def _our_proxy_addr(self) -> tuple[str, str]:
-        """Return ``(host_ip, port)`` for our mitmweb proxy as strings."""
-        from sandroid.core.proxy_manager import ProxyManager
+        """Return ``(host_ip, port)`` for our mitmweb proxy as strings.
+
+        Uses the emulator-aware ``resolve_proxy_host_ip`` (so the device proxy
+        and app proxies agree on where the host is), falling back to the LAN IP
+        only if that resolver itself fails. When our adb-reverse tunnel is
+        registered the device is pointed at ``127.0.0.1`` instead — but this
+        returns the *resolved* host IP; the loopback case is handled by the
+        shared ``classify_device_proxy`` classifier.
+        """
+        from sandroid.core.proxy_manager import (
+            ProxyManager,
+            resolve_proxy_host_ip,
+        )
 
         try:
-            from sandroid.services import get_proxy_service
-
-            host_ip = get_proxy_service()._get_setup_service().get_host_ip()
+            host_ip = resolve_proxy_host_ip()
         except Exception:
             host_ip = ProxyManager.get_host_ip()
         return host_ip, str(self._service.state.proxy_port)
@@ -513,20 +611,27 @@ class MitmproxyPanel(Widget):
     def _probe_proxy_state(self) -> tuple[str, str]:
         """Classify the device's current http_proxy synchronously.
 
-        Returns ``(state, addr)`` where ``state`` is ``"ours"`` (ip==host_ip
-        AND port==proxy_port), ``"other"`` (anything else set), or ``"none"``.
+        Returns ``(state, addr)`` where ``state`` is ``"ours"`` (our host IP, or
+        ``127.0.0.1`` while our adb-reverse tunnel is registered, AND
+        port==proxy_port), ``"other"`` (anything else set), or ``"none"``.
         Blocking (one ADB read) — called only on deliberate device-proxy
         actions, which matches the panel's synchronous device-setup precedent.
+        Uses the shared ``classify_device_proxy`` so all classifiers agree.
         """
-        from sandroid.core.proxy_manager import ProxyManager, ProxyStatus
+        from sandroid.core.proxy_manager import (
+            ProxyManager,
+            ProxyStatus,
+            classify_device_proxy,
+        )
 
         try:
             status, cfg = ProxyManager().get_proxy_settings()
             if status != ProxyStatus.SET or cfg is None:
                 return "none", ""
-            host_ip, _ = self._our_proxy_addr()
-            ours = cfg.ip == host_ip and cfg.port == self._service.state.proxy_port
-            return ("ours" if ours else "other"), cfg.address
+            state = classify_device_proxy(
+                cfg.ip, cfg.port, self._service.state.proxy_port
+            )
+            return state, cfg.address
         except Exception as exc:
             logger.debug("proxy classify failed: %s", exc)
             return "none", ""
@@ -571,6 +676,68 @@ class MitmproxyPanel(Widget):
                 pass
 
         threading.Thread(target=_run, name="mitm-setup-probe", daemon=True).start()
+
+    def _kick_reachability_probe(self) -> None:
+        """Prove the device can reach our mitmproxy off the UI thread.
+
+        Mirrors ``_kick_state_refresh``: the probe blocks on a device round-trip
+        + a short settle poll, so it runs in a daemon thread and marshals the
+        verdict back via ``call_from_thread``. The address probed is the one the
+        device is actually pointed at — the live ``http_proxy`` IP when set
+        (e.g. ``127.0.0.1`` for an adb-reverse route), else the resolved host IP.
+        """
+
+        def _run() -> None:
+            try:
+                from sandroid.core.proxy_manager import (
+                    ProxyManager,
+                    ProxyStatus,
+                    resolve_proxy_host_ip,
+                )
+
+                port = self._service.state.proxy_port
+                status, cfg = ProxyManager().get_proxy_settings()
+                if status == ProxyStatus.SET and cfg is not None:
+                    host = cfg.ip
+                else:
+                    host = resolve_proxy_host_ip()
+                result = self._service.probe_device_reachability(host, port)
+                addr = f"{host}:{port}"
+            except Exception as exc:  # marshal a failure as a quiet unknown
+                logger.debug("reachability probe kick failed: %s", exc)
+                return
+            try:
+                self.app.call_from_thread(self._apply_reachability_result, result, addr)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mitm-reach-probe", daemon=True).start()
+
+    def _apply_reachability_result(self, result, addr: str) -> None:
+        """Render the device→mitmproxy reachability verdict (UI thread).
+
+        ``result`` is a ``ReachabilityResult``. Unreachable flips the header's
+        Device token red and logs an ``[ERROR]`` + a neutral remedy hint;
+        reachable logs one quiet confirmation. Uses ``[~]`` for hints, never
+        ``[i]`` (RichLog parses ``[i]`` as italic markup).
+        """
+        if getattr(result, "reachable", False):
+            self._reach_state = "ok"
+            self._append_line(
+                "[INFO] [OK] device→mitmproxy reachable (flow round-trip confirmed)"
+            )
+        else:
+            self._reach_state = "unreachable"
+            self._append_line(
+                f"[ERROR] device CANNOT reach mitmproxy at {addr} — traffic "
+                "will silently time out (0 flows)"
+            )
+            hint = getattr(result, "hint", "") or (
+                f"device can't reach the proxy at {addr} — check the host IP, "
+                "or route via adb reverse in Proxy Settings (y)"
+            )
+            self._append_line(f"[INFO] [~] {hint}")
+        self._refresh_header()
 
     def _apply_setup_state(
         self, proxy_state: str, proxy_addr: str, ca_ok: bool, ct_ok: bool
@@ -640,6 +807,7 @@ class MitmproxyPanel(Widget):
             CAManager,
             ProxyManager,
             ProxyStatus,
+            classify_device_proxy,
         )
 
         proxy_state, proxy_addr = "none", ""
@@ -648,14 +816,9 @@ class MitmproxyPanel(Widget):
             status, cfg = ProxyManager().get_proxy_settings()
             if status == ProxyStatus.SET and cfg is not None:
                 proxy_addr = cfg.address
-                try:
-                    from sandroid.services import get_proxy_service
-
-                    host_ip = get_proxy_service()._get_setup_service().get_host_ip()
-                except Exception:
-                    host_ip = ProxyManager.get_host_ip()
-                ours = cfg.ip == host_ip and cfg.port == self._service.state.proxy_port
-                proxy_state = "ours" if ours else "other"
+                proxy_state = classify_device_proxy(
+                    cfg.ip, cfg.port, self._service.state.proxy_port
+                )
         except Exception as exc:
             logger.debug("proxy state probe failed: %s", exc)
 
@@ -673,13 +836,22 @@ class MitmproxyPanel(Widget):
         return proxy_state, proxy_addr, ca_ok, ct_ok
 
     def _set_device_proxy(self) -> None:
-        """Ensure the device proxy routes through mitmweb (idempotent)."""
+        """Ensure the device proxy routes through mitmweb (idempotent).
+
+        Uses the emulator-aware ``resolve_proxy_host_ip`` so the device proxy
+        targets the same host the app proxies do (e.g. ``10.0.2.2`` on an
+        emulator) instead of the display LAN IP.
+        """
         try:
-            from sandroid.core.proxy_manager import ProxyManager, ProxyStatus
+            from sandroid.core.proxy_manager import (
+                ProxyManager,
+                ProxyStatus,
+                resolve_proxy_host_ip,
+            )
             from sandroid.services import get_proxy_service
 
             svc = get_proxy_service()
-            host_ip = svc._get_setup_service().get_host_ip()
+            host_ip = resolve_proxy_host_ip()
             port = str(self._service.state.proxy_port)
             addr = f"{host_ip}:{port}"
 
@@ -705,7 +877,7 @@ class MitmproxyPanel(Widget):
             self._append_line(f"[ERROR] Proxy setup: {exc}")
 
     def _clear_device_proxy(self) -> None:
-        """Remove device proxy if we set it."""
+        """Remove device proxy if we set it (and our adb-reverse tunnel)."""
         if not self._proxy_set_by_us:
             return
         try:
@@ -717,10 +889,33 @@ class MitmproxyPanel(Widget):
             self._proxy_set_by_us = False
             self._proxy_state = "none"
             self._proxy_addr = ""
+            self._reach_state = "unknown"
+            self._armed_at = None
             self._set_glance_device_proxy("")
         except Exception as exc:
             logger.warning("Failed to clear device proxy: %s", exc)
             self._append_line(f"[ERROR] Proxy clear: {exc}")
+        # Drop our adb-reverse tunnel if we created one (disarm should leave no
+        # stale binding behind).
+        self._remove_our_reverse()
+
+    def _remove_our_reverse(self) -> None:
+        """Remove the ``adb reverse tcp:<proxy_port>`` binding if one is live.
+
+        Owner-agnostic: keyed on the live ``adb reverse --list`` (per-port
+        ``--remove``, never ``--remove-all``), so a tunnel created by the Proxy
+        modal is still torn down here on disarm/close. No-op when none is
+        registered. Best-effort; swallows errors.
+        """
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.proxy_manager import _reverse_registered
+
+            port = self._service.state.proxy_port
+            if _reverse_registered(port):
+                Adb.reverse_remove(f"tcp:{port}")
+        except Exception as exc:
+            logger.debug("Failed to remove our reverse tunnel: %s", exc)
 
     def _auto_inject_ca(self) -> None:
         """Auto-inject mitmproxy CA cert into Android system trust store."""
@@ -854,6 +1049,13 @@ class MitmproxyPanel(Widget):
                     self._append_line(f"[INFO] {ct_msg}")
                 else:
                     self._append_line(f"[INFO] Chrome CT bypass skipped: {ct_msg}")
+
+                # CA injection restarts Zygote, which resets app net state — if
+                # the device proxy is ours, re-prove reachability. Gated on
+                # success AND an armed device proxy so we never pollute
+                # flows_seen when no device proxy is even set.
+                if self._proxy_state == "ours":
+                    self._kick_reachability_probe()
             elif result.needs_root:
                 from sandroid.tui.modals.confirm_modal import ConfirmModal
 

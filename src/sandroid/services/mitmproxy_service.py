@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -277,6 +278,26 @@ addons = [ExampleLogger()]
 
 
 @dataclass
+class ReachabilityResult:
+    """Outcome of a device→mitmproxy end-to-end reachability probe.
+
+    Attributes:
+        reachable: True when the device's HTTP round-trip through the proxy
+            produced a mitmproxy response (``"HTTP/"`` in the device output).
+        flows_incremented: True when ``flows_seen`` rose during the probe —
+            independent host-side proof the proxy counted the flow.
+        detail: A short human-readable summary for the log.
+        hint: An optional remediation hint (e.g. check the host IP / route via
+            adb reverse), or ``""`` when none applies.
+    """
+
+    reachable: bool
+    flows_incremented: bool
+    detail: str
+    hint: str = ""
+
+
+@dataclass
 class MitmproxyState:
     """Runtime state visible to UI consumers."""
 
@@ -501,9 +522,11 @@ class MitmproxyService:
                 "apps": {package: "ours" | "http://ip:port", ...},
             }
 
-        The device classification mirrors the panel's ``_probe_proxy_state``:
-        ``ours`` iff the device http_proxy ip == our host IP AND port == our
-        proxy port; any other set value is ``external``; unset is ``none``.
+        The device classification uses the shared ``classify_device_proxy``
+        helper (the same rule the panel's classifiers use): ``ours`` iff the
+        port matches our proxy port AND the ip is the resolved host IP (or
+        ``127.0.0.1`` while our adb-reverse tunnel is registered); any other
+        set value is ``external``; unset is ``none``.
 
         WARNING: reads the device http_proxy over ADB (blocking). Call this OFF
         the UI thread. The app layer (``app_proxies``) is a cheap in-process
@@ -512,6 +535,7 @@ class MitmproxyService:
         from sandroid.core.proxy_manager import (
             ProxyManager,
             ProxyStatus,
+            classify_device_proxy,
             get_focus_manager,
         )
 
@@ -526,7 +550,7 @@ class MitmproxyService:
         try:
             status, cfg = ProxyManager().get_proxy_settings()
             if status == ProxyStatus.SET and cfg is not None:
-                ours = cfg.ip == host_ip and cfg.port == proxy_port
+                ours = classify_device_proxy(cfg.ip, cfg.port, proxy_port) == "ours"
                 device = {
                     "state": "ours" if ours else "external",
                     "addr": cfg.address,
@@ -546,6 +570,98 @@ class MitmproxyService:
             "device": device,
             "apps": apps,
         }
+
+    def probe_device_reachability(
+        self, host: str, port: int, *, timeout: int = 4
+    ) -> ReachabilityResult:
+        r"""Prove the device can actually reach our mitmproxy at ``host:port``.
+
+        ``set_proxy`` only verifies the proxy *string* was written, never that
+        the device can reach it. The auto-detected host IP can be unreachable
+        from the device, so the device silently times out (0 flows) while the
+        header reads green. This fires a real device→proxy round-trip and
+        cross-checks ``flows_seen`` for end-to-end proof.
+
+        Two independent signals (so an ``nc`` quirk alone can't flip the
+        verdict):
+
+        1. Device bytes — a forced-HTTP request through the proxy to
+           ``http://mitm.it/`` (mitmproxy's onboarding addon answers it itself,
+           offline, even with no upstream). Reachable iff stdout is non-empty
+           AND contains ``"HTTP/"`` (NOT the ``nc`` exit code — unreliable).
+        2. Host counter — ``flows_seen`` rising during the probe is independent
+           proof the proxy received and counted the flow.
+
+        QUOTING: ``Adb.send_adb_command`` runs the whole string through the host
+        shell (``shell=True``), so the device-side pipe + ``printf`` ``\\r\\n``
+        escapes are wrapped in a single double-quoted ``shell "..."`` argument so
+        the *device* shell interprets them; a bare pipe would be split by the
+        host shell. ``toybox nc`` closes the socket on stdin EOF before the reply
+        arrives, so we hold stdin open with ``{ ...; sleep N; }`` — do NOT
+        simplify it back to a bare pipe or stdout comes back empty.
+
+        WARNING: blocking (one device round-trip + a short settle poll). Call
+        this OFF the UI thread.
+
+        Args:
+            host: Proxy host the device is pointed at (the resolved host IP, or
+                ``127.0.0.1`` when routed via adb reverse).
+            port: Proxy port.
+            timeout: ``nc`` connect/read timeout in seconds.
+
+        Returns:
+            A :class:`ReachabilityResult`.
+        """
+        from sandroid.core.adb import Adb
+
+        before = self._state.flows_seen
+        addr = f"{host}:{port}"
+        request = (
+            "GET http://mitm.it/ HTTP/1.1\\r\\n"
+            "Host: mitm.it\\r\\n"
+            "Connection: close\\r\\n\\r\\n"
+        )
+        # toybox nc closes the socket on stdin EOF before the reply arrives
+        # (-w is a connect timeout, not a read timeout; -q doesn't keep the
+        # read side alive on this build). Hold stdin open with `sleep` so nc
+        # reads the response — a bare pipe yields empty stdout (false negative).
+        inner = (
+            f"{{ printf '{request}'; sleep 2; }} | "
+            f"toybox nc -w {timeout} {host} {port}"
+        )
+        try:
+            out, _ = Adb.send_adb_command(f'shell "{inner}"')
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("reachability probe failed: %s", exc)
+            out = ""
+        got_http = bool((out or "").strip()) and "HTTP/" in (out or "")
+
+        # Short settle poll (~0.3s x5, mirroring _wait_listening cadence) so a
+        # just-counted flow has a moment to land before we re-read.
+        after = self._state.flows_seen
+        for _ in range(5):
+            if self._state.flows_seen > before:
+                break
+            time.sleep(0.3)
+            after = self._state.flows_seen
+        flows_incremented = after > before
+
+        reachable = got_http or flows_incremented
+        if reachable:
+            detail = f"device→mitmproxy reachable ({addr})"
+            hint = ""
+        else:
+            detail = f"device CANNOT reach mitmproxy at {addr}"
+            hint = (
+                f"device can't reach the proxy at {addr} — check the host IP, "
+                "or route via adb reverse in Proxy Settings (y)"
+            )
+        return ReachabilityResult(
+            reachable=reachable,
+            flows_incremented=flows_incremented,
+            detail=detail,
+            hint=hint,
+        )
 
     def add_listener(self, callback: Callable[[str], None]) -> None:
         self._listeners.append(callback)
