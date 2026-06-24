@@ -44,6 +44,20 @@ SSL_UNPIN_HOOKS = [
     "cronet:SSL_get_verify_result",
     "cronet:bssl::ssl_verify_peer_cert",
     "cronet:net::CertVerifyProc::Verify",
+    # Tier 5: native mbedTLS verify entry points + the Meta Network Stack (MNS)
+    # cert verifier. Resolved at runtime by export name across all modules (no
+    # fixed module name); the universal mbedtls_x509_crt_verify* family makes
+    # this generic to ANY mbedTLS-pinning app, the MNS symbol is a Meta-specific
+    # supplement. Runtime emits "mbedtls:MNS:<joined>"; listed here per-symbol
+    # for the hook registry / display only.
+    "mbedtls:MNSCertificateVerifierVerifyMaybeCreateError",
+    "mbedtls:mbedtls_ssl_conf_verify",
+    "mbedtls:mbedtls_ssl_conf_authmode",
+    "mbedtls:mbedtls_ssl_set_hs_authmode",
+    "mbedtls:mbedtls_x509_crt_verify",
+    "mbedtls:mbedtls_x509_crt_verify_with_profile",
+    "mbedtls:mbedtls_x509_crt_verify_restartable",
+    "mbedtls:mbedtls_ssl_set_verify",
 ]
 
 _FRIDA_SCRIPT = r"""
@@ -459,6 +473,273 @@ Java.perform(function() {
         setTimeout(scanModules, 2000);
         setTimeout(scanModules, 5000);
         setTimeout(scanModules, 10000);
+    } catch (e) {}
+})();
+
+// ===========================================================================
+// Tier 5: Native mbedTLS / Meta Network Stack (MNS / "Silverstone DataGateway")
+// SSL-pinning unpin tier.
+//
+// Why this exists: Meta's apps (e.g. Meta AI = com.facebook.stella) do NOT route
+// their image-upload / DataGateway traffic through the Android system CA store,
+// the Java TrustManager/Conscrypt path, OkHttp, or cronet's BoringSSL. They use
+// Meta's OWN native network stack ("MNS" = Meta Network Stack) inside
+// libsilverstonedgw-*.so, which performs TLS with a STATICALLY-LINKED copy of
+// mbedTLS that lives (with its exported symbols intact) in the giant runtime lib
+// libstartup.so, and then ADDITIONALLY pins the server cert in a Meta-specific
+// verifier. Logcat on a pin failure shows:
+//   MNSCertificateVerifier: Pin verification failed
+//   mbedtls_ssl_handshake(): Pin verification failed (-0x2700 =
+//     MBEDTLS_ERR_X509_CERT_VERIFY_FAILED)
+// so the system-CA path and every Java/cronet tier above leave the
+// rupload.facebook.com image upload encrypted. This tier defeats the mbedTLS +
+// MNS pin so that channel decrypts through mitmproxy. More broadly it is a
+// GENERIC mbedTLS unpin: the universal mbedtls_x509_crt_verify* family makes it
+// work for ANY mbedTLS-pinning app, not just Meta.
+//
+// What we hook (resolved by EXPORT name across ALL loaded modules):
+//  1. MNSCertificateVerifierVerifyMaybeCreateError -> force the return value to 0
+//     (null / "no error"). The exact symbol named in the logcat pin failure;
+//     "MaybeCreateError" returns a non-null error object on a pin mismatch and
+//     null/0 on success, so forcing 0 makes every cert pass. Meta-specific
+//     supplement (the Meta pin lives here, ABOVE standard mbedTLS verification).
+//  2. mbedtls_ssl_conf_verify(conf, f_vrfy, p_vrfy) -> swap whatever custom
+//     verify callback is installed for one that zeroes *flags and returns 0.
+//  3. mbedtls_ssl_conf_authmode(conf, authmode) -> force VERIFY_NONE (0) so the
+//     standard chain verification is skipped (belt-and-braces).
+//  3b. mbedtls_ssl_set_hs_authmode(ssl, authmode) -> VERIFY_NONE. Per-handshake
+//     override of (3) for apps that re-arm verification per connection.
+//  4. mbedtls_x509_crt_verify / _with_profile / _restartable -> zero the *flags
+//     out-param and return 0. The UNIVERSAL mbedTLS chain-verify entry points;
+//     hooking them defeats a standard mbedTLS pin in ANY app regardless of any
+//     app-specific verifier, so the generic path stands on its own.
+//  5. mbedtls_ssl_set_verify(ssl, f_vrfy, p_vrfy) -> per-connection analogue of
+//     (2); swap the app's verify callback for one that returns success.
+//
+// Robustness measures (mirror the cronet tier):
+//  * mbedTLS lives in libstartup.so (~17 MB) and the MNS libs load LAZILY, so we
+//    DON'T hardcode a module: resolve each symbol across ALL loaded modules,
+//    hook dlopen and re-scan on every load, plus timed re-scans.
+//  * Clean no-op when none of these symbols resolve (the common case -- non-
+//    mbedTLS apps), wrapped in try/catch so it NEVER throws. Each symbol hooked
+//    at most once (latch map).
+//  * FLAGS.ssl-gated. Emits send({type:'info', hook:'mbedtls:...'}) per hook
+//    installed so success is observable exactly like the cronet tier above.
+//
+// Pure-native, runs outside Java.perform. Like cronet, MNS ignores the device
+// http_proxy, so its TCP/443 must be transparently redirected (per-UID REDIRECT
+// -> gost -> mitmproxy SOCKS5 + QUIC block) and reached via spawn-gated injection.
+// ===========================================================================
+(function() {
+    if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+
+    var MBEDTLS_SSL_VERIFY_NONE = 0;
+    var _mbedHooked = {};   // symbol name -> true (hook at most once)
+
+    // Resolve a symbol by EXPORT name across every loaded module. On Frida 17 /
+    // Android 16 Module.findExportByName(null, ...) is unreliable for these
+    // statically-linked-but-exported symbols, so we walk modules (the same
+    // "enumerate, don't trust global lookups" stance as the cronet tier).
+    function resolveAnyExport(name) {
+        var addr = null;
+        try {
+            Process.enumerateModules().some(function(m) {
+                try { var a = m.findExportByName(name); if (a && !a.isNull()) { addr = a; return true; } }
+                catch (e) {}
+                return false;
+            });
+        } catch (e) {}
+        return addr;
+    }
+
+    // A single shared "always trust" mbedTLS verify callback:
+    // int f_vrfy(void *p_vrfy, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
+    // Zero *flags and return 0 (success).
+    var _okMbedVrfy = null;
+    function okMbedtlsVerifyCb() {
+        if (_okMbedVrfy === null) {
+            _okMbedVrfy = new NativeCallback(function(p, crt, depth, flags) {
+                try { if (flags && !flags.isNull()) flags.writeU32(0); } catch (e) {}
+                return 0;
+            }, 'int', ['pointer', 'pointer', 'int', 'pointer']);
+        }
+        return _okMbedVrfy;
+    }
+
+    // Hook a mbedtls_x509_crt_verify* variant: zero the *flags out-param and
+    // force the return value to 0 (success). `flagsIdx` is the zero-based arg
+    // index of the `uint32_t *flags` out-parameter for that variant. This is the
+    // UNIVERSAL mbedTLS chain-verification entry point used by every public
+    // mbedTLS unpin -- hooking it defeats standard mbedTLS pinning regardless of
+    // any app-specific verifier, so the generic path stands on its own.
+    function hookX509Verify(latchKey, symName, flagsIdx, done) {
+        if (_mbedHooked[latchKey]) return;
+        var a = resolveAnyExport(symName);
+        if (!a) return;
+        try {
+            Interceptor.attach(a, {
+                onEnter: function(args) {
+                    if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) { this._skip = true; return; }
+                    this._flags = args[flagsIdx];   // uint32_t *flags out-param
+                },
+                onLeave: function(rv) {
+                    if (this._skip) return;
+                    try { if (this._flags && !this._flags.isNull()) this._flags.writeU32(0); } catch (e) {}
+                    rv.replace(0);   // 0 == verification succeeded
+                }
+            });
+            _mbedHooked[latchKey] = true;
+            done.push(symName);
+        } catch (e) {}
+    }
+
+    function installMbedtlsHooks() {
+        var done = [];
+
+        // (1) MNSCertificateVerifierVerifyMaybeCreateError -> return 0 (no error).
+        if (!_mbedHooked['MNSVerify']) {
+            var aMns = resolveAnyExport('MNSCertificateVerifierVerifyMaybeCreateError');
+            if (aMns) {
+                try {
+                    Interceptor.attach(aMns, {
+                        onLeave: function(rv) {
+                            if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+                            rv.replace(0);   // null / "no error" == pin passed
+                        }
+                    });
+                    _mbedHooked['MNSVerify'] = true;
+                    done.push('MNSCertificateVerifierVerifyMaybeCreateError');
+                } catch (e) {}
+            }
+        }
+
+        // (2) mbedtls_ssl_conf_verify(conf, f_vrfy, p_vrfy) -> swap callback for OK.
+        if (!_mbedHooked['conf_verify']) {
+            var aCV = resolveAnyExport('mbedtls_ssl_conf_verify');
+            if (aCV) {
+                try {
+                    var origCV = new NativeFunction(aCV, 'void', ['pointer', 'pointer', 'pointer']);
+                    Interceptor.replace(aCV, new NativeCallback(function(conf, f, p) {
+                        if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) { origCV(conf, f, p); return; }
+                        origCV(conf, okMbedtlsVerifyCb(), p);   // ignore the app's callback
+                    }, 'void', ['pointer', 'pointer', 'pointer']));
+                    _mbedHooked['conf_verify'] = true;
+                    done.push('mbedtls_ssl_conf_verify');
+                } catch (e) {}
+            }
+        }
+
+        // (3) mbedtls_ssl_conf_authmode(conf, authmode) -> force VERIFY_NONE.
+        if (!_mbedHooked['conf_authmode']) {
+            var aAM = resolveAnyExport('mbedtls_ssl_conf_authmode');
+            if (aAM) {
+                try {
+                    Interceptor.attach(aAM, {
+                        onEnter: function(args) {
+                            if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+                            args[1] = ptr(MBEDTLS_SSL_VERIFY_NONE);
+                        }
+                    });
+                    _mbedHooked['conf_authmode'] = true;
+                    done.push('mbedtls_ssl_conf_authmode');
+                } catch (e) {}
+            }
+        }
+
+        // (3b) mbedtls_ssl_set_hs_authmode(ssl, authmode) -> per-HANDSHAKE
+        //      analogue of (3): it OVERRIDES the conf-level authmode for the
+        //      current connection, so an app that re-arms verification per
+        //      handshake (set_hs_authmode(ssl, REQUIRED) after config) would
+        //      otherwise beat (3). Force VERIFY_NONE here too. Public mbedTLS
+        //      API in both 2.x and 3.x; clean no-op when the symbol is absent.
+        if (!_mbedHooked['set_hs_authmode']) {
+            var aHS = resolveAnyExport('mbedtls_ssl_set_hs_authmode');
+            if (aHS) {
+                try {
+                    Interceptor.attach(aHS, {
+                        onEnter: function(args) {
+                            if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+                            args[1] = ptr(MBEDTLS_SSL_VERIFY_NONE);
+                        }
+                    });
+                    _mbedHooked['set_hs_authmode'] = true;
+                    done.push('mbedtls_ssl_set_hs_authmode');
+                } catch (e) {}
+            }
+        }
+
+        // (4) The GENERIC mbedTLS chain-verification family. These are the
+        //     universal unpin points: zero the *flags out-param and return 0 so
+        //     the chain "verifies" no matter what CA signed it. Arg indices of
+        //     the `uint32_t *flags` out-param per the mbedTLS public signatures:
+        //       mbedtls_x509_crt_verify(crt, trust_ca, ca_crl, cn,
+        //                               *flags, f_vrfy, p_vrfy)            -> idx 4
+        //       mbedtls_x509_crt_verify_with_profile(crt, trust_ca, ca_crl,
+        //                               profile, cn, *flags, f_vrfy, p_vrfy) -> idx 5
+        //       mbedtls_x509_crt_verify_restartable(crt, trust_ca, ca_crl,
+        //                               profile, cn, *flags, f_vrfy, p_vrfy,
+        //                               rs_ctx)                            -> idx 5
+        hookX509Verify('x509_verify', 'mbedtls_x509_crt_verify', 4, done);
+        hookX509Verify('x509_verify_profile', 'mbedtls_x509_crt_verify_with_profile', 5, done);
+        hookX509Verify('x509_verify_restartable', 'mbedtls_x509_crt_verify_restartable', 5, done);
+
+        // (5) mbedtls_ssl_set_verify(ssl, f_vrfy, p_vrfy) -> per-CONNECTION
+        //     analogue of mbedtls_ssl_conf_verify. Some stacks install the
+        //     custom verify callback per-connection rather than per-conf; swap it
+        //     for the always-OK callback. Reuses okMbedtlsVerifyCb().
+        if (!_mbedHooked['set_verify']) {
+            var aSV = resolveAnyExport('mbedtls_ssl_set_verify');
+            if (aSV) {
+                try {
+                    var origSV = new NativeFunction(aSV, 'void', ['pointer', 'pointer', 'pointer']);
+                    Interceptor.replace(aSV, new NativeCallback(function(ssl, f, p) {
+                        if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) { origSV(ssl, f, p); return; }
+                        origSV(ssl, okMbedtlsVerifyCb(), p);   // ignore the app's callback
+                    }, 'void', ['pointer', 'pointer', 'pointer']));
+                    _mbedHooked['set_verify'] = true;
+                    done.push('mbedtls_ssl_set_verify');
+                } catch (e) {}
+            }
+        }
+
+        if (done.length) {
+            try {
+                send({type: 'info', hook: 'mbedtls:MNS:' + done.join('+')});
+            } catch (e) {}
+        }
+        // "All hooked?" early-stop signal. The generic mbedTLS unpin is complete
+        // once the UNIVERSAL chain-verify entry (mbedtls_x509_crt_verify) and the
+        // authmode override are both installed -- that pair alone defeats a
+        // standard mbedTLS pin in ANY app. The Meta-specific MNS symbol and the
+        // optional x509 verify variants and the per-conf/per-conn verify
+        // callbacks are supplements that may legitimately be absent, so they are
+        // NOT required for the "done" signal. The re-scan loop ignores this
+        // return value anyway (each symbol is latched), so it is purely an honest
+        // completeness indicator.
+        return _mbedHooked['x509_verify'] && _mbedHooked['conf_authmode'];
+    }
+
+    try {
+        // Initial attempt (libstartup.so is often already mapped at attach time).
+        installMbedtlsHooks();
+
+        // Re-attempt when libs load lazily (the silverstone JNI libs / DataGateway
+        // spin up after process start). Same dlopen-intercept strategy as above.
+        try {
+            new ApiResolver('module')
+                .enumerateMatches('exports:linker*!*dlopen*')
+                .forEach(function(d) {
+                    Interceptor.attach(d.address, {
+                        onLeave: function() { try { installMbedtlsHooks(); } catch (e) {} }
+                    });
+                });
+        } catch (e) {}
+
+        // Belt-and-braces timed re-scans for loaders dlopen doesn't surface.
+        setTimeout(installMbedtlsHooks, 1000);
+        setTimeout(installMbedtlsHooks, 3000);
+        setTimeout(installMbedtlsHooks, 6000);
+        setTimeout(installMbedtlsHooks, 10000);
     } catch (e) {}
 })();
 """
