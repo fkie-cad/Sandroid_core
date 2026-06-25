@@ -58,6 +58,14 @@ SSL_UNPIN_HOOKS = [
     "mbedtls:mbedtls_x509_crt_verify_with_profile",
     "mbedtls:mbedtls_x509_crt_verify_restartable",
     "mbedtls:mbedtls_ssl_set_verify",
+    # Deterministic pre-init verifier install via the linker's constructor caller
+    # (soinfo::call_constructors interpose). Installs the right tier's hooks in a
+    # module's mapped-but-pre-init window, BEFORE its early-init TLS handshake, so
+    # any app's early-init TLS is unpinned before its first connection. Runtime
+    # emits "<tier>:early-ctor-install@<module>"; listed here for the registry.
+    "cronet:early-ctor-install",
+    "mbedtls:early-ctor-install",
+    "flutter:early-ctor-install",
 ]
 
 _FRIDA_SCRIPT = r"""
@@ -78,7 +86,55 @@ _FRIDA_SCRIPT = r"""
 // .apply(this, arguments) — safe because they were hooked via .implementation
 // (single overload).
 
-Java.perform(function() {
+// ===========================================================================
+// SPAWN-SURVIVAL HARDENING — debounced dlopen re-scan scheduler.
+//
+// Problem this fixes (diagnosed on com.facebook.stella / Meta AI, Android 16):
+// the native tiers below (cronet / mbedTLS-MNS) each hook the linker's
+// android_dlopen_ext/dlopen and, on EVERY dlopen return, RE-RAN a full
+// Process.enumerateModules() scan that installs hooks on hot verify functions.
+// During a cold SPAWN the linker maps dozens of libraries back-to-back (incl.
+// the ~17 MB libstartup.so), so those re-scans fired RE-ENTRANTLY, dozens of
+// times, from inside dlopen's onLeave WHILE the splash thread was executing —
+// tearing a freshly-installed Interceptor trampoline. Result: the main thread
+// jumped through a clobbered code pointer (tombstone: SIGSEGV, "jump to
+// unmapped address") on most cold spawns; a plain ATTACH to an already-running
+// pid was stable because no dlopen-storm coincides with hooking.
+//
+// Fix (general, not stella-specific): never do heavy work inside dlopen onLeave.
+// Instead COALESCE all dlopen returns into a SINGLE re-scan scheduled a short
+// time AFTER the burst settles (debounce), so module hooking happens on a quiet
+// linker, never mid-load. The per-symbol / per-module latches already make each
+// re-scan idempotent, so coalescing loses no late-loaded module. Defined ONCE at
+// file scope and shared by all native tiers below.
+// ===========================================================================
+var _SU_debounce = (function() {
+    var timers = {};   // key -> pending timeout id
+    // Schedule fn under `key`; repeated calls within `delay` ms collapse into one
+    // run that fires `delay` ms after the LAST call (classic trailing debounce).
+    return function(key, fn, delay) {
+        try {
+            if (timers[key]) { try { clearTimeout(timers[key]); } catch (e) {} }
+            var d = (typeof delay === 'number') ? delay : 300;
+            timers[key] = setTimeout(function() {
+                timers[key] = null;
+                try { fn(); } catch (e) {}
+            }, d);
+        } catch (e) {
+            // setTimeout/clearTimeout unavailable — fall back to a direct (still
+            // try/catch-guarded) call so behaviour degrades safely.
+            try { fn(); } catch (e2) {}
+        }
+    };
+})();
+
+// --- Java tier, guarded for spawn/early-attach -----------------------------
+// On a cold SPAWN the ART VM is not up when the script loads, so Java.perform
+// would throw and abort the whole script (taking the native tiers with it).
+// Wrap the Java hooks in a named function and only run them once Java.available
+// is true, retrying on a short timer until the VM initialises. The native tiers
+// below run independently of this.
+function _suJavaTier() {
     var ArrayList = Java.use('java.util.ArrayList');
 
     // --- Tier 1: Core SSL hooks (~90% coverage) ---
@@ -282,7 +338,28 @@ Java.perform(function() {
     });
 
     send({type: 'ready', message: 'SSL pinning bypass hooks loaded'});
-});
+}
+
+// Run the Java tier behind a Java.available retry guard: on frida the global
+// `Java` is only usable once a Java bridge is injected AND the ART VM is up.
+// On a cold spawn that is not true at load time, so retry on a short timer
+// (bounded) until the VM initialises instead of throwing and aborting the
+// script. The native tiers below install independently of this.
+(function _suRunJavaTier(attempt) {
+    try {
+        if (typeof Java === 'undefined' || !Java.available) {
+            if ((attempt || 0) < 50) {
+                setTimeout(function() { _suRunJavaTier((attempt || 0) + 1); }, 200);
+            }
+            return;
+        }
+        Java.perform(_suJavaTier);
+    } catch (e) {
+        // Never let the Java tier abort the script — the native tiers below are
+        // what defeat the cronet/mbedTLS/MNS pins and must always install.
+        try { send({type: 'debug', hook: 'java-tier-skipped', error: '' + e}); } catch (e2) {}
+    }
+})(0);
 
 // --- Tier 4: native cronet / Chromium-BoringSSL unpin (FLAGS.ssl-gated) ------
 //
@@ -361,47 +438,59 @@ Java.perform(function() {
         hookedModules[mod.name] = true;
         var done = [];
 
-        // (1) custom-verify setters: install the always-OK callback when armed,
-        // forward cronet's real callback when off.
+        // (1) custom-verify setters: make cronet install OUR always-OK callback
+        // instead of its own. attach + onEnter arg-rewrite (args[2] = the cb
+        // pointer) rather than Interceptor.replace: attaching only inserts a
+        // prologue hook and leaves the real setter body intact, so it cannot tear
+        // a trampoline mid-execution the way replacing a hot function can (see
+        // SPAWN-SURVIVAL HARDENING header). Pass-through when off needs no special
+        // handling — we simply don't rewrite args[2], so the app's own cb stands.
         [['SSL_set_custom_verify', setCV],
          ['SSL_CTX_set_custom_verify', setCtxCV]].forEach(function(pair) {
             var addr = pair[1];
             if (!addr) return;
             try {
-                var orig = new NativeFunction(addr, 'void', ['pointer', 'int', 'pointer']);
-                Interceptor.replace(addr, new NativeCallback(function(ssl, mode, cb) {
-                    if (!FLAGS.ssl) { orig(ssl, mode, cb); return; }
-                    orig(ssl, mode, okVerifyCallback());   // ignore cronet's cb
-                }, 'void', ['pointer', 'int', 'pointer']));
+                Interceptor.attach(addr, {
+                    onEnter: function(args) {
+                        if (!FLAGS.ssl) return;
+                        try { args[2] = okVerifyCallback(); } catch (e) {}   // ignore cronet's cb
+                    }
+                });
                 done.push(pair[0]);
             } catch (e) {}
         });
 
-        // (3) SSL_get_verify_result -> X509_V_OK (forward original when off).
+        // (3) SSL_get_verify_result -> X509_V_OK. attach + onLeave retval.replace
+        // instead of replacing the whole function (leave the result intact when off).
         if (getVR) {
             try {
-                var origGVR = new NativeFunction(getVR, 'long', ['pointer']);
-                Interceptor.replace(getVR, new NativeCallback(function(ssl) {
-                    if (!FLAGS.ssl) return origGVR(ssl);
-                    return X509_V_OK;
-                }, 'long', ['pointer']));
+                Interceptor.attach(getVR, {
+                    onLeave: function(retval) {
+                        if (!FLAGS.ssl) return;
+                        retval.replace(X509_V_OK);
+                    }
+                });
                 done.push('SSL_get_verify_result');
             } catch (e) {}
         }
 
         // (2) BoringSSL internal verify entry points (bssl:: symbols, symbol
-        // table only). Return ssl_verify_ok when armed; forward original when off.
-        [['_ZN4bssl20ssl_verify_peer_certEPNS_13SSL_HANDSHAKEE', 'ssl_verify_peer_cert', ['pointer']],
-         ['_ZN4bssl22ssl_reverify_peer_certEPNS_13SSL_HANDSHAKEEb', 'ssl_reverify_peer_cert', ['pointer', 'int']]
+        // table only). attach + onLeave retval.replace (not Interceptor.replace):
+        // the original verify runs; we just overwrite its return value to
+        // ssl_verify_ok when armed, and leave it intact when off. Avoids
+        // trampolining the hot handshake function (see SPAWN-SURVIVAL HARDENING).
+        [['_ZN4bssl20ssl_verify_peer_certEPNS_13SSL_HANDSHAKEE', 'ssl_verify_peer_cert'],
+         ['_ZN4bssl22ssl_reverify_peer_certEPNS_13SSL_HANDSHAKEEb', 'ssl_reverify_peer_cert']
         ].forEach(function(t) {
             var addr = symbolAddr(mod, t[0]);
             if (!addr) return;
             try {
-                var origVP = new NativeFunction(addr, 'int', t[2]);
-                Interceptor.replace(addr, new NativeCallback(function() {
-                    if (!FLAGS.ssl) return origVP.apply(null, arguments);
-                    return SSL_VERIFY_OK;
-                }, 'int', t[2]));
+                Interceptor.attach(addr, {
+                    onLeave: function(retval) {
+                        if (!FLAGS.ssl) return;
+                        retval.replace(SSL_VERIFY_OK);   // bssl::ssl_verify_ok
+                    }
+                });
                 done.push(t[1]);
             } catch (e) {}
         });
@@ -461,12 +550,39 @@ Java.perform(function() {
         } catch (e) {}
     }
 
+    // Expose a TARGETED cronet hook to the file scope so the deterministic ctor-
+    // interpose (in the mbedTLS tier) can hook a cronet BoringSSL module in its
+    // mapped-but-pre-init window. We expose hookModule/hookNetCertVerify (single-
+    // module, light) rather than scanModules (full Process.enumerateModules() —
+    // too heavy/unsafe to run from inside the linker ctor caller).
     try {
-        scanModules();   // cronet's BoringSSL is often already mapped at spawn
-        // Re-scan when libraries load lazily after startup.
+        globalThis._SU_hookCronetModule = function(mod) {
+            var r = false;
+            try { if (!hookedModules[mod.name]) r = hookModule(mod) || r; } catch (e) {}
+            try { if (!hookedNetVerify[mod.name]) r = hookNetCertVerify(mod) || r; } catch (e) {}
+            return r;
+        };
+    } catch (e) {}
+
+    try {
+        // Initial scan (cronet's BoringSSL is often already mapped at spawn).
+        // DEFERRED via setTimeout(0): on a cold SPAWN this otherwise runs during
+        // script.load() while the process is still spawn-gated and frida is mid-
+        // RPC; doing Interceptor work synchronously there contributed to the torn-
+        // trampoline crash. Deferring to a tick lets load() return and the caller
+        // resume() the process first. Debounced so it coalesces with the dlopen
+        // scans below. Harmless for any app.
+        _SU_debounce('cronet', scanModules, 0);
+
+        // Re-scan when libraries load lazily after startup. DEBOUNCED: never
+        // re-scan re-entrantly from inside dlopen (see SPAWN-SURVIVAL HARDENING
+        // header) — coalesce the cold-spawn dlopen-storm into one scan after the
+        // linker goes quiet.
         try {
             new ApiResolver('module').enumerateMatches('exports:linker*!*dlopen*').forEach(function(d) {
-                Interceptor.attach(d.address, { onLeave: function() { scanModules(); } });
+                Interceptor.attach(d.address, {
+                    onLeave: function() { _SU_debounce('cronet', scanModules, 50); }
+                });
             });
         } catch (e) {}
         // Belt-and-braces timed re-scans for loaders dlopen doesn't surface.
@@ -536,12 +652,25 @@ Java.perform(function() {
     var MBEDTLS_SSL_VERIFY_NONE = 0;
     var _mbedHooked = {};   // symbol name -> true (hook at most once)
 
-    // Resolve a symbol by EXPORT name across every loaded module. On Frida 17 /
+    // When set (by the ctor-interpose path), resolve symbols ONLY from this one
+    // module via a cheap findExportByName — NOT a full Process.enumerateModules()
+    // walk. Enumerating all modules from inside the linker's call_constructors hot
+    // path is heavy and unsafe (it crashed the splash in testing); the targeted
+    // lookup against the just-mapped libstartup.so is light and stable.
+    var _mbedTargetModule = null;
+
+    // Resolve a symbol by EXPORT name. If a target module is pinned (ctor path),
+    // look there first/only. Otherwise walk every loaded module. On Frida 17 /
     // Android 16 Module.findExportByName(null, ...) is unreliable for these
     // statically-linked-but-exported symbols, so we walk modules (the same
     // "enumerate, don't trust global lookups" stance as the cronet tier).
     function resolveAnyExport(name) {
         var addr = null;
+        if (_mbedTargetModule) {
+            try { var a0 = _mbedTargetModule.findExportByName(name); if (a0 && !a0.isNull()) return a0; }
+            catch (e) {}
+            return null;   // ctor path: don't fall back to a full enumerate in the hot path
+        }
         try {
             Process.enumerateModules().some(function(m) {
                 try { var a = m.findExportByName(name); if (a && !a.isNull()) { addr = a; return true; } }
@@ -614,15 +743,20 @@ Java.perform(function() {
         }
 
         // (2) mbedtls_ssl_conf_verify(conf, f_vrfy, p_vrfy) -> swap callback for OK.
+        // attach + onEnter arg-rewrite (args[1] = f_vrfy) instead of replacing the
+        // setter: leaves the setter body intact so it can't tear a trampoline mid-
+        // call (see SPAWN-SURVIVAL HARDENING header). When off we don't rewrite, so
+        // the app's own callback stands.
         if (!_mbedHooked['conf_verify']) {
             var aCV = resolveAnyExport('mbedtls_ssl_conf_verify');
             if (aCV) {
                 try {
-                    var origCV = new NativeFunction(aCV, 'void', ['pointer', 'pointer', 'pointer']);
-                    Interceptor.replace(aCV, new NativeCallback(function(conf, f, p) {
-                        if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) { origCV(conf, f, p); return; }
-                        origCV(conf, okMbedtlsVerifyCb(), p);   // ignore the app's callback
-                    }, 'void', ['pointer', 'pointer', 'pointer']));
+                    Interceptor.attach(aCV, {
+                        onEnter: function(args) {
+                            if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+                            try { args[1] = okMbedtlsVerifyCb(); } catch (e) {}   // ignore the app's callback
+                        }
+                    });
                     _mbedHooked['conf_verify'] = true;
                     done.push('mbedtls_ssl_conf_verify');
                 } catch (e) {}
@@ -686,16 +820,19 @@ Java.perform(function() {
         // (5) mbedtls_ssl_set_verify(ssl, f_vrfy, p_vrfy) -> per-CONNECTION
         //     analogue of mbedtls_ssl_conf_verify. Some stacks install the
         //     custom verify callback per-connection rather than per-conf; swap it
-        //     for the always-OK callback. Reuses okMbedtlsVerifyCb().
+        //     for the always-OK callback. attach + onEnter arg-rewrite (args[1] =
+        //     f_vrfy) instead of replacing the setter (see SPAWN-SURVIVAL HARDENING
+        //     header). Reuses okMbedtlsVerifyCb().
         if (!_mbedHooked['set_verify']) {
             var aSV = resolveAnyExport('mbedtls_ssl_set_verify');
             if (aSV) {
                 try {
-                    var origSV = new NativeFunction(aSV, 'void', ['pointer', 'pointer', 'pointer']);
-                    Interceptor.replace(aSV, new NativeCallback(function(ssl, f, p) {
-                        if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) { origSV(ssl, f, p); return; }
-                        origSV(ssl, okMbedtlsVerifyCb(), p);   // ignore the app's callback
-                    }, 'void', ['pointer', 'pointer', 'pointer']));
+                    Interceptor.attach(aSV, {
+                        onEnter: function(args) {
+                            if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return;
+                            try { args[1] = okMbedtlsVerifyCb(); } catch (e) {}   // ignore the app's callback
+                        }
+                    });
                     _mbedHooked['set_verify'] = true;
                     done.push('mbedtls_ssl_set_verify');
                 } catch (e) {}
@@ -719,18 +856,183 @@ Java.perform(function() {
         return _mbedHooked['x509_verify'] && _mbedHooked['conf_authmode'];
     }
 
+    // =======================================================================
+    // DETERMINISTIC pre-init verifier install via the linker's constructor caller.
+    //
+    // The race we close: Meta's DataGateway opens the gateway.facebook.com TLS
+    // connection from libstartup.so's OWN init code, and bionic runs a library's
+    // .init_array / DT_INIT constructors INSIDE do_dlopen, BEFORE dlopen/
+    // android_dlopen_ext returns. So a dlopen onLeave hook (and any setTimeout/
+    // debounce on Frida's JS loop, which runs concurrently with the resumed app)
+    // is structurally TOO LATE — libstartup's constructor has already handshaked
+    // gateway.facebook.com by then, and it pin-fails because our mbedTLS/MNS hooks
+    // aren't in yet.
+    //
+    // The fix: interpose on soinfo::call_constructors (the linker function that
+    // invokes a freshly-mapped library's constructors). In its onEnter the target
+    // library is fully mapped + relocated but its .init_array has NOT run yet — the
+    // "mapped-but-pre-init" window. We detect each SSL-bearing module there and
+    // synchronously install ONLY that tier's verifier hooks on it (targeted — NOT a
+    // full enumerateModules re-scan in the hot path), then Interceptor.flush() so
+    // the patches are committed before we return into the linker which immediately
+    // runs the library's constructor. One-shot per module + idempotent.
+    //
+    // Robustness/generality:
+    //  * call_constructors is a LOCAL HIDDEN symbol -> resolve via enumerateSymbols
+    //    on linker64 (fall back to linker). getExportByName won't find it.
+    //  * Clean no-op if the symbol can't be resolved (then the debounced dlopen path
+    //    below remains the fallback) OR if none of the target sonames ever load (the
+    //    soname gate simply never matches) — so it cannot regress any other app.
+    //  * Identifies a module by Process.findModuleByName(soname) becoming non-null
+    //    at a ctor call — NO dependence on soinfo struct layout / get_soname.
+    //  * Armed on the first post-resume JS tick (NOT synchronously in load()):
+    //    attaching to a linker .text function during the mid-RPC load() window
+    //    crashes the spawn (measured), but the SSL libs load late enough in startup
+    //    (dozens of libraries after resume) that arming one tick after resume is
+    //    still well before their constructors run — race won, spawn survival kept.
+    // =======================================================================
+    var _ctorEarlyDone = false;
+    var _ctorListener = null;
+    function installEarlyVerifierViaCtors() {
+        if (typeof FLAGS !== 'undefined' && !FLAGS.ssl) return false;
+        var linker = null;
+        try {
+            linker = Process.findModuleByName('linker64') || Process.findModuleByName('linker');
+        } catch (e) {}
+        if (!linker) return false;   // no-op: fall back to debounced dlopen path
+
+        var ctorAddr = null;
+        try {
+            linker.enumerateSymbols().some(function(s) {
+                if (s.name === '__dl__ZN6soinfo17call_constructorsEv' && !s.address.isNull()) {
+                    ctorAddr = s.address; return true;
+                }
+                return false;
+            });
+        } catch (e) {}
+        if (!ctorAddr) return false;   // no-op: fall back to debounced dlopen path
+
+        // GENERIC, STACK-AGNOSTIC pre-init unpin table. Each entry names a module
+        // (by the soname an SSL-bearing library is loaded under) and the tier that
+        // should hook it, TARGETED to that module. This is intentionally driven by
+        // soname + a cheap findModuleByName check — NOT a full Process.enumerate-
+        // Modules() in the hot ctor path (which regressed spawn survival). The set
+        // covers every TLS stack the script supports, so ANY app's early-init TLS
+        // gets unpinned before its first handshake:
+        //   * system / conscrypt BoringSSL : libssl.so, libjavacrypto.so
+        //     (graph.facebook.com and other early OkHttp/HttpsURLConnection traffic)
+        //   * cronet (Chromium net)        : (stable_)cronet_libssl.so,
+        //     libmainlinecronet*.so  (ar-genai.graph.meta.com graphql)
+        //   * Meta MNS / mbedTLS           : libstartup.so  (gateway.facebook.com)
+        //   * Flutter                      : libflutter.so  (Dart BoringSSL)
+        // A module not present on a given app is simply skipped (clean no-op). The
+        // 'flutter' tier resolves to a no-op here unless _SU_scanFlutterModule is
+        // defined (this script ships no Flutter tier yet), so the libflutter.so
+        // entry is harmless and forward-compatible.
+        var _EARLY_TARGETS = [
+            { name: 'libstartup.so',                 tier: 'mbedtls' },
+            { name: 'stable_cronet_libssl.so',       tier: 'cronet'  },
+            { name: 'cronet_libssl.so',              tier: 'cronet'  },
+            { name: 'libmainlinecronet.so',          tier: 'cronet'  },
+            { name: 'libssl.so',                     tier: 'cronet'  },  // system/conscrypt BoringSSL
+            { name: 'libjavacrypto.so',              tier: 'cronet'  },  // conscrypt JNI BoringSSL
+            { name: 'libflutter.so',                 tier: 'flutter' }
+        ];
+        var _earlyDoneSet = {};   // soname -> true (hooked once)
+
+        // Install the right tier's hooks TARGETED to module `mod` (pre-init window).
+        function _earlyInstall(mod, tier) {
+            try {
+                if (tier === 'mbedtls') {
+                    _mbedTargetModule = mod;            // cheap findExportByName on this module
+                    try { installMbedtlsHooks(); } finally { _mbedTargetModule = null; }
+                } else if (tier === 'cronet') {
+                    if (typeof _SU_hookCronetModule === 'function') _SU_hookCronetModule(mod);
+                } else if (tier === 'flutter') {
+                    if (typeof _SU_scanFlutterModule === 'function') _SU_scanFlutterModule(mod);
+                }
+                Interceptor.flush();   // commit before the linker runs mod's constructor
+                send({type: 'info', hook: tier + ':early-ctor-install@' + mod.name});
+                return true;
+            } catch (e) { return false; }
+        }
+
+        var _ctorCalls = 0;
+        try {
+            _ctorListener = Interceptor.attach(ctorAddr, {
+                onEnter: function() {
+                    if (_ctorEarlyDone) return;
+                    _ctorCalls++;
+                    // For each not-yet-handled target, cheap findModuleByName (NOT a
+                    // full enumerate). When it first appears it is mapped-but-pre-init
+                    // (its ctor is about to run) -> install + flush now.
+                    var allDone = true;
+                    for (var i = 0; i < _EARLY_TARGETS.length; i++) {
+                        var t = _EARLY_TARGETS[i];
+                        if (_earlyDoneSet[t.name]) continue;
+                        var mod = null;
+                        try { mod = Process.findModuleByName(t.name); } catch (e) {}
+                        if (mod) {
+                            _earlyDoneSet[t.name] = _earlyInstall(mod, t.tier) || true;
+                        } else {
+                            allDone = false;   // may still load on a later ctor call
+                        }
+                    }
+                    // Detach the (hot) ctor caller once either every target has loaded
+                    // OR we've watched enough ctor calls that any further SSL module is
+                    // unlikely to be the early-init one (bounded so a non-matching app —
+                    // which never satisfies allDone — does not keep paying the per-call
+                    // findModuleByName cost forever; the app's own startup runs FAR more
+                    // than 400 constructors, and the SSL libs that back early traffic are
+                    // mapped well within that). The debounced dlopen rescans remain as
+                    // the safety net for anything that loads later.
+                    if (allDone || _ctorCalls > 400) {
+                        _ctorEarlyDone = true;
+                        try { if (_ctorListener) _ctorListener.detach(); } catch (e) {}
+                    }
+                }
+            });
+            return true;
+        } catch (e) { return false; }
+    }
+
     try {
-        // Initial attempt (libstartup.so is often already mapped at attach time).
-        installMbedtlsHooks();
+        // DETERMINISTIC PATH (primary): hook the linker's constructor caller so the
+        // verifier installs in libstartup's mapped-but-pre-init window — BEFORE its
+        // constructor opens gateway.facebook.com. Armed on the FIRST post-resume JS
+        // tick (setTimeout 0), NOT synchronously during script.load(): attaching to
+        // a linker .text function DURING load() (process spawn-gated, frida mid-RPC)
+        // tears the trampoline and crashes the splash, exactly the class of crash
+        // the SPAWN-SURVIVAL HARDENING fixes. Deferring the ATTACH to the first tick
+        // after resume is crash-safe and still wins the race (libstartup loads late
+        // in startup, well after the hook is armed).
+        try {
+            setTimeout(function() { try { installEarlyVerifierViaCtors(); } catch (e) {} }, 0);
+        } catch (e) {}
+
+        // Initial attempt (libstartup.so is often already mapped at attach time —
+        // e.g. when ATTACHing to an already-running pid rather than spawning).
+        // DEFERRED via setTimeout(0) so script.load() returns and the caller can
+        // resume() the spawn-gated process before we do native Interceptor work on
+        // libstartup.so (~17 MB) — doing it synchronously during load(), mid-RPC,
+        // was part of the torn-trampoline crash. Debounced + per-symbol-latched so
+        // coverage is unchanged. Clean no-op for non-mbedTLS apps.
+        _SU_debounce('mbedtls', installMbedtlsHooks, 0);
 
         // Re-attempt when libs load lazily (the silverstone JNI libs / DataGateway
-        // spin up after process start). Same dlopen-intercept strategy as above.
+        // spin up after process start). DEBOUNCED: the mbedTLS/MNS tier resolves
+        // symbols across libstartup.so (~17 MB); doing that re-entrantly on every
+        // dlopen during the cold-spawn linker-storm is what tore the trampoline.
+        // Coalesce into one post-burst scan. 10 ms: still coalesces the dlopen storm
+        // but installs almost immediately once libstartup.so maps — Meta's
+        // DataGateway opens its gateway.facebook.com TLS very early after libstartup
+        // loads, so a longer delay would let that handshake race ahead of the bypass.
         try {
             new ApiResolver('module')
                 .enumerateMatches('exports:linker*!*dlopen*')
                 .forEach(function(d) {
                     Interceptor.attach(d.address, {
-                        onLeave: function() { try { installMbedtlsHooks(); } catch (e) {} }
+                        onLeave: function() { _SU_debounce('mbedtls', installMbedtlsHooks, 10); }
                     });
                 });
         } catch (e) {}
