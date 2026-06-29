@@ -35,6 +35,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from typing import Any, Callable
 
 import frida
@@ -88,6 +89,86 @@ def _java_bridge_prelude() -> str:
             exc,
         )
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Spawn-reliability failure taxonomy
+# ---------------------------------------------------------------------------
+
+# Substrings (lowercased) that mark a wedged/crashed *frida-server* transport
+# — the remedy is a server restart, not a bare re-spawn.
+_DIRTY_MARKERS = (
+    "restart frida-server",
+    "connection is closed",
+    "transporterror",
+    "protocolerror",
+    "transport",
+    "timeout",
+    "need gadget",
+    "connection issue",
+    # A spawn that yields no PID is the canonical symptom of a down/wedged
+    # frida-server (apply_to_fresh_spawn emits "... (no PID — is frida-server
+    # running?)"); route it to the server-restart remedy, not a bare re-spawn.
+    "no pid",
+    "is frida-server running",
+)
+
+# Substrings that mark the *target process* dying (anti-Frida self-kill, hook
+# load crash) — the remedy is a fresh re-spawn.
+_CRASH_MARKERS = (
+    "no longer exists",
+    "processnotfound",
+    "died during hook load",
+    "crashed",
+    "script destroyed",
+)
+
+# Substrings that mark a benign "already running" outcome — treat as success.
+_BENIGN_MARKERS = (
+    "already running",
+    "invalidoperation",
+)
+
+
+def classify_spawn_failure(message: str | None, exc: Exception | None = None) -> str:
+    """Classify a spawn failure into ``dirty`` / ``crash`` / ``benign`` / ``other``.
+
+    The retry wrapper classifies the ``(False, msg)`` STRING returned by
+    :meth:`BypassService.apply_to_fresh_spawn` — that method already converts
+    the resume-path ``ProcessNotFoundError`` / ``InvalidOperationError`` to a
+    string internally and never propagates a frida exception, so callers do not
+    normally pass *exc*. The optional *exc* type fast-path is kept only for a
+    hypothetical future re-raise and is forward-compatible with a gated-spawn
+    variant.
+
+    ORDERING IS LOAD-BEARING: ``dirty`` is checked BEFORE ``crash`` because
+    AFM's ``TransportError`` message contains "may have crashed", yet the
+    correct remedy there is a server restart, not a bare re-spawn.
+
+    Args:
+        message: The failure message string (typically the ``(False, msg)``
+            second element). ``None`` is treated as empty.
+        exc: Optional exception whose type seeds the classification when the
+            message is inconclusive.
+
+    Returns:
+        One of ``"dirty"``, ``"crash"``, ``"benign"``, ``"other"``.
+    """
+    text = (message or "").lower()
+    if exc is not None:
+        # Type fast-path (forward-compat); the message scan below still wins
+        # when it is conclusive, preserving the dirty-before-crash ordering.
+        exc_name = type(exc).__name__.lower()
+        text = f"{text} {exc_name}"
+
+    # dirty BEFORE crash — see docstring.
+    if any(m in text for m in _DIRTY_MARKERS):
+        return "dirty"
+    if any(m in text for m in _CRASH_MARKERS):
+        return "crash"
+    if any(m in text for m in _BENIGN_MARKERS):
+        return "benign"
+    return "other"
 
 
 # ---------------------------------------------------------------------------
@@ -1983,6 +2064,211 @@ class BypassService:
                 + ", ".join(self.display_name(c) for c in loaded)
             )
         return True, f"Spawned {package} (no bypasses armed)"
+
+    def apply_to_fresh_spawn_with_retry(
+        self,
+        package: str,
+        categories,
+        on_message: Callable[[Any], None] | None = None,
+        resume: bool = True,
+        spawn_fn: Callable[..., tuple[bool, str]] | None = None,
+    ) -> tuple[bool, str]:
+        """Spawn-reliability ladder around :meth:`apply_to_fresh_spawn`.
+
+        Hardened apps (e.g. Meta AI ``com.facebook.stella``) crash off the
+        splash on a fraction of cold spawns even with the JS hardening: the
+        instrumented pid dies right after ``resume()`` and Android relaunches
+        the app *uninstrumented*, which re-pins TLS. This re-spawns until the
+        instrumented pid survives the splash window, recovering a wedged
+        frida-server at most once along the way, and FAILS LOUD on exhaustion.
+
+        It NEVER falls back to attach (which would lose the early SSL ctor
+        hooks installed at the pre-init window) and NEVER silently degrades to a
+        stock/uninstrumented launch — for a forensic tool a clear failure beats
+        a quietly-unhooked capture.
+
+        Only active in spawn mode: outside spawn mode this is EXACTLY one
+        :meth:`apply_to_fresh_spawn` call (zero behaviour change; attach is the
+        separate ``apply_armed`` path).
+
+        Args:
+            package: Package to spawn.
+            categories: Bypass categories to load (typically the armed set).
+            on_message: Optional Frida payload callback.
+            resume: When False (Start-paused) the spawn is intentionally left
+                frozen — no liveness poll, since the process is meant to stay
+                paused.
+            spawn_fn: Optional spawn callable returning ``(ok, msg)``
+                (forward-compat for a future child-process / gated-spawn
+                variant). Defaults to :meth:`apply_to_fresh_spawn`.
+
+        Returns:
+            (success, message). On exhaustion ``success`` is False and the
+            message names the attempt count and preserves the anti-Frida
+            diagnostic as the last error.
+        """
+        from sandroid.services import get_spotlight_service
+
+        spotlight = get_spotlight_service()
+        do_spawn = spawn_fn or self.apply_to_fresh_spawn
+
+        # Gate: the ladder only augments spawn mode. Outside it, behave EXACTLY
+        # like the pre-change single call.
+        if not spotlight.is_spawn_mode():
+            return do_spawn(package, categories, on_message, resume)
+
+        attempts, splash_window, retry_sleep = 4, 5.0, 0.6
+        try:
+            from sandroid.config import get_config
+
+            frida_cfg = get_config().frida
+            attempts = int(getattr(frida_cfg, "spawn_attempts", attempts))
+            splash_window = float(
+                getattr(frida_cfg, "spawn_splash_window", splash_window)
+            )
+            retry_sleep = float(getattr(frida_cfg, "spawn_retry_sleep", retry_sleep))
+        except Exception as exc:  # config unavailable — keep literal defaults
+            logger.debug("[Bypass] spawn-retry config read failed (%s)", exc)
+
+        restarted_server = False
+        last_msg = ""
+
+        for attempt in range(1, attempts + 1):
+            ok, msg = do_spawn(package, categories, on_message, resume)
+            last_msg = msg
+
+            if not ok:
+                klass = classify_spawn_failure(msg)
+                if klass == "benign":
+                    # "already running" — process is up with hooks; success.
+                    return True, msg
+                logger.warning(
+                    "[Bypass] spawn attempt %d/%d for %s failed (%s): %s",
+                    attempt,
+                    attempts,
+                    package,
+                    klass,
+                    msg,
+                )
+                self._teardown_failed_spawn(spotlight, package)
+                if klass == "dirty" and not restarted_server:
+                    logger.warning(
+                        "[Bypass] frida-server looks wedged; restarting it "
+                        "once before re-spawn"
+                    )
+                    self._recover_frida_server()
+                    restarted_server = True
+                time.sleep(retry_sleep)
+                continue
+
+            # ok == True
+            if not resume:
+                # Start-paused: intentionally frozen, no liveness poll.
+                return True, msg
+
+            # Resume path: confirm the SPECIFIC spawned pid survived the splash.
+            # MUST be pid-based — a relaunched uninstrumented process keeps the
+            # SAME package, so a package-focused check would false-positive.
+            try:
+                pid = spotlight.get_pid()
+            except Exception:
+                pid = None
+
+            if pid and pid > 0:
+                device = self._frida_device()
+                if self._poll_liveness(device, pid, splash_window):
+                    return True, msg
+                logger.warning(
+                    "[Bypass] spawned pid %s for %s vanished within the splash "
+                    "window (attempt %d/%d) — likely crashed and relaunched "
+                    "uninstrumented; re-spawning",
+                    pid,
+                    package,
+                    attempt,
+                    attempts,
+                )
+                self._teardown_failed_spawn(spotlight, package)
+                time.sleep(retry_sleep)
+                continue
+
+            # No pid to poll — can't confirm a crash, accept reported success.
+            return True, msg
+
+        # Exhausted every attempt — FAIL LOUD. Do not attach, do not degrade.
+        self._teardown_failed_spawn(spotlight, package)
+        return False, (
+            f"Spawn-reliability: exhausted {attempts} attempts for {package}; "
+            f"last: {last_msg}. Not falling back to attach (would lose the "
+            f"early SSL hooks). {package} likely died during hook load — the "
+            "target likely has anti-Frida detection. Enable the Frida "
+            "detection bypass first, or attach after the app is fully started "
+            "instead of spawning."
+        )
+
+    def _recover_frida_server(self) -> None:
+        """Restart a wedged frida-server and drop the stale device handle.
+
+        Fires at most once per ladder run (the caller guards that). Uses the
+        AFM recovery primitive, then invalidates the cached frida device so the
+        next spawn resolves a fresh, ready one — the same pattern the TUI uses
+        after a manual frida install/start.
+        """
+        try:
+            from sandroid.services import get_frida_session_service
+
+            svc = get_frida_session_service()
+            fm = svc.get_frida_manager()
+            if fm is not None:
+                ok = bool(fm.restart_frida_server_and_wait())
+                logger.info("[Bypass] frida-server restart -> ready=%s", ok)
+            try:
+                svc.invalidate_frida_device_cache()
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning("[Bypass] frida-server recovery failed: %s", exc)
+
+    def _poll_liveness(self, device: Any, pid: int, window: float) -> bool:
+        """Poll the SPECIFIC spawned *pid* for liveness over *window* seconds.
+
+        Returns True if the pid stays alive for the whole window (the
+        instrumented process survived the splash). A pid that vanishes from
+        ``enumerate_processes`` = crash-and-relaunch (the relaunch is
+        uninstrumented) => return False.
+
+        Guards (a good spawn must NEVER be failed by an inconclusive probe):
+
+        - ``_frida_device()`` CAN return ``None`` on a worker thread without a
+          pre-cached device, so ``device is None`` => accept (cannot confirm a
+          crash, don't false-fail a reported-good spawn).
+        - A transient transport/protocol hiccup raises from
+          ``enumerate_processes`` — treat it as alive and keep polling (per the
+          image-extractor reference). This is why the poll uses a direct,
+          hiccup-tolerant enumerate rather than AFM's ``is_process_alive``,
+          which (by design, for the one-shot dirty-server question) reports a
+          transport error as *not alive* — wrong for a splash poll, where a
+          momentary server blip must not tear down a good capture. Only a
+          definitive ``ProcessNotFoundError`` or genuine absence from the list
+          counts as a crash.
+        """
+        if device is None:
+            # Cannot confirm a crash — don't false-fail a reported-good spawn.
+            return True
+        deadline = time.time() + max(0.0, window)
+        while True:
+            try:
+                alive = any(p.pid == pid for p in device.enumerate_processes())
+            except frida.ProcessNotFoundError:
+                return False
+            except Exception as exc:
+                # Transient/transport hiccup — treat as alive (per reference).
+                logger.debug("[Bypass] liveness probe hiccup for %s: %s", pid, exc)
+                alive = True
+            if not alive:
+                return False
+            if time.time() >= deadline:
+                return True
+            time.sleep(0.3)
 
     def is_paused_session(self) -> bool:
         """True if the job manager reports a paused (spawned) process."""

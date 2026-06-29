@@ -646,7 +646,9 @@ class SpotlightPanel(Widget):
         package = spotlight.get_effective_package()
         if not package:
             return False, "No spotlight app selected"
-        return bypass.apply_to_fresh_spawn(package, bypass.armed_categories())
+        return bypass.apply_to_fresh_spawn_with_retry(
+            package, bypass.armed_categories()
+        )
 
     def _work_start_paused(self) -> tuple[bool, str]:
         spotlight = self._spotlight()
@@ -654,7 +656,7 @@ class SpotlightPanel(Widget):
         package = spotlight.get_effective_package()
         if not package:
             return False, "No spotlight app selected"
-        return bypass.apply_to_fresh_spawn(
+        return bypass.apply_to_fresh_spawn_with_retry(
             package, bypass.armed_categories(), resume=False
         )
 
@@ -690,7 +692,7 @@ class SpotlightPanel(Widget):
         bypass.stop_all()  # now fast: unloads fast-fail on the dead process
         self._reset_frida_session()  # clears jobs/session, is_first_job=True
         spotlight.set_pid(None)
-        return bypass.apply_to_fresh_spawn(package, armed)
+        return bypass.apply_to_fresh_spawn_with_retry(package, armed)
 
     def _work_kill(self) -> tuple[bool, str]:
         spotlight = self._spotlight()

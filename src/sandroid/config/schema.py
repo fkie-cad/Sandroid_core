@@ -112,6 +112,28 @@ class FridaConfig(BaseModel):
             "Legacy 'auto' is accepted as an alias for 'host'."
         ),
     )
+    spawn_attempts: int = Field(
+        default=4,
+        ge=1,
+        le=10,
+        description=(
+            "Max spawn-freeze attempts before failing loud "
+            "(spawn-reliability ladder)"
+        ),
+    )
+    spawn_splash_window: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "Seconds to poll the spawned PID for liveness after resume "
+            "(crash-relaunch detection)"
+        ),
+    )
+    spawn_retry_sleep: float = Field(
+        default=0.6,
+        ge=0.0,
+        description="Seconds to sleep between spawn re-attempts",
+    )
 
 
 class NetworkConfig(BaseModel):

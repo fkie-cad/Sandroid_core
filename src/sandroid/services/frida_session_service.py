@@ -513,6 +513,16 @@ class FridaSessionService:
         """
         import time
 
+        # Defensive: a worker thread without a pre-cached frida device gets
+        # None from get_frida_device(); resuming through None would AttributeError
+        # mid-spawn. Nothing to resume without a device — bail quietly.
+        if device is None:
+            self._logger.warning(
+                "resume_spawned_process: no frida device; cannot resume pid %s",
+                pid,
+            )
+            return
+
         # Idempotency guard (A2): ``is_paused()`` is the single source of truth
         # for whether a resume is needed. ``JobManager.start_job`` already
         # resumes the first job of a freshly spawned session, so callers that
