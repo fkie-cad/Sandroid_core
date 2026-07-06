@@ -535,6 +535,98 @@ function _suJavaTier() {
         return done.length > 0;
     }
 
+    // (5) STRIPPED, statically-linked BoringSSL (e.g. GmsCore split_CronetDynamite
+    // libcronet.*.so): .dynsym carries ZERO SSL symbols and there is no .symtab, so the
+    // export/symbol gate in hookModule() (the `if (!setCV && !setCtxCV && !getVR) return
+    // false;` above) and the mangled-name lookups in hookNetCertVerify() BOTH find
+    // nothing and skip the module entirely. Locate the cert-verify functions by a
+    // version-STABLE code signature instead of a symbol name or a fixed offset, so this
+    // self-adapts across cronet updates:
+    //   anchor  = PUT_ERROR(ERR_LIB_SSL=16, SSL_R_CERTIFICATE_VERIFY_FAILED=125), i.e.
+    //             `mov w0,#0x10 ; mov w1,wzr ; mov w2,#0x7d`  (aarch64, 12 bytes).
+    // This triple occurs in exactly the two cert-verify functions ssl_verify_peer_cert
+    // and ssl_reverify_peer_cert (proven: 2 hits in a stripped libcronet 149.x). From
+    // each hit we walk BACKWARDS to the `paciasp` prologue to recover the function entry,
+    // then find the custom_verify_callback dispatch inside it (`blr xN` immediately
+    // followed by `cmp w0,#1`) and rewrite the callback's ssl_verify_invalid(1) return to
+    // ssl_verify_ok(0) *before* the fatal-alert path runs. A plain onLeave return-flip is
+    // too late here: the invalid path calls ssl_send_alert() to QUEUE a fatal
+    // certificate_unknown(46) alert *inside* the function body before returning, which
+    // already aborts the TLS handshake (verified live). We keep an onLeave flip too as a
+    // belt-and-braces for any non-callback (x509_method) path. arm64 only.
+    //
+    // ADDITIVE + INDEPENDENT: this is a SEPARATE path from hookModule()'s symbol gate
+    // above — it does NOT touch that gate. It is the only tier that reaches
+    // stripped/symbol-less cronet libs, which the symbol gate necessarily misses. Keyed
+    // on per-load addresses (not module name) so a transient CronetDynamite reload is
+    // re-hooked.
+    var hookedCronetStripped = {};                 // addr/site keys -> true (per-load dedupe)
+    var _CV_PAT   = '00 02 80 52 e1 03 1f 2a a2 0f 80 52'; // mov w0,#0x10; mov w1,wzr; mov w2,#0x7d
+    var _CV_PACIASP = 0xd503233f, _CV_CMPW01 = 0x7100041f;
+    function _cvIsBlr(w) { return (((w & 0xFFFFFC1F)) >>> 0) === 0xD63F0000; }
+    function hookCronetStrippedVerify(mod) {
+        if (!mod || Process.arch !== 'arm64') return false;
+        var done = [];
+        var ranges = Process.enumerateRanges('r-x').filter(function(r) {
+            return r.base.compare(mod.base) >= 0 && r.base.compare(mod.base.add(mod.size)) < 0; });
+        var sites = [];
+        ranges.forEach(function(r) {
+            var mm; try { mm = Memory.scanSync(r.base, r.size, _CV_PAT); } catch (e) { mm = []; }
+            mm.forEach(function(m) { sites.push(m.address); });
+        });
+        if (!sites.length) return false;
+        sites.forEach(function(site) {
+            // dedupe by SITE address so a re-scan after we patch the prologue can't walk
+            // back past the (now-overwritten) paciasp into the previous function.
+            var sk = 's' + site.toString();
+            if (hookedCronetStripped[sk]) return;
+            hookedCronetStripped[sk] = true;
+            // walk back to the paciasp prologue -> function entry
+            var p = site, lim = site.sub(0x1000), entry = null;
+            while (p.compare(lim) >= 0) {
+                try { if (p.readU32() === _CV_PACIASP) { entry = p; break; } } catch (e) { break; }
+                p = p.sub(4);
+            }
+            if (!entry) return;
+            // custom_verify_callback dispatch: `blr xN` immediately followed by `cmp w0,#1`
+            var a = entry;
+            while (a.compare(site) < 0) {
+                var isDispatch = false;
+                try { isDispatch = _cvIsBlr(a.readU32()) && (a.add(4).readU32() === _CV_CMPW01); } catch (e) {}
+                if (isDispatch) {
+                    var cmpAddr = a.add(4), ck = 'c' + cmpAddr.toString();
+                    if (!hookedCronetStripped[ck]) {
+                        hookedCronetStripped[ck] = true;
+                        try {
+                            Interceptor.attach(cmpAddr, { onEnter: function() {
+                                if (!FLAGS.ssl) return;
+                                if ((this.context.x0.toInt32() | 0) === 1) this.context.x0 = ptr(0);
+                            }});
+                            done.push('cb@' + cmpAddr);
+                        } catch (e) {}
+                    }
+                }
+                a = a.add(4);
+            }
+            // belt-and-braces: flip the function's own return 1 -> 0 (covers x509_method path)
+            var ek = 'e' + entry.toString();
+            if (!hookedCronetStripped[ek]) {
+                hookedCronetStripped[ek] = true;
+                try {
+                    Interceptor.attach(entry, { onLeave: function(rv) {
+                        if (!FLAGS.ssl) return;
+                        if (rv.toInt32() === 1) rv.replace(0);
+                    }});
+                    done.push('fn@' + entry);
+                } catch (e) {}
+            }
+        });
+        if (done.length) {
+            try { send({type: 'info', hook: 'cronet_stripped:' + mod.name + ':' + done.join('+')}); } catch (e) {}
+        }
+        return done.length > 0;
+    }
+
     function scanModules() {
         try {
             Process.enumerateModules().forEach(function(m) {
@@ -546,6 +638,12 @@ function _suJavaTier() {
                 if (!looksRelevant) return;
                 if (!hookedModules[m.name]) hookModule(m);
                 if (!hookedNetVerify[m.name]) hookNetCertVerify(m);
+                // Stripped static BoringSSL inside cronet (no symbols at all): a
+                // SEPARATE, additive path from the symbol gate in hookModule() above,
+                // for symbol-less cronet libs it necessarily misses. Keyed on per-load
+                // addresses (not module name) so a transient CronetDynamite reload is
+                // re-hooked.
+                if (n.indexOf('cronet') !== -1) hookCronetStrippedVerify(m);
             });
         } catch (e) {}
     }
