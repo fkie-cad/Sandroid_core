@@ -272,11 +272,34 @@ class ConfigLoader:
         except Exception as e:
             raise ValueError(f"Invalid configuration: {e}") from e
 
+    @staticmethod
+    def _redact_secrets(config_dict: dict) -> dict:
+        """Redact known secret fields from a config dict, for display only.
+
+        Mutates and returns config_dict. Never called on the path that
+        actually persists a config file — only from the
+        ``sandroid-config show`` display helper, which discards its temp
+        file immediately after reading it back.
+        """
+        ai_section = config_dict.get("ai")
+        if isinstance(ai_section, dict) and ai_section.get("api_key"):
+            ai_section["api_key"] = "***REDACTED***"
+
+        credentials = config_dict.get("credentials")
+        if isinstance(credentials, dict):
+            custom_keys = credentials.get("custom_api_keys")
+            if isinstance(custom_keys, dict) and custom_keys:
+                credentials["custom_api_keys"] = dict.fromkeys(
+                    custom_keys, "***REDACTED***"
+                )
+        return config_dict
+
     def save_config(
         self,
         config: SandroidConfig,
         config_file: str | Path | None = None,
         format: str = "toml",
+        redact_secrets: bool = False,
     ) -> Path:
         """Save configuration to file.
 
@@ -284,6 +307,11 @@ class ConfigLoader:
             config: Configuration to save
             config_file: Target file path (defaults to ~/.config/sandroid/)
             format: Output format ('toml', 'yaml', 'json'). Default is 'toml'.
+            redact_secrets: If True, replace known secret field values
+                (``ai.api_key``, ``credentials.custom_api_keys``) with a
+                redacted placeholder before writing. Intended only for
+                display-purposes callers (e.g. ``sandroid-config show``) —
+                never set this when persisting a real configuration file.
 
         Returns:
             Path where configuration was saved
@@ -309,6 +337,9 @@ class ConfigLoader:
         else:
             # JSON and YAML support null/None values
             config_dict = json.loads(config.model_dump_json(exclude_unset=True))
+
+        if redact_secrets:
+            config_dict = self._redact_secrets(config_dict)
 
         # Save based on format
         if format == "toml":

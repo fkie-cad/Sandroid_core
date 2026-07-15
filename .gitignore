@@ -109,3 +109,8 @@ testing_3rd_party_scripts/
 # dexray-insight artifacts
 libinfo.jsonl
 libsmali.jsonl
+
+# local AI config / credentials - never commit real API keys
+/sandroid.yaml
+/sandroid.toml
+.env

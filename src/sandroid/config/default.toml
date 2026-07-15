@@ -48,15 +48,27 @@ enabled = false
 # config_mode = "I"  # I for interactive, D for default
 
 [ai]
-enabled = false
-provider = "google-genai"
+# Chat/agent LLM connection — all three must be set together to use the Chat tab.
+# Any OpenAI-compatible chat-completions endpoint works (OpenAI itself, Ollama,
+# vLLM, LM Studio, an internal gateway, ...).
+# base_url = "https://api.openai.com/v1"
 # api_key = "your-api-key-here"  # Better to use SANDROID_AI__API_KEY env var
-model = "gemini-pro"
+# model = "gpt-4o"
 
 [report]
 generate_pdf = false
 include_screenshots = true
 # template_path = "/path/to/custom/template.html"  # Optional: custom report template
+
+# MCP (Model Context Protocol) client — lets Sandroid's Chat feature call tools
+# hosted by external MCP servers. A bundled dummy server (proving the MCP
+# pipeline works end-to-end) is enabled by default with no config needed here.
+# [[mcp.servers]]
+# name = "my-external-server"
+# transport = "stdio"
+# command = "/usr/bin/some-mcp-server"
+# args = ["--flag", "value"]
+# enabled = true
 
 [theme]
 # Theme preset for terminal colors

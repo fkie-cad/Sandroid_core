@@ -52,19 +52,31 @@ trigdroid:
   # config_mode: I  # I for interactive, D for default
 
 ai:
-  enabled: false
-  provider: google-genai
-  # api_key: your-api-key-here  # Better to use credentials section or SANDROID_AI__API_KEY env var
-  model: gemini-pro
+  # Chat/agent LLM connection — all three must be set together to use the Chat tab.
+  # Any OpenAI-compatible chat-completions endpoint works (OpenAI itself, Ollama,
+  # vLLM, LM Studio, an internal gateway, ...).
+  # base_url: https://api.openai.com/v1
+  # api_key: your-api-key-here  # Better to use SANDROID_AI__API_KEY env var
+  # model: gpt-4o
 
 report:
   generate_pdf: false
   include_screenshots: true
   # template_path: /path/to/custom/template.html  # Optional: custom report template
 
+# MCP (Model Context Protocol) client — lets Sandroid's Chat feature call tools
+# hosted by external MCP servers. A bundled dummy server (proving the MCP
+# pipeline works end-to-end) is enabled by default with no config needed here.
+# mcp:
+#   servers:
+#     - name: my-external-server
+#       transport: stdio
+#       command: /usr/bin/some-mcp-server
+#       args: ["--flag", "value"]
+#       enabled: true
+
 # Secure credentials (use environment variables for production)
 credentials:
-  # google_genai_api_key: your-google-api-key  # Better to use SANDROID_CREDENTIALS__GOOGLE_GENAI_API_KEY env var
   custom_api_keys: {}
 
 # Custom settings (add your own as needed)
