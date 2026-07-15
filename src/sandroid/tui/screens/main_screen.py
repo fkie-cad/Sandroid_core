@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    ChatPanel,
     FriTapPanel,
     MitmproxyPanel,
     SandroidFooter,
@@ -145,11 +146,13 @@ class MainScreen(Screen):
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
+                        yield Static("Chat", id="tab-chat", classes="tool-tab")
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield FriTapPanel(id="fritap-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
+                        yield ChatPanel(id="chat-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
@@ -196,6 +199,7 @@ class MainScreen(Screen):
         "tab-mitm": "mitm-panel",
         "tab-fritap": "fritap-panel",
         "tab-snapshots": "snapshots-panel",
+        "tab-chat": "chat-panel",
     }
 
     def on_click(self, event) -> None:

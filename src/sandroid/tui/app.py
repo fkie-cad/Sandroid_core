@@ -539,6 +539,11 @@ class SandroidTUI(App):
         # Pre-initialize command registry and package cache in background
         self.run_worker(self._pre_init_commands, exclusive=False)
         self.run_worker(self._pre_fetch_packages, exclusive=False)
+        # Connect every enabled config.mcp.servers entry (e.g. the bundled
+        # dummy server) and bridge their tools into the shared ToolRegistry,
+        # so the Chat tab's tool-calling loop can see them immediately. A
+        # broken/unreachable MCP server must never break app startup.
+        self.run_worker(self._start_mcp_tools, exclusive=False, thread=True)
 
     async def _pre_init_commands(self) -> None:
         """Eagerly initialize command registry so first keypress is fast."""
@@ -557,6 +562,30 @@ class SandroidTUI(App):
             get_app_selection_service().get_installed_packages(user_only=True)
         except Exception as e:
             logger.debug(f"Pre-fetch packages failed: {e}")
+
+    def _start_mcp_tools(self) -> None:
+        """Start the MCP client manager and bridge its tools into the registry.
+
+        Plain sync function run via ``run_worker(..., thread=True)`` (not
+        ``async def`` on Textual's own event loop) -- ``MCPClientManager
+        .start()`` is a blocking call with up to ~35s of combined per-server
+        connect timeout and no ``await`` inside it, so running it as an
+        "async" worker without ``thread=True`` would actually block the UI
+        thread for however long that takes, not yield to it.
+
+        Wrapped in try/except: a broken or unreachable MCP server must never
+        break app startup -- the Chat tab still works with native tools only
+        if this fails, it just won't have any ``mcp:<server>:*`` tools.
+        """
+        try:
+            from sandroid.ai import bridge_mcp_tools, get_mcp_client_manager
+
+            get_mcp_client_manager().start()
+            bridge_mcp_tools()
+        except Exception as e:
+            logger.warning(
+                f"MCP client startup failed (Chat MCP tools unavailable): {e}"
+            )
 
     def _show_welcome_if_first_run(self) -> None:
         """Show a welcome modal on the very first TUI launch.
@@ -810,6 +839,17 @@ class SandroidTUI(App):
                 monitor.stop()
             except Exception:
                 pass
+
+        # Tear down every connected MCP server cleanly. Wrapped in try/except
+        # so a hung shutdown (e.g. an unresponsive server subprocess) never
+        # blocks app exit -- MCPClientManager.stop() itself already bounds
+        # every wait with its own timeouts.
+        try:
+            from sandroid.ai import get_mcp_client_manager
+
+            get_mcp_client_manager().stop()
+        except Exception:
+            pass
 
     def _get_main_screen(self) -> MainScreen | None:
         return self.screen if isinstance(self.screen, MainScreen) else None

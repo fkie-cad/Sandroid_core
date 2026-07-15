@@ -175,6 +175,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 with TabPane("MVT", id="tab-mvt"):
                     with ScrollableContainer():
                         yield from self._compose_mvt_tab(config)
+                with TabPane("AI Chat", id="tab-ai-chat"):
+                    with ScrollableContainer():
+                        yield from self._compose_ai_chat_tab(config)
                 with TabPane("Timeouts", id="tab-timeouts"):
                     with ScrollableContainer():
                         yield from self._compose_timeouts_tab(config)
@@ -585,6 +588,40 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-select",
             )
 
+    def _compose_ai_chat_tab(self, config: SandroidConfig) -> ComposeResult:
+        """Compose the AI Chat settings tab."""
+        yield Static("AI Chat", classes="section-header")
+
+        # Show Verbose Thinking
+        with Horizontal(classes="setting-row"):
+            yield Label("Show Verbose Thinking:", classes="setting-label")
+            yield Switch(
+                value=config.ai.show_verbose_thinking,
+                id="setting-ai--show_verbose_thinking",
+                classes="setting-switch",
+            )
+        yield Static(
+            "[dim]When on, the model's full reasoning/thinking text stays "
+            "visible in the transcript. When off (default), it collapses "
+            "into a single 'Thought for Ns' line once the reasoning phase "
+            "ends.[/dim]",
+            classes="setting-label",
+        )
+
+        # Show Chat Mascot
+        with Horizontal(classes="setting-row"):
+            yield Label("Show Chat Mascot:", classes="setting-label")
+            yield Switch(
+                value=config.ai.show_chat_mascot,
+                id="setting-ai--show_chat_mascot",
+                classes="setting-switch",
+            )
+        yield Static(
+            "[dim]Show the small animated mascot beside the Chat panel's "
+            "message input while Sandroid is thinking or replying.[/dim]",
+            classes="setting-label",
+        )
+
     def _compose_timeouts_tab(self, config: SandroidConfig) -> ComposeResult:
         """Compose the Timeouts settings tab."""
         timeouts = config.timeouts
@@ -659,16 +696,12 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             logger.debug(f"Could not access FridaSessionService: {e}")
 
         try:
-            self.app.call_from_thread(
-                self._populate_frida_versions, tags, installed
-            )
+            self.app.call_from_thread(self._populate_frida_versions, tags, installed)
         except Exception:
             # Screen already dismissed
             pass
 
-    def _populate_frida_versions(
-        self, tags: list[str], installed: str | None
-    ) -> None:
+    def _populate_frida_versions(self, tags: list[str], installed: str | None) -> None:
         """UI-thread callback: rebuild the version Select and info lines."""
         try:
             select = self.query_one("#setting-frida--server_version", Select)
@@ -683,9 +716,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         except Exception:
             pass
 
-        latest_label = (
-            f"Latest ({tags[0]})" if tags else "Latest (offline)"
-        )
+        latest_label = f"Latest ({tags[0]})" if tags else "Latest (offline)"
         current = select.value
         options: list[tuple[str, str]] = [
             (f"Match host ({host_ver})", "host"),
@@ -697,11 +728,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Preserve the currently-selected explicit version if it would
         # otherwise disappear from the list
         existing_values = {v for _, v in options}
-        if (
-            current
-            and current not in existing_values
-            and current != "__custom__"
-        ):
+        if current and current not in existing_values and current != "__custom__":
             options.append((str(current), str(current)))
         options.append(("Custom…", "__custom__"))
 
@@ -757,9 +784,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # visibility based on the selection.
         if key == "frida.server_version":
             try:
-                custom_row = self.query_one(
-                    "#frida-version-custom-row", Horizontal
-                )
+                custom_row = self.query_one("#frida-version-custom-row", Horizontal)
                 custom_input = self.query_one(
                     "#setting-frida--server_version_custom", Input
                 )
@@ -789,9 +814,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # its own key) so the saved config never contains "__custom__".
         if widget_id == "setting-frida--server_version_custom":
             try:
-                select = self.query_one(
-                    "#setting-frida--server_version", Select
-                )
+                select = self.query_one("#setting-frida--server_version", Select)
             except Exception:
                 select = None
             if select is not None and select.value == "__custom__":
