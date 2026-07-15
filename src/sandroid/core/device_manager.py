@@ -360,9 +360,14 @@ class DeviceManager:
         - Spotlight application
         - Running background tasks
         - Cached file information
+        - Cached installed-package list (it is device-specific)
         """
         try:
-            from sandroid.services import get_spotlight_service, get_task_service
+            from sandroid.services import (
+                get_app_selection_service,
+                get_spotlight_service,
+                get_task_service,
+            )
 
             from .toolbox import Toolbox
 
@@ -371,6 +376,11 @@ class DeviceManager:
 
             # Reset spotlight application
             get_spotlight_service().reset()
+
+            # Flush the installed-package cache: it is keyed only by the
+            # user_only flag, not by device, so it would otherwise keep serving
+            # the previous device's apps in the app selector after a switch.
+            get_app_selection_service().flush_package_cache()
 
             # Clear caches
             Toolbox.changed_files_cache = {}

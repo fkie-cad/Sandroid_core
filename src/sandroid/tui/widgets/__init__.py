@@ -4,6 +4,7 @@ Reusable widget components for the Sandroid TUI.
 """
 
 from sandroid.tui.widgets.activity_log import ActivityLog
+from sandroid.tui.widgets.dexray_panel import DEXrayPanel
 from sandroid.tui.widgets.forensic_panel import ForensicPanel
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.loading_spinner import LoadingSpinner
@@ -16,6 +17,7 @@ from sandroid.tui.widgets.status_bar import StatusBar
 
 __all__ = [
     "ActivityLog",
+    "DEXrayPanel",
     "ForensicPanel",
     "FriTapPanel",
     "LoadingSpinner",

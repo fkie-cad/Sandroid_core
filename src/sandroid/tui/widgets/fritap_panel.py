@@ -89,6 +89,10 @@ class FriTapPanel(Widget):
         self._keys = 0
         self._datalog = 0
         self._errors = 0
+        # The running FriTap instance, captured on TASK_STARTED so the
+        # post-capture flow can read its result_paths after TASK_STOPPED (the
+        # task is unregistered by then, but the Python object outlives it).
+        self._results_instance = None
 
     # -- compose / mount --------------------------------------------------
 
@@ -161,6 +165,25 @@ class FriTapPanel(Widget):
                 cb = _make_refresh_cb()
                 bus.subscribe(event_type, cb)
                 self._event_handlers.append((event_type, cb))
+
+            # Capture the friTap instance when its task starts, and run the
+            # post-capture flow (Capture Results → Decrypt offer) when it stops.
+            # stop() finalizes the capture synchronously inside the task's
+            # stop_callback BEFORE TASK_STOPPED fires, so result_paths is ready.
+            def _started_cb(event) -> None:
+                if (getattr(event, "data", None) or {}).get("task_name") != "fritap":
+                    return
+                _schedule(self._capture_fritap_instance)
+
+            def _stopped_cb(event) -> None:
+                if (getattr(event, "data", None) or {}).get("task_name") != "fritap":
+                    return
+                _schedule(self._on_fritap_stopped)
+
+            bus.subscribe(EventType.TASK_STARTED, _started_cb)
+            self._event_handlers.append((EventType.TASK_STARTED, _started_cb))
+            bus.subscribe(EventType.TASK_STOPPED, _stopped_cb)
+            self._event_handlers.append((EventType.TASK_STOPPED, _stopped_cb))
         except Exception as exc:
             logger.debug(f"FriTapPanel event subscribe failed: {exc}")
 
@@ -314,24 +337,75 @@ class FriTapPanel(Widget):
     # -- actions ----------------------------------------------------------
 
     def action_toggle_running(self) -> None:
-        """Enter — delegate Start/Stop to the existing FriTap command (key h).
+        """Enter — start via the capture wizard, or stop the running session.
 
-        The command owns ALL preconditions (frida-server up, spotlight app),
-        the config modal, task registration, the paused-spawn guard, and the
-        dual-path cleanup — and dispatches the blocking Frida work to its own
-        worker thread (``is_blocking_io=True``). So we just trigger it; do NOT
-        wrap this in a second worker (double-dispatch).
+        On **start** (no friTap task running) this launches the Sandroid friTap
+        capture wizard (capture mode → protocol → … → confirm). When the wizard
+        confirms, it arms ``FriTapConfigService`` and triggers the existing
+        FriTap command (key ``h``), which consumes the armed config and runs the
+        blocking Frida work on its own worker thread (``is_blocking_io=True``).
+
+        On **stop** (a friTap task is running) Enter delegates straight to the
+        command, exactly as before. The command still owns ALL preconditions
+        (frida-server up, spotlight app), task registration, the paused-spawn
+        guard, and the dual-path cleanup — so we never double-dispatch here.
         """
         try:
+            running = bool(get_task_service().is_running("fritap"))
+        except Exception:
+            running = False
+
+        # --- Stop path (unchanged): delegate to the command. ---
+        if running:
+            # Capture the instance now (in case TASK_STARTED was missed, e.g. the
+            # panel mounted after the session began) so the post-stop Capture
+            # Results flow can read its result_paths.
+            self._capture_fritap_instance()
+            try:
+                self.query_one("#fritap-log", RichLog).write(
+                    "[#7dd3fc][INFO] friTap stop requested…[/]"
+                )
+            except Exception:
+                pass
+            try:
+                self.app.action_action_key("h")
+            except Exception as exc:
+                logger.warning("FriTap toggle failed: %s", exc)
+            self.refresh_header()
+            return
+
+        # --- Start path: require a target app, then run the wizard. ---
+        from sandroid.services import get_spotlight_service
+
+        if not get_spotlight_service().get_effective_package():
+            try:
+                self.app.notify(
+                    "Select a target app in Spotlight before starting friTap.",
+                    severity="warning",
+                )
+            except Exception:
+                pass
+            return
+
+        try:
             self.query_one("#fritap-log", RichLog).write(
-                "[#7dd3fc][INFO] friTap toggle requested…[/]"
+                "[#7dd3fc][INFO] friTap capture wizard…[/]"
             )
         except Exception:
             pass
         try:
-            self.app.action_action_key("h")
+            from sandroid.tui.widgets.fritap_capture_wizard import (
+                FriTapCaptureWizard,
+            )
+
+            FriTapCaptureWizard(self.app).start()
         except Exception as exc:
-            logger.warning("FriTap toggle failed: %s", exc)
+            logger.warning("FriTap wizard launch failed: %s", exc)
+            # Fallback to the command's own interactive configuration path.
+            try:
+                self.app.action_action_key("h")
+            except Exception:
+                pass
         self.refresh_header()
 
     def action_clear_log(self) -> None:
@@ -389,6 +463,184 @@ class FriTapPanel(Widget):
             ),
             on_result,
         )
+
+    # -- post-capture flow (results → decrypt → replay) -------------------
+
+    def _capture_fritap_instance(self) -> None:
+        """Remember the running friTap instance (UI thread, on TASK_STARTED)."""
+        try:
+            task = get_task_service().get_task("fritap")
+            self._results_instance = getattr(task, "instance", None)
+        except Exception:
+            self._results_instance = None
+
+    def _on_fritap_stopped(self) -> None:
+        """On TASK_STOPPED for friTap: show the Capture Results summary, then
+        (for a full capture with keys) offer to decrypt into a ``.tap``.
+
+        Runs on the UI thread. ``stop()`` finalized the capture synchronously
+        before this fired, so ``result_paths`` is already populated.
+        """
+        inst = self._results_instance
+        self._results_instance = None
+        if inst is None:
+            return
+        result_paths = getattr(inst, "result_paths", None) or {}
+        if not result_paths:
+            return
+        # This runs via loop.call_soon_threadsafe, which does NOT set Textual's
+        # active_app ContextVar. Creating a modal here directly makes compose()
+        # fail with NoActiveAppError (it builds unparented widgets in a `with`
+        # block). call_later re-enters the app's message loop where the context
+        # is set — non-blocking, unlike call_from_thread (which deadlocks against
+        # friTap's Frida publisher threads).
+        self.app.call_later(self._show_capture_results, inst, result_paths)
+
+    def _show_capture_results(self, inst, result_paths: dict) -> None:
+        """Push the "Capture Results" modal, then chain the decrypt offer."""
+        from sandroid.tui.modals import MessageModal
+
+        stats = getattr(inst, "result_stats", None) or {}
+        app = getattr(inst, "app_package", None) or "target"
+        lines = [f"Capture of [bold]{app}[/] completed.\n"]
+        for label, path in result_paths.items():
+            stat = stats.get(label)
+            suffix = f" ({stat})" if stat else ""
+            lines.append(f"  {label}: [bold]{path}[/]{suffix}")
+
+        def _after_results(_result=None) -> None:
+            self._maybe_offer_decrypt(inst)
+
+        try:
+            self.app.push_screen(
+                MessageModal(
+                    title="Capture Results",
+                    message="\n".join(lines),
+                    level="info",
+                ),
+                _after_results,
+            )
+        except Exception as exc:
+            logger.warning("Failed to show Capture Results modal: %s", exc)
+
+    def _maybe_offer_decrypt(self, inst) -> None:
+        """Offer to decrypt a full capture's pcap+keys into a layered flow view.
+
+        Only for full captures that produced both a pcap with packets and at
+        least one keylog on disk — mirrors friTap's own decrypt offer.
+        """
+        if not getattr(inst, "full_capture_done", False):
+            return
+        keylogs = getattr(inst, "result_keylogs", None) or {}
+        pcap = (getattr(inst, "result_paths", None) or {}).get("PCAP")
+        has_packets = getattr(inst, "pcap_has_packets", False)
+        if not (keylogs and pcap and has_packets):
+            return
+
+        from sandroid.tui.modals import ConfirmModal
+
+        def _on_choice(ok: bool | None) -> None:
+            if ok:
+                self._start_decrypt_to_tap(pcap, keylogs)
+
+        try:
+            self.app.push_screen(
+                ConfirmModal(
+                    title="Decrypt captured traffic?",
+                    message=(
+                        "Decrypt the captured pcap with the captured keys into a "
+                        "layered flow view?"
+                    ),
+                    yes_label="Decrypt",
+                    no_label="Skip",
+                ),
+                _on_choice,
+            )
+        except Exception as exc:
+            logger.warning("Failed to show decrypt offer modal: %s", exc)
+
+    def _start_decrypt_to_tap(self, pcap: str, keylogs: dict) -> None:
+        """Decrypt ``pcap`` + ``keylogs`` into a ``.tap`` on a worker thread,
+        then open it with ``fritap -r`` in a new terminal.
+
+        ``convert_pcap_to_tap`` shells out to tshark (slow + blocking), so it
+        runs on a Textual thread-worker to keep the TUI responsive; UI work is
+        marshalled back via ``app.call_from_thread`` (the documented pattern for
+        thread-workers — distinct from the EventBus publisher threads this
+        panel must NOT call_from_thread on).
+        """
+        tap_path = os.path.splitext(pcap)[0] + ".tap"
+        tls_keylog = keylogs.get("tls")
+        protocol_keylogs = {p: f for p, f in keylogs.items() if p != "tls"}
+
+        try:
+            self.app.notify(
+                f"Decrypting capture into {os.path.basename(tap_path)} …"
+            )
+        except Exception:
+            pass
+
+        def _work() -> None:
+            try:
+                from friTap.offline.pcap_to_tap import convert_pcap_to_tap
+            except Exception as exc:
+                self._notify_from_thread(
+                    f"friTap offline converter unavailable: {exc}", "error"
+                )
+                return
+            try:
+                result = convert_pcap_to_tap(
+                    pcap,
+                    tap_path=tap_path,
+                    keylog_path=tls_keylog,
+                    signal_keylog=protocol_keylogs.get("signal"),
+                    mtproto_keylog=protocol_keylogs.get("mtproto"),
+                    protocol_keylogs=protocol_keylogs or None,
+                )
+            except Exception as exc:
+                # Most common cause: tshark not installed. Surface it plainly.
+                self._notify_from_thread(f"Decrypt failed: {exc}", "error")
+                return
+
+            try:
+                from sandroid.core.toolbox import Toolbox
+
+                Toolbox.mark_tool_used("fritap", files=[tap_path])
+            except Exception:
+                pass
+
+            flows = getattr(result, "flow_count", None)
+            if flows is not None:
+                msg = (
+                    f"Decrypted {flows} flow{'s' if flows != 1 else ''} → "
+                    f"{os.path.basename(tap_path)}"
+                )
+            else:
+                msg = f"Decrypted → {os.path.basename(tap_path)}"
+            self._notify_from_thread(msg, "information")
+            # Open the replay TUI in a new terminal (existing infra).
+            try:
+                self.app.call_from_thread(
+                    self._launch_fritap_replay, Path(tap_path)
+                )
+            except Exception as exc:
+                logger.warning("Failed to launch replay after decrypt: %s", exc)
+
+        try:
+            self.run_worker(_work, thread=True, exclusive=False)
+        except Exception as exc:
+            logger.warning("Failed to start decrypt worker: %s", exc)
+            try:
+                self.app.notify(f"Could not start decrypt: {exc}", severity="error")
+            except Exception:
+                pass
+
+    def _notify_from_thread(self, message: str, severity: str = "information") -> None:
+        """Marshal an ``app.notify`` onto the UI thread from a worker thread."""
+        try:
+            self.app.call_from_thread(self.app.notify, message, severity=severity)
+        except Exception:
+            pass
 
     # -- helpers ----------------------------------------------------------
 

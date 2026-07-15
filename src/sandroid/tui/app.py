@@ -1179,11 +1179,29 @@ class SandroidTUI(App):
     def action_action_key(self, key: str) -> None:
         ms = self._get_main_screen()
         if ms:
+            # Dexray (m): in the TUI the DEXray tab is the config home, so arm
+            # the in-tab configuration before a Start. MalwareMonitor consumes
+            # it (one-shot) and skips the legacy interactive prompt. Only arm
+            # when starting — a running task means this press is a Stop.
+            if key == "m":
+                try:
+                    from sandroid.services import (
+                        get_dexray_config_service,
+                        get_task_service,
+                    )
+
+                    if not get_task_service().is_running("dexray-intercept"):
+                        get_dexray_config_service().mark_configured()
+                except Exception:
+                    pass
             ms.execute_action_by_key(key)
             # friTap (h) gets a first-class tab — jump to it so the toggle has
             # a visible home (mirrors 0 → open_snapshots_tab).
             if key == "h":
                 ms.open_fritap_tab()
+            # Dexray (m) likewise gets its DEXray tab as a visible home.
+            elif key == "m":
+                ms.open_dexray_tab()
         # Spotlight selection (C attach / Shift+C spawn) does NOT force the
         # panel open — it stays minimized by default. The panel live-updates
         # via the EventBus whether shown or hidden; press Ctrl+B to view it.

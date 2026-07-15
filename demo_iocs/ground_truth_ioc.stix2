@@ -1,0 +1,88 @@
+{
+    "type": "bundle",
+    "id": "bundle--sandroid-demo-ground-truth-001",
+    "objects": [
+        {
+            "type": "malware",
+            "spec_version": "2.1",
+            "id": "malware--demo-ground-truth-001",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "name": "Sandroid Ground Truth Demo",
+            "description": "Demo IOC for testing Sandroid forensic scanning with ground_truth.apk",
+            "is_family": false
+        },
+        {
+            "type": "indicator",
+            "spec_version": "2.1",
+            "id": "indicator--demo-ground-truth-pkg-001",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "name": "Ground Truth APK Package Name",
+            "description": "Demo indicator: Sandroid ground_truth.apk test application package name",
+            "indicator_types": ["malicious-activity"],
+            "pattern": "[process:name='de.fkie.ground_truth']",
+            "pattern_type": "stix",
+            "pattern_version": "2.1",
+            "valid_from": "2025-12-02T00:00:00.000Z"
+        },
+        {
+            "type": "relationship",
+            "spec_version": "2.1",
+            "id": "relationship--demo-ground-truth-001",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "relationship_type": "indicates",
+            "source_ref": "indicator--demo-ground-truth-pkg-001",
+            "target_ref": "malware--demo-ground-truth-001"
+        },
+        {
+            "type": "indicator",
+            "spec_version": "2.1",
+            "id": "indicator--demo-ground-truth-md5-001",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "name": "Ground Truth APK MD5 Hash",
+            "description": "Demo indicator: MD5 hash of Sandroid ground_truth.apk",
+            "indicator_types": ["malicious-activity"],
+            "pattern": "[file:hashes.MD5='b306f8e0aeb22adbea3594937b49fbe6']",
+            "pattern_type": "stix",
+            "pattern_version": "2.1",
+            "valid_from": "2025-12-02T00:00:00.000Z"
+        },
+        {
+            "type": "relationship",
+            "spec_version": "2.1",
+            "id": "relationship--demo-ground-truth-002",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "relationship_type": "indicates",
+            "source_ref": "indicator--demo-ground-truth-md5-001",
+            "target_ref": "malware--demo-ground-truth-001"
+        },
+        {
+            "type": "indicator",
+            "spec_version": "2.1",
+            "id": "indicator--demo-ground-truth-sha256-001",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "name": "Ground Truth APK SHA256 Hash",
+            "description": "Demo indicator: SHA256 hash of Sandroid ground_truth.apk",
+            "indicator_types": ["malicious-activity"],
+            "pattern": "[file:hashes.'SHA-256'='4f6fb2aba39bdaca5b466f93e62c56c6596e8a62e2394ba4d5c34dd561d3a181']",
+            "pattern_type": "stix",
+            "pattern_version": "2.1",
+            "valid_from": "2025-12-02T00:00:00.000Z"
+        },
+        {
+            "type": "relationship",
+            "spec_version": "2.1",
+            "id": "relationship--demo-ground-truth-003",
+            "created": "2025-12-02T00:00:00.000Z",
+            "modified": "2025-12-02T00:00:00.000Z",
+            "relationship_type": "indicates",
+            "source_ref": "indicator--demo-ground-truth-sha256-001",
+            "target_ref": "malware--demo-ground-truth-001"
+        }
+    ]
+}

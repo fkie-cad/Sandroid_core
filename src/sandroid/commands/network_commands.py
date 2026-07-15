@@ -142,8 +142,21 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             app_name = app_info[0] if app_info else "unknown"
             logger.info(f"Starting FriTap for {app_name}")
 
+            # Consume an armed wizard config (one-shot). When the TUI capture
+            # wizard finished it stored its selections here; drive a fully
+            # configured non-interactive start. Otherwise fall back to the
+            # interactive configuration prompt (terminal / no-wizard path).
+            from sandroid.services import get_fritap_config_service
+
+            session_config = get_fritap_config_service().consume_panel_config()
+
             fritap = FriTap()
-            success = fritap.start(interactive=True)
+            if session_config is not None:
+                success = fritap.start(
+                    interactive=False, session_config=session_config
+                )
+            else:
+                success = fritap.start(interactive=True)
 
             if not success:
                 return CommandResult(
@@ -175,7 +188,7 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             # Collect output file paths
             output_files = [
                 path
-                for attr in ("keylog_path", "json_output_path", "log_path")
+                for attr in ("keylog_path", "pcap_path", "json_output_path", "log_path")
                 if (path := getattr(fritap, attr, None))
             ]
 

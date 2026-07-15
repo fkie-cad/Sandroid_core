@@ -46,8 +46,9 @@ class DeviceManagerProtocol(Protocol):
         """Refresh and return list of connected devices."""
         ...
 
-    def get_current_device(self) -> Any:
-        """Get currently selected device."""
+    @property
+    def active_device(self) -> Any:
+        """Currently selected/active device (matches DeviceManager.active_device)."""
         ...
 
     def set_current_device(self, serial: str) -> bool:
@@ -610,7 +611,7 @@ class DeviceController:
         """
         try:
             dm = self._get_device_manager()
-            current = dm.get_current_device()
+            current = dm.active_device
 
             if not current:
                 return None

@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Capture mode configuration modal for friTap TUI.
+
+Shown when the user presses 1-5 to select a capture mode.
+Displays mode info and editable output paths.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+try:
+    from textual.app import ComposeResult
+    from textual.widgets import Button, Input, Static
+    from textual.containers import Vertical, Horizontal
+    TEXTUAL_AVAILABLE = True
+except ImportError:
+    TEXTUAL_AVAILABLE = False
+
+if TEXTUAL_AVAILABLE:
+    from .base import FriTapWizardModal, c
+
+    _MODE_DESCRIPTIONS = {
+        "full": "Capture decryption keys and write a PCAPNG file with decrypted traffic.",
+        "keys": "Extract decryption keys only (no traffic capture).",
+        "plaintext": "Write decrypted plaintext traffic to a PCAPNG file.",
+        "wireshark": "Stream decrypted plaintext traffic live to Wireshark — no keylog needed.",
+        "live_pcapng": "Stream PCAPNG with embedded decryption keys directly to Wireshark.",
+    }
+
+    class CaptureModeModal(FriTapWizardModal[Optional[dict]]):
+        """Modal for configuring capture mode output paths."""
+
+        DEFAULT_CSS = """
+        CaptureModeModal > #modal-container {
+            width: 65;
+            height: auto;
+            max-height: 70%;
+            background: $surface;
+            border: solid $primary;
+            padding: 0 1;
+        }
+        CaptureModeModal .path-label {
+            margin-top: 0;
+            color: $foreground;
+        }
+        CaptureModeModal .mode-description {
+            margin: 0 0;
+            color: $text-muted;
+            text-align: center;
+        }
+        CaptureModeModal Input {
+            margin-bottom: 0;
+        }
+        """
+
+        def __init__(
+            self,
+            mode_id: str,
+            mode_display: str,
+            default_keylog: str = "",
+            default_pcap: str = "",
+            is_live: bool = False,
+            **kwargs,
+        ) -> None:
+            super().__init__(**kwargs)
+            self._mode_id = mode_id
+            self._mode_display = mode_display
+            self._default_keylog = default_keylog
+            self._default_pcap = default_pcap
+            self._is_live = is_live
+            self._ws_found: bool | None = None
+            if is_live:
+                from friTap.fritap_utility import find_wireshark_binary
+                self._ws_found = find_wireshark_binary() is not None
+
+        def compose(self) -> ComposeResult:
+            description = _MODE_DESCRIPTIONS.get(self._mode_id, "")
+            with Vertical(id="modal-container"):
+                yield Static(
+                    f"[bold {c('primary')}]Configure: {self._mode_display}[/]",
+                    classes="modal-title",
+                )
+                if description:
+                    yield Static(description, classes="mode-description")
+
+                if self._default_keylog:
+                    yield Static(f"[{c('text-secondary')}]Key log file:[/]", classes="path-label")
+                    yield Input(
+                        value=self._default_keylog,
+                        placeholder="Path for key log file...",
+                        id="keylog-input",
+                    )
+
+                if self._default_pcap:
+                    yield Static(f"[{c('text-secondary')}]Output file (PCAP/PCAPNG):[/]", classes="path-label")
+                    yield Input(
+                        value=self._default_pcap,
+                        placeholder="Path for capture file (.pcap or .pcapng)...",
+                        id="pcap-input",
+                    )
+
+                if self._is_live:
+                    if self._mode_id == "live_pcapng":
+                        yield Static(
+                            f"[{c('secondary')}]Keys are embedded in the PCAPNG stream — no file paths needed.\n"
+                            f"Wireshark receives a single stream with both traffic and decryption keys.[/]",
+                            classes="mode-description",
+                        )
+                    else:
+                        yield Static(
+                            f"[{c('secondary')}]Decrypted plaintext streams directly to Wireshark via a named pipe.\n"
+                            f"No keylog file needed — traffic is already decrypted.[/]",
+                            classes="mode-description",
+                        )
+                    if self._ws_found:
+                        yield Static(
+                            f"[{c('success')}]Wireshark found — will auto-launch when capture starts.[/]",
+                            classes="mode-description",
+                        )
+                    else:
+                        yield Static(
+                            f"[{c('warning-amber')}]Wireshark not found in PATH — you will need to connect manually.[/]",
+                            classes="mode-description",
+                        )
+
+                has_inputs = bool(self._default_keylog or self._default_pcap)
+                hint_parts = ["Enter: Accept"]
+                if has_inputs:
+                    hint_parts.append("Tab: Edit paths")
+                hint_parts.append("Esc: Cancel")
+                yield Static(
+                    f"[{c('text-muted')}]{'  |  '.join(hint_parts)}[/]",
+                    classes="key-hints",
+                )
+                with Horizontal(classes="button-row"):
+                    yield Button("Accept", id="btn-accept", variant="primary")
+                    yield Button("Cancel", id="btn-cancel", variant="default")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "btn-accept":
+                self._submit()
+            elif event.button.id == "btn-cancel":
+                self.dismiss(None)
+
+        def _submit(self) -> None:
+            """Collect input values and dismiss with result dict."""
+            result = {
+                "live": self._is_live,
+                "full_capture": self._mode_id == "full",
+            }
+            if self._is_live:
+                result["live_mode"] = self._mode_id
+
+            try:
+                keylog_input = self.query_one("#keylog-input", Input)
+                result["keylog"] = keylog_input.value.strip()
+            except Exception:
+                result["keylog"] = ""
+
+            try:
+                pcap_input = self.query_one("#pcap-input", Input)
+                result["pcap"] = pcap_input.value.strip()
+            except Exception:
+                result["pcap"] = ""
+
+            self.dismiss(result)

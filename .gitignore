@@ -109,3 +109,7 @@ testing_3rd_party_scripts/
 # dexray-insight artifacts
 libinfo.jsonl
 libsmali.jsonl
+
+# Local packet captures
+*.pcap
+*.pcapng

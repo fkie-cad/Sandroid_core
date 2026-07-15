@@ -36,8 +36,12 @@ try:
     from dexray_insight import asam
 except ImportError:
     logger = getLogger(__name__)
-    logger.warning(
-        "dexray-insight package not installed. Static analysis will be disabled."
+    # Optional dependency (the `static-analysis` extra). Its absence only
+    # disables static analysis, so keep this at debug level instead of warning
+    # to avoid alarming output on every friTap/dexray run that never uses it.
+    logger.debug(
+        "dexray-insight package not installed; static analysis disabled. "
+        "Install with: pip install 'dexray-insight'"
     )
     asam = None
 

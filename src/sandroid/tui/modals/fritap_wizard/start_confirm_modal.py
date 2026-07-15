@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Start confirmation modal for friTap TUI wizard.
+
+Shows a summary of all configured settings and asks for
+confirmation before starting capture.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+try:
+    from textual.app import ComposeResult
+    from textual.binding import Binding
+    from textual.reactive import reactive
+    from textual.widgets import Button, Static
+    from textual.containers import Vertical, Horizontal
+    TEXTUAL_AVAILABLE = True
+except ImportError:
+    TEXTUAL_AVAILABLE = False
+
+if TEXTUAL_AVAILABLE:
+    from .base import FriTapWizardModal, c
+
+    _TYPE_TAGS = {
+        "usb": "U",
+        "remote": "R",
+        "local": "L",
+    }
+
+    class StartConfirmModal(FriTapWizardModal[Optional[bool]]):
+        """Confirmation modal displaying capture settings before start."""
+
+        DEFAULT_CSS = """
+        StartConfirmModal > #modal-container {
+            width: 65;
+            height: auto;
+            max-height: 70%;
+            background: $surface;
+            border: solid $primary;
+            padding: 0 1;
+        }
+        StartConfirmModal #summary-block {
+            margin: 1 2;
+            color: $foreground;
+        }
+        """
+
+        BINDINGS = [
+            Binding("v", "toggle_verbose", "Verbose", show=False),
+            Binding("e", "toggle_experimental", "Experimental", show=False),
+            Binding("l", "toggle_library_scan", "Library Scan", show=False),
+            Binding("d", "toggle_debug_log", "Debug Log", show=False),
+        ]
+
+        verbose: reactive[bool] = reactive(False)
+        experimental: reactive[bool] = reactive(False)
+        library_scan: reactive[bool] = reactive(False)
+        debug_log: reactive[bool] = reactive(False)
+
+        def __init__(self, summary: dict, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self._summary = summary
+            self._ws_found: bool = False
+            if summary.get("live", False):
+                from friTap.fritap_utility import find_wireshark_binary
+                self._ws_found = find_wireshark_binary() is not None
+            self.verbose = summary.get("verbose", False)
+            self.experimental = summary.get("experimental", False)
+            self.library_scan = summary.get("library_scan", False)
+            self.debug_log = summary.get("debug_log", False)
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="modal-container"):
+                yield Static(
+                    f"[bold {c('success')}]Ready to Capture[/]",
+                    classes="modal-title",
+                )
+                yield Static("", id="summary-block")
+                yield Static(
+                    f"[{c('text-muted')}]Enter: Start  |  v: Verbose  |  e: Experimental\n"
+                    f"l: Library Scan  |  d: Debug Log  |  Esc: Back[/]",
+                    classes="key-hints",
+                )
+                with Horizontal(classes="button-row"):
+                    yield Button(
+                        "Start Capture", id="btn-start", variant="primary"
+                    )
+                    yield Button("Back", id="btn-back", variant="default")
+
+        def on_mount(self) -> None:
+            super().on_mount()
+            self._refresh_summary()
+
+        def _refresh_summary(self) -> None:
+            """Rebuild the summary text and update the widget."""
+            text = self._build_summary_text()
+            try:
+                self.query_one("#summary-block", Static).update(text)
+            except Exception:
+                pass
+
+        def _build_summary_text(self) -> str:
+            """Build the formatted summary block from the summary dict."""
+            device_name = self._summary.get("device_name", "Unknown")
+            device_type = self._summary.get("device_type", "local")
+            target_name = self._summary.get("target_name", "Unknown")
+            target_mode = self._summary.get("target_mode", "attach")
+            capture_mode_display = self._summary.get(
+                "capture_mode_display", "Unknown"
+            )
+            keylog_path = self._summary.get("keylog_path", "")
+            pcap_path = self._summary.get("pcap_path", "")
+            live = self._summary.get("live", False)
+            capture_mode_id = self._summary.get("capture_mode_id", "")
+
+            type_tag = _TYPE_TAGS.get(device_type, "L")
+            target_mode_upper = target_mode.upper()
+
+            verbose_indicator = "[bold green]ON[/]" if self.verbose else "[dim]off[/]"
+            experimental_indicator = "[bold green]ON[/]" if self.experimental else "[dim]off[/]"
+            library_scan_indicator = "[bold green]ON[/]" if self.library_scan else "[dim]off[/]"
+            debug_log_indicator = "[bold green]ON[/]" if self.debug_log else "[dim]off[/]"
+
+            # Determine display values for keys/output based on mode
+            keys_display = "(embedded in PCAPNG stream)" if live and capture_mode_id == "live_pcapng" else keylog_path or "—"
+            output_display = "Named pipe (auto-created)" if live else pcap_path or "—"
+
+            lines = [
+                f"  Device:        [{type_tag}] {device_name}",
+                f"  Target:        {target_name} [{target_mode_upper}]",
+                f"  Mode:          {capture_mode_display}",
+            ]
+
+            # QUIC capture boundary only matters for plaintext TLS/auto capture
+            # (mirrors the wizard gate that presents the QUIC capture-mode step).
+            protocol = self._summary.get("protocol", "tls")
+            if capture_mode_id == "plaintext" and protocol in ("tls", "auto"):
+                quic_mode = self._summary.get("quic_capture_mode", "stream")
+                lines.append(f"  QUIC Mode:     {quic_mode}")
+
+            lines.append(f"  Keys:          {keys_display}")
+            lines.append(f"  Output:        {output_display}")
+
+            if live:
+                if self._ws_found:
+                    lines.append(f"  Wireshark:     [{c('success')}]Will auto-launch when capture starts[/]")
+                else:
+                    lines.append(f"  Wireshark:     [{c('warning-amber')}]Not found — manual connection required[/]")
+
+            lines.append("")
+            lines.append(f"  Verbose:       {verbose_indicator}")
+            lines.append(f"  Experimental:  {experimental_indicator}")
+            lines.append(f"  Library Scan:  {library_scan_indicator}")
+            lines.append(f"  Debug Log:     {debug_log_indicator}")
+
+            return "\n".join(lines)
+
+        def watch_verbose(self, value: bool) -> None:
+            self._refresh_summary()
+
+        def watch_experimental(self, value: bool) -> None:
+            self._refresh_summary()
+
+        def watch_library_scan(self, value: bool) -> None:
+            self._refresh_summary()
+
+        def watch_debug_log(self, value: bool) -> None:
+            self._refresh_summary()
+
+        def action_toggle_verbose(self) -> None:
+            """Toggle verbose flag."""
+            self.verbose = not self.verbose
+
+        def action_toggle_experimental(self) -> None:
+            """Toggle experimental flag."""
+            self.experimental = not self.experimental
+
+        def action_toggle_library_scan(self) -> None:
+            """Toggle library scan flag."""
+            self.library_scan = not self.library_scan
+
+        def action_toggle_debug_log(self) -> None:
+            """Toggle debug log file creation."""
+            self.debug_log = not self.debug_log
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "btn-start":
+                self.dismiss(True)
+            elif event.button.id == "btn-back":
+                self.dismiss(None)

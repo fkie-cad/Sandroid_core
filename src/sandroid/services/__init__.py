@@ -222,6 +222,18 @@ def _create_device_settings_service() -> "DeviceSettingsService":
     return DeviceSettingsService()
 
 
+def _create_dexray_config_service() -> "DexrayConfigService":
+    from .dexray_config_service import DexrayConfigService
+
+    return DexrayConfigService()
+
+
+def _create_fritap_config_service() -> "FriTapConfigService":
+    from .fritap_config_service import FriTapConfigService
+
+    return FriTapConfigService()
+
+
 # ---------------------------------------------------------------------------
 # Public getter functions (thin wrappers for backwards compatibility)
 # ---------------------------------------------------------------------------
@@ -337,6 +349,16 @@ def get_device_settings_service() -> "DeviceSettingsService":
     return _get_or_create(_create_device_settings_service)
 
 
+def get_dexray_config_service() -> "DexrayConfigService":
+    """Get or create the DexrayConfigService singleton."""
+    return _get_or_create(_create_dexray_config_service)
+
+
+def get_fritap_config_service() -> "FriTapConfigService":
+    """Get or create the FriTapConfigService singleton."""
+    return _get_or_create(_create_fritap_config_service)
+
+
 def reset_services() -> None:
     """Reset all service singletons (useful for testing).
 
@@ -356,7 +378,9 @@ from .app_selection_service import AppSelectionService, PackageInfo, SelectionRe
 from .configuration_service import ConfigurationService, SessionConfig
 from .device_service import DeviceService, DeviceState
 from .device_settings_service import DevicePreset, DeviceSettingsService, SettingsResult
+from .dexray_config_service import DexrayConfigService
 from .emulator_service import EmulatorService, ScreenRecordingState, SnapshotInfo
+from .fritap_config_service import FriTapConfigService, FriTapSessionConfig
 from .environment_service import EnvironmentService, SetupResult
 from .file_extraction_service import ExtractionResult, FileExtractionService
 from .forensic_apk_service import ForensicAPK, ForensicAPKService
@@ -400,6 +424,7 @@ __all__ = [
     "DeviceService",
     "DeviceSettingsService",
     "DeviceState",
+    "DexrayConfigService",
     "EmulatorInfoRenderer",
     "EmulatorService",
     "EnvironmentService",
@@ -411,6 +436,8 @@ __all__ = [
     "ForensicAPKService",
     "ForensicService",
     "ForensicTimeline",
+    "FriTapConfigService",
+    "FriTapSessionConfig",
     "FridaJobInfo",
     "FridaSessionService",
     "InitializationResult",
@@ -453,12 +480,14 @@ __all__ = [
     "get_configuration_service",
     "get_device_service",
     "get_device_settings_service",
+    "get_dexray_config_service",
     "get_emulator_service",
     "get_environment_service",
     "get_file_extraction_service",
     "get_forensic_apk_service",
     "get_forensic_service",
     "get_frida_session_service",
+    "get_fritap_config_service",
     "get_initialization_service",
     "get_network_capture_service",
     "get_objection_service",

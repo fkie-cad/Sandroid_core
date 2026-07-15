@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    DEXrayPanel,
     ForensicPanel,
     FriTapPanel,
     MitmproxyPanel,
@@ -147,6 +148,7 @@ class MainScreen(Screen):
                         )
                         yield Static("Mitmproxy", id="tab-mitm", classes="tool-tab")
                         yield Static("friTap", id="tab-fritap", classes="tool-tab")
+                        yield Static("DEXray", id="tab-dexray", classes="tool-tab")
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
@@ -161,6 +163,7 @@ class MainScreen(Screen):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield FriTapPanel(id="fritap-panel")
+                        yield DEXrayPanel(id="dexray-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
                         yield ForensicPanel(id="forensic-panel")
 
@@ -208,6 +211,7 @@ class MainScreen(Screen):
         "tab-spotlight": "spotlight-panel",
         "tab-mitm": "mitm-panel",
         "tab-fritap": "fritap-panel",
+        "tab-dexray": "dexray-panel",
         "tab-snapshots": "snapshots-panel",
         "tab-forensic": "forensic-panel",
     }
@@ -221,11 +225,11 @@ class MainScreen(Screen):
         wid = getattr(getattr(event, "widget", None), "id", None)
         if wid in self._TOOL_TABS:
             self._select_bottom_tab(self._TOOL_TABS[wid])
-        elif wid and wid.startswith(("act-", "snap-", "forensic-")):
+        elif wid and wid.startswith(("act-", "snap-", "forensic-", "dx-")):
             # Tool-panel action cells. Route to the ACTIVE tool child
             # (spotlight uses act-*, snapshots uses snap-*, forensic uses
-            # forensic-*). The hasattr guard keeps panels without a dispatcher
-            # (e.g. MitmproxyPanel) safe.
+            # forensic-*, dexray uses dx-*). The hasattr guard keeps panels
+            # without a dispatcher (e.g. MitmproxyPanel) safe.
             current = self._bottom_current()
             if current:
                 try:
@@ -277,6 +281,10 @@ class MainScreen(Screen):
     def open_fritap_tab(self) -> None:
         """Switch to the friTap tab (key h)."""
         self._select_bottom_tab("fritap-panel")
+
+    def open_dexray_tab(self) -> None:
+        """Switch to the DEXray tab (key m)."""
+        self._select_bottom_tab("dexray-panel")
 
     def cycle_bottom_tab(self, delta: int) -> None:
         """Switch the active tab by *delta* (Left/Right while focus is inside).
