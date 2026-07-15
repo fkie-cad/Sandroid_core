@@ -83,7 +83,6 @@ async def run_malware_analysis(
     args.whitelist = None
     args.trigdroid_ccf = None
     args.debug = kwargs.get("debug", False)
-    args.ai = False
     args.report = False
 
     toolbox.args = args

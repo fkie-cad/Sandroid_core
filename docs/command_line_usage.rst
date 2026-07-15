@@ -299,17 +299,6 @@ Exclude specific files/paths from analysis results:
 Advanced Features
 -----------------
 
-**AI Analysis**::
-
-   sandroid --ai
-
-Enable AI-powered analysis and summarization:
-
-- Automated threat detection
-- Behavioral pattern analysis
-- Natural language analysis summaries
-- Requires AI optional dependencies
-
 **PDF Report Generation**::
 
    sandroid --report
@@ -355,16 +344,13 @@ Common Usage Patterns
    # Full feature analysis
    sandroid --network --sockets --screenshot 3 --hash --apk --report
 
-   # With AI analysis
-   sandroid --network --ai --report --screenshot 5
-
 **Malware Analysis**::
 
    # Automated malware analysis
    sandroid --trigdroid com.malware.sample \
             --network --screenshot 2 \
             --show-deleted --hash \
-            --ai --report
+            --report
 
    # Manual malware analysis
    sandroid --network --sockets --screenshot 3 \
@@ -383,7 +369,7 @@ Common Usage Patterns
 
    # Complete security analysis
    sandroid --network --sockets --show-deleted \
-            --hash --apk --ai --report \
+            --hash --apk --report \
             --avoid-strong-noise-filter
 
 Configuration Integration
@@ -462,7 +448,7 @@ Batch Processing
        adb wait-for-device
 
        # Run analysis
-       sandroid --network --ai --report \
+       sandroid --network --report \
                 --output-file ci_analysis_results.json
 
        # Archive results
@@ -569,7 +555,7 @@ Integration Examples
            stage('Android Analysis') {
                steps {
                    sh '''
-                       sandroid --network --ai --report \
+                       sandroid --network --report \
                                 --file analysis_${BUILD_NUMBER}.json
                    '''
                    archiveArtifacts artifacts: '*.json,*.pdf,results/**'
@@ -592,8 +578,7 @@ Integration Examples
      with:
        python-version: '3.10'
    - run: |
-       pip install sandroid[ai]
-       sandroid --network --ai --report
+       sandroid --network --report
    - uses: actions/upload-artifact@v2
      with:
        name: analysis-results

@@ -11,8 +11,6 @@ import time
 from logging import getLogger
 
 from sandroid.core.adb import Adb
-from sandroid.core.toolbox import Toolbox
-from sandroid.services import get_emulator_service
 
 from .functionality import Functionality
 
@@ -41,9 +39,6 @@ class Recorder(Functionality):
         Raises:
             RuntimeError: If the recording file cannot be opened or written to.
         """
-        if Toolbox.args.ai:
-            get_emulator_service().toggle_recording()
-
         raw_path = os.getenv("RAW_RESULTS_PATH", "")
         if raw_path:
             os.makedirs(raw_path, exist_ok=True)
@@ -87,9 +82,6 @@ class Recorder(Functionality):
 
         logger.info(f"End of recording. Recording took {duration} Seconds.")
         logger.info(f"Saved recording to file {self.output_file_name}.")
-
-        if Toolbox.args.ai:
-            get_emulator_service().toggle_recording()
 
     def write_event(self, dev: str, etype: str, ecode: str, data: str) -> None:
         """Write an input event to the output file.

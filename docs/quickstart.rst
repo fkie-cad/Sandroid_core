@@ -94,9 +94,6 @@ For automated analysis without interaction::
    # Complete analysis with all features
    sandroid --network --sockets --screenshot 3 --hash --apk --report
 
-   # AI-powered analysis with PDF report
-   sandroid --ai --report --network
-
 Configuration Examples
 ----------------------
 
@@ -152,7 +149,7 @@ Common Workflows
 
 4. **Generate Report**::
 
-      sandroid --report --ai
+      sandroid --report
 
 **App Development Testing**
 

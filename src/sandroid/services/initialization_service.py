@@ -679,7 +679,6 @@ class InitializationService:
             whitelist=None,
             iterative=False,
             report=True,
-            ai=False,
             debug=False,
         )
 
@@ -854,12 +853,6 @@ class InitializationService:
             action="store_true",
             default=True,
             help="Enable generation of a report file(pdf)",
-        )
-        parser.add_argument(
-            "--ai",
-            action="store_true",
-            default=False,
-            help="Use AI to summarize the action and generate a report",
         )
         parser.add_argument(
             "--debug",

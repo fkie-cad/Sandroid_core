@@ -431,8 +431,6 @@ Dynamic Configuration
        config.trigdroid.enabled = True
        config.trigdroid.timeout = 600
 
-       # AI analysis
-       config.ai.enabled = True
        config.report.generate_pdf = True
 
        return config
