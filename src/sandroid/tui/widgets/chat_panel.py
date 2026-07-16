@@ -390,8 +390,7 @@ class ChatPanel(Widget):
 
         # Blank line before each new turn (skipped for the very first one)
         # so consecutive turns read as visually distinct blocks in the
-        # transcript, on top of the user's highlighted input band and the
-        # colored "Sandroid:" label.
+        # transcript, on top of the user's highlighted input band.
         if self._history_lines:
             self._push_history("")
         self._push_history(self._format_user_line(text))
@@ -537,9 +536,10 @@ class ChatPanel(Widget):
         """Render one user turn, Claude-Code-CLI style: a ``>``-prefixed,
         bold line sitting inside a full-width band that's a subtly lighter
         neutral shade than the surrounding background -- no border, no box,
-        no per-role hue, just a plain background shift (unlike the
-        assistant's colored "Sandroid:" label + green Markdown below it,
-        which this variant deliberately leaves untouched).
+        no per-role hue, just a plain background shift. The assistant's
+        reply carries no label at all -- with the user's own line this
+        clearly marked, anything else in the transcript is unambiguously
+        the reply, so a "Sandroid:" tag would be redundant.
 
         A ``rich.text.Text`` shorter than the log's own width only paints
         its background behind its own characters -- ``RichLog.write()``
@@ -581,13 +581,12 @@ class ChatPanel(Widget):
         """Fold any in-progress reasoning/reply buffers into history."""
         changed = self._finalize_reasoning_only()
         if self._live_text:
-            self._history_lines.append("[#4ade80][bold]Sandroid:[/bold][/]")
-            # ``style=`` is required here -- Markdown() defaults to "none"
-            # (the console's default foreground), so without it only the
-            # "Sandroid:" label above would be green and the actual reply
-            # body would render plain white, indistinguishable from the
-            # user's own lines. This colors the whole rendered block
-            # (paragraphs/bold/bullets/etc.) green to match the label.
+            # No "Sandroid:" label -- the user's own line already stands
+            # out via its highlight band (see ``_format_user_line``), so
+            # anything else in the transcript is unambiguously the reply.
+            # ``style=`` is still required here -- Markdown() defaults to
+            # "none" (the console's default foreground), so without it the
+            # reply body would render plain white instead of green.
             self._history_lines.append(Markdown(self._live_text, style="#4ade80"))
             self._live_text = ""
             changed = True
@@ -648,7 +647,7 @@ class ChatPanel(Widget):
         if self._live_reasoning:
             log.write(f"[italic #facc15]thinking: {escape(self._live_reasoning)}[/]")
         if self._live_text:
-            log.write(f"[#4ade80][bold]Sandroid:[/bold] {escape(self._live_text)}[/]")
+            log.write(f"[#4ade80]{escape(self._live_text)}[/]")
 
     # -- header -----------------------------------------------------------
 
