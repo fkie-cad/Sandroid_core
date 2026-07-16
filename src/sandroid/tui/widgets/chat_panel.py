@@ -39,9 +39,10 @@ chat transcript's realistic length/rate.
 Markdown (``**bold**``, lists, code fences, ...), which is a different
 language from Rich's console markup (``[bold]...[/]``) used for our own
 UI chrome. So ``self._history_lines`` holds a mix of plain markup
-*strings* (for chrome: the "You:"/tool-call/error lines) and
+*strings* (for chrome: the tool-call/error lines), ``rich.text.Text``
+(the user's own echoed input -- see ``_format_user_line``), and
 ``rich.markdown.Markdown`` renderables (for LLM-authored prose) --
-``RichLog.write()`` accepts either uniformly (see ``_make_renderable``:
+``RichLog.write()`` accepts all three uniformly (see ``_make_renderable``:
 non-str ``RenderableType``s pass straight through, untouched by the
 ``markup=True`` flag). Re-parsing Markdown on every streamed token would
 be wasteful and can render oddly mid-stream (unclosed ``**``/code fences),
@@ -70,6 +71,7 @@ from typing import TYPE_CHECKING
 
 from rich.markdown import Markdown
 from rich.markup import escape
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widget import Widget
@@ -80,6 +82,7 @@ from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.core.console import SANDROID_LOGO
 
 if TYPE_CHECKING:
+    from rich.console import RenderableType
     from textual.timer import Timer
 
 logger = logging.getLogger(__name__)
@@ -292,10 +295,11 @@ class ChatPanel(Widget):
         # Finalized transcript lines -- the single source of truth for
         # what's on screen; see module docstring for why a full
         # redraw-on-delta is used instead of live line edits. A mix of
-        # plain markup strings (our own UI chrome) and ``Markdown``
+        # plain markup strings (our own UI chrome), ``Text`` (the user's
+        # own echoed input, see ``_format_user_line``), and ``Markdown``
         # renderables (LLM-authored prose) -- ``RichLog.write()`` accepts
-        # both uniformly.
-        self._history_lines: list[str | Markdown] = []
+        # all three uniformly.
+        self._history_lines: list[str | Markdown | Text] = []
         self._live_reasoning: str = ""
         self._live_text: str = ""
         # Wall-clock (monotonic) start of the current reasoning phase, for
@@ -386,10 +390,11 @@ class ChatPanel(Widget):
 
         # Blank line before each new turn (skipped for the very first one)
         # so consecutive turns read as visually distinct blocks in the
-        # transcript, on top of the colored "You:"/"Sandroid:" labels.
+        # transcript, on top of the user's highlighted input band and the
+        # colored "Sandroid:" label.
         if self._history_lines:
             self._push_history("")
-        self._push_history(f"[#38bdf8]❯ [bold]You:[/bold] {escape(text)}[/]")
+        self._push_history(self._format_user_line(text))
 
         handle = ChatTurnHandle()
         self._active_handle = handle
@@ -527,6 +532,50 @@ class ChatPanel(Widget):
             pass
 
     # -- transcript rendering -------------------------------------------
+
+    def _format_user_line(self, text: str) -> str | RenderableType:
+        """Render one user turn, Claude-Code-CLI style: a ``>``-prefixed,
+        bold line sitting inside a full-width band that's a subtly lighter
+        neutral shade than the surrounding background -- no border, no box,
+        no per-role hue, just a plain background shift (unlike the
+        assistant's colored "Sandroid:" label + green Markdown below it,
+        which this variant deliberately leaves untouched).
+
+        A ``rich.text.Text`` shorter than the log's own width only paints
+        its background behind its own characters -- ``RichLog.write()``
+        pads a rendered line out to the target width using the *renderable's*
+        trailing style, which defaults to ``None`` (see
+        ``Strip.adjust_cell_length``), so without explicit padding here the
+        highlight would show as a short island hugging the text instead of
+        spanning the whole row. Padding is done per physical line (split on
+        newlines) so a pasted multi-line message gets a full-width band on
+        every row, not just the first.
+
+        Args:
+            text: The raw, already-stripped text the user submitted.
+
+        Returns:
+            A ``Text`` renderable ready to hand to ``RichLog.write()``
+            (accepted uniformly alongside plain markup strings and
+            ``Markdown``, see the module docstring).
+        """
+        width = 0
+        try:
+            log = self.query_one("#chat-log", RichLog)
+            width = log.scrollable_content_region.width
+        except Exception:
+            width = 0
+
+        line = Text(style="bold white on #1c2333", no_wrap=True)
+        for i, row in enumerate(text.split("\n")):
+            if i == 0:
+                row = f"> {row}"
+            if i:
+                line.append("\n")
+            line.append(row)
+            if width > len(row):
+                line.append(" " * (width - len(row)))
+        return line
 
     def _finalize_live(self) -> None:
         """Fold any in-progress reasoning/reply buffers into history."""

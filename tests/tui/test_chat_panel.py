@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 from rich.markdown import Markdown
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Input, RichLog, Static
 
@@ -140,13 +141,13 @@ def test_finalized_assistant_reply_renders_as_markdown():
     assert panel._live_text == ""
 
 
-def test_user_input_and_tool_call_lines_stay_plain_markup():
-    """Only LLM-authored prose gets the Markdown treatment -- the user's
-    own typed text, tool-call announcements, and errors are our own UI
-    chrome and stay simple Rich console-markup strings.
+def test_tool_call_lines_stay_plain_markup():
+    """Only LLM-authored prose gets the Markdown treatment, and only the
+    user's own echoed input gets the highlight-band ``Text`` treatment (see
+    the "Task 4" tests below) -- tool-call announcements and errors are our
+    own UI chrome and stay simple Rich console-markup strings.
     """
     panel = ChatPanel(id="chat-panel")
-    panel._push_history("[#38bdf8]❯ [bold]You:[/bold] hello[/]")
     panel._append_ui_event(
         {"type": "tool_call_done", "name": "list_packages", "arguments": {}}
     )
@@ -428,3 +429,99 @@ async def test_mascot_blends_into_log_with_no_visible_box():
         for y in range(mr.y, min(mr.bottom, log_region.bottom)):
             for x in range(mr.x, mr.right):
                 assert bg_at(x, y) == ref, f"box edge visible at ({x}, {y})"
+
+
+# -- Task 4: Claude-Code-style user input highlight (round-3 variant I) ---
+
+
+def test_format_user_line_returns_highlighted_text_not_markup_string():
+    """The user's echoed input must be a `>`-prefixed, bold `rich.text.Text`
+    carrying a lighter background highlight style -- not the old colored
+    heavy-angle-quote-plus-"You:" console-markup string. This is the one
+    and only change this variant makes; everything else
+    (assistant/reasoning/tool-call rendering) stays exactly as baseline.
+    """
+    panel = ChatPanel(id="chat-panel")  # unmounted: no #chat-log width yet
+    rendered = panel._format_user_line("hello there")
+
+    assert isinstance(rendered, Text)
+    assert rendered.plain == "> hello there"
+    assert "bold" in rendered.style
+    assert "on #1c2333" in rendered.style
+    # no leftover trace of the old blue label/glyph scheme
+    old_glyph = "❯"  # HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT
+    assert "You:" not in rendered.plain
+    assert old_glyph not in rendered.plain
+
+
+@pytest.mark.smoke
+async def test_user_line_highlight_band_spans_full_log_width():
+    """The whole point of this variant: the lighter background must stretch
+    the full row, not just hug the typed characters -- so the rendered
+    `Text`'s cell length has to match the log's own current content width.
+    """
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        log = app.query_one("#chat-log", RichLog)
+        await pilot.pause()
+
+        rendered = panel._format_user_line("hi")
+
+        assert isinstance(rendered, Text)
+        assert rendered.cell_len == log.scrollable_content_region.width
+        assert rendered.plain.startswith("> hi")
+        assert rendered.plain == rendered.plain.rstrip() + " " * (
+            log.scrollable_content_region.width - len(rendered.plain.rstrip())
+        )
+
+
+def test_format_user_line_prefixes_only_the_first_row_of_pasted_text():
+    """A pasted multi-line message must only get the `>` echo marker once,
+    on its first physical line -- matching a blockquote-style echo -- while
+    every row still individually carries the highlight style so a multi-line
+    paste doesn't lose the band partway through.
+    """
+    panel = ChatPanel(id="chat-panel")
+    rendered = panel._format_user_line("first line\nsecond line")
+
+    assert isinstance(rendered, Text)
+    assert rendered.plain == "> first line\nsecond line"
+
+
+@pytest.mark.smoke
+async def test_on_input_submitted_pushes_a_text_renderable_for_the_user_line(
+    monkeypatch,
+):
+    """Integration point for the extracted method: submitting a message must
+    push whatever `_format_user_line` builds (a `Text`), not the old inline
+    f-string, into history -- verifying the wiring, not just the formatter
+    in isolation. `_run_turn_sync` is stubbed out so this only exercises the
+    synchronous, UI-thread half of `on_input_submitted` -- no real worker
+    thread/network call.
+    """
+    from sandroid.core.toolbox import Toolbox
+
+    monkeypatch.setattr(
+        Toolbox,
+        "config",
+        SimpleNamespace(
+            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+        ),
+        raising=False,
+    )
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        monkeypatch.setattr(panel, "_run_turn_sync", lambda *a, **kw: None)
+
+        input_widget = app.query_one("#chat-input", Input)
+        input_widget.value = "hello"
+        await pilot.pause()
+        input_widget.post_message(Input.Submitted(input_widget, "hello"))
+        await pilot.pause()
+
+        user_lines = [line for line in panel._history_lines if isinstance(line, Text)]
+        assert len(user_lines) == 1
+        assert user_lines[0].plain.startswith("> hello")
