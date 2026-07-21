@@ -52,8 +52,9 @@ panel -- should build against)::
 
 Import-time side effects (deliberate, see each module's own docstring for
 why): importing this package eagerly registers every native tool (via
-:mod:`sandroid.ai.tools.dummy_tools`) AND one orchestrator-facing tool per
-subagent template (via :func:`sandroid.ai.subagents.register_subagent_tools`)
+:mod:`sandroid.ai.tools.app_query` and :mod:`sandroid.ai.tools.device_query`)
+AND one orchestrator-facing tool per subagent template (via
+:func:`sandroid.ai.subagents.register_subagent_tools`)
 into the :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton. So a
 bare ``import sandroid.ai`` is enough to populate native + subagent tools,
 and never touches config or spawns a subprocess.
@@ -78,7 +79,7 @@ from sandroid.ai.subagents import (
     SubagentTemplate,
     register_subagent_tools,
 )
-from sandroid.ai.tools import (  # also imports dummy_tools
+from sandroid.ai.tools import (  # also imports app_query, device_query
     bridge_mcp_tools,
     get_tool_registry,
 )

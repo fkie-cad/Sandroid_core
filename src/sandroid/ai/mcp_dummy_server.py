@@ -1,10 +1,13 @@
 """Bundled dummy MCP server.
 
-Its purpose is narrower than :mod:`sandroid.ai.tools.dummy_tools`: it exists
-to demonstrate that Sandroid can consume a genuinely *external* MCP tool
-server, not to host Sandroid's own capabilities. Tools are framed accordingly
-in an "external service" style -- a trivial deterministic tool plus a
-fabricated third-party-style threat-intel lookup.
+Its purpose is narrower than Sandroid's native tools (see
+:mod:`sandroid.ai.tools.app_query` and :mod:`sandroid.ai.tools.device_query`):
+it exists to demonstrate that Sandroid can consume a genuinely *external* MCP
+tool server, not to host Sandroid's own capabilities. Unlike those native
+tools, which now dispatch to real ADB/device queries, everything here is
+deliberately fabricated -- tools are framed in an "external service" style, a
+trivial deterministic tool plus a fabricated third-party-style threat-intel
+lookup.
 
 Built on the official ``mcp`` package's ``mcp.server.fastmcp.FastMCP``, which
 ships in the base ``mcp`` distribution (no extra needed).

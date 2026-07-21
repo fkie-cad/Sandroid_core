@@ -88,6 +88,12 @@ ai = [
 ]
 static-analysis = [
     "dexray-insight>=1.0.0",
+    # Already a transitive dependency of dexray-insight; declared directly
+    # since sandroid.ai.tools.app_query and sandroid.services.component_info_parser
+    # import it directly to decode AndroidManifest.xml for exported-component
+    # enumeration (real dumpsys package output has no exported/permission
+    # data -- see component_info_parser's module docstring).
+    "androguard>=4.0.0",
 ]
 dev = [
     "pytest>=7.0.0",

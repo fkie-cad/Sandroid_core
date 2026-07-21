@@ -54,9 +54,14 @@ SUBAGENT_TEMPLATES: dict[str, SubagentTemplate] = {
         name="device-inspector",
         system_prompt=DEVICE_INSPECTOR_SYSTEM_PROMPT,
         tool_names=[
-            "get_emulator_status",  # native (sandroid.ai.tools.dummy_tools)
+            "get_foreground_app",  # native (sandroid.ai.tools.app_query)
+            "is_package_installed",  # native
             "list_installed_packages",  # native
-            "get_running_background_tasks",  # native
+            "get_package_pid",  # native
+            "get_package_details",  # native
+            "list_exported_components",  # native
+            "get_build_and_patch_info",  # native (sandroid.ai.tools.device_query)
+            "check_root_and_magisk",  # native
             "mcp:sandroid-dummy:sample_forensic_lookup",  # external MCP demo
         ],
     ),

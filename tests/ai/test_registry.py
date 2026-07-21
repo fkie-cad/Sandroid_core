@@ -3,7 +3,7 @@
 Every test builds its own fresh ToolRegistry() instance rather than using the
 process-wide get_tool_registry() singleton, to stay isolated from the
 tools registered as import-time side effects elsewhere in sandroid.ai
-(dummy_tools, subagents).
+(app_query, device_query, subagents).
 """
 
 import pytest

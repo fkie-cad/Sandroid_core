@@ -2,7 +2,8 @@
 
 Merges two kinds of tools behind one flat namespace and one schema shape:
 
-- native, in-process Python functions (see :mod:`sandroid.ai.tools.dummy_tools`)
+- native, in-process Python functions (see :mod:`sandroid.ai.tools.app_query`
+  and :mod:`sandroid.ai.tools.device_query`)
 - tools bridged in from external MCP servers, registered as
   ``mcp:<server>:<tool>`` (see :mod:`sandroid.ai.tools.mcp_bridge`)
 
