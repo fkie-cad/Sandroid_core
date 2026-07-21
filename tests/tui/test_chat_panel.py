@@ -60,8 +60,41 @@ async def test_chat_panel_mounts_without_error():
 
 
 def test_chat_tab_registered_in_tool_tabs():
-    """main_screen.py's additive wiring: the Chat tab maps to chat-panel."""
-    assert MainScreen._TOOL_TABS["tab-chat"] == "chat-panel"
+    """Chat is no longer one of the left tool tabs -- it docks separately
+    (see ``MainScreen.toggle_chat_panel``) -- so it must never reappear in
+    ``_TOOL_TABS`` (the 4-way Spotlight/Mitmproxy/friTap/Snapshots cycle).
+    """
+    assert "tab-chat" not in MainScreen._TOOL_TABS
+
+
+@pytest.mark.smoke
+async def test_toggle_chat_panel_shows_and_hides_the_dock():
+    """``Ctrl+Y`` (``MainScreen.toggle_chat_panel``) shows/hides ``#chat-dock``
+    via its ``visible`` CSS class, focusing ``#chat-input`` when opening and
+    the active tool panel when closing.
+    """
+    app = App()
+    screen = MainScreen()
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        dock = screen.query_one("#chat-dock")
+        assert not dock.has_class("visible")
+
+        screen.toggle_chat_panel()
+        await pilot.pause()
+
+        assert dock.has_class("visible")
+        assert isinstance(app.focused, Input)
+        assert app.focused.id == "chat-input"
+
+        screen.toggle_chat_panel()
+        await pilot.pause()
+
+        assert not dock.has_class("visible")
+        assert app.focused is not None
+        assert app.focused.id == "spotlight-panel"
 
 
 def test_chat_panel_seeds_orchestrator_system_prompt():

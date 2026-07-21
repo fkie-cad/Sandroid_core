@@ -99,6 +99,7 @@ class SandroidTUI(App):
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
         Binding("ctrl+b", "focus_tools", "Tools", show=True),
+        Binding("ctrl+y", "toggle_chat", "AI Chat", show=True),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -895,6 +896,12 @@ class SandroidTUI(App):
         screen = self._get_main_screen()
         if screen is not None:
             screen.open_snapshots_tab()
+
+    def action_toggle_chat(self) -> None:
+        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y)."""
+        screen = self._get_main_screen()
+        if screen is not None:
+            screen.toggle_chat_panel()
 
     def action_show_settings(self) -> None:
         """Show the settings screen."""

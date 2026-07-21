@@ -60,7 +60,8 @@ MainScreen {
 
 /* Activity log styling */
 ActivityLog {
-    height: 100%;
+    height: 1fr;
+    min-height: 3;
     scrollbar-size: 1 1;
     background: #3B4252;
 }

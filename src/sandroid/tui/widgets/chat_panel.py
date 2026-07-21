@@ -82,8 +82,10 @@ from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.core.console import SANDROID_LOGO
 from sandroid.tui.widgets.tool_permission_prompt import (
+    _DESCRIPTION_MAX_LEN,
     ToolPermissionPrompt,
     _format_args_preview,
+    _truncate,
 )
 
 if TYPE_CHECKING:
@@ -188,6 +190,81 @@ _MASCOT_TALK_FRAMES: tuple[tuple[str, ...], ...] = (
     _tilt(_MASCOT_IDLE_FRAME, 1),
     _tilt(_MASCOT_IDLE_FRAME, -1),
 )
+
+# Small allowlist of acronyms `str.title()` mangles (e.g. "Pid" instead of
+# "PID") -- looked up per whole word (not a substring replace), so an
+# ordinary word that merely contains one of these as a substring (e.g.
+# "Rapid") is never touched.
+_TOOL_NAME_ACRONYM_FIXUPS: dict[str, str] = {
+    "Pid": "PID",
+    "Uid": "UID",
+    "Gid": "GID",
+    "Apk": "APK",
+    "Adb": "ADB",
+    "Gms": "GMS",
+    "Ssl": "SSL",
+    "Tls": "TLS",
+    "Mcp": "MCP",
+    "Url": "URL",
+    "Ip": "IP",
+    "Id": "ID",
+}
+
+
+def _humanize_tool_name(name: str) -> str:
+    """Render a snake_case tool name as a human-readable title.
+
+    E.g. ``get_package_pid`` -> ``"Get Package PID"``,
+    ``get_emulator_status`` -> ``"Get Emulator Status"``. Title-cases the
+    underscore-separated name, then fixes up a small allowlist of
+    acronyms (see ``_TOOL_NAME_ACRONYM_FIXUPS``) that ``str.title()``
+    otherwise mangles into e.g. "Pid" instead of "PID".
+
+    Args:
+        name: The raw tool name (e.g. from a ``tool_call_done`` event).
+
+    Returns:
+        A human-readable, title-cased rendering of ``name``.
+    """
+    words = name.replace("_", " ").title().split(" ")
+    return " ".join(_TOOL_NAME_ACRONYM_FIXUPS.get(word, word) for word in words)
+
+
+#: Overall cap on how many `key: value` argument lines are shown per tool
+#: call -- a tool with a huge args dict shouldn't be able to blow up the
+#: transcript.
+_TOOL_ARGS_MAX_LINES = 6
+
+
+def _format_tool_args_lines(args: dict) -> list[str]:
+    """Render a tool call's arguments as sorted ``key: value`` lines.
+
+    One pair per line (rather than one big ``json.dumps`` blob) so string
+    values stay individually quoted/readable without dumping the whole
+    object as one blob. Each value is capped at
+    ``tool_permission_prompt._DESCRIPTION_MAX_LEN`` characters (reused here
+    for consistency with that widget's own truncation ceiling), and the
+    overall number of lines is capped at ``_TOOL_ARGS_MAX_LINES`` with a
+    trailing ``"… N more"`` line if there were more.
+
+    Args:
+        args: The tool call's arguments.
+
+    Returns:
+        A list of formatted ``"key: value"`` lines, or ``[]`` if ``args``
+        is empty (so the caller can skip the indented block entirely).
+    """
+    if not args:
+        return []
+    items = sorted(args.items())
+    lines = [
+        f"{key}: {_truncate(json.dumps(value), _DESCRIPTION_MAX_LEN)}"
+        for key, value in items[:_TOOL_ARGS_MAX_LINES]
+    ]
+    remaining = len(items) - _TOOL_ARGS_MAX_LINES
+    if remaining > 0:
+        lines.append(f"… {remaining} more")
+    return lines
 
 
 class ChatTurnHandle:
@@ -639,9 +716,12 @@ class ChatPanel(Widget):
             name = event.get("name") or "?"
             args = event.get("arguments") or {}
             self._push_history(
-                f"[#a78bfa]→ tool call: {escape(name)}"
-                f"({escape(json.dumps(args))})[/]"
+                f"[bold #a78bfa]● {escape(_humanize_tool_name(name))}[/]"
             )
+            arg_lines = _format_tool_args_lines(args)
+            if arg_lines:
+                body = "\n".join(f"    [dim]{escape(line)}[/]" for line in arg_lines)
+                self._push_history(body)
             self._header_state = "tool"
             self._header_detail = name
             self.refresh_header()
@@ -762,7 +842,7 @@ class ChatPanel(Widget):
             duration = 0.0
             if self._reasoning_started_at is not None:
                 duration = max(0.0, time.monotonic() - self._reasoning_started_at)
-            self._history_lines.append(f"[dim]✻ Thought for {round(duration)}s[/]")
+            self._history_lines.append(f"[dim]✧ Thought for {round(duration)}s[/]")
         self._live_reasoning = ""
         self._reasoning_started_at = None
         return True
@@ -809,8 +889,8 @@ class ChatPanel(Widget):
     def refresh_header(self) -> None:
         """Re-render the status header (main thread; best-effort).
 
-        Public so ``MainScreen._select_bottom_tab`` can refresh it the
-        moment the Chat tab is activated (mirrors ``FriTapPanel``).
+        Public so ``MainScreen.toggle_chat_panel`` can refresh it the moment
+        the Chat dock is opened (mirrors ``FriTapPanel``).
 
         Also the single choke point that syncs the mascot to
         ``_header_state`` -- every place that changes header state already

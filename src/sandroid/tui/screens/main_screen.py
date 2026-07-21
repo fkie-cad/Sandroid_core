@@ -99,6 +99,16 @@ class MainScreen(Screen):
         height: 1fr;
         border-top: solid #1f2d4d;
     }
+    #chat-dock {
+        display: none;
+        height: 16;
+        min-height: 8;
+        max-height: 50%;
+        border-top: solid #1f2d4d;
+    }
+    #chat-dock.visible {
+        display: block;
+    }
     """
 
     def __init__(
@@ -146,17 +156,17 @@ class MainScreen(Screen):
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
-                        yield Static("Chat", id="tab-chat", classes="tool-tab")
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield FriTapPanel(id="fritap-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
-                        yield ChatPanel(id="chat-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
                 yield ActivityLog(id="activity-log")
+                with Vertical(id="chat-dock"):
+                    yield ChatPanel(id="chat-panel")
 
         yield SandroidFooter()
         logger.debug("[MAIN_SCREEN] compose complete")
@@ -199,7 +209,6 @@ class MainScreen(Screen):
         "tab-mitm": "mitm-panel",
         "tab-fritap": "fritap-panel",
         "tab-snapshots": "snapshots-panel",
-        "tab-chat": "chat-panel",
     }
 
     def on_click(self, event) -> None:
@@ -280,6 +289,38 @@ class MainScreen(Screen):
         except ValueError:
             idx = 0
         self._select_bottom_tab(order[(idx + delta) % len(order)])
+
+    def toggle_chat_panel(self) -> None:
+        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y).
+
+        Non-modal: the left tool tabs stay fully live/interactive while the
+        dock is open. ChatPanel itself never unmounts -- only #chat-dock's
+        `display` flips via the `.visible` class -- so conversation history
+        and scroll position persist across toggles.
+        """
+        try:
+            dock = self.query_one("#chat-dock")
+        except Exception:
+            return
+        showing = not dock.has_class("visible")
+        dock.set_class(showing, "visible")
+
+        if showing:
+            try:
+                self.query_one("#chat-panel", ChatPanel).refresh_header()
+            except Exception:
+                pass
+            try:
+                self.query_one("#chat-input").focus()
+            except Exception:
+                pass
+        else:
+            current = self._bottom_current()
+            if current:
+                try:
+                    self.query_one(f"#{current}").focus()
+                except Exception:
+                    pass
 
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.

@@ -880,7 +880,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             except Exception:
                 continue
             # refresh_header() is ChatPanel's existing public repaint hook
-            # (already used cross-widget by MainScreen._select_bottom_tab)
+            # (already used cross-widget by MainScreen.toggle_chat_panel)
             # -- it re-renders the header text (no-op here, header state is
             # untouched) and, as its docstring says, is "the single choke
             # point that syncs the mascot to _header_state", i.e. exactly
