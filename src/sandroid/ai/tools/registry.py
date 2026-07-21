@@ -69,6 +69,15 @@ class ToolSpec:
         risk: Safety tier (see :class:`RiskTier`). Defaults to read-only.
         category: Free-form grouping label (e.g. ``"general"``, ``"mcp"``,
             ``"subagent"``), used for display/filtering, not enforced.
+        can_remember_choice: Whether a user's "Allow always"/"Never" choice
+            for this tool may be persisted and reused on future calls (see
+            :mod:`sandroid.ai.tool_permissions`). Defaults to ``True``. Set
+            to ``False`` for tools whose risk lives in their *arguments*
+            rather than their identity (e.g. ``invoke_exported_component`` --
+            approving one call must not silently approve every future call
+            with different, unreviewed arguments): such a tool always
+            resolves to ``"ask"`` and its decline is call-scoped only, never
+            written to the permission store.
     """
 
     name: str
@@ -77,6 +86,7 @@ class ToolSpec:
     func: Callable
     risk: RiskTier = RiskTier.READ_ONLY
     category: str = "general"
+    can_remember_choice: bool = True
 
 
 class ToolRegistry:
@@ -147,6 +157,23 @@ class ToolRegistry:
             raise ToolExecutionError(f"Unknown tool: {name!r}")
         return spec.func(**arguments)
 
+    def get_spec(self, name: str) -> ToolSpec | None:
+        """Look up a tool's spec without executing it.
+
+        Non-executing counterpart to :meth:`dispatch`'s lookup -- used by the
+        tool-permission gate (:mod:`sandroid.ai.tool_permissions`) to inspect
+        a tool's ``risk``/``can_remember_choice`` before deciding whether to
+        call it at all.
+
+        Args:
+            name: Registered tool name.
+
+        Returns:
+            The registered :class:`ToolSpec`, or ``None`` if no tool is
+            registered under ``name``.
+        """
+        return self._tools.get(name)
+
     @staticmethod
     def _to_schema_entry(spec: ToolSpec) -> dict:
         return {
@@ -180,6 +207,7 @@ def sandroid_tool(
     parameters: dict,
     risk: RiskTier = RiskTier.READ_ONLY,
     category: str = "general",
+    can_remember_choice: bool = True,
 ) -> Callable:
     """Decorator that wraps a function and registers it as a tool.
 
@@ -193,6 +221,8 @@ def sandroid_tool(
         parameters: Hand-written JSON Schema for the tool's arguments.
         risk: Safety tier, see :class:`RiskTier`.
         category: Free-form grouping label.
+        can_remember_choice: Whether an "Allow always"/"Never" choice for
+            this tool may be persisted, see :attr:`ToolSpec.can_remember_choice`.
 
     Returns:
         A decorator that returns the original function unchanged.
@@ -207,6 +237,7 @@ def sandroid_tool(
                 func=func,
                 risk=risk,
                 category=category,
+                can_remember_choice=can_remember_choice,
             )
         )
         return func

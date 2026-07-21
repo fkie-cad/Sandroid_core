@@ -113,7 +113,29 @@ def test_default_risk_tier_is_read_only():
     assert spec.risk == RiskTier.READ_ONLY
 
 
+def test_default_can_remember_choice_is_true():
+    spec = _make_spec()
+    assert spec.can_remember_choice is True
+
+
 def test_get_tool_registry_is_a_singleton():
     first = get_tool_registry()
     second = get_tool_registry()
     assert first is second
+
+
+def test_get_spec_returns_the_registered_spec_without_executing_it():
+    registry = ToolRegistry()
+    calls = []
+    spec = _make_spec(func=calls.append)
+    registry.register(spec)
+
+    found = registry.get_spec("echo")
+
+    assert found is spec
+    assert calls == []  # get_spec is a non-executing peek, unlike dispatch
+
+
+def test_get_spec_returns_none_for_unregistered_name():
+    registry = ToolRegistry()
+    assert registry.get_spec("does-not-exist") is None

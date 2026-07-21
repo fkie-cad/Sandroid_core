@@ -14,7 +14,9 @@ that only happens once a message is actually submitted -- so this mounts
 cleanly with zero fixtures.
 """
 
+import asyncio
 import functools
+import threading
 import time as time_module
 from types import SimpleNamespace
 
@@ -22,11 +24,14 @@ import pytest
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Input, RichLog, Static
+from textual.css.query import NoMatches
+from textual.widgets import Button, Input, RichLog, Static
 
 import sandroid.tui.widgets.chat_panel as chat_panel_module
+from sandroid.ai.tools.registry import RiskTier, ToolSpec
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.widgets.chat_panel import ChatPanel, ChatTurnHandle
+from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 
 
 class _ChatPanelHarness(App):
@@ -134,7 +139,9 @@ async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
 
     captured_calls = []
 
-    def fake_run_agent_turn(messages, tools, client, cancel_event, on_event=None):
+    def fake_run_agent_turn(
+        messages, tools, client, cancel_event, on_event=None, approve=None
+    ):
         captured_calls.append(list(messages))
         return "assistant reply"
 
@@ -593,3 +600,213 @@ async def test_on_input_submitted_pushes_a_text_renderable_for_the_user_line(
         user_lines = [line for line in panel._history_lines if isinstance(line, Text)]
         assert len(user_lines) == 1
         assert user_lines[0].plain.startswith("> hello")
+
+
+# -- Tool-permission gate (approve_tool_call) ------------------------------
+
+#: Both tests below need `_run_turn_sync` to actually run on a background OS
+#: thread (so `approve_tool_call`'s blocking wait doesn't freeze the event
+#: loop), but deliberately use a bare `threading.Thread` instead of this
+#: file's usual `panel.run_worker(..., thread=True)`. A repeatable
+#: investigation (see task notes) found that Textual's own Worker/
+#: WorkerManager bookkeeping, when combined with a worker callable that makes
+#: *multiple, blocking* `call_from_thread` round-trips into the app while the
+#: test's own coroutine is concurrently polling the DOM, intermittently wedges
+#: the app's event loop hard enough that even `asyncio.wait_for`'s
+#: cancellation is never delivered -- a genuine, pre-existing hazard in
+#: combining `run_worker(thread=True)` with this brand-new
+#: blocks-on-a-cross-thread-round-trip pattern, not a bug in
+#: `approve_tool_call` itself (confirmed independently reproducible with a
+#: minimal, ChatPanel-free widget). A bare `Thread` runs the exact same
+#: `_run_turn_sync` method on the exact same kind of real OS thread `approve_
+#: tool_call` is written to expect, without going through that flaky
+#: machinery -- reliable across 15+ repeated manual runs, vs. failing roughly
+#: a third of the time via `run_worker`. Flagged for separate follow-up.
+
+
+async def _wait_for_thread_done(
+    thread: threading.Thread, max_wait: float = 10.0
+) -> bool:
+    """Cooperatively wait for `thread` to finish without blocking the loop.
+
+    Polls `thread.is_alive()` with short `asyncio.sleep`s (never a blocking
+    `Thread.join()`) so that if something ever goes wrong, the *surrounding*
+    `asyncio.wait_for(...)` in the calling test can still deliver its
+    cancellation -- a synchronous `join()` would have no await point for
+    that cancellation to land on, defeating the whole safety net.
+
+    Returns:
+        True once `thread` has finished; False if `max_wait` elapsed first.
+    """
+    deadline = time_module.monotonic() + max_wait
+    while thread.is_alive():
+        if time_module.monotonic() > deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+@pytest.mark.smoke
+async def test_approve_tool_call_resolves_via_real_button_click(monkeypatch):
+    """End-to-end regression test for the tool-permission gate: a pending
+    tool call blocks the worker thread until a real button click on the
+    mounted ``ToolPermissionPrompt`` resolves it.
+
+    Sequencing is critical here. The fake ``run_agent_turn`` below calls the
+    panel's real ``approve_tool_call`` closure directly -- on a real
+    background thread, simulating exactly what ``ai.loop._dispatch_one``
+    does for a real "ask"-policy tool call. That closure blocks on a local
+    ``threading.Event`` that only a button click (handled on the app's
+    event-loop thread) can set. So this test MUST poll for the mounted
+    prompt's own button and click it BEFORE awaiting the thread -- awaiting
+    it first (this file's more common ``run_worker``/``wait()`` pattern)
+    would deadlock, since nothing would ever click the button to unblock it.
+    There is no ``pytest-timeout`` configured in this repo, so the whole
+    scenario is additionally wrapped in ``asyncio.wait_for`` as a
+    belt-and-braces guard: a sequencing mistake fails fast with a
+    ``TimeoutError`` instead of hanging the suite.
+    """
+    captured: dict[str, str] = {}
+
+    spec = ToolSpec(
+        name="dangerous_tool",
+        description="Does something dangerous.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        func=lambda: None,
+        risk=RiskTier.REVERSIBLE,
+    )
+
+    def fake_run_agent_turn(
+        messages, tools, client, cancel_event, on_event=None, approve=None
+    ):
+        assert approve is not None, "approve_tool_call was not passed through"
+        captured["choice"] = approve(spec, {"target": "thing"})
+        return "assistant reply"
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    async def scenario() -> None:
+        app = _ChatPanelHarness()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one("#chat-panel", ChatPanel)
+            handle = ChatTurnHandle()
+
+            thread = threading.Thread(
+                target=panel._run_turn_sync,
+                args=("hello", handle, "http://x", "k", "m"),
+                daemon=True,
+            )
+            thread.start()
+
+            # Poll for the prompt's OWN button (not just its parent
+            # container) FIRST: mounting the container is awaited, but its
+            # composed children (the buttons) can lag a beat behind that --
+            # polling for the button itself is the only fully reliable
+            # "ready to click" signal. Also wait for the header state, not
+            # just the button: `approve_tool_call` mounts the widget and
+            # flips the header state inside the SAME awaited coroutine, but
+            # `Widget.mount()` has its own internal await points, so the
+            # button can become queryable a beat before that coroutine
+            # actually resumes past its `await self.mount(...)` to set the
+            # header state -- wait for both together rather than assume
+            # they land in the same tick.
+            button = None
+            for _ in range(300):
+                try:
+                    candidate = app.query_one("#btn-once", Button)
+                except NoMatches:
+                    candidate = None
+                if candidate is not None and panel._header_state == "awaiting-approval":
+                    button = candidate
+                    break
+                await asyncio.sleep(0.02)
+            assert button is not None, "ToolPermissionPrompt's button never mounted"
+            assert panel._header_state == "awaiting-approval"
+
+            # ONLY NOW simulate the click -- this is what sets the local
+            # Event the background thread is blocked waiting on.
+            clicked = await pilot.click("#btn-once")
+            assert clicked
+
+            # Wait for the thread AFTER the click, never before -- and
+            # cooperatively (never a blocking Thread.join()), so this
+            # test's own asyncio.wait_for can still cancel it if wrong.
+            finished = await _wait_for_thread_done(thread)
+            assert finished, "background thread never finished after the click"
+            await pilot.pause()
+
+            assert captured.get("choice") == "once"
+            # The prompt is unmounted and the header state restored once
+            # the approval is resolved.
+            with pytest.raises(NoMatches):
+                app.query_one(ToolPermissionPrompt)
+            assert panel._header_state != "awaiting-approval"
+
+    await asyncio.wait_for(scenario(), timeout=15)
+
+
+@pytest.mark.smoke
+async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypatch):
+    """A Stop (Ctrl+X, i.e. the turn's own ``cancel_event``) must unblock a
+    pending approval as ``"cancelled"`` -- never a permanent "never" -- so
+    hitting Stop while a prompt is up can't silently blacklist whatever tool
+    happened to be pending. No button is ever clicked in this test; the
+    cancel_event alone must be enough to resolve the wait within a couple of
+    poll ticks, so this also indirectly proves the wait loop's cancellation
+    check actually runs. Wrapped in ``asyncio.wait_for`` for the same
+    hang-safety reason as the sibling test above.
+    """
+    captured: dict[str, str] = {}
+
+    spec = ToolSpec(
+        name="dangerous_tool",
+        description="Does something dangerous.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        func=lambda: None,
+        risk=RiskTier.REVERSIBLE,
+    )
+
+    def fake_run_agent_turn(
+        messages, tools, client, cancel_event, on_event=None, approve=None
+    ):
+        assert approve is not None
+        captured["choice"] = approve(spec, {"target": "thing"})
+        return ""
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    async def scenario() -> None:
+        app = _ChatPanelHarness()
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one("#chat-panel", ChatPanel)
+            handle = ChatTurnHandle()
+
+            thread = threading.Thread(
+                target=panel._run_turn_sync,
+                args=("hello", handle, "http://x", "k", "m"),
+                daemon=True,
+            )
+            thread.start()
+
+            button = None
+            for _ in range(300):
+                try:
+                    button = app.query_one("#btn-once", Button)
+                    break
+                except NoMatches:
+                    await asyncio.sleep(0.02)
+            assert button is not None, "ToolPermissionPrompt's button never mounted"
+
+            # Simulate Ctrl+X: set the turn's cancel_event directly, exactly
+            # what ChatPanel.action_stop_turn does via `handle.stop()`.
+            handle.stop()
+
+            finished = await _wait_for_thread_done(thread)
+            assert finished, "background thread never finished after cancel_event.set()"
+            await pilot.pause()
+
+            assert captured.get("choice") == "cancelled"
+            with pytest.raises(NoMatches):
+                app.query_one(ToolPermissionPrompt)
+
+    await asyncio.wait_for(scenario(), timeout=15)

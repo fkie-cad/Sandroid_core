@@ -81,16 +81,33 @@ from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agen
 from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.core.console import SANDROID_LOGO
+from sandroid.tui.widgets.tool_permission_prompt import (
+    ToolPermissionPrompt,
+    _format_args_preview,
+)
 
 if TYPE_CHECKING:
     from rich.console import RenderableType
     from textual.timer import Timer
+
+    from sandroid.ai.tools.registry import ToolSpec
 
 logger = logging.getLogger(__name__)
 
 # Seconds between talk frames while the mascot is "talking" -- brisk enough
 # to read as animated/lively rather than a slow, barely-perceptible blink.
 _MASCOT_FRAME_INTERVAL = 0.35
+
+# Hard ceiling on how long a pending tool-permission prompt may block the
+# worker thread before giving up and treating it as cancelled -- matches
+# UIRequestBus's own default timeout (see core/ui_request_bus.py), so this
+# bespoke mechanism gets the same shutdown/hang safety net that bus gets for
+# free from `result_event.wait(timeout=300.0)`.
+_APPROVAL_HARD_TIMEOUT_SECONDS = 300.0
+
+# How often the wait loop below wakes up to re-check cancel_event/the hard
+# ceiling while polling for the user's choice.
+_APPROVAL_POLL_INTERVAL_SECONDS = 0.3
 
 # The mascot is NOT a hand-drawn approximation -- it is an actual crop of
 # ``core.console.SANDROID_LOGO`` (the exact Braille-block asset the startup
@@ -307,7 +324,8 @@ class ChatPanel(Widget):
         # the collapsed "Thought for Ns" summary -- see
         # ``_finalize_reasoning_only``.
         self._reasoning_started_at: float | None = None
-        self._header_state = "idle"  # idle | streaming | thinking | tool | error
+        self._header_state = "idle"
+        # idle | streaming | thinking | tool | awaiting-approval | error
         self._header_detail = ""
         self._turn_in_progress = False
         self._active_handle: ChatTurnHandle | None = None
@@ -434,6 +452,107 @@ class ChatPanel(Widget):
         def on_event(event: dict) -> None:
             self.app.call_from_thread(self._append_ui_event, event)
 
+        def approve_tool_call(spec: ToolSpec, arguments: dict) -> str:
+            """Gate one pending tool call that needs a human decision.
+
+            Called synchronously by ``run_agent_turn`` (via
+            ``ai.loop._dispatch_one``) from this same worker thread whenever
+            :func:`~sandroid.ai.tool_permissions.resolve_tool_policy` returns
+            ``"ask"``. Mounts a :class:`ToolPermissionPrompt` between the
+            transcript and the input box, blocks this thread until it's
+            resolved, then unmounts it and restores whatever header state was
+            active beforehand.
+
+            Returns:
+                ``"once"`` / ``"always"`` / ``"decline"`` / ``"cancelled"`` --
+                the loop's own vocabulary (see
+                :data:`sandroid.ai.loop.ApproveCallback`), translated from
+                the widget's ``"once"``/``"always"``/``"never"`` choices.
+            """
+            args_preview = _format_args_preview(arguments)
+            logger.debug(
+                "Awaiting tool-permission decision for %r (args: %s)",
+                spec.name,
+                args_preview,
+            )
+
+            done = threading.Event()
+            outcome: dict[str, str] = {}
+
+            def on_choice(choice: str) -> None:
+                # The widget only ever calls back with once/always/never --
+                # translate "never" into "decline" here, the loop's own
+                # vocabulary, so ai.loop._dispatch_one can tell an explicit
+                # decline (which persists a "never" policy) apart from
+                # "cancelled" (cancel/timeout below, which must never
+                # persist -- see that function's docstring).
+                outcome["choice"] = "decline" if choice == "never" else choice
+                done.set()
+
+            prompt = ToolPermissionPrompt(spec, arguments, on_choice)
+            previous_state = self._header_state
+            previous_detail = self._header_detail
+
+            async def mount_prompt_and_set_state() -> None:
+                # Positioned between the transcript and the input bar --
+                # a sibling of both under ChatPanel's own vertical layout.
+                # Mounting and the header-state flip happen in the SAME
+                # call_from_thread round-trip (not two separate ones): a
+                # widget-mounted-but-header-still-idle window, even a brief
+                # one, is a real observable inconsistency (and made an
+                # earlier version of this test flaky).
+                await self.mount(prompt, before="#chat-input-bar")
+                self._header_state = "awaiting-approval"
+                self._header_detail = spec.name
+                self.refresh_header()
+
+            # Awaited via call_from_thread (Textual awaits a coroutine
+            # function callback) rather than a bare synchronous
+            # self.mount(...): that call isn't guaranteed to have actually
+            # attached the widget before this thread proceeds to wait on it.
+            self.app.call_from_thread(mount_prompt_and_set_state)
+
+            # Blocks this worker thread until resolved by a button (sets
+            # `done` via on_choice), the turn's own cancel_event, or an
+            # overall hard ceiling -- the shutdown/hang safety net
+            # UIRequestBus gets for free (see its own `timeout=300.0`) and
+            # this bespoke mechanism must build in explicitly instead.
+            choice = "cancelled"
+            start = time.monotonic()
+            while not done.wait(timeout=_APPROVAL_POLL_INTERVAL_SECONDS):
+                if handle.cancel_event.is_set():
+                    break
+                if time.monotonic() - start > _APPROVAL_HARD_TIMEOUT_SECONDS:
+                    logger.warning(
+                        "Tool-permission prompt for %r timed out after %.0fs",
+                        spec.name,
+                        _APPROVAL_HARD_TIMEOUT_SECONDS,
+                    )
+                    break
+            else:
+                # The while loop only exits without `break` when
+                # done.wait(...) finally returned True -- i.e. on_choice ran.
+                choice = outcome.get("choice", "cancelled")
+
+            async def unmount_prompt_and_restore_state() -> None:
+                # Same reasoning as the mount above: unmounting and
+                # restoring the header state happen in one round-trip so
+                # there's no window where the prompt is gone but the header
+                # still reads "awaiting-approval".
+                try:
+                    await prompt.remove()
+                except Exception:
+                    logger.debug(
+                        "Failed to unmount ToolPermissionPrompt", exc_info=True
+                    )
+                self._header_state = previous_state
+                self._header_detail = previous_detail
+                self.refresh_header()
+
+            self.app.call_from_thread(unmount_prompt_and_restore_state)
+
+            return choice
+
         try:
             client = OpenAIClient(base_url, api_key, model)
             tools = get_tool_registry().openai_tools_schema()
@@ -466,6 +585,7 @@ class ChatPanel(Widget):
                 client,
                 handle.cancel_event,
                 on_event=on_event,
+                approve=approve_tool_call,
             )
             if result:
                 turn_messages.append({"role": "assistant", "content": result})
@@ -680,6 +800,8 @@ class ChatPanel(Widget):
             return "[#facc15]● thinking…[/]"
         if self._header_state == "tool":
             return f"[#a78bfa]● tool: `{escape(self._header_detail)}`[/]"
+        if self._header_state == "awaiting-approval":
+            return f"[#fbbf24]● waiting on you: `{escape(self._header_detail)}`[/]"
         if self._header_state == "error":
             return self._HEADER_ERROR
         return self._HEADER_IDLE

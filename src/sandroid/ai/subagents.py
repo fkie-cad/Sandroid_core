@@ -142,7 +142,7 @@ def _build_agent_tool(template: SubagentTemplate):
             raise RuntimeError(
                 f"{template.name} subagent invoked outside of an active agent turn"
             )
-        client, parent_cancel_event = turn_context
+        client, parent_cancel_event, approve = turn_context
 
         local_cancel = threading.Event()
         combined_cancel = _OrCancelEvent(parent_cancel_event, local_cancel)
@@ -181,6 +181,7 @@ def _build_agent_tool(template: SubagentTemplate):
                 tools=sub_tools,
                 client=client,
                 cancel_event=combined_cancel,
+                approve=approve,
             )
         finally:
             Toolbox.unregister_background_task(task_name)

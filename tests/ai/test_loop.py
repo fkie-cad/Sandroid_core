@@ -13,9 +13,11 @@ import threading
 import pytest
 
 import sandroid.ai.loop as loop_module
+import sandroid.ai.tool_permissions as tool_permissions_module
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.loop import run_agent_turn
-from sandroid.ai.tools.registry import ToolRegistry, ToolSpec
+from sandroid.ai.tool_permissions import ToolPermissionStore
+from sandroid.ai.tools.registry import RiskTier, ToolRegistry, ToolSpec
 
 
 class FakeOpenAIClient:
@@ -36,6 +38,25 @@ def test_registry(monkeypatch):
     registry = ToolRegistry()
     monkeypatch.setattr(loop_module, "get_tool_registry", lambda: registry)
     return registry
+
+
+@pytest.fixture
+def permission_store(tmp_path, monkeypatch):
+    """A fresh ToolPermissionStore backed by a temp file, wired up wherever
+    the gate reads it from: `resolve_tool_policy` (defined in
+    tool_permissions.py) calls the module-level `get_tool_permission_store`
+    in *its own* module's globals, while `_dispatch_one` (loop.py) calls the
+    name it imported into *loop.py's* globals -- both must be patched to the
+    same instance, or `mark_allowed`/`mark_never` and policy resolution would
+    silently disagree. Mirrors test_tool_permissions.py's `store` fixture.
+    """
+    instance = ToolPermissionStore(path=tmp_path / "ai_tool_permissions.toml")
+    monkeypatch.setattr(tool_permissions_module, "_tool_permission_store", None)
+    monkeypatch.setattr(
+        tool_permissions_module, "get_tool_permission_store", lambda: instance
+    )
+    monkeypatch.setattr(loop_module, "get_tool_permission_store", lambda: instance)
+    return instance
 
 
 def test_no_tool_call_returns_accumulated_text(test_registry):
@@ -466,7 +487,7 @@ def test_current_turn_context_available_during_turn_and_cleared_after(test_regis
         cancel_event=cancel_event,
     )
 
-    assert seen["context"] == (client, cancel_event)
+    assert seen["context"] == (client, cancel_event, None)
     assert loop_module.get_current_turn_context() is None
 
 
@@ -475,3 +496,338 @@ def test_tool_execution_error_is_a_normal_exception_subclass():
     # ToolExecutionError must be an Exception subclass, or the catch-all in
     # _dispatch_one would not cover it.
     assert issubclass(ToolExecutionError, Exception)
+
+
+# -- Tool-permission gate: resolve_tool_policy consulted before dispatch -----
+
+
+def _single_tool_call_then_text(tool_name, final_text="done", call_id="call_1"):
+    """Two scripted .chat() rounds: one tool call, then a plain-text reply."""
+    return [
+        [
+            {
+                "type": "tool_call_delta",
+                "index": 0,
+                "id": call_id,
+                "name": tool_name,
+                "arguments_fragment": "{}",
+            },
+            {"type": "done"},
+        ],
+        [{"type": "text_delta", "content": final_text}, {"type": "done"}],
+    ]
+
+
+def test_read_only_tool_runs_and_approve_is_never_called(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def read_only_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="read_only_tool",
+            description="A read-only tool.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=read_only_tool,
+            risk=RiskTier.READ_ONLY,
+        )
+    )
+
+    approve_calls = []
+
+    def approve(spec, arguments):
+        approve_calls.append((spec, arguments))
+        return "once"
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("read_only_tool"))
+
+    result = run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=approve,
+    )
+
+    assert result == "done"
+    assert func_calls == ["ran"]
+    assert approve_calls == []
+
+
+def test_ask_policy_tool_refuses_on_decline_and_persists_never(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def reversible_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="reversible_tool",
+            description="A reversible tool needing confirmation.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=reversible_tool,
+            risk=RiskTier.REVERSIBLE,
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("reversible_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=lambda spec, arguments: "decline",
+    )
+
+    assert func_calls == [], "declined tool must never reach registry.dispatch"
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "error" in payload
+    assert permission_store.is_never("reversible_tool")
+    assert not permission_store.is_allowed("reversible_tool")
+
+
+def test_cancelled_approve_refuses_but_does_not_persist(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def reversible_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="reversible_tool",
+            description="A reversible tool needing confirmation.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=reversible_tool,
+            risk=RiskTier.REVERSIBLE,
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("reversible_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=lambda spec, arguments: "cancelled",
+    )
+
+    assert func_calls == []
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "error" in payload
+    assert not permission_store.is_never(
+        "reversible_tool"
+    ), "a cancelled wait must not be conflated with an explicit decline"
+    assert not permission_store.is_allowed("reversible_tool")
+
+
+def test_ask_policy_tool_refuses_safely_when_approve_is_none(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def reversible_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="reversible_tool",
+            description="A reversible tool needing confirmation.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=reversible_tool,
+            risk=RiskTier.REVERSIBLE,
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("reversible_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    # approve intentionally omitted -- defaults to None, i.e. no UI available.
+    run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+    )
+
+    assert func_calls == []
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "error" in payload
+    assert "no UI is available" in payload["error"]
+
+
+def test_approve_raising_is_caught_and_fed_back_as_tool_result(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def reversible_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="reversible_tool",
+            description="A reversible tool needing confirmation.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=reversible_tool,
+            risk=RiskTier.REVERSIBLE,
+        )
+    )
+
+    def approve(spec, arguments):
+        raise RuntimeError("approve blew up")
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("reversible_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    result = run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=approve,
+    )
+
+    # Must not raise -- the turn completes normally, same contract as an
+    # ordinary tool bug already caught by registry.dispatch's try/except.
+    assert result == "done"
+    assert func_calls == []
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "error" in payload
+    assert "approve blew up" in payload["error"]
+
+
+def test_always_persists_and_second_call_same_turn_skips_approve(
+    test_registry, permission_store
+):
+    func_calls = []
+
+    def reversible_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="reversible_tool",
+            description="A reversible tool needing confirmation.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=reversible_tool,
+            risk=RiskTier.REVERSIBLE,
+        )
+    )
+
+    approve_calls = []
+
+    def approve(spec, arguments):
+        approve_calls.append((spec, arguments))
+        return "always"
+
+    client = FakeOpenAIClient(
+        [
+            [
+                {
+                    "type": "tool_call_delta",
+                    "index": 0,
+                    "id": "call_1",
+                    "name": "reversible_tool",
+                    "arguments_fragment": "{}",
+                },
+                {"type": "done"},
+            ],
+            [
+                {
+                    "type": "tool_call_delta",
+                    "index": 0,
+                    "id": "call_2",
+                    "name": "reversible_tool",
+                    "arguments_fragment": "{}",
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text_delta", "content": "done"}, {"type": "done"}],
+        ]
+    )
+
+    result = run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=approve,
+    )
+
+    assert result == "done"
+    assert func_calls == ["ran", "ran"]
+    assert len(approve_calls) == 1, (
+        "the second call to the same tool within this turn must resolve to "
+        "'allowed' via the now-persisted store entry, without asking again"
+    )
+    assert permission_store.is_allowed("reversible_tool")
+
+
+def test_can_remember_choice_false_still_asks_despite_prior_allowed_entry(
+    test_registry, permission_store
+):
+    # Simulates a stale/pre-existing "allowed" entry under this tool's name
+    # (e.g. left over from a prior test/run before the tool was marked
+    # can_remember_choice=False).
+    permission_store.mark_allowed("arg_sensitive_tool")
+
+    func_calls = []
+
+    def arg_sensitive_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="arg_sensitive_tool",
+            description="A tool whose risk lives in its arguments.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=arg_sensitive_tool,
+            risk=RiskTier.CONSEQUENTIAL,
+            can_remember_choice=False,
+        )
+    )
+
+    approve_calls = []
+
+    def approve(spec, arguments):
+        approve_calls.append((spec, arguments))
+        return "once"
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("arg_sensitive_tool"))
+
+    result = run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        approve=approve,
+    )
+
+    assert result == "done"
+    assert func_calls == ["ran"]
+    assert len(approve_calls) == 1, (
+        "can_remember_choice=False must always ask, even against a stored "
+        "'allowed' entry under the same name"
+    )

@@ -21,7 +21,8 @@ from collections.abc import Callable
 from contextvars import ContextVar
 
 from sandroid.ai.client import OpenAIClient
-from sandroid.ai.tools.registry import get_tool_registry
+from sandroid.ai.tool_permissions import get_tool_permission_store, resolve_tool_policy
+from sandroid.ai.tools.registry import ToolSpec, get_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +30,28 @@ logger = logging.getLogger(__name__)
 #: that keeps requesting tools can't loop forever.
 MAX_ITERATIONS_DEFAULT = 8
 
-#: (client, cancel_event) for the turn currently executing on this thread.
-#: Subagent tool dispatch (sandroid.ai.subagents) reads this via
+#: A pending tool call's approval callback: given the tool's ToolSpec and its
+#: parsed arguments, blocks until the user (or caller) decides, returning
+#: "once" | "always" | "decline" | "cancelled". See _dispatch_one.
+ApproveCallback = Callable[[ToolSpec, dict], str]
+
+#: (client, cancel_event, approve) for the turn currently executing on this
+#: thread. Subagent tool dispatch (sandroid.ai.subagents) reads this via
 #: get_current_turn_context() to recurse into run_agent_turn with the same
-#: client and a cancel_event that ORs the parent's. Deliberately lives here
-#: (not in subagents.py) so this module has zero knowledge of subagents --
-#: the dependency points one way: subagents.py -> loop.py.
-_current_turn_context: ContextVar[tuple[OpenAIClient, threading.Event] | None] = (
-    ContextVar("_current_turn_context", default=None)
-)
+#: client, a cancel_event that ORs the parent's, and the same approve
+#: callback (so the tool-permission gate applies uniformly to subagent
+#: dispatch too). Deliberately lives here (not in subagents.py) so this
+#: module has zero knowledge of subagents -- the dependency points one way:
+#: subagents.py -> loop.py.
+_current_turn_context: ContextVar[
+    tuple[OpenAIClient, threading.Event, ApproveCallback | None] | None
+] = ContextVar("_current_turn_context", default=None)
 
 
-def get_current_turn_context() -> tuple[OpenAIClient, threading.Event] | None:
-    """Return the ``(client, cancel_event)`` of the turn running on this thread.
+def get_current_turn_context() -> (
+    tuple[OpenAIClient, threading.Event, ApproveCallback | None] | None
+):
+    """Return the ``(client, cancel_event, approve)`` of the turn running on this thread.
 
     Returns:
         The active turn's context, or ``None`` if no :func:`run_agent_turn`
@@ -62,6 +72,7 @@ def run_agent_turn(
     cancel_event: threading.Event,
     on_event: Callable[[dict], None] | None = None,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
+    approve: ApproveCallback | None = None,
 ) -> str:
     """Drive one full agent turn (streaming + tool-calling) to completion.
 
@@ -81,6 +92,15 @@ def run_agent_turn(
             fully assembled, and any ``error`` event) -- this is how a UI
             renders token-by-token streaming.
         max_iterations: Cap on tool-calling round-trips within this turn.
+        approve: Callback consulted before dispatching a tool call whose
+            persisted policy is ``"ask"`` (see
+            :func:`~sandroid.ai.tool_permissions.resolve_tool_policy`); given
+            the tool's :class:`~sandroid.ai.tools.registry.ToolSpec` and its
+            parsed arguments, blocks until resolved and returns one of
+            ``"once"``/``"always"``/``"decline"``/``"cancelled"``.
+            ``None`` (the default) means no UI is available to ask, so any
+            tool needing confirmation is refused outright rather than
+            dispatched.
 
     Returns:
         The final reply text not yet reflected in ``messages`` -- i.e. only
@@ -105,10 +125,17 @@ def run_agent_turn(
         t["function"]["name"] for t in tools if t.get("type") == "function"
     }
 
-    token = _current_turn_context.set((client, cancel_event))
+    token = _current_turn_context.set((client, cancel_event, approve))
     try:
         return _run_iterations(
-            messages, tools, client, cancel_event, emit, max_iterations, allowed_names
+            messages,
+            tools,
+            client,
+            cancel_event,
+            emit,
+            max_iterations,
+            allowed_names,
+            approve,
         )
     finally:
         _current_turn_context.reset(token)
@@ -122,6 +149,7 @@ def _run_iterations(
     emit: Callable[[dict], None],
     max_iterations: int,
     allowed_names: set[str],
+    approve: ApproveCallback | None = None,
 ) -> str:
     for _ in range(max_iterations):
         if cancel_event.is_set():
@@ -144,7 +172,7 @@ def _run_iterations(
         # returned after this point must NOT re-include text_accum, or the
         # caller would duplicate it by appending the return value again.
         _dispatch_tool_calls(
-            messages, tool_calls, text_accum, emit, cancel_event, allowed_names
+            messages, tool_calls, text_accum, emit, cancel_event, allowed_names, approve
         )
         if cancel_event.is_set():
             return ""
@@ -208,6 +236,7 @@ def _dispatch_tool_calls(
     emit: Callable[[dict], None],
     cancel_event: threading.Event,
     allowed_names: set[str] | None = None,
+    approve: ApproveCallback | None = None,
 ) -> None:
     """Assemble, announce, append, and execute every tool call from one turn.
 
@@ -261,7 +290,7 @@ def _dispatch_tool_calls(
             content = json.dumps({"error": "cancelled before this tool call ran"})
         else:
             content = _dispatch_one(
-                registry, call["name"], parsed_by_index[index], allowed_names
+                registry, call["name"], parsed_by_index[index], allowed_names, approve
             )
         messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
 
@@ -271,6 +300,7 @@ def _dispatch_one(
     name: str | None,
     arguments: dict,
     allowed_names: set[str] | None = None,
+    approve: ApproveCallback | None = None,
 ) -> str:
     """Dispatch one tool call, converting any failure into a tool-result error.
 
@@ -285,10 +315,46 @@ def _dispatch_one(
     call to anything outside it is refused rather than dispatched: a
     narrower tool subset (e.g. a subagent's) is meant to be an enforced
     boundary, not just an advisory hint in the schema the model was shown.
+
+    Before dispatch, the tool-permission gate is consulted (see
+    :func:`~sandroid.ai.tool_permissions.resolve_tool_policy`): a policy of
+    ``"never"`` refuses immediately, ``"ask"`` consults ``approve`` (refusing
+    outright if ``approve`` is ``None``, i.e. no UI is available to ask), and
+    only a policy-permitted call reaches :meth:`ToolRegistry.dispatch`.
+    Read-only/already-decided ("allowed") tools resolve to ``"allowed"`` and
+    never touch ``approve`` at all.
     """
     if allowed_names is not None and name not in allowed_names:
         logger.debug("Tool %r not in this turn's allowed set; refusing", name)
         return json.dumps({"error": f"tool {name!r} is not available this turn"})
+
+    spec = registry.get_spec(name)
+    if spec is not None:
+        policy = resolve_tool_policy(spec.name, spec.risk, spec.can_remember_choice)
+        if policy == "never":
+            return json.dumps({"error": f"{name!r} is blocked by saved policy"})
+        if policy == "ask":
+            if approve is None:
+                return json.dumps(
+                    {"error": f"{name!r} needs confirmation but no UI is available"}
+                )
+            try:
+                choice = approve(spec, arguments)
+            except Exception as exc:
+                logger.debug("approve() raised for %r: %s", name, exc)
+                return json.dumps(
+                    {"error": f"could not obtain confirmation for {name!r}: {exc}"}
+                )
+            if choice in ("decline", "cancelled"):
+                # Only an explicit decline persists -- a turn-cancelled/timed-out
+                # wait must NOT be treated as a permanent "never", or hitting Stop
+                # would silently blacklist whatever tool happened to be pending.
+                if choice == "decline" and spec.can_remember_choice:
+                    get_tool_permission_store().mark_never(spec.name)
+                return json.dumps({"error": f"{name!r} was not approved ({choice})"})
+            if choice == "always" and spec.can_remember_choice:
+                get_tool_permission_store().mark_allowed(spec.name)
+
     try:
         result = registry.dispatch(name, arguments)
         return json.dumps(result)
