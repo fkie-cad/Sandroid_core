@@ -8,7 +8,7 @@ Responsibilities:
 - Configure monitoring paths and PIDs
 - Process and display filesystem events
 - Handle monitoring lifecycle
-- Observer modal with minimize/restore support
+- Publish live events to the Files tab's Monitor sub-tab via the EventBus
 
 Usage:
     from sandroid.tui.controllers import FSMonController
@@ -53,7 +53,8 @@ class FSMonConfig:
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
 
 # Shared color rules for fsmon event colorization.
-# Used by both the controller (activity log) and the observer modal (RichLog).
+# Used by both the controller (activity log) and the Files tab's Monitor
+# sub-tab (tui/widgets/monitor_view.py).
 FSMON_COLOR_RULES: list[tuple[tuple[str, ...], str]] = [
     (("CREATE", "WRITE", "MODIFY"), "green"),
     (("DELETE", "REMOVE", "UNLINK"), "red"),
@@ -81,6 +82,35 @@ def colorize_fsmon_line(line: str, max_width: int = 0) -> str:
         if any(kw in line for kw in keywords):
             return f"[{color}]{escaped}[/{color}]"
     return escaped
+
+
+def _publish_fsmon_event(message: str) -> None:
+    """Publish an fsmon TASK_OUTPUT event to the EventBus.
+
+    Mirrors ``analysis/fritap.py``'s ``_publish_fritap_event`` — the Monitor
+    sub-tab (``tui/widgets/monitor_view.py``) subscribes to
+    ``EventType.TASK_OUTPUT`` filtered by ``source == "fsmon"``, the same
+    idiom ``FriTapPanel`` uses for ``source == "fritap"``. Lazy import
+    (matches every other EventBus/TaskService touch in this controller, e.g.
+    ``_get_task_service``) to avoid a module-level dependency on the core
+    event system.
+
+    Args:
+        message: Already-colorized (``colorize_fsmon_line``) Rich markup
+            message for the line.
+    """
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.TASK_OUTPUT,
+                data={"task_name": "FSMon", "message": message},
+                source="fsmon",
+            )
+        )
+    except Exception:
+        logger.debug("Failed to publish fsmon EventBus event", exc_info=True)
 
 
 class FSMonController:
@@ -122,8 +152,7 @@ class FSMonController:
         call_from_thread: Callable[..., None] | None = None,
         force_ui_refresh: Callable[[], None] | None = None,
         get_current_view: Callable[[], str] | None = None,
-        show_minimized_bar: Callable[[str, str], None] | None = None,
-        hide_minimized_bar: Callable[[], None] | None = None,
+        open_files_tab: Callable[[], None] | None = None,
     ):
         """Initialize FSMonController with UI callbacks.
 
@@ -139,8 +168,14 @@ class FSMonController:
             call_from_thread: Callback to execute function on main thread
             force_ui_refresh: Callback to force UI refresh after state changes
             get_current_view: Callback to get current view mode
-            show_minimized_bar: Callback to show minimized indicator (task_name, description)
-            hide_minimized_bar: Callback to hide minimized indicator
+            open_files_tab: Callback to switch the TUI to the Files tab's
+                Monitor sub-tab, invoked once fsmon has actually *started*
+                (after ``_start_fsmon`` registers with TaskService) — not
+                merely when the config modal opens. Mirrors friTap's
+                ``h`` key -> ``MainScreen.open_fritap_tab()`` jump
+                (``app.py``'s ``action_action_key``). Injected rather than
+                importing ``app.py``/``MainScreen`` directly here, same
+                reasoning as every other UI callback on this controller.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -153,15 +188,7 @@ class FSMonController:
         self._call_from_thread = call_from_thread or (lambda fn, *args: fn(*args))
         self._force_ui_refresh = force_ui_refresh
         self._get_current_view = get_current_view
-        self._show_minimized_bar = show_minimized_bar
-        self._hide_minimized_bar = hide_minimized_bar
-
-        # Observer state
-        self._display_mode: str | None = None  # "observer" | "background" | None
-        self._observer_minimized: bool = False
-        self._observer_buffer: deque[str] = deque(maxlen=self._get_max_lines())
-        self._observer_modal: Any = None
-        self._observer_config: Any = None
+        self._open_files_tab = open_files_tab
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -191,11 +218,7 @@ class FSMonController:
         Returns:
             Tuple of (can_start, reason_if_not)
         """
-        # Check if already running
         if self.is_running():
-            # If observer is minimized, allow restore
-            if self._observer_minimized:
-                return True, "restore"
             return (
                 False,
                 "FSMon is already running. Press 'o' to stop it.",
@@ -217,13 +240,11 @@ class FSMonController:
 
         can_start, reason = self.can_start()
 
-        # Handle restore case
-        if can_start and reason == "restore":
-            self._restore_observer()
-            return True
-
         if not can_start:
-            # Toggle: stop if running in background mode
+            # Already running -> toggle it off (mirrors the old
+            # already-running-in-background-mode behavior; there is no
+            # observer modal to restore anymore, Monitor is the only
+            # display surface).
             if self.is_running():
                 return self.stop()
             self._log_warning(reason)
@@ -236,36 +257,10 @@ class FSMonController:
         def on_config(config: FSMonConfig) -> None:
             if config is None or config.cancelled:
                 return
-            self._handle_post_config(config)
+            self._start_fsmon(config)
 
         self._push_modal(FSMonConfigModal(), on_config)
         return True
-
-    def _handle_post_config(self, config: FSMonConfig) -> None:
-        """Handle post-config flow: check display mode preference."""
-        display_mode = self._get_saved_display_mode()
-
-        if display_mode == "ask":
-            self._show_display_choice(config)
-        elif display_mode == "observer":
-            self._start_fsmon_with_mode(config, "observer")
-        else:
-            self._start_fsmon_with_mode(config, "background")
-
-    def _get_saved_display_mode(self) -> str:
-        """Read fsmon_display_mode from config.
-
-        Returns:
-            "ask", "observer", or "background"
-        """
-        try:
-            from sandroid.config.loader import ConfigLoader
-
-            loader = ConfigLoader()
-            config = loader.load()
-            return config.tui.fsmon_display_mode
-        except Exception:
-            return "ask"
 
     def _get_buffer_interval(self) -> float:
         """Read fsmon_buffer_interval from config.
@@ -282,131 +277,6 @@ class FSMonController:
             return max(interval, 0.01) if interval > 0 else 0.01
         except Exception:
             return 0.15
-
-    def _get_max_lines(self) -> int:
-        """Read fsmon_max_lines from config.
-
-        Returns:
-            Maximum lines for observer buffer.
-        """
-        try:
-            from sandroid.config.loader import ConfigLoader
-
-            loader = ConfigLoader()
-            config = loader.load()
-            return config.tui.fsmon_max_lines
-        except Exception:
-            return 500
-
-    def _show_display_choice(self, config: FSMonConfig) -> None:
-        """Show the display choice modal.
-
-        Args:
-            config: FSMon configuration from the config modal
-        """
-        from sandroid.tui.modals.fsmon_display_choice_modal import (
-            FSMonDisplayChoice,
-            FSMonDisplayChoiceModal,
-        )
-
-        def on_choice(choice: FSMonDisplayChoice) -> None:
-            if choice is None or choice.cancelled:
-                return
-
-            if choice.remember_choice:
-                self._save_display_preference(choice.display_mode)
-
-            self._start_fsmon_with_mode(config, choice.display_mode)
-
-        if self._push_modal:
-            self._push_modal(FSMonDisplayChoiceModal(), on_choice)
-
-    def _save_display_preference(self, mode: str) -> None:
-        """Save display mode preference to config file.
-
-        Args:
-            mode: "observer" or "background"
-        """
-        try:
-            from sandroid.config.loader import ConfigLoader
-
-            loader = ConfigLoader()
-            loader.load_and_update_section("tui", {"fsmon_display_mode": mode})
-            self._log_info(f"FSMon display preference saved: {mode}")
-        except Exception as e:
-            logger.debug(f"Failed to save display preference: {e}")
-
-    def _start_fsmon_with_mode(self, config: FSMonConfig, display_mode: str) -> None:
-        """Start fsmon and route output based on display mode.
-
-        Args:
-            config: FSMon configuration
-            display_mode: "observer" or "background"
-        """
-        self._display_mode = display_mode
-        self._observer_minimized = False
-        self._observer_buffer.clear()
-        self._observer_modal = None
-        self._observer_config = config
-
-        started = self._start_fsmon(config)
-        if started and display_mode == "observer":
-            self._open_observer_modal(config)
-
-    def _open_observer_modal(self, config: FSMonConfig) -> None:
-        """Open the observer modal for live output.
-
-        Args:
-            config: FSMon configuration
-        """
-        from sandroid.tui.modals.fsmon_modal import FSMonRunningModal
-
-        modal = FSMonRunningModal(config)
-        self._observer_modal = modal
-        self._push_observer(modal)
-
-    def _restore_observer(self) -> None:
-        """Restore minimized observer modal with buffered output."""
-        if not self._observer_config:
-            return
-
-        from sandroid.tui.modals.fsmon_modal import FSMonRunningModal
-
-        modal = FSMonRunningModal(self._observer_config)
-        modal.load_buffer(list(self._observer_buffer))
-        self._observer_modal = modal
-        self._observer_minimized = False
-
-        if self._hide_minimized_bar:
-            self._hide_minimized_bar()
-
-        self._push_observer(modal)
-
-    def _push_observer(self, modal: Any) -> None:
-        """Push an observer modal with the standard dismiss handler.
-
-        Args:
-            modal: FSMonRunningModal instance to push
-        """
-        config = self._observer_config
-
-        def on_dismiss(result: str) -> None:
-            self._observer_modal = None
-            if result == "stop":
-                self.stop()
-            elif result == "minimize":
-                self._observer_minimized = True
-                self._log_info("FSMon observer minimized - press 'o' to restore")
-                if self._show_minimized_bar and config:
-                    desc = config.target_path
-                    if config.app_name:
-                        desc = f"{config.app_name} ({config.target_path})"
-                    self._show_minimized_bar("FSMon", desc)
-                if self._force_ui_refresh:
-                    self._force_ui_refresh()
-
-        if self._push_modal:
-            self._push_modal(modal, on_dismiss)
 
     def _start_fsmon(self, config: FSMonConfig) -> bool:
         """Start FSMon with the given configuration.
@@ -457,6 +327,24 @@ class FSMonController:
 
             # Start output reader thread
             self._start_output_reader(fsmon_wrapper)
+
+            # fsmon actually STARTED (not just the config modal opening) —
+            # jump to the Files tab's Monitor sub-tab so the live stream is
+            # immediately visible, mirroring "h" (friTap) ->
+            # MainScreen.open_fritap_tab(). This whole call chain runs on the
+            # main thread already (originates from FSMonConfigModal's
+            # push_modal dismiss callback — same reasoning as the
+            # log_task_started call above needing no call_from_thread), so
+            # invoke directly rather than via self._call_from_thread (which
+            # asserts it is being called from a DIFFERENT thread than the
+            # app's own and would raise here).
+            if self._open_files_tab:
+                try:
+                    self._open_files_tab()
+                except Exception:
+                    logger.debug(
+                        "Failed to open Files tab after fsmon start", exc_info=True
+                    )
 
             return True
 
@@ -562,16 +450,16 @@ class FSMonController:
             lines: Batch of output lines from the reader thread
         """
         for line in lines:
-            # Buffer when in observer mode (for restore after minimize)
-            if self._display_mode == "observer":
-                self._observer_buffer.append(line)
-
-            # Route to observer modal if active
-            if self._observer_modal is not None:
-                try:
-                    self._observer_modal.add_output(line)
-                except Exception:
-                    pass
+            # Stream every line to the EventBus (additive — alongside, not
+            # instead of, the activity-log routing below) so the
+            # Files tab's Monitor sub-tab (tui/widgets/monitor_view.py) gets
+            # the full live stream, not just the throttled last-5-per-batch
+            # slice the activity log gets below. Reuses colorize_fsmon_line
+            # so Monitor's colors stay identical to the activity log's.
+            try:
+                _publish_fsmon_event(colorize_fsmon_line(line))
+            except Exception:
+                logger.debug("Failed to publish fsmon line to EventBus", exc_info=True)
 
         # Route last few lines to activity log (throttled to avoid flooding)
         if lines:
@@ -607,22 +495,9 @@ class FSMonController:
         if task_service.is_running("fsmon"):
             task_service.unregister("fsmon")
 
-        # Clear observer state
-        self._clear_observer_state()
-
         # Update UI
         if self._force_ui_refresh:
             self._force_ui_refresh()
-
-    def _clear_observer_state(self) -> None:
-        """Clear all observer-related state."""
-        self._display_mode = None
-        self._observer_minimized = False
-        self._observer_buffer.clear()
-        self._observer_modal = None
-        self._observer_config = None
-        if self._hide_minimized_bar:
-            self._hide_minimized_bar()
 
     def stop(self) -> bool:
         """Stop FSMon if running.
@@ -636,13 +511,98 @@ class FSMonController:
         self._get_task_service().stop("fsmon")
         self._log_info("FSMon stopped")
 
-        # Clear observer state
-        self._clear_observer_state()
-
         if self._force_ui_refresh:
             self._force_ui_refresh()
 
         return True
+
+    # =========================================================================
+    # Resume after Play's snapshot-revert safety stop
+    # =========================================================================
+
+    def resume_after_playback(self, config: "FSMonConfig | None") -> bool:
+        """Re-fork fsmon after Play's snapshot revert auto-stopped it.
+
+        Called from the main thread (this is a direct handler for
+        MonitorView's "Resume monitoring" button — see ``app.py``'s
+        ``resume_fsmon_after_playback``), with the ``FSMonConfig`` fsmon was
+        running with just before ``RecordingController._stop_fsmon_before_
+        revert`` stopped it.
+
+        In PID-mode, ``config.target_pid`` is almost always stale by the
+        time Play finishes: the target app typically relaunches with a new
+        PID during replay. This re-resolves the PID from ``config.app_name``
+        (``Adb.get_pid_for_package_name``) before re-forking rather than
+        trusting the stored one. If the app can no longer be found running,
+        it falls back to path-mode (when ``config.target_path`` is
+        available) instead of silently forking against a dead PID; if
+        neither a fresh PID nor a path is available, it refuses to start at
+        all and logs an explicit reason rather than failing silently.
+
+        Reuses ``_start_fsmon`` for the actual (re-)start rather than
+        duplicating its binary-check/register/output-reader/open-files-tab
+        sequence.
+
+        Args:
+            config: The FSMonConfig fsmon was running with before the
+                Play-triggered auto-stop. ``None`` (e.g. if it couldn't be
+                recovered at stop time) is handled explicitly, not silently.
+
+        Returns:
+            True if fsmon was successfully re-forked.
+        """
+        if config is None:
+            self._log_warning(
+                "Cannot resume monitoring: no prior FSMon configuration available."
+            )
+            return False
+
+        if self.is_running():
+            self._log_warning("FSMon is already running.")
+            return False
+
+        resolved = config
+        if config.mode == "pid":
+            new_pid = None
+            if config.app_name:
+                try:
+                    from sandroid.core.adb import Adb
+
+                    new_pid = Adb.get_pid_for_package_name(
+                        config.app_name, use_frida_fallback=False, quiet=True
+                    )
+                except Exception:
+                    logger.debug("PID re-resolution failed", exc_info=True)
+                    new_pid = None
+
+            if new_pid:
+                resolved = FSMonConfig(
+                    mode="pid",
+                    target_path=config.target_path,
+                    target_pid=new_pid,
+                    app_name=config.app_name,
+                )
+            elif config.target_path:
+                self._log_warning(
+                    f"{config.app_name or 'Target app'} is no longer running — "
+                    f"resuming in path mode ({config.target_path}) instead of "
+                    "PID mode."
+                )
+                resolved = FSMonConfig(
+                    mode="path",
+                    target_path=config.target_path,
+                    target_pid=None,
+                    app_name=config.app_name,
+                )
+            else:
+                self._log_warning(
+                    f"Could not resume monitoring: {config.app_name or 'the target app'} "
+                    "is no longer running and no path fallback was configured. "
+                    "Start FSMon manually with 'o'."
+                )
+                return False
+
+        return self._start_fsmon(resolved)
 
 
 __all__ = [

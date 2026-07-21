@@ -7,11 +7,6 @@ Rich-based dialogs when running in TUI mode.
 # FSMonConfig is canonically defined in the controller; re-export for convenience
 from sandroid.tui.controllers.fsmon_controller import FSMonConfig
 
-from .analysis_summary_modal import (
-    AnalysisData,
-    AnalysisSummaryModal,
-    AnalysisSummaryResult,
-)
 from .apk_install_modal import APKInstallModal, APKInstallResult
 from .apk_selection_modal import APKSelectionModal, APKSelectionResult
 from .app_selection_modal import AppSelectionModal, AppSelectionResult
@@ -33,6 +28,7 @@ from .device_switch_modal import (
     DeviceSwitchContext,
     DeviceSwitchResult,
 )
+from .diff_zoom_modal import DiffZoomModal
 from .export_modal import ExportModal, ExportResult
 from .folder_select_modal import (
     FolderSelectModal,
@@ -45,8 +41,7 @@ from .frida_install_modal import (
     FridaInstallResult,
     ensure_frida_running,
 )
-from .fsmon_display_choice_modal import FSMonDisplayChoice, FSMonDisplayChoiceModal
-from .fsmon_modal import FSMonConfigModal, FSMonRunningModal
+from .fsmon_modal import FSMonConfigModal
 from .input_modal import InputModal
 from .install_warning_modal import InstallWarningModal, InstallWarningResult
 from .ioc_choice_modal import IOCChoiceModal, IOCChoiceResult
@@ -68,7 +63,6 @@ from .snapshot_save_choice_modal import (
     SnapshotSaveChoiceResult,
 )
 from .spawn_mode_modal import SpawnModeModal
-from .spotlight_files_modal import SpotlightFilesAction, SpotlightFilesModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
 from .tool_selection_modal import ToolSelectionModal
 from .trigdroid_modal import SpawnMode, TrigDroidConfig, TrigDroidModal
@@ -81,9 +75,6 @@ __all__ = [
     "AVDInfo",
     "AVDSelectionModal",
     "AVDSelectionResult",
-    "AnalysisData",
-    "AnalysisSummaryModal",
-    "AnalysisSummaryResult",
     "AppSelectionModal",
     "AppSelectionResult",
     "BootMode",
@@ -97,14 +88,12 @@ __all__ = [
     "DeviceSwitchConfirmModal",
     "DeviceSwitchContext",
     "DeviceSwitchResult",
+    "DiffZoomModal",
     "ErrorModal",
     "ExportModal",
     "ExportResult",
     "FSMonConfig",
     "FSMonConfigModal",
-    "FSMonDisplayChoice",
-    "FSMonDisplayChoiceModal",
-    "FSMonRunningModal",
     "FolderSelectModal",
     "FolderSelectResult",
     "ForensicAPKAction",
@@ -147,8 +136,6 @@ __all__ = [
     "SnapshotSelectionResult",
     "SpawnMode",
     "SpawnModeModal",
-    "SpotlightFilesAction",
-    "SpotlightFilesModal",
     "ToggleConfigModal",
     "ToolSelectionModal",
     "TrigDroidConfig",

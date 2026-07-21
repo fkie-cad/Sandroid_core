@@ -298,21 +298,6 @@ class TUIConfig(BaseModel):
         default=False,
         description="If True, Ctrl+C exits immediately. If False (default), shows quit confirmation dialog.",
     )
-    fsmon_display_mode: str = Field(
-        default="ask",
-        description="FSMon output display: 'ask' (prompt), 'observer' (modal), 'background' (activity log)",
-    )
-
-    @validator("fsmon_display_mode")
-    def validate_fsmon_display_mode(cls, v):
-        """Validate FSMon display mode setting."""
-        valid = {"ask", "observer", "background"}
-        if v not in valid:
-            raise ValueError(
-                f"Invalid fsmon_display_mode: {v}. Must be one of: {', '.join(sorted(valid))}"
-            )
-        return v
-
     fsmon_buffer_interval: float = Field(
         default=0.15,
         ge=0.0,

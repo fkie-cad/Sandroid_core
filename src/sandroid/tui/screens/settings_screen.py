@@ -250,20 +250,6 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-switch",
             )
 
-        # FSMon Display Mode
-        with Horizontal(classes="setting-row"):
-            yield Label("FSMon Display:", classes="setting-label")
-            yield Select(
-                [
-                    ("Always Ask", "ask"),
-                    ("Observer Modal", "observer"),
-                    ("Background Log", "background"),
-                ],
-                value=config.tui.fsmon_display_mode,
-                id="setting-tui--fsmon_display_mode",
-                classes="setting-select",
-            )
-
         # FSMon Buffer Interval
         with Horizontal(classes="setting-row"):
             yield Label("FSMon Buffer (s):", classes="setting-label")

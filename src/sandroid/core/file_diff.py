@@ -564,4 +564,67 @@ def txt_diff(txt_file):
     return "".join(parts)
 
 
+def txt_diff_paths(old_path, new_path):
+    """Calculates the differences between two text files given explicit paths.
+
+    Same line-set diff algorithm as :func:`txt_diff`, but takes the two file
+    paths directly instead of assuming the ``RAW_RESULTS_PATH``/
+    ``first_pull``/``second_pull`` convention baked into that function's
+    signature. Added for callers with their own baseline-cache layout (e.g.
+    the Files tab's Watchlist sub-tab, which keeps a ``previous``/``current``
+    pull cache per watched path) that still want the same textual diffing
+    ``ChangedFiles.return_data()`` uses for ``.txt`` files. Deliberately a
+    **new** function rather than an overload of ``txt_diff``'s signature --
+    ``ChangedFiles.return_data()`` calls ``txt_diff(file)`` as-is and must be
+    left untouched.
+
+    Also tolerates non-UTF-8/binary content (returning a friendly error
+    string instead of raising ``UnicodeDecodeError``), unlike ``txt_diff``:
+    that function is only ever called for files already known to be
+    ``.txt``, while this one may be used as a generic fallback for files
+    whose type isn't otherwise recognized.
+
+    :param old_path: Full path to the "before" version of the file.
+    :type old_path: str
+    :param new_path: Full path to the "after" version of the file.
+    :type new_path: str
+    :returns: A formatted string naming lines that have been added and removed.
+    :rtype: str
+    """
+    try:
+        with open(old_path, encoding="utf-8") as f:
+            old_text = f.readlines()
+    except OSError as e:
+        logger.error(f"Failed to open old text file '{old_path}': {e}")
+        return f"\tError: Could not open file {old_path}"
+    except UnicodeDecodeError as e:
+        logger.debug(f"'{old_path}' is not valid UTF-8 text: {e}")
+        return f"\tError: {old_path} is not a text file"
+
+    try:
+        with open(new_path, encoding="utf-8") as f:
+            new_text = f.readlines()
+    except OSError as e:
+        logger.error(f"Failed to open new text file '{new_path}': {e}")
+        return f"\tError: Could not open file {new_path}"
+    except UnicodeDecodeError as e:
+        logger.debug(f"'{new_path}' is not valid UTF-8 text: {e}")
+        return f"\tError: {new_path} is not a text file"
+
+    # Use sets for efficient membership testing
+    old_set = set(old_text)
+    new_set = set(new_text)
+
+    parts = []
+    for line in old_text:
+        if line not in new_set:
+            parts.append(f"\t[LINE DELETED] {line}")
+
+    for line in new_text:
+        if line not in old_set:
+            parts.append(f"\t[LINE ADDED] {line}")
+
+    return "".join(parts)
+
+
 # to get the sqldiff tool, run "sudo apt install sqlite3-tools"

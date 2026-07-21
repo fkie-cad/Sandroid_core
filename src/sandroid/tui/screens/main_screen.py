@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    FilesPanel,
     FriTapPanel,
     MitmproxyPanel,
     SandroidFooter,
@@ -145,11 +146,13 @@ class MainScreen(Screen):
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
+                        yield Static("Files", id="tab-files", classes="tool-tab")
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
                         yield MitmproxyPanel(id="mitm-panel")
                         yield FriTapPanel(id="fritap-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
+                        yield FilesPanel(id="files-panel")
 
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
@@ -196,6 +199,7 @@ class MainScreen(Screen):
         "tab-mitm": "mitm-panel",
         "tab-fritap": "fritap-panel",
         "tab-snapshots": "snapshots-panel",
+        "tab-files": "files-panel",
     }
 
     def on_click(self, event) -> None:
@@ -252,6 +256,8 @@ class MainScreen(Screen):
                 panel_widget.refresh_snapshots()
             if hasattr(panel_widget, "refresh_header"):
                 panel_widget.refresh_header()
+            if hasattr(panel_widget, "refresh_glance"):
+                panel_widget.refresh_glance()
         except Exception:
             pass
 
@@ -262,6 +268,26 @@ class MainScreen(Screen):
     def open_fritap_tab(self) -> None:
         """Switch to the friTap tab (key h)."""
         self._select_bottom_tab("fritap-panel")
+
+    def open_files_tab(self, sub_tab: str | None = None) -> None:
+        """Switch to the Files tab, optionally landing on a specific inner sub-tab.
+
+        ``sub_tab`` is the inner ContentSwitcher child id (e.g.
+        ``"files-diffs"``). Used by Play, which must always land on Diffs on
+        press — the "tab-switch on Play-press" half of the unified focus
+        rule, which always happens regardless of what run history looks
+        like. The separate, gated half (whether the just-completed run also
+        steals the current *selection*) lives in DiffsView.on_new_run, not
+        here.
+        """
+        self._select_bottom_tab("files-panel")
+        if sub_tab:
+            try:
+                panel = self.query_one("#files-panel")
+                if hasattr(panel, "select_subtab"):
+                    panel.select_subtab(sub_tab)
+            except Exception:
+                pass
 
     def cycle_bottom_tab(self, delta: int) -> None:
         """Switch the active tab by *delta* (Left/Right while focus is inside).
@@ -870,7 +896,9 @@ class MainScreen(Screen):
                 if started:
                     # Log success
                     self.app.call_from_thread(
-                        lambda: self._log_to_activity("Frida server installed and started")
+                        lambda: self._log_to_activity(
+                            "Frida server installed and started"
+                        )
                     )
                 else:
                     self.app.call_from_thread(

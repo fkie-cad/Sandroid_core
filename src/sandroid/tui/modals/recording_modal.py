@@ -5,6 +5,7 @@ with real-time status display and optional live event viewing.
 """
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,11 @@ class RecordingResult:
     duration: int = 0
     event_count: int = 0
     output_file: str = ""
+    #: The label chosen (or kept as the auto-generated default) via the
+    #: "Label this run" prompt shown right after recording starts. Seeds
+    #: RecordingController's ``_current_recording_label`` for every
+    #: subsequent Play of this recording.
+    label: str = ""
 
 
 class RecordingModal(ExtractionModal[RecordingResult]):
@@ -156,8 +162,24 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         name: str = None,
         id: str = None,
         classes: str = None,
+        auto_start: bool = False,
+        default_label: str = "",
+        on_label_chosen: Callable[[str], None] | None = None,
     ):
-        """Initialize the recording modal."""
+        """Initialize the recording modal.
+
+        Args:
+            auto_start: If True, start recording immediately on mount
+                instead of waiting for the "Start Recording" button — used
+                by ``RecordingController.start_recording()`` so pressing
+                Record starts the device capture with no extra step.
+            default_label: Auto-generated default name (e.g.
+                ``"Run 3 · 14:22"``) shown as the label prompt's placeholder.
+            on_label_chosen: Called with the final label (custom or the
+                default) the moment the non-blocking "Label this run" prompt
+                is dismissed — fires well before Stop/dismiss, since
+                recording is device-driven and unaffected by a stacked modal.
+        """
         super().__init__(name=name, id=id, classes=classes)
         self._wrapper: RecordingWrapper | None = None
         self._timer: Timer | None = None
@@ -166,6 +188,11 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self._output_file = os.path.join(
             os.getenv("RAW_RESULTS_PATH", "./"), "recording.txt"
         )
+        self._auto_start = auto_start
+        self._default_label = default_label
+        self._chosen_label = default_label
+        self._on_label_chosen = on_label_chosen
+        self._label_prompted = False
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -207,6 +234,11 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             btn.focus()
         except Exception:
             pass
+        if self._auto_start and not self.is_recording:
+            # Pressing Record starts device capture immediately — no extra
+            # "press Start" step. _start_recording() itself prompts for the
+            # run label right after (see its docstring / class docstring).
+            self._start_recording()
 
     def watch_is_recording(self, recording: bool) -> None:
         """React to recording state changes."""
@@ -333,6 +365,45 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self.elapsed_seconds = 0
         self.event_count = 0
 
+        # Non-blocking: recording is already running in the background
+        # (RecordingWrapper is device-driven), so stacking this prompt on
+        # top right now costs nothing time-sensitive.
+        self._prompt_label()
+
+    def _prompt_label(self) -> None:
+        """Pop the (non-blocking) "Label this run" prompt.
+
+        Only ever shown once per recording session. The chosen label (or the
+        auto-generated default, kept on Esc/blank) is cached on
+        ``self._chosen_label`` and forwarded live via ``on_label_chosen`` —
+        see ``RecordingController.start_recording()`` for why the label
+        needs to seed future Plays before this whole modal even dismisses.
+        """
+        if self._label_prompted:
+            return
+        self._label_prompted = True
+        from sandroid.tui.modals.input_modal import InputModal
+
+        def on_result(value: str | None) -> None:
+            label = value.strip() if value else ""
+            if not label:
+                label = self._default_label
+            self._chosen_label = label
+            if self._on_label_chosen:
+                try:
+                    self._on_label_chosen(label)
+                except Exception:
+                    pass
+
+        self.app.push_screen(
+            InputModal(
+                title="Label this run",
+                message="Seeds the default label for every Play of this recording.",
+                placeholder=self._default_label or "run label",
+            ),
+            on_result,
+        )
+
     def _stop_recording(self) -> None:
         """Stop the recording process."""
         if self._timer:
@@ -361,6 +432,7 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             duration=duration,
             event_count=event_count,
             output_file=self._output_file,
+            label=self._chosen_label,
         )
         self._dismiss_with_refresh(result)
 

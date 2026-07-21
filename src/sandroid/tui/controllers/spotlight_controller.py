@@ -17,8 +17,7 @@ Usage:
         push_modal=app.push_screen,
     )
 
-    # Show spotlight files modal
-    controller.show_spotlight_modal()
+    controller.add_file("/data/data/com.example.app/databases/app.db")
 """
 
 import logging
@@ -54,8 +53,7 @@ class SpotlightController:
             push_modal=lambda modal, cb: cb(None),
         )
 
-        # Show spotlight files modal
-        controller.show_spotlight_modal()
+        controller.add_file("/data/data/com.example.app/databases/app.db")
     """
 
     def __init__(
@@ -104,18 +102,6 @@ class SpotlightController:
     # Spotlight Status
     # =========================================================================
 
-    def can_show_modal(self) -> tuple[bool, str]:
-        """Check if spotlight modal can be shown.
-
-        TODO(modes-as-presets): The FORENSIC-view gate was removed (view modes
-        dropped from the TUI). Modes will return as user-selectable presets,
-        at which point a gate may be reintroduced here.
-
-        Returns:
-            Tuple of (can_show, reason_if_not)
-        """
-        return True, ""
-
     def get_spotlight_files(self) -> list[str]:
         """Get list of spotlight files.
 
@@ -131,48 +117,6 @@ class SpotlightController:
     # =========================================================================
     # Spotlight Operations
     # =========================================================================
-
-    def show_spotlight_modal(self) -> bool:
-        """Open spotlight files manager modal.
-
-        Shows modal for viewing, adding, removing, and pulling monitored files.
-
-        Returns:
-            True if modal was shown
-        """
-        from sandroid.tui.modals import SpotlightFilesModal
-
-        can_show, reason = self.can_show_modal()
-        if not can_show:
-            self._log_warning(reason)
-            return False
-
-        if not self._push_modal:
-            self._log_error("Cannot show spotlight modal - push_modal not configured")
-            return False
-
-        def on_action(result: SpotlightFilesAction) -> None:
-            if result is None:
-                return
-            if result.action == "close":
-                return
-            self._handle_action(result)
-
-        self._push_modal(SpotlightFilesModal(), on_action)
-        return True
-
-    def _handle_action(self, result: SpotlightFilesAction) -> None:
-        """Handle spotlight files modal action.
-
-        Args:
-            result: SpotlightFilesAction from modal
-        """
-        if result.action == "add":
-            self.add_file(result.file_path)
-        elif result.action == "remove":
-            self.remove_file(result.file_path)
-        elif result.action in ("pull", "pull_all"):
-            self.pull_files(result.file_path if not result.pull_all else None)
 
     def add_file(self, file_path: str) -> bool:
         """Add file to spotlight.

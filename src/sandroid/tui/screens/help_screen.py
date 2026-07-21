@@ -333,6 +333,24 @@ class HelpScreen(ModalScreen):
             # it out of the editor. TODO(modes-as-presets): surface presets here.
             if action.name == "switch_view":
                 continue
+            # ``remove_file``/``pull_files``/``pull_spotlight_db`` no longer
+            # have a live app.py Binding — Watchlist's in-tab row actions
+            # (d/p/P) replaced their global v/u/space keys, with no
+            # global-key equivalent. The MenuController registrations
+            # themselves are kept (not removed) because the legacy Rich-CLI
+            # path (``ActionQ.parse_interactive_char`` ->
+            # ``MenuController.get_action_by_key``) still validates and
+            # dispatches those same keys to the (still-shared)
+            # ``commands/forensic_commands.py`` handlers. Without this
+            # exclusion they'd fall into the generic "(fixed)" bucket below
+            # and read as live TUI shortcuts when v/u/space now do nothing
+            # in the TUI at all.
+            if action.name in (
+                "remove_file",
+                "pull_files",
+                "pull_spotlight_db",
+            ):
+                continue
             by_category.setdefault(action.category, []).append(action)
 
         first_enabled: int | None = None

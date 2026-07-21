@@ -125,13 +125,7 @@ class SandroidTUI(App):
         Binding("d", "action_key('d')", "Dump Memory", show=False, id="dump_memory"),
         # Files
         Binding("l", "spotlight_files", "Spotlight Files", show=False, id="list_files"),
-        Binding("v", "action_key('v')", "Remove File", show=False, id="remove_file"),
-        Binding("u", "action_key('u')", "Pull Files", show=False, id="pull_files"),
         Binding("o", "fsmon", "FSMon", show=False, id="fsmon"),
-        Binding(
-            "space", "action_key(' ')", "Pull Spotlight DB", show=False,
-            id="pull_spotlight_db",
-        ),
         # Emulator
         Binding(
             "e", "action_key('e')", "Emulator Info", show=False, id="emulator_info"
@@ -281,6 +275,9 @@ class SandroidTUI(App):
             run_worker=cb.run_worker,
             call_from_thread=cb.call_from_thread,
             force_ui_refresh=cb.force_ui_refresh,
+            on_run_saved=self._notify_diffs_new_run,
+            on_fsmon_stopped_for_playback=self._notify_fsmon_stopped_for_playback,
+            on_fsmon_resume_available=self._notify_fsmon_resume_available,
         )
 
         self._fsmon_controller = FSMonController(
@@ -295,8 +292,7 @@ class SandroidTUI(App):
             call_from_thread=cb.call_from_thread,
             force_ui_refresh=cb.force_ui_refresh,
             get_current_view=cb.get_current_view,
-            show_minimized_bar=self._show_minimized_bar,
-            hide_minimized_bar=self._hide_minimized_bar,
+            open_files_tab=self._open_monitor_tab,
         )
 
         self._spotlight_controller = SpotlightController(
@@ -1101,35 +1097,29 @@ class SandroidTUI(App):
     def action_fsmon(self) -> None:
         self._fsmon_controller.show_config_modal()
 
-    def _find_minimized_bar(self):
-        """Find the MinimizedTaskBar widget across the screen stack."""
-        from sandroid.tui.widgets import MinimizedTaskBar
+    def _open_monitor_tab(self) -> None:
+        """FSMonController's ``open_files_tab`` hook: land on Files > Monitor.
 
-        for screen in self.screen_stack:
-            if isinstance(screen, MainScreen):
-                return screen.query_one("#minimized-task-bar", MinimizedTaskBar)
-        return None
-
-    def _show_minimized_bar(self, task_name: str, description: str) -> None:
-        """Show minimized task indicator in right panel."""
-        try:
-            bar = self._find_minimized_bar()
-            if bar:
-                bar.show_minimized(task_name, description)
-        except Exception:
-            pass
-
-    def _hide_minimized_bar(self) -> None:
-        """Hide minimized task indicator."""
-        try:
-            bar = self._find_minimized_bar()
-            if bar:
-                bar.hide()
-        except Exception:
-            pass
+        Fires once fsmon has actually *started* (called from inside
+        ``FSMonController._start_fsmon`` after it registers with
+        TaskService), not merely when the config modal opens — mirrors
+        ``action_action_key``'s ``h`` -> ``open_fritap_tab()`` jump for
+        friTap. Injected as a callback (constructed in ``_init_controllers``)
+        rather than the controller importing ``MainScreen`` directly.
+        """
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.open_files_tab(sub_tab="files-monitor")
 
     def action_spotlight_files(self) -> None:
-        self._spotlight_controller.show_spotlight_modal()
+        """``l`` — land on Files > Watchlist (mirrors ``o``'s Monitor jump).
+
+        Rewired from the now-retired ``SpotlightFilesModal`` popup to the
+        in-tab Watchlist sub-view, which owns add/remove/pull/diff.
+        """
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.open_files_tab(sub_tab="files-watchlist")
 
     def _apply_theme(self, theme) -> None:
         """Apply a theme to the app."""
@@ -1297,7 +1287,92 @@ class SandroidTUI(App):
         self._recording_controller.start_recording()
 
     def action_play(self) -> None:
+        # Tab-switch on Play-*press* always happens, regardless of what run
+        # history looks like (the other, gated half of the unified focus
+        # rule — whether the completed run also steals the rail's current
+        # *selection* — lives in DiffsView.on_new_run via _notify_diffs_new_run).
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.open_files_tab(sub_tab="files-diffs")
         self._recording_controller.start_playback()
+
+    def _notify_diffs_new_run(self, run_id: str) -> None:
+        """Tell DiffsView a new run was saved (RecordingController's on_run_saved).
+
+        Always safe to call even if the Files tab isn't showing right now —
+        DiffsView keeps its own selection/unread state; the gated
+        auto-select-vs-unread-marker logic lives entirely in
+        DiffsView.on_new_run, not here.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-diffs")
+        except Exception:
+            return
+        if hasattr(view, "on_new_run"):
+            try:
+                view.on_new_run(run_id)
+            except Exception:
+                logger.warning("DiffsView.on_new_run failed", exc_info=True)
+
+    def _notify_fsmon_stopped_for_playback(self) -> None:
+        """RecordingController's ``on_fsmon_stopped_for_playback``.
+
+        Fires the moment Play's snapshot-revert safety-net force-stops a
+        running fsmon session (see
+        ``RecordingController._stop_fsmon_before_revert``). Same
+        query_one + hasattr-guard dispatch pattern as
+        ``_notify_diffs_new_run`` — the controller only knows about a plain
+        callback, app.py owns reaching into the concrete widget.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-monitor")
+        except Exception:
+            return
+        if hasattr(view, "notify_fsmon_stopped_for_playback"):
+            try:
+                view.notify_fsmon_stopped_for_playback()
+            except Exception:
+                logger.warning(
+                    "MonitorView.notify_fsmon_stopped_for_playback failed",
+                    exc_info=True,
+                )
+
+    def _notify_fsmon_resume_available(self, config) -> None:
+        """RecordingController's ``on_fsmon_resume_available``.
+
+        Fires once Play has fully finished, only if fsmon was auto-stopped
+        for it — surfaces MonitorView's one-click "Resume monitoring" offer.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-monitor")
+        except Exception:
+            return
+        if hasattr(view, "offer_resume"):
+            try:
+                view.offer_resume(config)
+            except Exception:
+                logger.warning("MonitorView.offer_resume failed", exc_info=True)
+
+    def resume_fsmon_after_playback(self, config) -> None:
+        """MonitorView's "Resume monitoring" button handler.
+
+        Delegates entirely to ``FSMonController.resume_after_playback``,
+        which owns the PID re-resolution (target app likely relaunched with
+        a new PID during replay) and the path-mode/refuse-to-start
+        fallbacks. On success, fsmon's own TASK_STARTED event clears the
+        Resume offer (MonitorView._on_fsmon_started) — no extra plumbing
+        needed here.
+        """
+        self._fsmon_controller.resume_after_playback(config)
 
     def action_export_action(self) -> None:
         self._recording_controller.show_export_modal()

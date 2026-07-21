@@ -29,8 +29,10 @@ Usage:
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,9 @@ class RecordingController:
         call_from_thread: Callable[..., None] | None = None,
         force_ui_refresh: Callable[[], None] | None = None,
         toolbox: Any | None = None,
+        on_run_saved: Callable[[str], None] | None = None,
+        on_fsmon_stopped_for_playback: Callable[[], None] | None = None,
+        on_fsmon_resume_available: Callable[[Any], None] | None = None,
     ):
         """Initialize RecordingController with UI callbacks.
 
@@ -111,6 +116,27 @@ class RecordingController:
             call_from_thread: Callback to execute function on main thread
             force_ui_refresh: Callback to force UI refresh after state changes
             toolbox: Optional Toolbox reference (defaults to imported Toolbox)
+            on_run_saved: Callback invoked (via call_from_thread, so always on
+                the main thread) with the new run's ``run_id`` once
+                ``_run_playback_analysis`` has persisted a RunRecord. Wired by
+                app.py to DiffsView.on_new_run for the gated auto-select/
+                unread-marker behaviour; safe to leave unset (e.g. in tests).
+            on_fsmon_stopped_for_playback: Callback invoked (via
+                call_from_thread) the moment the Play safety-net force-stops
+                a running fsmon session, right before ``load_snapshot``.
+                Takes no arguments — it only needs to tell the UI "show the
+                inline notice", nothing more. See
+                ``_stop_fsmon_before_revert``. Safe to leave unset.
+            on_fsmon_resume_available: Callback invoked (via
+                call_from_thread) once ``_run_playback_analysis`` finishes
+                (success or failure — the offer is orthogonal to whether the
+                diff analysis itself errored), but *only* if fsmon was
+                actually auto-stopped by this run. Receives the
+                ``FSMonConfig`` fsmon was running with beforehand (may carry
+                a now-stale ``target_pid`` in PID-mode — re-resolving it is
+                ``FSMonController.resume_after_playback``'s job, not this
+                controller's). Wired by app.py to MonitorView's one-click
+                "Resume monitoring" offer; safe to leave unset.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -121,6 +147,15 @@ class RecordingController:
         self._call_from_thread = call_from_thread or (lambda fn, *args: fn(*args))
         self._force_ui_refresh = force_ui_refresh
         self._toolbox = toolbox
+        self._on_run_saved = on_run_saved
+        self._on_fsmon_stopped_for_playback = on_fsmon_stopped_for_playback
+        self._on_fsmon_resume_available = on_fsmon_resume_available
+        # Recording-session bookkeeping for the label-seed flow (see
+        # start_recording()): a monotonic counter for the "Run N" default
+        # name, and the label seed that every subsequent Play of the current
+        # recording defaults to (until a fresh Record replaces it).
+        self._recording_seq = 0
+        self._current_recording_label: str | None = None
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -164,6 +199,16 @@ class RecordingController:
         Shows recording modal that captures input events from the device.
         Creates a snapshot before recording starts.
 
+        Recording itself starts immediately and non-blockingly (the modal is
+        pushed with ``auto_start=True`` — see ``RecordingModal``), and a
+        "Label this run" prompt pops right after: recording captures *device*
+        interaction, not TUI input, so stacking that prompt on top blocks
+        nothing time-sensitive. The chosen label (or the auto-generated
+        default if the user leaves it blank/Escapes) seeds the default label
+        for *every subsequent Play of this same recording* — it is not a
+        one-time identity. A later per-run rename (DiffsView's ``n`` key)
+        only edits that one run's saved label and never touches this seed.
+
         Returns:
             True if recording was started successfully
         """
@@ -178,18 +223,40 @@ class RecordingController:
             self._log_error("Cannot show recording modal - push_modal not configured")
             return False
 
+        self._recording_seq += 1
+        default_label = f"Run {self._recording_seq} · {time.strftime('%H:%M')}"
+        # Seed a sane fallback immediately, in case the live callback below
+        # never fires for some reason (e.g. the modal is torn down early).
+        self._current_recording_label = default_label
+
+        def on_label_chosen(label: str) -> None:
+            # Fires the moment the non-blocking label prompt is dismissed —
+            # well before the recording session itself ends (Stop/dismiss).
+            self._current_recording_label = label
+
         def on_recording_result(result: RecordingResult) -> None:
             if result is None or result.cancelled:
                 self._log_info("Recording cancelled")
                 return
 
             if result.completed:
+                # Belt-and-suspenders: keep the seed in sync even if
+                # on_label_chosen was somehow never wired/fired.
+                if getattr(result, "label", ""):
+                    self._current_recording_label = result.label
                 self._log_success(
                     f"Recording saved: {result.event_count} events, {result.duration}s"
                 )
 
         self._log_info("Opening recording modal...")
-        self._push_modal(RecordingModal(), on_recording_result)
+        self._push_modal(
+            RecordingModal(
+                auto_start=True,
+                default_label=default_label,
+                on_label_chosen=on_label_chosen,
+            ),
+            on_recording_result,
+        )
         return True
 
     # =========================================================================
@@ -300,159 +367,243 @@ class RecordingController:
 
         return False
 
+    def _stop_fsmon_before_revert(self) -> Any | None:
+        """Safety net: fsmon's live ``adb shell`` session cannot survive
+        Play's snapshot revert (``EmulatorService.load_snapshot()`` is a bare
+        telnet command + ``sleep(2)``, zero adb-reconnect logic anywhere) and
+        would otherwise silently die with no indication. Stop it cleanly
+        *before* the revert instead, so its disappearance is explained rather
+        than mysterious.
+
+        True no-op when fsmon isn't running: the ``is_running`` guard below
+        means nothing else in this method executes (no stop call, no
+        callback, no log line) — verified by a dedicated test.
+
+        Calls ``TaskService.stop("fsmon")`` directly rather than
+        ``FSMonController.stop()``: the latter also calls
+        ``_force_ui_refresh`` — a real Textual UI touch that is not safe to
+        invoke un-marshaled from this worker thread. ``TaskService.stop()``
+        itself is plain locking + ``FSMonWrapper.stop()``
+        (``process.terminate()``/``wait()``, no widget access) and is safe to
+        call from any thread. Task-service state still gets cleaned up
+        correctly and on the main thread shortly after: killing the process
+        makes fsmon's own output-reader thread notice ``process.poll()`` go
+        non-None on its next iteration, which triggers
+        ``FSMonController._fsmon_ended`` via its own ``call_from_thread`` —
+        the existing teardown path, unmodified by this change.
+
+        Returns:
+            The ``FSMonConfig`` fsmon was running with (so a later "Resume
+            monitoring" action can re-fork it), or ``None`` if fsmon wasn't
+            running, or if it was but the config couldn't be recovered.
+        """
+        try:
+            task_service = self._get_task_service()
+            if not task_service.is_running("fsmon"):
+                return None
+
+            task = task_service.get_task("fsmon")
+            config = getattr(getattr(task, "instance", None), "config", None)
+
+            task_service.stop("fsmon")
+
+            self._call_from_thread(
+                self._log_warning,
+                "fsmon stopped — won't survive Play's snapshot revert.",
+            )
+            if self._on_fsmon_stopped_for_playback:
+                self._call_from_thread(self._on_fsmon_stopped_for_playback)
+
+            return config
+        except Exception as e:
+            logger.debug(f"fsmon auto-stop safety check failed: {e}", exc_info=True)
+            return None
+
     def _run_playback_analysis(self) -> None:
-        """Execute playback analysis pipeline (runs in worker thread)."""
+        """Execute playback analysis pipeline (runs in worker thread).
+
+        Keeps the *native* result shapes from each analyzer instead of
+        flattening them to bare filenames — ``changed_files`` stays
+        ``ChangedFiles.return_data()``'s ``{file: [diff_lines]} | str`` list
+        (real diff text for diffed sqlite/xml/txt files, a bare path for
+        everything else), all the way through to the persisted
+        :class:`~sandroid.core.run_history.RunRecord`. The old
+        ``_extract_file_names()``/``_flatten_file_list()`` helpers that threw
+        the diff text away are gone. ``DeletedFiles`` is now gathered too
+        (previously only the CLI's ``ActionQ``/headless
+        ``api/analysis_runners.py`` path called it — never this TUI Play
+        path), mirroring the same gather-order those callers use: Changed,
+        then New, then Deleted, all via ``.gather()`` + ``.return_data()``.
+        """
         from sandroid.analysis.changedfiles import ChangedFiles
+        from sandroid.analysis.deletedfiles import DeletedFiles
         from sandroid.analysis.newfiles import NewFiles
         from sandroid.features.player import Player
 
-        changed_files_data = []
-        new_files_data = []
+        changed_files_data: list[Any] = []
+        new_files_data: list[str] = []
+        deleted_files_data: list[str] = []
         duration = 0
+        error: str | None = None
         toolbox = self._get_toolbox()
+        recorded_at = datetime.now().isoformat()
+        fsmon_config_for_resume: Any = None
 
         try:
+            # Safety net (see _stop_fsmon_before_revert's docstring): fsmon
+            # cannot survive the snapshot revert about to happen in Step 1,
+            # so stop it cleanly right before that call rather than let it
+            # silently die. True no-op if fsmon isn't running.
+            fsmon_config_for_resume = self._stop_fsmon_before_revert()
+
             # Step 1: Load snapshot
-            self._call_from_thread(self._log_info, "[1/5] Loading snapshot...")
+            self._call_from_thread(self._log_info, "[1/6] Loading snapshot...")
             toolbox.load_snapshot(b"tmp")
 
             # Step 2: Create baseline
-            self._call_from_thread(self._log_info, "[2/5] Creating baseline...")
+            self._call_from_thread(self._log_info, "[2/6] Creating baseline...")
             forensic = self._get_forensic_service()
             forensic.set_baseline(toolbox.fetch_changed_files(fetch_all=True))
 
             # Step 3: Play recording
-            self._call_from_thread(self._log_info, "[3/5] Playing recording...")
+            self._call_from_thread(self._log_info, "[3/6] Playing recording...")
             player = Player()
             player.perform()
             duration = self._get_forensic_service().get_action_duration()
 
-            # Step 4: Analyze changed files
-            self._call_from_thread(self._log_info, "[4/5] Analyzing changed files...")
+            # Step 4: Analyze changed files (native shape kept — see docstring)
+            self._call_from_thread(self._log_info, "[4/6] Analyzing changed files...")
             changed_files_obj = ChangedFiles()
             changed_files_obj.gather()
-            changed_files_result = changed_files_obj.return_data().get(
+            changed_files_data = changed_files_obj.return_data().get(
                 "Changed Files", []
             )
-            changed_files_data = self._extract_file_names(changed_files_result)
 
             # Step 5: Analyze new files
-            self._call_from_thread(self._log_info, "[5/5] Analyzing new files...")
+            self._call_from_thread(self._log_info, "[5/6] Analyzing new files...")
             new_files_obj = NewFiles()
             new_files_obj.gather()
-            new_files_result = new_files_obj.return_data().get("New Files", [])
-            new_files_data = self._flatten_file_list(new_files_result)
+            new_files_data = new_files_obj.return_data().get("New Files", [])
 
-            # Save results
-            self._call_from_thread(self._log_info, "Saving results...")
-            self._save_playback_results()
-
-            # Show summary modal on main thread
-            self._call_from_thread(
-                self._show_analysis_summary,
-                changed_files_data,
-                new_files_data,
-                [],
-                duration,
+            # Step 6: Analyze deleted files (newly wired into the TUI Play path)
+            self._call_from_thread(self._log_info, "[6/6] Analyzing deleted files...")
+            deleted_files_obj = DeletedFiles()
+            deleted_files_obj.gather()
+            deleted_files_data = deleted_files_obj.return_data().get(
+                "Deleted Files", []
             )
 
         except Exception as e:
-            error_msg = f"Playback failed: {e}"
-            self._call_from_thread(self._log_error, error_msg)
+            error = f"Playback failed: {e}"
+            self._call_from_thread(self._log_error, error)
 
-    def _extract_file_names(self, file_list: list[Any]) -> list[str]:
-        """Extract file names from analysis result.
+        # Persist regardless of a mid-pipeline error, so a failed/partial run
+        # is still visible in Diffs (with its error message) instead of
+        # silently vanishing — this is exactly why RunRecord.error exists.
+        self._call_from_thread(self._log_info, "Saving results...")
+        run_id = self._save_playback_results(
+            changed_files_data,
+            new_files_data,
+            deleted_files_data,
+            duration,
+            recorded_at,
+            error,
+        )
 
-        Args:
-            file_list: List of file entries (dicts or strings)
-
-        Returns:
-            List of file names
-        """
-        result = []
-        for item in file_list:
-            if isinstance(item, dict):
-                result.extend(item.keys())
-            elif isinstance(item, str):
-                result.append(item)
-        return result
-
-    def _flatten_file_list(self, file_list: list[Any]) -> list[str]:
-        """Flatten nested file list.
-
-        Args:
-            file_list: List that may contain nested lists
-
-        Returns:
-            Flattened list of file names
-        """
-        result = []
-        for item in file_list:
-            if isinstance(item, list):
-                result.extend(item)
-            elif isinstance(item, str):
-                result.append(item)
-        return result
-
-    def _save_playback_results(self) -> None:
-        """Save playback results to file."""
-        import json
-
-        try:
-            results_path = os.getenv("RESULTS_PATH", "./")
-            output_file = f"{results_path}sandroid.json"
-            toolbox = self._get_toolbox()
-
-            data = {
-                "Device Name": toolbox.device_name,
-                "Action Duration": self._get_forensic_service().get_action_duration(),
-            }
-
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-
-        except Exception as e:
+        if error is None:
             self._call_from_thread(
-                self._log_info,
-                f"[warning]Could not save results: {e}[/warning]",
+                self._log_success,
+                f"Analysis complete: {len(changed_files_data)} changed, "
+                f"{len(new_files_data)} new, {len(deleted_files_data)} deleted files",
             )
 
-    def _show_analysis_summary(
+        if run_id and self._on_run_saved:
+            self._call_from_thread(self._on_run_saved, run_id)
+
+        # Offer to resume monitoring once Play is fully done — regardless of
+        # success/error above, since resuming fsmon is orthogonal to whether
+        # the diff analysis itself errored. Only fires if fsmon was actually
+        # auto-stopped for *this* run (fsmon_config_for_resume is None both
+        # when fsmon wasn't running to begin with, and in the true-no-op
+        # case covered by _stop_fsmon_before_revert).
+        if fsmon_config_for_resume is not None and self._on_fsmon_resume_available:
+            self._call_from_thread(
+                self._on_fsmon_resume_available, fsmon_config_for_resume
+            )
+
+    def _save_playback_results(
         self,
-        changed_files: list[str],
+        changed_files: list[Any],
         new_files: list[str],
         deleted_files: list[str],
         duration: int,
-    ) -> None:
-        """Show the analysis summary modal."""
-        from sandroid.tui.modals import (
-            AnalysisData,
-            AnalysisSummaryModal,
-            AnalysisSummaryResult,
-        )
+        recorded_at: str,
+        error: str | None,
+    ) -> str | None:
+        """Persist this Play as a :class:`RunRecord` (run_history.py).
 
-        self._log_success(
-            f"Analysis complete: {len(changed_files)} changed, "
-            f"{len(new_files)} new, {len(deleted_files)} deleted files"
-        )
+        Returns the new ``run_id`` on success, or ``None`` if saving failed
+        (logged, never raised — a persistence failure must not crash the
+        playback worker thread).
 
-        data = AnalysisData(
+        Also (still) writes the legacy ``RESULTS_PATH/sandroid.json`` summary
+        for anything outside the TUI that reads it.
+        """
+        from sandroid.core import run_history
+
+        toolbox = self._get_toolbox()
+        device_name = getattr(toolbox, "device_name", None) or "unknown"
+        run_id = run_history.new_run_id()
+        label = self._current_recording_label or f"Run · {time.strftime('%H:%M')}"
+
+        record = run_history.RunRecord(
+            schema_version=run_history.SCHEMA_VERSION,
+            run_id=run_id,
+            label=label,
+            recorded_at=recorded_at,
+            completed_at=datetime.now().isoformat(),
+            device_name=device_name,
+            recording_path=self.get_recording_path(),
+            duration=duration,
+            error=error,
             changed_files=changed_files,
             new_files=new_files,
             deleted_files=deleted_files,
-            duration=duration,
+            counts={
+                "changed": len(changed_files),
+                "new": len(new_files),
+                "deleted": len(deleted_files),
+            },
         )
 
-        def on_summary_result(result: AnalysisSummaryResult) -> None:
-            if (
-                result is not None
-                and result.action == "exported"
-                and result.export_path
-            ):
-                logger.info(f"Analysis results exported to: {result.export_path}")
+        try:
+            run_history.save_run(record)
+        except Exception as e:
+            self._call_from_thread(
+                self._log_warning,
+                f"Could not save run history: {e}",
+            )
+            run_id = None
 
-        if self._push_modal:
-            self._push_modal(AnalysisSummaryModal(data=data), on_summary_result)
+        # Legacy summary file some external tooling may still read.
+        try:
+            import json
+
+            results_path = os.getenv("RESULTS_PATH", "./")
+            output_file = os.path.join(results_path, "sandroid.json")
+            data = {
+                "Device Name": device_name,
+                "Action Duration": duration,
+            }
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            self._call_from_thread(
+                self._log_info,
+                f"[warning]Could not save legacy results summary: {e}[/warning]",
+            )
+
+        return run_id
 
     # =========================================================================
     # Export Operations

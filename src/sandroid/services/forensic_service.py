@@ -334,6 +334,71 @@ class ForensicService:
         return len(self._spotlight_files) > 0
 
     # =========================================================================
+    # Spotlight Files Persistence (Watchlist sub-tab)
+    # =========================================================================
+    #
+    # ``_spotlight_files`` above is in-memory only -- today's watchlist
+    # evaporates on every TUI restart. These two methods persist/restore the
+    # watched-path list itself (not the pulled baselines, which are a
+    # separate concern owned by ``core/watchlist_store.py``'s
+    # previous/current cache). The on-disk shape lives in
+    # ``core/watchlist_store.py`` (mirrors how ``core/run_history.py`` owns
+    # the Diffs sub-tab's on-disk shape); this service only decides *when*
+    # to call it. Callers (``WatchlistView``) call ``save_watchlist_index()``
+    # after any successful add/remove, and ``load_watchlist_index()`` once on
+    # mount / app start to restore membership from a prior session.
+
+    def save_watchlist_index(
+        self,
+        row_states: dict[str, dict] | None = None,
+        auto_enabled: bool = False,
+    ) -> None:
+        """Persist the current spotlight-file watchlist membership to disk.
+
+        ``row_states``/``auto_enabled`` are optional pass-throughs to
+        ``watchlist_store.save_membership`` -- this service has no notion of
+        per-row pull/auto state itself (that lives client-side in
+        ``WatchlistView._rows``/``_auto_enabled``), so it just forwards
+        whatever the caller supplies, defaulting to "nothing extra to
+        persist" for callers that only care about membership.
+        """
+        from sandroid.core import watchlist_store
+
+        try:
+            watchlist_store.save_membership(
+                self._spotlight_files,
+                row_states=row_states,
+                auto_enabled=auto_enabled,
+            )
+        except Exception as exc:
+            self._logger.warning(f"Failed to persist watchlist membership: {exc}")
+
+    def load_watchlist_index(self) -> int:
+        """Load persisted watchlist membership from disk into memory.
+
+        Merges into whatever is already tracked via ``_add_single_spotlight_file``
+        (its existing dedup/WAL-journal filtering applies unchanged), so
+        calling this more than once (e.g. every time the Watchlist sub-tab
+        mounts) is idempotent -- already-tracked paths are silently skipped.
+
+        Returns:
+            The number of *new* paths actually added.
+        """
+        from sandroid.core import watchlist_store
+
+        try:
+            paths = watchlist_store.load_membership()
+        except Exception as exc:
+            self._logger.warning(f"Failed to load watchlist membership: {exc}")
+            return 0
+
+        added = 0
+        for path in paths:
+            if self._add_single_spotlight_file(path):
+                added += 1
+        return added
+
+    # =========================================================================
     # Whitelist Management
     # =========================================================================
 

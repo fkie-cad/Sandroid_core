@@ -1,4 +1,4 @@
-"""Custom footer with keybinding hints (left) and minimized task bar (right)."""
+"""Custom footer with keybinding hints."""
 
 import logging
 
@@ -8,13 +8,11 @@ from textual.screen import Screen
 from textual.widget import Widget
 from textual.widgets._footer import FooterKey
 
-from sandroid.tui.widgets.minimized_task_bar import MinimizedTaskBar
-
 logger = logging.getLogger(__name__)
 
 
 class SandroidFooter(Widget):
-    """Footer bar split into two zones: key bindings (left) and minimized tasks (right)."""
+    """Footer bar showing active key bindings."""
 
     DEFAULT_CSS = """
     SandroidFooter {
@@ -32,15 +30,10 @@ class SandroidFooter(Widget):
     SandroidFooter FooterKey {
         padding: 0 1;
     }
-    SandroidFooter MinimizedTaskBar {
-        width: auto;
-        height: 1;
-    }
     """
 
     def compose(self) -> ComposeResult:
         yield HorizontalScroll(id="footer-keys")
-        yield MinimizedTaskBar(id="minimized-task-bar")
 
     def on_mount(self) -> None:
         try:
