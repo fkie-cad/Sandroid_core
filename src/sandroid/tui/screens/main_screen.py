@@ -63,10 +63,15 @@ class MainScreen(Screen):
 
     BINDINGS = []  # Bindings are handled by the main app
 
-    # Defined here (not in styles.tcss) so it applies under every theme — the
-    # app loads exactly one theme-specific .tcss and none of them define these
-    # ids, while app CSS always beats Screen DEFAULT_CSS. Putting the rules
-    # here keeps them unopposed and theme-independent.
+    # These values are also themed: each of the 8 .tcss files (styles.tcss +
+    # themes/*.tcss) defines matching selectors for #tool-tabbar/.tool-tab/
+    # #tool-body/#chat-dock, and since a loaded stylesheet file always beats
+    # a widget's own DEFAULT_CSS in Textual's cascade, that file-level CSS is
+    # what actually wins at runtime for every theme (including "default",
+    # whose styles.tcss rules reproduce the exact hex below). The values here
+    # now only serve as a fallback/default-theme baseline -- e.g. if a theme
+    # file ever fails to load, the UI still renders with a sensible look
+    # instead of blank/unstyled widgets.
     #
     # #tool-panel is a plain Vertical that fills the space below the dock:top
     # status band: a single-row tab strip (#tool-tabbar) on top and the active
@@ -101,9 +106,8 @@ class MainScreen(Screen):
     }
     #chat-dock {
         display: none;
-        height: 16;
+        height: 67%;
         min-height: 8;
-        max-height: 50%;
         border-top: solid #1f2d4d;
     }
     #chat-dock.visible {
@@ -915,7 +919,9 @@ class MainScreen(Screen):
                 if started:
                     # Log success
                     self.app.call_from_thread(
-                        lambda: self._log_to_activity("Frida server installed and started")
+                        lambda: self._log_to_activity(
+                            "Frida server installed and started"
+                        )
                     )
                 else:
                     self.app.call_from_thread(

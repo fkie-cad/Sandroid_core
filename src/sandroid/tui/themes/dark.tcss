@@ -426,3 +426,59 @@ Button.-primary {
 .logo-subtitle {
     color: #757575;
 }
+
+/* ========== Tool Panel & Chat Panel Theming ========== */
+/* Overrides MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
+   there) so the tool-tab strip and AI chat panel follow this theme instead
+   of staying frozen on the default Midnight Cyan hardcoded values. */
+
+#tool-tabbar {
+    background: #000000;
+}
+
+.tool-tab {
+    color: #757575;
+    background: #121212;
+}
+
+.tool-tab:hover {
+    color: #E0E0E0;
+    background: #333333;
+}
+
+.tool-tab.-active {
+    color: #000000;
+    background: #BB86FC;
+}
+
+#tool-body {
+    border-top: solid #333333;
+}
+
+#chat-dock {
+    border-top: solid #333333;
+}
+
+ChatPanel {
+    background: #121212;
+}
+
+ChatPanel > #chat-header {
+    color: #BB86FC;
+}
+
+ChatPanel > #chat-log {
+    background: #000000;
+}
+
+ChatPanel > #chat-input-bar > #chat-input {
+    border: solid #333333;
+    background: #000000;
+}
+
+ChatPanel > #chat-mascot {
+    /* MUST equal #chat-log's background above -- see the comment on
+       ChatPanel > #chat-mascot in chat_panel.py for why. */
+    background: #000000;
+    color: #BB86FC;
+}

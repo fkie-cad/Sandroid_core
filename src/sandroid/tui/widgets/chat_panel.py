@@ -326,6 +326,14 @@ class ChatPanel(Widget):
         height: 1fr;
         background: #050811;
         scrollbar-size: 1 1;
+        /* RichLog's own default is `overflow-y: scroll` -- an
+           always-visible scrollbar regardless of whether there's
+           anything to scroll. With the dock sitting directly under the
+           Activity Log (also a RichLog, also always-on), that read as
+           two permanently-visible scrollbar tracks stacked on the right
+           edge. `auto` only shows this one when the transcript actually
+           overflows. */
+        overflow-y: auto;
     }
     ChatPanel > #chat-input-bar {
         height: 3;
@@ -353,6 +361,16 @@ class ChatPanel(Widget):
            Matching the log makes that box vanish, leaving only the teal
            glyphs floating over the transcript: no border, no panel, no box
            edges. (Keep this in sync with #chat-log's background above.)
+
+           This same invariant applies per-theme, not just here: each of the
+           8 .tcss files (styles.tcss + themes/*.tcss) defines its own
+           #chat-mascot/#chat-log rules for ChatPanel -- and since a loaded
+           stylesheet file always beats this DEFAULT_CSS in Textual's
+           cascade, those file-level values (not these Python ones) are what
+           actually render for every theme. Any edit to one theme's
+           #chat-log background must be mirrored onto that same theme's
+           #chat-mascot background, or that theme grows the exact box
+           artifact described above.
 
            Deliberately auto-width, NOT `width: 100%` + `dock: bottom` (an
            earlier version): a full-width box made the *hit-test* region span

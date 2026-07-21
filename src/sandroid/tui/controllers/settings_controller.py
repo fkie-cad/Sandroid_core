@@ -8,7 +8,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from sandroid.config import ConfigLoader, SandroidConfig, reset_config_cache
-from sandroid.tui.themes import THEMES, get_theme
+from sandroid.tui.themes import THEMES, get_theme, get_theme_css_path
 
 if TYPE_CHECKING:
     from sandroid.tui.app import SandroidTUI
@@ -49,7 +49,7 @@ class SettingsController:
         theme = get_theme(name)
         self._app._sandroid_theme = theme
         self._app._sandroid_theme_name = name
-        self._app._apply_theme(theme)
+        self._app._apply_theme(theme, get_theme_css_path(name))
 
     def revert_theme_preview(self) -> None:
         """Revert to the original theme before any previews."""
@@ -57,7 +57,7 @@ class SettingsController:
             theme = get_theme(self._original_theme_name)
             self._app._sandroid_theme = theme
             self._app._sandroid_theme_name = self._original_theme_name
-            self._app._apply_theme(theme)
+            self._app._apply_theme(theme, get_theme_css_path(self._original_theme_name))
             self._original_theme_name = None
 
     def save(self, pending: dict[str, Any]) -> SandroidConfig:
