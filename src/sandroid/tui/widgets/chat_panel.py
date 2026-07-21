@@ -50,6 +50,17 @@ so the *live* buffers stay plain escaped text while streaming and only
 become real ``Markdown(...)`` once folded into history at
 ``_finalize_live``.
 
+**Theming:** the transcript/header colors below are read live from
+``self.app.sandroid_theme`` (see ``_theme()``) every time a new line is
+built, so freshly-rendered content always follows whichever theme is
+active *at that moment*. ``self._history_lines`` only ever stores already
+fully-rendered ``Text``/``Markdown``/markup-string objects once a line is
+finalized (see above), so switching themes mid-conversation does NOT
+retroactively recolor lines already folded into history -- only new
+content picks up the new theme. Fixing that would mean storing semantic
+roles instead of pre-rendered content and re-rendering all of history on
+every theme change; a deliberate scope cut, not an oversight.
+
 **Verbose thinking:** ``config.ai.show_verbose_thinking`` (default
 ``False``) controls whether a finished reasoning phase gets dumped into
 the transcript verbatim (as ``Markdown``, verbose) or collapsed into one
@@ -81,6 +92,7 @@ from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agen
 from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.core.console import SANDROID_LOGO
+from sandroid.tui.themes import DEFAULT_THEME
 from sandroid.tui.widgets.tool_permission_prompt import (
     _DESCRIPTION_MAX_LEN,
     ToolPermissionPrompt,
@@ -93,6 +105,7 @@ if TYPE_CHECKING:
     from textual.timer import Timer
 
     from sandroid.ai.tools.registry import ToolSpec
+    from sandroid.tui.themes import Theme
 
 logger = logging.getLogger(__name__)
 
@@ -393,9 +406,6 @@ class ChatPanel(Widget):
         ("ctrl+l", "clear_log", "Clear log"),
     ]
 
-    _HEADER_IDLE = "[#5b6479]○ idle[/]"
-    _HEADER_ERROR = "[#fb7185]○ error[/]"
-
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.can_focus = True
@@ -427,10 +437,40 @@ class ChatPanel(Widget):
         self._mascot_timer: Timer | None = None
         self._mascot_frame_index: int = 0
 
+    # -- theming ------------------------------------------------------------
+
+    def _theme(self) -> Theme:
+        """Return the currently active theme for coloring transcript/header
+        markup built in Python (see the module docstring's "Theming" note).
+
+        ``self.app.sandroid_theme`` is a real, live-updated property on
+        ``SandroidTUI`` (see ``app.py``), but several existing tests mount a
+        bare ``ChatPanel`` under a plain ``textual.app.App()`` instead --
+        which has no such attribute at all -- and some construct a
+        ``ChatPanel`` directly with no app running at all, in which case
+        ``self.app`` itself raises Textual's own ``NoActiveAppError``
+        (a ``RuntimeError``) rather than anything ``getattr`` alone can
+        catch. Either way this falls back to ``DEFAULT_THEME``, which
+        carries the exact original hardcoded hex values this file used
+        before theming existed, so rendering stays identical for anything
+        not running under the real ``SandroidTUI``.
+        """
+        try:
+            app = self.app
+        except Exception:
+            return DEFAULT_THEME
+        return getattr(app, "sandroid_theme", None) or DEFAULT_THEME
+
+    def _header_idle_markup(self) -> str:
+        return f"[{self._theme().muted_status_color}]○ idle[/]"
+
+    def _header_error_markup(self) -> str:
+        return f"[{self._theme().error}]○ error[/]"
+
     # -- compose / mount --------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Static(self._HEADER_IDLE, id="chat-header")
+        yield Static(self._header_idle_markup(), id="chat-header")
         yield RichLog(
             markup=True,
             wrap=True,
@@ -454,7 +494,8 @@ class ChatPanel(Widget):
     def on_mount(self) -> None:
         try:
             self.query_one("#chat-log", RichLog).write(
-                "[#5b6479]Enter: send · Ctrl+X: stop · Ctrl+L: clear[/]"
+                f"[{self._theme().muted_status_color}]"
+                "Enter: send · Ctrl+X: stop · Ctrl+L: clear[/]"
             )
         except Exception:
             pass
@@ -490,8 +531,8 @@ class ChatPanel(Widget):
         model = getattr(ai_cfg, "model", None)
         if not (base_url and api_key and model):
             self._push_history(
-                "[#fb7185]Set config.ai.base_url/api_key/model to use Chat — "
-                "see `sandroid-config` docs[/]"
+                f"[{self._theme().error}]Set config.ai.base_url/api_key/model "
+                "to use Chat — see `sandroid-config` docs[/]"
             )
             return
 
@@ -733,8 +774,9 @@ class ChatPanel(Widget):
             self._finalize_live()
             name = event.get("name") or "?"
             args = event.get("arguments") or {}
+            tool_color = self._theme().tool_color
             self._push_history(
-                f"[bold #a78bfa]● {escape(_humanize_tool_name(name))}[/]"
+                f"[bold {tool_color}]● {escape(_humanize_tool_name(name))}[/]"
             )
             arg_lines = _format_tool_args_lines(args)
             if arg_lines:
@@ -746,13 +788,13 @@ class ChatPanel(Widget):
         elif etype == "error":
             self._finalize_live()
             message = event.get("message", "unknown error")
-            self._push_history(f"[#fb7185]error: {escape(message)}[/]")
+            self._push_history(f"[{self._theme().error}]error: {escape(message)}[/]")
             self._header_state = "error"
             self.refresh_header()
 
     def _report_turn_error(self, message: str) -> None:
         self._finalize_live()
-        self._push_history(f"[#fb7185]{escape(message)}[/]")
+        self._push_history(f"[{self._theme().error}]{escape(message)}[/]")
         self._header_state = "error"
         self.refresh_header()
 
@@ -806,7 +848,8 @@ class ChatPanel(Widget):
         except Exception:
             width = 0
 
-        line = Text(style="bold white on #1c2333", no_wrap=True)
+        highlight_bg = self._theme().user_highlight_background
+        line = Text(style=f"bold white on {highlight_bg}", no_wrap=True)
         for i, row in enumerate(text.split("\n")):
             if i == 0:
                 row = f"> {row}"
@@ -827,7 +870,9 @@ class ChatPanel(Widget):
             # ``style=`` is still required here -- Markdown() defaults to
             # "none" (the console's default foreground), so without it the
             # reply body would render plain white instead of green.
-            self._history_lines.append(Markdown(self._live_text, style="#4ade80"))
+            self._history_lines.append(
+                Markdown(self._live_text, style=self._theme().assistant_reply_color)
+            )
             self._live_text = ""
             changed = True
         if changed:
@@ -849,12 +894,13 @@ class ChatPanel(Widget):
         if not self._live_reasoning:
             return False
         if self._show_verbose_thinking():
-            self._history_lines.append("[italic #facc15]thinking:[/]")
+            warning_color = self._theme().warning
+            self._history_lines.append(f"[italic {warning_color}]thinking:[/]")
             # Same reasoning as the reply body above: an explicit ``style``
             # is needed or this renders in the default foreground instead
             # of matching the "thinking:" label's italic yellow.
             self._history_lines.append(
-                Markdown(self._live_reasoning, style="italic #facc15")
+                Markdown(self._live_reasoning, style=f"italic {warning_color}")
             )
         else:
             duration = 0.0
@@ -884,25 +930,30 @@ class ChatPanel(Widget):
         log.clear()
         for line in self._history_lines:
             log.write(line)
+        theme = self._theme()
         if self._live_reasoning:
-            log.write(f"[italic #facc15]thinking: {escape(self._live_reasoning)}[/]")
+            log.write(
+                f"[italic {theme.warning}]thinking: {escape(self._live_reasoning)}[/]"
+            )
         if self._live_text:
-            log.write(f"[#4ade80]{escape(self._live_text)}[/]")
+            log.write(f"[{theme.assistant_reply_color}]{escape(self._live_text)}[/]")
 
     # -- header -----------------------------------------------------------
 
     def _render_header(self) -> str:
+        theme = self._theme()
         if self._header_state == "streaming":
-            return "[#4ade80]● streaming…[/]"
+            return f"[{theme.assistant_reply_color}]● streaming…[/]"
         if self._header_state == "thinking":
-            return "[#facc15]● thinking…[/]"
+            return f"[{theme.warning}]● thinking…[/]"
         if self._header_state == "tool":
-            return f"[#a78bfa]● tool: `{escape(self._header_detail)}`[/]"
+            return f"[{theme.tool_color}]● tool: `{escape(self._header_detail)}`[/]"
         if self._header_state == "awaiting-approval":
-            return f"[#fbbf24]● waiting on you: `{escape(self._header_detail)}`[/]"
+            detail = escape(self._header_detail)
+            return f"[{theme.waiting_color}]● waiting on you: `{detail}`[/]"
         if self._header_state == "error":
-            return self._HEADER_ERROR
-        return self._HEADER_IDLE
+            return self._header_error_markup()
+        return self._header_idle_markup()
 
     def refresh_header(self) -> None:
         """Re-render the status header (main thread; best-effort).

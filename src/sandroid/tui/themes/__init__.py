@@ -66,6 +66,17 @@ class Theme:
     logo_color: str = "#00ff00"  # Main logo color (bright green by default)
     logo_text_color: str = "#ffffff"  # "Sandroid" text in logo (white by default)
 
+    # AI Chat panel colors (see tui/widgets/chat_panel.py) -- these back
+    # inline Rich-markup colors built in Python (NOT CSS chrome, which is
+    # themed separately via the .tcss files' ChatPanel/#chat-* selectors).
+    # No existing field above was a good semantic fit for any of these, so
+    # they're their own fields; every theme below sets its own value.
+    tool_color: str = "#a78bfa"  # Tool-call bullet/label (purple by default)
+    user_highlight_background: str = "#1c2333"  # User-line highlight band bg
+    assistant_reply_color: str = "#4ade80"  # Assistant reply text (soft green)
+    waiting_color: str = "#fbbf24"  # "waiting on you" amber (distinct from warning)
+    muted_status_color: str = "#5b6479"  # Idle/muted chat status text
+
 
 # ========== Fixed Semantic Colors ==========
 # These colors do NOT change with theme - they provide consistent status recognition
@@ -110,6 +121,12 @@ DEFAULT_THEME = Theme(
     security_color="#facc15",  # soft yellow
     logo_color="#00ff00",  # bright green logo
     logo_text_color="#ffffff",  # white "Sandroid" text
+    tool_color="#a78bfa",  # purple -- exact reproduction of the prior
+    # hardcoded chat_panel.py literal, preserving today's look exactly
+    user_highlight_background="#1c2333",  # dark navy -- exact reproduction
+    assistant_reply_color="#4ade80",  # soft green -- exact reproduction
+    waiting_color="#fbbf24",  # amber -- exact reproduction
+    muted_status_color="#5b6479",  # muted gray -- exact reproduction
 )
 
 DARK_THEME = Theme(
@@ -133,6 +150,17 @@ DARK_THEME = Theme(
     security_color="#FFB74D",  # Orange
     logo_color="#03DAC6",  # Teal logo
     logo_text_color="#BB86FC",  # Purple "Sandroid" text
+    tool_color="#BB86FC",  # matches this theme's .tool-tab.-active/#chat-header
+    # color chosen in themes/dark.tcss (== primary) -- keeps the chat
+    # transcript's tool-call color visually consistent with the chrome
+    user_highlight_background="#333333",  # this theme's .tool-tab:hover bg --
+    # already an established "lighter highlight" shade for this theme
+    assistant_reply_color="#81C784",  # == success -- a soft Material green,
+    # already an appropriate readable reply color for this theme
+    waiting_color="#FFC107",  # Material Amber 500 -- distinct from this
+    # theme's warning (#FFB74D, more orange)
+    muted_status_color="#757575",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 LIGHT_THEME = Theme(
@@ -156,6 +184,17 @@ LIGHT_THEME = Theme(
     security_color="#F57C00",  # Orange
     logo_color="#1976D2",  # Blue logo
     logo_text_color="#0D47A1",  # Dark blue "Sandroid" text
+    tool_color="#1976D2",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/light.tcss -- consistent with the chrome
+    user_highlight_background="#E3F2FD",  # this theme's .tool-tab:hover bg --
+    # a light blue tint that actually stands out against the near-white
+    # #chat-log background (surface/background are both too close to white)
+    assistant_reply_color="#388E3C",  # == success -- dark enough green for
+    # readable contrast against this theme's light background
+    waiting_color="#FFA000",  # Material Amber 700 -- distinct from this
+    # theme's warning (#F57C00, more orange), still readable on white
+    muted_status_color="#757575",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 HIGH_CONTRAST_THEME = Theme(
@@ -179,6 +218,17 @@ HIGH_CONTRAST_THEME = Theme(
     security_color="#FFFF00",  # Yellow
     logo_color="#00FF00",  # Bright green logo
     logo_text_color="#FFFF00",  # Yellow "Sandroid" text
+    tool_color="#FFFF00",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/high_contrast.tcss -- consistent with the chrome
+    user_highlight_background="#333333",  # this theme's .tool-tab:hover bg --
+    # clearly visible against pure black (surface is also pure black, i.e.
+    # zero contrast, unacceptable for an accessibility-focused theme)
+    assistant_reply_color="#00FF00",  # == success -- pure green, matching
+    # this theme's maximum-contrast design intent
+    waiting_color="#FFA500",  # pure orange -- clearly distinct from this
+    # theme's pure-yellow warning, still maximally visible on black
+    muted_status_color="#CCCCCC",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 CYBERPUNK_THEME = Theme(
@@ -202,6 +252,16 @@ CYBERPUNK_THEME = Theme(
     security_color="#FFFF00",  # Yellow
     logo_color="#FF00FF",  # Magenta logo
     logo_text_color="#00FFFF",  # Cyan "Sandroid" text
+    tool_color="#FF00FF",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/cyberpunk.tcss -- consistent with the chrome
+    user_highlight_background="#2A1040",  # this theme's .tool-tab:hover bg --
+    # already an established "lighter highlight" shade for this theme
+    assistant_reply_color="#00FF9F",  # == success -- neon green, fits this
+    # theme's neon aesthetic
+    waiting_color="#FFCC00",  # neon amber -- distinct from this theme's
+    # warning (#FF9900) and accent/security (#FFFF00)
+    muted_status_color="#8B8B8B",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 NORD_THEME = Theme(
@@ -225,6 +285,16 @@ NORD_THEME = Theme(
     security_color="#EBCB8B",  # Aurora yellow
     logo_color="#88C0D0",  # Frost blue logo
     logo_text_color="#ECEFF4",  # Snow white "Sandroid" text
+    tool_color="#88C0D0",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/nord.tcss -- consistent with the chrome
+    user_highlight_background="#434C5E",  # this theme's .tool-tab:hover bg --
+    # already an established "lighter highlight" shade for this theme
+    assistant_reply_color="#A3BE8C",  # == success -- Nord's own aurora
+    # green, already a soft/muted tone
+    waiting_color="#D08770",  # Nord's own aurora orange (nord12) --
+    # distinct from this theme's warning (#EBCB8B, aurora yellow)
+    muted_status_color="#4C566A",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 DRACULA_THEME = Theme(
@@ -248,6 +318,16 @@ DRACULA_THEME = Theme(
     security_color="#FFB86C",  # Orange
     logo_color="#BD93F9",  # Purple logo
     logo_text_color="#50FA7B",  # Green "Sandroid" text
+    tool_color="#BD93F9",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/dracula.tcss -- consistent with the chrome
+    user_highlight_background="#6272A4",  # this theme's .tool-tab:hover bg --
+    # already an established "lighter highlight" shade for this theme
+    assistant_reply_color="#50FA7B",  # == success -- Dracula's own green
+    waiting_color="#FFB86C",  # == warning -- Dracula's canonical 8-color
+    # palette has no second amber/orange distinct from this, so this is a
+    # deliberate duplicate rather than an invented, non-canonical hex
+    muted_status_color="#6272A4",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 SOLARIZED_THEME = Theme(
@@ -271,6 +351,18 @@ SOLARIZED_THEME = Theme(
     security_color="#B58900",  # Yellow
     logo_color="#2AA198",  # Cyan logo
     logo_text_color="#268BD2",  # Blue "Sandroid" text
+    tool_color="#268BD2",  # == primary, == this theme's .tool-tab.-active
+    # color in themes/solarized.tcss -- consistent with the chrome
+    user_highlight_background="#073642",  # Base02 (== surface) -- one step
+    # lighter than #chat-log's own background (Base03, #002B36); NOT this
+    # theme's .tool-tab:hover bg, which is #002B36 -- identical to the log
+    # background itself, i.e. zero contrast, so it would be invisible here
+    assistant_reply_color="#859900",  # == success -- Solarized's own olive
+    # green, already a muted tone
+    waiting_color="#CB4B16",  # Solarized's own canonical "orange" swatch --
+    # distinct from this theme's warning (#B58900, yellow)
+    muted_status_color="#586E75",  # == text_muted, == this theme's
+    # .tool-tab inactive color -- consistent with the chrome
 )
 
 # Theme registry
