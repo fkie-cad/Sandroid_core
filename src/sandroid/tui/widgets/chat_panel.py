@@ -78,6 +78,7 @@ from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
 
 from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agent_turn
+from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.core.console import SANDROID_LOGO
 
@@ -436,7 +437,28 @@ class ChatPanel(Widget):
         try:
             client = OpenAIClient(base_url, api_key, model)
             tools = get_tool_registry().openai_tools_schema()
-            turn_messages = [*self._messages, {"role": "user", "content": text}]
+            # Rebuilt fresh every turn from cheap in-memory state -- see
+            # ai/context.py's module docstring. Merged straight into the
+            # SAME system message as `self._messages[0]` (the persisted
+            # ORCHESTRATOR_SYSTEM_PROMPT) rather than sent as a second,
+            # separate system message: the actually-configured production
+            # model only attends to the first system-role message in the
+            # list and silently ignores any later one (confirmed against
+            # the real backend), so a second system message is worse than
+            # useless -- it just never gets read. `self._messages[0]`
+            # itself is never mutated, so the persisted history stays the
+            # pure, unmodified prompt -- only this turn's local
+            # `combined_system_msg` carries the ambient text, and it never
+            # survives into `self._messages` below.
+            combined_system_msg = {
+                "role": "system",
+                "content": f"{ORCHESTRATOR_SYSTEM_PROMPT}\n\n{build_ambient_block()}",
+            }
+            turn_messages = [
+                combined_system_msg,
+                *self._messages[1:],
+                {"role": "user", "content": text},
+            ]
 
             result = run_agent_turn(
                 turn_messages,
@@ -447,7 +469,7 @@ class ChatPanel(Widget):
             )
             if result:
                 turn_messages.append({"role": "assistant", "content": result})
-            self._messages = turn_messages
+            self._messages = [self._messages[0], *turn_messages[1:]]
         except AIClientError as exc:
             self.app.call_from_thread(
                 self._report_turn_error, f"AI backend error: {exc}"

@@ -21,6 +21,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 
+from sandroid.ai.context import build_ambient_block
 from sandroid.ai.loop import get_current_turn_context, run_agent_turn
 from sandroid.ai.prompts import DEVICE_INSPECTOR_SYSTEM_PROMPT
 from sandroid.ai.tools.registry import RiskTier, ToolSpec, get_tool_registry
@@ -156,8 +157,22 @@ def _build_agent_tool(template: SubagentTemplate):
             started_by="chat",
         )
         try:
+            # A subagent turn is one-shot and never persisted anywhere
+            # outside this closure, so the ambient block can be spliced in
+            # directly -- no identity-filter needed (contrast
+            # chat_panel.py._run_turn_sync, which keeps `self._messages`
+            # across turns and must filter it back out). Merged into the
+            # SAME system message as the template's own prompt, not sent as
+            # a second, separate system message -- the actually-configured
+            # production model only attends to the first system-role
+            # message in the list and silently ignores any later one
+            # (confirmed against the real backend for the top-level chat
+            # turn; this call site has the identical shape).
             sub_messages = [
-                {"role": "system", "content": template.system_prompt},
+                {
+                    "role": "system",
+                    "content": f"{template.system_prompt}\n\n{build_ambient_block()}",
+                },
                 {"role": "user", "content": task},
             ]
             sub_tools = get_tool_registry().subset(template.tool_names)

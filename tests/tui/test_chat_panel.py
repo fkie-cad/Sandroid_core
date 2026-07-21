@@ -14,6 +14,7 @@ that only happens once a message is actually submitted -- so this mounts
 cleanly with zero fixtures.
 """
 
+import functools
 import time as time_module
 from types import SimpleNamespace
 
@@ -23,8 +24,9 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Input, RichLog, Static
 
+import sandroid.tui.widgets.chat_panel as chat_panel_module
 from sandroid.tui.screens.main_screen import MainScreen
-from sandroid.tui.widgets.chat_panel import ChatPanel
+from sandroid.tui.widgets.chat_panel import ChatPanel, ChatTurnHandle
 
 
 class _ChatPanelHarness(App):
@@ -109,6 +111,72 @@ async def test_ctrl_l_refused_while_a_turn_is_in_progress():
         await pilot.pause()
 
         assert len(panel._messages) == 2  # unchanged -- clear was refused
+
+
+@pytest.mark.smoke
+async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
+    """Regression test for the ambient-context wiring (``ai/context.py``):
+    ``build_ambient_block()`` is merged into the SAME system message as
+    ``ORCHESTRATOR_SYSTEM_PROMPT`` for the turn actually sent to the model
+    (never as a second, separate system message -- the real backend only
+    attends to the first system-role message in the list, see
+    ``_run_turn_sync``), but must never survive into ``self._messages``
+    afterward, which must keep carrying the pure, unmodified prompt. Runs
+    the real ``_run_turn_sync`` worker-thread method (via
+    ``run_worker(thread=True)``, same as ``on_input_submitted`` does), with
+    ``build_ambient_block`` and ``run_agent_turn`` monkeypatched so no real
+    network/tool call happens.
+    """
+    from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+
+    sentinel = "SENTINEL-AMBIENT-BLOCK-content"
+    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: sentinel)
+
+    captured_calls = []
+
+    def fake_run_agent_turn(messages, tools, client, cancel_event, on_event=None):
+        captured_calls.append(list(messages))
+        return "assistant reply"
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    app = _ChatPanelHarness()
+    async with app.run_test() as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        handle = ChatTurnHandle()
+
+        worker = panel.run_worker(
+            functools.partial(
+                panel._run_turn_sync, "hello", handle, "http://x", "k", "m"
+            ),
+            name="chat_turn",
+            thread=True,
+        )
+        await worker.wait()
+        await pilot.pause()
+
+        assert captured_calls, "run_agent_turn was never invoked"
+        sent_messages = captured_calls[0]
+        assert sentinel in sent_messages[0]["content"], (
+            "the ambient block must reach the model for this turn, merged "
+            "into the first (system) message's own content"
+        )
+        assert sent_messages[0]["role"] == "system"
+        assert ORCHESTRATOR_SYSTEM_PROMPT in sent_messages[0]["content"], (
+            "the merged system message must still carry the orchestrator "
+            "prompt alongside the ambient block"
+        )
+        # Only ONE system message is ever sent -- never a second, separate
+        # one -- since the real backend silently ignores any system message
+        # past the first.
+        assert sum(1 for m in sent_messages if m["role"] == "system") == 1
+        assert not any(
+            sentinel in m.get("content", "") for m in panel._messages
+        ), "the ambient block must never persist into self._messages"
+        assert panel._messages[0] == {
+            "role": "system",
+            "content": ORCHESTRATOR_SYSTEM_PROMPT,
+        }, "self._messages[0] must remain the pure, unmodified system prompt"
 
 
 # -- Task 1: Markdown rendering ------------------------------------------
