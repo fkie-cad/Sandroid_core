@@ -199,6 +199,32 @@ def _describe_mitmproxy() -> str | None:
         return None
 
 
+def _describe_app_proxies() -> str | None:
+    """Describe which apps currently have their own proxy lane, if any.
+
+    Deliberate, explicit exception to this module's "omit when absent" rule
+    for list-shaped facts: the app_filter param on get_captured_flows is
+    only useful if the model already knows what packages exist to filter
+    by, so this always renders (even when empty), like the boolean-fact
+    describers, rather than omitting like _describe_spotlight_files does.
+    Uses the non-blocking read so a slow concurrent FocusManager mutation
+    can never stall ambient-context building -- returns None on lock
+    contention, consistent with this module's isolated-failure rule.
+    """
+    try:
+        from sandroid.core.proxy_manager import get_focus_manager
+
+        apps = get_focus_manager().app_proxies_nonblocking()
+        if apps is None:
+            return None
+        if not apps:
+            return "App proxies: none currently active."
+        parts = [f"{pkg} -> {target}" for pkg, target in apps.items()]
+        return "App proxies active: " + ", ".join(parts)
+    except Exception:
+        return None
+
+
 # One helper per cheap, in-memory state source -- see the module docstring
 # for the rules every helper follows.
 _DESCRIBERS: tuple[Callable[[], str | None], ...] = (
@@ -210,6 +236,7 @@ _DESCRIBERS: tuple[Callable[[], str | None], ...] = (
     _describe_recording,
     _describe_spotlight_files,
     _describe_mitmproxy,
+    _describe_app_proxies,
 )
 
 

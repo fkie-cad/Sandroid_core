@@ -737,6 +737,36 @@ class MitmproxyConfig(BaseModel):
             "mitmproxy SOCKS port for our-mitmproxy lanes)"
         ),
     )
+    flow_log_enabled: bool = Field(
+        default=True,
+        description=(
+            "Write every captured flow to a structured, queryable log under "
+            "the session's raw-results directory (mitm_flows/), so the AI "
+            "chat's get_captured_flows/get_flow_detail tools can read what "
+            "was intercepted. Disable to skip this bookkeeping entirely."
+        ),
+    )
+    max_stored_flows: int = Field(
+        default=5000,
+        ge=100,
+        le=100000,
+        description=(
+            "Maximum number of flow records kept in the structured flow "
+            "log. Once exceeded, the oldest records (and their detail "
+            "files) are dropped to make room for new ones."
+        ),
+    )
+    max_captured_body_bytes: int = Field(
+        default=65536,
+        ge=0,
+        le=1048576,
+        description=(
+            "Maximum request/response body size, in bytes, captured per "
+            "side into a flow's detail file. Capped once at capture time -- "
+            "raising this later cannot recover bodies already truncated "
+            "under a smaller value."
+        ),
+    )
 
     @validator("addons_dir", pre=True)
     def expand_addons_dir(cls, v):

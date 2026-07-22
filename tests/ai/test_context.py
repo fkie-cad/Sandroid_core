@@ -1,17 +1,20 @@
 """Unit tests for sandroid.ai.context.build_ambient_block.
 
 Every `_describe_*` helper does its `from sandroid.services import ...` (or
-`from sandroid.core.toolbox import Toolbox`) lazily, inside its own body --
-see context.py's module docstring -- so tests monkeypatch the accessor
-function/classmethod on the module it actually lives on (``sandroid.services``,
-``sandroid.services.mitmproxy_service``, ``sandroid.core.toolbox.Toolbox``),
-the same style ``test_loop.py`` uses for ``loop_module.get_tool_registry``.
+`from sandroid.core.toolbox import Toolbox`, or
+`from sandroid.core.proxy_manager import get_focus_manager`) lazily, inside
+its own body -- see context.py's module docstring -- so tests monkeypatch the
+accessor function/classmethod on the module it actually lives on
+(``sandroid.services``, ``sandroid.services.mitmproxy_service``,
+``sandroid.core.toolbox.Toolbox``, ``sandroid.core.proxy_manager``), the same
+style ``test_loop.py`` uses for ``loop_module.get_tool_registry``.
 """
 
 from types import SimpleNamespace
 
 from sandroid import services
 from sandroid.ai import context
+from sandroid.core import proxy_manager
 from sandroid.core.toolbox import Toolbox
 from sandroid.services import mitmproxy_service
 
@@ -35,6 +38,7 @@ def test_block_is_header_only_when_every_real_source_raises(monkeypatch):
     monkeypatch.setattr(services, "get_emulator_service", _raise)
     monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", _raise)
     monkeypatch.setattr(Toolbox, "get_device_manager", staticmethod(_raise))
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", _raise)
 
     block = context.build_ambient_block()
 
@@ -269,7 +273,7 @@ def test_frida_session_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_frida_session()
     assert line is not None
-    assert "No active Frida session is attached." == line
+    assert line == "No active Frida session is attached."
 
     monkeypatch.setattr(
         services,
@@ -278,7 +282,7 @@ def test_frida_session_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_frida_session()
     assert line is not None
-    assert "An active Frida session is attached." == line
+    assert line == "An active Frida session is attached."
 
 
 # -- _describe_results_path --------------------------------------------------
@@ -346,7 +350,7 @@ def test_recording_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_recording()
     assert line is not None
-    assert "Screen recording is not currently active." == line
+    assert line == "Screen recording is not currently active."
 
     monkeypatch.setattr(
         services,
@@ -355,7 +359,7 @@ def test_recording_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_recording()
     assert line is not None
-    assert "Screen recording is currently active." == line
+    assert line == "Screen recording is currently active."
 
 
 # -- _describe_mitmproxy -------------------------------------------------------
@@ -369,7 +373,7 @@ def test_mitmproxy_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_mitmproxy()
     assert line is not None
-    assert "Mitmproxy is not running." == line
+    assert line == "Mitmproxy is not running."
 
     monkeypatch.setattr(
         mitmproxy_service,
@@ -378,4 +382,63 @@ def test_mitmproxy_renders_explicit_state_either_way(monkeypatch):
     )
     line = context._describe_mitmproxy()
     assert line is not None
-    assert "Mitmproxy is running." == line
+    assert line == "Mitmproxy is running."
+
+
+# -- _describe_app_proxies -----------------------------------------------------
+
+
+def test_app_proxies_renders_explicit_none_line_when_empty(monkeypatch):
+    """Deliberate exception to the module's "omit when absent" rule for
+    list-shaped facts -- unlike _describe_spotlight_files, this always
+    renders, even with no active lanes, since app_filter on
+    get_captured_flows is only useful if the model already knows which
+    packages exist to filter by.
+    """
+    monkeypatch.setattr(
+        proxy_manager,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_nonblocking=dict),
+    )
+
+    line = context._describe_app_proxies()
+
+    assert line == "App proxies: none currently active."
+
+
+def test_app_proxies_renders_active_lane_pkg_and_target_pairs(monkeypatch):
+    monkeypatch.setattr(
+        proxy_manager,
+        "get_focus_manager",
+        lambda: SimpleNamespace(
+            app_proxies_nonblocking=lambda: {
+                "com.example.app": "ours",
+                "com.other.app": "http://127.0.0.1:8888",
+            }
+        ),
+    )
+
+    line = context._describe_app_proxies()
+
+    assert line is not None
+    assert "com.example.app -> ours" in line
+    assert "com.other.app -> http://127.0.0.1:8888" in line
+
+
+def test_app_proxies_degrades_to_none_on_lock_contention(monkeypatch):
+    """app_proxies_nonblocking() returning None (lock contention) must
+    degrade to None, not render a misleading "none active" line.
+    """
+    monkeypatch.setattr(
+        proxy_manager,
+        "get_focus_manager",
+        lambda: SimpleNamespace(app_proxies_nonblocking=lambda: None),
+    )
+
+    assert context._describe_app_proxies() is None
+
+
+def test_app_proxies_degrades_to_none_on_error(monkeypatch):
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", _raise)
+
+    assert context._describe_app_proxies() is None

@@ -657,3 +657,145 @@ def test_check_hook_conflicts_no_conflicts(monkeypatch):
     )
 
     assert ec.check_hook_conflicts(["open"]) == {"conflicts": {}}
+
+
+# -- start_ssl_unpin / stop_ssl_unpin / get_ssl_unpin_status ---------------------
+
+
+def _patch_mitmproxy_service(monkeypatch, service):
+    """Point ``get_mitmproxy_service()`` at a fake service.
+
+    ``environment_control``'s SSL-unpin tools lazily import
+    ``get_mitmproxy_service`` from ``sandroid.services.mitmproxy_service``
+    inside their own bodies, so patch the attribute on that module directly
+    -- mirroring ``tests/ai/tools/test_session_control.py``'s convention for
+    the same lazy import.
+    """
+    from sandroid.services import mitmproxy_service
+
+    monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: service)
+
+
+def test_start_ssl_unpin_success(monkeypatch):
+    service = SimpleNamespace(
+        start_ssl_unpin=lambda: (True, "SSL unpin active"),
+        ssl_unpin_target=lambda: "com.example.app",
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    assert ec.start_ssl_unpin() == {
+        "success": True,
+        "message": "SSL unpin active",
+        "target": "com.example.app",
+    }
+
+
+def test_start_ssl_unpin_already_active_is_idempotent(monkeypatch):
+    service = SimpleNamespace(
+        start_ssl_unpin=lambda: (
+            True,
+            "SSL unpin already active for com.example.app",
+        ),
+        ssl_unpin_target=lambda: "com.example.app",
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.start_ssl_unpin()
+
+    assert result["success"] is True
+    assert "already active" in result["message"]
+    assert result["target"] == "com.example.app"
+
+
+def test_start_ssl_unpin_session_paused_failure(monkeypatch):
+    """A generic BypassService.start() failure (e.g. no live spotlight
+    process to attach to) must surface as success=False with target=None,
+    not raise.
+    """
+    service = SimpleNamespace(
+        start_ssl_unpin=lambda: (False, "no spotlight app or session is paused"),
+        ssl_unpin_target=lambda: None,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    assert ec.start_ssl_unpin() == {
+        "success": False,
+        "message": "no spotlight app or session is paused",
+        "target": None,
+    }
+
+
+def test_stop_ssl_unpin_not_active_never_calls_stop_no_error_key(monkeypatch):
+    calls = []
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: False,
+        stop_ssl_unpin=lambda: calls.append("stop") or True,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.stop_ssl_unpin()
+
+    assert result == {"stopped": False, "was_active": False}
+    assert "error" not in result
+    assert calls == []
+
+
+def test_stop_ssl_unpin_success(monkeypatch):
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: True,
+        stop_ssl_unpin=lambda: True,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    assert ec.stop_ssl_unpin() == {"stopped": True, "was_active": True}
+
+
+def test_stop_ssl_unpin_genuine_failure_has_error_key(monkeypatch):
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: True,
+        stop_ssl_unpin=lambda: False,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.stop_ssl_unpin()
+
+    assert result["stopped"] is False
+    assert result["was_active"] is True
+    assert "error" in result
+
+
+def test_stop_ssl_unpin_stop_call_raises_has_error_key(monkeypatch):
+    def _boom():
+        raise RuntimeError("bypass teardown failed")
+
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: True,
+        stop_ssl_unpin=_boom,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.stop_ssl_unpin()
+
+    assert result["stopped"] is False
+    assert result["was_active"] is True
+    assert "bypass teardown failed" in result["error"]
+
+
+def test_get_ssl_unpin_status_active(monkeypatch):
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: True,
+        ssl_unpin_target=lambda: "com.example.app",
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    assert ec.get_ssl_unpin_status() == {"active": True, "target": "com.example.app"}
+
+
+def test_get_ssl_unpin_status_inactive(monkeypatch):
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: False,
+        ssl_unpin_target=lambda: None,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    assert ec.get_ssl_unpin_status() == {"active": False, "target": None}

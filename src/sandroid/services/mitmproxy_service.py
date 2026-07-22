@@ -40,14 +40,22 @@ _ADDON_SOURCE = r'''
 Tag format on stdout:
     [FLOW]|HH:MM:SS|protocol|status|method|host_and_path|size_str|app
     [TLS_FAIL]|HH:MM:SS|host_or_sni|short_reason|app
+    [FLOW_ERR]|HH:MM:SS|host_and_path|reason|app
 
 `protocol` is a compact token like "HTTPS/2", "HTTP/1.1", "WS", "WSS".
 `app` is the focused package the flow was attributed to (empty when not in a
 Focus lane). Attribution uses the lane's SOCKS5 listen port as the key into a
 sidecar map written by FocusManager and pointed to by SANDROID_FOCUS_MAP.
+
+Structured flow log (Track 2): every completed or errored flow is also
+appended as a JSON record to SANDROID_FLOW_LOG (empty/unset disables this at
+zero cost), with a full-headers/capped-body detail file alongside it. See
+_append_flow_record's docstring for the on-disk layout and the write-safety
+property that makes clearing the log safe while mitmweb keeps running.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -59,6 +67,27 @@ from mitmproxy import tls as _tls
 # changes. Shape: {"8082": {"package": "com.foo", "marker": ":green_circle:"}}.
 _FOCUS_MAP: dict = {}
 _FOCUS_MTIME: float = -1.0
+
+# Monotonic per-flow sequence counter, resumed once per addon-process-load
+# (see _resume_seq). Never reset by clear_captured_flows -- that is exactly
+# the point (see _resume_seq's docstring).
+_SEQ: dict = {"n": 0, "initialized": False}
+
+# In-memory flows.jsonl line count, lazily initialized once per addon-
+# process-load (one real file read) and then updated in memory on every
+# append/trim -- _maybe_trim used to re-`readlines()` the entire file on
+# EVERY single flow just to learn its current length, which turns into an
+# O(current file size) cost on every flow once traffic has passed
+# max_stored_flows. Keyed by log_path so a mid-process device/session switch
+# (a fresh path) re-measures rather than reusing a stale count.
+_LINE_COUNT: dict[str, int] = {}
+
+# Env vars are read once and cached -- they never change for the lifetime of
+# one mitmweb subprocess (a config change takes effect on the next restart,
+# which is a fresh addon load with fresh globals anyway).
+_FLOW_LOG_PATH: str | None = None
+_FLOW_MAX_STORED: int | None = None
+_FLOW_MAX_BODY_BYTES: int | None = None
 
 
 def _focus_map() -> dict:
@@ -136,24 +165,372 @@ def _protocol(flow: http.HTTPFlow) -> str:
     return f"{base}/{ver}" if ver else base
 
 
+def _attribute_and_tag(flow: http.HTTPFlow) -> str:
+    """Attribute a flow to its Focus app and tag it, degrading to app="".
+
+    Shared by response() and error() so this per-flow app-attribution logic
+    (arrival SOCKS lane port -> sidecar map -> flow.comment/metadata/marked)
+    lives in exactly one place. Any failure degrades to app="" and never
+    raises -- never breaks emission of the flow itself.
+    """
+    app = ""
+    try:
+        entry = _lane_entry(flow.client_conn.proxy_mode)
+        if entry is not None:
+            app = entry.get("package") or ""
+            flow.comment = app
+            flow.metadata["sandroid_app"] = app
+            flow.marked = entry.get("marker") or ""
+    except Exception:
+        app = ""
+    return app
+
+
+def _flow_log_path() -> str:
+    global _FLOW_LOG_PATH
+    if _FLOW_LOG_PATH is None:
+        _FLOW_LOG_PATH = os.environ.get("SANDROID_FLOW_LOG", "")
+    return _FLOW_LOG_PATH
+
+
+def _flow_max_stored() -> int:
+    global _FLOW_MAX_STORED
+    if _FLOW_MAX_STORED is None:
+        try:
+            _FLOW_MAX_STORED = int(os.environ.get("SANDROID_FLOW_MAX_STORED", "5000"))
+        except ValueError:
+            _FLOW_MAX_STORED = 5000
+    return _FLOW_MAX_STORED
+
+
+def _flow_max_body_bytes() -> int:
+    global _FLOW_MAX_BODY_BYTES
+    if _FLOW_MAX_BODY_BYTES is None:
+        try:
+            _FLOW_MAX_BODY_BYTES = int(
+                os.environ.get("SANDROID_FLOW_MAX_BODY_BYTES", "65536")
+            )
+        except ValueError:
+            _FLOW_MAX_BODY_BYTES = 65536
+    return _FLOW_MAX_BODY_BYTES
+
+
+def _details_dir(log_path: str) -> str:
+    return os.path.join(os.path.dirname(log_path), "details")
+
+
+def _meta_path(log_path: str) -> str:
+    return os.path.join(os.path.dirname(log_path), "meta.json")
+
+
+def _read_meta(log_path: str) -> dict:
+    try:
+        with open(_meta_path(log_path), encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _write_meta(log_path: str, meta: dict) -> None:
+    """Write meta.json atomically (temp file + os.replace).
+
+    meta.json is read on every addon (re)load to resume `seq` (see
+    _resume_seq) and by the reader module to detect a retention trim -- a
+    process killed mid-write must never leave it half-written.
+    """
+    meta_path = _meta_path(log_path)
+    tmp_path = f"{meta_path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        os.replace(tmp_path, meta_path)
+    except OSError:
+        pass
+
+
+def _resume_seq(log_path: str) -> None:
+    """Resume the `seq` counter once per addon-process-load.
+
+    THE BUG THIS FIXES: resuming only from flows.jsonl's tail breaks the
+    moment that file is deleted (e.g. by the clear_captured_flows AI tool)
+    while mitmweb isn't running -- the addon would restart the counter at 0,
+    colliding with any pre-clear seq numbers a caller's cached since_cursor
+    still references. Falling back to meta.json's latest_seq (which
+    clear_captured_flows deliberately preserves) closes that gap.
+    """
+    if _SEQ["initialized"]:
+        return
+    _SEQ["initialized"] = True
+    # 1) Prefer the tail of flows.jsonl (cheapest, most common case).
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 8192))
+            tail = f.read().decode("utf-8", "ignore").splitlines()
+        for line in reversed(tail):
+            try:
+                _SEQ["n"] = json.loads(line)["seq"]
+                return
+            except (ValueError, KeyError):
+                continue
+    except OSError:
+        pass
+    # 2) Fall back to meta.json's latest_seq -- survives clear_captured_flows
+    # wiping flows.jsonl itself.
+    try:
+        with open(_meta_path(log_path), encoding="utf-8") as f:
+            _SEQ["n"] = json.load(f).get("latest_seq", 0)
+    except (OSError, ValueError):
+        _SEQ["n"] = 0
+
+
+def _next_seq(log_path: str) -> int:
+    _resume_seq(log_path)
+    _SEQ["n"] = _SEQ["n"] + 1
+    return _SEQ["n"]
+
+
+def _cap_body(raw, max_bytes: int) -> dict:
+    """Cap raw body bytes at write time, mirroring read_host_file's shape.
+
+    Body capping happens ONCE here -- there is no later re-cap opportunity
+    since the live flow object (the only source of the body) won't exist
+    once mitmweb restarts.
+    """
+    raw = raw or b""
+    size_bytes = len(raw)
+    capped = raw[:max_bytes]
+    truncated = size_bytes > len(capped)
+    try:
+        content = capped.decode("utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        content = base64.b64encode(capped).decode("ascii")
+        encoding = "base64"
+    return {
+        "content": content,
+        "encoding": encoding,
+        "truncated": truncated,
+        "size_bytes": size_bytes,
+        "bytes_read": len(capped),
+    }
+
+
+def _flow_ts_end(flow: http.HTTPFlow) -> float:
+    if flow.response is not None:
+        return flow.response.timestamp_end or flow.response.timestamp_start or time.time()
+    if flow.error is not None:
+        return flow.error.timestamp
+    return time.time()
+
+
+def _write_detail_file(log_path: str, flow: http.HTTPFlow, error) -> None:
+    """Write details/<flow_id>.json: full headers + capped body per side.
+
+    Headers are stored as [[name, value], ...] pairs via .items(multi=True)
+    -- NOT a plain dict, since mitmproxy.http.Headers is a MultiDict and a
+    bare dict() would silently collapse duplicate header names (e.g. two
+    Set-Cookie headers).
+    """
+    max_body = _flow_max_body_bytes()
+    req = flow.request
+    resp = flow.response
+    detail = {
+        "id": flow.id,
+        "request_headers": list(req.headers.items(multi=True)) if req else [],
+        "response_headers": list(resp.headers.items(multi=True)) if resp else [],
+        "request_body": _cap_body(req.raw_content if req else None, max_body),
+        "response_body": _cap_body(resp.raw_content if resp else None, max_body),
+        "error": error,
+    }
+    details_dir = _details_dir(log_path)
+    try:
+        os.makedirs(details_dir, exist_ok=True)
+        detail_path = os.path.join(details_dir, f"{flow.id}.json")
+        with open(detail_path, "w", encoding="utf-8") as f:
+            json.dump(detail, f)
+    except OSError:
+        pass
+
+
+def _update_meta_on_append(log_path: str, seq: int) -> None:
+    meta = _read_meta(log_path)
+    if meta.get("earliest_seq") is None:
+        meta["earliest_seq"] = seq
+    meta["latest_seq"] = seq
+    meta["total_flows_lifetime"] = meta.get("total_flows_lifetime", 0) + 1
+    meta.setdefault("generation", 0)
+    _write_meta(log_path, meta)
+
+
+def _line_count_after_append(log_path: str) -> int:
+    """Track flows.jsonl's line count in memory, lazily seeded once.
+
+    Called AFTER the line has already been appended to disk, so the first
+    call per (addon-process, log_path) pays for one real line-count read
+    that already reflects this very append -- it seeds the counter directly
+    from that read rather than also adding +1 on top of it (which would
+    permanently overcount by one for the rest of the process's life). Every
+    call after that first one is a pure in-memory increment -- see the
+    ``_LINE_COUNT`` module docstring for why this matters.
+    """
+    if log_path not in _LINE_COUNT:
+        try:
+            with open(log_path, "rb") as f:
+                _LINE_COUNT[log_path] = sum(1 for _ in f)
+        except OSError:
+            _LINE_COUNT[log_path] = 0
+        return _LINE_COUNT[log_path]
+    _LINE_COUNT[log_path] += 1
+    return _LINE_COUNT[log_path]
+
+
+def _maybe_trim(log_path: str, line_count: int) -> None:
+    """Rewrite flows.jsonl to the newest N records once over the cap.
+
+    ``line_count`` is the in-memory-tracked count (see
+    ``_line_count_after_append``) -- this function only actually opens the
+    file when a trim might be due, not on every single flow.
+
+    The rewrite itself is a temp-file + ``os.replace`` swap, exactly like
+    ``_write_meta``'s own atomicity guarantee: a plain truncating
+    ``open(log_path, "w")`` would let a concurrent reader (a different OS
+    process from this addon) observe a momentarily empty or partially
+    written file mid-rewrite. This is the ONLY thing that ever changes
+    existing records' byte offsets, so it bumps meta.json's `generation` in
+    the same pass -- the reader module's cursor cache uses a `generation`
+    mismatch as proof a cached byte offset is no longer valid (see
+    mitmproxy_flow_log.py). A narrow window remains between this atomic swap
+    and the following meta.json write where a reader could still observe the
+    new file against the old generation; unlike a torn/partial file, that
+    combination only ever produces a stale-but-well-formed read that
+    self-corrects on the next poll once `generation` catches up -- accepted
+    for the same reason as this feature's other documented, narrow,
+    self-healing races.
+    """
+    max_stored = _flow_max_stored()
+    if line_count <= max_stored:
+        return
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    if len(lines) <= max_stored:
+        _LINE_COUNT[log_path] = len(lines)
+        return
+
+    keep = lines[-max_stored:]
+    dropped = lines[:-max_stored]
+
+    tmp_path = f"{log_path}.tmp-{os.getpid()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.writelines(keep)
+        os.replace(tmp_path, log_path)
+    except OSError:
+        return
+    _LINE_COUNT[log_path] = len(keep)
+
+    details_dir = _details_dir(log_path)
+    for line in dropped:
+        try:
+            flow_id = json.loads(line).get("id")
+        except ValueError:
+            continue
+        if not flow_id:
+            continue
+        try:
+            os.unlink(os.path.join(details_dir, f"{flow_id}.json"))
+        except OSError:
+            pass
+
+    new_earliest = None
+    for line in keep:
+        try:
+            new_earliest = json.loads(line)["seq"]
+            break
+        except (ValueError, KeyError):
+            continue
+
+    meta = _read_meta(log_path)
+    meta["earliest_seq"] = new_earliest
+    meta["generation"] = meta.get("generation", 0) + 1
+    _write_meta(log_path, meta)
+
+
+def _append_flow_record(flow: http.HTTPFlow, error, app: str) -> None:
+    """Append one JSON record to flows.jsonl and write its detail file.
+
+    WRITE-SAFETY: opens flows.jsonl in append mode and closes it on every
+    single call -- never a long-lived, held-open handle. This is what makes
+    clear_captured_flows safe against a still-running mitmweb: the next
+    flow's write reopens (and, if needed, recreates) the path instead of
+    silently writing into an unlinked, invisible inode.
+    """
+    log_path = _flow_log_path()
+    if not log_path:
+        return
+
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError:
+        return
+
+    seq = _next_seq(log_path)
+    req = flow.request
+    resp = flow.response
+    request_bytes = len(req.raw_content) if req and req.raw_content else 0
+    response_bytes = None
+    status_code = None
+    response_content_type = None
+    if resp is not None:
+        response_bytes = len(resp.raw_content) if resp.raw_content else 0
+        status_code = resp.status_code
+        response_content_type = resp.headers.get("content-type")
+
+    record = {
+        "seq": seq,
+        "id": flow.id,
+        "ts_start": req.timestamp_start if req else time.time(),
+        "ts_end": _flow_ts_end(flow),
+        "protocol": _protocol(flow),
+        "method": (req.method or "?") if req else "?",
+        "host": (req.pretty_host or "?") if req else "?",
+        "path": (req.path or "/") if req else "/",
+        "status_code": status_code,
+        "error": error,
+        "request_bytes": request_bytes,
+        "response_bytes": response_bytes,
+        "app": app,
+        "request_content_type": req.headers.get("content-type") if req else None,
+        "response_content_type": response_content_type,
+    }
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        return
+
+    line_count = _line_count_after_append(log_path)
+    _write_detail_file(log_path, flow, error)
+    _update_meta_on_append(log_path, seq)
+    _maybe_trim(log_path, line_count)
+
+
 class SandroidLogger:
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.response is None:
             return
         body_len = len(flow.response.raw_content) if flow.response.raw_content else 0
 
-        # Per-flow app attribution via the arrival SOCKS lane port. Any failure
-        # degrades to app="" and never breaks emission.
-        app = ""
-        try:
-            entry = _lane_entry(flow.client_conn.proxy_mode)
-            if entry is not None:
-                app = entry.get("package") or ""
-                flow.comment = app
-                flow.metadata["sandroid_app"] = app
-                flow.marked = entry.get("marker") or ""
-        except Exception:
-            app = ""
+        app = _attribute_and_tag(flow)
+        _append_flow_record(flow, error=None, app=app)
 
         line = "|".join((
             "[FLOW]",
@@ -166,6 +543,22 @@ class SandroidLogger:
             app,
         ))
         print(line, flush=True)
+
+    def error(self, flow: http.HTTPFlow) -> None:
+        """Fires when a request went out but never got a response (reset,
+        DNS failure, killed flow, client disconnect) -- disjoint from
+        tls_failed_client, which fires pre-flow at the TLS layer with no
+        HTTPFlow object at all.
+        """
+        if flow.response is not None:
+            return  # defensive: never double-count if both hooks ever fire
+        app = _attribute_and_tag(flow)
+        reason = str(flow.error.msg) if flow.error else "unknown error"
+        _append_flow_record(flow, error=reason, app=app)
+        print(
+            f"[FLOW_ERR]|{_ts()}|{_host_path(flow.request)}|{reason[:40]}|{app}",
+            flush=True,
+        )
 
     def tls_failed_client(self, data: _tls.TlsData) -> None:
         host = "?"
@@ -308,6 +701,7 @@ class MitmproxyState:
     pid: int | None = None
     flows_seen: int = 0
     tls_failures: int = 0
+    flow_errors: int = 0
     verbose: bool = False
     last_error: str | None = None
     ssl_unpin_active: bool = False
@@ -403,6 +797,51 @@ class MitmproxyService:
             return os.path.expanduser(get_config().focus.sidecar_path)
         except Exception:  # pragma: no cover - defensive
             return default
+
+    @staticmethod
+    def _resolve_flow_log_env() -> dict[str, str]:
+        """Resolve the structured flow log's env vars for the mitmweb subprocess.
+
+        Path resolution deliberately duplicates
+        ``mitmproxy_flow_log.resolve_flow_dir``'s own two-line resolution
+        (see that module's docstring) rather than importing it, and rather
+        than importing ``ai/tools/file_transfer.py``'s private helper, which
+        would be a backwards ``services`` -> ``ai/tools`` dependency that
+        doesn't exist anywhere else in this codebase.
+
+        Returns an empty dict (leaving the feature disabled at zero cost on
+        the addon side) if config says it's off, or if path resolution fails
+        for any reason -- never raises, never blocks ``start()``.
+        """
+        try:
+            from sandroid.services import get_configuration_service
+
+            cfg = get_config().mitmproxy if get_config is not None else None
+            enabled = (
+                getattr(cfg, "flow_log_enabled", True) if cfg is not None else True
+            )
+            if not enabled:
+                return {}
+
+            raw_root = (
+                Path(get_configuration_service().get_raw_results_path())
+                .expanduser()
+                .resolve()
+            )
+            flows_dir = raw_root / "mitm_flows"
+            flows_dir.mkdir(parents=True, exist_ok=True)
+            (flows_dir / "details").mkdir(parents=True, exist_ok=True)
+
+            max_stored = getattr(cfg, "max_stored_flows", 5000) if cfg else 5000
+            max_body = getattr(cfg, "max_captured_body_bytes", 65536) if cfg else 65536
+            return {
+                "SANDROID_FLOW_LOG": str(flows_dir / "flows.jsonl"),
+                "SANDROID_FLOW_MAX_STORED": str(max_stored),
+                "SANDROID_FLOW_MAX_BODY_BYTES": str(max_body),
+            }
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Failed to resolve flow log path: %s", exc)
+            return {}
 
     def _ensure_addons_dir(self) -> None:
         """First-run scaffold for the user addons directory.
@@ -750,6 +1189,14 @@ class MitmproxyService:
             # path is stable even as the map contents change at runtime.
             sidecar_path = self._focus_sidecar_path()
 
+            # Structured flow log (Track 2): resolved fresh here, independently
+            # of mitmproxy_flow_log.py's own resolution (see that module's
+            # docstring for why this small duplication is deliberate rather
+            # than a shared import -- services -> ai/tools would be a
+            # backwards dependency). Empty SANDROID_FLOW_LOG disables the
+            # whole feature at zero cost on the addon side.
+            flow_log_env = self._resolve_flow_log_env()
+
             try:
                 self._proc = subprocess.Popen(
                     cmd,
@@ -757,7 +1204,11 @@ class MitmproxyService:
                     stderr=subprocess.STDOUT,
                     bufsize=1,
                     text=True,
-                    env={**os.environ, "SANDROID_FOCUS_MAP": sidecar_path},
+                    env={
+                        **os.environ,
+                        "SANDROID_FOCUS_MAP": sidecar_path,
+                        **flow_log_env,
+                    },
                 )
             except Exception as exc:
                 self._state.last_error = f"spawn failed: {exc}"
@@ -773,6 +1224,7 @@ class MitmproxyService:
             self._state.last_error = None
             self._state.flows_seen = 0
             self._state.tls_failures = 0
+            self._state.flow_errors = 0
 
             self._reader_thread = threading.Thread(
                 target=self._read_loop,
@@ -951,6 +1403,8 @@ class MitmproxyService:
                     self._state.flows_seen += 1
                 elif line.startswith("[TLS_FAIL]|"):
                     self._state.tls_failures += 1
+                elif line.startswith("[FLOW_ERR]|"):
+                    self._state.flow_errors += 1
                 self._emit(line)
         except Exception as exc:
             logger.debug("mitmweb reader exited: %s", exc)
