@@ -777,6 +777,11 @@ class Toolbox(metaclass=_ToolboxMeta):
         _service("get_network_capture_service").start_capture(output_file=path)
 
     @classmethod
+    def is_capturing_network(cls) -> bool:
+        """Delegates to NetworkCaptureService to report capture state."""
+        return _service("get_network_capture_service").is_capturing()
+
+    @classmethod
     def get_spotlight_files(cls):
         """Returns the spotlight files list. Delegates to SpotlightService."""
         return _service("get_spotlight_service").get_spotlight_files()

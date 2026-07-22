@@ -41,7 +41,7 @@ SANDROID_THREAD_PATTERNS = {
     "screenshot": "Screenshot",
     "screenrecord": "Screen Recording",
     "frida": "Frida Session",
-    "fsmon": "File Monitor",
+    "monitor": "File Monitor",
     "forensic": "Forensic Scan",
     "emulator": "Emulator",
     "recording": "Screen Recording",

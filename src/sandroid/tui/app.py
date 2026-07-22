@@ -34,7 +34,7 @@ from sandroid.tui.controllers import (
     DeviceController,
     ForensicAPKController,
     ForensicController,
-    FSMonController,
+    MonitorController,
     NetworkCaptureController,
     ObjectionResumeController,
     ProxyController,
@@ -125,7 +125,7 @@ class SandroidTUI(App):
         Binding("d", "action_key('d')", "Dump Memory", show=False, id="dump_memory"),
         # Files
         Binding("l", "spotlight_files", "Spotlight Files", show=False, id="list_files"),
-        Binding("o", "fsmon", "FSMon", show=False, id="fsmon"),
+        Binding("o", "monitor", "Monitor", show=False, id="monitor"),
         # Emulator
         Binding(
             "e", "action_key('e')", "Emulator Info", show=False, id="emulator_info"
@@ -284,11 +284,11 @@ class SandroidTUI(App):
             call_from_thread=cb.call_from_thread,
             force_ui_refresh=cb.force_ui_refresh,
             on_run_saved=self._notify_diffs_new_run,
-            on_fsmon_stopped_for_playback=self._notify_fsmon_stopped_for_playback,
-            on_fsmon_resume_available=self._notify_fsmon_resume_available,
+            on_monitor_stopped_for_playback=self._notify_monitor_stopped_for_playback,
+            on_monitor_resume_available=self._notify_monitor_resume_available,
         )
 
-        self._fsmon_controller = FSMonController(
+        self._monitor_controller = MonitorController(
             log_info=cb.log_info,
             log_warning=cb.log_warning,
             log_error=cb.log_error,
@@ -301,6 +301,7 @@ class SandroidTUI(App):
             get_current_view=cb.get_current_view,
             open_files_tab=self._open_monitor_tab,
             on_pid_mode_fallback=self._notify_pid_mode_fallback,
+            on_backend_fallback=self._notify_backend_fallback,
         )
 
         self._spotlight_controller = SpotlightController(
@@ -346,6 +347,7 @@ class SandroidTUI(App):
             push_modal=cb.push_modal,
             schedule_timer=self.set_timer,
             refresh_ui=cb.force_ui_refresh,
+            call_from_thread=cb.call_from_thread,
         )
 
         self._widget_refresh_controller = WidgetRefreshController(
@@ -649,6 +651,9 @@ class SandroidTUI(App):
                 if device:
                     logger.info(f"Device changed to: {device.serial}")
                     frida_service.update_device_serial(device.serial)
+                    # Re-warm the per-serial kprobe availability cache for the
+                    # new device (off-thread) and re-sync an open SettingsScreen.
+                    self._warm_kprobe_cache_on_device_change()
                 else:
                     logger.info("Device changed to: None")
 
@@ -762,9 +767,74 @@ class SandroidTUI(App):
         def _background_check():
             self._device_controller.check_devices_on_startup()
             self._run_deferred_setup_checks()
+            self._warm_kprobe_cache_on_startup()
 
         thread = threading.Thread(target=_background_check, daemon=True)
         thread.start()
+
+    def _warm_kprobe_cache_on_startup(self) -> None:
+        """Warm the per-serial kprobe availability cache at startup.
+
+        Runs inside the already-off-thread startup check, so the heavy adb
+        probe never touches the UI thread. Skips the probe when no device is
+        active: an inconclusive probe would not memoize, and the device-change
+        path warms the cache once a device appears.
+        """
+        try:
+            from sandroid.core.adb import Adb
+
+            if not Adb.get_target_device():
+                return
+            from sandroid.core.kprobe_tracer import KprobeTracer
+
+            KprobeTracer.kprobe_supported()
+        except Exception as exc:
+            logger.debug(f"Startup kprobe availability probe failed: {exc}")
+
+    def _warm_kprobe_cache_on_device_change(self) -> None:
+        """Warm the kprobe availability cache for the newly active device.
+
+        Spawns a short daemon thread so the heavy adb probe never stalls the
+        device-change callback chain. ``Adb.set_target_device`` has already run
+        before callbacks fire, so ``kprobe_supported`` reads the new serial.
+        Afterwards, if a ``SettingsScreen`` is open, its Source disabled-state
+        is re-synced on the UI thread.
+        """
+        import threading
+
+        def _probe() -> None:
+            try:
+                from sandroid.core.kprobe_tracer import KprobeTracer
+
+                KprobeTracer.kprobe_supported()
+            except Exception as exc:
+                logger.debug(f"Device-change kprobe probe failed: {exc}")
+            self._refresh_open_settings_backend()
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _refresh_open_settings_backend(self) -> None:
+        """Re-sync an open SettingsScreen's backend availability (UI thread).
+
+        The stack scan and the refresh call both run on the UI thread via
+        ``call_from_thread``. No-op (guarded) when no SettingsScreen is open or
+        the method is absent.
+        """
+
+        def _do_refresh() -> None:
+            from sandroid.tui.screens.settings_screen import SettingsScreen
+
+            for screen in self.screen_stack:
+                if isinstance(screen, SettingsScreen):
+                    refresh = getattr(screen, "refresh_backend_availability", None)
+                    if callable(refresh):
+                        refresh()
+                    break
+
+        try:
+            self.call_from_thread(_do_refresh)
+        except Exception as exc:
+            logger.debug(f"Settings backend availability refresh failed: {exc}")
 
     def _run_deferred_setup_checks(self) -> None:
         """Run deferred (non-critical) setup checks in background."""
@@ -1149,14 +1219,14 @@ class SandroidTUI(App):
     def action_manage_forensic_apks(self) -> None:
         self._forensic_apk_controller.show_forensic_apk_modal()
 
-    def action_fsmon(self) -> None:
-        self._fsmon_controller.show_config_modal()
+    def action_monitor(self) -> None:
+        self._monitor_controller.show_config_modal()
 
     def _open_monitor_tab(self) -> None:
-        """FSMonController's ``open_files_tab`` hook: land on Files > Monitor.
+        """MonitorController's ``open_files_tab`` hook: land on Files > Monitor.
 
-        Fires once fsmon has actually *started* (called from inside
-        ``FSMonController._start_fsmon`` after it registers with
+        Fires once monitor has actually *started* (called from inside
+        ``MonitorController._start_monitor`` after it registers with
         TaskService), not merely when the config modal opens — mirrors
         ``action_action_key``'s ``h`` -> ``open_fritap_tab()`` jump for
         friTap. Injected as a callback (constructed in ``_init_controllers``)
@@ -1445,12 +1515,12 @@ class SandroidTUI(App):
             except Exception:
                 logger.warning("DiffsView.on_new_run failed", exc_info=True)
 
-    def _notify_fsmon_stopped_for_playback(self) -> None:
-        """RecordingController's ``on_fsmon_stopped_for_playback``.
+    def _notify_monitor_stopped_for_playback(self) -> None:
+        """RecordingController's ``on_monitor_stopped_for_playback``.
 
         Fires the moment Play's snapshot-revert safety-net force-stops a
-        running fsmon session (see
-        ``RecordingController._stop_fsmon_before_revert``). Same
+        running monitor session (see
+        ``RecordingController._stop_monitor_before_revert``). Same
         query_one + hasattr-guard dispatch pattern as
         ``_notify_diffs_new_run`` — the controller only knows about a plain
         callback, app.py owns reaching into the concrete widget.
@@ -1462,22 +1532,22 @@ class SandroidTUI(App):
             view = ms.query_one("#files-monitor")
         except Exception:
             return
-        if hasattr(view, "notify_fsmon_stopped_for_playback"):
+        if hasattr(view, "notify_monitor_stopped_for_playback"):
             try:
-                view.notify_fsmon_stopped_for_playback()
+                view.notify_monitor_stopped_for_playback()
             except Exception:
                 logger.warning(
-                    "MonitorView.notify_fsmon_stopped_for_playback failed",
+                    "MonitorView.notify_monitor_stopped_for_playback failed",
                     exc_info=True,
                 )
 
     def _notify_pid_mode_fallback(self, path: str) -> None:
-        """FSMonController's ``on_pid_mode_fallback``.
+        """MonitorController's ``on_pid_mode_fallback``.
 
-        Fires the moment ``FSMonController._start_fsmon``'s PID-mode branch
+        Fires the moment ``MonitorController._start_monitor``'s PID-mode branch
         silently substitutes path-mode because ``FSMon.fanotify_supported()``
         reports the device's kernel lacks fanotify. Same query_one +
-        hasattr-guard dispatch pattern as ``_notify_fsmon_stopped_for_playback``
+        hasattr-guard dispatch pattern as ``_notify_monitor_stopped_for_playback``
         — the controller only knows about a plain callback, app.py owns
         reaching into the concrete widget.
         """
@@ -1496,10 +1566,35 @@ class SandroidTUI(App):
                     "MonitorView.notify_pid_mode_fallback failed", exc_info=True
                 )
 
-    def _notify_fsmon_resume_available(self, config) -> None:
-        """RecordingController's ``on_fsmon_resume_available``.
+    def _notify_backend_fallback(self, reason: str) -> None:
+        """MonitorController's ``on_backend_fallback``.
 
-        Fires once Play has fully finished, only if fsmon was auto-stopped
+        Fires when the requested/auto-selected kprobe backend is unavailable
+        and the monitor falls back to fsmon. Marshaled back onto the main
+        thread by ``MonitorController._start_monitor`` before this is called,
+        so it dispatches straight into the concrete widget (same query_one +
+        hasattr-guard pattern as ``_notify_pid_mode_fallback``). Distinct from
+        that path-only, fanotify-worded notice.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-monitor")
+        except Exception:
+            return
+        if hasattr(view, "notify_backend_fallback"):
+            try:
+                view.notify_backend_fallback(reason)
+            except Exception:
+                logger.warning(
+                    "MonitorView.notify_backend_fallback failed", exc_info=True
+                )
+
+    def _notify_monitor_resume_available(self, config) -> None:
+        """RecordingController's ``on_monitor_resume_available``.
+
+        Fires once Play has fully finished, only if monitor was auto-stopped
         for it — surfaces MonitorView's one-click "Resume monitoring" offer.
         """
         ms = self._get_main_screen()
@@ -1515,17 +1610,17 @@ class SandroidTUI(App):
             except Exception:
                 logger.warning("MonitorView.offer_resume failed", exc_info=True)
 
-    def resume_fsmon_after_playback(self, config) -> None:
+    def resume_monitor_after_playback(self, config) -> None:
         """MonitorView's "Resume monitoring" button handler.
 
-        Delegates entirely to ``FSMonController.resume_after_playback``,
+        Delegates entirely to ``MonitorController.resume_after_playback``,
         which owns the PID re-resolution (target app likely relaunched with
         a new PID during replay) and the path-mode/refuse-to-start
-        fallbacks. On success, fsmon's own TASK_STARTED event clears the
-        Resume offer (MonitorView._on_fsmon_started) — no extra plumbing
+        fallbacks. On success, monitor's own TASK_STARTED event clears the
+        Resume offer (MonitorView._on_monitor_started) — no extra plumbing
         needed here.
         """
-        self._fsmon_controller.resume_after_playback(config)
+        self._monitor_controller.resume_after_playback(config)
 
     def action_export_action(self) -> None:
         self._recording_controller.show_export_modal()

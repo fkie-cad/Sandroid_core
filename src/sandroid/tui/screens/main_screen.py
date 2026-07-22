@@ -28,13 +28,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: Task sources whose TASK_OUTPUT events must NOT reach Background Activity
-#: because they already have their own dedicated display surface (fsmon's
+#: because they already have their own dedicated display surface (monitor's
 #: output lives in the Files tab's Monitor sub-tab -- see
 #: ``tui/widgets/monitor_view.py``). A frozenset (not a bare equality check)
 #: makes this rule explicit and extensible to future dedicated-tab tools.
 #: Lifecycle notices (TASK_STARTED/TASK_STOPPED) are NOT filtered -- only
-#: TASK_OUTPUT, so fsmon's start/stop still appears in Background Activity.
-_ACTIVITY_LOG_EXCLUDED_SOURCES = frozenset({"fsmon"})
+#: TASK_OUTPUT, so monitor's start/stop still appears in Background Activity.
+_ACTIVITY_LOG_EXCLUDED_SOURCES = frozenset({"monitor"})
 
 
 class _ToolPanel(Vertical):

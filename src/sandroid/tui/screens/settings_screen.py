@@ -28,17 +28,19 @@ from textual.widgets import (
 
 from sandroid.config import SandroidConfig, get_config
 from sandroid.config.schema import LogLevel
+from sandroid.core.adb import Adb
+from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.tui.controllers.settings_controller import SettingsController
 from sandroid.tui.themes import THEME_ORDER, THEMES
 
 logger = logging.getLogger(__name__)
 
-# Per-category FSMon Monitor visibility rows. The widget id uses "__" (not
+# Per-category Monitor visibility rows. The widget id uses "__" (not
 # "--") after the field name so it doesn't collide with _id_to_key's "--"->"."
 # section-separator convention -- these 6 Selects are assembled into a single
-# dict and saved under one key ("tui.fsmon_event_visibility"), never routed
+# dict and saved under one key ("tui.monitor_event_visibility"), never routed
 # through the generic per-widget key path.
-_FSMON_VISIBILITY_CATEGORIES = (
+_MONITOR_VISIBILITY_CATEGORIES = (
     "create",
     "modify",
     "delete",
@@ -46,14 +48,21 @@ _FSMON_VISIBILITY_CATEGORIES = (
     "attrs",
     "noise",
 )
-_FSMON_VISIBILITY_ID_PREFIX = "setting-tui--fsmon_event_visibility__"
-_FSMON_VISIBILITY_LABELS = {
-    "create": "FSMon Create:",
-    "modify": "FSMon Modify:",
-    "delete": "FSMon Delete:",
-    "rename": "FSMon Rename:",
-    "attrs": "FSMon Attrs:",
-    "noise": "FSMon Noise (open/close):",
+# Base label for the Monitor Source kprobe RadioButton. Availability suffixes
+# ("— unavailable on this device" / "— checking…") are appended to it so a
+# greyed-out kprobe is never visually indistinguishable from an enabled one
+# (the label is the only persistent, always-visible signal; a toast is
+# transient). Kept as one constant so compose() and the state helper agree.
+_KPROBE_BASE_LABEL = "kprobe (kernel tracefs)"
+
+_MONITOR_VISIBILITY_ID_PREFIX = "setting-tui--monitor_event_visibility__"
+_MONITOR_VISIBILITY_LABELS = {
+    "create": "Monitor Create:",
+    "modify": "Monitor Modify:",
+    "delete": "Monitor Delete:",
+    "rename": "Monitor Rename:",
+    "attrs": "Monitor Attrs:",
+    "noise": "Monitor Noise (open/close):",
 }
 
 
@@ -190,6 +199,13 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # ``_revert_ai_toggle_previews`` if the user cancels instead of
         # saving.
         self._ai_toggle_originals: dict[str, bool] = {}
+        # Async reentrancy guard for the Monitor Source RadioSet: flipping a
+        # ``RadioButton.value`` programmatically re-fires ``RadioSet.Changed``
+        # via a queued ``post_message`` (handled a couple of loop iterations
+        # later), so the guard is set before the flip and cleared *inside*
+        # the re-entrant ``on_radio_set_changed`` call (see
+        # ``_revert_backend_to_fsmon``).
+        self._reverting_backend = False
 
     def _get_config(self) -> SandroidConfig:
         """Get current config, falling back to defaults."""
@@ -211,6 +227,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 with TabPane("General", id="tab-general"):
                     with ScrollableContainer():
                         yield from self._compose_general_tab(config)
+                with TabPane("Monitor", id="tab-monitor"):
+                    with ScrollableContainer():
+                        yield from self._compose_monitor_tab(config)
                 with TabPane("Analysis", id="tab-analysis"):
                     with ScrollableContainer():
                         yield from self._compose_analysis_tab(config)
@@ -301,41 +320,6 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-switch",
             )
 
-        # FSMon Buffer Interval
-        with Horizontal(classes="setting-row"):
-            yield Label("FSMon Buffer (s):", classes="setting-label")
-            yield Input(
-                value=str(config.tui.fsmon_buffer_interval),
-                id="setting-tui--fsmon_buffer_interval",
-                type="number",
-                classes="setting-input",
-            )
-
-        # FSMon Max Lines
-        with Horizontal(classes="setting-row"):
-            yield Label("FSMon Max Lines:", classes="setting-label")
-            yield Input(
-                value=str(config.tui.fsmon_max_lines),
-                id="setting-tui--fsmon_max_lines",
-                type="integer",
-                classes="setting-input",
-            )
-
-        # FSMon per-category event visibility (Always / Only in verbose / Never)
-        for category in _FSMON_VISIBILITY_CATEGORIES:
-            with Horizontal(classes="setting-row"):
-                yield Label(_FSMON_VISIBILITY_LABELS[category], classes="setting-label")
-                yield Select(
-                    [
-                        ("Always", "always"),
-                        ("Only in verbose", "verbose"),
-                        ("Never", "never"),
-                    ],
-                    value=config.tui.fsmon_event_visibility.get(category, "always"),
-                    id=f"{_FSMON_VISIBILITY_ID_PREFIX}{category}",
-                    classes="setting-select",
-                )
-
         # Flush Package Cache
         with Horizontal(classes="setting-row"):
             yield Label("Package Cache:", classes="setting-label")
@@ -344,6 +328,83 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 id="btn-flush-pkg-cache",
                 variant="warning",
             )
+
+    def _compose_monitor_tab(self, config: SandroidConfig) -> ComposeResult:
+        """Compose the File System Monitor settings tab.
+
+        Holds every live FS-Monitor setting: the backend Source selector
+        (fsmon vs kprobe), the default monitor path, buffer/line limits, and
+        the per-category event-visibility Selects. The Source uses a
+        ``RadioSet`` (not a ``Select``) because Textual's ``Select`` cannot
+        disable a single option -- kprobe must be greyed out (via
+        ``RadioButton.disabled``) on devices whose kernel lacks kprobe
+        support.
+        """
+        # Source (backend) selector -- kprobe preferred, fsmon fallback.
+        yield Static("Source", classes="section-header")
+        with RadioSet(id="setting-tui--monitor_backend"):
+            yield RadioButton(
+                _KPROBE_BASE_LABEL,
+                value=(config.tui.monitor_backend == "kprobe"),
+                id="backend-kprobe",
+            )
+            yield RadioButton(
+                "fsmon (binary)",
+                value=(config.tui.monitor_backend == "fsmon"),
+                id="backend-fsmon",
+            )
+        yield Static(
+            "[dim]kprobe reads the kernel's tracefs and auto-falls-back to "
+            "fsmon when the kernel lacks support. Multi-path monitoring needs "
+            "kprobe.[/dim]",
+            classes="setting-help",
+        )
+
+        # Default monitor path (drives the monitor session modal's prefill).
+        with Horizontal(classes="setting-row"):
+            yield Label("Default Path:", classes="setting-label")
+            yield Input(
+                value=config.device_paths.default_monitor_path,
+                id="setting-device_paths--default_monitor_path",
+                classes="setting-input",
+            )
+
+        # Monitor Buffer Interval
+        with Horizontal(classes="setting-row"):
+            yield Label("Monitor Buffer (s):", classes="setting-label")
+            yield Input(
+                value=str(config.tui.monitor_buffer_interval),
+                id="setting-tui--monitor_buffer_interval",
+                type="number",
+                classes="setting-input",
+            )
+
+        # Monitor Max Lines
+        with Horizontal(classes="setting-row"):
+            yield Label("Monitor Max Lines:", classes="setting-label")
+            yield Input(
+                value=str(config.tui.monitor_max_lines),
+                id="setting-tui--monitor_max_lines",
+                type="integer",
+                classes="setting-input",
+            )
+
+        # Monitor per-category event visibility (Always / Only in verbose / Never)
+        for category in _MONITOR_VISIBILITY_CATEGORIES:
+            with Horizontal(classes="setting-row"):
+                yield Label(
+                    _MONITOR_VISIBILITY_LABELS[category], classes="setting-label"
+                )
+                yield Select(
+                    [
+                        ("Always", "always"),
+                        ("Only in verbose", "verbose"),
+                        ("Never", "never"),
+                    ],
+                    value=config.tui.monitor_event_visibility.get(category, "always"),
+                    id=f"{_MONITOR_VISIBILITY_ID_PREFIX}{category}",
+                    classes="setting-select",
+                )
 
     def _compose_analysis_tab(self, config: SandroidConfig) -> ComposeResult:
         """Compose the Analysis settings tab."""
@@ -357,30 +418,30 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
-        # Monitor Processes
+        # Capture Processes
         with Horizontal(classes="setting-row"):
-            yield Label("Monitor Processes:", classes="setting-label")
+            yield Label("Capture Processes:", classes="setting-label")
             yield Switch(
-                value=config.analysis.monitor_processes,
-                id="setting-analysis--monitor_processes",
+                value=config.analysis.capture_processes,
+                id="setting-analysis--capture_processes",
                 classes="setting-switch",
             )
 
-        # Monitor Sockets
+        # Capture Sockets
         with Horizontal(classes="setting-row"):
-            yield Label("Monitor Sockets:", classes="setting-label")
+            yield Label("Capture Sockets:", classes="setting-label")
             yield Switch(
-                value=config.analysis.monitor_sockets,
-                id="setting-analysis--monitor_sockets",
+                value=config.analysis.capture_sockets,
+                id="setting-analysis--capture_sockets",
                 classes="setting-switch",
             )
 
-        # Monitor Network
+        # Capture Network Traffic
         with Horizontal(classes="setting-row"):
-            yield Label("Monitor Network:", classes="setting-label")
+            yield Label("Capture Network Traffic:", classes="setting-label")
             yield Switch(
-                value=config.analysis.monitor_network,
-                id="setting-analysis--monitor_network",
+                value=config.analysis.capture_network,
+                id="setting-analysis--capture_network",
                 classes="setting-switch",
             )
 
@@ -741,6 +802,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             name="settings-frida-versions",
             daemon=True,
         ).start()
+        # Grey out / re-select the Monitor Source per this device's kprobe
+        # verdict (and warm the cache off-thread when it is unknown).
+        self.refresh_backend_availability()
 
     def _fetch_frida_versions(self) -> None:
         """Background worker: pull available + installed frida versions."""
@@ -819,6 +883,184 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             )
         except Exception:
             pass
+
+    # -------------------------------------------------------------------------
+    # Monitor Source (backend) availability
+    # -------------------------------------------------------------------------
+
+    def _set_kprobe_button_state(self, state: str) -> None:
+        """Reflect a kprobe availability verdict on the Source RadioButton.
+
+        ``state`` is ``"available"`` / ``"unavailable"`` / ``"checking"``.
+        Updates BOTH ``disabled`` and the visible ``label`` -- the label is the
+        only persistent, always-visible signal (a toast is transient), so a
+        greyed-out kprobe must say WHY. No-ops if the tab isn't mounted.
+        """
+        try:
+            kprobe_btn = self.query_one("#backend-kprobe", RadioButton)
+        except Exception:
+            return
+        if state == "available":
+            kprobe_btn.disabled = False
+            kprobe_btn.label = _KPROBE_BASE_LABEL
+        elif state == "checking":
+            kprobe_btn.disabled = True
+            kprobe_btn.label = f"{_KPROBE_BASE_LABEL} — checking…"
+        else:  # "unavailable"
+            kprobe_btn.disabled = True
+            kprobe_btn.label = f"{_KPROBE_BASE_LABEL} — unavailable on this device"
+
+    def refresh_backend_availability(self) -> None:
+        """Re-sync the Monitor Source selector to this device's kprobe verdict.
+
+        Public so the app's device-change wiring can call it whenever the
+        active device changes. ``True`` -> kprobe enabled; ``False`` -> kprobe
+        greyed with an "unavailable on this device" label and (per Decision C)
+        the visible selection flipped to fsmon if kprobe was checked; ``None``
+        with a device connected -> a transient "checking…" state (kprobe
+        disabled so the user can't pick an unconfirmed source) while an
+        off-thread warm-up probe runs. No-ops safely if the tab isn't mounted.
+        """
+        try:
+            self.query_one("#backend-kprobe", RadioButton)
+        except Exception:
+            return  # Monitor tab not mounted
+
+        verdict = KprobeTracer.cached_availability()
+        if verdict is True:
+            self._set_kprobe_button_state("available")
+            return
+        if verdict is False:
+            self._set_kprobe_button_state("unavailable")
+            self._select_fsmon_visually()
+            return
+
+        # Unknown (None): probe off-thread if a device is connected, showing a
+        # transient "checking…" state so the user can't select an unconfirmed
+        # source (avoids the confusing select-then-snap-back). With no device
+        # there is nothing to probe and nothing to monitor -- leave kprobe
+        # selectable/optimistic (the runtime falls back per-device anyway).
+        if Adb.get_target_device():
+            self._set_kprobe_button_state("checking")
+            threading.Thread(
+                target=self._warm_kprobe_availability,
+                name="settings-kprobe-warmup",
+                daemon=True,
+            ).start()
+        else:
+            self._set_kprobe_button_state("available")
+
+    def _warm_kprobe_availability(self) -> None:
+        """Off-thread: probe kprobe support, then apply the boolean verdict.
+
+        Runs the heavy :meth:`KprobeTracer.kprobe_supported` (adb round-trip)
+        off the UI thread and marshals its BOOLEAN result back. We act on that
+        bool -- not a re-read of :meth:`cached_availability` -- because an
+        inconclusive probe leaves the cache ``None`` while the bool is
+        ``False``; keying off the cache would wrongly leave a known-unusable
+        kprobe selectable.
+        """
+        try:
+            supported = KprobeTracer.kprobe_supported()
+        except Exception as e:
+            logger.debug(f"kprobe warm-up probe failed: {e}")
+            return
+        try:
+            self.app.call_from_thread(self._apply_warmed_availability, supported)
+        except Exception:
+            # Screen already dismissed
+            pass
+
+    def _apply_warmed_availability(self, supported: bool) -> None:
+        """UI-thread callback: apply a warmed kprobe boolean to the selector."""
+        try:
+            kprobe_btn = self.query_one("#backend-kprobe", RadioButton)
+        except Exception:
+            return
+        if supported:
+            self._set_kprobe_button_state("available")
+            return
+        was_selected = kprobe_btn.value
+        self._set_kprobe_button_state("unavailable")
+        if was_selected:
+            self._select_fsmon_visually()
+            self.notify(
+                "kprobe unavailable on this device — using fsmon",
+                severity="warning",
+            )
+
+    def _select_fsmon_visually(self) -> None:
+        """Flip the visible Source selection to fsmon WITHOUT persisting it.
+
+        kprobe availability is per-device, but ``tui.monitor_backend`` is a
+        GLOBAL preference. When kprobe is unavailable on the current device we
+        show fsmon (the source that will actually run) but must NOT overwrite a
+        saved ``kprobe`` preference -- so any optimistic pending backend
+        override is DROPPED rather than replaced with ``fsmon``. On Ctrl+S the
+        untouched saved value (e.g. ``kprobe``) is preserved, and a later
+        capable device re-enables kprobe. Only an EXPLICIT user pick of fsmon
+        (in :meth:`_handle_monitor_backend_changed`) persists ``fsmon``.
+
+        Sets :attr:`_reverting_backend` before the programmatic
+        ``RadioButton.value = True`` because that assignment re-fires
+        ``RadioSet.Changed`` via a queued ``post_message``; the guard is
+        cleared inside that re-entrant :meth:`_handle_monitor_backend_changed`
+        call. Only guards when the button actually needs flipping (an unchanged
+        ``value`` posts nothing).
+        """
+        self._pending.pop("tui.monitor_backend", None)
+        try:
+            fsmon_btn = self.query_one("#backend-fsmon", RadioButton)
+        except Exception:
+            return
+        if not fsmon_btn.value:
+            self._reverting_backend = True
+            try:
+                fsmon_btn.value = True
+            except Exception:
+                # Guard against a stuck _reverting_backend if the assignment
+                # itself ever raised (no RadioSet.Changed would then fire to
+                # clear it via the normal re-entrant path).
+                self._reverting_backend = False
+                raise
+
+    def _probe_kprobe_after_select(self) -> None:
+        """Off-thread: probe kprobe after the user interactively selects it.
+
+        Called with an unknown (``None``) cached verdict, after
+        :meth:`_handle_monitor_backend_changed` already set the button to
+        "checking...". Marshals BOTH outcomes back to the UI thread: a
+        confirmed-unavailable result reverts to fsmon (with a toast); a
+        confirmed-available result restores the plain "available" state (else
+        the button would be stuck reading "checking..." forever).
+        """
+        try:
+            supported = KprobeTracer.kprobe_supported()
+        except Exception as e:
+            logger.debug(f"kprobe select-probe failed: {e}")
+            supported = False
+        try:
+            self.app.call_from_thread(self._on_kprobe_select_probed, supported)
+        except Exception:
+            # Screen already dismissed
+            pass
+
+    def _on_kprobe_select_probed(self, supported: bool) -> None:
+        """UI-thread callback: apply the interactive select-probe's verdict."""
+        if supported:
+            self._set_kprobe_button_state("available")
+            return
+        self._on_kprobe_select_unavailable()
+
+    def _on_kprobe_select_unavailable(self) -> None:
+        """UI-thread callback: an interactively-selected kprobe was unavailable."""
+        self._set_kprobe_button_state("unavailable")
+        # Drops the optimistic pending "kprobe" and flips the view to fsmon.
+        self._select_fsmon_visually()
+        self.notify(
+            "kprobe unavailable on this device — using fsmon",
+            severity="warning",
+        )
 
     @staticmethod
     def _id_to_key(widget_id: str) -> str:
@@ -962,9 +1204,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             if custom_row is not None:
                 custom_row.display = False
 
-        # FSMon per-category visibility Selects don't map to a single flat
+        # Monitor per-category visibility Selects don't map to a single flat
         # key -- they must be assembled into one dict written under
-        # "tui.fsmon_event_visibility". SettingsController._apply_setting
+        # "tui.monitor_event_visibility". SettingsController._apply_setting
         # does a full setattr() REPLACE (not a merge), so re-read ALL 6
         # Selects' *current* values every time any one of them fires
         # Changed (the one that just changed has already updated its
@@ -972,17 +1214,17 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # self-contained and correct regardless of save/reload timing --
         # never accumulate partial state across edits, or a save would
         # silently wipe the other categories.
-        if widget_id.startswith(_FSMON_VISIBILITY_ID_PREFIX):
+        if widget_id.startswith(_MONITOR_VISIBILITY_ID_PREFIX):
             visibility: dict[str, str] = {}
-            for category in _FSMON_VISIBILITY_CATEGORIES:
+            for category in _MONITOR_VISIBILITY_CATEGORIES:
                 try:
                     select = self.query_one(
-                        f"#{_FSMON_VISIBILITY_ID_PREFIX}{category}", Select
+                        f"#{_MONITOR_VISIBILITY_ID_PREFIX}{category}", Select
                     )
                     visibility[category] = select.value
                 except Exception:
                     pass
-            self._pending["tui.fsmon_event_visibility"] = visibility
+            self._pending["tui.monitor_event_visibility"] = visibility
             return
 
         self._pending[key] = event.value
@@ -1004,6 +1246,49 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 self._pending["frida.server_version"] = event.value
             return
 
+        # The default monitor path must never be staged empty:
+        # ``DevicePathsConfig.validate_non_empty_path`` runs only at
+        # construction (not on the setattr save path), so persisting a blank
+        # ``""`` would break the *next* config load. Drop any pending value
+        # and skip staging when the field is blanked (reverting to the
+        # current on-disk value on save).
+        if widget_id == "setting-device_paths--default_monitor_path":
+            if not event.value.strip():
+                self._pending.pop("device_paths.default_monitor_path", None)
+                return
+            self._pending["device_paths.default_monitor_path"] = event.value
+            return
+
+        # The two Monitor-tab numeric fields must not stage an out-of-schema-
+        # range value: ``_apply_setting`` writes via plain ``setattr`` on the
+        # nested ``TUIConfig`` instance, which has no ``validate_assignment``
+        # (only the top-level ``SandroidConfig`` does), so Field(ge=/le=)
+        # constraints are NOT enforced on save -- an out-of-range value would
+        # persist silently and only fail on the *next* config load, where
+        # ``get_config()``'s broad exception fallback would silently reset the
+        # WHOLE config to defaults. Same "drop rather than persist a bad
+        # value" precedent as the blank-default-path guard above.
+        if widget_id == "setting-tui--monitor_buffer_interval":
+            try:
+                value = float(event.value)
+            except ValueError:
+                value = None
+            if value is None or not (0.0 <= value <= 5.0):
+                self._pending.pop("tui.monitor_buffer_interval", None)
+                return
+            self._pending["tui.monitor_buffer_interval"] = value
+            return
+        if widget_id == "setting-tui--monitor_max_lines":
+            try:
+                value = int(event.value)
+            except ValueError:
+                value = None
+            if value is None or not (50 <= value <= 10000):
+                self._pending.pop("tui.monitor_max_lines", None)
+                return
+            self._pending["tui.monitor_max_lines"] = value
+            return
+
         key = self._id_to_key(widget_id)
         # Convert integer inputs
         if event.input.type == "integer":
@@ -1020,8 +1305,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             self._pending[key] = event.value
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        """Track theme radio changes and preview."""
-        if event.radio_set.id == "setting-tui--theme":
+        """Track theme and Monitor Source radio changes."""
+        radio_set_id = event.radio_set.id
+        if radio_set_id == "setting-tui--theme":
             # Extract theme name from radio button id (e.g., "theme-cyberpunk" -> "cyberpunk")
             button_id = event.pressed.id
             if button_id and button_id.startswith("theme-"):
@@ -1030,6 +1316,64 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 # Live preview
                 if self._controller:
                     self._controller.preview_theme(theme_name)
+            return
+
+        if radio_set_id == "setting-tui--monitor_backend":
+            self._handle_monitor_backend_changed(event)
+
+    def _handle_monitor_backend_changed(self, event: RadioSet.Changed) -> None:
+        """Stage the Monitor Source backend, probing kprobe when needed.
+
+        fsmon stages immediately. kprobe stages per the cached verdict:
+        ``True`` -> stage ``kprobe``; ``None`` with a device connected ->
+        stage ``kprobe`` optimistically, show "checking..." (so the button
+        can't be re-clicked mid-probe), and probe off-thread (reverting to
+        fsmon + toast if it turns out unavailable, restoring "available" if
+        confirmed); ``None`` with no device connected -> nothing to probe,
+        leave the optimistic stage as-is (mirrors
+        :meth:`refresh_backend_availability`'s no-device policy); ``False``
+        -> defensively revert (the button should already be disabled).
+        """
+        # Reentrancy guard: a programmatic ``RadioButton.value = True``
+        # (from ``_revert_backend_to_fsmon``) re-fires this event via a
+        # queued ``post_message`` -- clear the flag HERE, inside the
+        # re-entrant call, and swallow it so it doesn't re-trigger a probe.
+        if self._reverting_backend:
+            self._reverting_backend = False
+            return
+
+        button_id = event.pressed.id if event.pressed else None
+        if button_id == "backend-fsmon":
+            self._pending["tui.monitor_backend"] = "fsmon"
+            return
+        if button_id != "backend-kprobe":
+            return
+
+        verdict = KprobeTracer.cached_availability()
+        if verdict is True:
+            self._pending["tui.monitor_backend"] = "kprobe"
+            return
+        if verdict is False:
+            # Button should already be disabled; defensively fall back
+            # (visual only -- don't overwrite the saved kprobe preference).
+            self._select_fsmon_visually()
+            return
+
+        # Unknown: stage kprobe optimistically. With no device connected
+        # there is nothing to probe (mirrors refresh_backend_availability's
+        # no-device policy) -- leave the optimistic stage as-is. With a
+        # device connected, show "checking..." BEFORE spawning the thread so
+        # the user can't select an unconfirmed kprobe mid-probe (matches
+        # refresh_backend_availability's ordering).
+        self._pending["tui.monitor_backend"] = "kprobe"
+        if not Adb.get_target_device():
+            return
+        self._set_kprobe_button_state("checking")
+        threading.Thread(
+            target=self._probe_kprobe_after_select,
+            name="settings-kprobe-select-probe",
+            daemon=True,
+        ).start()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""

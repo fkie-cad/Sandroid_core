@@ -77,7 +77,7 @@ COMMAND_KEYS: set[str] = {
     "y",  # Proxy configuration
     "w",  # Network capture (toggle)
     # Monitoring commands
-    "o",  # FSMon monitoring
+    "o",  # Filesystem monitor
     # Objection commands
     "b",  # Objection interactive shell
     "O",  # Objection resume session

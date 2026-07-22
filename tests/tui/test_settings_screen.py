@@ -2,13 +2,13 @@
 
 Covers two independent additions to the Settings screen:
 
-- The FSMon event-visibility rows: the 6 Select rows added to the General
+- The Monitor event-visibility rows: the 6 Select rows added to the General
   tab (``create``/``modify``/``delete``/``rename``/``attrs``/``noise``) and
   the ``on_select_changed`` save-path special-case for their
-  ``setting-tui--fsmon_event_visibility__<category>`` ids. The critical
+  ``setting-tui--monitor_event_visibility__<category>`` ids. The critical
   regression this guards against: ``SettingsController.save`` /
   ``_apply_setting`` does a full ``setattr`` REPLACE of the whole
-  ``fsmon_event_visibility`` dict, not a merge. If the special-case handler
+  ``monitor_event_visibility`` dict, not a merge. If the special-case handler
   only ever inserted the one changed category into a fresh dict, saving
   would silently wipe the other 5 categories back to nothing (or to their
   schema defaults, whichever a naive implementation happened to default
@@ -29,14 +29,17 @@ covers.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Select, Static, Switch
+from textual.widgets import Input, RadioButton, Select, Static, Switch
 
 from sandroid.config import SandroidConfig
+from sandroid.core.adb import Adb
+from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.core.toolbox import Toolbox
 from sandroid.tui.screens.settings_screen import SettingsScreen
 from sandroid.tui.widgets.chat_panel import ChatPanel
@@ -72,7 +75,7 @@ class _StubLoader:
         return Path("/dev/null")
 
 
-class _FSMonSettingsHarness(App):
+class _MonitorSettingsHarness(App):
     """Pushes SettingsScreen with an injected config.
 
     Setting ``sandroid_config`` directly makes ``SettingsScreen._get_config``
@@ -115,17 +118,19 @@ def _no_frida_version_fetch(monkeypatch):
 
 
 def _visibility_select(screen: SettingsScreen, category: str) -> Select:
-    return screen.query_one(f"#setting-tui--fsmon_event_visibility__{category}", Select)
+    return screen.query_one(
+        f"#setting-tui--monitor_event_visibility__{category}", Select
+    )
 
 
-# -- FSMon event-visibility rows ---------------------------------------------
+# -- Monitor event-visibility rows ---------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_compose_renders_default_visibility_selects() -> None:
     """Schema-default config: 5 categories 'always', noise 'verbose'."""
     config = SandroidConfig()
-    app = _FSMonSettingsHarness(config)
+    app = _MonitorSettingsHarness(config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -140,7 +145,7 @@ async def test_compose_renders_default_visibility_selects() -> None:
 async def test_compose_uses_preexisting_nondefault_visibility_values() -> None:
     """A config with non-default values populates the Selects from it."""
     config = SandroidConfig()
-    config.tui.fsmon_event_visibility = {
+    config.tui.monitor_event_visibility = {
         "create": "never",
         "modify": "verbose",
         "delete": "always",
@@ -148,7 +153,7 @@ async def test_compose_uses_preexisting_nondefault_visibility_values() -> None:
         "attrs": "verbose",
         "noise": "never",
     }
-    app = _FSMonSettingsHarness(config)
+    app = _MonitorSettingsHarness(config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -174,7 +179,7 @@ async def test_changing_one_category_preserves_others_through_save(
     would fail in that case.
     """
     preset_config = SandroidConfig()
-    preset_config.tui.fsmon_event_visibility = {
+    preset_config.tui.monitor_event_visibility = {
         "create": "always",
         "modify": "always",
         "delete": "always",
@@ -188,7 +193,7 @@ async def test_changing_one_category_preserves_others_through_save(
         lambda: _StubLoader(preset_config),
     )
 
-    app = _FSMonSettingsHarness(preset_config)
+    app = _MonitorSettingsHarness(preset_config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -207,7 +212,7 @@ async def test_changing_one_category_preserves_others_through_save(
             "noise": "never",
         }
         # The pending dict must be the full, self-contained 6-key dict.
-        assert screen._pending["tui.fsmon_event_visibility"] == expected_after_edit
+        assert screen._pending["tui.monitor_event_visibility"] == expected_after_edit
 
         screen.action_save()
         await pilot.pause()
@@ -215,7 +220,7 @@ async def test_changing_one_category_preserves_others_through_save(
     # The save path (real SettingsController.save/_apply_setting, only the
     # disk-touching ConfigLoader stubbed out) must have applied the same
     # full dict -- "attrs" must still be "never", not reset to "always".
-    assert preset_config.tui.fsmon_event_visibility == expected_after_edit
+    assert preset_config.tui.monitor_event_visibility == expected_after_edit
 
 
 # -- Bug A: cramped/misaligned AI Chat tab layout ---------------------------
@@ -393,3 +398,319 @@ def test_on_switch_changed_still_stages_into_pending():
     screen.on_switch_changed(event)
 
     assert screen._pending == {"ai.show_chat_mascot": False}
+
+
+# -- Monitor Source (backend) selector + default path -------------------------
+
+
+@pytest.mark.asyncio
+async def test_kprobe_disabled_and_selection_lands_on_fsmon_when_unavailable(
+    monkeypatch,
+) -> None:
+    """Decision C: a definitive ``False`` kprobe verdict greys kprobe, labels it
+    "unavailable", and flips the visible selection to fsmon -- WITHOUT persisting
+    fsmon over the saved kprobe preference.
+
+    The schema default backend is ``kprobe``; on a device whose kernel lacks
+    kprobe support the Source selector must show fsmon (the source that will
+    actually run) rather than a greyed-but-checked kprobe. But because kprobe
+    availability is per-device and ``tui.monitor_backend`` is a global
+    preference, the auto-flip must NOT stage ``fsmon`` into ``_pending`` (a
+    later Ctrl+S would otherwise clobber the kprobe preference for future
+    capable devices).
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: False)
+    config = SandroidConfig()
+    assert config.tui.monitor_backend == "kprobe"  # sanity: schema default
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        kprobe_btn = screen.query_one("#backend-kprobe", RadioButton)
+        fsmon_btn = screen.query_one("#backend-fsmon", RadioButton)
+
+        assert kprobe_btn.disabled is True
+        assert fsmon_btn.value is True
+        assert kprobe_btn.value is False
+        # Persistent, always-visible "unavailable" signal on the label.
+        assert "unavailable" in str(kprobe_btn.label).lower()
+        # Preference preserved: the auto-flip is visual-only, never staged.
+        assert "tui.monitor_backend" not in screen._pending
+
+
+@pytest.mark.asyncio
+async def test_warmed_unavailable_verdict_disables_without_persisting(
+    monkeypatch,
+) -> None:
+    """An off-thread warm-up that resolves to unavailable must disable+label
+    kprobe and flip to fsmon WITHOUT staging fsmon.
+
+    This guards the ``cached_availability() is None`` vs ``kprobe_supported()
+    is False`` inconsistency: on a device where the self-check is inconclusive
+    the cache stays ``None`` while the probe boolean is ``False``. The warm-up
+    keys off the boolean, so a known-unusable kprobe is correctly greyed
+    instead of left selectable.
+    """
+    # None cached + no device -> on_mount leaves kprobe available (no auto
+    # warm-up thread), so we can drive _apply_warmed_availability deterministically.
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: None)
+    monkeypatch.setattr(Adb, "get_target_device", lambda: "")
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        kprobe_btn = screen.query_one("#backend-kprobe", RadioButton)
+        assert kprobe_btn.disabled is False  # None+no-device -> selectable
+
+        # Simulate the warm-up probe resolving to "unavailable".
+        screen._apply_warmed_availability(False)
+        await pilot.pause()
+
+        fsmon_btn = screen.query_one("#backend-fsmon", RadioButton)
+        assert kprobe_btn.disabled is True
+        assert "unavailable" in str(kprobe_btn.label).lower()
+        assert fsmon_btn.value is True
+        assert kprobe_btn.value is False
+        assert "tui.monitor_backend" not in screen._pending
+
+
+@pytest.mark.asyncio
+async def test_selecting_fsmon_stages_fsmon(monkeypatch) -> None:
+    """Interactively picking fsmon stages ``"fsmon"``."""
+    # kprobe available -> on_mount leaves the default selection untouched.
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        screen.query_one("#backend-fsmon", RadioButton).value = True
+        await pilot.pause()
+
+        assert screen._pending["tui.monitor_backend"] == "fsmon"
+
+
+@pytest.mark.asyncio
+async def test_default_monitor_path_input_stages_key(monkeypatch) -> None:
+    """The default-path Input stages ``device_paths.default_monitor_path``."""
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        path_input = screen.query_one(
+            "#setting-device_paths--default_monitor_path", Input
+        )
+        path_input.value = "/sdcard/Download/"
+        await pilot.pause()
+
+        assert (
+            screen._pending["device_paths.default_monitor_path"] == "/sdcard/Download/"
+        )
+
+
+@pytest.mark.asyncio
+async def test_empty_default_monitor_path_is_not_staged(monkeypatch) -> None:
+    """An empty default-path must not be staged (and drops any prior value).
+
+    ``DevicePathsConfig.validate_non_empty_path`` runs only at construction,
+    so persisting ``""`` would break the *next* config load.
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        path_input = screen.query_one(
+            "#setting-device_paths--default_monitor_path", Input
+        )
+        path_input.value = "/data/local/tmp/"
+        await pilot.pause()
+        assert (
+            screen._pending["device_paths.default_monitor_path"] == "/data/local/tmp/"
+        )
+
+        # Blanking the field must drop the previously-staged value, not
+        # persist an empty string.
+        path_input.value = ""
+        await pilot.pause()
+        assert "device_paths.default_monitor_path" not in screen._pending
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_monitor_buffer_interval_is_not_staged(
+    monkeypatch,
+) -> None:
+    """An out-of-schema-range buffer interval must not be staged.
+
+    ``TUIConfig`` has no ``validate_assignment``, so ``_apply_setting``'s
+    plain ``setattr`` on save would silently accept an invalid value and only
+    fail on the *next* config load (where ``get_config()``'s broad exception
+    fallback resets the WHOLE config to defaults). Schema bounds: [0.0, 5.0].
+    Mirrors the blank-default-path guard: an invalid value DROPS any pending
+    override entirely (falling back to the on-disk value on save), the same
+    behavior as blanking the default-path Input.
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        buf_input = screen.query_one("#setting-tui--monitor_buffer_interval", Input)
+        buf_input.value = "2.5"
+        await pilot.pause()
+        assert screen._pending["tui.monitor_buffer_interval"] == 2.5
+
+        # Out of range (> 5.0) drops the pending override entirely.
+        buf_input.value = "999"
+        await pilot.pause()
+        assert "tui.monitor_buffer_interval" not in screen._pending
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_monitor_max_lines_is_not_staged(monkeypatch) -> None:
+    """An out-of-schema-range max-lines value must not be staged.
+
+    Schema bounds: [50, 10000]. Mirrors the blank-default-path guard: an
+    invalid value DROPS any pending override entirely.
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        lines_input = screen.query_one("#setting-tui--monitor_max_lines", Input)
+        lines_input.value = "1000"
+        await pilot.pause()
+        assert screen._pending["tui.monitor_max_lines"] == 1000
+
+        # Below the minimum (50) drops the pending override entirely.
+        lines_input.value = "1"
+        await pilot.pause()
+        assert "tui.monitor_max_lines" not in screen._pending
+
+
+@pytest.mark.asyncio
+async def test_interactive_kprobe_select_shows_checking_before_probe(
+    monkeypatch,
+) -> None:
+    """Selecting kprobe with an unconfirmed (``None``) verdict must show
+    "checking..." (disabled) BEFORE the off-thread probe starts -- mirroring
+    ``refresh_backend_availability``'s ordering -- so the user can't persist
+    an unverified ``kprobe`` mid-probe. The probe itself is blocked on an
+    Event so the test can observe the intermediate "checking" state.
+    """
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+
+    def _blocking_probe():
+        probe_started.set()
+        release_probe.wait(timeout=5)
+        return True
+
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: None)
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", _blocking_probe)
+    monkeypatch.setattr(Adb, "get_target_device", lambda: "emulator-5556")
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    try:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, SettingsScreen)
+
+            kprobe_btn = screen.query_one("#backend-kprobe", RadioButton)
+            fsmon_btn = screen.query_one("#backend-fsmon", RadioButton)
+            fsmon_btn.value = True
+            await pilot.pause()
+
+            kprobe_btn.value = True
+            await pilot.pause()
+
+            assert probe_started.wait(timeout=2)
+            # Mid-probe: disabled + "checking" label, not the plain label.
+            assert kprobe_btn.disabled is True
+            assert "checking" in str(kprobe_btn.label).lower()
+    finally:
+        release_probe.set()
+
+
+@pytest.mark.asyncio
+async def test_interactive_kprobe_select_restores_available_on_success(
+    monkeypatch,
+) -> None:
+    """A confirmed-available interactive select-probe restores the plain
+    "available" state (not left stuck reading "checking...").
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: None)
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", lambda: True)
+    monkeypatch.setattr(Adb, "get_target_device", lambda: "emulator-5556")
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        kprobe_btn = screen.query_one("#backend-kprobe", RadioButton)
+        fsmon_btn = screen.query_one("#backend-fsmon", RadioButton)
+        fsmon_btn.value = True
+        await pilot.pause()
+
+        kprobe_btn.value = True
+        await pilot.pause(0.2)  # let the daemon thread + call_from_thread land
+
+        assert kprobe_btn.disabled is False
+        assert "checking" not in str(kprobe_btn.label).lower()
+        assert "unavailable" not in str(kprobe_btn.label).lower()
+        assert screen._pending["tui.monitor_backend"] == "kprobe"
+
+
+@pytest.mark.asyncio
+async def test_interactive_kprobe_select_with_no_device_skips_checking(
+    monkeypatch,
+) -> None:
+    """With no device connected, selecting kprobe on an unconfirmed verdict
+    stages it optimistically WITHOUT entering "checking" (mirrors
+    ``refresh_backend_availability``'s no-device policy -- nothing to probe).
+    """
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: None)
+    monkeypatch.setattr(Adb, "get_target_device", lambda: "")
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        kprobe_btn = screen.query_one("#backend-kprobe", RadioButton)
+        fsmon_btn = screen.query_one("#backend-fsmon", RadioButton)
+        fsmon_btn.value = True
+        await pilot.pause()
+
+        kprobe_btn.value = True
+        await pilot.pause()
+
+        assert kprobe_btn.disabled is False
+        assert "checking" not in str(kprobe_btn.label).lower()
+        assert screen._pending["tui.monitor_backend"] == "kprobe"

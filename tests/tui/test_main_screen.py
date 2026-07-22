@@ -1,6 +1,6 @@
 """Unit tests for MainScreen's TASK_OUTPUT -> Background Activity routing.
 
-Covers Problem 1's fix: fsmon's output must NOT reach Background Activity
+Covers Problem 1's fix: monitor's output must NOT reach Background Activity
 (it has its own dedicated home, the Files tab's Monitor sub-tab), while every
 other task's output must still reach it unaffected.
 
@@ -8,7 +8,7 @@ No real Textual ``App``/``Pilot`` needed: ``MainScreen._handle_task_output``
 is an unbound method called directly against a minimal duck-typed fake
 ``self`` -- an object with a ``query_one``-like method returning a fake
 activity-log stub (recording ``log_message`` calls) and a no-op
-``_safe_refresh_status_bar``. Mirrors ``test_fsmon_controller.py``'s
+``_safe_refresh_status_bar``. Mirrors ``test_monitor_controller.py``'s
 dependency-injected testing style (no UI framework spun up just to exercise
 plain-Python routing logic).
 """
@@ -45,15 +45,15 @@ class _FakeMainScreen:
         self.refresh_calls += 1
 
 
-def test_handle_task_output_excludes_fsmon():
-    """FSMon output must never reach Background Activity -- it has its own
+def test_handle_task_output_excludes_monitor():
+    """Monitor output must never reach Background Activity -- it has its own
     dedicated display (Files tab's Monitor sub-tab).
     """
     fake_self = _FakeMainScreen()
     event = Event(
         type=EventType.TASK_OUTPUT,
-        data={"task_name": "FSMon", "message": "some fsmon output"},
-        source="fsmon",
+        data={"task_name": "Monitor", "message": "some monitor output"},
+        source="monitor",
     )
 
     MainScreen._handle_task_output(fake_self, event)
@@ -82,7 +82,7 @@ def test_handle_task_output_still_shows_other_sources():
 
 def test_handle_task_output_with_no_source_still_shows():
     """Events with no ``source`` at all (e.g. legacy callers) must not be
-    swept up by the fsmon exclusion -- only an explicit ``source == "fsmon"``
+    swept up by the monitor exclusion -- only an explicit ``source == "monitor"``
     is excluded.
     """
     fake_self = _FakeMainScreen()

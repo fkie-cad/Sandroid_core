@@ -1,6 +1,6 @@
 """Headless Textual Pilot smoke tests for the Monitor sub-tab (MonitorView).
 
-No physical device and no real fsmon process needed: MonitorView only ever
+No physical device and no real monitor process needed: MonitorView only ever
 reads ``TaskService`` (a real, process-wide singleton — cleaned up via an
 autouse fixture below) and the EventBus (``EventType.TASK_OUTPUT``/
 ``TASK_STARTED``/``TASK_STOPPED``). A minimal single-widget host App is
@@ -18,21 +18,21 @@ from textual.widgets import RichLog
 
 from sandroid.core.events import Event, EventBus, EventType
 from sandroid.services import get_task_service
-from sandroid.tui.controllers.fsmon_controller import (
-    FSMonConfig,
-    build_fsmon_display_item,
+from sandroid.tui.controllers.monitor_controller import (
+    MonitorConfig,
+    build_monitor_item,
 )
 from sandroid.tui.widgets.files_panel import FilesPanel
 from sandroid.tui.widgets.monitor_view import MonitorView
 
 
 @pytest.fixture(autouse=True)
-def _clean_fsmon_task():
+def _clean_monitor_task():
     """Guard the real TaskService singleton against cross-test leakage."""
     svc = get_task_service()
-    svc._tasks.pop("fsmon", None)
+    svc._tasks.pop("monitor", None)
     yield
-    svc._tasks.pop("fsmon", None)
+    svc._tasks.pop("monitor", None)
 
 
 @pytest.fixture(autouse=True)
@@ -49,32 +49,32 @@ def _fse(
     pid: int = 123,
     process: str = "com.example.app",
 ) -> str:
-    """Build a real tab-separated fsmon wire-format line for tests."""
+    """Build a real tab-separated monitor wire-format line for tests."""
     if new_path is not None:
         return f'{event_type}\t{pid}\t"{process}"\t{path} -> {new_path}'
     return f'{event_type}\t{pid}\t"{process}"\t{path}'
 
 
-def _publish_fsmon_batch(lines: list[str]) -> None:
-    """Publish a WHOLE BATCH of raw fsmon lines as ONE TASK_OUTPUT event,
+def _publish_monitor_batch(lines: list[str]) -> None:
+    """Publish a WHOLE BATCH of raw monitor lines as ONE TASK_OUTPUT event,
     matching production's real batch-shaped contract exactly (see
-    ``FSMonController._log_fsmon_output_batch``/``_publish_fsmon_batch``,
-    Part B): each line is parsed via the real ``build_fsmon_display_item``
+    ``MonitorController._log_monitor_output_batch``/``_publish_monitor_batch``,
+    Part B): each line is parsed via the real ``build_monitor_item``
     (no re-implementation of that parsing here), and the whole list of
     structured items is published as ``data["batch"]`` in one event.
     """
-    items = [build_fsmon_display_item(line) for line in lines]
+    items = [build_monitor_item(line) for line in lines]
     EventBus.get().publish(
         Event(
             type=EventType.TASK_OUTPUT,
-            data={"task_name": "FSMon", "batch": items},
-            source="fsmon",
+            data={"task_name": "Monitor", "batch": items},
+            source="monitor",
         )
     )
 
 
-def _publish_fsmon_output(line: str) -> None:
-    """Publish a single raw fsmon line as a batch-of-1 event.
+def _publish_monitor_output(line: str) -> None:
+    """Publish a single raw monitor line as a batch-of-1 event.
 
     A single-line "batch of 1" is the natural adaptation of the old
     per-line helper for most of this file's existing tests: since tallying
@@ -85,7 +85,7 @@ def _publish_fsmon_output(line: str) -> None:
     renders via the isolated/inline path -- matching this file's existing
     assertions about single events landing as one row.
     """
-    _publish_fsmon_batch([line])
+    _publish_monitor_batch([line])
 
 
 class _MonitorHarness(App):
@@ -101,7 +101,7 @@ async def test_stopped_state_before_any_start() -> None:
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
         await pilot.pause()
-        assert view.glance_fragment() == "fsmon ○ stopped"
+        assert view.glance_fragment() == "monitor ○ stopped"
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_task_output_event_increments_counter_and_reaches_log() -> None:
         view = app.query_one(MonitorView)
         assert view._total == 0
 
-        _publish_fsmon_output(_fse("FSE_CREATE_FILE", "/data/new_file.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_FILE", "/data/new_file.txt"))
         await pilot.pause()
 
         assert view._total == 1
@@ -126,8 +126,8 @@ async def test_task_output_event_increments_counter_and_reaches_log() -> None:
 
 @pytest.mark.asyncio
 async def test_log_is_capped_at_configured_max_lines(monkeypatch) -> None:
-    """RichLog must actually trim old lines once ``tui.fsmon_max_lines`` is
-    exceeded -- the now-retired ``FSMonRunningModal`` capped its own RichLog
+    """RichLog must actually trim old lines once ``tui.monitor_max_lines`` is
+    exceeded -- the now-retired ``MonitorRunningModal`` capped its own RichLog
     at this value (via the constructor's ``max_lines`` param), and Monitor's
     live, un-throttled feed must not regress to unbounded growth.
     """
@@ -140,7 +140,7 @@ async def test_log_is_capped_at_configured_max_lines(monkeypatch) -> None:
         assert log.max_lines == 5
 
         for i in range(20):
-            _publish_fsmon_output(_fse("FSE_CREATE_FILE", f"/data/file_{i}.txt"))
+            _publish_monitor_output(_fse("FSE_CREATE_FILE", f"/data/file_{i}.txt"))
             await pilot.pause()
 
         assert len(log.lines) <= 5
@@ -169,7 +169,7 @@ async def test_task_output_filtered_by_source_excludes_other_tasks() -> None:
 
         assert view._total == 0
 
-        _publish_fsmon_output(_fse("FSE_DELETE", "/data/gone.txt"))
+        _publish_monitor_output(_fse("FSE_DELETE", "/data/gone.txt"))
         await pilot.pause()
         assert view._total == 1
         assert view._delete == 1
@@ -187,13 +187,15 @@ async def test_multiple_events_accumulate_per_category() -> None:
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
 
-        _publish_fsmon_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
-        _publish_fsmon_output(_fse("FSE_CREATE_DIR", "/data/dir"))
-        _publish_fsmon_output(_fse("FSE_CONTENT_MODIFIED", "/data/a.txt"))
-        _publish_fsmon_output(_fse("FSE_DELETE", "/data/b.txt"))
-        _publish_fsmon_output(_fse("FSE_RENAME", "/data/c.txt", new_path="/data/d.txt"))
-        _publish_fsmon_output(_fse("FSE_ATTRIB", "/data/e.txt"))
-        _publish_fsmon_output(_fse("FSE_OPEN", "/data/f.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_DIR", "/data/dir"))
+        _publish_monitor_output(_fse("FSE_CONTENT_MODIFIED", "/data/a.txt"))
+        _publish_monitor_output(_fse("FSE_DELETE", "/data/b.txt"))
+        _publish_monitor_output(
+            _fse("FSE_RENAME", "/data/c.txt", new_path="/data/d.txt")
+        )
+        _publish_monitor_output(_fse("FSE_ATTRIB", "/data/e.txt"))
+        _publish_monitor_output(_fse("FSE_OPEN", "/data/f.txt"))
         await pilot.pause()
 
         assert view._total == 7
@@ -211,21 +213,21 @@ async def test_glance_fragment_reflects_running_task_and_counter() -> None:
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
 
-        _publish_fsmon_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
         await pilot.pause()
 
-        # Register a fake fsmon task so is_running("fsmon") is True (no real
-        # fsmon binary/process involved).
+        # Register a fake monitor task so is_running("monitor") is True (no real
+        # monitor binary/process involved).
         get_task_service().register(
-            name="fsmon",
-            display_name="FSMon",
+            name="monitor",
+            display_name="Monitor",
             instance=object(),
             stop_callback=lambda: None,
         )
         try:
-            assert view.glance_fragment() == "fsmon ● running · 1 events"
+            assert view.glance_fragment() == "monitor ● running · 1 events"
         finally:
-            get_task_service().unregister("fsmon")
+            get_task_service().unregister("monitor")
 
 
 @pytest.mark.asyncio
@@ -233,7 +235,7 @@ async def test_clear_log_resets_counters() -> None:
     app = _MonitorHarness()
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
-        _publish_fsmon_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_FILE", "/data/a.txt"))
         await pilot.pause()
         assert view._total == 1
 
@@ -244,7 +246,7 @@ async def test_clear_log_resets_counters() -> None:
 
 
 # =============================================================================
-# Per-category visibility (tui.fsmon_event_visibility) + the 'v' verbose toggle
+# Per-category visibility (tui.monitor_event_visibility) + the 'v' verbose toggle
 # =============================================================================
 
 
@@ -275,7 +277,7 @@ async def test_noise_hidden_by_default_but_still_counted(monkeypatch) -> None:
         log = view.query_one("#monitor-log", RichLog)
         lines_before = len(log.lines)
 
-        _publish_fsmon_output(_fse("FSE_OPEN", "/data/a.txt"))
+        _publish_monitor_output(_fse("FSE_OPEN", "/data/a.txt"))
         await pilot.pause()
 
         assert view._noise == 1
@@ -299,7 +301,7 @@ async def test_verbose_toggle_is_forward_only(monkeypatch) -> None:
         view = app.query_one(MonitorView)
         log = view.query_one("#monitor-log", RichLog)
 
-        _publish_fsmon_output(_fse("FSE_OPEN", "/data/before.txt"))
+        _publish_monitor_output(_fse("FSE_OPEN", "/data/before.txt"))
         await pilot.pause()
         lines_after_hidden = len(log.lines)
         assert not any("before.txt" in line.text for line in log.lines)
@@ -311,7 +313,7 @@ async def test_verbose_toggle_is_forward_only(monkeypatch) -> None:
         # that, but the earlier "before.txt" line must NOT have appeared.
         assert not any("before.txt" in line.text for line in log.lines)
 
-        _publish_fsmon_output(_fse("FSE_OPEN", "/data/after.txt"))
+        _publish_monitor_output(_fse("FSE_OPEN", "/data/after.txt"))
         await pilot.pause()
         assert any("after.txt" in line.text for line in log.lines)
         assert len(log.lines) > lines_after_hidden
@@ -337,7 +339,7 @@ async def test_never_category_stays_hidden_even_with_verbose_on(monkeypatch) -> 
         await pilot.pause()
         assert view._verbose is True
 
-        _publish_fsmon_output(_fse("FSE_ATTRIB", "/data/perm.txt"))
+        _publish_monitor_output(_fse("FSE_ATTRIB", "/data/perm.txt"))
         await pilot.pause()
 
         assert view._attrs == 1
@@ -357,13 +359,13 @@ async def test_header_renders_noise_badge_when_verbose_off(monkeypatch) -> None:
         view = app.query_one(MonitorView)
 
         get_task_service().register(
-            name="fsmon",
-            display_name="FSMon",
+            name="monitor",
+            display_name="Monitor",
             instance=object(),
             stop_callback=lambda: None,
         )
         try:
-            _publish_fsmon_output(_fse("FSE_OPEN", "/data/a.txt"))
+            _publish_monitor_output(_fse("FSE_OPEN", "/data/a.txt"))
             await pilot.pause()
 
             header = view._render_header()
@@ -375,7 +377,7 @@ async def test_header_renders_noise_badge_when_verbose_off(monkeypatch) -> None:
             header_verbose = view._render_header()
             assert "noise" not in header_verbose
         finally:
-            get_task_service().unregister("fsmon")
+            get_task_service().unregister("monitor")
 
 
 @pytest.mark.asyncio
@@ -398,19 +400,19 @@ async def test_header_hidden_badge_is_generic_across_categories(monkeypatch) -> 
         view = app.query_one(MonitorView)
 
         get_task_service().register(
-            name="fsmon",
-            display_name="FSMon",
+            name="monitor",
+            display_name="Monitor",
             instance=object(),
             stop_callback=lambda: None,
         )
         try:
             # noise=always -> renders, doesn't count toward the badge.
-            _publish_fsmon_output(_fse("FSE_OPEN", "/data/a.txt"))
+            _publish_monitor_output(_fse("FSE_OPEN", "/data/a.txt"))
             # modify=verbose -> hidden, DOES count toward the badge.
-            _publish_fsmon_output(_fse("FSE_CONTENT_MODIFIED", "/data/b.txt"))
+            _publish_monitor_output(_fse("FSE_CONTENT_MODIFIED", "/data/b.txt"))
             # delete=never -> hidden, must NOT count toward the badge (v
             # can't reveal it).
-            _publish_fsmon_output(_fse("FSE_DELETE", "/data/c.txt"))
+            _publish_monitor_output(_fse("FSE_DELETE", "/data/c.txt"))
             await pilot.pause()
 
             header = view._render_header()
@@ -420,7 +422,7 @@ async def test_header_hidden_badge_is_generic_across_categories(monkeypatch) -> 
             header_verbose = view._render_header()
             assert "hidden" not in header_verbose
         finally:
-            get_task_service().unregister("fsmon")
+            get_task_service().unregister("monitor")
 
 
 # =============================================================================
@@ -444,7 +446,7 @@ async def test_batch_of_same_directory_run_emits_one_breadcrumb() -> None:
             _fse("FSE_CREATE_FILE", "/data/cache/two.txt"),
             _fse("FSE_CREATE_FILE", "/data/cache/three.txt"),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         breadcrumb_lines = [line for line in log.lines if "▸" in line.text]
@@ -474,7 +476,7 @@ async def test_isolated_single_directory_items_render_inline_no_breadcrumb() -> 
             _fse("FSE_DELETE", "/data/b/two.txt"),
             _fse("FSE_CREATE_FILE", "/data/c/three.txt"),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         assert not any("▸" in line.text for line in log.lines)
@@ -504,7 +506,7 @@ async def test_mixed_batch_handles_isolated_and_grouped_runs() -> None:
             _fse("FSE_CREATE_FILE", "/data/group/a.txt"),  # run of 2 starts
             _fse("FSE_CREATE_FILE", "/data/group/b.txt"),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         breadcrumb_lines = [line for line in log.lines if "▸" in line.text]
@@ -537,7 +539,7 @@ async def test_consecutive_identical_items_collapse_with_count() -> None:
         log = view.query_one("#monitor-log", RichLog)
 
         lines = [_fse("FSE_CREATE_FILE", "/data/cache/dup.txt") for _ in range(4)]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         matches = [line for line in log.lines if "dup.txt" in line.text]
@@ -556,7 +558,7 @@ async def test_collapsed_run_tally_equals_n_not_one() -> None:
         view = app.query_one(MonitorView)
 
         lines = [_fse("FSE_CREATE_FILE", "/data/cache/dup.txt") for _ in range(4)]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         assert view._total == 4
@@ -601,7 +603,7 @@ async def test_hidden_noise_item_within_visible_run_still_tallies_and_does_not_b
             _fse("FSE_OPEN", "/data/cache/hidden.txt"),  # noise -- hidden
             _fse("FSE_CREATE_FILE", "/data/cache/two.txt"),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         # (1) Tallying is unconditional.
@@ -639,7 +641,7 @@ async def test_grouped_rename_shows_old_arrow_new_filenames_when_same_directory(
                 new_path="/data/cache/new.txt",
             ),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         rename_lines = [line for line in log.lines if "old.txt -> new.txt" in line.text]
@@ -683,7 +685,7 @@ async def test_full_path_view_wraps_long_paths_instead_of_truncating() -> None:
 
         long_dir = "/data/data/com.example.app/cache/" + ("segment/" * 10)
         long_path = long_dir + "very_long_filename_tail_marker.tmp"
-        _publish_fsmon_batch([_fse("FSE_CREATE_FILE", long_path)])
+        _publish_monitor_batch([_fse("FSE_CREATE_FILE", long_path)])
         await pilot.pause()
 
         new_lines = log.lines[lines_before:]
@@ -708,7 +710,7 @@ async def test_toggle_view_mode_does_not_reformat_already_written_rows() -> None
             _fse("FSE_CREATE_FILE", "/data/cache/one.txt"),
             _fse("FSE_CREATE_FILE", "/data/cache/two.txt"),
         ]
-        _publish_fsmon_batch(lines)
+        _publish_monitor_batch(lines)
         await pilot.pause()
 
         breadcrumb_lines_before = [line.text for line in log.lines if "▸" in line.text]
@@ -717,7 +719,7 @@ async def test_toggle_view_mode_does_not_reformat_already_written_rows() -> None
         view.action_toggle_view_mode()
         await pilot.pause()
 
-        _publish_fsmon_batch([_fse("FSE_DELETE", "/data/other/new_after_toggle.txt")])
+        _publish_monitor_batch([_fse("FSE_DELETE", "/data/other/new_after_toggle.txt")])
         await pilot.pause()
 
         # The old breadcrumb is untouched -- still exactly one, same text.
@@ -726,17 +728,17 @@ async def test_toggle_view_mode_does_not_reformat_already_written_rows() -> None
 
 
 @pytest.mark.asyncio
-async def test_notify_fsmon_stopped_for_playback_writes_notice_without_bumping_counters() -> (
+async def test_notify_monitor_stopped_for_playback_writes_notice_without_bumping_counters() -> (
     None
 ):
     """The Play-safety-net notice must reach the log but NOT be treated as a
-    live fsmon event — it's a system notice, not an fsmon-reported change.
+    live monitor event — it's a system notice, not an monitor-reported change.
     """
     app = _MonitorHarness()
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
 
-        view.notify_fsmon_stopped_for_playback()
+        view.notify_monitor_stopped_for_playback()
         await pilot.pause()
 
         assert view._total == 0
@@ -749,8 +751,8 @@ async def test_notify_pid_mode_fallback_writes_notice_without_bumping_counters()
     None
 ):
     """The PID-mode-unavailable notice must reach the log but NOT be treated
-    as a live fsmon event -- it's a system notice, not an fsmon-reported
-    change (mirrors notify_fsmon_stopped_for_playback's test exactly).
+    as a live monitor event -- it's a system notice, not an monitor-reported
+    change (mirrors notify_monitor_stopped_for_playback's test exactly).
     """
     app = _MonitorHarness()
     async with app.run_test() as pilot:
@@ -796,7 +798,7 @@ async def test_offer_resume_shows_bar_and_clear_hides_it() -> None:
         bar = view.query_one("#monitor-resume-bar")
         assert "-hidden" in bar.classes
 
-        config = FSMonConfig(mode="path", target_path="/data/local/tmp/")
+        config = MonitorConfig(mode="path", target_path="/data/local/tmp/")
         view.offer_resume(config)
         await pilot.pause()
 
@@ -811,25 +813,25 @@ async def test_offer_resume_shows_bar_and_clear_hides_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fsmon_started_event_clears_pending_resume_offer() -> None:
-    """A fresh fsmon start (Resume button, or plain 'o') must drop any
+async def test_monitor_started_event_clears_pending_resume_offer() -> None:
+    """A fresh monitor start (Resume button, or plain 'o') must drop any
     stale Resume offer — it refers to an already-superseded config.
     """
     app = _MonitorHarness()
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
-        view.offer_resume(FSMonConfig(mode="path", target_path="/data/"))
+        view.offer_resume(MonitorConfig(mode="path", target_path="/data/"))
         await pilot.pause()
         assert view._resume_config is not None
 
         get_task_service().register(
-            name="fsmon",
-            display_name="FSMon",
+            name="monitor",
+            display_name="Monitor",
             instance=object(),
             stop_callback=lambda: None,
         )
         try:
-            _publish_fsmon_output(
+            _publish_monitor_output(
                 _fse("FSE_CREATE_FILE", "/data/a.txt")
             )  # not the trigger…
             await pilot.pause()
@@ -837,8 +839,8 @@ async def test_fsmon_started_event_clears_pending_resume_offer() -> None:
             EventBus.get().publish(
                 Event(
                     type=EventType.TASK_STARTED,
-                    data={"task_name": "fsmon"},
-                    source="fsmon",
+                    data={"task_name": "monitor"},
+                    source="monitor",
                 )
             )
             await pilot.pause()
@@ -847,14 +849,14 @@ async def test_fsmon_started_event_clears_pending_resume_offer() -> None:
             bar = view.query_one("#monitor-resume-bar")
             assert "-hidden" in bar.classes
         finally:
-            get_task_service().unregister("fsmon")
+            get_task_service().unregister("monitor")
 
 
 @pytest.mark.asyncio
 async def test_resume_button_press_delegates_to_app(monkeypatch) -> None:
     """Pressing "Resume monitoring" must hand the stashed config straight to
-    App.resume_fsmon_after_playback — MonitorView itself never resolves
-    PIDs or re-forks fsmon.
+    App.resume_monitor_after_playback — MonitorView itself never resolves
+    PIDs or re-forks monitor.
     """
 
     class _AppWithResume(App):
@@ -865,13 +867,13 @@ async def test_resume_button_press_delegates_to_app(monkeypatch) -> None:
             super().__init__()
             self.resume_calls: list = []
 
-        def resume_fsmon_after_playback(self, config) -> None:
+        def resume_monitor_after_playback(self, config) -> None:
             self.resume_calls.append(config)
 
     app = _AppWithResume()
     async with app.run_test() as pilot:
         view = app.query_one(MonitorView)
-        config = FSMonConfig(mode="path", target_path="/data/")
+        config = MonitorConfig(mode="path", target_path="/data/")
         view.offer_resume(config)
         await pilot.pause()
 
@@ -900,8 +902,8 @@ async def test_files_panel_mounts_real_monitor_view_not_stub() -> None:
 
         monitor = panel.query_one("#files-monitor")
         assert isinstance(monitor, MonitorView)
-        assert monitor.glance_fragment() == "fsmon ○ stopped"
+        assert monitor.glance_fragment() == "monitor ○ stopped"
 
-        _publish_fsmon_output(_fse("FSE_CREATE_FILE", "/data/new_file.txt"))
+        _publish_monitor_output(_fse("FSE_CREATE_FILE", "/data/new_file.txt"))
         await pilot.pause()
         assert monitor._total == 1

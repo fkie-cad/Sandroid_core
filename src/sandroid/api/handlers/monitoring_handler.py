@@ -1,4 +1,4 @@
-"""Monitoring handler — FSMon, malware monitor, network capture."""
+"""Monitoring handler — Monitor, malware monitor, network capture."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class MonitoringHandler:
-    """Handles FSMon, malware monitor, and network capture operations."""
+    """Handles Monitor, malware monitor, and network capture operations."""
 
     def __init__(self, api: SandroidHeadlessAPI) -> None:
         self._api = api
@@ -119,22 +119,22 @@ class MonitoringHandler:
             },
         )
 
-    # -- FSMon ---------------------------------------------------------------
+    # -- Monitor ---------------------------------------------------------------
 
-    @safe_command("Failed to start FSMon")
-    async def start_fsmon(
+    @safe_command("Failed to start Monitor")
+    async def start_monitor(
         self, mode: str = "auto", path: str | None = None
     ) -> CommandResult:
-        """Start FSMon filesystem monitoring."""
+        """Start Monitor filesystem monitoring."""
         from sandroid.core.fsmon import FSMon
         from sandroid.services import get_spotlight_service, get_task_service
 
         task_service = get_task_service()
-        if task_service.is_running("fsmon"):
+        if task_service.is_running("monitor"):
             return CommandResult(
                 success=False,
-                message="FSMon is already running",
-                error="Stop the current FSMon before starting a new one",
+                message="Monitor is already running",
+                error="Stop the current Monitor before starting a new one",
             )
 
         FSMon.check_and_install_fsmon()
@@ -160,40 +160,40 @@ class MonitoringHandler:
             )
 
         if target_pid:
-            fsmon_process = FSMon.run_fsmon_by_pid(target_pid, monitor_path)
+            monitor_process = FSMon.run_fsmon_by_pid(target_pid, monitor_path)
         else:
-            fsmon_process = FSMon.run_fsmon_by_path(monitor_path)
+            monitor_process = FSMon.run_fsmon_by_path(monitor_path)
 
-        if fsmon_process is None:
+        if monitor_process is None:
             return CommandResult(
                 success=False,
-                message="Failed to start FSMon process",
+                message="Failed to start Monitor process",
             )
 
-        def stop_fsmon():
+        def stop_monitor():
             try:
-                if fsmon_process.poll() is None:
-                    fsmon_process.terminate()
+                if monitor_process.poll() is None:
+                    monitor_process.terminate()
                     try:
-                        fsmon_process.wait(timeout=5)
+                        monitor_process.wait(timeout=5)
                     except Exception:
-                        fsmon_process.kill()
+                        monitor_process.kill()
             except Exception as e:
-                logger.error(f"Error stopping FSMon: {e}")
+                logger.error(f"Error stopping Monitor: {e}")
 
         task_service.register(
-            name="fsmon",
-            display_name="FSMon",
-            instance=fsmon_process,
-            stop_callback=stop_fsmon,
+            name="monitor",
+            display_name="Monitor",
+            instance=monitor_process,
+            stop_callback=stop_monitor,
             app_name=app_name,
             target_pid=target_pid,
         )
 
         message = (
-            f"FSMon started monitoring PID {target_pid} ({app_name})"
+            f"Monitor started monitoring PID {target_pid} ({app_name})"
             if target_pid
-            else f"FSMon started monitoring path: {monitor_path}"
+            else f"Monitor started monitoring path: {monitor_path}"
         )
         return CommandResult(
             success=True,
@@ -205,17 +205,17 @@ class MonitoringHandler:
             },
         )
 
-    @safe_command("Failed to stop FSMon")
-    async def stop_fsmon(self) -> CommandResult:
-        """Stop FSMon filesystem monitoring."""
+    @safe_command("Failed to stop Monitor")
+    async def stop_monitor(self) -> CommandResult:
+        """Stop Monitor filesystem monitoring."""
         from sandroid.services import get_task_service
 
         task_service = get_task_service()
-        if not task_service.is_running("fsmon"):
-            return CommandResult(success=False, message="FSMon is not running")
+        if not task_service.is_running("monitor"):
+            return CommandResult(success=False, message="Monitor is not running")
 
-        task_service.stop("fsmon")
-        return CommandResult(success=True, message="FSMon stopped")
+        task_service.stop("monitor")
+        return CommandResult(success=True, message="Monitor stopped")
 
     # -- Network Capture -----------------------------------------------------
 

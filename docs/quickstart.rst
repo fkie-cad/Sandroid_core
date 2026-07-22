@@ -109,7 +109,7 @@ Create ``~/.config/sandroid/sandroid.toml``::
 
    [analysis]
    number_of_runs = 2
-   monitor_processes = true
+   capture_processes = true
 
 **Security Analysis Configuration**::
 
@@ -117,8 +117,8 @@ Create ``~/.config/sandroid/sandroid.toml``::
 
    [analysis]
    number_of_runs = 3
-   monitor_network = true
-   monitor_processes = true
+   capture_network = true
+   capture_processes = true
    show_deleted_files = true
 
    [features]
@@ -135,7 +135,7 @@ Common Workflows
 
       sandroid-config init
       # Edit config for malware analysis
-      sandroid-config set analysis.monitor_network true
+      sandroid-config set analysis.capture_network true
       sandroid-config set log_level DEBUG
 
 2. **Start Analysis**::

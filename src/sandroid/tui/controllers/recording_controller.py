@@ -101,8 +101,8 @@ class RecordingController:
         force_ui_refresh: Callable[[], None] | None = None,
         toolbox: Any | None = None,
         on_run_saved: Callable[[str], None] | None = None,
-        on_fsmon_stopped_for_playback: Callable[[], None] | None = None,
-        on_fsmon_resume_available: Callable[[Any], None] | None = None,
+        on_monitor_stopped_for_playback: Callable[[], None] | None = None,
+        on_monitor_resume_available: Callable[[Any], None] | None = None,
     ):
         """Initialize RecordingController with UI callbacks.
 
@@ -121,20 +121,20 @@ class RecordingController:
                 ``_run_playback_analysis`` has persisted a RunRecord. Wired by
                 app.py to DiffsView.on_new_run for the gated auto-select/
                 unread-marker behaviour; safe to leave unset (e.g. in tests).
-            on_fsmon_stopped_for_playback: Callback invoked (via
+            on_monitor_stopped_for_playback: Callback invoked (via
                 call_from_thread) the moment the Play safety-net force-stops
-                a running fsmon session, right before ``load_snapshot``.
+                a running monitor session, right before ``load_snapshot``.
                 Takes no arguments — it only needs to tell the UI "show the
                 inline notice", nothing more. See
-                ``_stop_fsmon_before_revert``. Safe to leave unset.
-            on_fsmon_resume_available: Callback invoked (via
+                ``_stop_monitor_before_revert``. Safe to leave unset.
+            on_monitor_resume_available: Callback invoked (via
                 call_from_thread) once ``_run_playback_analysis`` finishes
                 (success or failure — the offer is orthogonal to whether the
-                diff analysis itself errored), but *only* if fsmon was
+                diff analysis itself errored), but *only* if monitor was
                 actually auto-stopped by this run. Receives the
-                ``FSMonConfig`` fsmon was running with beforehand (may carry
+                ``MonitorConfig`` monitor was running with beforehand (may carry
                 a now-stale ``target_pid`` in PID-mode — re-resolving it is
-                ``FSMonController.resume_after_playback``'s job, not this
+                ``MonitorController.resume_after_playback``'s job, not this
                 controller's). Wired by app.py to MonitorView's one-click
                 "Resume monitoring" offer; safe to leave unset.
         """
@@ -148,8 +148,8 @@ class RecordingController:
         self._force_ui_refresh = force_ui_refresh
         self._toolbox = toolbox
         self._on_run_saved = on_run_saved
-        self._on_fsmon_stopped_for_playback = on_fsmon_stopped_for_playback
-        self._on_fsmon_resume_available = on_fsmon_resume_available
+        self._on_monitor_stopped_for_playback = on_monitor_stopped_for_playback
+        self._on_monitor_resume_available = on_monitor_resume_available
         # Recording-session bookkeeping for the settings-seed flow (see
         # start_recording()): a monotonic counter for the "Run N" default
         # name, the label seed, and the replay-count/dry-run settings that
@@ -401,56 +401,56 @@ class RecordingController:
 
         return False
 
-    def _stop_fsmon_before_revert(self) -> Any | None:
-        """Safety net: fsmon's live ``adb shell`` session cannot survive
+    def _stop_monitor_before_revert(self) -> Any | None:
+        """Safety net: monitor's live ``adb shell`` session cannot survive
         Play's snapshot revert (``EmulatorService.load_snapshot()`` is a bare
         telnet command + ``sleep(2)``, zero adb-reconnect logic anywhere) and
         would otherwise silently die with no indication. Stop it cleanly
         *before* the revert instead, so its disappearance is explained rather
         than mysterious.
 
-        True no-op when fsmon isn't running: the ``is_running`` guard below
+        True no-op when monitor isn't running: the ``is_running`` guard below
         means nothing else in this method executes (no stop call, no
         callback, no log line) — verified by a dedicated test.
 
-        Calls ``TaskService.stop("fsmon")`` directly rather than
-        ``FSMonController.stop()``: the latter also calls
+        Calls ``TaskService.stop("monitor")`` directly rather than
+        ``MonitorController.stop()``: the latter also calls
         ``_force_ui_refresh`` — a real Textual UI touch that is not safe to
         invoke un-marshaled from this worker thread. ``TaskService.stop()``
-        itself is plain locking + ``FSMonWrapper.stop()``
+        itself is plain locking + ``MonitorProcessWrapper.stop()``
         (``process.terminate()``/``wait()``, no widget access) and is safe to
         call from any thread. Task-service state still gets cleaned up
         correctly and on the main thread shortly after: killing the process
-        makes fsmon's own output-reader thread notice ``process.poll()`` go
+        makes monitor's own output-reader thread notice ``process.poll()`` go
         non-None on its next iteration, which triggers
-        ``FSMonController._fsmon_ended`` via its own ``call_from_thread`` —
+        ``MonitorController._monitor_ended`` via its own ``call_from_thread`` —
         the existing teardown path, unmodified by this change.
 
         Returns:
-            The ``FSMonConfig`` fsmon was running with (so a later "Resume
-            monitoring" action can re-fork it), or ``None`` if fsmon wasn't
+            The ``MonitorConfig`` monitor was running with (so a later "Resume
+            monitoring" action can re-fork it), or ``None`` if monitor wasn't
             running, or if it was but the config couldn't be recovered.
         """
         try:
             task_service = self._get_task_service()
-            if not task_service.is_running("fsmon"):
+            if not task_service.is_running("monitor"):
                 return None
 
-            task = task_service.get_task("fsmon")
+            task = task_service.get_task("monitor")
             config = getattr(getattr(task, "instance", None), "config", None)
 
-            task_service.stop("fsmon")
+            task_service.stop("monitor")
 
             self._call_from_thread(
                 self._log_warning,
-                "fsmon stopped — won't survive Play's snapshot revert.",
+                "monitor stopped — won't survive Play's snapshot revert.",
             )
-            if self._on_fsmon_stopped_for_playback:
-                self._call_from_thread(self._on_fsmon_stopped_for_playback)
+            if self._on_monitor_stopped_for_playback:
+                self._call_from_thread(self._on_monitor_stopped_for_playback)
 
             return config
         except Exception as e:
-            logger.debug(f"fsmon auto-stop safety check failed: {e}", exc_info=True)
+            logger.debug(f"monitor auto-stop safety check failed: {e}", exc_info=True)
             return None
 
     def _run_playback_analysis(self) -> None:
@@ -471,7 +471,7 @@ class RecordingController:
         A fatal step (e.g. a mid-run device switch) makes the engine return a
         partial ``RunResult(error=...)`` rather than raising; that partial
         result is persisted too, so a failed run stays visible in Diffs with
-        its error message. The fsmon Play-safety-net (stop-before-revert +
+        its error message. The monitor Play-safety-net (stop-before-revert +
         resume offer) is preserved around the engine run.
         """
         from sandroid.analysis.engine import AnalysisEngine
@@ -485,14 +485,14 @@ class RecordingController:
         result: Any = None
         error: str | None = None
         abs_rec = self.get_recording_path()
-        fsmon_config_for_resume: Any = None
+        monitor_config_for_resume: Any = None
 
         try:
-            # Safety net (see _stop_fsmon_before_revert's docstring): fsmon
+            # Safety net (see _stop_monitor_before_revert's docstring): monitor
             # cannot survive the snapshot revert the engine's first step does,
             # so stop it cleanly *before* handing off to the engine rather than
-            # let it silently die. True no-op if fsmon isn't running.
-            fsmon_config_for_resume = self._stop_fsmon_before_revert()
+            # let it silently die. True no-op if monitor isn't running.
+            monitor_config_for_resume = self._stop_monitor_before_revert()
 
             # Build the run bundle and copy the live recording into it up-front
             # so every later step reads it by absolute path.
@@ -548,14 +548,14 @@ class RecordingController:
             self._call_from_thread(self._on_run_saved, saved_run_id)
 
         # Offer to resume monitoring once Play is fully done — regardless of
-        # success/error above, since resuming fsmon is orthogonal to whether
-        # the diff analysis itself errored. Only fires if fsmon was actually
-        # auto-stopped for *this* run (fsmon_config_for_resume is None both
-        # when fsmon wasn't running to begin with, and in the true-no-op
-        # case covered by _stop_fsmon_before_revert).
-        if fsmon_config_for_resume is not None and self._on_fsmon_resume_available:
+        # success/error above, since resuming monitor is orthogonal to whether
+        # the diff analysis itself errored. Only fires if monitor was actually
+        # auto-stopped for *this* run (monitor_config_for_resume is None both
+        # when monitor wasn't running to begin with, and in the true-no-op
+        # case covered by _stop_monitor_before_revert).
+        if monitor_config_for_resume is not None and self._on_monitor_resume_available:
             self._call_from_thread(
-                self._on_fsmon_resume_available, fsmon_config_for_resume
+                self._on_monitor_resume_available, monitor_config_for_resume
             )
 
     def _emit_progress(self, update: Any) -> None:

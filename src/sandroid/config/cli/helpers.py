@@ -166,9 +166,9 @@ def _show_config_rich(config: SandroidConfig) -> None:
     table.add_row(
         "Strong Noise Filter", str(not config.analysis.avoid_strong_noise_filter)
     )
-    table.add_row("Monitor Processes", str(config.analysis.monitor_processes))
-    table.add_row("Monitor Sockets", str(config.analysis.monitor_sockets))
-    table.add_row("Monitor Network", str(config.analysis.monitor_network))
+    table.add_row("Capture Processes", str(config.analysis.capture_processes))
+    table.add_row("Capture Sockets", str(config.analysis.capture_sockets))
+    table.add_row("Capture Network Traffic", str(config.analysis.capture_network))
     table.add_row("Show Deleted Files", str(config.analysis.show_deleted_files))
     table.add_row("Hash Files", str(config.analysis.hash_files))
     table.add_row("List APKs", str(config.analysis.list_apks))

@@ -44,6 +44,9 @@ class Device:
         android_version: Android version string
         api_level: Android API level
         capabilities: Set of available capabilities
+        last_probe_attempt: ``time.monotonic()`` timestamp of the last
+            ``_populate_device_info`` probe attempt, used to cooldown-gate
+            re-probing a flickering/zombie device.
     """
 
     serial: str
@@ -54,6 +57,7 @@ class Device:
     android_version: str = ""
     api_level: int = 0
     capabilities: set[DeviceCapability] = field(default_factory=set)
+    last_probe_attempt: float = 0.0
 
     def __post_init__(self):
         """Detect device type and capabilities based on serial pattern."""

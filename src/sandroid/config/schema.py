@@ -6,7 +6,7 @@ import tempfile
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, model_validator, validator
 
 
 def get_secure_temp_dir() -> Path:
@@ -192,13 +192,15 @@ class AnalysisConfig(BaseModel):
     hash_files: bool = Field(
         default=False, description="Generate MD5 hashes of changed/new files"
     )
-    monitor_processes: bool = Field(
-        default=True, description="Monitor active processes during analysis"
+    capture_processes: bool = Field(
+        default=True, description="Capture active processes during analysis run"
     )
-    monitor_sockets: bool = Field(
-        default=False, description="Monitor listening sockets"
+    capture_sockets: bool = Field(
+        default=False, description="Capture listening sockets during analysis run"
     )
-    monitor_network: bool = Field(default=False, description="Capture network traffic")
+    capture_network: bool = Field(
+        default=False, description="Capture network traffic during analysis run"
+    )
     show_deleted_files: bool = Field(
         default=False, description="Perform full filesystem checks for deleted files"
     )
@@ -211,6 +213,28 @@ class AnalysisConfig(BaseModel):
         description="Default view mode for interactive menu (forensic, malware, or security)",
         pattern=r"^(forensic|malware|security)$",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_capture_keys(cls, data):
+        """Back-fill legacy ``monitor_*`` keys onto their ``capture_*`` names.
+
+        The automated-analysis-run artifact toggles were renamed from
+        ``monitor_*`` to ``capture_*`` (ending the name collision with the live
+        FS Monitor). Sub-models default to ``extra="ignore"``, so without this a
+        legacy ``monitor_processes`` (etc.) would be silently dropped. Copy each
+        legacy key to its new name only when the new key isn't already present.
+        """
+        if isinstance(data, dict):
+            aliases = {
+                "monitor_processes": "capture_processes",
+                "monitor_sockets": "capture_sockets",
+                "monitor_network": "capture_network",
+            }
+            for old, new in aliases.items():
+                if old in data and new not in data:
+                    data[new] = data[old]
+        return data
 
 
 class TrigDroidConfig(BaseModel):
@@ -371,21 +395,21 @@ class TUIConfig(BaseModel):
         default=False,
         description="If True, Ctrl+C exits immediately. If False (default), shows quit confirmation dialog.",
     )
-    fsmon_buffer_interval: float = Field(
+    monitor_buffer_interval: float = Field(
         default=0.15,
         ge=0.0,
         le=5.0,
-        description="FSMon output buffer flush interval in seconds. "
+        description="Monitor output buffer flush interval in seconds. "
         "Lower values = faster display, higher CPU. 0 = near-realtime.",
     )
-    fsmon_max_lines: int = Field(
+    monitor_max_lines: int = Field(
         default=500,
         ge=50,
         le=10000,
-        description="Maximum lines kept in FSMon observer log. "
+        description="Maximum lines kept in Monitor observer log. "
         "Higher values use more memory but allow scrolling back further.",
     )
-    fsmon_event_visibility: dict[str, str] = Field(
+    monitor_event_visibility: dict[str, str] = Field(
         default_factory=lambda: {
             "create": "always",
             "modify": "always",
@@ -395,7 +419,13 @@ class TUIConfig(BaseModel):
             "noise": "verbose",
         },
         description="Per-category Monitor visibility: 'always', 'verbose', or 'never'. "
-        "Categories: create, modify, delete, rename, attrs, noise (fsmon OPEN/CLOSE).",
+        "Categories: create, modify, delete, rename, attrs, noise (monitor OPEN/CLOSE).",
+    )
+    monitor_backend: str = Field(
+        default="kprobe",
+        description="Filesystem monitor backend: 'kprobe' (kernel tracefs "
+        "kprobes; prefer kprobe, auto-fall-back to fsmon when the kernel lacks "
+        "support) or 'fsmon' (the fsmon binary).",
     )
     keybindings: dict[str, str] = Field(
         default_factory=dict,
@@ -431,17 +461,57 @@ class TUIConfig(BaseModel):
             )
         return v
 
-    @validator("fsmon_event_visibility")
-    def validate_fsmon_event_visibility(cls, v):
-        """Validate FSMon per-category visibility modes."""
+    @validator("monitor_event_visibility")
+    def validate_monitor_event_visibility(cls, v):
+        """Validate Monitor per-category visibility modes."""
         valid = {"always", "verbose", "never"}
         for category, mode in v.items():
             if mode not in valid:
                 raise ValueError(
-                    f"Invalid fsmon_event_visibility mode for '{category}': {mode}. "
+                    f"Invalid monitor_event_visibility mode for '{category}': {mode}. "
                     f"Must be one of: {', '.join(sorted(valid))}"
                 )
         return v
+
+    @validator("monitor_backend")
+    def validate_monitor_backend(cls, v):
+        """Validate filesystem monitor backend setting.
+
+        The legacy ``"auto"`` value is normalized to ``"kprobe"`` before the
+        membership check (a transform-in-validator, like ``validate_theme``),
+        so existing configs self-heal to the two-way selector on load.
+        """
+        if v == "auto":
+            v = "kprobe"
+        valid = {"fsmon", "kprobe"}
+        if v not in valid:
+            raise ValueError(
+                f"Invalid monitor_backend: {v}. Must be one of: "
+                f"{', '.join(sorted(valid))}"
+            )
+        return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_monitor_keys(cls, data):
+        """Back-fill legacy ``fsmon_*`` config keys onto their ``monitor_*`` names.
+
+        The generic monitoring layer was renamed from ``fsmon_*`` to
+        ``monitor_*``; an existing config file may still carry the old keys.
+        Sub-models default to ``extra="ignore"``, so without this a legacy
+        ``fsmon_buffer_interval`` (etc.) would be silently dropped. Copy each
+        legacy key to its new name only when the new key isn't already present.
+        """
+        if isinstance(data, dict):
+            aliases = {
+                "fsmon_buffer_interval": "monitor_buffer_interval",
+                "fsmon_max_lines": "monitor_max_lines",
+                "fsmon_event_visibility": "monitor_event_visibility",
+            }
+            for old, new in aliases.items():
+                if old in data and new not in data:
+                    data[new] = data[old]
+        return data
 
     @validator("custom_css_path", pre=True)
     def expand_css_path(cls, v):
@@ -758,7 +828,7 @@ class DevicePathsConfig(BaseModel):
     )
     default_monitor_path: str = Field(
         default="/data/",
-        description="Default filesystem path for FSMon monitoring",
+        description="Default filesystem path for filesystem monitoring",
     )
     scan_directories: list[str] = Field(
         default=["/data", "/storage", "/sdcard"],

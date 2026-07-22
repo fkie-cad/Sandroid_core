@@ -33,9 +33,9 @@ cache_path = "~/.cache/sandroid/"
 [analysis]
 number_of_runs = 2
 avoid_strong_noise_filter = false
-monitor_processes = true
-monitor_sockets = false
-monitor_network = false
+capture_processes = true
+capture_sockets = false
+capture_network = false
 show_deleted_files = false
 hash_files = false
 list_apks = false
@@ -93,10 +93,13 @@ show_theme_indicator = false
 # logo_color = "#00ff00"        # Main ASCII art color (bright green by default)
 # logo_text_color = "#ffffff"   # "Sandroid" text highlight color (white by default)
 
-# FSMon output buffer interval (seconds). Lower = faster, higher CPU. 0 = near-realtime.
-# fsmon_buffer_interval = 0.15
-# Maximum lines kept in FSMon observer (50-10000). Higher = more scrollback, more memory.
-# fsmon_max_lines = 500
+# Monitor output buffer interval (seconds). Lower = faster, higher CPU. 0 = near-realtime.
+# monitor_buffer_interval = 0.15
+# Maximum lines kept in Monitor observer (50-10000). Higher = more scrollback, more memory.
+# monitor_max_lines = 500
+# Filesystem monitor backend: "kprobe" (kernel tracefs kprobes, auto-falls-back
+# to fsmon when unsupported) or "fsmon" (the fsmon binary).
+# monitor_backend = "kprobe"
 
 # Device Paths - Android device filesystem paths
 # Override these to match non-standard device setups

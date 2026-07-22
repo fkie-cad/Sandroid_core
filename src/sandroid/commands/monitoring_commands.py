@@ -1,4 +1,4 @@
-"""Monitoring commands for FSMon filesystem monitoring."""
+"""Monitoring commands for Monitor filesystem monitoring."""
 
 import logging
 import threading
@@ -19,10 +19,10 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class FSMonCommand(ToggleCommand):
-    """Command handler for toggling FSMon filesystem monitoring.
+class MonitorCommand(ToggleCommand):
+    """Command handler for toggling Monitor filesystem monitoring.
 
-    FSMon monitors file system changes in real-time on the Android device.
+    Monitor monitors file system changes in real-time on the Android device.
     This is a toggle command - pressing 'o' starts monitoring,
     pressing 'o' again stops it.
 
@@ -35,7 +35,7 @@ class FSMonCommand(ToggleCommand):
     """
 
     key = "o"
-    name = "FSMon"
+    name = "Monitor"
     description = "Start/stop filesystem monitoring"
     category = CommandCategory.MONITORING
     views = ["forensic", "malware"]
@@ -61,44 +61,44 @@ class FSMonCommand(ToggleCommand):
     DEFAULT_MONITOR_PATH = _DEFAULT_MONITOR_PATH
 
     def get_task_name(self) -> str:
-        """Get the task name for FSMon.
+        """Get the task name for the filesystem monitor.
 
         Returns:
-            Task identifier string "fsmon"
+            Task identifier string "monitor"
         """
-        return "fsmon"
+        return "monitor"
 
     async def start_task(self, ctx: CommandContext) -> CommandResult:
-        """Start FSMon filesystem monitoring.
+        """Start Monitor filesystem monitoring.
 
-        Checks and installs FSMon binary if needed, then starts monitoring.
+        Checks and installs Monitor binary if needed, then starts monitoring.
         Can monitor either a path or a specific PID if a spotlight app is set.
 
         Args:
             ctx: Command context with services and utilities
 
         Returns:
-            CommandResult indicating success/failure of starting FSMon
+            CommandResult indicating success/failure of starting Monitor
         """
         try:
             from sandroid.core.fsmon import FSMon
         except ImportError as e:
-            logger.error(f"Failed to import FSMon: {e}")
+            logger.error(f"Failed to import the monitor backend: {e}")
             return CommandResult(
                 success=False,
-                message="FSMon module not available",
+                message="Monitor module not available",
                 error=f"Import error: {e}",
             )
 
-        # Check and install FSMon binary on device
+        # Check and install Monitor binary on device
         try:
-            logger.info("Checking FSMon binary on device...")
+            logger.info("Checking Monitor binary on device...")
             FSMon.check_and_install_fsmon()
         except Exception as e:
-            logger.error(f"Failed to install FSMon: {e}")
+            logger.error(f"Failed to install Monitor: {e}")
             return CommandResult(
                 success=False,
-                message="Failed to install FSMon binary on device",
+                message="Failed to install Monitor binary on device",
                 error=str(e),
             )
 
@@ -147,7 +147,7 @@ class FSMonCommand(ToggleCommand):
                     f"Monitor by path ({monitor_path})",
                 ]
                 choice = await ctx.request_selection(
-                    title="FSMon Monitoring Mode",
+                    title="Monitoring Mode",
                     prompt="Select monitoring mode:",
                     options=options,
                 )
@@ -158,58 +158,60 @@ class FSMonCommand(ToggleCommand):
                 logger.warning(f"Could not get user selection: {e}")
                 # Continue with default (PID if available)
 
-        # Start FSMon process
+        # Start Monitor process
         try:
             if target_pid:
-                logger.info(f"Starting FSMon monitoring PID {target_pid} ({app_name})")
-                fsmon_process = FSMon.run_fsmon_by_pid(target_pid, monitor_path)
+                logger.info(
+                    f"Starting Monitor monitoring PID {target_pid} ({app_name})"
+                )
+                monitor_process = FSMon.run_fsmon_by_pid(target_pid, monitor_path)
             else:
-                logger.info(f"Starting FSMon monitoring path: {monitor_path}")
-                fsmon_process = FSMon.run_fsmon_by_path(monitor_path)
+                logger.info(f"Starting Monitor monitoring path: {monitor_path}")
+                monitor_process = FSMon.run_fsmon_by_path(monitor_path)
 
-            if fsmon_process is None:
+            if monitor_process is None:
                 return CommandResult(
                     success=False,
-                    message="Failed to start FSMon process",
-                    error="FSMon returned None",
+                    message="Failed to start Monitor process",
+                    error="Monitor returned None",
                 )
 
             # Create stop callback that terminates the process
-            def stop_fsmon():
-                """Stop the FSMon subprocess."""
+            def stop_monitor():
+                """Stop the Monitor subprocess."""
                 try:
-                    if fsmon_process.poll() is None:  # Process still running
-                        fsmon_process.terminate()
+                    if monitor_process.poll() is None:  # Process still running
+                        monitor_process.terminate()
                         try:
-                            fsmon_process.wait(timeout=5)
+                            monitor_process.wait(timeout=5)
                         except Exception:
-                            fsmon_process.kill()
-                        logger.info("FSMon process terminated")
+                            monitor_process.kill()
+                        logger.info("Monitor process terminated")
                 except Exception as e:
-                    logger.error(f"Error stopping FSMon: {e}")
+                    logger.error(f"Error stopping Monitor: {e}")
 
             # Register with task service
             if ctx.task_service:
                 ctx.task_service.register(
                     name=self.get_task_name(),
-                    display_name="FSMon",
-                    instance=fsmon_process,
-                    stop_callback=stop_fsmon,
+                    display_name="Monitor",
+                    instance=monitor_process,
+                    stop_callback=stop_monitor,
                     app_name=app_name,
                     target_pid=target_pid,
                 )
 
             # Start rich output reader for non-TUI mode
             if not ctx.is_tui_mode:
-                self._start_rich_output_reader(fsmon_process)
+                self._start_rich_output_reader(monitor_process)
 
             # Build success message
             if target_pid:
-                message = f"FSMon started monitoring PID {target_pid}"
+                message = f"Monitor started monitoring PID {target_pid}"
                 if app_name:
                     message += f" ({app_name})"
             else:
-                message = f"FSMon started monitoring path: {monitor_path}"
+                message = f"Monitor started monitoring path: {monitor_path}"
 
             return CommandResult(
                 success=True,
@@ -219,29 +221,29 @@ class FSMonCommand(ToggleCommand):
                     "monitor_path": monitor_path,
                     "target_pid": target_pid,
                     "app_name": app_name,
-                    "process_pid": fsmon_process.pid,
+                    "process_pid": monitor_process.pid,
                 },
             )
 
         except Exception as e:
-            logger.exception("Error starting FSMon")
+            logger.exception("Error starting Monitor")
             return CommandResult(
-                success=False, message=f"Failed to start FSMon: {e!s}", error=str(e)
+                success=False, message=f"Failed to start Monitor: {e!s}", error=str(e)
             )
 
     def _start_rich_output_reader(self, process) -> None:
-        """Start a daemon thread that prints fsmon output to the Rich console.
+        """Start a daemon thread that prints monitor output to the Rich console.
 
         Used in non-TUI (Rich) mode where there is no Textual event loop.
         Reads lines from the process stdout, strips ANSI escape codes from
         PTY output, colorizes them, and prints to the SandroidConsole.
 
         Args:
-            process: The fsmon subprocess.Popen instance.
+            process: The monitor subprocess.Popen instance.
         """
-        from sandroid.tui.controllers.fsmon_controller import (
+        from sandroid.tui.controllers.monitor_controller import (
             _ANSI_RE,
-            colorize_fsmon_line,
+            colorize_monitor_line,
         )
 
         def _reader():
@@ -260,9 +262,9 @@ class FSMonCommand(ToggleCommand):
                     line_str = _ANSI_RE.sub("", line).strip()
                     if line_str:
                         try:
-                            SandroidConsole.print(colorize_fsmon_line(line_str))
+                            SandroidConsole.print(colorize_monitor_line(line_str))
                         except Exception:
-                            logger.debug("Failed to print fsmon line", exc_info=True)
+                            logger.debug("Failed to print monitor line", exc_info=True)
 
             # Drain remaining output
             try:
@@ -270,25 +272,27 @@ class FSMonCommand(ToggleCommand):
                     line_str = _ANSI_RE.sub("", line).strip()
                     if line_str:
                         try:
-                            SandroidConsole.print(colorize_fsmon_line(line_str))
+                            SandroidConsole.print(colorize_monitor_line(line_str))
                         except Exception:
                             pass
             except Exception:
                 pass
 
-        thread = threading.Thread(target=_reader, daemon=True, name="fsmon-rich-reader")
+        thread = threading.Thread(
+            target=_reader, daemon=True, name="monitor-rich-reader"
+        )
         thread.start()
 
     async def stop_task(self, ctx: CommandContext) -> CommandResult:
-        """Stop FSMon filesystem monitoring.
+        """Stop Monitor filesystem monitoring.
 
-        Stops the running FSMon process via the task service.
+        Stops the running Monitor process via the task service.
 
         Args:
             ctx: Command context with services
 
         Returns:
-            CommandResult indicating success/failure of stopping FSMon
+            CommandResult indicating success/failure of stopping Monitor
         """
         if not ctx.task_service:
             return CommandResult(
@@ -311,20 +315,20 @@ class FSMonCommand(ToggleCommand):
         try:
             success = ctx.task_service.stop(task_name)
         except Exception as e:
-            logger.exception("Error stopping FSMon via task service")
+            logger.exception("Error stopping Monitor via task service")
             return CommandResult(
-                success=False, message=f"Error stopping FSMon: {e!s}", error=str(e)
+                success=False, message=f"Error stopping Monitor: {e!s}", error=str(e)
             )
 
         if not success:
             return CommandResult(
                 success=False,
-                message="Failed to stop FSMon",
+                message="Failed to stop Monitor",
                 error="Task service stop() returned False",
             )
 
         # Build descriptive stop message
-        message = "FSMon stopped"
+        message = "Monitor stopped"
         if task_data.get("target_pid"):
             pid_info = f"PID {task_data['target_pid']}"
             if task_data.get("app_name"):
@@ -334,7 +338,7 @@ class FSMonCommand(ToggleCommand):
         return CommandResult(success=True, message=message, data=task_data)
 
     def can_execute(self, ctx: CommandContext) -> tuple[bool, str]:
-        """Check if FSMon can be executed.
+        """Check if Monitor can be executed.
 
         Verifies that required services are available.
 
@@ -355,7 +359,7 @@ class FSMonCommand(ToggleCommand):
 
         # For starting, we need ADB access
         if not ctx.adb and not ctx.toolbox:
-            return False, "ADB access required to start FSMon"
+            return False, "ADB access required to start Monitor"
 
         return True, ""
 
@@ -366,4 +370,4 @@ def register_commands(registry) -> None:
     Args:
         registry: CommandRegistry instance to register commands with
     """
-    registry.register(FSMonCommand())
+    registry.register(MonitorCommand())

@@ -210,13 +210,13 @@ class MenuController:
             inline_text="p[u]ll spotlight files",
         )
         self._register(
-            "fsmon",
+            "monitor",
             "Observe filesystem changes",
             "o",
             ActionCategory.FILES,
             ["forensic"],
-            description="Monitor filesystem changes with fsmon",
-            inline_text="[o]bserve filesystem changes (fsmon)",
+            description="Monitor filesystem changes",
+            inline_text="[o]bserve filesystem changes",
         )
         self._register(
             "pull_spotlight_db",

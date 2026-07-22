@@ -26,7 +26,7 @@ This creates ``~/.config/sandroid/sandroid.toml`` with default settings.
 
    [analysis]
    number_of_runs = 2
-   monitor_network = false
+   capture_network = false
 
    [paths]
    results_path = "./results/"
@@ -62,8 +62,8 @@ Configuration Formats
 
    [analysis]
    number_of_runs = 2
-   monitor_processes = true
-   monitor_network = false
+   capture_processes = true
+   capture_network = false
 
 **YAML**
 
@@ -78,8 +78,8 @@ Configuration Formats
 
    analysis:
      number_of_runs: 2
-     monitor_processes: true
-     monitor_network: false
+     capture_processes: true
+     capture_network: false
 
 **JSON**
 
@@ -94,8 +94,8 @@ Configuration Formats
      },
      "analysis": {
        "number_of_runs": 2,
-       "monitor_processes": true,
-       "monitor_network": false
+       "capture_processes": true,
+       "capture_network": false
      }
    }
 
@@ -152,11 +152,11 @@ Analysis Settings
    # Number of analysis runs (minimum 2 for comparison)
    number_of_runs = 2
 
-   # Monitor running processes
-   monitor_processes = true
+   # Capture running processes
+   capture_processes = true
 
    # Capture network traffic
-   monitor_network = false
+   capture_network = false
 
    # Perform full filesystem scan for deleted files
    show_deleted_files = false
@@ -328,7 +328,7 @@ Configuration Management
 
 ::
 
-   sandroid-config set analysis.monitor_network true
+   sandroid-config set analysis.capture_network true
    sandroid-config set emulator.device_name MyDevice
 
 **Get Configuration Value:**
@@ -353,8 +353,8 @@ Configuration Templates
 
    [analysis]
    number_of_runs = 3
-   monitor_processes = true
-   monitor_network = true
+   capture_processes = true
+   capture_network = true
    show_deleted_files = true
    calculate_hashes = true
    avoid_noise_filter = true
@@ -381,8 +381,8 @@ Configuration Templates
 
    [analysis]
    number_of_runs = 1
-   monitor_processes = false
-   monitor_network = false
+   capture_processes = false
+   capture_network = false
 
    [features]
    screenshot_interval = 10
@@ -402,8 +402,8 @@ Configuration Templates
 
    [analysis]
    number_of_runs = 1
-   monitor_processes = true
-   monitor_network = true
+   capture_processes = true
+   capture_network = true
 
    [features]
    screenshot_interval = 30
@@ -438,7 +438,7 @@ Create ``~/.config/sandroid/production.toml``:
 
    [analysis]
    number_of_runs = 3
-   monitor_network = true
+   capture_network = true
 
    [report]
    generate_pdf = true
