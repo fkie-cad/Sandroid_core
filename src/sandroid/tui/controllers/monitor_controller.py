@@ -458,6 +458,21 @@ _KPROBE_FIELD_RE = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
 # O_CREAT bit in openat2 flags (create vs plain open).
 _O_CREAT = 0x40
 
+# Kernel ERR_PTR range: the top 4 KiB (MAX_ERRNO) of the 64-bit address space.
+# do_filp_open returns an ERR_PTR (e.g. -ENOENT) on a FAILED open, and its
+# r:dfor return probe reports that value as the "file*". Storing it in the
+# file* map would leak an entry that no __fput ever invalidates, so the
+# translator skips any file* at/above this threshold.
+_ERR_PTR_MIN = 0xFFFFFFFFFFFFF000
+
+
+def _is_err_ptr(file_ptr: str) -> bool:
+    """True if a ``file*`` hex string falls in the kernel ERR_PTR range."""
+    try:
+        return int(file_ptr, 16) >= _ERR_PTR_MIN
+    except (ValueError, TypeError):
+        return False
+
 
 def _parse_kprobe_fields(rest: str) -> dict[str, str]:
     """Extract ``field=value`` pairs from a trace line's payload."""
@@ -490,6 +505,18 @@ class KprobeStreamTranslator:
     Reuses ``_strip_prefix`` / ``_split_dir_filename`` and MONITOR_EVENT_INFO
     for display parity with fsmon. Emits ``FileSystemMonitorItem(source=
     "kprobe")``. MonitorView is unchanged.
+
+    PATH-MODE WRITE-FIREHOSE LIMITATION: in pure path mode the write path
+    (vfs_write/do_iter_write) and the do_filp_open-return/__fput correlation
+    lines can't be path-filtered in-kernel, so they fire system-wide. Under
+    heavy system write load the KERNEL ring buffer can drop the sparse
+    ``dfor``/``fput`` control lines *before* this correlator ever sees them --
+    that loss is upstream of the reader-thread deque, so the
+    translate-ahead-of-deque design here cannot recover it, and the file* map
+    can be corrupted (writes mis-attributed or dropped). The 64 MB/CPU buffer
+    mitigates it; when a target PID is known, ``KprobeTracer.run_by_pid(pid,
+    path)`` bounds the firehose via ``set_event_pid`` and is strongly
+    preferred over pure path mode.
     """
 
     def __init__(self) -> None:
@@ -560,7 +587,10 @@ class KprobeStreamTranslator:
         if event == "dfor":
             file_ptr = fields.get("file")
             path = self._pending.pop(tid, None)
-            if file_ptr and path is not None:
+            # Skip ERR_PTR returns (failed open): they have no matching __fput,
+            # so storing them would leak file* map entries. pending is still
+            # popped above -- the open attempt is over either way.
+            if file_ptr and path is not None and not _is_err_ptr(file_ptr):
                 self._filemap[file_ptr] = (path, tid)
             return []
         if event == "fput":
@@ -744,6 +774,13 @@ class MonitorController:
         self._on_pid_mode_fallback = on_pid_mode_fallback
         self._on_backend_fallback = on_backend_fallback
         self._run_off_thread = run_off_thread or self._default_run_off_thread
+        # "A start is in progress" latch (Fix 6). Set the instant _start_monitor
+        # begins and cleared when the launch finalizes (success OR failure),
+        # including the off-thread kprobe path where the task doesn't register
+        # until after the preflight+setup worker finishes -- so is_running() is
+        # False during that window. Guards against a second 'o' press (or resume)
+        # opening the config modal / starting a concurrent session mid-preflight.
+        self._start_pending = False
 
     @staticmethod
     def _default_run_off_thread(target: Callable[[], None]) -> None:
@@ -784,6 +821,14 @@ class MonitorController:
             return (
                 False,
                 "Monitor is already running. Press 'o' to stop it.",
+            )
+
+        # A start already in flight (e.g. the off-thread kprobe preflight is
+        # still running, before the task registers) -> refuse a second start.
+        if self._start_pending:
+            return (
+                False,
+                "Monitor is already starting — please wait.",
             )
 
         return True, ""
@@ -869,13 +914,18 @@ class MonitorController:
 
         The backend decision precedes ``FSMon.check_and_install_fsmon`` so a
         kprobe session pushes no ELF. For an fsmon-resolved preference the
-        start is fully synchronous. For kprobe/auto the preflight (kallsyms
-        scan + test-attach + offset self-check -- several adb round-trips) runs
-        OFF the UI thread via ``run_off_thread``; the actual launch then
-        finalizes back on the main thread via ``call_from_thread``. In that
-        async case ``_start_monitor`` returns ``True`` optimistically; when the
-        runner + marshaler are synchronous (tests) the return reflects the real
-        launch outcome.
+        start is fully synchronous. For kprobe/auto BOTH the preflight (kallsyms
+        scan + test-attach + offset self-check) AND, on success, the
+        device-heavy session SETUP (``KprobeTracer.run_by_*`` -- ~40-60
+        synchronous ``adb shell`` round-trips: self-clean + install + enable +
+        buffer + filters, each with a 30s timeout) run OFF the UI thread via
+        ``run_off_thread``. Only the CHEAP finalization (constructing/
+        registering the wrapper, starting the reader thread, focusing the tab)
+        is marshaled back to the main thread via ``call_from_thread`` -- so
+        Textual never freezes for seconds (or minutes if adb is wedged). In
+        that async case ``_start_monitor`` returns ``True`` optimistically; when
+        the runner + marshaler are synchronous (tests) the return reflects the
+        real launch outcome.
 
         Args:
             config: MonitorConfig from the configuration modal.
@@ -883,13 +933,25 @@ class MonitorController:
         Returns:
             True if Monitor was started (or a kprobe start was initiated).
         """
+        # Fix 6: refuse a start while one is already running or pending (the
+        # off-thread kprobe preflight/setup window, before the task registers).
+        if self.is_running() or self._start_pending:
+            self._log_warning("Monitor is already starting — please wait.")
+            return False
+        self._start_pending = True
+
         pref = self._resolve_backend_pref(config)
 
         if pref == "fsmon":
             # No preflight needed -> fully synchronous fsmon start (unchanged).
-            return self._launch_fsmon(config)
+            try:
+                return self._launch_fsmon(config)
+            finally:
+                self._start_pending = False
 
-        # kprobe or auto: preflight off the UI thread, finalize on main thread.
+        # kprobe or auto: preflight AND device-heavy setup off the UI thread;
+        # only the cheap finalization is marshaled back to the main thread.
+        self._log_info("Checking kprobe backend support on this device…")
         result = {"ok": True}
 
         def _preflight_worker() -> None:
@@ -902,28 +964,52 @@ class MonitorController:
                 logger.debug("kprobe preflight errored", exc_info=True)
                 supported = False
 
+            if not supported:
+                # kprobe unavailable -> fall back to fsmon on the main thread
+                # (fsmon's own threading behavior is unchanged).
+                def _fallback() -> None:
+                    try:
+                        result["ok"] = self._fall_back_to_fsmon(config, pref)
+                    finally:
+                        self._start_pending = False
+
+                try:
+                    self._call_from_thread(_fallback)
+                except Exception:
+                    self._start_pending = False
+                    logger.debug("kprobe fallback finalize failed", exc_info=True)
+                return
+
+            # Supported: run the DEVICE-HEAVY session setup HERE, off the main
+            # thread. Only the finalization is marshaled back.
+            try:
+                setup = self._kprobe_setup(config)
+            except Exception:
+                logger.debug("kprobe setup errored", exc_info=True)
+                setup = None
+
             def _finish() -> None:
-                result["ok"] = self._finish_backend_selection(config, pref, supported)
+                try:
+                    result["ok"] = self._finish_kprobe_launch(config, setup)
+                finally:
+                    self._start_pending = False
 
             try:
                 self._call_from_thread(_finish)
             except Exception:
-                logger.debug("kprobe preflight finalize failed", exc_info=True)
+                self._start_pending = False
+                logger.debug("kprobe launch finalize failed", exc_info=True)
 
         self._run_off_thread(_preflight_worker)
         return result["ok"]
 
-    def _finish_backend_selection(
-        self, config: MonitorConfig, pref: str, supported: bool
-    ) -> bool:
-        """Main-thread continuation once the kprobe preflight has completed."""
-        if supported:
-            return self._launch_kprobe(config)
+    def _fall_back_to_fsmon(self, config: MonitorConfig, pref: str) -> bool:
+        """Main-thread continuation when the kprobe backend is unavailable.
 
-        # kprobe unavailable (auto -> not supported, or explicit kprobe ->
-        # preflight failed): fall back to fsmon AND surface a reason-carrying
-        # notice (distinct from the fsmon pid->path notice, which may ALSO fire
-        # afterwards inside _launch_fsmon in auto mode).
+        Surfaces a reason-carrying notice (distinct from the fsmon pid->path
+        notice, which may ALSO fire afterwards inside ``_launch_fsmon`` in auto
+        mode) then launches fsmon.
+        """
         if pref == "kprobe":
             reason = (
                 "kprobe backend was requested but this device's kernel lacks "
@@ -1053,50 +1139,95 @@ class MonitorController:
             self._log_error(f"Failed to start monitor: {e}")
             return False
 
-    def _launch_kprobe(self, config: MonitorConfig) -> bool:
-        """Start the kprobe backend (no ELF pushed).
+    def _kprobe_setup(self, config: MonitorConfig) -> tuple[Any, Any, str] | None:
+        """DEVICE-HEAVY kprobe session setup -- MUST run OFF the UI thread.
 
-        Builds the per-session ``KprobeStreamTranslator`` and a wrapper that
-        carries ``KprobeTracer.teardown`` (run AFTER the pipe is killed).
+        Every ``KprobeTracer.run_by_*`` issues ~40-60 synchronous ``adb shell``
+        round-trips (self-clean + probe install + enable + buffer + filters),
+        each with a 30s timeout, so this would freeze Textual for seconds (or
+        minutes if adb is wedged) on the main thread. The cheap finalization is
+        split out into :meth:`_finish_kprobe_launch`.
+
+        Returns ``(process, translator, mode_desc)`` on success, or ``None`` if
+        the tracer couldn't start the streaming process.
+
+        PID preference (firehose bounding): whenever a target PID is known --
+        even for a ``"path"``-mode config -- ``run_by_pid(pid, path)`` is
+        preferred over pure ``run_by_path``. It seeds ``set_event_pid`` (which
+        bounds the system-wide write firehose to the target's task tree) AND
+        applies the same path glob, so pure path mode is used only when no PID
+        is available.
+        """
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        config.backend = "kprobe"
+
+        if config.target_pid:
+            process = KprobeTracer.run_by_pid(
+                config.target_pid, config.target_path or None
+            )
+            if config.mode == "pid":
+                mode_desc = f"PID {config.target_pid} + children (kprobe)"
+            else:
+                mode_desc = (
+                    f"path {config.target_path} + PID {config.target_pid} (kprobe)"
+                )
+        elif config.mode == "path" and config.target_path:
+            process = KprobeTracer.run_by_path(config.target_path)
+            mode_desc = f"path {config.target_path} (kprobe)"
+        else:
+            process = KprobeTracer.run_capture_all()
+            mode_desc = "all processes (kprobe)"
+
+        if process is None:
+            return None
+
+        # One long-lived translator per session, reset now; the reader thread
+        # runs it AHEAD of its ring buffer (see _start_output_reader).
+        translator = KprobeStreamTranslator()
+        translator.reset(config)
+        return process, translator, mode_desc
+
+    def _finish_kprobe_launch(
+        self, config: MonitorConfig, setup: tuple[Any, Any, str] | None
+    ) -> bool:
+        """CHEAP main-thread finalize of a kprobe launch.
+
+        Constructs the wrapper (carrying ``KprobeTracer.teardown``, run AFTER
+        the pipe is killed), registers the task, starts the reader thread and
+        focuses the tab. The device-heavy work already happened off-thread in
+        :meth:`_kprobe_setup`.
         """
         from sandroid.core.kprobe_tracer import KprobeTracer
         from sandroid.tui.utils import MonitorProcessWrapper
 
-        config.backend = "kprobe"
+        if setup is None:
+            self._log_error("Failed to start kprobe monitor")
+            return False
+        process, translator, mode_desc = setup
+        wrapper = MonitorProcessWrapper(
+            process,
+            config,
+            teardown=KprobeTracer.teardown,
+            translator=translator,
+        )
+        return self._register_and_start(config, wrapper, mode_desc)
+
+    def _launch_kprobe(self, config: MonitorConfig) -> bool:
+        """Synchronous kprobe launch: device-heavy setup THEN cheap finalize.
+
+        The production async path calls :meth:`_kprobe_setup` (off-thread) and
+        :meth:`_finish_kprobe_launch` (main thread) separately; this method
+        keeps them combined for direct/synchronous callers (e.g. tests). No ELF
+        is pushed.
+        """
         self._log_info("Starting kprobe filesystem monitor (no binary pushed)…")
-
         try:
-            if config.mode == "pid" and config.target_pid:
-                process = KprobeTracer.run_by_pid(
-                    config.target_pid, config.target_path or None
-                )
-                mode_desc = f"PID {config.target_pid} + children (kprobe)"
-            elif config.mode == "path" and config.target_path:
-                process = KprobeTracer.run_by_path(config.target_path)
-                mode_desc = f"path {config.target_path} (kprobe)"
-            else:
-                process = KprobeTracer.run_capture_all()
-                mode_desc = "all processes (kprobe)"
-
-            if process is None:
-                self._log_error("Failed to start kprobe monitor")
-                return False
-
-            # One long-lived translator per session, reset now; the reader
-            # thread runs it AHEAD of its ring buffer (see _start_output_reader).
-            translator = KprobeStreamTranslator()
-            translator.reset(config)
-            wrapper = MonitorProcessWrapper(
-                process,
-                config,
-                teardown=KprobeTracer.teardown,
-                translator=translator,
-            )
-            return self._register_and_start(config, wrapper, mode_desc)
-
+            setup = self._kprobe_setup(config)
         except Exception as e:
             self._log_error(f"Failed to start kprobe monitor: {e}")
             return False
+        return self._finish_kprobe_launch(config, setup)
 
     def _start_output_reader(self, monitor_process_wrapper: Any) -> None:
         """Start a thread to read monitor output with batched UI delivery.
@@ -1373,7 +1504,7 @@ class MonitorController:
             )
             return False
 
-        if self.is_running():
+        if self.is_running() or self._start_pending:
             self._log_warning("Monitor is already running.")
             return False
 

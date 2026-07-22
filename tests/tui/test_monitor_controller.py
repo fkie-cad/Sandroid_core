@@ -833,6 +833,27 @@ def test_translator_dropped_control_line_shows_write_becomes_unattributed():
     assert [i.filename for i in ok] == ["x.bin"]
 
 
+def test_translator_skips_err_ptr_file_pointer():
+    """Fix 5: do_filp_open returns an ERR_PTR (top 4 KiB of the address space)
+    on a FAILED open. That value has no matching __fput, so it must NOT be
+    stored in the file* map (it would leak). A write to it stays unattributed,
+    and a real file* is still stored normally.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    # Failed open -> -ENOENT as an ERR_PTR. Must not populate the map.
+    t.feed(_kp("dfo", 100, 'path="/data/fail.txt"'))
+    assert t.feed(_kp("dfor", 100, "file=0xfffffffffffffffe")) == []
+    assert t.feed(_kp("vw", 100, "file=0xfffffffffffffffe count=0x10")) == []
+
+    # A genuine (non-ERR_PTR) file* is still correlated as before.
+    t.feed(_kp("dfo", 100, 'path="/data/ok.txt"'))
+    t.feed(_kp("dfor", 100, "file=0xffff8000abcd"))
+    ok = t.feed(_kp("vw", 100, "file=0xffff8000abcd count=0x10"))
+    assert [i.filename for i in ok] == ["ok.txt"]
+
+
 def test_translator_openat2_create_vs_open():
     t = KprobeStreamTranslator()
     t.reset(None)
@@ -1077,6 +1098,151 @@ def test_start_monitor_kprobe_reader_routes_through_translator(monkeypatch):
         assert modifies[0].source == "kprobe"
     finally:
         EventBus.get().unsubscribe(EventType.TASK_OUTPUT, received.append)
+
+
+# =============================================================================
+# Off-thread setup / preflight guards (Fixes 1, 3b, 6, 7)
+# =============================================================================
+
+
+def test_start_monitor_kprobe_setup_runs_off_thread_registration_on_main(monkeypatch):
+    """Fix 1: the device-heavy kprobe SETUP (run_by_*) runs inside the
+    off-thread runner, and only the cheap finalization (registration + reader
+    start) is marshaled back via call_from_thread.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_path",
+        classmethod(lambda cls, path: events.append("setup") or object()),
+    )
+    monkeypatch.setattr(
+        MonitorController,
+        "_start_output_reader",
+        lambda self, wrapper: events.append("reader"),
+    )
+
+    def fake_off_thread(target):
+        events.append("off_thread")
+        target()  # run synchronously, but records it was routed off-thread
+
+    def fake_from_thread(fn, *args):
+        events.append("from_thread")
+        return fn(*args)
+
+    controller = _make_controller(
+        run_off_thread=fake_off_thread, call_from_thread=fake_from_thread
+    )
+    assert (
+        controller._start_monitor(MonitorConfig(mode="path", target_path="/d")) is True
+    )
+
+    # Ordering proves the structure: off-thread runner wraps the setup, and the
+    # registration/reader-start happen inside the marshaled finalization.
+    assert events.index("off_thread") < events.index("setup")
+    assert events.index("setup") < events.index("from_thread")
+    assert events.index("from_thread") < events.index("reader")
+    assert get_task_service().is_running("monitor")
+
+
+def test_start_monitor_double_start_is_noop_during_pending(monkeypatch):
+    """Fix 6: a second start while the first is still pending (off-thread
+    preflight/setup not yet finished, so the task hasn't registered) must be a
+    no-op -- only ONE worker is ever scheduled.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    _patch_kprobe_launch(monkeypatch)
+
+    deferred = []  # capture the worker instead of running it -> stays pending
+    controller = _make_controller(run_off_thread=deferred.append)
+
+    assert (
+        controller._start_monitor(MonitorConfig(mode="path", target_path="/x")) is True
+    )
+    assert controller._start_pending is True
+
+    warnings: list[str] = []
+    controller._log_warning = warnings.append
+    second = controller._start_monitor(MonitorConfig(mode="path", target_path="/y"))
+    assert second is False
+    assert len(deferred) == 1  # no concurrent worker scheduled
+    assert any("already starting" in w for w in warnings)
+
+    # Draining the first worker finalizes, clears the latch, and registers.
+    deferred[0]()
+    assert controller._start_pending is False
+    assert get_task_service().is_running("monitor")
+
+
+def test_start_monitor_clears_pending_on_kprobe_fallback(monkeypatch):
+    """Fix 6: the pending latch is cleared even when kprobe is unsupported and
+    we fall back to fsmon (else a later start would be wrongly blocked).
+    """
+    monkeypatch.setattr(
+        KprobeTracer, "kprobe_supported", classmethod(lambda cls: False)
+    )
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        FSMon, "run_fsmon_by_path", classmethod(lambda cls, path: object())
+    )
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    controller = _make_controller()
+    assert (
+        controller._start_monitor(MonitorConfig(mode="path", target_path="/x")) is True
+    )
+    assert controller._start_pending is False
+
+
+def test_start_monitor_logs_checking_backend_before_preflight(monkeypatch):
+    """Fix 7: a user-visible notice is logged when the (potentially slow)
+    kprobe preflight begins, so the delay is explained.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    _patch_kprobe_launch(monkeypatch)
+
+    infos: list[str] = []
+    controller = _make_controller(log_info=infos.append)
+    controller._start_monitor(MonitorConfig(mode="path", target_path="/x"))
+    assert any("kprobe" in m.lower() and "check" in m.lower() for m in infos)
+
+
+def test_kprobe_path_mode_with_known_pid_prefers_run_by_pid(monkeypatch):
+    """Fix 3b: when a target PID is known -- even a path-mode config -- prefer
+    run_by_pid(pid, path) (set_event_pid bounds the write firehose) over pure
+    run_by_path.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    by_pid: list[tuple] = []
+    by_path: list[str] = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_pid",
+        classmethod(lambda cls, pid, path=None: by_pid.append((pid, path)) or object()),
+    )
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_path",
+        classmethod(lambda cls, path: by_path.append(path) or object()),
+    )
+
+    controller = _make_controller()
+    # A path-mode config that nonetheless carries a resolved PID.
+    config = MonitorConfig(mode="path", target_path="/data/data/com.x", target_pid=4321)
+    assert controller._start_monitor(config) is True
+
+    assert by_pid == [(4321, "/data/data/com.x")]
+    assert by_path == []  # pure path mode NOT used when a PID is available
 
 
 # =============================================================================

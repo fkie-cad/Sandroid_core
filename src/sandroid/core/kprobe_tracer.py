@@ -134,6 +134,19 @@ class KprobeTracer:
         "fput",
     )
 
+    # ATTRS/XATTR probes (notify_change / vfs_setxattr) capture only a
+    # *basename* (dentry name), never a full path -- so they are absent from
+    # _PATH_FILTER_FIELDS and CANNOT be in-kernel path-glob-filtered. In pure
+    # PATH mode they are therefore NOT installed/enabled: otherwise ANY
+    # process's chmod/chown/truncate/utimes/setxattr device-wide would surface
+    # as an ATTRS/XATTR row, violating the "nothing outside the path" contract.
+    # They ARE kept in PID mode (scoped by set_event_pid) and in capture-all
+    # mode (global capture is the intent).
+    #
+    # KNOWN LIMITATION: ATTRS/XATTR events are unavailable in pure path mode.
+    # Use PID mode (or PID+path) or capture-all mode if you need them.
+    _GLOBAL_ONLY_PROBES = ("nc", "sx")
+
     # Metadata probes whose path/name field is glob-filterable in path mode.
     _PATH_FILTER_FIELDS = {
         "openat2": "fname",
@@ -223,13 +236,24 @@ class KprobeTracer:
     # =========================================================================
 
     @classmethod
-    def ensure_root(cls) -> bool:
-        """Enable adb root and verify uid=0 (mirrors proxy_manager.enable_adb_root).
+    def _root_status(cls) -> str:
+        """Enable adb root and classify the outcome into a tri-state.
 
-        Never uses ``su``/``su 0`` (a non-functional stub on the target AVDs).
+        Mirrors ``proxy_manager.enable_adb_root`` but distinguishes a GENUINE
+        "this device can't grant root" verdict from a merely transient/timeout
+        adb failure, so ``kprobe_supported`` can apply the same
+        no-memoize-on-inconclusive rule it already uses for the tracefs-None
+        branch. Never uses ``su``/``su 0`` (a non-functional stub on the target
+        AVDs).
 
         Returns:
-            True if the device shell is running as uid=0.
+            ``"root"`` -- the device shell is confirmed running as uid=0.
+            ``"denied"`` -- adbd reported the genuine "adbd cannot run as root"
+            signal (a real, memoizable verdict for this serial).
+            ``"inconclusive"`` -- neither confirmed nor genuinely denied (e.g.
+            an adb timeout/protocol fault, device offline, or an exception);
+            indistinguishable from a transient failure, so the caller must NOT
+            memoize it.
         """
         import time
 
@@ -237,14 +261,25 @@ class KprobeTracer:
             stdout, stderr = Adb.send_adb_command("root")
             combined = (stdout or "") + (stderr or "")
             if "adbd cannot run as root" in combined:
-                return False
+                return "denied"
             if "restarting" in combined.lower():
                 time.sleep(0.5)
             stdout, _ = Adb.send_adb_command("shell id")
-            return "uid=0" in (stdout or "")
+            return "root" if "uid=0" in (stdout or "") else "inconclusive"
         except Exception as e:
-            cls.logger.warning(f"ensure_root failed: {e}")
-            return False
+            cls.logger.warning(f"root status check failed: {e}")
+            return "inconclusive"
+
+    @classmethod
+    def ensure_root(cls) -> bool:
+        """Enable adb root and verify uid=0 (thin bool wrapper over _root_status).
+
+        Never uses ``su``/``su 0`` (a non-functional stub on the target AVDs).
+
+        Returns:
+            True if the device shell is running as uid=0.
+        """
+        return cls._root_status() == "root"
 
     # =========================================================================
     # Capability preflight (run OFF the UI thread by the controller)
@@ -337,9 +372,16 @@ class KprobeTracer:
         if serial in cls._kprobe_cache:
             return cls._kprobe_cache[serial]
 
-        # 1. Root -- a real "device can't grant root" verdict for this serial.
-        if not cls.ensure_root():
+        # 1. Root. Only a GENUINE "device can't grant root" verdict is memoized
+        # for this serial; a transient/timeout adb failure is inconclusive and
+        # must NOT be cached (else a later start can never retry once adb
+        # recovers) -- same no-memoize-on-inconclusive rule as the tracefs-None
+        # branch below.
+        status = cls._root_status()
+        if status == "denied":
             cls._kprobe_cache[serial] = False
+            return False
+        if status != "root":
             return False
 
         # 2. Writable tracefs.
@@ -396,17 +438,34 @@ class KprobeTracer:
             cls._shell(f"echo {cls._dq('-:' + name)} >> {events} 2>/dev/null")
 
     @classmethod
-    def _install_probes(cls, tracefs: str) -> None:
-        """Append the full verified probe set to the global kprobe_events."""
-        events = f"{tracefs}/kprobe_events"
-        for definition in cls._PROBE_DEFS:
-            cls._shell(f"echo {cls._dq(definition)} >> {events}")
+    def _active_probes(cls, mode: str) -> tuple[str, ...]:
+        """Probe names to install+enable for a given scoping ``mode``.
+
+        In pure ``"path"`` mode the ATTRS/XATTR probes (``nc``/``sx``) are
+        OMITTED -- they capture only a basename and can't be path-glob-filtered,
+        so keeping them would leak device-wide attribute/xattr rows (see
+        ``_GLOBAL_ONLY_PROBES``). Every other mode (``"pid"``, capture-all)
+        keeps the full set.
+        """
+        if mode == "path":
+            return tuple(
+                n for n in cls._PROBE_NAMES if n not in cls._GLOBAL_ONLY_PROBES
+            )
+        return cls._PROBE_NAMES
 
     @classmethod
-    def _enable_events(cls, tracefs: str) -> None:
-        """Enable each of our events inside the dedicated instance."""
+    def _install_probes(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
+        """Append the mode-appropriate probe set to the global kprobe_events."""
+        events = f"{tracefs}/kprobe_events"
+        for name, definition in zip(cls._PROBE_NAMES, cls._PROBE_DEFS, strict=True):
+            if name in probe_names:
+                cls._shell(f"echo {cls._dq(definition)} >> {events}")
+
+    @classmethod
+    def _enable_events(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
+        """Enable each of the mode's events inside the dedicated instance."""
         inst = cls._instance_dir(tracefs)
-        for name in cls._PROBE_NAMES:
+        for name in probe_names:
             cls._shell(f"echo 1 > {inst}/events/kprobes/{name}/enable")
 
     @classmethod
@@ -434,7 +493,7 @@ class KprobeTracer:
         cls._shell(f"echo 1 > {inst}/options/event-fork")
 
     @classmethod
-    def _begin_session(cls, tracefs: str) -> None:
+    def _begin_session(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
         """Self-clean, create the instance, bump the buffer, install probes."""
         cls._self_clean(tracefs)
         inst = cls._instance_dir(tracefs)
@@ -443,12 +502,14 @@ class KprobeTracer:
         # restore it (belt-and-suspenders if the instance rmdir later fails).
         cls._orig_buffer_kb = cls._shell(f"cat {inst}/buffer_size_kb").strip() or None
         cls._shell(f"echo {cls._BUFFER_SIZE_KB} > {inst}/buffer_size_kb")
-        cls._install_probes(tracefs)
+        cls._install_probes(tracefs, probe_names)
 
     @classmethod
-    def _finish_session(cls, tracefs: str) -> subprocess.Popen | None:
+    def _finish_session(
+        cls, tracefs: str, probe_names: tuple[str, ...]
+    ) -> subprocess.Popen | None:
         """Enable events, turn tracing on, and stream the instance trace_pipe."""
-        cls._enable_events(tracefs)
+        cls._enable_events(tracefs, probe_names)
         inst = cls._instance_dir(tracefs)
         cls._shell(f"echo 1 > {inst}/tracing_on")
         cmd = cls._build_adb_cmd("shell", "cat", f"{inst}/trace_pipe")
@@ -459,22 +520,42 @@ class KprobeTracer:
         """Start kprobe tracing scoped to ``pid`` and its whole child tree.
 
         Optionally also constrains to files under ``path`` (a glob on the
-        metadata + do_filp_open probes).
+        metadata + do_filp_open probes). PID mode keeps the FULL probe set --
+        the ATTRS/XATTR probes (nc/sx) are scoped by ``set_event_pid`` here, so
+        (unlike pure path mode) they don't leak device-wide.
         """
         tracefs = cls._tracefs or cls._resolve_tracefs()
         if tracefs is None:
             cls.logger.error("kprobe run_by_pid: no writable tracefs")
             return None
         cls._tracefs = tracefs
-        cls._begin_session(tracefs)
+        probe_names = cls._active_probes("pid")
+        cls._begin_session(tracefs, probe_names)
         cls._seed_pid_tree(tracefs, pid)
         if path:
             cls._apply_path_filter(tracefs, path)
-        return cls._finish_session(tracefs)
+        return cls._finish_session(tracefs, probe_names)
 
     @classmethod
     def run_by_path(cls, path: str) -> subprocess.Popen | None:
-        """Start kprobe tracing scoped (in-kernel) to files under ``path``."""
+        """Start kprobe tracing scoped (in-kernel) to files under ``path``.
+
+        Two path-mode caveats callers should know about:
+
+        * ATTRS/XATTR events are UNAVAILABLE here -- the ``nc``/``sx`` probes
+          capture only a basename, can't be path-glob-filtered, and are omitted
+          to avoid leaking device-wide attribute/xattr rows (see
+          ``_GLOBAL_ONLY_PROBES``). Use PID mode or capture-all for those.
+        * WRITE FIREHOSE: writes (``vfs_write``/``do_iter_write``) and the
+          ``do_filp_open``-return / ``__fput`` correlation lines can't be
+          path-filtered in-kernel, so they fire system-wide. Under heavy system
+          write load the kernel ring buffer can drop the sparse ``dfor``/``fput``
+          control lines -- upstream of the Python deque, so the translator's
+          translate-ahead-of-deque design can't recover them -- corrupting the
+          file* map. The 64 MB/CPU buffer mitigates this. When a target PID is
+          known, prefer ``run_by_pid(pid, path)`` (PID+path): ``set_event_pid``
+          bounds the firehose to the target's task tree.
+        """
         if not path:
             cls.logger.error("kprobe run_by_path: empty path")
             return None
@@ -483,20 +564,26 @@ class KprobeTracer:
             cls.logger.error("kprobe run_by_path: no writable tracefs")
             return None
         cls._tracefs = tracefs
-        cls._begin_session(tracefs)
+        probe_names = cls._active_probes("path")
+        cls._begin_session(tracefs, probe_names)
         cls._apply_path_filter(tracefs, path)
-        return cls._finish_session(tracefs)
+        return cls._finish_session(tracefs, probe_names)
 
     @classmethod
     def run_capture_all(cls) -> subprocess.Popen | None:
-        """Start kprobe tracing with no pid/path filter (global capture)."""
+        """Start kprobe tracing with no pid/path filter (global capture).
+
+        Keeps the FULL probe set including ATTRS/XATTR -- device-wide capture
+        is the explicit intent of this mode.
+        """
         tracefs = cls._tracefs or cls._resolve_tracefs()
         if tracefs is None:
             cls.logger.error("kprobe run_capture_all: no writable tracefs")
             return None
         cls._tracefs = tracefs
-        cls._begin_session(tracefs)
-        return cls._finish_session(tracefs)
+        probe_names = cls._active_probes("all")
+        cls._begin_session(tracefs, probe_names)
+        return cls._finish_session(tracefs, probe_names)
 
     @classmethod
     def teardown(cls) -> None:

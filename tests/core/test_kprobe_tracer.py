@@ -238,6 +238,39 @@ def test_kprobe_supported_inconclusive_tracefs_not_memoized(monkeypatch):
     assert "emulator-5556" not in KprobeTracer._kprobe_cache
 
 
+def test_kprobe_supported_transient_root_failure_not_memoized(monkeypatch):
+    """Fix 4: a transient/timeout root failure (NOT the genuine "adbd cannot
+    run as root" signal) is inconclusive -> return False WITHOUT memoizing, so
+    a later start retries once adb recovers.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake = _FakeShell(
+        [
+            # `adb root` neither confirms nor denies (e.g. protocol fault), and
+            # `shell id` doesn't show uid=0 -> inconclusive, must NOT memoize.
+            (_root_ok, ("", "error: protocol fault")),
+            (_id_ok, ("", "error: device offline")),
+        ]
+    )
+    _install(monkeypatch, fake)
+    assert KprobeTracer.kprobe_supported() is False
+    assert "emulator-5556" not in KprobeTracer._kprobe_cache
+
+
+def test_kprobe_supported_root_exception_not_memoized(monkeypatch):
+    """Fix 4: an exception during the root check (adb wedged) is inconclusive
+    too -> False without memoizing.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+
+    def _boom(command):
+        raise RuntimeError("adb transport died")
+
+    monkeypatch.setattr(Adb, "send_adb_command", _boom)
+    assert KprobeTracer.kprobe_supported() is False
+    assert "emulator-5556" not in KprobeTracer._kprobe_cache
+
+
 # =============================================================================
 # Session setup -- command construction
 # =============================================================================
@@ -301,7 +334,7 @@ def test_run_by_path_installs_probe_set_and_path_filter(monkeypatch):
     KprobeTracer.run_by_path("/data/data/com.example.app")
 
     joined = "\n".join(fake.commands)
-    # Full verified probe set installed.
+    # Path-mode probe set installed (everything EXCEPT the attr/xattr probes).
     for sym in (
         "do_sys_openat2",
         "do_mkdirat",
@@ -311,14 +344,28 @@ def test_run_by_path_installs_probe_set_and_path_filter(monkeypatch):
         "do_iter_write",
         "do_filp_open",
         "__fput",
-        "notify_change",
-        "vfs_setxattr",
     ):
         assert sym in joined, sym
+    # Fix 2: pure PATH mode must NOT install the ATTRS/XATTR probes. They
+    # capture only a basename (never a full path), so they can't be
+    # path-glob-filtered and would otherwise emit device-wide ATTRS/XATTR rows
+    # for any process. (The self-clean/teardown still reference them by the
+    # short probe names nc/sx, but the kernel symbols only ever appear via an
+    # INSTALL, so their absence proves the defs were never installed.)
+    assert "notify_change" not in joined
+    assert "vfs_setxattr" not in joined
     # In-kernel path glob on the scoped probes + do_filp_open correlation set.
     assert "/data/data/com.example.app/*" in joined
     assert "/events/kprobes/openat2/filter" in joined
     assert "/events/kprobes/dfo/filter" in joined
+    # nc/sx are not ENABLED inside the instance (the self-clean still DISABLES
+    # them idempotently with `echo 0`, but no `echo 1` enable is issued).
+    assert not any(
+        "echo 1 > " in c and "/events/kprobes/nc/enable" in c for c in fake.commands
+    )
+    assert not any(
+        "echo 1 > " in c and "/events/kprobes/sx/enable" in c for c in fake.commands
+    )
     # No PID scoping in path mode: no /proc/<pid>/task enumeration and no
     # event-fork (both are pid-mode-only). The only set_event_pid touch is the
     # self-clean's clearing write.
@@ -384,6 +431,46 @@ def test_run_capture_all_has_no_pid_or_path_filter(monkeypatch):
     assert "options/event-fork" not in joined
     assert "/filter" not in joined
     assert captured["stream_cmd"][-1].endswith("/sandroid_mon/trace_pipe")
+
+
+def test_run_by_pid_keeps_attr_probes(monkeypatch):
+    """Fix 2: PID mode keeps the ATTRS/XATTR probes (nc/sx) -- they're scoped by
+    set_event_pid, so they don't leak device-wide.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, _ = _capture_run(monkeypatch)
+
+    KprobeTracer.run_by_pid(1234)
+
+    joined = "\n".join(fake.commands)
+    assert "notify_change" in joined  # nc def installed
+    assert "vfs_setxattr" in joined  # sx def installed
+    assert any(
+        "echo 1 > " in c and "/events/kprobes/nc/enable" in c for c in fake.commands
+    )
+    assert any(
+        "echo 1 > " in c and "/events/kprobes/sx/enable" in c for c in fake.commands
+    )
+
+
+def test_run_capture_all_keeps_attr_probes(monkeypatch):
+    """Fix 2: capture-all mode keeps the ATTRS/XATTR probes -- device-wide
+    capture is the explicit intent.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, _ = _capture_run(monkeypatch)
+
+    KprobeTracer.run_capture_all()
+
+    joined = "\n".join(fake.commands)
+    assert "notify_change" in joined
+    assert "vfs_setxattr" in joined
+    assert any(
+        "echo 1 > " in c and "/events/kprobes/nc/enable" in c for c in fake.commands
+    )
+    assert any(
+        "echo 1 > " in c and "/events/kprobes/sx/enable" in c for c in fake.commands
+    )
 
 
 # =============================================================================
