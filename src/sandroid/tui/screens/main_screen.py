@@ -119,13 +119,15 @@ class MainScreen(Screen):
         height: 1;
         background: #0a1124;
         padding: 0 0 0 1;
+        /* Always reserve the left-border column (colored to match the
+           background, so it's invisible) -- switching only the color
+           in -level-active below avoids any width shift on toggle, and
+           a left/right border costs a column, never a row, so it can't
+           repeat the height-collapse bug a bottom border caused here. */
+        border-left: heavy #0a1124;
     }
     #tool-tabbar.-level-active {
-        /* border-box: the single-cell content row + this 1-cell border need
-           2 rows total, else the border eats the only row and the tab labels
-           clip to nothing (the bug that hid the whole tab strip). */
-        height: 2;
-        border-bottom: solid #38bdf8;
+        border-left: heavy #38bdf8;
     }
     .tool-tab {
         width: auto;

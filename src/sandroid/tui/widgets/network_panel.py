@@ -73,12 +73,13 @@ class NetworkPanel(Widget):
         height: 1;
         background: #0a1124;
         padding: 0 0 0 1;
+        /* Always reserve the left-border column (colored to match the
+           background, so it's invisible) -- switching only the color
+           in -level-active below avoids any width shift on toggle. */
+        border-left: heavy #0a1124;
     }
     NetworkPanel > #network-tabbar.-level-active {
-        /* border-box: reserve a 2nd row for the border so it doesn't eat the
-           single content row and clip the sub-tab labels to nothing. */
-        height: 2;
-        border-bottom: solid #38bdf8;
+        border-left: heavy #38bdf8;
     }
     NetworkPanel .network-subtab {
         width: auto;
