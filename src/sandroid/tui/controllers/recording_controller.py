@@ -150,12 +150,16 @@ class RecordingController:
         self._on_run_saved = on_run_saved
         self._on_fsmon_stopped_for_playback = on_fsmon_stopped_for_playback
         self._on_fsmon_resume_available = on_fsmon_resume_available
-        # Recording-session bookkeeping for the label-seed flow (see
+        # Recording-session bookkeeping for the settings-seed flow (see
         # start_recording()): a monotonic counter for the "Run N" default
-        # name, and the label seed that every subsequent Play of the current
-        # recording defaults to (until a fresh Record replaces it).
+        # name, the label seed, and the replay-count/dry-run settings that
+        # every subsequent Play of the current recording defaults to (until a
+        # fresh Record replaces them). Chosen in the combined Record-settings
+        # form (idea B) and forwarded live via ``on_settings_chosen``.
         self._recording_seq = 0
         self._current_recording_label: str | None = None
+        self._current_number_of_runs = 2
+        self._current_noise_filter = True
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -181,6 +185,12 @@ class RecordingController:
 
         return get_forensic_service()
 
+    def _get_action_window_service(self) -> Any:
+        """Get action-window service instance."""
+        from sandroid.services import get_action_window_service
+
+        return get_action_window_service()
+
     # =========================================================================
     # Recording Operations
     # =========================================================================
@@ -200,14 +210,21 @@ class RecordingController:
         Creates a snapshot before recording starts.
 
         Recording itself starts immediately and non-blockingly (the modal is
-        pushed with ``auto_start=True`` — see ``RecordingModal``), and a
-        "Label this run" prompt pops right after: recording captures *device*
-        interaction, not TUI input, so stacking that prompt on top blocks
-        nothing time-sensitive. The chosen label (or the auto-generated
-        default if the user leaves it blank/Escapes) seeds the default label
-        for *every subsequent Play of this same recording* — it is not a
-        one-time identity. A later per-run rename (DiffsView's ``n`` key)
-        only edits that one run's saved label and never touches this seed.
+        pushed with ``auto_start=True`` — see ``RecordingModal``), and the
+        combined Record-settings form (idea B: name + replays + dry-run) pops
+        right after: recording captures *device* interaction, not TUI input,
+        so stacking that form on top blocks nothing time-sensitive. The chosen
+        name (or the auto-generated default if left blank/Escaped) seeds the
+        default label for *every subsequent Play of this same recording* — it
+        is not a one-time identity — and the replay-count/dry-run choices seed
+        both the auto-chained playback and every later manual Play. A per-run
+        rename (DiffsView's ``n`` key) only edits that one run's saved label
+        and never touches this seed.
+
+        On a completed Stop the recording **auto-chains straight into
+        playback** with those settings (idea B), so Record → interact → Stop
+        lands the user on the Diff panel with results; pressing ``p`` still
+        re-plays the current recording manually with the same settings.
 
         Returns:
             True if recording was started successfully
@@ -225,14 +242,19 @@ class RecordingController:
 
         self._recording_seq += 1
         default_label = f"Run {self._recording_seq} · {time.strftime('%H:%M')}"
-        # Seed a sane fallback immediately, in case the live callback below
+        # Seed sane fallbacks immediately, in case the live callback below
         # never fires for some reason (e.g. the modal is torn down early).
         self._current_recording_label = default_label
 
-        def on_label_chosen(label: str) -> None:
-            # Fires the moment the non-blocking label prompt is dismissed —
-            # well before the recording session itself ends (Stop/dismiss).
+        def on_settings_chosen(
+            label: str, number_of_runs: int, noise_filter: bool
+        ) -> None:
+            # Fires the moment the non-blocking Record-settings form is
+            # dismissed — well before the recording session itself ends
+            # (Stop/dismiss). Seeds every subsequent Play of this recording.
             self._current_recording_label = label
+            self._current_number_of_runs = number_of_runs
+            self._current_noise_filter = noise_filter
 
         def on_recording_result(result: RecordingResult) -> None:
             if result is None or result.cancelled:
@@ -240,20 +262,32 @@ class RecordingController:
                 return
 
             if result.completed:
-                # Belt-and-suspenders: keep the seed in sync even if
-                # on_label_chosen was somehow never wired/fired.
+                # Belt-and-suspenders: keep the seeds in sync even if
+                # on_settings_chosen was somehow never wired/fired.
                 if getattr(result, "label", ""):
                     self._current_recording_label = result.label
+                self._current_number_of_runs = getattr(
+                    result, "number_of_runs", self._current_number_of_runs
+                )
+                self._current_noise_filter = getattr(
+                    result, "noise_filter", self._current_noise_filter
+                )
                 self._log_success(
                     f"Recording saved: {result.event_count} events, {result.duration}s"
                 )
+                # Auto-chain (idea B): Record → interact → Stop flows straight
+                # into playback with the chosen settings, landing the user on
+                # the Diff panel with results.
+                self.start_playback()
 
         self._log_info("Opening recording modal...")
         self._push_modal(
             RecordingModal(
                 auto_start=True,
                 default_label=default_label,
-                on_label_chosen=on_label_chosen,
+                default_number_of_runs=self._current_number_of_runs,
+                default_noise_filter=self._current_noise_filter,
+                on_settings_chosen=on_settings_chosen,
             ),
             on_recording_result,
         )
@@ -420,79 +454,70 @@ class RecordingController:
             return None
 
     def _run_playback_analysis(self) -> None:
-        """Execute playback analysis pipeline (runs in worker thread).
+        """Execute the playback analysis via the unified ``AnalysisEngine``.
 
-        Keeps the *native* result shapes from each analyzer instead of
-        flattening them to bare filenames — ``changed_files`` stays
-        ``ChangedFiles.return_data()``'s ``{file: [diff_lines]} | str`` list
-        (real diff text for diffed sqlite/xml/txt files, a bare path for
-        everything else), all the way through to the persisted
-        :class:`~sandroid.core.run_history.RunRecord`. The old
-        ``_extract_file_names()``/``_flatten_file_list()`` helpers that threw
-        the diff text away are gone. ``DeletedFiles`` is now gathered too
-        (previously only the CLI's ``ActionQ``/headless
-        ``api/analysis_runners.py`` path called it — never this TUI Play
-        path), mirroring the same gather-order those callers use: Changed,
-        then New, then Deleted, all via ``.gather()`` + ``.return_data()``.
+        Runs in a worker thread. Builds a self-contained *run bundle*
+        (``core/run_bundle.py``) for this Play, copies the live recording into
+        it up-front (so it is addressed by absolute path and immune to a
+        mid-flow device switch re-pointing ``RAW_RESULTS_PATH``), then hands a
+        :class:`~sandroid.analysis.run_config.RunConfig` to
+        :class:`~sandroid.analysis.engine.AnalysisEngine`. The engine performs
+        the whole load-snapshot / baseline / play / gather / first-second-noise
+        pull / dry-run pipeline (replacing the old hand-rolled ``[n/6]`` body)
+        and returns a :class:`~sandroid.analysis.run_config.RunResult` whose
+        *native* diff shapes (``{file: [diff_lines]} | str``) are persisted
+        verbatim into the :class:`~sandroid.core.run_history.RunRecord`.
+
+        A fatal step (e.g. a mid-run device switch) makes the engine return a
+        partial ``RunResult(error=...)`` rather than raising; that partial
+        result is persisted too, so a failed run stays visible in Diffs with
+        its error message. The fsmon Play-safety-net (stop-before-revert +
+        resume offer) is preserved around the engine run.
         """
-        from sandroid.analysis.changedfiles import ChangedFiles
-        from sandroid.analysis.deletedfiles import DeletedFiles
-        from sandroid.analysis.newfiles import NewFiles
-        from sandroid.features.player import Player
+        from sandroid.analysis.engine import AnalysisEngine
+        from sandroid.analysis.run_config import RunConfig
+        from sandroid.core import run_bundle, run_history
 
-        changed_files_data: list[Any] = []
-        new_files_data: list[str] = []
-        deleted_files_data: list[str] = []
-        duration = 0
-        error: str | None = None
         toolbox = self._get_toolbox()
+        device_name = getattr(toolbox, "device_name", None) or "unknown"
         recorded_at = datetime.now().isoformat()
+        run_id = run_history.new_run_id()
+        result: Any = None
+        error: str | None = None
+        abs_rec = self.get_recording_path()
         fsmon_config_for_resume: Any = None
 
         try:
             # Safety net (see _stop_fsmon_before_revert's docstring): fsmon
-            # cannot survive the snapshot revert about to happen in Step 1,
-            # so stop it cleanly right before that call rather than let it
-            # silently die. True no-op if fsmon isn't running.
+            # cannot survive the snapshot revert the engine's first step does,
+            # so stop it cleanly *before* handing off to the engine rather than
+            # let it silently die. True no-op if fsmon isn't running.
             fsmon_config_for_resume = self._stop_fsmon_before_revert()
 
-            # Step 1: Load snapshot
-            self._call_from_thread(self._log_info, "[1/6] Loading snapshot...")
-            toolbox.load_snapshot(b"tmp")
+            # Build the run bundle and copy the live recording into it up-front
+            # so every later step reads it by absolute path.
+            run_bundle.create_bundle(run_id)
+            abs_rec = run_bundle.import_recording(run_id, self.get_recording_path())
 
-            # Step 2: Create baseline
-            self._call_from_thread(self._log_info, "[2/6] Creating baseline...")
-            forensic = self._get_forensic_service()
-            forensic.set_baseline(toolbox.fetch_changed_files(fetch_all=True))
-
-            # Step 3: Play recording
-            self._call_from_thread(self._log_info, "[3/6] Playing recording...")
-            player = Player()
-            player.perform()
-            duration = self._get_forensic_service().get_action_duration()
-
-            # Step 4: Analyze changed files (native shape kept — see docstring)
-            self._call_from_thread(self._log_info, "[4/6] Analyzing changed files...")
-            changed_files_obj = ChangedFiles()
-            changed_files_obj.gather()
-            changed_files_data = changed_files_obj.return_data().get(
-                "Changed Files", []
+            config = RunConfig.for_playback(
+                recording_path=abs_rec,
+                number_of_runs=self._current_number_of_runs,
+                noise_filter=self._current_noise_filter,
             )
+            config.raw_results_path = run_bundle.raw_dir(run_id)
+            config.results_path = str(run_bundle.bundle_dir(run_id))
+            config.device_name = device_name
 
-            # Step 5: Analyze new files
-            self._call_from_thread(self._log_info, "[5/6] Analyzing new files...")
-            new_files_obj = NewFiles()
-            new_files_obj.gather()
-            new_files_data = new_files_obj.return_data().get("New Files", [])
-
-            # Step 6: Analyze deleted files (newly wired into the TUI Play path)
-            self._call_from_thread(self._log_info, "[6/6] Analyzing deleted files...")
-            deleted_files_obj = DeletedFiles()
-            deleted_files_obj.gather()
-            deleted_files_data = deleted_files_obj.return_data().get(
-                "Deleted Files", []
-            )
-
+            result = AnalysisEngine(
+                config,
+                progress=self._emit_progress,
+                toolbox=toolbox,
+                forensic_service=self._get_forensic_service(),
+                action_window_service=self._get_action_window_service(),
+            ).run()
+            # The engine returns a partial RunResult(error=...) for a fatal
+            # step instead of raising, so surface that as this run's error.
+            error = result.error
         except Exception as e:
             error = f"Playback failed: {e}"
             self._call_from_thread(self._log_error, error)
@@ -501,24 +526,26 @@ class RecordingController:
         # is still visible in Diffs (with its error message) instead of
         # silently vanishing — this is exactly why RunRecord.error exists.
         self._call_from_thread(self._log_info, "Saving results...")
-        run_id = self._save_playback_results(
-            changed_files_data,
-            new_files_data,
-            deleted_files_data,
-            duration,
-            recorded_at,
-            error,
+        saved_run_id = self._persist_run(
+            run_id=run_id,
+            result=result,
+            recording_path=abs_rec,
+            bundle_dir=str(run_bundle.bundle_dir(run_id)),
+            device_name=device_name,
+            recorded_at=recorded_at,
+            error=error,
         )
 
-        if error is None:
+        if error is None and result is not None:
             self._call_from_thread(
                 self._log_success,
-                f"Analysis complete: {len(changed_files_data)} changed, "
-                f"{len(new_files_data)} new, {len(deleted_files_data)} deleted files",
+                f"Analysis complete: {len(result.changed_files)} changed, "
+                f"{len(result.new_files)} new, "
+                f"{len(result.deleted_files)} deleted files",
             )
 
-        if run_id and self._on_run_saved:
-            self._call_from_thread(self._on_run_saved, run_id)
+        if saved_run_id and self._on_run_saved:
+            self._call_from_thread(self._on_run_saved, saved_run_id)
 
         # Offer to resume monitoring once Play is fully done — regardless of
         # success/error above, since resuming fsmon is orthogonal to whether
@@ -531,59 +558,93 @@ class RecordingController:
                 self._on_fsmon_resume_available, fsmon_config_for_resume
             )
 
-    def _save_playback_results(
+    def _emit_progress(self, update: Any) -> None:
+        """Marshal an engine ``ProgressUpdate`` to a UI-thread log line.
+
+        Replaces the old hand-rolled ``[n/6]`` step strings — the engine now
+        drives progress at run boundaries via ``AnalysisEngine(progress=...)``.
+        Invoked on the playback worker thread, so the log write is marshaled to
+        the UI thread via ``call_from_thread``.
+        """
+        label = getattr(update, "label", "") or ""
+        message = getattr(update, "message", "") or ""
+        line = f"{label}: {message}" if message else label
+        if not line:
+            return
+        self._call_from_thread(self._log_info, line)
+
+    def _persist_run(
         self,
-        changed_files: list[Any],
-        new_files: list[str],
-        deleted_files: list[str],
-        duration: int,
+        *,
+        run_id: str,
+        result: Any,
+        recording_path: str,
+        bundle_dir: str,
+        device_name: str,
         recorded_at: str,
         error: str | None,
     ) -> str | None:
-        """Persist this Play as a :class:`RunRecord` (run_history.py).
+        """Persist this Play's run-bundle manifest (a :class:`RunRecord`).
 
         Returns the new ``run_id`` on success, or ``None`` if saving failed
         (logged, never raised — a persistence failure must not crash the
-        playback worker thread).
+        playback worker thread). When ``result`` is a
+        :class:`~sandroid.analysis.run_config.RunResult` its native diff shapes
+        are preserved via ``to_run_record``; when it is ``None`` (an exception
+        aborted the run before the engine returned) a minimal error-only record
+        is written so the failed run still appears in Diffs.
 
         Also (still) writes the legacy ``RESULTS_PATH/sandroid.json`` summary
         for anything outside the TUI that reads it.
         """
-        from sandroid.core import run_history
+        from sandroid.core import run_bundle, run_history
 
-        toolbox = self._get_toolbox()
-        device_name = getattr(toolbox, "device_name", None) or "unknown"
-        run_id = run_history.new_run_id()
+        completed_at = datetime.now().isoformat()
         label = self._current_recording_label or f"Run · {time.strftime('%H:%M')}"
 
-        record = run_history.RunRecord(
-            schema_version=run_history.SCHEMA_VERSION,
-            run_id=run_id,
-            label=label,
-            recorded_at=recorded_at,
-            completed_at=datetime.now().isoformat(),
-            device_name=device_name,
-            recording_path=self.get_recording_path(),
-            duration=duration,
-            error=error,
-            changed_files=changed_files,
-            new_files=new_files,
-            deleted_files=deleted_files,
-            counts={
-                "changed": len(changed_files),
-                "new": len(new_files),
-                "deleted": len(deleted_files),
-            },
-        )
+        if result is not None:
+            duration = int(getattr(result, "action_duration", 0) or 0)
+            record = result.to_run_record(
+                run_id=run_id,
+                label=label,
+                recording_path=recording_path,
+                bundle_dir=bundle_dir,
+                recorded_at=recorded_at,
+                completed_at=completed_at,
+                duration=duration,
+            )
+            # to_run_record already copies result.error; keep any wrapping
+            # error (e.g. a bundle/import failure) if one was recorded.
+            if error is not None:
+                record.error = error
+        else:
+            duration = 0
+            record = run_history.RunRecord(
+                schema_version=run_history.SCHEMA_VERSION,
+                run_id=run_id,
+                label=label,
+                recorded_at=recorded_at,
+                completed_at=completed_at,
+                device_name=device_name,
+                recording_path=recording_path,
+                bundle_dir=bundle_dir,
+                duration=duration,
+                error=error,
+                changed_files=[],
+                new_files=[],
+                deleted_files=[],
+                counts={"changed": 0, "new": 0, "deleted": 0},
+            )
 
+        saved_run_id: str | None = run_id
         try:
-            run_history.save_run(record)
+            run_bundle.write_manifest(record)
         except Exception as e:
             self._call_from_thread(
                 self._log_warning,
                 f"Could not save run history: {e}",
             )
-            run_id = None
+            saved_run_id = None
 
         # Legacy summary file some external tooling may still read.
         try:
@@ -603,7 +664,7 @@ class RecordingController:
                 f"[warning]Could not save legacy results summary: {e}[/warning]",
             )
 
-        return run_id
+        return saved_run_id
 
     # =========================================================================
     # Export Operations

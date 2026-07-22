@@ -149,9 +149,6 @@ def __getattr__(name: str):
     help="Show log messages in terminal (useful for debugging TUI issues)",
 )
 @click.option(
-    "--interactive", "-i", is_flag=True, help="Start in legacy Rich interactive mode"
-)
-@click.option(
     "--fresh",
     is_flag=True,
     help="Start as if running for the first time (reset welcome screen)",
@@ -287,7 +284,6 @@ def main(
     report: bool,
     debug: bool,
     log: bool,
-    interactive: bool,
     fresh: bool,
     view: str | None,
     headless: bool,
@@ -313,9 +309,8 @@ def main(
     loading, logging setup, and dispatches to the appropriate execution mode:
 
     1. Default mode: Textual TUI (when running just 'sandroid')
-    2. Legacy Rich mode (-i flag): Classic Rich-based interactive menu
-    3. Automated analysis: Command-line driven analysis with --trigdroid
-    4. Headless mode (--headless): Programmatic API-based analysis
+    2. Automated analysis: Command-line driven analysis with --trigdroid
+    3. Headless mode (--headless): Programmatic API-based analysis
     """
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
@@ -422,13 +417,10 @@ def main(
         )
         get_ui_service().set_current_view(initial_view)
 
-        # Determine if we're using TUI mode
-        use_tui = not interactive
-
-        # Setup logging
+        # Setup logging (the Textual TUI is the only interactive UI)
         active_logger = setup_logging(
             sandroid_config,
-            tui_mode=use_tui,
+            tui_mode=True,
             show_terminal_log=log,
         )
 
@@ -520,13 +512,12 @@ def main(
                 PDFReport,
             )
         else:
-            # Default: TUI mode (or legacy Rich mode with -i)
+            # Default: Textual TUI
             start_interactive_mode(
                 sandroid_config,
                 active_logger,
                 Toolbox,
                 Adb,
-                use_tui=use_tui,
                 show_terminal_log=log,
             )
 

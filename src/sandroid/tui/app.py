@@ -109,9 +109,8 @@ class SandroidTUI(App):
         Binding("home", "scroll_top", "Top", show=False),
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("G", "handle_shift_g", "Forensic APKs", show=False),
-        # Recording
-        Binding("r", "record", "Record", show=False, id="record"),
-        Binding("p", "play", "Play", show=False, id="play"),
+        # Recording — r/p are panel-scoped to the Diffs view (see
+        # DiffsView.BINDINGS -> app.record/app.play); only x/i stay global.
         Binding("x", "export_action", "Export", show=False, id="export"),
         Binding("i", "action_key('i')", "Import", show=False, id="import"),
         # Spotlight
@@ -1412,10 +1411,10 @@ class SandroidTUI(App):
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()
 
-    def action_record(self) -> None:
-        self._recording_controller.start_recording()
+    def action_record(self) -> bool:
+        return self._recording_controller.start_recording()
 
-    def action_play(self) -> None:
+    def action_play(self) -> bool:
         # Tab-switch on Play-*press* always happens, regardless of what run
         # history looks like (the other, gated half of the unified focus
         # rule — whether the completed run also steals the rail's current
@@ -1423,7 +1422,7 @@ class SandroidTUI(App):
         ms = self._get_main_screen()
         if ms is not None:
             ms.open_files_tab(sub_tab="files-diffs")
-        self._recording_controller.start_playback()
+        return self._recording_controller.start_playback()
 
     def _notify_diffs_new_run(self, run_id: str) -> None:
         """Tell DiffsView a new run was saved (RecordingController's on_run_saved).
@@ -1537,8 +1536,8 @@ class SandroidTUI(App):
     def action_network_capture(self) -> None:
         self._network_capture_controller.toggle_or_show_modal()
 
-    def action_trigdroid(self) -> None:
-        self._trigdroid_controller.toggle_trigdroid()
+    def action_trigdroid(self) -> bool:
+        return self._trigdroid_controller.toggle_trigdroid()
 
     def _refresh_status_bar(self) -> None:
         try:

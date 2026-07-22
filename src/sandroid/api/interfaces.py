@@ -120,6 +120,14 @@ class AnalysisConfig:
         hash_files: Whether to compute file hashes
         pull_apk: Whether to pull APK files
         dry_run: Whether this is a dry run (noise detection)
+        whitelist: Optional path to a whitelist file whose listed paths are
+            excluded from analysis (``None`` disables whitelisting)
+        capture_window: Seconds to wait for filesystem changes before
+            scanning, for a pure forensic run with no driving action (e.g.
+            ``AnalysisMode.FORENSIC``, which passes ``action=None``). Ignored
+            for action-driven runs (Trigdroid/Player), which measure their
+            own real elapsed duration instead. 60s matches this API's
+            existing headless network-capture default (``cli.py --duration``).
     """
 
     number_of_runs: int = 2
@@ -132,6 +140,8 @@ class AnalysisConfig:
     hash_files: bool = False
     pull_apk: bool = False
     dry_run: bool = False
+    whitelist: str | None = None
+    capture_window: int = 60
 
 
 @dataclass

@@ -5,7 +5,6 @@ Modified to fit the needs of this project.
 """
 
 import math
-import os
 import re
 import time
 from logging import getLogger
@@ -31,18 +30,61 @@ class Player(Functionality):
 
     STORE_LINE_RE = re.compile(r"(\S+) (\S+) (\S+) (\S+) (\S+)$")
 
-    def perform(self) -> None:
-        """Replay recorded actions from the recording file.
+    def __init__(self, recording_path: str | None = None) -> None:
+        """Initialize the player.
+
+        Args:
+            recording_path: Absolute path to the ``recording.txt`` to replay.
+                This is how the recording is supplied and is immune to the
+                device-switch re-derivation bug (see module notes). May be
+                left ``None`` here and passed to :meth:`perform` instead, but
+                one of the two must provide a path.
+        """
+        self._recording_path = recording_path
+
+    def _resolve_recording_path(self, override: str | None) -> str:
+        """Resolve the recording path from the explicit args only.
+
+        Resolution order: the explicit ``perform`` argument, then the value
+        passed to the constructor. The recording path is never derived from
+        the process-global ``RAW_RESULTS_PATH`` env var — doing so is exactly
+        the device-switch orphaning bug this design removes.
+
+        Args:
+            override: Explicit path passed to :meth:`perform`, if any.
+
+        Returns:
+            The recording file path to read.
 
         Raises:
-            RuntimeError: If the recording file cannot be opened.
+            RuntimeError: If no recording path was supplied to either the
+                constructor or :meth:`perform`.
+        """
+        path = override or self._recording_path
+        if not path:
+            raise RuntimeError(
+                "Player has no recording path: pass recording_path to the "
+                "constructor or to perform()."
+            )
+        return str(path)
+
+    def perform(self, recording_path: str | None = None) -> None:
+        """Replay recorded actions from the recording file.
+
+        Args:
+            recording_path: Absolute path to the recording to replay. Takes
+                precedence over the constructor value.
+
+        Raises:
+            RuntimeError: If no recording path was supplied, or if the
+                recording file cannot be opened.
         """
         Toolbox.set_action_time()
         start_time = int(round(time.time()))
         logger.info("Start playing")
 
         last_ts = None
-        recording_file = f"{os.getenv('RAW_RESULTS_PATH')}recording.txt"
+        recording_file = self._resolve_recording_path(recording_path)
 
         # TODO: Improve replay of swiping motions
         try:

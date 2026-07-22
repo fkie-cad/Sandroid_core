@@ -140,34 +140,39 @@ class ExportResultsCommand(CommandHandler):
     def _collect_export_data(self, ctx: CommandContext) -> dict:
         """Collect data to export from available sources.
 
+        Results no longer live on ``forensic_service`` as a bulk blob (it has
+        no ``get_results()`` -- that was always a dead ``hasattr`` check, even
+        before the ``AnalysisEngine`` refactor); the durable record of each
+        completed Record->Play analysis is the current device's most recent
+        entry in ``run_history`` (what the Files -> Diffs panel reads), so
+        that is what gets exported here, alongside a snapshot of live
+        forensic-service state.
+
         Args:
             ctx: Command context
 
         Returns:
             Dictionary containing exportable data
         """
-        export_data = {"export_timestamp": datetime.now().isoformat(), "version": "1.0"}
+        export_data = {"export_timestamp": datetime.now().isoformat(), "version": "2.0"}
 
-        # Try to get data from action_queue
-        if ctx.action_queue and hasattr(ctx.action_queue, "get_data"):
+        if ctx.forensic_service and hasattr(ctx.forensic_service, "get_state_dict"):
             try:
-                queue_data = ctx.action_queue.get_data()
-                if queue_data:
-                    # Parse if it's a JSON string
-                    if isinstance(queue_data, str):
-                        queue_data = json.loads(queue_data)
-                    export_data["analysis_results"] = queue_data
+                export_data["forensic_state"] = ctx.forensic_service.get_state_dict()
             except Exception as e:
-                logger.warning(f"Could not get action queue data: {e}")
+                logger.warning(f"Could not get forensic service state: {e}")
 
-        # Try to get forensic service data
-        if ctx.forensic_service and hasattr(ctx.forensic_service, "get_results"):
-            try:
-                forensic_data = ctx.forensic_service.get_results()
-                if forensic_data:
-                    export_data["forensic_results"] = forensic_data
-            except Exception as e:
-                logger.warning(f"Could not get forensic service data: {e}")
+        try:
+            from sandroid.core import run_history
+
+            device_name = getattr(ctx.toolbox, "device_name", None)
+            index = run_history.load_index(device_name=device_name)
+            if index:
+                latest_run_id = index[0]["run_id"]
+                record = run_history.load_run(latest_run_id)
+                export_data["latest_run"] = record.to_dict()
+        except Exception as e:
+            logger.warning(f"Could not get latest run_history entry: {e}")
 
         return export_data
 
@@ -330,14 +335,23 @@ class ImportResultsCommand(CommandHandler):
             )
 
     def _apply_import_data(self, ctx: CommandContext, data: dict) -> int:
-        """Apply imported data to the current context.
+        """Apply/recognize imported data.
+
+        ``"latest_run"`` (a ``run_history`` ``RunRecord``) and
+        ``"forensic_state"`` (a forensic-service state snapshot) are
+        historical/read-only -- there is no live, mutable "current results"
+        to restore them into (that concept left with the legacy ``ActionQ``
+        engine) -- so they are counted as recognized rather than restored.
+        ``"forensic_results"``/``set_results`` is kept for forward
+        compatibility with any future bulk-restore API; it is currently
+        always a no-op since ``forensic_service`` has no such method.
 
         Args:
             ctx: Command context
             data: Imported data dictionary
 
         Returns:
-            Number of entries applied
+            Number of entries recognized/applied
         """
         entries = 0
 
@@ -350,14 +364,12 @@ class ImportResultsCommand(CommandHandler):
                 except Exception as e:
                     logger.warning(f"Could not restore forensic results: {e}")
 
-        # If analysis_results present, try to restore to action_queue
-        if ctx.action_queue and hasattr(ctx.action_queue, "set_data"):
-            if "analysis_results" in data:
-                try:
-                    ctx.action_queue.set_data(data["analysis_results"])
-                    entries += 1
-                except Exception as e:
-                    logger.warning(f"Could not restore action queue data: {e}")
+        # run_history/forensic-state snapshots are historical -- recognize
+        # them rather than pretending to restore into a live session.
+        if "latest_run" in data:
+            entries += 1
+        if "forensic_state" in data:
+            entries += 1
 
         # Count top-level entries if no specific restoration happened
         if entries == 0:

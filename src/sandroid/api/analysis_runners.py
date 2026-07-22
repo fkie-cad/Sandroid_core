@@ -22,6 +22,47 @@ logger = logging.getLogger(__name__)
 RunSetter = Callable[[int], None] | None
 
 
+def _apply_network_degradation(degrade: bool) -> None:
+    """Replicate legacy ``assembleQ`` network shaping (``actionQ.py:92-97``).
+
+    Args:
+        degrade: When ``True`` simulate a UMTS/3G link; otherwise reset the
+            emulated network to full speed / no delay.
+    """
+    from sandroid.core.adb import Adb
+
+    if degrade:
+        Adb.send_telnet_command("network delay umts")
+        Adb.send_telnet_command("network speed umts")
+    else:
+        Adb.send_telnet_command("network delay none")
+        Adb.send_telnet_command("network speed full")
+
+
+def _make_progress_adapter(
+    current_run_setter: RunSetter, runs: int
+) -> Callable[[Any], None]:
+    """Adapt the engine's ``ProgressUpdate`` callback to ``current_run_setter``.
+
+    The engine emits a ``ProgressUpdate`` per run boundary; the headless API
+    only wants the clamped 1-based run number. Setup (``run_number == 0``) and
+    the dry run (``run_number > runs``) are folded into the run range.
+
+    Args:
+        current_run_setter: The headless run-number callback (or ``None``).
+        runs: Total configured runs (upper clamp).
+
+    Returns:
+        A callable accepting a ``ProgressUpdate``.
+    """
+
+    def _progress(update: Any) -> None:
+        if current_run_setter is not None and update.run_number >= 1:
+            current_run_setter(min(update.run_number, runs))
+
+    return _progress
+
+
 async def run_malware_analysis(
     toolbox: type[Toolbox],
     package: str,
@@ -31,15 +72,16 @@ async def run_malware_analysis(
     current_run_setter: RunSetter = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run TrigDroid-based malware analysis.
+    """Run TrigDroid-based malware analysis via the unified engine.
 
     This function:
-    1. Sets the spotlight application to the target package
-    2. Creates a snapshot for clean-state restoration
-    3. Executes TrigDroid malware triggers
-    4. Monitors file system changes
-    5. Optionally captures network traffic
-    6. Returns comprehensive behavioral results
+    1. Sets the spotlight application to the target package (spawn mode)
+    2. Optionally runs the TrigDroid CCF utility (only when explicitly
+       requested via ``trigdroid_ccf``; it exits the process)
+    3. Creates the ``tmp`` snapshot the engine reverts to on its first step
+    4. Optionally degrades the emulated network
+    5. Executes the unified :class:`~sandroid.analysis.engine.AnalysisEngine`
+       with a ``Trigdroid`` action and returns the JSON-safe result dict
 
     Args:
         toolbox: The Toolbox class reference.
@@ -48,59 +90,70 @@ async def run_malware_analysis(
         capture_network: Enable network capture.
         compute_hashes: Compute file hashes.
         current_run_setter: Optional callback to update current run number.
-        **kwargs: Additional mode-specific options.
+        **kwargs: Additional mode-specific options (``track_deleted``,
+            ``monitor_processes``, ``monitor_sockets``, ``screenshot_interval``,
+            ``skip_noise_filter``, ``degrade_network``, ``pull_apk``,
+            ``whitelist``, ``trigdroid_ccf``).
 
     Returns:
         Dictionary with malware analysis results.
     """
-    import argparse
-
-    from sandroid.core.actionQ import ActionQ
+    from sandroid.analysis.engine import AnalysisEngine
+    from sandroid.analysis.run_config import RunConfig
+    from sandroid.api.interfaces import AnalysisConfig
+    from sandroid.core.json_utils import json_encoder
+    from sandroid.features.trigdroid import Trigdroid
     from sandroid.services import get_spotlight_service
 
-    # Set spotlight application
-    spotlight = get_spotlight_service()
-    spotlight.set_spawn_app(package, auto_resume=True)
+    # 1. Point the spotlight at the target package in spawn mode.
+    get_spotlight_service().set_spawn_app(package, auto_resume=True)
 
-    # Create ActionQ and configure for TrigDroid analysis
-    action_q = ActionQ()
+    # 2. Optional TrigDroid CCF (guarded; never part of a normal run). run_ccf()
+    #    reads Toolbox.args.trigdroid_ccf and exits the process, so it is only
+    #    reached when explicitly requested — legacy hard-coded this to None.
+    ccf_mode = kwargs.get("trigdroid_ccf")
+    if ccf_mode:
+        from types import SimpleNamespace
 
-    # Configure via Toolbox.args (legacy interface)
-    args = argparse.Namespace()
-    args.trigdroid = package
-    args.number_of_runs = runs
-    args.network = capture_network
-    args.hash = compute_hashes
-    args.show_deleted = kwargs.get("track_deleted", False)
-    args.processes = kwargs.get("monitor_processes", True)
-    args.sockets = kwargs.get("monitor_sockets", False)
-    args.screenshot = kwargs.get("screenshot_interval")
-    args.avoid_strong_noise_filter = kwargs.get("skip_noise_filter", False)
-    args.degrade_network = kwargs.get("degrade_network", False)
-    args.file = kwargs.get("output_file", "sandroid.json")
-    args.loglevel = kwargs.get("log_level", "INFO")
-    args.apk = False
-    args.whitelist = None
-    args.trigdroid_ccf = None
-    args.debug = kwargs.get("debug", False)
-    args.report = False
+        toolbox.args = SimpleNamespace(trigdroid_ccf=ccf_mode)
+        Trigdroid().run_ccf()
 
-    toolbox.args = args
+    # 3. The engine's first step reverts to the ``tmp`` snapshot.
+    toolbox.create_snapshot(b"tmp")
 
-    # Assemble the automated queue
-    action_q.assembleQ()
+    # 4. Optional network degradation (replicates legacy assembleQ).
+    _apply_network_degradation(kwargs.get("degrade_network", False))
 
-    # Process the queue
-    current_run = 0
-    while not action_q.finished:
-        action_q.do_next()
-        current_run = min(current_run + 1, runs)
-        if current_run_setter:
-            current_run_setter(current_run)
+    # 5. Build the typed config and run the unified engine.
+    screenshot_interval = kwargs.get("screenshot_interval")
+    ac = AnalysisConfig(
+        number_of_runs=runs,
+        monitor_network=capture_network,
+        monitor_processes=kwargs.get("monitor_processes", True),
+        monitor_sockets=kwargs.get("monitor_sockets", False),
+        show_deleted=kwargs.get("track_deleted", False),
+        take_screenshots=screenshot_interval is not None,
+        screenshot_interval=screenshot_interval or 3,
+        hash_files=compute_hashes,
+        pull_apk=kwargs.get("pull_apk", False),
+        dry_run=not kwargs.get("skip_noise_filter", False),
+        whitelist=kwargs.get("whitelist"),
+    )
+    run_config = RunConfig.from_analysis_config(
+        ac, action=Trigdroid(), whitelist=ac.whitelist
+    )
+    # Identity pin: headless has no run bundle, so run against the existing
+    # session dir (empty paths leave RESULTS_PATH / RAW_RESULTS_PATH untouched).
+    run_config.results_path = ""
+    run_config.raw_results_path = ""
 
-    # Get results
-    results_json = action_q.get_data()
-    return json.loads(results_json)
+    result = AnalysisEngine(
+        run_config, progress=_make_progress_adapter(current_run_setter, runs)
+    ).run()
+
+    # Normalize to a JSON-safe dict (sets -> lists, etc.), matching the legacy
+    # ``json.loads(action_q.get_data())`` return type.
+    return json.loads(json.dumps(result.to_json_dict(), default=json_encoder))
 
 
 async def run_forensic_analysis(
@@ -128,60 +181,51 @@ async def run_forensic_analysis(
         **kwargs: Additional mode-specific options.
 
     Returns:
-        Dictionary with forensic analysis results.
+        Dictionary with forensic analysis results in the unified
+        ``RunResult.to_json_dict()`` shape, plus the legacy ``analysis_type``
+        and ``runs`` metadata keys.
     """
-    from sandroid.services import get_forensic_service
+    from sandroid.analysis.engine import AnalysisEngine
+    from sandroid.analysis.run_config import RunConfig
+    from sandroid.api.interfaces import AnalysisConfig
+    from sandroid.core.json_utils import json_encoder
 
-    forensic = get_forensic_service()
+    # The engine reverts to the ``tmp`` snapshot on its first step (and between
+    # runs), so it must exist before the run starts.
+    toolbox.create_snapshot(b"tmp")
 
-    # Set baseline
-    baseline = toolbox.fetch_changed_files(fetch_all=True)
-    forensic.set_baseline(baseline)
+    screenshot_interval = kwargs.get("screenshot_interval")
+    ac = AnalysisConfig(
+        number_of_runs=runs,
+        monitor_network=kwargs.get("capture_network", False),
+        monitor_processes=kwargs.get("monitor_processes", False),
+        monitor_sockets=kwargs.get("monitor_sockets", False),
+        show_deleted=track_deleted,
+        take_screenshots=screenshot_interval is not None,
+        screenshot_interval=screenshot_interval or 3,
+        hash_files=compute_hashes,
+        pull_apk=kwargs.get("pull_apk", False),
+        dry_run=kwargs.get("dry_run", False),
+        whitelist=kwargs.get("whitelist"),
+        capture_window=kwargs.get("capture_window", 60),
+    )
+    # Pure forensic run: no action (``action=None``) — the engine opens a
+    # capture window instead of performing/replaying anything.
+    run_config = RunConfig.from_analysis_config(ac, action=None, whitelist=ac.whitelist)
+    # Identity pin (headless has no run bundle -> run against the session dir).
+    run_config.results_path = ""
+    run_config.raw_results_path = ""
 
-    # Import analysis modules
-    from sandroid.analysis.changedfiles import ChangedFiles
-    from sandroid.analysis.newfiles import NewFiles
+    result = AnalysisEngine(
+        run_config, progress=_make_progress_adapter(current_run_setter, runs)
+    ).run()
 
-    changed_files = ChangedFiles()
-    new_files = NewFiles()
-
-    results: dict[str, Any] = {
-        "device_name": toolbox.device_name,
-        "analysis_type": "forensic",
-        "runs": runs,
-        "changed_files": [],
-        "new_files": [],
-    }
-
-    # Run analysis cycles
-    for run in range(runs):
-        if current_run_setter:
-            current_run_setter(run + 1)
-        logger.info(f"Forensic analysis run {run + 1}/{runs}")
-
-        # Gather data
-        changed_files.gather()
-        new_files.gather()
-
-        # Load snapshot between runs to restore clean state
-        if run < runs - 1:
-            toolbox.load_snapshot(b"tmp")
-
-    # Collect results
-    results.update(changed_files.return_data())
-    results.update(new_files.return_data())
-
-    if track_deleted:
-        from sandroid.analysis.deletedfiles import DeletedFiles
-
-        deleted_files = DeletedFiles()
-        deleted_files.gather()
-        results.update(deleted_files.return_data())
-
-    if compute_hashes:
-        toolbox.calculate_hashes()
-
-    return results
+    data = json.loads(json.dumps(result.to_json_dict(), default=json_encoder))
+    # Preserve the two metadata keys the legacy implementation returned so API
+    # consumers do not regress.
+    data["analysis_type"] = "forensic"
+    data["runs"] = runs
+    return data
 
 
 async def run_security_analysis(

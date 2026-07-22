@@ -57,6 +57,11 @@ class DiffsView(FilesSubViewBase):
     """Play run-history sub-tab: Runs rail + Changed/New/Deleted detail.
 
     Bindings (when focused):
+        r: start recording (idea A: panel-scoped, routes to ``app.record``;
+           the global ``r`` binding was removed from ``app.py`` so Record
+           only fires while this Diff panel is focused).
+        p: replay the current recording (panel-scoped, routes to
+           ``app.play``; likewise removed from the global map).
         n: rename the selected run (shadows global "n"=Install APK — see
            module docstring).
         delete / backspace: delete the selected run, through a ConfirmModal
@@ -70,6 +75,12 @@ class DiffsView(FilesSubViewBase):
     can_focus = True
 
     BINDINGS = [
+        # Panel-scoped Record/Play (idea A). The ``app.`` namespace routes
+        # these to SandroidTUI.action_record / action_play; the global r/p
+        # bindings were removed from app.py so they fire only while the Diff
+        # panel is focused — the same focused-ancestor mechanism as n/[.
+        ("r", "app.record", "Record"),
+        ("p", "app.play", "Play"),
         ("n", "rename_run", "Rename run"),
         ("delete", "delete_run", "Delete run"),
         ("backspace", "delete_run", "Delete run"),
@@ -174,7 +185,8 @@ class DiffsView(FilesSubViewBase):
                 yield Static("", id="diffs-banner")
                 with VerticalScroll(id="diffs-scroll"):
                     yield Static(
-                        "[dim]No runs yet — press Play after recording.[/dim]",
+                        "[dim]No runs yet — press [b]r[/b] to record, "
+                        "[b]p[/b] to replay.[/dim]",
                         id="diffs-empty",
                     )
 
@@ -392,7 +404,7 @@ class DiffsView(FilesSubViewBase):
         if not self._summaries:
             option_list.add_option(
                 Option(
-                    "[#5b6479]no runs yet — Play after recording[/]",
+                    "[#5b6479]no runs yet — r record · p replay[/]",
                     id=_EMPTY_OPTION_ID,
                 )
             )

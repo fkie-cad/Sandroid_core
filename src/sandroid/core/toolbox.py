@@ -154,10 +154,6 @@ def _build_toolbox_meta() -> type:
 _ToolboxMeta = _build_toolbox_meta()
 
 
-# Module-level cache for singleton utility references (not class state)
-_menu_renderer_cache: dict = {}
-
-
 def _service(name: str):
     """Lazy import helper for service getters.
 
@@ -229,15 +225,6 @@ class Toolbox(metaclass=_ToolboxMeta):
     def clear_background_output_buffer(cls) -> None:
         """Delegates to UIService to clear the output buffer."""
         _service("get_ui_service").clear_output()
-
-    @classmethod
-    def _get_menu_renderer(cls):
-        """Get or create the MenuRenderer singleton (module-level cache, not class state)."""
-        if _menu_renderer_cache.get("instance") is None:
-            from .menu_renderer import MenuRenderer
-
-            _menu_renderer_cache["instance"] = MenuRenderer(cls)
-        return _menu_renderer_cache["instance"]
 
     # ==================== Initialization ====================
 
@@ -966,40 +953,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         """
         result = _service("get_emulator_service").stop_recording()
         return result if result else False
-
-    @classmethod
-    def print_interactive_menu(cls):
-        """Prints the interactive main menu with view-based filtering.
-
-        Delegates to MenuRenderer for the actual rendering logic.
-        """
-        renderer = cls._get_menu_renderer()
-        renderer.render()
-
-    @classmethod
-    def _create_colored_box(
-        cls, text: str, title: str, border_color: str = "cyan"
-    ) -> str:
-        """Delegates to MenuRenderer for creating a colored box.
-
-        :param text: The text to be enclosed in the box.
-        :param title: The title of the box (can include Rich markup).
-        :param border_color: Color for the box borders.
-        :returns: The formatted box with Rich color markup.
-        """
-        renderer = cls._get_menu_renderer()
-        return renderer._create_colored_box(text, title, border_color)
-
-    @classmethod
-    def _create_ascii_box(cls, text: str, title: str) -> str:
-        """Delegates to MenuRenderer for creating an ASCII box.
-
-        :param text: The text to be enclosed in the ASCII box.
-        :param title: The title of the ASCII box.
-        :returns: The formatted ASCII box.
-        """
-        renderer = cls._get_menu_renderer()
-        return renderer._create_ascii_box(text, title)
 
     @classmethod
     def wrap_up(cls):

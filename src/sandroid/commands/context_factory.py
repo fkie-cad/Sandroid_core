@@ -35,6 +35,7 @@ def _safe_import(import_func, label: str):
 def create_context_from_actionq(
     action_queue: Any,
     toolbox: Any | None = None,
+    app: Any | None = None,
 ) -> CommandContext:
     """Create a CommandContext from ActionQ and Toolbox.
 
@@ -45,6 +46,10 @@ def create_context_from_actionq(
     Args:
         action_queue: ActionQ instance managing the analysis queue
         toolbox: Optional Toolbox class (defaults to imported Toolbox)
+        app: Optional reference to the running ``SandroidTUI`` app instance.
+            Only the TUI's live worker-thread key-dispatch path
+            (``MainScreen._execute_action_sync``) has one to pass; leave
+            unset for headless/API/test contexts.
 
     Returns:
         Fully initialized CommandContext with all dependencies
@@ -121,6 +126,7 @@ def create_context_from_actionq(
         config=None,
         is_tui_mode=is_tui_mode,
         action_queue=action_queue,
+        app=app,
         logger=logging.getLogger(__name__),
         request_input=request_input_func,
         request_confirm=request_confirm_func,

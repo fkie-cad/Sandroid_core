@@ -6,14 +6,22 @@ missing, corrupt-run-file skipping (never crashes the whole rail), delete/
 clear-all, label rename independence from the recording-seed label, and the
 soft run-count warning flag.
 
-Every test gets a fresh ``RESULTS_PATH`` pointed at a pytest ``tmp_path`` via
-the autouse fixture below, so runs never leak across tests or touch the real
+Schema v2 specifics also covered here: the ``bundle_dir`` field + absolute
+in-bundle ``recording_path``, the per-run ``runs/<id>/run.json`` directory
+layout, ``delete_run`` removing the whole bundle dir (``rmtree``, not a single
+file), and the one-time fallback that still surfaces pre-v2 flat
+``runs/run_*.json`` files.
+
+Because ``run_history._results_path()`` is now config-first (§11), the autouse
+fixture points a *fake config* at a pytest ``tmp_path`` (and sets
+``RESULTS_PATH`` too), so runs never leak across tests or touch the real
 ``./results/`` directory.
 """
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,8 +30,16 @@ from sandroid.core import run_history
 
 @pytest.fixture(autouse=True)
 def _isolated_results_path(tmp_path, monkeypatch):
-    """Point RESULTS_PATH at a throwaway directory for every test."""
+    """Point run storage at a throwaway directory for every test.
+
+    ``_results_path()`` resolves the config first, so a fake config whose
+    ``paths.results_path`` is ``tmp_path`` is what makes storage deterministic;
+    ``RESULTS_PATH`` is set as well so the env fallback is also isolated if it
+    is ever exercised.
+    """
     monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
+    fake_config = SimpleNamespace(paths=SimpleNamespace(results_path=tmp_path))
+    monkeypatch.setattr("sandroid.config.get_config", lambda: fake_config)
     return tmp_path
 
 
@@ -36,6 +52,8 @@ def _make_record(
     changed_files=None,
     new_files=None,
     deleted_files=None,
+    bundle_dir: str | None = None,
+    recording_path: str | None = None,
 ) -> run_history.RunRecord:
     run_id = run_id or run_history.new_run_id()
     changed_files = (
@@ -45,6 +63,10 @@ def _make_record(
     )
     new_files = new_files if new_files is not None else ["/data/new_file.txt"]
     deleted_files = deleted_files if deleted_files is not None else ["/data/gone.txt"]
+    bundle_dir = bundle_dir if bundle_dir is not None else f"/abs/results/runs/{run_id}"
+    recording_path = (
+        recording_path if recording_path is not None else f"{bundle_dir}/recording.txt"
+    )
     return run_history.RunRecord(
         schema_version=run_history.SCHEMA_VERSION,
         run_id=run_id,
@@ -52,8 +74,9 @@ def _make_record(
         recorded_at="2026-07-21T10:00:00",
         completed_at="2026-07-21T10:05:00",
         device_name=device_name,
-        recording_path="/tmp/recording.txt",
+        recording_path=recording_path,
         duration=42,
+        bundle_dir=bundle_dir,
         error=error,
         changed_files=changed_files,
         new_files=new_files,
@@ -121,6 +144,47 @@ class TestSaveLoadRoundTrip:
         assert index[0]["error"] == "Playback failed: boom"
 
 
+class TestSchemaV2:
+    def test_schema_version_is_2(self):
+        assert run_history.SCHEMA_VERSION == 2
+
+        record = _make_record()
+        run_history.save_run(record)
+
+        assert run_history.load_run(record.run_id).schema_version == 2
+
+    def test_bundle_dir_and_absolute_recording_path_round_trip(self):
+        record = _make_record(
+            run_id="20260101_000000_bundle",
+            bundle_dir="/abs/results/runs/20260101_000000_bundle",
+            recording_path="/abs/results/runs/20260101_000000_bundle/recording.txt",
+        )
+        run_history.save_run(record)
+
+        loaded = run_history.load_run(record.run_id)
+        assert loaded.bundle_dir == "/abs/results/runs/20260101_000000_bundle"
+        assert loaded.recording_path == (
+            "/abs/results/runs/20260101_000000_bundle/recording.txt"
+        )
+
+    def test_run_written_under_per_run_subdir(self, tmp_path):
+        record = _make_record()
+        run_history.save_run(record)
+
+        # v2 layout: runs/<id>/run.json — not the flat runs/run_<id>.json.
+        assert (tmp_path / "runs" / record.run_id / "run.json").exists()
+        assert not (tmp_path / "runs" / f"run_{record.run_id}.json").exists()
+
+    def test_bundle_dir_defaults_when_missing_from_disk(self):
+        """A record whose JSON lacks bundle_dir loads with the "" default."""
+        record = _make_record()
+        data = record.to_dict()
+        del data["bundle_dir"]
+
+        rebuilt = run_history.RunRecord.from_dict(data)
+        assert rebuilt.bundle_dir == ""
+
+
 class TestDeviceScoping:
     def test_load_index_filters_by_device(self):
         a = _make_record(run_id="20260101_000000_aaaaaa", device_name="device-a")
@@ -146,7 +210,7 @@ class TestDeviceScoping:
 
         assert run_history.load_index(device_name="device-a") == []
         assert len(run_history.load_index(device_name="device-b")) == 1
-        # The run file itself must actually be gone, not just de-indexed.
+        # The run's bundle must actually be gone, not just de-indexed.
         with pytest.raises(run_history.RunHistoryError):
             run_history.load_run(a.run_id)
         run_history.load_run(b.run_id)  # does not raise
@@ -193,12 +257,12 @@ class TestCorruptionSafety:
         good = _make_record(run_id="20260101_000000_good01")
         run_history.save_run(good)
 
-        # Hand-craft a corrupt run file directly (bypassing save_run) and
-        # drop the index so the next load is forced to rebuild by scanning.
+        # Hand-craft a corrupt run.json inside its own bundle dir (bypassing
+        # save_run) and drop the index so the next load rebuilds by scanning.
         runs_dir = tmp_path / "runs"
-        (runs_dir / "run_20260101_000001_bad0001.json").write_text(
-            "{ this is not json", encoding="utf-8"
-        )
+        bad_bundle = runs_dir / "20260101_000001_bad001"
+        bad_bundle.mkdir(parents=True, exist_ok=True)
+        (bad_bundle / "run.json").write_text("{ this is not json", encoding="utf-8")
         (runs_dir / "index.json").unlink()
 
         with caplog.at_level("WARNING"):
@@ -213,9 +277,9 @@ class TestCorruptionSafety:
 
     def test_load_run_corrupt_file_raises_run_history_error(self, tmp_path):
         run_id = "20260101_000000_badbad"
-        runs_dir = tmp_path / "runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        (runs_dir / f"run_{run_id}.json").write_text("{ nope", encoding="utf-8")
+        bundle = tmp_path / "runs" / run_id
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "run.json").write_text("{ nope", encoding="utf-8")
 
         with pytest.raises(run_history.RunHistoryError):
             run_history.load_run(run_id)
@@ -224,22 +288,79 @@ class TestCorruptionSafety:
         run_history.save_run(_make_record())
 
         runs_dir = tmp_path / "runs"
-        leftovers = list(runs_dir.glob(".*.tmp-*"))
+        # Temp files may live in runs/ (index) or runs/<id>/ (run.json).
+        leftovers = list(runs_dir.glob("**/.*.tmp-*"))
         assert leftovers == []
 
 
+class TestLegacyLayoutFallback:
+    def test_legacy_flat_run_file_is_picked_up_by_rebuild(self, tmp_path):
+        """A pre-v2 flat run_*.json (no bundle_dir) still surfaces in the rail."""
+        legacy = {
+            "schema_version": 1,
+            "run_id": "20250101_000000_legacy",
+            "label": "Old run",
+            "recorded_at": "2025-01-01T00:00:00",
+            "completed_at": "2025-01-01T00:01:00",
+            "device_name": "device-a",
+            "recording_path": "/old/results/raw/recording.txt",
+            "duration": 10,
+            "changed_files": [],
+            "new_files": [],
+            "deleted_files": [],
+            "counts": {"changed": 0, "new": 0, "deleted": 0},
+        }
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "run_20250101_000000_legacy.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        # No index.json yet -> load_index is forced to rebuild by scanning.
+
+        index = run_history.load_index(device_name="device-a")
+
+        assert [e["run_id"] for e in index] == ["20250101_000000_legacy"]
+
+    def test_v2_run_wins_over_stale_legacy_flat_file(self, tmp_path):
+        """If both layouts hold the same run id, the v2 bundle entry wins."""
+        record = _make_record(run_id="20260101_000000_dupdup", label="v2 label")
+        run_history.save_run(record)
+
+        # Stale flat file for the same id with a different label.
+        legacy = record.to_dict()
+        legacy["label"] = "stale legacy label"
+        (tmp_path / "runs" / "run_20260101_000000_dupdup.json").write_text(
+            json.dumps(legacy), encoding="utf-8"
+        )
+        (tmp_path / "runs" / "index.json").unlink()
+
+        index = run_history.load_index(device_name=record.device_name)
+
+        assert len(index) == 1
+        assert index[0]["label"] == "v2 label"
+
+
 class TestDeleteAndRename:
-    def test_delete_run_removes_file_and_index_entry(self, tmp_path):
+    def test_delete_run_rmtrees_bundle_dir_and_index_entry(self, tmp_path):
         record = _make_record()
         run_history.save_run(record)
+
+        bundle = tmp_path / "runs" / record.run_id
+        # Drop extra artifacts alongside run.json to prove rmtree (not unlink).
+        (bundle / "recording.txt").write_text("events", encoding="utf-8")
+        (bundle / "raw").mkdir(exist_ok=True)
 
         run_history.delete_run(record.run_id)
 
         assert run_history.load_index(device_name=record.device_name) == []
-        run_file = tmp_path / "runs" / f"run_{record.run_id}.json"
-        assert not run_file.exists()
+        assert not bundle.exists()
         with pytest.raises(run_history.RunHistoryError):
             run_history.load_run(record.run_id)
+
+    def test_delete_run_missing_bundle_is_noop(self):
+        # Deleting an unknown run must not raise (guarded rmtree).
+        run_history.delete_run("does_not_exist")
+        assert run_history.load_index() == []
 
     def test_update_label_only_touches_that_run(self):
         a = _make_record(run_id="20260101_000000_aaaaaa", label="Run A")
@@ -283,7 +404,7 @@ class TestFromDictForwardCompat:
         record = _make_record()
         run_history.save_run(record)
 
-        run_file = tmp_path / "runs" / f"run_{record.run_id}.json"
+        run_file = tmp_path / "runs" / record.run_id / "run.json"
         with open(run_file, encoding="utf-8") as f:
             raw = json.load(f)
 

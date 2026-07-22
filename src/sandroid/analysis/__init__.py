@@ -1,12 +1,9 @@
 """Sandroid Analysis Module
 
 This package contains the data gathering and analysis components for Sandroid.
-Previously located in src/datagather/, these modules have been migrated here
-for better packaging and pip installation support.
 
 Key modules:
-- datagather: Base class for data gathering operations (legacy)
-- base_di: Modern DI-enabled base class for new implementations
+- base_di: DI-enabled base class for data-gathering implementations
 - changedfiles: Detects modified files during analysis
 - newfiles: Identifies newly created files
 - deletedfiles: Tracks deleted files (with --show_deleted flag)
@@ -17,8 +14,7 @@ Key modules:
 - interfaces: Segregated interfaces following ISP
 
 Base Classes:
-    DataGather: Legacy base class using static Toolbox access
-    DataGatherBase: Modern DI-enabled base class for testability
+    DataGatherBase: DI-enabled base class for testability
 
 Interfaces:
     DataGatherer: Core data collection interface
@@ -37,7 +33,6 @@ from .base_di import (
     ForensicServiceProtocol,
 )
 from .changedfiles import ChangedFiles
-from .datagather import DataGather
 from .deletedfiles import DeletedFiles
 
 # Segregated interfaces
@@ -62,9 +57,7 @@ __all__ = [
     # Analysis modules
     "ChangedFiles",
     "ConfigProtocol",
-    # Legacy base class
-    "DataGather",
-    # Modern DI-enabled base class
+    # DI-enabled base class
     "DataGatherBase",
     "DataGatherDI",
     "DataGatherModule",

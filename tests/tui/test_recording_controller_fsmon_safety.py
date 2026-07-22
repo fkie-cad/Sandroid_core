@@ -15,13 +15,15 @@ Two independent things are exercised:
    ``_run_playback_analysis`` really calls it (``start_playback`` dispatches
    it via ``run_worker(..., thread=True)``).
 2. ``_run_playback_analysis()`` end-to-end, with the analysis pipeline
-   (``ChangedFiles``/``NewFiles``/``DeletedFiles``/``Player``/forensic
-   service) monkeypatched to lightweight no-ops — this test is only about
-   the fsmon safety net wrapped around that pipeline, not the pipeline
-   itself (already covered elsewhere). Calls ``_run_playback_analysis()``
-   directly rather than through ``start_playback()``, which additionally
-   requires a real ``recording.txt`` on disk — orthogonal to what this file
-   covers.
+   (``ChangedFiles``/``NewFiles``/``DeletedFiles``/``Player``) and the
+   injected toolbox/forensic/action-window services monkeypatched to
+   lightweight no-ops — this test is only about the fsmon safety net wrapped
+   around that pipeline, not the pipeline itself (already covered elsewhere).
+   ``_run_playback_analysis()`` now drives the unified ``AnalysisEngine``, so
+   the fakes are injected into the engine and a real ``recording.txt`` is
+   written under a tmp ``RAW_RESULTS_PATH`` (the engine imports it into the
+   run bundle up-front). ``get_config`` is pointed at ``tmp_path`` too so the
+   config-first run-bundle root never leaks into the repo's ``./results/``.
 
 No physical device involved anywhere: the real (process-wide) TaskService
 singleton is used with a fake fsmon "task" registered directly (same
@@ -31,6 +33,7 @@ against cross-test leakage.
 
 from __future__ import annotations
 
+import os
 import threading
 from types import SimpleNamespace
 
@@ -76,18 +79,46 @@ class _FakeForensicService:
     def set_baseline(self, data) -> None:
         self.baseline_calls.append(data)
 
+    def get_baseline(self) -> dict:
+        return {}
+
     def get_action_duration(self) -> int:
         return 5
+
+
+class _FakeActionWindow:
+    """In-memory stand-in for ActionWindowService (keeps the engine fast)."""
+
+    def get_action_time(self) -> int:
+        return 0
+
+    def get_duration(self) -> int:
+        return 0
+
+    def set_duration(self, value, force: bool = False) -> None:
+        pass
+
+    def start_dry_run(self) -> None:
+        pass
+
+    def end_dry_run(self) -> None:
+        pass
+
+    def is_dry_run(self) -> bool:
+        return False
 
 
 def _patch_pipeline(monkeypatch) -> None:
     """Neuter the analysis pipeline itself — irrelevant to this file's scope."""
     monkeypatch.setattr(ChangedFiles, "gather", lambda self: None)
     monkeypatch.setattr(ChangedFiles, "return_data", lambda self: {"Changed Files": []})
+    monkeypatch.setattr(ChangedFiles, "pretty_print", lambda self: "")
     monkeypatch.setattr(NewFiles, "gather", lambda self: None)
     monkeypatch.setattr(NewFiles, "return_data", lambda self: {"New Files": []})
+    monkeypatch.setattr(NewFiles, "pretty_print", lambda self: "")
     monkeypatch.setattr(DeletedFiles, "gather", lambda self: None)
     monkeypatch.setattr(DeletedFiles, "return_data", lambda self: {"Deleted Files": []})
+    monkeypatch.setattr(DeletedFiles, "pretty_print", lambda self: "")
     monkeypatch.setattr(Player, "perform", lambda self: None)
 
 
@@ -96,9 +127,18 @@ def _make_controller(
 ) -> tuple[RecordingController, _FakeToolbox, _FakeForensicService]:
     _patch_pipeline(monkeypatch)
     monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
+    monkeypatch.setenv("RAW_RESULTS_PATH", str(tmp_path) + os.sep)
+    # run_history/run_bundle resolve their storage root config-first, so
+    # isolate it to tmp_path (else the run bundle leaks into ./results/).
+    fake_cfg = SimpleNamespace(paths=SimpleNamespace(results_path=tmp_path))
+    monkeypatch.setattr("sandroid.config.get_config", lambda: fake_cfg)
+    # A real recording.txt so run_bundle.import_recording (which the engine
+    # path performs up-front) succeeds and the engine actually runs.
+    (tmp_path / "recording.txt").write_text("0.0 /dev/input/event0 1 2 3\n")
 
     toolbox = _FakeToolbox()
     forensic = _FakeForensicService()
+    action_window = _FakeActionWindow()
 
     defaults: dict = {
         "log_info": lambda *_: None,
@@ -111,6 +151,7 @@ def _make_controller(
     defaults.update(overrides)
     controller = RecordingController(**defaults)
     monkeypatch.setattr(controller, "_get_forensic_service", lambda: forensic)
+    monkeypatch.setattr(controller, "_get_action_window_service", lambda: action_window)
     return controller, toolbox, forensic
 
 
@@ -245,7 +286,10 @@ def test_run_playback_analysis_noop_when_fsmon_not_running(monkeypatch, tmp_path
 
     controller._run_playback_analysis()
 
-    assert toolbox.load_snapshot_calls == [b"tmp"]
+    # The engine reverts to the tmp snapshot once per bracketed step (pre +
+    # per-run), so there is >=1 call and every call targets b"tmp".
+    assert toolbox.load_snapshot_calls
+    assert set(toolbox.load_snapshot_calls) == {b"tmp"}
     assert stopped_notice_calls == []
     assert resume_calls == []
 
@@ -274,7 +318,8 @@ def test_run_playback_analysis_stops_fsmon_and_offers_resume_on_success(
     assert stopped_notice_calls == [True]
     # ...the rest of the pipeline still ran normally (load_snapshot etc. is
     # unaffected by whether fsmon was running)...
-    assert toolbox.load_snapshot_calls == [b"tmp"]
+    assert toolbox.load_snapshot_calls
+    assert set(toolbox.load_snapshot_calls) == {b"tmp"}
     # ...and the Resume offer fires exactly once, with the original config.
     assert resume_calls == [config]
 
