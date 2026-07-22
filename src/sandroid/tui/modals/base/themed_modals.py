@@ -59,7 +59,7 @@ class FridaModal(SandroidModal[T], Generic[T]):
     Categories using this base:
     - Frida server installation
     - Objection configuration
-    - FSMon, Spotlight file browser
+    - Monitor, Spotlight file browser
     - Tool selection for Frida tools
     """
 

@@ -1,4 +1,4 @@
-"""Monitor sub-tab: fsmon's live filesystem-event stream.
+"""Monitor sub-tab: monitor's live filesystem-event stream.
 
 Replaces the ``MonitorView`` stub in ``files_panel.py`` with the first real
 sub-view of the Files tab. Reuses :class:`~sandroid.tui.widgets.fritap_panel.
@@ -9,13 +9,13 @@ capture the running loop in ``on_mount`` and marshal callbacks with
 deadlock a caller on a background thread (see ``FriTapPanel``/``FilesPanel``
 for the identical pattern).
 
-fsmon itself has zero EventBus integration otherwise: its output only ever
+monitor itself has zero EventBus integration otherwise: its output only ever
 reached the Activity Log (throttled to the last 5 lines per flush batch) and
-the now-legacy observer modal. ``FSMonController._log_fsmon_output_batch``
+the now-legacy observer modal. ``MonitorController._log_monitor_output_batch``
 was extended (additively — the Activity Log/observer routing is untouched)
 to publish each flush batch as ONE ``EventType.TASK_OUTPUT`` event with
-``source="fsmon"`` and ``data["batch"]`` a list of structured
-``FSMonDisplayItem``s (one per parsed line -- see ``_publish_fsmon_batch``
+``source="monitor"`` and ``data["batch"]`` a list of structured
+``FileSystemMonitorItem``s (one per parsed line -- see ``_publish_monitor_batch``
 there, mirrors ``analysis/fritap.py``'s ``_publish_fritap_event``). This view
 is the consumer of that stream and gets the FULL, un-throttled feed --
 grouping/dedup/visibility-filtering/tallying/width-aware rendering all live
@@ -29,17 +29,17 @@ was rejected by two independent review passes for exactly this reason).
 
 Stateless like ``FriTapPanel``: no new manager, no config schema. Live
 running/target state is read straight from ``TaskService``; the only local
-state is a client-side event tally (fsmon has no counter of its own), reset
-on ``TASK_STARTED`` for ``task_name == "fsmon"`` — a more reliable reset
+state is a client-side event tally (monitor has no counter of its own), reset
+on ``TASK_STARTED`` for ``task_name == "monitor"`` — a more reliable reset
 signal than FriTapPanel's ad hoc "FriTap started for" substring match, since
 ``TaskService.register()`` already publishes that event for every task.
 
 Bindings (when focused):
-    Enter:  start/stop fsmon (delegates to ``action_fsmon``, key ``o`` — the
+    Enter:  start/stop monitor (delegates to ``action_monitor``, key ``o`` — the
             same command, not a second code path)
     Ctrl+L: clear the log view + reset the event-category counters
     v:      toggle the session-only "verbose" mode, revealing categories
-            configured as ``tui.fsmon_event_visibility`` = "verbose" (e.g.
+            configured as ``tui.monitor_event_visibility`` = "verbose" (e.g.
             OPEN/CLOSE "noise" by default) going forward, not retroactively
     u:      toggle the session-only "full path" view: bypasses grouping/dedup
             entirely and shows every passing-the-gate event on its own row
@@ -57,19 +57,19 @@ collapse into one row with a trailing "xN" counter. Renames show
 ``old_filename -> new_filename`` when grouped under a breadcrumb and the
 rename didn't also change directory, else full relative paths on both
 sides. Grouping only ever considers state within one batch (no cross-batch
-run continuation) -- the reader thread flushes every ``fsmon_buffer_
+run continuation) -- the reader thread flushes every ``monitor_buffer_
 interval`` (default 0.15s) already, so this is a rare, self-limiting
 cosmetic edge case, not a correctness concern.
 
-**Log cap** (``tui.fsmon_max_lines``, default 500): the now-retired
-``FSMonRunningModal`` capped its ``RichLog`` at this value via the
+**Log cap** (``tui.monitor_max_lines``, default 500): the now-retired
+``MonitorRunningModal`` capped its ``RichLog`` at this value via the
 constructor's ``max_lines`` parameter (Textual's ``RichLog`` trims old lines
 off the top once the buffer exceeds it — see ``RichLog.write``); this view
 reads the same config field the same way (see ``_get_config_max_lines``,
-mirroring ``FSMonController._get_buffer_interval``'s read pattern) so
+mirroring ``MonitorController._get_buffer_interval``'s read pattern) so
 Monitor's live, un-throttled feed doesn't grow unbounded for a long-running
 session. Read once at construction time (matches the old modal, which was
-itself recreated fresh per fsmon session) -- a config change made via the
+itself recreated fresh per monitor session) -- a config change made via the
 Settings screen takes effect on the next TUI restart, not live.
 """
 
@@ -88,13 +88,13 @@ from sandroid.services import get_task_service
 from .files_panel import FilesSubViewBase
 
 if TYPE_CHECKING:
-    from sandroid.tui.controllers.fsmon_controller import FSMonDisplayItem
+    from sandroid.tui.controllers.monitor_controller import FileSystemMonitorItem
 
 logger = logging.getLogger(__name__)
 
 
 class MonitorView(FilesSubViewBase):
-    """Files tab sub-view: fsmon status header + live event-stream log."""
+    """Files tab sub-view: monitor status header + live event-stream log."""
 
     _LABEL = "Monitor"
 
@@ -160,9 +160,9 @@ class MonitorView(FilesSubViewBase):
         self.can_focus = True
         self._main_loop = None
         self._event_handlers: list = []
-        # Glance/header counters. fsmon has no notion of these itself, so
+        # Glance/header counters. monitor has no notion of these itself, so
         # they are purely client-side tallies of what has streamed through
-        # this view — reset on a fresh TASK_STARTED("fsmon"), not on unmount,
+        # this view — reset on a fresh TASK_STARTED("monitor"), not on unmount,
         # so switching sub-tabs and back doesn't lose the running count.
         self._total = 0
         self._create = 0
@@ -171,15 +171,15 @@ class MonitorView(FilesSubViewBase):
         self._rename = 0
         self._attrs = 0
         self._noise = 0
-        # The FSMonConfig fsmon was running with before Play's safety-net
-        # auto-stopped it (see recording_controller._stop_fsmon_before_
+        # The MonitorConfig monitor was running with before Play's safety-net
+        # auto-stopped it (see recording_controller._stop_monitor_before_
         # revert) — stashed here so the "Resume monitoring" button can hand
-        # it back to FSMonController.resume_after_playback(). None whenever
+        # it back to MonitorController.resume_after_playback(). None whenever
         # no resume offer is pending.
         self._resume_config: Any = None
-        # tui.fsmon_max_lines -- see module docstring's "Log cap" section.
+        # tui.monitor_max_lines -- see module docstring's "Log cap" section.
         self._max_lines = self._get_config_max_lines()
-        # tui.fsmon_event_visibility -- per-category Always/Verbose/Never
+        # tui.monitor_event_visibility -- per-category Always/Verbose/Never
         # mode, read once at construction (mirrors _get_config_max_lines).
         self._visibility: dict[str, str] = self._get_config_visibility()
         # Session-only "show verbose-tier categories too" toggle (key 'v'),
@@ -223,9 +223,9 @@ class MonitorView(FilesSubViewBase):
 
     @staticmethod
     def _get_config_max_lines() -> int:
-        """Read ``tui.fsmon_max_lines`` from config.
+        """Read ``tui.monitor_max_lines`` from config.
 
-        Mirrors ``FSMonController._get_buffer_interval``'s read pattern (same
+        Mirrors ``MonitorController._get_buffer_interval``'s read pattern (same
         ``ConfigLoader().load()`` call, same try/except-to-default shape) --
         the sibling read for the sibling config field in the same feature
         area. Falls back to the schema's own default (500) on any error, so
@@ -237,13 +237,13 @@ class MonitorView(FilesSubViewBase):
 
             loader = ConfigLoader()
             config = loader.load()
-            return config.tui.fsmon_max_lines
+            return config.tui.monitor_max_lines
         except Exception:
             return 500
 
     @staticmethod
     def _get_config_visibility() -> dict[str, str]:
-        """Read ``tui.fsmon_event_visibility`` from config.
+        """Read ``tui.monitor_event_visibility`` from config.
 
         Mirrors ``_get_config_max_lines``'s read pattern. Falls back to an
         empty dict on any error, so ``.get(category, "always")`` downstream
@@ -254,7 +254,7 @@ class MonitorView(FilesSubViewBase):
 
             loader = ConfigLoader()
             config = loader.load()
-            return dict(config.tui.fsmon_event_visibility)
+            return dict(config.tui.monitor_event_visibility)
         except Exception:
             return {}
 
@@ -267,12 +267,12 @@ class MonitorView(FilesSubViewBase):
     def glance_fragment(self) -> str:
         running = False
         try:
-            running = bool(get_task_service().is_running("fsmon"))
+            running = bool(get_task_service().is_running("monitor"))
         except Exception:
             pass
         if running:
-            return f"fsmon ● running · {self._total} events"
-        return "fsmon ○ stopped"
+            return f"monitor ● running · {self._total} events"
+        return "monitor ○ stopped"
 
     # -- EventBus wiring (non-blocking, thread-safe) ------------------------
 
@@ -308,16 +308,16 @@ class MonitorView(FilesSubViewBase):
 
             def _started_cb(event) -> None:
                 data = getattr(event, "data", None) or {}
-                if data.get("task_name") != "fsmon":
+                if data.get("task_name") != "monitor":
                     return
-                _schedule(self._on_fsmon_started)
+                _schedule(self._on_monitor_started)
 
             bus.subscribe(EventType.TASK_STARTED, _started_cb)
             self._event_handlers.append((EventType.TASK_STARTED, _started_cb))
 
             def _stopped_cb(event) -> None:
                 data = getattr(event, "data", None) or {}
-                if data.get("task_name") != "fsmon":
+                if data.get("task_name") != "monitor":
                     return
                 _schedule(self.refresh_header)
 
@@ -341,26 +341,26 @@ class MonitorView(FilesSubViewBase):
         """Handle a TASK_OUTPUT event (runs on the UI thread).
 
         Source-only match, same reasoning as ``FriTapPanel``: another task
-        that happens to share the "FSMon" display name must not leak into
-        this view, so filter on ``event.source == "fsmon"`` and nothing else.
+        that happens to share the "Monitor" display name must not leak into
+        this view, so filter on ``event.source == "monitor"`` and nothing else.
 
         Part B change: the event now carries a whole BATCH of structured
-        ``FSMonDisplayItem``s (``data["batch"]``, see ``fsmon_controller.py``'s
-        ``_log_fsmon_output_batch``/``_publish_fsmon_batch``) instead of one
+        ``FileSystemMonitorItem``s (``data["batch"]``, see ``monitor_controller.py``'s
+        ``_log_monitor_output_batch``/``_publish_monitor_batch``) instead of one
         pre-rendered message string -- ``_process_batch`` does the tallying/
         visibility-gating/grouping/rendering this view now owns entirely.
         """
-        if getattr(event, "source", None) != "fsmon":
+        if getattr(event, "source", None) != "monitor":
             return
         data = getattr(event, "data", None) or {}
         batch = data.get("batch")
         if batch:
             self._process_batch(batch)
 
-    def _on_fsmon_started(self) -> None:
-        """A fresh fsmon session started — reset the client-side tally.
+    def _on_monitor_started(self) -> None:
+        """A fresh monitor session started — reset the client-side tally.
 
-        Also clears any pending "Resume monitoring" offer: whether fsmon
+        Also clears any pending "Resume monitoring" offer: whether monitor
         just (re-)started via this button, the global 'o' key, or any other
         path, a stale offer referring to an already-superseded config would
         only confuse the user.
@@ -372,17 +372,17 @@ class MonitorView(FilesSubViewBase):
 
     # -- Play safety-net notice + "Resume monitoring" offer -----------------
 
-    def notify_fsmon_stopped_for_playback(self) -> None:
-        """Inline notice: Play's snapshot revert safety-net auto-stopped fsmon.
+    def notify_monitor_stopped_for_playback(self) -> None:
+        """Inline notice: Play's snapshot revert safety-net auto-stopped monitor.
 
-        Invoked via app.py's ``on_fsmon_stopped_for_playback`` callback,
+        Invoked via app.py's ``on_monitor_stopped_for_playback`` callback,
         itself invoked (via ``call_from_thread``, so always on the main
         thread by the time this runs) from
-        ``RecordingController._stop_fsmon_before_revert``. Written directly
+        ``RecordingController._stop_monitor_before_revert``. Written directly
         to the log rather than through ``_process_batch``/``_tally_category``
         so it does NOT bump the live-event tally/category counters — this is
         a system notice
-        about fsmon's lifecycle, not an fsmon-reported filesystem event.
+        about monitor's lifecycle, not an monitor-reported filesystem event.
         ``refresh_header`` picks up the now-stopped TaskService state
         (already refreshed once by the TASK_STOPPED subscription, but
         calling it again here is harmless and keeps this method
@@ -390,7 +390,7 @@ class MonitorView(FilesSubViewBase):
         """
         try:
             self.query_one("#monitor-log", RichLog).write(
-                "[#facc15]⚠ fsmon stopped — won't survive Play's snapshot revert.[/]"
+                "[#facc15]⚠ monitor stopped — won't survive Play's snapshot revert.[/]"
             )
         except Exception:
             pass
@@ -400,15 +400,15 @@ class MonitorView(FilesSubViewBase):
         """Inline notice: PID-mode silently fell back to path-mode.
 
         Invoked via app.py's ``_notify_pid_mode_fallback`` callback, itself
-        invoked directly (no thread marshaling -- ``_start_fsmon`` already
+        invoked directly (no thread marshaling -- ``_start_monitor`` already
         runs on the main thread) from
-        ``FSMonController._start_fsmon``'s PID-mode branch when
+        ``MonitorController._start_monitor``'s PID-mode branch when
         ``FSMon.fanotify_supported()`` reports the device's kernel lacks
-        fanotify. Mirrors ``notify_fsmon_stopped_for_playback`` exactly:
+        fanotify. Mirrors ``notify_monitor_stopped_for_playback`` exactly:
         written directly to the log rather than through
         ``_process_batch``/``_tally_category`` so it does NOT bump the
         live-event tally/category counters -- this is a system notice about
-        fsmon's lifecycle, not an fsmon-reported filesystem event.
+        monitor's lifecycle, not an monitor-reported filesystem event.
         """
         try:
             log = self.query_one("#monitor-log", RichLog)
@@ -430,11 +430,11 @@ class MonitorView(FilesSubViewBase):
     def offer_resume(self, config: Any) -> None:
         """Show the one-click "Resume monitoring" bar once Play has finished.
 
-        ``config`` is the (possibly PID-stale) FSMonConfig fsmon was running
+        ``config`` is the (possibly PID-stale) MonitorConfig monitor was running
         with before the Play-triggered auto-stop. Stashed on this view so
         the button handler can hand it back to
-        ``FSMonController.resume_after_playback`` — this view never
-        resolves PIDs or re-forks fsmon itself, it only presents the offer.
+        ``MonitorController.resume_after_playback`` — this view never
+        resolves PIDs or re-forks monitor itself, it only presents the offer.
         """
         self._resume_config = config
         try:
@@ -447,7 +447,7 @@ class MonitorView(FilesSubViewBase):
                 elif getattr(config, "target_path", None):
                     target = config.target_path
             self.query_one("#monitor-resume-label", Static).update(
-                f"fsmon was stopped for Play — {target}"
+                f"monitor was stopped for Play — {target}"
             )
             self.query_one("#monitor-resume-bar").remove_class("-hidden")
         except Exception:
@@ -464,15 +464,15 @@ class MonitorView(FilesSubViewBase):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle the "Resume monitoring" button.
 
-        Delegates entirely to ``App.resume_fsmon_after_playback``, which
-        calls ``FSMonController.resume_after_playback`` (PID re-resolution
+        Delegates entirely to ``App.resume_monitor_after_playback``, which
+        calls ``MonitorController.resume_after_playback`` (PID re-resolution
         and the path-mode/refuse-to-start fallbacks live there — this view
         stays a thin presentation layer, same division of responsibility as
         ``action_toggle_running`` delegating Start/Stop to
-        ``app.action_fsmon()``). Left showing on failure (rather than
+        ``app.action_monitor()``). Left showing on failure (rather than
         auto-hidden) so the user can retry — e.g. after manually relaunching
         the target app — without losing the offer; a successful resume
-        clears it automatically via the TASK_STARTED -> _on_fsmon_started
+        clears it automatically via the TASK_STARTED -> _on_monitor_started
         path.
         """
         if event.button.id != "monitor-resume-btn":
@@ -480,7 +480,7 @@ class MonitorView(FilesSubViewBase):
         event.stop()
         config = self._resume_config
         try:
-            self.app.resume_fsmon_after_playback(config)
+            self.app.resume_monitor_after_playback(config)
         except Exception:
             logger.warning("Resume monitoring failed", exc_info=True)
 
@@ -523,8 +523,8 @@ class MonitorView(FilesSubViewBase):
         mode = self._visibility.get(category, "always")
         return mode == "always" or (mode == "verbose" and self._verbose)
 
-    def _process_batch(self, batch: list[FSMonDisplayItem]) -> None:
-        """Process one whole batch of parsed fsmon items (see B1/B2/B3).
+    def _process_batch(self, batch: list[FileSystemMonitorItem]) -> None:
+        """Process one whole batch of parsed monitor items (see B1/B2/B3).
 
         Order of operations is the exact invariant B1 requires:
         1. Tally + visibility-gate EVERY item, unconditionally, first --
@@ -536,7 +536,7 @@ class MonitorView(FilesSubViewBase):
            purely a display concern from here on, it doesn't touch any
            counter.
         """
-        visible_items: list[FSMonDisplayItem] = []
+        visible_items: list[FileSystemMonitorItem] = []
         for item in batch:
             category = item.category
             self._tally_category(category)
@@ -581,17 +581,17 @@ class MonitorView(FilesSubViewBase):
 
     @staticmethod
     def _directory_runs(
-        items: list[FSMonDisplayItem],
-    ) -> list[tuple[str, list[FSMonDisplayItem]]]:
+        items: list[FileSystemMonitorItem],
+    ) -> list[tuple[str, list[FileSystemMonitorItem]]]:
         """Group CONSECUTIVE items by exact ``.directory`` match.
 
         Renames group by their OLD directory (``.directory``, not
         ``.new_directory``) -- a rename joins the run of the directory it
         originated from.
         """
-        runs: list[tuple[str, list[FSMonDisplayItem]]] = []
+        runs: list[tuple[str, list[FileSystemMonitorItem]]] = []
         current_dir: str | None = None
-        current_run: list[FSMonDisplayItem] = []
+        current_run: list[FileSystemMonitorItem] = []
         for item in items:
             if current_run and item.directory == current_dir:
                 current_run.append(item)
@@ -606,8 +606,8 @@ class MonitorView(FilesSubViewBase):
 
     @staticmethod
     def _collapse_consecutive(
-        run: list[FSMonDisplayItem],
-    ) -> list[tuple[FSMonDisplayItem, int]]:
+        run: list[FileSystemMonitorItem],
+    ) -> list[tuple[FileSystemMonitorItem, int]]:
         """Collapse consecutive items sharing the same displayed identity.
 
         Rendering-only -- tallying already happened, unconditionally, in
@@ -615,9 +615,9 @@ class MonitorView(FilesSubViewBase):
         undercount anything (B1's "Defect 1" again: the count is preserved
         in the returned ``int``, not lost).
         """
-        collapsed: list[tuple[FSMonDisplayItem, int]] = []
+        collapsed: list[tuple[FileSystemMonitorItem, int]] = []
         prev_key: tuple | None = None
-        prev_item: FSMonDisplayItem | None = None
+        prev_item: FileSystemMonitorItem | None = None
         count = 0
         for item in run:
             key = (
@@ -639,7 +639,7 @@ class MonitorView(FilesSubViewBase):
             collapsed.append((prev_item, count))
         return collapsed
 
-    def _render_grouped(self, items: list[FSMonDisplayItem], log: RichLog) -> None:
+    def _render_grouped(self, items: list[FileSystemMonitorItem], log: RichLog) -> None:
         """Grouped/compact rendering pass -- see B2.
 
         Only ever called with items that already passed the visibility
@@ -660,7 +660,7 @@ class MonitorView(FilesSubViewBase):
             pass
 
     @staticmethod
-    def _label_markup(item: FSMonDisplayItem) -> str:
+    def _label_markup(item: FileSystemMonitorItem) -> str:
         if not item.label:
             return ""
         text = escape(item.label)
@@ -679,7 +679,7 @@ class MonitorView(FilesSubViewBase):
         return text
 
     def _format_path_segment(
-        self, item: FSMonDisplayItem, in_run: bool, width: int
+        self, item: FileSystemMonitorItem, in_run: bool, width: int
     ) -> str:
         """The path portion of a row for a NON-rename item.
 
@@ -694,7 +694,7 @@ class MonitorView(FilesSubViewBase):
         return escape(self._truncate_keep_tail(combined, width))
 
     def _format_rename_segment(
-        self, item: FSMonDisplayItem, in_run: bool, width: int
+        self, item: FileSystemMonitorItem, in_run: bool, width: int
     ) -> str:
         """The path portion of a row for a rename item.
 
@@ -720,7 +720,7 @@ class MonitorView(FilesSubViewBase):
 
     def _write_row(
         self,
-        item: FSMonDisplayItem,
+        item: FileSystemMonitorItem,
         count: int,
         in_run: bool,
         width: int,
@@ -743,7 +743,9 @@ class MonitorView(FilesSubViewBase):
 
     # -- full-path view (toggleable, key 'u') --------------------------------
 
-    def _render_full_path(self, items: list[FSMonDisplayItem], log: RichLog) -> None:
+    def _render_full_path(
+        self, items: list[FileSystemMonitorItem], log: RichLog
+    ) -> None:
         """Full-path rendering pass -- entirely bypasses grouping/dedup.
 
         Every item gets its own row with the complete, untruncated path
@@ -784,7 +786,7 @@ class MonitorView(FilesSubViewBase):
         return chunks
 
     def _write_full_path_row(
-        self, item: FSMonDisplayItem, width: int, log: RichLog
+        self, item: FileSystemMonitorItem, width: int, log: RichLog
     ) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         label_markup = self._label_markup(item)
@@ -819,8 +821,8 @@ class MonitorView(FilesSubViewBase):
         task = None
         try:
             svc = get_task_service()
-            running = bool(svc.is_running("fsmon"))
-            task = svc.get_task("fsmon")
+            running = bool(svc.is_running("monitor"))
+            task = svc.get_task("monitor")
         except Exception:
             pass
 
@@ -891,18 +893,18 @@ class MonitorView(FilesSubViewBase):
     # -- actions ----------------------------------------------------------
 
     def action_toggle_running(self) -> None:
-        """Enter — delegate Start/Stop to the existing fsmon command (key o).
+        """Enter — delegate Start/Stop to the existing monitor command (key o).
 
-        ``action_fsmon`` owns ALL preconditions (config modal, task
+        ``action_monitor`` owns ALL preconditions (config modal, task
         registration, the "already running -> stop" toggle) — this just
         triggers it, exactly like ``FriTapPanel.action_toggle_running``
         delegates to ``action_action_key("h")`` rather than duplicating
         friTap's start/stop logic.
         """
         try:
-            self.app.action_fsmon()
+            self.app.action_monitor()
         except Exception as exc:
-            logger.warning("fsmon toggle failed: %s", exc)
+            logger.warning("monitor toggle failed: %s", exc)
         self.refresh_header()
 
     def action_clear_log(self) -> None:

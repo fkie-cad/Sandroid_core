@@ -9,7 +9,7 @@ in a scrollable ``RichLog`` and adds:
     o       hand that temp file to the OS opener
 
 Search matches against markup-STRIPPED text (never the literal
-``[success]``/``[warning]`` pseudo-tags friTap/fsmon/file_diff wrap lines
+``[success]``/``[warning]`` pseudo-tags friTap/monitor/file_diff wrap lines
 in), then re-highlights matches with ``[reverse]...[/reverse]`` in the
 rendered view. This is pure TUI-layer post-processing — no changes to
 ``core/file_diff.py`` or any diff producer.
@@ -68,7 +68,7 @@ class DiffZoomModal(ForensicModal[None]):
        inside the RichLog is untouched (this class does not bind up/down),
        so there is no fight with RichLog's own scroll handling.
 
-    ``e``/``o`` reuse global app keys (Emulator Info / fsmon) — harmless,
+    ``e``/``o`` reuse global app keys (Emulator Info / monitor) — harmless,
     since a focused modal captures all keys before they reach app-level
     bindings; noted here so it doesn't read as an oversight.
     """

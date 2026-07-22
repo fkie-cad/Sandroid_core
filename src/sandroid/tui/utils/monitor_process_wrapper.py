@@ -1,4 +1,4 @@
-"""FSMon process wrapper for TUI integration."""
+"""Monitor process wrapper for TUI integration."""
 
 import logging
 import subprocess
@@ -6,8 +6,8 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
-class FSMonWrapper:
-    """Wrapper around fsmon subprocess for TUI background task management.
+class MonitorProcessWrapper:
+    """Wrapper around monitor subprocess for TUI background task management.
 
     Provides:
     - Process lifecycle management
@@ -16,11 +16,11 @@ class FSMonWrapper:
     """
 
     def __init__(self, process: subprocess.Popen, config):
-        """Initialize the FSMon wrapper.
+        """Initialize the Monitor wrapper.
 
         Args:
-            process: The fsmon subprocess
-            config: FSMonConfig from the configuration modal
+            process: The monitor subprocess
+            config: MonitorConfig from the configuration modal
         """
         self.process = process
         self.config = config
@@ -32,7 +32,7 @@ class FSMonWrapper:
         return self.process.poll() is None and not self._stopped
 
     def stop(self) -> None:
-        """Stop the fsmon process.
+        """Stop the monitor process.
 
         Terminates the process gracefully, then forces kill if needed.
         """
@@ -51,14 +51,14 @@ class FSMonWrapper:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     # Force kill if still running
-                    logger.warning("FSMon did not terminate gracefully, killing...")
+                    logger.warning("Monitor did not terminate gracefully, killing...")
                     self.process.kill()
                     self.process.wait(timeout=1)
 
-            logger.info("FSMon process stopped")
+            logger.info("Monitor process stopped")
 
         except Exception as e:
-            logger.error(f"Error stopping fsmon: {e}")
+            logger.error(f"Error stopping monitor: {e}")
             # Try to force kill
             try:
                 self.process.kill()

@@ -1,4 +1,4 @@
-"""FSMon configuration modal for filesystem observation."""
+"""Monitor configuration modal for filesystem observation."""
 
 from textual import events
 from textual.app import ComposeResult
@@ -7,12 +7,12 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
 
 from sandroid.services import get_spotlight_service
-from sandroid.tui.controllers.fsmon_controller import FSMonConfig
+from sandroid.tui.controllers.monitor_controller import MonitorConfig
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
 
-class FSMonConfigModal(ForensicModal[FSMonConfig]):
-    """Modal for configuring FSMon filesystem monitoring.
+class MonitorConfigModal(ForensicModal[MonitorConfig]):
+    """Modal for configuring Monitor filesystem monitoring.
 
     Features:
     - Choose between PID-based or Path-based monitoring
@@ -28,13 +28,13 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
     ]
 
     DEFAULT_CSS = """
-    FSMonConfigModal .modal-container {
+    MonitorConfigModal .modal-container {
         width: 75;
         max-width: 90%;
         max-height: 80%;
     }
 
-    FSMonConfigModal #fsmon-description {
+    MonitorConfigModal #monitor-description {
         color: $foreground;
         text-align: center;
         content-align: center middle;
@@ -43,7 +43,7 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
         padding-bottom: 1;
     }
 
-    FSMonConfigModal #spotlight-info {
+    MonitorConfigModal #spotlight-info {
         color: $text-muted;
         background: $panel;
         border: solid $foreground-muted;
@@ -52,21 +52,21 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
         height: auto;
     }
 
-    FSMonConfigModal #spotlight-info.has-app {
+    MonitorConfigModal #spotlight-info.has-app {
         border: solid $success;
     }
 
-    FSMonConfigModal #mode-section {
+    MonitorConfigModal #mode-section {
         margin-bottom: 1;
     }
 
-    FSMonConfigModal #mode-label {
+    MonitorConfigModal #mode-label {
         color: $foreground;
         text-style: bold;
         padding-bottom: 1;
     }
 
-    FSMonConfigModal RadioSet {
+    MonitorConfigModal RadioSet {
         width: 100%;
         height: auto;
         background: transparent;
@@ -74,98 +74,98 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
         padding: 0;
     }
 
-    FSMonConfigModal RadioSet:focus {
+    MonitorConfigModal RadioSet:focus {
         border: solid $primary;
     }
 
-    FSMonConfigModal RadioSet:focus-within {
+    MonitorConfigModal RadioSet:focus-within {
         border: solid $primary;
     }
 
-    FSMonConfigModal RadioButton {
+    MonitorConfigModal RadioButton {
         background: transparent;
         padding: 0 1;
     }
 
-    FSMonConfigModal RadioButton.-on {
+    MonitorConfigModal RadioButton.-on {
         text-style: bold;
         color: $primary;
     }
 
-    FSMonConfigModal #mode-info {
+    MonitorConfigModal #mode-info {
         padding: 0 1;
         height: auto;
     }
 
-    FSMonConfigModal #path-section {
+    MonitorConfigModal #path-section {
         margin-top: 1;
     }
 
-    FSMonConfigModal #path-label {
+    MonitorConfigModal #path-label {
         color: $text-muted;
         height: 1;
     }
 
-    FSMonConfigModal #path-input {
+    MonitorConfigModal #path-input {
         width: 100%;
         background: $panel;
         border: solid $foreground-muted;
     }
 
-    FSMonConfigModal #path-input:focus {
+    MonitorConfigModal #path-input:focus {
         border: solid $success;
     }
 
-    FSMonConfigModal #path-input.error {
+    MonitorConfigModal #path-input.error {
         border: solid $error;
     }
 
-    FSMonConfigModal #path-hint {
+    MonitorConfigModal #path-hint {
         color: $text-muted;
         height: auto;
         padding-top: 1;
     }
 
-    FSMonConfigModal #error-label {
+    MonitorConfigModal #error-label {
         color: $error;
         height: auto;
         padding-top: 1;
     }
 
-    FSMonConfigModal .hidden {
+    MonitorConfigModal .hidden {
         display: none;
     }
 
-    FSMonConfigModal .button-row {
+    MonitorConfigModal .button-row {
         margin-top: 1;
         height: 3;
     }
 
-    FSMonConfigModal #btn-start {
+    MonitorConfigModal #btn-start {
         background: $success;
         color: #ffffff;
     }
 
-    FSMonConfigModal #btn-start:hover {
+    MonitorConfigModal #btn-start:hover {
         background: $success-darken-1;
     }
 
-    FSMonConfigModal #btn-start:focus {
+    MonitorConfigModal #btn-start:focus {
         background: $success;
         text-style: bold;
     }
 
-    FSMonConfigModal #btn-start:disabled {
+    MonitorConfigModal #btn-start:disabled {
         background: $panel;
         color: $foreground-disabled;
     }
 
-    FSMonConfigModal #btn-cancel {
+    MonitorConfigModal #btn-cancel {
         background: $panel;
         color: $foreground;
     }
 
-    FSMonConfigModal #btn-cancel:hover {
+    MonitorConfigModal #btn-cancel:hover {
         background: $panel-lighten-1;
     }
     """
@@ -176,7 +176,7 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
         id: str = None,
         classes: str = None,
     ):
-        """Initialize the FSMon configuration modal."""
+        """Initialize the Monitor configuration modal."""
         super().__init__(name=name, id=id, classes=classes)
 
         # Get spotlight info
@@ -213,10 +213,10 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
         with Vertical(classes="modal-container"):
-            yield Label("Filesystem Monitor (fsmon)", classes="modal-title")
+            yield Label("Filesystem Monitor", classes="modal-title")
             yield Label(
                 "Monitor filesystem changes on the Android device in real-time.",
-                id="fsmon-description",
+                id="monitor-description",
             )
 
             # Spotlight app info
@@ -457,7 +457,7 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
 
     def _cancel(self) -> None:
         """Cancel and dismiss."""
-        self._dismiss_with_refresh(FSMonConfig(cancelled=True))
+        self._dismiss_with_refresh(MonitorConfig(cancelled=True))
 
     def _start(self) -> None:
         """Validate and start monitoring."""
@@ -474,7 +474,7 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
 
             mode = self._get_selected_mode()
 
-            config = FSMonConfig(
+            config = MonitorConfig(
                 cancelled=False,
                 mode=mode,
                 target_path=path,

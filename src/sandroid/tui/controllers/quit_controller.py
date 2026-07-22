@@ -153,7 +153,7 @@ class QuitController:
         """Show quit confirmation dialog or stop running tasks.
 
         Called by 'q' key and Ctrl+C.
-        - If background tasks are running (esp. fsmon), stops them first
+        - If background tasks are running (esp. monitor), stops them first
         - If untracked Frida jobs are detected, stops them first
         - Otherwise shows quit confirmation
         """

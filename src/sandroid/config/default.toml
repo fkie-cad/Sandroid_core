@@ -93,10 +93,10 @@ show_theme_indicator = false
 # logo_color = "#00ff00"        # Main ASCII art color (bright green by default)
 # logo_text_color = "#ffffff"   # "Sandroid" text highlight color (white by default)
 
-# FSMon output buffer interval (seconds). Lower = faster, higher CPU. 0 = near-realtime.
-# fsmon_buffer_interval = 0.15
-# Maximum lines kept in FSMon observer (50-10000). Higher = more scrollback, more memory.
-# fsmon_max_lines = 500
+# Monitor output buffer interval (seconds). Lower = faster, higher CPU. 0 = near-realtime.
+# monitor_buffer_interval = 0.15
+# Maximum lines kept in Monitor observer (50-10000). Higher = more scrollback, more memory.
+# monitor_max_lines = 500
 
 # Device Paths - Android device filesystem paths
 # Override these to match non-standard device setups

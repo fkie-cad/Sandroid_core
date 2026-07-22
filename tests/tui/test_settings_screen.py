@@ -2,13 +2,13 @@
 
 Covers two independent additions to the Settings screen:
 
-- The FSMon event-visibility rows: the 6 Select rows added to the General
+- The Monitor event-visibility rows: the 6 Select rows added to the General
   tab (``create``/``modify``/``delete``/``rename``/``attrs``/``noise``) and
   the ``on_select_changed`` save-path special-case for their
-  ``setting-tui--fsmon_event_visibility__<category>`` ids. The critical
+  ``setting-tui--monitor_event_visibility__<category>`` ids. The critical
   regression this guards against: ``SettingsController.save`` /
   ``_apply_setting`` does a full ``setattr`` REPLACE of the whole
-  ``fsmon_event_visibility`` dict, not a merge. If the special-case handler
+  ``monitor_event_visibility`` dict, not a merge. If the special-case handler
   only ever inserted the one changed category into a fresh dict, saving
   would silently wipe the other 5 categories back to nothing (or to their
   schema defaults, whichever a naive implementation happened to default
@@ -72,7 +72,7 @@ class _StubLoader:
         return Path("/dev/null")
 
 
-class _FSMonSettingsHarness(App):
+class _MonitorSettingsHarness(App):
     """Pushes SettingsScreen with an injected config.
 
     Setting ``sandroid_config`` directly makes ``SettingsScreen._get_config``
@@ -115,17 +115,19 @@ def _no_frida_version_fetch(monkeypatch):
 
 
 def _visibility_select(screen: SettingsScreen, category: str) -> Select:
-    return screen.query_one(f"#setting-tui--fsmon_event_visibility__{category}", Select)
+    return screen.query_one(
+        f"#setting-tui--monitor_event_visibility__{category}", Select
+    )
 
 
-# -- FSMon event-visibility rows ---------------------------------------------
+# -- Monitor event-visibility rows ---------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_compose_renders_default_visibility_selects() -> None:
     """Schema-default config: 5 categories 'always', noise 'verbose'."""
     config = SandroidConfig()
-    app = _FSMonSettingsHarness(config)
+    app = _MonitorSettingsHarness(config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -140,7 +142,7 @@ async def test_compose_renders_default_visibility_selects() -> None:
 async def test_compose_uses_preexisting_nondefault_visibility_values() -> None:
     """A config with non-default values populates the Selects from it."""
     config = SandroidConfig()
-    config.tui.fsmon_event_visibility = {
+    config.tui.monitor_event_visibility = {
         "create": "never",
         "modify": "verbose",
         "delete": "always",
@@ -148,7 +150,7 @@ async def test_compose_uses_preexisting_nondefault_visibility_values() -> None:
         "attrs": "verbose",
         "noise": "never",
     }
-    app = _FSMonSettingsHarness(config)
+    app = _MonitorSettingsHarness(config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -174,7 +176,7 @@ async def test_changing_one_category_preserves_others_through_save(
     would fail in that case.
     """
     preset_config = SandroidConfig()
-    preset_config.tui.fsmon_event_visibility = {
+    preset_config.tui.monitor_event_visibility = {
         "create": "always",
         "modify": "always",
         "delete": "always",
@@ -188,7 +190,7 @@ async def test_changing_one_category_preserves_others_through_save(
         lambda: _StubLoader(preset_config),
     )
 
-    app = _FSMonSettingsHarness(preset_config)
+    app = _MonitorSettingsHarness(preset_config)
     async with app.run_test() as pilot:
         await pilot.pause()
         screen = app.screen
@@ -207,7 +209,7 @@ async def test_changing_one_category_preserves_others_through_save(
             "noise": "never",
         }
         # The pending dict must be the full, self-contained 6-key dict.
-        assert screen._pending["tui.fsmon_event_visibility"] == expected_after_edit
+        assert screen._pending["tui.monitor_event_visibility"] == expected_after_edit
 
         screen.action_save()
         await pilot.pause()
@@ -215,7 +217,7 @@ async def test_changing_one_category_preserves_others_through_save(
     # The save path (real SettingsController.save/_apply_setting, only the
     # disk-touching ConfigLoader stubbed out) must have applied the same
     # full dict -- "attrs" must still be "never", not reset to "always".
-    assert preset_config.tui.fsmon_event_visibility == expected_after_edit
+    assert preset_config.tui.monitor_event_visibility == expected_after_edit
 
 
 # -- Bug A: cramped/misaligned AI Chat tab layout ---------------------------

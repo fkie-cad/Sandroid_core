@@ -753,7 +753,7 @@ class SandroidHeadlessAPI(SandroidAPI):
         return await self._device_handler.list_snapshots()
 
     # =========================================================================
-    # Screen Recording, FSMon, Action Import/Export (delegates to handlers)
+    # Screen Recording, Monitor, Action Import/Export (delegates to handlers)
     # =========================================================================
 
     @require_initialized
@@ -769,16 +769,16 @@ class SandroidHeadlessAPI(SandroidAPI):
         return await self._device_handler.stop_screen_recording()
 
     @require_initialized
-    async def start_fsmon(
+    async def start_monitor(
         self, mode: str = "auto", path: str | None = None
     ) -> CommandResult:
-        """Start FSMon filesystem monitoring."""
-        return await self._monitoring_handler.start_fsmon(mode=mode, path=path)
+        """Start Monitor filesystem monitoring."""
+        return await self._monitoring_handler.start_monitor(mode=mode, path=path)
 
     @require_initialized
-    async def stop_fsmon(self) -> CommandResult:
-        """Stop FSMon filesystem monitoring."""
-        return await self._monitoring_handler.stop_fsmon()
+    async def stop_monitor(self) -> CommandResult:
+        """Stop Monitor filesystem monitoring."""
+        return await self._monitoring_handler.stop_monitor()
 
     @require_initialized
     async def import_action(self, file_path: str) -> CommandResult:

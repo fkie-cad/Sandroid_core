@@ -34,7 +34,7 @@ from sandroid.tui.controllers import (
     DeviceController,
     ForensicAPKController,
     ForensicController,
-    FSMonController,
+    MonitorController,
     NetworkCaptureController,
     ObjectionResumeController,
     ProxyController,
@@ -126,7 +126,7 @@ class SandroidTUI(App):
         Binding("d", "action_key('d')", "Dump Memory", show=False, id="dump_memory"),
         # Files
         Binding("l", "spotlight_files", "Spotlight Files", show=False, id="list_files"),
-        Binding("o", "fsmon", "FSMon", show=False, id="fsmon"),
+        Binding("o", "monitor", "Monitor", show=False, id="monitor"),
         # Emulator
         Binding(
             "e", "action_key('e')", "Emulator Info", show=False, id="emulator_info"
@@ -285,11 +285,11 @@ class SandroidTUI(App):
             call_from_thread=cb.call_from_thread,
             force_ui_refresh=cb.force_ui_refresh,
             on_run_saved=self._notify_diffs_new_run,
-            on_fsmon_stopped_for_playback=self._notify_fsmon_stopped_for_playback,
-            on_fsmon_resume_available=self._notify_fsmon_resume_available,
+            on_monitor_stopped_for_playback=self._notify_monitor_stopped_for_playback,
+            on_monitor_resume_available=self._notify_monitor_resume_available,
         )
 
-        self._fsmon_controller = FSMonController(
+        self._monitor_controller = MonitorController(
             log_info=cb.log_info,
             log_warning=cb.log_warning,
             log_error=cb.log_error,
@@ -1150,14 +1150,14 @@ class SandroidTUI(App):
     def action_manage_forensic_apks(self) -> None:
         self._forensic_apk_controller.show_forensic_apk_modal()
 
-    def action_fsmon(self) -> None:
-        self._fsmon_controller.show_config_modal()
+    def action_monitor(self) -> None:
+        self._monitor_controller.show_config_modal()
 
     def _open_monitor_tab(self) -> None:
-        """FSMonController's ``open_files_tab`` hook: land on Files > Monitor.
+        """MonitorController's ``open_files_tab`` hook: land on Files > Monitor.
 
-        Fires once fsmon has actually *started* (called from inside
-        ``FSMonController._start_fsmon`` after it registers with
+        Fires once monitor has actually *started* (called from inside
+        ``MonitorController._start_monitor`` after it registers with
         TaskService), not merely when the config modal opens — mirrors
         ``action_action_key``'s ``h`` -> ``open_fritap_tab()`` jump for
         friTap. Injected as a callback (constructed in ``_init_controllers``)
@@ -1446,12 +1446,12 @@ class SandroidTUI(App):
             except Exception:
                 logger.warning("DiffsView.on_new_run failed", exc_info=True)
 
-    def _notify_fsmon_stopped_for_playback(self) -> None:
-        """RecordingController's ``on_fsmon_stopped_for_playback``.
+    def _notify_monitor_stopped_for_playback(self) -> None:
+        """RecordingController's ``on_monitor_stopped_for_playback``.
 
         Fires the moment Play's snapshot-revert safety-net force-stops a
-        running fsmon session (see
-        ``RecordingController._stop_fsmon_before_revert``). Same
+        running monitor session (see
+        ``RecordingController._stop_monitor_before_revert``). Same
         query_one + hasattr-guard dispatch pattern as
         ``_notify_diffs_new_run`` — the controller only knows about a plain
         callback, app.py owns reaching into the concrete widget.
@@ -1463,22 +1463,22 @@ class SandroidTUI(App):
             view = ms.query_one("#files-monitor")
         except Exception:
             return
-        if hasattr(view, "notify_fsmon_stopped_for_playback"):
+        if hasattr(view, "notify_monitor_stopped_for_playback"):
             try:
-                view.notify_fsmon_stopped_for_playback()
+                view.notify_monitor_stopped_for_playback()
             except Exception:
                 logger.warning(
-                    "MonitorView.notify_fsmon_stopped_for_playback failed",
+                    "MonitorView.notify_monitor_stopped_for_playback failed",
                     exc_info=True,
                 )
 
     def _notify_pid_mode_fallback(self, path: str) -> None:
-        """FSMonController's ``on_pid_mode_fallback``.
+        """MonitorController's ``on_pid_mode_fallback``.
 
-        Fires the moment ``FSMonController._start_fsmon``'s PID-mode branch
+        Fires the moment ``MonitorController._start_monitor``'s PID-mode branch
         silently substitutes path-mode because ``FSMon.fanotify_supported()``
         reports the device's kernel lacks fanotify. Same query_one +
-        hasattr-guard dispatch pattern as ``_notify_fsmon_stopped_for_playback``
+        hasattr-guard dispatch pattern as ``_notify_monitor_stopped_for_playback``
         — the controller only knows about a plain callback, app.py owns
         reaching into the concrete widget.
         """
@@ -1497,10 +1497,10 @@ class SandroidTUI(App):
                     "MonitorView.notify_pid_mode_fallback failed", exc_info=True
                 )
 
-    def _notify_fsmon_resume_available(self, config) -> None:
-        """RecordingController's ``on_fsmon_resume_available``.
+    def _notify_monitor_resume_available(self, config) -> None:
+        """RecordingController's ``on_monitor_resume_available``.
 
-        Fires once Play has fully finished, only if fsmon was auto-stopped
+        Fires once Play has fully finished, only if monitor was auto-stopped
         for it — surfaces MonitorView's one-click "Resume monitoring" offer.
         """
         ms = self._get_main_screen()
@@ -1516,17 +1516,17 @@ class SandroidTUI(App):
             except Exception:
                 logger.warning("MonitorView.offer_resume failed", exc_info=True)
 
-    def resume_fsmon_after_playback(self, config) -> None:
+    def resume_monitor_after_playback(self, config) -> None:
         """MonitorView's "Resume monitoring" button handler.
 
-        Delegates entirely to ``FSMonController.resume_after_playback``,
+        Delegates entirely to ``MonitorController.resume_after_playback``,
         which owns the PID re-resolution (target app likely relaunched with
         a new PID during replay) and the path-mode/refuse-to-start
-        fallbacks. On success, fsmon's own TASK_STARTED event clears the
-        Resume offer (MonitorView._on_fsmon_started) — no extra plumbing
+        fallbacks. On success, monitor's own TASK_STARTED event clears the
+        Resume offer (MonitorView._on_monitor_started) — no extra plumbing
         needed here.
         """
-        self._fsmon_controller.resume_after_playback(config)
+        self._monitor_controller.resume_after_playback(config)
 
     def action_export_action(self) -> None:
         self._recording_controller.show_export_modal()
