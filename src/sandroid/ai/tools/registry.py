@@ -40,13 +40,10 @@ logger = logging.getLogger(__name__)
 
 
 class RiskTier(IntEnum):
-    """How consequential a tool call is, for a future safety gate to attach to.
+    """How consequential a tool call is; consulted by the permission gate.
 
-    Every tool in this codebase is currently ``READ_ONLY`` -- there are no
-    real, consequential Toolbox-backed tools yet -- but the tier is present on
-    every :class:`ToolSpec` now so a later gate (auto-approve read-only calls,
-    prompt for reversible ones, require explicit confirmation for
-    consequential ones) has somewhere to attach without a schema change.
+    ``READ_ONLY`` calls auto-run. ``REVERSIBLE``/``CONSEQUENTIAL`` calls
+    prompt the analyst for approval (see :mod:`sandroid.ai.tool_permissions`).
     """
 
     READ_ONLY = 0
