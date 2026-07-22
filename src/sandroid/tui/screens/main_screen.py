@@ -121,6 +121,10 @@ class MainScreen(Screen):
         padding: 0 0 0 1;
     }
     #tool-tabbar.-level-active {
+        /* border-box: the single-cell content row + this 1-cell border need
+           2 rows total, else the border eats the only row and the tab labels
+           clip to nothing (the bug that hid the whole tab strip). */
+        height: 2;
         border-bottom: solid #38bdf8;
     }
     .tool-tab {

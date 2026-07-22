@@ -75,6 +75,9 @@ class NetworkPanel(Widget):
         padding: 0 0 0 1;
     }
     NetworkPanel > #network-tabbar.-level-active {
+        /* border-box: reserve a 2nd row for the border so it doesn't eat the
+           single content row and clip the sub-tab labels to nothing. */
+        height: 2;
         border-bottom: solid #38bdf8;
     }
     NetworkPanel .network-subtab {

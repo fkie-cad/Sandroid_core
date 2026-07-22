@@ -130,6 +130,9 @@ class FilesPanel(Widget):
         padding: 0 0 0 1;
     }
     FilesPanel > #files-tabbar.-level-active {
+        /* border-box: reserve a 2nd row for the border so it doesn't eat the
+           single content row and clip the sub-tab labels to nothing. */
+        height: 2;
         border-bottom: solid #38bdf8;
     }
     FilesPanel .files-subtab {
