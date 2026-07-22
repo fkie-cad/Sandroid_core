@@ -25,7 +25,11 @@ import tempfile
 from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
-from sandroid.ai.tools._shared import resolve_package_name
+from sandroid.ai.tools._shared import (
+    PACKAGE_NAME_PARAM,
+    parse_pm_path_output,
+    resolve_package_name,
+)
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb import Adb
 from sandroid.services.component_info_parser import (
@@ -59,14 +63,6 @@ try:
 except ImportError:  # pragma: no cover - exercised via ANDROGUARD_AVAILABLE
     APK = None
     etree = None
-
-_PACKAGE_NAME_PARAM = {
-    "type": "string",
-    "description": (
-        "Fully qualified package name (e.g. 'com.example.app'). Omit to use "
-        "the analyst's current spotlight app."
-    ),
-}
 
 # `Adb.send_adb_command`'s blanket 30s timeout is too short for pulling a
 # real installed APK -- verified on a live emulator: WhatsApp's base.apk
@@ -193,7 +189,7 @@ def list_installed_packages(include_system: bool = False) -> dict[str, Any]:
     ),
     parameters={
         "type": "object",
-        "properties": {"package_name": _PACKAGE_NAME_PARAM},
+        "properties": {"package_name": PACKAGE_NAME_PARAM},
         "required": [],
     },
     risk=RiskTier.READ_ONLY,
@@ -230,7 +226,7 @@ def get_package_pid(package_name: str | None = None) -> dict[str, Any]:
     ),
     parameters={
         "type": "object",
-        "properties": {"package_name": _PACKAGE_NAME_PARAM},
+        "properties": {"package_name": PACKAGE_NAME_PARAM},
         "required": [],
     },
     risk=RiskTier.READ_ONLY,
@@ -257,22 +253,6 @@ def get_package_details(package_name: str | None = None) -> dict[str, Any]:
     stdout, _stderr = Adb.send_adb_command(f"shell dumpsys package {shlex.quote(pkg)}")
     details = parse_extended_package_info(stdout or "")
     return {**details, "package_name": pkg}
-
-
-def _parse_pm_path_output(stdout: str) -> list[str]:
-    """Parse `pm path <pkg>` output into a list of on-device APK paths.
-
-    Real output is one ``package:/absolute/path/to/*.apk`` line per APK
-    (``base.apk`` plus any installed splits) -- verified against a live
-    emulator across several multi-split apps (Microsoft Edge, Snapchat,
-    Telegram, Uber all install ``base.apk`` + several ``split_*.apk``).
-    """
-    paths = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if line.startswith("package:"):
-            paths.append(line[len("package:") :])
-    return paths
 
 
 def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
@@ -317,7 +297,7 @@ def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
         )
 
     stdout, _stderr = Adb.send_adb_command(f"shell pm path {shlex.quote(pkg)}")
-    device_paths = _parse_pm_path_output(stdout)
+    device_paths = parse_pm_path_output(stdout)
     if not device_paths:
         return []
 
@@ -380,7 +360,7 @@ def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
     ),
     parameters={
         "type": "object",
-        "properties": {"package_name": _PACKAGE_NAME_PARAM},
+        "properties": {"package_name": PACKAGE_NAME_PARAM},
         "required": [],
     },
     risk=RiskTier.READ_ONLY,

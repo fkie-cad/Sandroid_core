@@ -1,20 +1,29 @@
-"""Frida-server lifecycle and screen-capture/snapshot tools for the AI chat.
+"""Frida-server lifecycle, screen-capture/snapshot, and emulator-control tools
+for the AI chat.
 
-Importing this module registers all ten tools into the
+Importing this module registers all fifteen tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator).
 
-Two categories:
+Three categories:
 
-- ``category="frida"`` (4 tools): ``check_frida_server_status``,
-  ``start_frida_server``, ``stop_frida_server``, ``install_frida_server`` --
-  ``RiskTier.READ_ONLY``/``REVERSIBLE``/``REVERSIBLE``/``CONSEQUENTIAL``
-  respectively, all dispatching through the real installed
-  ``AndroidFridaManager.FridaManager`` instance shared with the rest of the
-  app via :meth:`sandroid.services.frida_session_service.FridaSessionService.get_frida_manager`.
+- ``category="frida"`` (6 tools): ``check_frida_server_status``,
+  ``start_frida_server``, ``stop_frida_server``, ``install_frida_server``,
+  ``get_running_frida_jobs``, ``check_hook_conflicts`` --
+  ``RiskTier.READ_ONLY``/``REVERSIBLE``/``REVERSIBLE``/``CONSEQUENTIAL``/
+  ``READ_ONLY``/``READ_ONLY`` respectively. The first four dispatch through
+  the real installed ``AndroidFridaManager.FridaManager`` instance shared
+  with the rest of the app via
+  :meth:`sandroid.services.frida_session_service.FridaSessionService.get_frida_manager`.
   ``install_frida_server`` has ``can_remember_choice=False`` -- its risk
   varies with the (optional) ``version`` argument and device state, so an
-  "allow always" choice must not be persisted.
+  "allow always" choice must not be persisted. The last two,
+  ``get_running_frida_jobs``/``check_hook_conflicts``, are thin wraps of
+  :meth:`~sandroid.services.frida_session_service.FridaSessionService.get_running_jobs`/
+  :meth:`~sandroid.services.frida_session_service.FridaSessionService.check_hook_conflicts`
+  -- both already job-manager-null-checked and exception-safe inside the
+  service itself, so neither needs the ``_get_frida_manager`` construction
+  guard the first four rely on.
 - ``category="capture"`` (6 tools): ``take_screenshot``,
   ``start_screen_recording``, ``stop_screen_recording``, ``create_snapshot``,
   ``load_snapshot``, ``list_snapshots`` -- ``RiskTier.READ_ONLY``/
@@ -28,6 +37,20 @@ Two categories:
   work against the emulator's telnet console (not a real physical device);
   screen recording is real ``adb shell screenrecord`` and works on physical
   devices too -- see each tool's docstring for which applies.
+- ``category="emulator_control"`` (3 tools): ``delete_snapshot``,
+  ``restart_emulator``, ``kill_emulator`` -- all ``RiskTier.CONSEQUENTIAL``,
+  dispatching through the same ``EmulatorService``. Kept as a dedicated
+  category rather than folded into ``capture`` because these mutate/destroy
+  emulator state outright rather than capturing session artifacts. All
+  three are guarded by :func:`_require_emulator_device`
+  (:meth:`sandroid.services.device_service.DeviceService.is_emulator_device`)
+  and cleanly raise a :class:`~sandroid.ai.errors.ToolExecutionError` on a
+  physical device, rather than attempting a telnet-console call that cannot
+  possibly succeed there. ``delete_snapshot`` has ``can_remember_choice=False``
+  for the same argument-dependent-risk reason as ``load_snapshot``;
+  ``restart_emulator``/``kill_emulator`` keep the default
+  ``can_remember_choice=True`` since they take no arguments for that risk to
+  hide behind.
 """
 
 import os
@@ -275,6 +298,80 @@ def install_frida_server(version: str | None = None) -> dict[str, Any]:
     except Exception as exc:
         return {"installed": False, "error": str(exc)}
     return {"installed": True, "version": manager.get_installed_server_version()}
+
+
+@sandroid_tool(
+    name="get_running_frida_jobs",
+    description=(
+        "List currently running Frida jobs (hooking sessions) on the "
+        "device, including whatever job metadata each one carries."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="frida",
+)
+def get_running_frida_jobs() -> dict[str, Any]:
+    """List currently running Frida jobs.
+
+    Real integration point:
+    :meth:`sandroid.services.frida_session_service.FridaSessionService.get_running_jobs`.
+    Unlike the other four tools in this module, this does not go through
+    :func:`_get_frida_manager` -- the underlying method reads from the
+    service's own job manager (already lock-guarded and null-checked
+    internally), never constructs a ``FridaManager``, and cannot raise.
+
+    Returns:
+        ``{"jobs": [...], "count": int}`` -- ``jobs`` is whatever list of
+        job-info dicts the underlying job manager reports (empty if no job
+        manager is active). Each entry's exact shape is job-manager-defined.
+    """
+    from sandroid.services import get_frida_session_service
+
+    jobs = get_frida_session_service().get_running_jobs()
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@sandroid_tool(
+    name="check_hook_conflicts",
+    description=(
+        "Check whether any of the given Frida hook targets are already "
+        "registered by another running job -- useful before registering new "
+        "hooks to avoid double-hooking the same target."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "hooks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Hook target identifiers to check for conflicts.",
+            },
+        },
+        "required": ["hooks"],
+    },
+    risk=RiskTier.READ_ONLY,
+    category="frida",
+)
+def check_hook_conflicts(hooks: list[str]) -> dict[str, Any]:
+    """Check whether any of *hooks* are already claimed by another job.
+
+    Real integration point:
+    :meth:`sandroid.services.frida_session_service.FridaSessionService.check_hook_conflicts`.
+    Like :func:`get_running_frida_jobs`, this reads the service's own
+    job-manager state directly and does not go through
+    :func:`_get_frida_manager`.
+
+    Args:
+        hooks: Hook target identifiers to check for conflicts.
+
+    Returns:
+        ``{"conflicts": {hook: owning_job_id, ...}}`` -- empty dict if none
+        of *hooks* are currently claimed by another job.
+    """
+    from sandroid.services import get_frida_session_service
+
+    conflicts = get_frida_session_service().check_hook_conflicts(hooks)
+    return {"conflicts": conflicts}
 
 
 @sandroid_tool(
@@ -552,3 +649,171 @@ def list_snapshots() -> dict[str, Any]:
         "snapshots": [{"name": s.name, "date": s.date} for s in snapshots],
         "count": len(snapshots),
     }
+
+
+def _require_emulator_device() -> None:
+    """Raise unless the active device is an emulator.
+
+    Real integration point:
+    :meth:`sandroid.services.device_service.DeviceService.is_emulator_device`.
+    Shared precondition for every ``category="emulator_control"`` tool in
+    this module: ``delete_snapshot``/``restart_emulator``/``kill_emulator``
+    all ultimately reach the AVD's telnet console (or, for ``restart``, the
+    local emulator binary/process directly) and cannot possibly succeed
+    against a real physical device -- calling straight through and letting
+    the telnet layer fail would produce a confusing low-level error instead
+    of a clear, immediate rejection. Lazily imported inside the function
+    body (matching this module's existing convention for every other
+    service lookup) so tests can monkeypatch
+    ``sandroid.services.get_device_service`` directly.
+
+    Raises:
+        ToolExecutionError: The active device is a physical device, or no
+            device is currently selected.
+    """
+    from sandroid.services import get_device_service
+
+    if not get_device_service().is_emulator_device():
+        raise ToolExecutionError(
+            "this tool only works against an emulator (AVD) -- the active "
+            "device is a physical device, or no device is currently "
+            "selected"
+        )
+
+
+@sandroid_tool(
+    name="delete_snapshot",
+    description=(
+        "Delete a named emulator snapshot. Emulator-only -- this uses the "
+        "AVD's telnet console and does not work against a real physical "
+        "device."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Name of the snapshot to delete.",
+            },
+        },
+        "required": ["name"],
+    },
+    risk=RiskTier.CONSEQUENTIAL,
+    category="emulator_control",
+    can_remember_choice=False,
+)
+def delete_snapshot(name: str) -> dict[str, Any]:
+    """Delete a named emulator snapshot via the telnet console.
+
+    Real integration point:
+    :meth:`sandroid.services.emulator_service.EmulatorService.delete_snapshot`.
+    Emulator-telnet-console-only -- does **not** work against a real
+    physical device; guarded by :func:`_require_emulator_device` so a
+    physical device gets a clean, immediate rejection instead of a
+    telnet-console failure.
+
+    NOTE (carried forward from ``EmulatorService.delete_snapshot``'s own
+    docstring): ``avd snapshot del`` is the documented emulator-console verb,
+    but unlike ``create_snapshot``/``load_snapshot`` (which use the
+    proven ``save``/``load`` verbs), it has no in-repo precedent and is
+    unverified against a live emulator.
+
+    ``can_remember_choice=False`` -- deleting an arbitrary named snapshot is
+    destructive, and which snapshot is at risk depends entirely on the
+    (unbounded) ``name`` argument rather than the tool's identity -- the
+    same reasoning as ``load_snapshot``.
+
+    Args:
+        name: Name of the snapshot to delete.
+
+    Returns:
+        ``{"deleted": bool, "name": str}``.
+
+    Raises:
+        ToolExecutionError: The active device is not an emulator.
+    """
+    _require_emulator_device()
+    from sandroid.services import get_emulator_service
+
+    deleted = get_emulator_service().delete_snapshot(name)
+    return {"deleted": deleted, "name": name}
+
+
+@sandroid_tool(
+    name="restart_emulator",
+    description=(
+        "Restart the Android emulator: kill the current instance and start "
+        "a new one. Emulator-only -- does not work against a real physical "
+        "device."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.CONSEQUENTIAL,
+    category="emulator_control",
+)
+def restart_emulator() -> dict[str, Any]:
+    """Kill the current emulator instance and start a new one.
+
+    Real integration point:
+    :meth:`sandroid.services.emulator_service.EmulatorService.restart`.
+    Emulator-only; guarded by :func:`_require_emulator_device` so a physical
+    device gets a clean, immediate rejection instead of a telnet-console/
+    process-launch failure. ``EmulatorService.restart()`` raises a bare
+    ``RuntimeError`` when the configured emulator binary is missing or
+    fails to launch -- caught here and folded into a
+    ``{"restarted": False, "error": ...}`` result rather than propagating,
+    so a missing/misconfigured emulator binary reads as a normal tool
+    failure instead of an unhandled exception.
+
+    Returns:
+        ``{"restarted": bool}`` reflecting whatever the service itself
+        reports. ``{"restarted": False, "error": str}`` if the emulator
+        binary was missing or failed to launch.
+
+    Raises:
+        ToolExecutionError: The active device is not an emulator.
+    """
+    _require_emulator_device()
+    from sandroid.services import get_emulator_service
+
+    try:
+        restarted = get_emulator_service().restart()
+    except RuntimeError as exc:
+        return {"restarted": False, "error": str(exc)}
+    return {"restarted": restarted}
+
+
+@sandroid_tool(
+    name="kill_emulator",
+    description=(
+        "Send a kill command to the running Android emulator over its "
+        "telnet console. Emulator-only -- does not work against a real "
+        "physical device."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.CONSEQUENTIAL,
+    category="emulator_control",
+)
+def kill_emulator() -> dict[str, Any]:
+    """Send a kill command to the running emulator over its telnet console.
+
+    Real integration point:
+    :meth:`sandroid.services.emulator_service.EmulatorService.kill`.
+    Emulator-telnet-console-only; guarded by :func:`_require_emulator_device`
+    so a physical device gets a clean, immediate rejection. Per
+    ``EmulatorService.kill()``'s own docstring, a ``True`` return only means
+    the kill command was successfully *sent* over the telnet console -- it
+    is not a confirmation that the emulator process actually died, and this
+    wrapper adds no extra liveness polling of its own on top of that.
+
+    Returns:
+        ``{"killed": bool}`` -- ``True`` only means the kill command was
+        sent, not that the emulator's death has been confirmed.
+
+    Raises:
+        ToolExecutionError: The active device is not an emulator.
+    """
+    _require_emulator_device()
+    from sandroid.services import get_emulator_service
+
+    killed = get_emulator_service().kill()
+    return {"killed": killed}

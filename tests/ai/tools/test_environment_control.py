@@ -43,6 +43,15 @@ def _patch_configuration_service(monkeypatch, raw_results_path="results/raw/"):
     )
 
 
+def _patch_device_service(monkeypatch, is_emulator=True):
+    """Point ``get_device_service()`` at a fake reporting *is_emulator*."""
+    monkeypatch.setattr(
+        services,
+        "get_device_service",
+        lambda: SimpleNamespace(is_emulator_device=lambda: is_emulator),
+    )
+
+
 # -- _get_frida_manager failure propagation -------------------------------------
 
 
@@ -486,3 +495,165 @@ def test_list_snapshots_empty(monkeypatch):
     _patch_emulator_service(monkeypatch, service)
 
     assert ec.list_snapshots() == {"snapshots": [], "count": 0}
+
+
+# -- delete_snapshot -------------------------------------------------------------
+
+
+def test_delete_snapshot_passes_through(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+    captured = {}
+
+    def fake_delete(name):
+        captured["name"] = name
+        return True
+
+    service = SimpleNamespace(delete_snapshot=fake_delete)
+    _patch_emulator_service(monkeypatch, service)
+
+    assert ec.delete_snapshot("baseline") == {"deleted": True, "name": "baseline"}
+    assert captured["name"] == "baseline"
+
+
+def test_delete_snapshot_failure(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+    service = SimpleNamespace(delete_snapshot=lambda name: False)
+    _patch_emulator_service(monkeypatch, service)
+
+    assert ec.delete_snapshot("missing") == {"deleted": False, "name": "missing"}
+
+
+def test_delete_snapshot_rejects_physical_device(monkeypatch):
+    """A physical device must get a clean rejection, never a telnet attempt."""
+    _patch_device_service(monkeypatch, is_emulator=False)
+    calls = []
+    service = SimpleNamespace(delete_snapshot=lambda name: calls.append(name) or True)
+    _patch_emulator_service(monkeypatch, service)
+
+    with pytest.raises(ToolExecutionError, match="emulator"):
+        ec.delete_snapshot("baseline")
+    assert calls == []
+
+
+# -- restart_emulator -------------------------------------------------------------
+
+
+def test_restart_emulator_passes_through(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+    service = SimpleNamespace(restart=lambda: True)
+    _patch_emulator_service(monkeypatch, service)
+
+    assert ec.restart_emulator() == {"restarted": True}
+
+
+def test_restart_emulator_binary_missing_caught_as_error(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+
+    def fake_restart():
+        raise RuntimeError("emulator binary not found")
+
+    service = SimpleNamespace(restart=fake_restart)
+    _patch_emulator_service(monkeypatch, service)
+
+    result = ec.restart_emulator()
+
+    assert result == {"restarted": False, "error": "emulator binary not found"}
+
+
+def test_restart_emulator_rejects_physical_device(monkeypatch):
+    """A physical device must get a clean rejection, never a process launch."""
+    _patch_device_service(monkeypatch, is_emulator=False)
+    calls = []
+    service = SimpleNamespace(restart=lambda: calls.append("restart") or True)
+    _patch_emulator_service(monkeypatch, service)
+
+    with pytest.raises(ToolExecutionError, match="emulator"):
+        ec.restart_emulator()
+    assert calls == []
+
+
+# -- kill_emulator ----------------------------------------------------------------
+
+
+def test_kill_emulator_passes_through(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+    service = SimpleNamespace(kill=lambda: True)
+    _patch_emulator_service(monkeypatch, service)
+
+    assert ec.kill_emulator() == {"killed": True}
+
+
+def test_kill_emulator_send_failed(monkeypatch):
+    _patch_device_service(monkeypatch, is_emulator=True)
+    service = SimpleNamespace(kill=lambda: False)
+    _patch_emulator_service(monkeypatch, service)
+
+    assert ec.kill_emulator() == {"killed": False}
+
+
+def test_kill_emulator_rejects_physical_device(monkeypatch):
+    """A physical device must get a clean rejection, never a telnet attempt."""
+    _patch_device_service(monkeypatch, is_emulator=False)
+    calls = []
+    service = SimpleNamespace(kill=lambda: calls.append("kill") or True)
+    _patch_emulator_service(monkeypatch, service)
+
+    with pytest.raises(ToolExecutionError, match="emulator"):
+        ec.kill_emulator()
+    assert calls == []
+
+
+# -- get_running_frida_jobs -------------------------------------------------------
+
+
+def test_get_running_frida_jobs_passes_through(monkeypatch):
+    jobs = [{"job_id": "1", "target": "com.example.app"}]
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(get_running_jobs=lambda: jobs),
+    )
+
+    assert ec.get_running_frida_jobs() == {"jobs": jobs, "count": 1}
+
+
+def test_get_running_frida_jobs_empty(monkeypatch):
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(get_running_jobs=list),
+    )
+
+    assert ec.get_running_frida_jobs() == {"jobs": [], "count": 0}
+
+
+# -- check_hook_conflicts ---------------------------------------------------------
+
+
+def test_check_hook_conflicts_passes_hooks_through_and_reports_conflicts(monkeypatch):
+    captured = {}
+
+    def fake_check(hooks):
+        captured["hooks"] = hooks
+        return {"open": "job-42"}
+
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(check_hook_conflicts=fake_check),
+    )
+
+    result = ec.check_hook_conflicts(["open", "read"])
+
+    assert captured["hooks"] == ["open", "read"]
+    assert result == {"conflicts": {"open": "job-42"}}
+
+
+def test_check_hook_conflicts_no_conflicts(monkeypatch):
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(check_hook_conflicts=lambda hooks: {}),
+    )
+
+    assert ec.check_hook_conflicts(["open"]) == {"conflicts": {}}

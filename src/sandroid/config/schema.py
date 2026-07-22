@@ -254,6 +254,38 @@ class AIConfig(BaseModel):
         default=True,
         description="Show the small animated ASCII mascot in the Chat panel.",
     )
+    data_share_path: Path = Field(
+        default=Path("~/Sandroid/ai_share/").expanduser(),
+        description=(
+            "Always-available host directory for the AI's file tools. Bare "
+            "relative paths given to list_host_dir/read_host_file/push_path/"
+            "install_apk are resolved against this directory -- drop a file "
+            "here (e.g. an APK to install) and the AI can reach it by "
+            "filename alone. Created automatically if missing."
+        ),
+    )
+    extra_host_paths: list[Path] = Field(
+        default_factory=list,
+        description=(
+            "Additional host roots the AI's file tools may access, beyond "
+            "data_share_path and the current session's results/raw-results/"
+            "cache directories. Empty by default."
+        ),
+    )
+
+    @validator("data_share_path", pre=True)
+    def expand_data_share_path(cls, v):
+        """Expand user path for the AI data-share directory."""
+        if isinstance(v, (str, Path)):
+            return Path(str(v)).expanduser()
+        return v
+
+    @validator("extra_host_paths", pre=True, each_item=True)
+    def expand_extra_host_paths(cls, v):
+        """Expand user path for each configured extra host root."""
+        if isinstance(v, (str, Path)):
+            return Path(str(v)).expanduser()
+        return v
 
 
 class MCPServerConfig(BaseModel):

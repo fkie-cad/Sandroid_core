@@ -5,9 +5,9 @@ classmethod or
 :class:`~sandroid.services.device_settings_service.DeviceSettingsService`
 accessor -- no ``"note": "SAMPLE DATA"`` markers, this is real device data.
 
-Importing this module registers both tools into the
+Importing this module registers all three tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
-(see the ``@sandroid_tool`` decorator). Both tools in this module are
+(see the ``@sandroid_tool`` decorator). All tools in this module are
 ``RiskTier.READ_ONLY`` and ``category="device_query"``.
 """
 
@@ -93,3 +93,26 @@ def check_root_and_magisk() -> dict[str, bool]:
     root_available = get_device_settings_service().check_root_available()
     magisk_installed = Adb._is_package_installed(_MAGISK_PACKAGE_NAME)
     return {"root_available": root_available, "magisk_installed": magisk_installed}
+
+
+@sandroid_tool(
+    name="get_selinux_status",
+    description=(
+        "Get the device's SELinux enforcement mode (e.g. 'Enforcing' or "
+        "'Permissive') -- useful for anti-detection/anti-tamper reasoning."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="device_query",
+)
+def get_selinux_status() -> dict[str, str | None]:
+    """Return the device's SELinux enforcement mode.
+
+    Real integration point: :meth:`sandroid.core.adb.Adb.get_selinux_status`.
+
+    Returns:
+        ``{"selinux_status": ...}`` where the value is the raw trimmed
+        ``getenforce`` output (e.g. ``"Enforcing"``, ``"Permissive"``), or
+        ``None`` if the query fails.
+    """
+    return {"selinux_status": Adb.get_selinux_status()}

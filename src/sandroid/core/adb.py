@@ -7,6 +7,8 @@ for all ADB operations.  The actual logic is split across focused modules:
 - :mod:`adb_packages`  -- APK install / uninstall / package listing
 - :mod:`adb_process`   -- PID lookup with multiple fallback strategies
 - :mod:`adb_emulator`  -- emulator telnet commands (geo, sensors, snapshots, network)
+- :mod:`adb_dumpsys`   -- ``dumpsys activity`` parsing (services, activity stack)
+- :mod:`adb_network`   -- ``/proc/net/tcp[6]`` connection listing
 - :mod:`adb_utils`     -- error handling & stderr filtering
 
 All public methods remain accessible on the ``Adb`` class so that callers
@@ -14,12 +16,16 @@ do not need any changes.
 """
 
 import re
+import shlex
 import shutil
 import subprocess
 from logging import getLogger
+from typing import Any
 
 # Import delegation modules
+from sandroid.core import adb_dumpsys as _dumpsys
 from sandroid.core import adb_emulator as _emu
+from sandroid.core import adb_network as _net
 from sandroid.core import adb_packages as _pkg
 from sandroid.core import adb_process as _proc
 from sandroid.core import adb_queries as _qry
@@ -384,6 +390,18 @@ class Adb:
         """
         return _qry.get_device_time(cls.send_adb_command)
 
+    @classmethod
+    def get_selinux_status(cls) -> str | None:
+        """Retrieve the device's SELinux enforcement mode.
+
+        Queries via ``getenforce``.
+
+        Returns:
+            The raw trimmed status string (e.g. ``'Enforcing'``,
+            ``'Permissive'``), or None if an error occurs.
+        """
+        return _qry.get_selinux_status(cls.send_adb_command)
+
     # ------------------------------------------------------------------
     # Delegated: Package management  (adb_packages)
     # ------------------------------------------------------------------
@@ -571,6 +589,39 @@ class Adb:
             return False, combined or "force-stop failed"
         return True, f"Force-stopped {package_name}"
 
+    @classmethod
+    def push_file(cls, local_path: str, remote_path: str) -> tuple[bool, str]:
+        """Push a local file to the device via ``adb push``.
+
+        Generic host-to-device file transfer primitive -- unlike the
+        frida-server/CA-cert/fsmon-binary pushes elsewhere in this codebase,
+        this one is not scoped to a specific file kind. ``push`` is an
+        adb-level verb (not a ``shell`` command), so it is run directly.
+
+        Args:
+            local_path: Path to the file on the host.
+            remote_path: Destination path on the device.
+
+        Returns:
+            Tuple of (success, message).
+        """
+        stdout, stderr = cls.send_adb_command(
+            f"push {shlex.quote(local_path)} {shlex.quote(remote_path)}"
+        )
+        combined = f"{stdout or ''}\n{stderr or ''}".strip()
+        lc = combined.lower()
+        if (
+            "error" in lc
+            or "no such file" in lc
+            or "failed to copy" in lc
+            or "permission denied" in lc
+        ):
+            logger.warning(
+                f"push_file failed for {local_path} -> {remote_path}: {combined}"
+            )
+            return False, combined or "push failed"
+        return True, f"Pushed {local_path} to {remote_path}"
+
     # ------------------------------------------------------------------
     # Delegated: Process identification  (adb_process)
     # ------------------------------------------------------------------
@@ -609,6 +660,96 @@ class Adb:
             use_frida_fallback=use_frida_fallback,
             quiet=quiet,
         )
+
+    @classmethod
+    def list_processes(
+        cls, package_filter: str | None = None
+    ) -> list[dict[str, str | int]]:
+        """List running processes on the device via ``ps -A``.
+
+        Args:
+            package_filter: Optional substring to match against each
+                process name. Omit to list every running process.
+
+        Returns:
+            A list of dicts, each with keys ``'pid'`` (int), ``'user'``
+            (str), and ``'name'`` (str).
+        """
+        return _proc.list_processes(cls.send_adb_command, package_filter)
+
+    @classmethod
+    def get_process_detail(cls, pid: int) -> dict[str, Any] | None:
+        """Get detailed process info from ``/proc/<pid>``.
+
+        Args:
+            pid: The process ID to inspect.
+
+        Returns:
+            A dict with process status fields (name, state, ppid, threads,
+            uid, memory, fd/map counts), or None if the process is gone or
+            unreadable.
+        """
+        return _proc.get_process_detail(cls.send_adb_command, pid)
+
+    @classmethod
+    def kill_pid(cls, pid: int, signal: str = "TERM") -> tuple[bool, bool]:
+        """Send a signal to a process, retrying as root if it doesn't die.
+
+        Args:
+            pid: The target process ID. Coerced with ``int()``.
+            signal: Signal name to send -- one of ``'TERM'``, ``'KILL'``,
+                ``'HUP'``, ``'INT'``.
+
+        Returns:
+            A tuple of ``(killed, used_root)``.
+
+        Raises:
+            ValueError: *pid* is not coercible to ``int``, or *signal* is
+                not one of the allowed values.
+        """
+        return _proc.kill_pid(cls.send_adb_command, cls.send_root_shell, pid, signal)
+
+    # ------------------------------------------------------------------
+    # Delegated: Dumpsys queries  (adb_dumpsys)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_services(cls, package_name: str | None = None) -> list[dict[str, Any]]:
+        """List running Android services via ``dumpsys activity services``.
+
+        Args:
+            package_name: Optional package to filter to. Omit to list every
+                running service device-wide.
+
+        Returns:
+            A list of parsed service-record dicts.
+        """
+        return _dumpsys.list_services(cls.send_adb_command, package_name)
+
+    @classmethod
+    def get_activity_stack(cls) -> list[dict[str, Any]]:
+        """Get the device's activity task stack.
+
+        Queries via ``dumpsys activity activities``.
+
+        Returns:
+            A list of task dicts, each containing its activities.
+        """
+        return _dumpsys.get_activity_stack(cls.send_adb_command)
+
+    # ------------------------------------------------------------------
+    # Delegated: Network queries  (adb_network)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def list_connections(cls) -> list[dict[str, Any]]:
+        """List TCP sockets via ``/proc/net/tcp`` and ``/proc/net/tcp6``.
+
+        Returns:
+            A list of connection dicts (protocol, local/remote
+            address+port, state, uid, and cross-referenced package_name).
+        """
+        return _net.list_connections(cls.send_adb_command)
 
     # ------------------------------------------------------------------
     # Delegated: Emulator operations  (adb_emulator)

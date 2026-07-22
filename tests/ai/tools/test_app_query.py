@@ -23,6 +23,7 @@ import pytest
 from sandroid import services
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools import app_query
+from sandroid.ai.tools._shared import parse_pm_path_output
 from sandroid.core.adb import Adb
 
 # -- get_foreground_app -------------------------------------------------------
@@ -397,13 +398,13 @@ def test_list_exported_components_raises_when_androguard_unavailable(monkeypatch
         app_query.list_exported_components("com.example.app")
 
 
-# -- _parse_pm_path_output ----------------------------------------------------
+# -- parse_pm_path_output -----------------------------------------------------
 
 
 def test_parse_pm_path_output_single_apk():
     stdout = "package:/data/app/~~abc==/com.example.app-xyz==/base.apk\n"
 
-    assert app_query._parse_pm_path_output(stdout) == [
+    assert parse_pm_path_output(stdout) == [
         "/data/app/~~abc==/com.example.app-xyz==/base.apk"
     ]
 
@@ -417,7 +418,7 @@ def test_parse_pm_path_output_multiple_splits():
         "package:/data/app/~~abc==/com.example.app-xyz==/split_config.en.apk\n"
     )
 
-    assert app_query._parse_pm_path_output(stdout) == [
+    assert parse_pm_path_output(stdout) == [
         "/data/app/~~abc==/com.example.app-xyz==/base.apk",
         "/data/app/~~abc==/com.example.app-xyz==/split_config.arm64_v8a.apk",
         "/data/app/~~abc==/com.example.app-xyz==/split_config.en.apk",
@@ -425,4 +426,4 @@ def test_parse_pm_path_output_multiple_splits():
 
 
 def test_parse_pm_path_output_empty_when_not_installed():
-    assert app_query._parse_pm_path_output("") == []
+    assert parse_pm_path_output("") == []

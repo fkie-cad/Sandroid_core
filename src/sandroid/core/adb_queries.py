@@ -124,3 +124,24 @@ def get_device_time(
         logger.error(f"Failed to get device time: {stderr}")
         return None
     return stdout.strip()
+
+
+def get_selinux_status(
+    send_command: Callable[[str], tuple[str, str]],
+) -> str | None:
+    """Retrieve the device's SELinux enforcement mode via ``getenforce``.
+
+    Promotes the exact command already proven at
+    ``services/setup_service.py``'s ``check_selinux_permissive`` (a pure
+    read, no ``setenforce`` side effect) to a reusable primitive -- but
+    returns the raw trimmed string instead of reducing it to a bool.
+
+    Returns:
+        The trimmed status string (e.g. ``'Enforcing'``, ``'Permissive'``),
+        or *None* if an error occurs.
+    """
+    stdout, stderr = send_command("shell getenforce")
+    if stderr:
+        logger.error(f"Failed to get SELinux status: {stderr}")
+        return None
+    return stdout.strip() if stdout else None

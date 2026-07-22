@@ -116,3 +116,18 @@ def test_check_root_and_magisk_queries_the_magisk_package_name(monkeypatch):
     device_query.check_root_and_magisk()
 
     assert captured["package_name"] == "com.topjohnwu.magisk"
+
+
+# -- get_selinux_status -----------------------------------------------------------
+
+
+def test_get_selinux_status_passes_through(monkeypatch):
+    monkeypatch.setattr(Adb, "get_selinux_status", staticmethod(lambda: "Enforcing"))
+
+    assert device_query.get_selinux_status() == {"selinux_status": "Enforcing"}
+
+
+def test_get_selinux_status_none_on_failure(monkeypatch):
+    monkeypatch.setattr(Adb, "get_selinux_status", staticmethod(lambda: None))
+
+    assert device_query.get_selinux_status() == {"selinux_status": None}
