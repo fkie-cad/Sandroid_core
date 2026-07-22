@@ -9,18 +9,24 @@ Covers:
   ``push_modal`` directly -- the latter was verified to raise
   ``RuntimeError: no current event loop in thread`` when invoked straight
   from the background thread ``check_devices_on_startup`` runs on.
+- ``switch_device``/``setup_device_results_folder`` reading ``dm.active_device``
+  (regression test for the ``get_current_device`` AttributeError, traced to
+  commit ``cc40b98``, that was silently swallowed by a broad ``except``).
 """
 
 from __future__ import annotations
+
+import os
 
 from sandroid.config import android_env
 from sandroid.tui.controllers.device_controller import AVDInfo, DeviceController
 
 
 class _FakeDevice:
-    def __init__(self, serial: str, state: str = "device"):
+    def __init__(self, serial: str, state: str = "device", is_emulator: bool = True):
         self.serial = serial
         self.state = state
+        self.is_emulator = is_emulator
 
 
 class _FakeDeviceManager:
@@ -37,8 +43,12 @@ class _FakeDeviceManager:
     def auto_select_device(self):
         self.auto_select_called += 1
 
-    def get_current_device(self):
-        return self.active_device
+    def set_active_device(self, serial: str) -> bool:
+        for device in self.devices:
+            if device.serial == serial:
+                self.active_device = device
+                return True
+        return False
 
 
 def _make_controller(dm, push_modal=None, call_from_thread=None) -> DeviceController:
@@ -283,3 +293,43 @@ def test_offer_avd_start_marshals_via_call_from_thread_only(monkeypatch):
     assert len(cft_calls) == 1
     assert cft_calls[0][0] is controller._push_modal
     assert push_calls == []  # never invoked directly/synchronously
+
+
+# ---------------------------------------------------------------------------
+# setup_device_results_folder / switch_device: dm.active_device regression
+# ---------------------------------------------------------------------------
+
+
+def test_setup_device_results_folder_reads_active_device(monkeypatch, tmp_path):
+    device = _FakeDevice("emulator-5554", is_emulator=True)
+    dm = _FakeDeviceManager(devices=[device], active_device=device)
+    controller = _make_controller(dm)
+
+    monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
+
+    result = controller.setup_device_results_folder()
+
+    expected = os.path.join(str(tmp_path), "E_emulator-5554")
+    assert result == expected
+    assert os.path.isdir(expected)
+
+
+def test_setup_device_results_folder_no_active_device_returns_none():
+    dm = _FakeDeviceManager(devices=[], active_device=None)
+    controller = _make_controller(dm)
+
+    assert controller.setup_device_results_folder() is None
+
+
+def test_switch_device_completes_without_raising(monkeypatch, tmp_path):
+    device = _FakeDevice("emulator-5554", is_emulator=True)
+    dm = _FakeDeviceManager(devices=[device])
+    controller = _make_controller(dm)
+
+    monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
+
+    result = controller.switch_device("emulator-5554")
+
+    assert result is True
+    assert dm.active_device is device
+    assert os.path.isdir(os.path.join(str(tmp_path), "E_emulator-5554"))

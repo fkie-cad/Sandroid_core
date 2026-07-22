@@ -34,7 +34,10 @@ import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Optional, Protocol
+
+if TYPE_CHECKING:
+    from sandroid.core.device_manager import Device
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +45,25 @@ logger = logging.getLogger(__name__)
 class DeviceManagerProtocol(Protocol):
     """Protocol for device manager operations."""
 
-    def refresh_devices(self) -> list:
+    @property
+    def active_device(self) -> Optional["Device"]:
+        """Get the currently active device."""
+        ...
+
+    def refresh_devices(self, *, auto_select: bool = True) -> list:
         """Refresh and return list of connected devices."""
         ...
 
-    def get_current_device(self) -> Any:
-        """Get currently selected device."""
+    def set_active_device(self, serial: str) -> bool:
+        """Set the active device by serial."""
         ...
 
-    def set_current_device(self, serial: str) -> bool:
-        """Set current device by serial."""
+    def auto_select_device(self) -> Optional["Device"]:
+        """Automatically select a device, preferring emulators."""
+        ...
+
+    def get_device(self, serial: str) -> Optional["Device"]:
+        """Get a device by serial number."""
         ...
 
 
@@ -174,7 +186,7 @@ class DeviceController:
 
         return Toolbox
 
-    def _get_device_manager(self) -> Any:
+    def _get_device_manager(self) -> DeviceManagerProtocol:
         """Get device manager from Toolbox."""
         return self._get_toolbox().get_device_manager()
 
@@ -683,7 +695,7 @@ class DeviceController:
         """
         try:
             dm = self._get_device_manager()
-            current = dm.get_current_device()
+            current = dm.active_device
 
             if not current:
                 return None
