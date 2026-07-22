@@ -477,15 +477,26 @@ class KprobeTracer:
         """
         inst = cls._instance_dir(tracefs)
         events = f"{tracefs}/kprobe_events"
-        cls._shell(f"echo 0 > {inst}/tracing_on 2>/dev/null")
+        # Every step is guarded by an on-device existence test. A bare
+        # ``echo 0 > missing/file`` fails its redirect BEFORE a trailing
+        # ``2>/dev/null`` can take effect (redirects apply left-to-right and the
+        # shell aborts on the first failure), so on a clean device -- the common
+        # case, since a normal stop removes the instance -- the old unguarded
+        # form leaked a "can't create ..." to stderr and spammed a WARNING per
+        # probe on EVERY start. Guarding means a clean device emits no stderr.
+        cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
         for name in cls._PROBE_NAMES:
-            cls._shell(f"echo 0 > {inst}/events/kprobes/{name}/enable 2>/dev/null")
-        cls._shell(f"echo > {inst}/set_event_pid 2>/dev/null")
-        cls._shell(f"rmdir {inst} 2>/dev/null")
-        # Remove our probes from the GLOBAL kprobe_events (must be disabled
-        # everywhere first, done above).
+            enable = f"{inst}/events/kprobes/{name}/enable"
+            cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
+        cls._shell(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
+        cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+        # Remove our probes from the GLOBAL kprobe_events, but only the ones
+        # actually registered -- a ``-:name`` for an absent probe errors too.
         for name in cls._PROBE_NAMES:
-            cls._shell(f"echo {cls._dq('-:' + name)} >> {events} 2>/dev/null")
+            cls._shell(
+                f'grep -q "kprobes/{name} " {events} 2>/dev/null '
+                f"&& echo {cls._dq('-:' + name)} >> {events}"
+            )
 
     @classmethod
     def _active_probes(cls, mode: str) -> tuple[str, ...]:
@@ -649,18 +660,26 @@ class KprobeTracer:
         inst = cls._instance_dir(tracefs)
         events = f"{tracefs}/kprobe_events"
         try:
-            cls._shell(f"echo 0 > {inst}/tracing_on 2>/dev/null")
+            # Guarded like _self_clean: in path mode nc/sx are never installed,
+            # so their per-probe disable + `-:name` removal would otherwise warn
+            # on every stop. Existence tests keep stderr clean.
+            cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
             for name in cls._PROBE_NAMES:
-                cls._shell(f"echo 0 > {inst}/events/kprobes/{name}/enable 2>/dev/null")
-            cls._shell(f"echo > {inst}/set_event_pid 2>/dev/null")
+                enable = f"{inst}/events/kprobes/{name}/enable"
+                cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
+            cls._shell(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
             if cls._orig_buffer_kb:
                 cls._shell(
-                    f"echo {cls._orig_buffer_kb} > {inst}/buffer_size_kb 2>/dev/null"
+                    f"[ -e {inst}/buffer_size_kb ] "
+                    f"&& echo {cls._orig_buffer_kb} > {inst}/buffer_size_kb"
                 )
             for name in cls._PROBE_NAMES:
-                cls._shell(f"echo {cls._dq('-:' + name)} >> {events} 2>/dev/null")
+                cls._shell(
+                    f'grep -q "kprobes/{name} " {events} 2>/dev/null '
+                    f"&& echo {cls._dq('-:' + name)} >> {events}"
+                )
             # Instance removal LAST (after the pipe is released + probes gone).
-            cls._shell(f"rmdir {inst} 2>/dev/null")
+            cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
         except Exception:
             cls.logger.debug("kprobe teardown swallowed an error", exc_info=True)
         finally:
