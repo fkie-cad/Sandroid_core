@@ -15,6 +15,7 @@ All public methods remain accessible on the ``Adb`` class so that callers
 do not need any changes.
 """
 
+import functools
 import re
 import shlex
 import shutil
@@ -78,19 +79,23 @@ class Adb:
         return cls._target_device
 
     @classmethod
-    def _build_command(cls, command: str) -> str:
+    def _build_command(cls, command: str, serial: str | None = None) -> str:
         """Build an ADB command with optional device targeting.
 
         If a target device is set, prepends -s <serial> to the command.
 
         Args:
             command: The ADB command to build
+            serial: Device serial to target for this call only, overriding
+                the shared ``_target_device`` global without mutating it.
+                Falls back to ``_target_device`` when ``None`` (default).
 
         Returns:
             The command with device targeting if applicable
         """
-        if cls._target_device:
-            return f"-s {cls._target_device} {command}"
+        target = serial if serial is not None else cls._target_device
+        if target:
+            return f"-s {target} {command}"
         return command
 
     # ------------------------------------------------------------------
@@ -121,7 +126,9 @@ class Adb:
     # ------------------------------------------------------------------
 
     @classmethod
-    def send_adb_command(cls, command: str) -> tuple[str, str]:
+    def send_adb_command(
+        cls, command: str, serial: str | None = None
+    ) -> tuple[str, str]:
         """Send an ADB command and return the output.
 
         If a target device is set via set_target_device(), the command will
@@ -129,6 +136,9 @@ class Adb:
 
         Args:
             command: The ADB command to be executed.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             A tuple containing (stdout, stderr) from the command execution.
@@ -141,7 +151,7 @@ class Adb:
         if not cls.ADB_PATH:
             cls.init()
 
-        full_command = cls._build_command(command)
+        full_command = cls._build_command(command, serial=serial)
         logger.debug("Running ADB command " + full_command)
         try:
             output = subprocess.run(
@@ -165,7 +175,9 @@ class Adb:
             return "", f"SubprocessError: {e}"
 
     @classmethod
-    def send_adb_command_popen(cls, command: str) -> subprocess.Popen:
+    def send_adb_command_popen(
+        cls, command: str, serial: str | None = None
+    ) -> subprocess.Popen:
         """Execute an ADB command using subprocess.Popen for streaming output.
 
         Use this method when you need to process output as it arrives, or when
@@ -175,6 +187,9 @@ class Adb:
 
         Args:
             command: The ADB command to be executed.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             A Popen object representing the running process with stdout and stderr pipes.
@@ -183,7 +198,7 @@ class Adb:
             OSError: If the ADB process fails to start.
             subprocess.SubprocessError: If there is a subprocess error during execution.
         """
-        full_command = cls._build_command(command)
+        full_command = cls._build_command(command, serial=serial)
         logger.debug("Running ADB command " + full_command)
         try:
             process = subprocess.Popen(
@@ -362,11 +377,18 @@ class Adb:
         return _qry.get_device_locale(cls.send_adb_command)
 
     @classmethod
-    def get_android_version_and_api_level(cls) -> dict[str, str | None] | None:
+    def get_android_version_and_api_level(
+        cls, serial: str | None = None
+    ) -> dict[str, str | None] | None:
         """Retrieve the Android version and API level of the connected device.
 
         Queries the 'ro.build.version.release' and 'ro.build.version.sdk'
         system properties.
+
+        Args:
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             A dictionary containing:
@@ -374,7 +396,12 @@ class Adb:
                 - 'api_level': The API level as a string (e.g., '34', '33')
             Returns None if an error occurs while querying the properties.
         """
-        return _qry.get_android_version_and_api_level(cls.send_adb_command)
+        send_command = (
+            functools.partial(cls.send_adb_command, serial=serial)
+            if serial is not None
+            else cls.send_adb_command
+        )
+        return _qry.get_android_version_and_api_level(send_command)
 
     @classmethod
     def get_device_time(cls) -> str | None:
@@ -756,7 +783,9 @@ class Adb:
     # ------------------------------------------------------------------
 
     @classmethod
-    def send_telnet_command(cls, command: str | bytes) -> tuple[str, str]:
+    def send_telnet_command(
+        cls, command: str | bytes, serial: str | None = None
+    ) -> tuple[str, str]:
         """Send a telnet command to the Android emulator console.
 
         Uses ADB's 'emu' command to send telnet commands to the emulator console.
@@ -766,14 +795,24 @@ class Adb:
         Args:
             command: The telnet command to be executed. Can be a string or bytes;
                 bytes will be decoded to UTF-8.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             A tuple containing (stdout, stderr) from the command execution.
         """
-        return _emu.send_telnet_command(cls.send_adb_command, command)
+        send_command = (
+            functools.partial(cls.send_adb_command, serial=serial)
+            if serial is not None
+            else cls.send_adb_command
+        )
+        return _emu.send_telnet_command(send_command, command)
 
     @classmethod
-    def _get_avd_property(cls, avd_command: str, label: str) -> str | None:
+    def _get_avd_property(
+        cls, avd_command: str, label: str, serial: str | None = None
+    ) -> str | None:
         """Query an AVD property via the telnet console.
 
         Sends the given ``avd`` sub-command and returns the first line of
@@ -782,21 +821,31 @@ class Adb:
         Args:
             avd_command: The telnet sub-command (e.g., ``"avd name"``).
             label: Human-readable label for error messages.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             The property value, or None if it cannot be determined.
         """
-        return _emu._get_avd_property(cls.send_telnet_command, avd_command, label)
+        send_telnet = functools.partial(cls.send_telnet_command, serial=serial)
+        return _emu._get_avd_property(send_telnet, avd_command, label)
 
     @classmethod
-    def get_current_avd_name(cls) -> str | None:
+    def get_current_avd_name(cls, serial: str | None = None) -> str | None:
         """Get the name of the currently running Android Virtual Device (AVD).
+
+        Args:
+            serial: Device serial to target for this call only, without
+                mutating the shared ``_target_device`` global. Omit to use
+                the current global target (default behavior, unchanged).
 
         Returns:
             The name of the current AVD (e.g., 'Pixel_6_API_34'),
             or None if it cannot be determined.
         """
-        return _emu.get_current_avd_name(cls.send_telnet_command)
+        send_telnet = functools.partial(cls.send_telnet_command, serial=serial)
+        return _emu.get_current_avd_name(send_telnet)
 
     @classmethod
     def get_current_avd_path(cls) -> str | None:

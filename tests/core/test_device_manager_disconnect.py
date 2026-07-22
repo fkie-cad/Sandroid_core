@@ -5,15 +5,30 @@ Covers the refresh_devices() disconnect path:
   and fires the change callback once with None;
 - a normal refresh (device still listed and ready) does nothing;
 - a transient non-ready state (offline) does NOT disconnect (no flapping).
+
+Also covers the shared-global-race fix and the zombie-retry cooldown:
+- _populate_device_info() targets via serial=, never touching Adb._target_device
+  (its own monkeypatched fake here doesn't exercise the plumbing, so this is
+  tested against the real method with send_adb_command mocked instead);
+- a device stuck at state="device" with no android_version isn't re-probed
+  inside PROBE_RETRY_COOLDOWN_SECONDS, but is re-probed once it elapses;
+- refresh_devices(auto_select=False) never auto-selects, even with 2+ ready
+  devices and no active device.
 """
+
+import time
 
 import pytest
 
 from sandroid.core.adb import Adb
 from sandroid.core.device import Device
-from sandroid.core.device_manager import DeviceManager
+from sandroid.core.device_manager import PROBE_RETRY_COOLDOWN_SECONDS, DeviceManager
 
 HEADER = "List of devices attached"
+
+# Captured at import time (before the autouse fixture below ever stubs it
+# out), so tests that need the REAL _populate_device_info can restore it.
+_REAL_POPULATE_DEVICE_INFO = DeviceManager._populate_device_info
 
 
 def _devices_output(*lines: str) -> str:
@@ -270,3 +285,201 @@ def test_repopulate_non_active_device_does_not_repaint(monkeypatch):
     assert other.android_version == "16"
     assert calls == []  # not the active device -> no part-B repaint
     assert dm.active_device is active
+
+
+# ---------------------------------------------------------------------------
+# Shared-global race: _populate_device_info must never touch Adb._target_device
+# ---------------------------------------------------------------------------
+
+
+def test_populate_device_info_does_not_touch_adb_target_device(monkeypatch):
+    """_populate_device_info targets via serial=, leaving the shared global alone.
+
+    Simulates the real race: a concurrent caller has the global target set to
+    a DIFFERENT (the real active) device while this device is probed.
+    """
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", _REAL_POPULATE_DEVICE_INFO
+    )
+    dm = DeviceManager.get()
+    device = Device(serial="emulator-5556", name="", state="device", model="")
+
+    Adb.set_target_device("emulator-5554")
+
+    calls: list = []
+
+    def fake_send_adb_command(command, serial=None):
+        calls.append((command, serial))
+        return "14\n", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", fake_send_adb_command)
+
+    dm._populate_device_info(device)
+
+    assert calls and all(serial == "emulator-5556" for _cmd, serial in calls)
+    assert Adb.get_target_device() == "emulator-5554"  # untouched throughout
+    assert device.android_version == "14"
+
+
+def test_populate_device_info_root_check_uses_serial_not_global(monkeypatch):
+    """_check_root_capability (reached for physical devices) also uses serial=."""
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", _REAL_POPULATE_DEVICE_INFO
+    )
+    dm = DeviceManager.get()
+    device = Device(serial="R58N123ABC", name="", state="device", model="")
+
+    Adb.set_target_device("emulator-5554")
+
+    calls: list = []
+
+    def fake_send_adb_command(command, serial=None):
+        calls.append((command, serial))
+        if "getprop" in command:
+            return "14\n", ""
+        return "uid=0(root)", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", fake_send_adb_command)
+
+    dm._populate_device_info(device)
+
+    assert ("shell su -c id", "R58N123ABC") in calls
+    assert Adb.get_target_device() == "emulator-5554"
+
+
+def test_populate_device_info_stamps_last_probe_attempt(monkeypatch):
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", _REAL_POPULATE_DEVICE_INFO
+    )
+    monkeypatch.setattr(
+        Adb, "send_adb_command", lambda command, serial=None: ("14\n", "")
+    )
+    dm = DeviceManager.get()
+    device = Device(serial="emulator-5556", name="", state="device", model="")
+    assert device.last_probe_attempt == 0.0
+
+    before = time.monotonic()
+    dm._populate_device_info(device)
+    after = time.monotonic()
+
+    assert before <= device.last_probe_attempt <= after
+
+
+# ---------------------------------------------------------------------------
+# Zombie-device retry cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_zombie_device_not_reprobed_within_cooldown(monkeypatch):
+    """A device probed moments ago is NOT re-probed again inside the cooldown."""
+    dm = DeviceManager.get()
+    device = Device(serial="emulator-5554", state="device")
+    device.last_probe_attempt = time.monotonic()  # just probed, still zombie
+    dm._devices = {"emulator-5554": device}
+
+    populated: list = []
+    monkeypatch.setattr(
+        DeviceManager,
+        "_populate_device_info",
+        lambda self, dev: populated.append(dev.serial),
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        lambda command: (
+            _devices_output(
+                "emulator-5554 device product:sdk model:sdk "
+                "device:emu transport_id:1"
+            ),
+            "",
+        ),
+    )
+
+    dm.refresh_devices()
+
+    assert populated == []  # still within cooldown
+
+
+def test_zombie_device_reprobed_after_cooldown_elapses(monkeypatch):
+    """Once PROBE_RETRY_COOLDOWN_SECONDS has passed, the device is re-probed."""
+    dm = DeviceManager.get()
+    device = Device(serial="emulator-5554", state="device")
+    device.last_probe_attempt = time.monotonic() - (PROBE_RETRY_COOLDOWN_SECONDS + 1)
+    dm._devices = {"emulator-5554": device}
+
+    populated: list = []
+    monkeypatch.setattr(
+        DeviceManager,
+        "_populate_device_info",
+        lambda self, dev: populated.append(dev.serial),
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        lambda command: (
+            _devices_output(
+                "emulator-5554 device product:sdk model:sdk "
+                "device:emu transport_id:1"
+            ),
+            "",
+        ),
+    )
+
+    dm.refresh_devices()
+
+    assert populated == ["emulator-5554"]
+
+
+# ---------------------------------------------------------------------------
+# Startup-only multi-device picker: refresh_devices(auto_select=False)
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_devices_auto_select_false_leaves_no_active_device(monkeypatch):
+    """With 2+ ready devices and auto_select=False, nothing gets auto-selected."""
+    dm = DeviceManager.get()
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", lambda self, device: None
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        lambda command: (
+            _devices_output(
+                "emulator-5554 device product:sdk model:sdk "
+                "device:emu transport_id:1",
+                "emulator-5556 device product:sdk model:sdk "
+                "device:emu transport_id:2",
+            ),
+            "",
+        ),
+    )
+
+    devices = dm.refresh_devices(auto_select=False)
+
+    assert len(devices) == 2
+    assert dm.active_device is None
+
+
+def test_refresh_devices_default_auto_selects_with_no_active_device(monkeypatch):
+    """Contrast case: the default (auto_select=True) still auto-selects."""
+    dm = DeviceManager.get()
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", lambda self, device: None
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        lambda command: (
+            _devices_output(
+                "emulator-5554 device product:sdk model:sdk "
+                "device:emu transport_id:1",
+            ),
+            "",
+        ),
+    )
+
+    dm.refresh_devices()
+
+    assert dm.active_device is not None
+    assert dm.active_device.serial == "emulator-5554"

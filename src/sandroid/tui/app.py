@@ -348,6 +348,7 @@ class SandroidTUI(App):
             push_modal=cb.push_modal,
             schedule_timer=self.set_timer,
             refresh_ui=cb.force_ui_refresh,
+            call_from_thread=cb.call_from_thread,
         )
 
         self._widget_refresh_controller = WidgetRefreshController(

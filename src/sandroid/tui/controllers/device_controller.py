@@ -131,6 +131,7 @@ class DeviceController:
         schedule_timer: Callable[[float, Callable], None] | None = None,
         refresh_ui: Callable[[], None] | None = None,
         toolbox: Any | None = None,
+        call_from_thread: Callable[..., Any] | None = None,
     ):
         """Initialize DeviceController with UI callbacks.
 
@@ -142,6 +143,14 @@ class DeviceController:
             schedule_timer: Callback to schedule a timed function call
             refresh_ui: Callback to force UI refresh after state changes
             toolbox: Optional Toolbox reference (defaults to imported Toolbox)
+            call_from_thread: Callback to marshal a function call onto the
+                UI thread (Textual's ``App.call_from_thread``). Required
+                whenever a modal is pushed from a background thread --
+                ``push_modal`` (Textual's ``push_screen``) calls
+                ``asyncio.get_running_loop()`` internally, which raises if
+                invoked directly off-thread. Defaults to calling the
+                function immediately (safe for tests / already-UI-thread
+                callers).
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -150,6 +159,7 @@ class DeviceController:
         self._schedule_timer = schedule_timer
         self._refresh_ui = refresh_ui
         self._toolbox = toolbox
+        self._call_from_thread = call_from_thread or (lambda fn, *args: fn(*args))
         self._polling_active = False
 
     def _default_log(self, message: str) -> None:
@@ -175,15 +185,20 @@ class DeviceController:
     def check_devices_on_startup(self) -> bool:
         """Check for connected devices on startup.
 
+        Enumerates without auto-selecting (``auto_select=False``) so that,
+        when 2+ devices are ready, a picker can be offered before any device
+        is silently selected -- see ``_resolve_startup_device_selection``.
+
         Returns:
             True if devices are available, False if no devices found
         """
         try:
             dm = self._get_device_manager()
-            devices = dm.refresh_devices()
+            devices = dm.refresh_devices(auto_select=False)
 
             if devices:
                 logger.debug(f"Found {len(devices)} device(s) on startup")
+                self._resolve_startup_device_selection(dm, devices)
                 return True
 
             # No devices connected - offer to start an AVD
@@ -194,6 +209,55 @@ class DeviceController:
             logger.error(f"Error checking devices on startup: {e}")
             self._log_error(f"Error checking devices: {e}")
             return False
+
+    def _resolve_startup_device_selection(self, dm: Any, devices: list) -> None:
+        """Resolve device selection at startup, prompting when 2+ are ready.
+
+        With fewer than 2 ready (``state == "device"``) devices, or when a
+        device is already active, falls back to the existing silent
+        ``auto_select_device()``. With 2+ ready devices, pushes the existing
+        ``DeviceSelectionModal`` so the user picks explicitly instead of
+        silently landing on ``emulators[0]``.
+
+        This is deliberately startup-only: any later mid-session auto-select
+        (e.g. after a disconnect leaves 2+ devices) keeps today's silent
+        behavior and is untouched by this method. The session is never left
+        device-less just because the picker was cancelled or unavailable.
+
+        Args:
+            dm: The device manager instance.
+            devices: The freshly refreshed device list.
+        """
+        try:
+            if dm.active_device is not None:
+                return
+
+            ready_devices = [d for d in devices if d.state == "device"]
+            if len(ready_devices) < 2 or not self._push_modal:
+                dm.auto_select_device()
+                return
+
+            from sandroid.tui.modals import DeviceSelectionModal
+
+            def on_selected(serial: str | None) -> None:
+                if serial:
+                    self.switch_device(serial)
+                else:
+                    dm.auto_select_device()
+
+            modal = DeviceSelectionModal(devices=devices, current_serial=None)
+            # Runs off a raw background thread (check_devices_on_startup's
+            # caller) -- push_modal (Textual's push_screen) calls
+            # asyncio.get_running_loop() internally and raises if invoked
+            # directly off-thread, so this must marshal onto the UI thread.
+            self._call_from_thread(self._push_modal, modal, on_selected)
+
+        except Exception as e:
+            logger.exception(f"Error resolving startup device selection: {e}")
+            try:
+                dm.auto_select_device()
+            except Exception:
+                pass
 
     def get_connected_devices(self) -> list[DeviceInfo]:
         """Get list of currently connected devices.
@@ -312,9 +376,7 @@ class DeviceController:
                 return
 
             # Push AVD selection modal
-            from sandroid.tui.modals import (
-                AVDInfo as ModalAVDInfo,
-            )
+            from sandroid.tui.modals import AVDInfo as ModalAVDInfo
             from sandroid.tui.modals import (
                 AVDSelectionModal,
                 AVDSelectionResult,
@@ -345,7 +407,14 @@ class DeviceController:
                     sdk_path=sdk_path,
                 )
 
-            self._push_modal(AVDSelectionModal(avds=modal_avds), on_avd_selected)
+            # check_devices_on_startup (this method's only caller) runs off a
+            # raw background thread -- push_modal (Textual's push_screen)
+            # calls asyncio.get_running_loop() internally and raises if
+            # invoked directly off-thread, so this must marshal onto the UI
+            # thread (matching _resolve_startup_device_selection).
+            self._call_from_thread(
+                self._push_modal, AVDSelectionModal(avds=modal_avds), on_avd_selected
+            )
 
         except Exception as e:
             logger.exception(f"Error offering AVD start: {e}")

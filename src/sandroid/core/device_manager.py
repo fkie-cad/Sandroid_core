@@ -6,11 +6,18 @@ selection, and switching with proper state management.
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from .device import Device, DeviceCapability
 
 logger = logging.getLogger(__name__)
+
+#: Minimum interval between re-probe attempts on a device that is present and
+#: "ready" but still failed to answer getprop (a flickering/zombie serial).
+#: Without this, a device that never actually finishes booting would be
+#: re-probed on every single refresh cycle indefinitely.
+PROBE_RETRY_COOLDOWN_SECONDS = 30.0
 
 
 class DeviceManager:
@@ -54,10 +61,17 @@ class DeviceManager:
         """Reset the singleton instance (primarily for testing)."""
         cls._instance = None
 
-    def refresh_devices(self) -> list[Device]:
+    def refresh_devices(self, *, auto_select: bool = True) -> list[Device]:
         """Refresh the list of connected devices from ADB.
 
         Parses the output of `adb devices -l` to enumerate all connected devices.
+
+        Args:
+            auto_select: Whether to auto-select a device when there is no
+                active device (default: True, preserving prior behavior).
+                Pass False to enumerate without ever auto-selecting -- used
+                by the startup-only multi-device picker so it can offer a
+                choice before anything is silently selected.
 
         Returns:
             List of Device objects
@@ -140,11 +154,17 @@ class DeviceManager:
                     # getprop, so its android_version/api_level are still empty.
                     # Re-read them once it is ready. Idempotent: skips as soon as
                     # android_version is set, so there is no per-refresh ADB churn
-                    # on a healthy device.
+                    # on a healthy device. Gated by a cooldown so a flickering
+                    # zombie serial (present but never actually answers) isn't
+                    # re-probed on every single refresh cycle indefinitely.
                     if state == "device" and not device.android_version:
-                        self._populate_device_info(device)
-                        if device is self._active_device and device.android_version:
-                            active_metadata_device = device
+                        since_last_attempt = (
+                            time.monotonic() - device.last_probe_attempt
+                        )
+                        if since_last_attempt >= PROBE_RETRY_COOLDOWN_SECONDS:
+                            self._populate_device_info(device)
+                            if device is self._active_device and device.android_version:
+                                active_metadata_device = device
                 else:
                     device = Device(
                         serial=serial,
@@ -186,8 +206,11 @@ class DeviceManager:
 
             self._devices = new_devices
 
-            # Auto-select if there are devices but no active device.
-            need_auto_select = not self._active_device and len(self._devices) > 0
+            # Auto-select if there are devices but no active device (unless the
+            # caller opted out, e.g. the startup picker choosing among 2+).
+            need_auto_select = (
+                auto_select and not self._active_device and len(self._devices) > 0
+            )
 
         # DEADLOCK AVOIDANCE: enumerate/mutate under the lock above, then
         # notify/auto-select OUTSIDE it. The app's registered change handler
@@ -230,8 +253,11 @@ class DeviceManager:
     def _populate_device_info(self, device: Device) -> None:
         """Populate additional device information via ADB.
 
-        Temporarily sets the ADB target to this specific device to support
-        multi-device environments.
+        Targets this specific device per-call (via ``serial=``) instead of
+        mutating the shared ``Adb._target_device`` global, so a concurrent
+        caller targeting a different (e.g. the real active) device is never
+        affected by this probe -- this can run against ANY device, not just
+        the active one, from a background poll thread.
 
         Note: AVD name retrieval is SKIPPED here because it uses a slow telnet
         connection (5-30s per emulator). Use get_avd_name_for_device() lazily
@@ -242,13 +268,14 @@ class DeviceManager:
         """
         from .adb import Adb
 
-        # Save current target and temporarily set to this device
-        original_target = Adb.get_target_device()
-        Adb.set_target_device(device.serial)
+        # Stamped unconditionally at entry (covers both the cooldown-gated
+        # existing-device probe and the unconditional new-device probe) so a
+        # failed probe is never retried before PROBE_RETRY_COOLDOWN_SECONDS.
+        device.last_probe_attempt = time.monotonic()
 
         try:
             # Get Android version (fast ~95ms)
-            version_info = Adb.get_android_version_and_api_level()
+            version_info = Adb.get_android_version_and_api_level(serial=device.serial)
             if version_info:
                 device.android_version = version_info.get("android_version", "")
                 api_str = version_info.get("api_level", "0")
@@ -268,9 +295,6 @@ class DeviceManager:
 
         except Exception as e:
             logger.debug(f"Failed to populate device info for {device.serial}: {e}")
-        finally:
-            # Restore original target device
-            Adb.set_target_device(original_target)
 
     def get_avd_name_for_device(self, device: Device) -> str:
         """Get AVD name for an emulator device, fetching lazily if needed.
@@ -289,19 +313,14 @@ class DeviceManager:
 
         # Only fetch for emulators that haven't had their AVD name fetched yet
         if device.is_emulator and not getattr(device, "_avd_name_fetched", False):
-            # Save current target
-            original_target = Adb.get_target_device()
             try:
-                Adb.set_target_device(device.serial)
-                avd_name = Adb.get_current_avd_name()
+                avd_name = Adb.get_current_avd_name(serial=device.serial)
                 if avd_name:
                     device.name = avd_name
                     device._avd_name_fetched = True
                     logger.debug(f"Fetched AVD name for {device.serial}: {avd_name}")
             except Exception as e:
                 logger.debug(f"Could not fetch AVD name for {device.serial}: {e}")
-            finally:
-                Adb.set_target_device(original_target)
 
         return device.name
 
@@ -314,7 +333,9 @@ class DeviceManager:
         from .adb import Adb
 
         try:
-            stdout, _stderr = Adb.send_adb_command("shell su -c id")
+            stdout, _stderr = Adb.send_adb_command(
+                "shell su -c id", serial=device.serial
+            )
             if stdout and "uid=0" in stdout:
                 device.add_capability(DeviceCapability.ADB_ROOT)
                 logger.debug(f"Device {device.serial} has root access")
