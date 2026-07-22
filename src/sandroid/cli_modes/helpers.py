@@ -78,7 +78,6 @@ def build_cli_overrides(
     degrade_network: bool,
     trigdroid: str | None,
     trigdroid_ccf: str | None,
-    ai: bool,
     report: bool,
 ) -> dict:
     """Translate Click parameters into the nested override dict for ConfigLoader.
@@ -100,7 +99,6 @@ def build_cli_overrides(
         degrade_network: Simulate degraded network.
         trigdroid: TrigDroid package name.
         trigdroid_ccf: TrigDroid CCF mode.
-        ai: Enable AI analysis.
         report: Generate PDF report.
 
     Returns:
@@ -151,8 +149,6 @@ def build_cli_overrides(
             trigdroid_overrides["config_mode"] = trigdroid_ccf
         cli_overrides["trigdroid"] = trigdroid_overrides
 
-    if ai:
-        cli_overrides["ai"] = {"enabled": True}
     if report:
         cli_overrides["report"] = {"generate_pdf": True}
 

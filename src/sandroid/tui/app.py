@@ -99,6 +99,7 @@ class SandroidTUI(App):
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
         Binding("ctrl+b", "focus_tools", "Tools", show=True),
+        Binding("ctrl+y", "toggle_chat", "AI Chat", show=True),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -235,7 +236,15 @@ class SandroidTUI(App):
         self._modal_manager: ModalManager | None = None
         self._sub_title = "Android Analysis"
 
-        super().__init__(**kwargs)
+        # Textual only loads a stylesheet file it's told about via its own
+        # `css_path` constructor kwarg -- `_sandroid_css_path` was resolved
+        # above but never reached here, so styles.tcss/themes/*.tcss were
+        # silently never registered in `self.stylesheet` (confirmed via
+        # `self.stylesheet.source`): every rule in those files -- borders,
+        # `#activity-title`'s color, `ActivityLog`'s `scrollbar-size: 1 1`,
+        # etc. -- was a no-op, and every theme rendered identically (only
+        # each widget's own hardcoded Python `DEFAULT_CSS` ever applied).
+        super().__init__(css_path=self._sandroid_css_path, **kwargs)
 
         # Post-super init
         self._controller = MenuController.get()
@@ -535,6 +544,11 @@ class SandroidTUI(App):
         # Pre-initialize command registry and package cache in background
         self.run_worker(self._pre_init_commands, exclusive=False)
         self.run_worker(self._pre_fetch_packages, exclusive=False)
+        # Connect every enabled config.mcp.servers entry (e.g. the bundled
+        # dummy server) and bridge their tools into the shared ToolRegistry,
+        # so the Chat tab's tool-calling loop can see them immediately. A
+        # broken/unreachable MCP server must never break app startup.
+        self.run_worker(self._start_mcp_tools, exclusive=False, thread=True)
 
     async def _pre_init_commands(self) -> None:
         """Eagerly initialize command registry so first keypress is fast."""
@@ -553,6 +567,30 @@ class SandroidTUI(App):
             get_app_selection_service().get_installed_packages(user_only=True)
         except Exception as e:
             logger.debug(f"Pre-fetch packages failed: {e}")
+
+    def _start_mcp_tools(self) -> None:
+        """Start the MCP client manager and bridge its tools into the registry.
+
+        Plain sync function run via ``run_worker(..., thread=True)`` (not
+        ``async def`` on Textual's own event loop) -- ``MCPClientManager
+        .start()`` is a blocking call with up to ~35s of combined per-server
+        connect timeout and no ``await`` inside it, so running it as an
+        "async" worker without ``thread=True`` would actually block the UI
+        thread for however long that takes, not yield to it.
+
+        Wrapped in try/except: a broken or unreachable MCP server must never
+        break app startup -- the Chat tab still works with native tools only
+        if this fails, it just won't have any ``mcp:<server>:*`` tools.
+        """
+        try:
+            from sandroid.ai import bridge_mcp_tools, get_mcp_client_manager
+
+            get_mcp_client_manager().start()
+            bridge_mcp_tools()
+        except Exception as e:
+            logger.warning(
+                f"MCP client startup failed (Chat MCP tools unavailable): {e}"
+            )
 
     def _show_welcome_if_first_run(self) -> None:
         """Show a welcome modal on the very first TUI launch.
@@ -807,6 +845,17 @@ class SandroidTUI(App):
             except Exception:
                 pass
 
+        # Tear down every connected MCP server cleanly. Wrapped in try/except
+        # so a hung shutdown (e.g. an unresponsive server subprocess) never
+        # blocks app exit -- MCPClientManager.stop() itself already bounds
+        # every wait with its own timeouts.
+        try:
+            from sandroid.ai import get_mcp_client_manager
+
+            get_mcp_client_manager().stop()
+        except Exception:
+            pass
+
     def _get_main_screen(self) -> MainScreen | None:
         return self.screen if isinstance(self.screen, MainScreen) else None
 
@@ -851,6 +900,12 @@ class SandroidTUI(App):
         screen = self._get_main_screen()
         if screen is not None:
             screen.open_snapshots_tab()
+
+    def action_toggle_chat(self) -> None:
+        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y)."""
+        screen = self._get_main_screen()
+        if screen is not None:
+            screen.toggle_chat_panel()
 
     def action_show_settings(self) -> None:
         """Show the settings screen."""
@@ -1121,15 +1176,88 @@ class SandroidTUI(App):
         if ms is not None:
             ms.open_files_tab(sub_tab="files-watchlist")
 
-    def _apply_theme(self, theme) -> None:
-        """Apply a theme to the app."""
+    def _apply_theme(self, theme, css_path: Path | str | None = None) -> None:
+        """Apply a theme to the app.
+
+        Args:
+            theme: Theme to apply -- controls Textual's own binary
+                dark/light flag (``self.dark``/``self.theme``), which is a
+                much narrower thing than swapping which ``.tcss`` FILE is
+                loaded (our themes only differ by literal hex values inside
+                ``styles.tcss``/``themes/*.tcss``, not by Textual's design
+                tokens).
+            css_path: If given, also swap the live stylesheet to this
+                theme's ``.tcss`` file via :meth:`_reload_theme_css` -- used
+                by the Settings preview/revert path, where the user has
+                just explicitly picked a named theme. Deliberately omitted
+                from the ``on_mount`` startup call: at startup the correct
+                file was already loaded via the ``css_path`` constructor
+                kwarg, which (unlike this method) also honours
+                ``tui.custom_css_path`` -- an override the named-theme
+                mapping knows nothing about -- so recomputing it here would
+                wrongly clobber that override.
+        """
         self.dark = theme.is_dark
         try:
             if hasattr(self, "theme"):
                 self.theme = "textual-dark" if theme.is_dark else "textual-light"
         except Exception:
             pass
+
+        if css_path is not None:
+            self._reload_theme_css(css_path)
+
         logger.debug(f"Applied theme: {theme.display_name}")
+
+    def _reload_theme_css(self, css_path: Path | str) -> None:
+        """Swap a theme's ``.tcss`` file into the live running stylesheet.
+
+        Textual only ever loads a ``.tcss`` file it's told about via the
+        ``css_path`` constructor kwarg, once, at startup (see
+        ``App.__init__``/``App._process_messages``'s ``app_prelude``). There
+        is no built-in "switch to a different CSS file at runtime" API --
+        the closest existing precedent is Textual's own CSS hot-reload
+        (``App._on_css_change``, the mechanism behind ``watch_css=True``),
+        which re-reads the *same* file(s) after an on-disk edit. This mirrors
+        that exact approach but swaps in a *different* file:
+
+        1. Copy the current stylesheet (``Stylesheet.copy()``) so every
+           already-registered per-widget ``DEFAULT_CSS`` source survives --
+           those are added lazily, once, via ``Widget._post_register`` when
+           a widget instance first mounts, so rebuilding from scratch would
+           silently lose them for anything already on screen.
+        2. Drop whichever raw ``.tcss`` FILE source is currently loaded.
+           ``Stylesheet.source`` is keyed by ``(path, class_var)``; a source
+           added via ``read``/``read_all`` (i.e. an actual file) always has
+           an empty ``class_var`` half, while default CSS added via
+           ``add_source`` (widget ``DEFAULT_CSS``, ``App.CSS``) never does
+           -- so that's an unambiguous way to find "the old theme file" to
+           remove, without needing to know its exact former path.
+        3. Read and parse the new file, then swap the rebuilt stylesheet in
+           and re-apply it to the app and every currently pushed screen --
+           exactly what ``_on_css_change`` does after re-parsing.
+        """
+        css_path = Path(css_path)
+        try:
+            stylesheet = self.stylesheet.copy()
+            for key in list(stylesheet.source):
+                _, class_var = key
+                if class_var == "":
+                    del stylesheet.source[key]
+            stylesheet.read_all([css_path])
+            stylesheet.parse()
+        except Exception:
+            logger.exception(f"Failed to reload theme CSS from {css_path}")
+            return
+
+        self.stylesheet = stylesheet
+        self.css_path = [css_path]
+        self._sandroid_css_path = css_path
+        self._css_content = None  # invalidate the lazily-cached `.css` text
+
+        self.stylesheet.update(self)
+        for screen in self.screen_stack:
+            self.stylesheet.update(screen)
 
     @property
     def sandroid_theme_name(self) -> str:

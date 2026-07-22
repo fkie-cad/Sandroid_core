@@ -129,8 +129,6 @@ class PDFReport:
                 case "Artifact Hashes":
                     self.newFileHashesTableMaker()
                     self.changedFileHashesTableMaker()
-                case "AI Action Summary":
-                    pass  # Make page that displays action summary
 
         if len(os.listdir(f"{os.getenv('RAW_RESULTS_PATH')}screenshots")) != 0:
             self.pageHeader("Screenshots")
@@ -188,16 +186,6 @@ class PDFReport:
             + str(self.data["Device Name"])
             + """<br/>"""
         )
-
-        if (
-            "Other Data" in self.data
-            and "AI Action Overview" in self.data["Other Data"]
-        ):
-            text += (
-                """Action: """
-                + str(self.data["Other Data"]["AI Action Overview"][0])
-                + """<br/>"""
-            )
 
         text += (
             """Emulator relative action timestamp: """
@@ -351,8 +339,6 @@ class PDFReport:
                 "Emulator relative action timestamp",
                 "Action Duration",
                 "Other Data",
-                "AI Action Summary",
-                "AI Action Overview",
             ]:
                 continue
             lineData.append([section, len(self.data[section])])

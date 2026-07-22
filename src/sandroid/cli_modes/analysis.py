@@ -20,24 +20,22 @@ def run_analysis(
     Toolbox,
     Adb,
     ActionQ,
-    AIProcessing,
     PDFReport,
 ) -> None:
     """Execute automated forensic analysis workflow.
 
     Performs a complete forensic analysis cycle including initialization,
-    action queue processing, optional AI summarization, result generation,
-    and optional PDF report creation. This is the primary entry point for
-    non-interactive, command-line driven analysis.
+    action queue processing, result generation, and optional PDF report
+    creation. This is the primary entry point for non-interactive,
+    command-line driven analysis.
 
     Args:
         config: Sandroid configuration containing analysis parameters,
-            paths, AI settings, and report options.
+            paths, and report options.
         active_logger: Configured logger instance for status and error messages.
         Toolbox: The Toolbox class for core utility operations.
         Adb: The Adb class for Android Debug Bridge operations.
         ActionQ: The ActionQ class for managing analysis operations.
-        AIProcessing: The AIProcessing class for AI-powered summarization.
         PDFReport: The PDFReport class for generating PDF reports.
 
     Raises:
@@ -64,24 +62,12 @@ def run_analysis(
         while not q.finished:
             q.do_next()
 
-        # Handle AI summarization if enabled
-        action = ""
-        if config.ai.enabled:
-            recording_path = config.paths.raw_results_path / "recording.webm"
-            if recording_path.exists():
-                action = AIProcessing.summarize_video(str(recording_path))
-
         Toolbox.wrap_up()
 
         # Write results
         console = SandroidConsole.get()
         output_file = config.paths.results_path / config.output_file.name
         _write_results(q, output_file, config, console)
-
-        if config.ai.enabled and action:
-            console.print(
-                f"[success bold]Sandroid Results for the action: {action}[/success bold]"
-            )
 
         print(q.get_pretty_print())
 

@@ -13,6 +13,7 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
+    ChatPanel,
     FilesPanel,
     FriTapPanel,
     MitmproxyPanel,
@@ -72,10 +73,15 @@ class MainScreen(Screen):
 
     BINDINGS = []  # Bindings are handled by the main app
 
-    # Defined here (not in styles.tcss) so it applies under every theme — the
-    # app loads exactly one theme-specific .tcss and none of them define these
-    # ids, while app CSS always beats Screen DEFAULT_CSS. Putting the rules
-    # here keeps them unopposed and theme-independent.
+    # These values are also themed: each of the 8 .tcss files (styles.tcss +
+    # themes/*.tcss) defines matching selectors for #tool-tabbar/.tool-tab/
+    # #tool-body/#chat-dock, and since a loaded stylesheet file always beats
+    # a widget's own DEFAULT_CSS in Textual's cascade, that file-level CSS is
+    # what actually wins at runtime for every theme (including "default",
+    # whose styles.tcss rules reproduce the exact hex below). The values here
+    # now only serve as a fallback/default-theme baseline -- e.g. if a theme
+    # file ever fails to load, the UI still renders with a sensible look
+    # instead of blank/unstyled widgets.
     #
     # #tool-panel is a plain Vertical that fills the space below the dock:top
     # status band: a single-row tab strip (#tool-tabbar) on top and the active
@@ -107,6 +113,15 @@ class MainScreen(Screen):
         display: block;
         height: 1fr;
         border-top: solid #1f2d4d;
+    }
+    #chat-dock {
+        display: none;
+        height: 67%;
+        min-height: 8;
+        border-top: solid #1f2d4d;
+    }
+    #chat-dock.visible {
+        display: block;
     }
     """
 
@@ -166,6 +181,8 @@ class MainScreen(Screen):
             with Vertical(id="right-panel"):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
                 yield ActivityLog(id="activity-log")
+                with Vertical(id="chat-dock"):
+                    yield ChatPanel(id="chat-panel")
 
         yield SandroidFooter()
         logger.debug("[MAIN_SCREEN] compose complete")
@@ -311,6 +328,38 @@ class MainScreen(Screen):
         except ValueError:
             idx = 0
         self._select_bottom_tab(order[(idx + delta) % len(order)])
+
+    def toggle_chat_panel(self) -> None:
+        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y).
+
+        Non-modal: the left tool tabs stay fully live/interactive while the
+        dock is open. ChatPanel itself never unmounts -- only #chat-dock's
+        `display` flips via the `.visible` class -- so conversation history
+        and scroll position persist across toggles.
+        """
+        try:
+            dock = self.query_one("#chat-dock")
+        except Exception:
+            return
+        showing = not dock.has_class("visible")
+        dock.set_class(showing, "visible")
+
+        if showing:
+            try:
+                self.query_one("#chat-panel", ChatPanel).refresh_header()
+            except Exception:
+                pass
+            try:
+                self.query_one("#chat-input").focus()
+            except Exception:
+                pass
+        else:
+            current = self._bottom_current()
+            if current:
+                try:
+                    self.query_one(f"#{current}").focus()
+                except Exception:
+                    pass
 
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.

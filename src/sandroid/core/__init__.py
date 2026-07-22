@@ -11,7 +11,6 @@ Key modules:
 - actionQ: Action queue management system
 - frida_manager: Frida instrumentation management
 - emulator: Android emulator control
-- AI_processing: AI-powered analysis features
 """
 
 # Core analysis components
@@ -29,8 +28,7 @@ from .adb_utils import (
 
 # ActionQ excluded from __init__ to prevent circular imports (import directly when needed)
 
-# AI_processing and frida_manager are imported directly when needed:
-#   from sandroid.core.AI_processing import AIProcessing
+# frida_manager is imported directly when needed:
 #   from sandroid.core.frida_manager import FridaManager
 
 __all__ = [

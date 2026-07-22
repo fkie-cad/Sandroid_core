@@ -222,27 +222,6 @@ TrigDroid Integration
    # Trigger categories to execute
    trigger_sets = ["network", "filesystem", "permissions"]
 
-AI Analysis
-~~~~~~~~~~~
-
-.. code-block:: toml
-
-   [ai]
-   # Enable AI-powered analysis
-   enabled = false
-
-   # AI provider (google, openai)
-   provider = "google"
-
-   # Model to use
-   model = "gemini-pro"
-
-   # API key (better to use environment variable)
-   api_key = ""
-
-   # Temperature for AI generation
-   temperature = 0.7
-
 Report Generation
 ~~~~~~~~~~~~~~~~~
 
@@ -387,9 +366,6 @@ Configuration Templates
    enabled = true
    timeout = 600
 
-   [ai]
-   enabled = true
-
    [report]
    generate_pdf = true
 
@@ -516,8 +492,7 @@ Advanced Configuration
    # Use environment variables instead
 
    [ai]
-   enabled = true
-   provider = "google"
+   base_url = "https://api.example.com/v1"
    # api_key = ""  # Don't put API keys in files
 
 .. code-block:: bash

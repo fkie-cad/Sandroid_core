@@ -113,7 +113,6 @@ Device Management:
   --preset CODE                   Apply country preset (e.g., de, us, ru, cn)
 
 Output & Debugging:
-  --ai                            Enable AI-powered analysis and summarization
   --report                        Generate PDF report
   --debug                         Enable debug/verbose mode
   --log                           Show log messages in terminal

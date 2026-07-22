@@ -137,7 +137,6 @@ def __getattr__(name: str):
     metavar="FILE",
     help="Entries in the whitelist will be excluded from any outputs",
 )
-@click.option("--ai", is_flag=True, help="Enable AI-powered analysis and summarization")
 @click.option("--report", is_flag=True, help="Generate PDF report")
 @click.option(
     "--debug",
@@ -285,7 +284,6 @@ def main(
     apk: bool,
     degrade_network: bool,
     whitelist: str | None,
-    ai: bool,
     report: bool,
     debug: bool,
     log: bool,
@@ -357,7 +355,6 @@ def main(
 
         from .core.actionQ import ActionQ
         from .core.adb import Adb
-        from .core.AI_processing import AIProcessing
         from .core.pdf_report import PDFReport
         from .core.toolbox import Toolbox
 
@@ -378,7 +375,6 @@ def main(
             whitelist=whitelist,
             file=file if file else "sandroid.json",
             loglevel=loglevel if loglevel else "INFO",
-            ai=ai,
             report=report,
             debug=debug,
         )
@@ -409,7 +405,6 @@ def main(
             degrade_network=degrade_network,
             trigdroid=trigdroid,
             trigdroid_ccf=trigdroid_ccf,
-            ai=ai,
             report=report,
         )
 
@@ -522,7 +517,6 @@ def main(
                 Toolbox,
                 Adb,
                 ActionQ,
-                AIProcessing,
                 PDFReport,
             )
         else:

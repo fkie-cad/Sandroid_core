@@ -59,7 +59,8 @@ MainScreen {
 
 /* Activity log styling */
 ActivityLog {
-    height: 100%;
+    height: 1fr;
+    min-height: 3;
     scrollbar-size: 1 1;
     background: #080c18;
 }
@@ -518,3 +519,62 @@ Button.-primary {
      .logo-container { color: #2AA198; }
      .logo-text { color: #268BD2; }
 */
+
+/* ========== Tool Panel & Chat Panel Theming ========== */
+/* These override MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
+   there) -- a matching selector in a loaded .tcss file always beats a
+   widget's own DEFAULT_CSS in Textual's cascade, so these rules are what
+   actually determines the tool-tab strip and AI chat panel colors at
+   runtime. The values below are identical to the old DEFAULT_CSS hardcoded
+   hex, preserving the existing Midnight Cyan look as the "default" theme. */
+
+#tool-tabbar {
+    background: #0a1124;
+}
+
+.tool-tab {
+    color: #8f9bb3;
+    background: #11203a;
+}
+
+.tool-tab:hover {
+    color: #cbd5e1;
+    background: #1f2937;
+}
+
+.tool-tab.-active {
+    color: #06121f;
+    background: #38bdf8;
+}
+
+#tool-body {
+    border-top: solid #1f2d4d;
+}
+
+#chat-dock {
+    border-top: solid #1f2d4d;
+}
+
+ChatPanel {
+    background: #080c18;
+}
+
+ChatPanel > #chat-header {
+    color: #38bdf8;
+}
+
+ChatPanel > #chat-log {
+    background: #050811;
+}
+
+ChatPanel > #chat-input-bar > #chat-input {
+    border: solid #1f2d4d;
+    background: #0a1124;
+}
+
+ChatPanel > #chat-mascot {
+    /* MUST equal #chat-log's background above -- see the comment on
+       ChatPanel > #chat-mascot in chat_panel.py for why. */
+    background: #050811;
+    color: #38bdf8;
+}

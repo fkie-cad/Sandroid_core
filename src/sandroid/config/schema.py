@@ -1,6 +1,7 @@
 """Configuration schema for Sandroid using Pydantic."""
 
 import shutil
+import sys
 import tempfile
 from enum import Enum
 from pathlib import Path
@@ -229,15 +230,55 @@ class TrigDroidConfig(BaseModel):
 
 
 class AIConfig(BaseModel):
-    """AI processing configuration."""
+    """Chat/agent LLM connection config.
 
-    enabled: bool = Field(default=False, description="Enable AI-powered analysis")
-    provider: str = Field(default="google-genai", description="AI provider to use")
-    api_key: str | None = Field(
-        default=None,
-        description="AI service API key (use environment variable or credentials section)",
+    The connection fields (``base_url``/``api_key``/``model``) have no
+    defaults — must be explicitly set. The behavior toggles below do have
+    defaults since they're just chat-UI presentation preferences.
+    """
+
+    base_url: str | None = Field(
+        default=None, description="OpenAI-compatible chat-completions base URL"
     )
-    model: str = Field(default="gemini-pro", description="AI model to use")
+    api_key: str | None = Field(default=None, description="API key for the endpoint")
+    model: str | None = Field(default=None, description="Model name to request")
+    show_verbose_thinking: bool = Field(
+        default=False,
+        description=(
+            "Show the model's full reasoning/thinking text in the Chat "
+            "transcript. Off (default) collapses it into a single "
+            "'Thought for Ns' line once the reasoning phase ends."
+        ),
+    )
+    show_chat_mascot: bool = Field(
+        default=True,
+        description="Show the small animated ASCII mascot in the Chat panel.",
+    )
+
+
+class MCPServerConfig(BaseModel):
+    """A single MCP server connection Sandroid can consume tools from."""
+
+    name: str
+    transport: str = "stdio"  # "stdio" | "sse"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None  # for "sse" transport
+    enabled: bool = True
+
+
+class MCPConfig(BaseModel):
+    """MCP (Model Context Protocol) client configuration."""
+
+    servers: list[MCPServerConfig] = Field(
+        default_factory=lambda: [
+            MCPServerConfig(
+                name="sandroid-dummy",
+                command=sys.executable,
+                args=["-m", "sandroid.ai.mcp_dummy_server"],
+            )
+        ]
+    )
 
 
 class ReportConfig(BaseModel):
@@ -542,10 +583,22 @@ class FocusConfig(BaseModel):
     )
     gost_assets: dict[str, dict[str, str]] = Field(
         default_factory=lambda: {
-            "arm64":  {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_arm64.tar.gz", "sha256": "343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7"},
-            "arm":    {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_armv7.tar.gz", "sha256": "ad5b0979f452b07c23e90d566c632b0ffe228ef0e1021085e8c4e2f164824151"},
-            "x86":    {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_386.tar.gz",   "sha256": "c4c4156acda43caa2ccc71ccf025662699cdea05ae9e6e763c07588d893bfb45"},
-            "x86_64": {"url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz", "sha256": "a2aea24efb4597b5f57b35b8e1bbcc59f439b80723854d4371f6828b46682ffb"},
+            "arm64": {
+                "url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_arm64.tar.gz",
+                "sha256": "343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7",
+            },
+            "arm": {
+                "url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_armv7.tar.gz",
+                "sha256": "ad5b0979f452b07c23e90d566c632b0ffe228ef0e1021085e8c4e2f164824151",
+            },
+            "x86": {
+                "url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_386.tar.gz",
+                "sha256": "c4c4156acda43caa2ccc71ccf025662699cdea05ae9e6e763c07588d893bfb45",
+            },
+            "x86_64": {
+                "url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz",
+                "sha256": "a2aea24efb4597b5f57b35b8e1bbcc59f439b80723854d4371f6828b46682ffb",
+            },
         },
         description=(
             "Per-ABI gost download URLs and sha256 checksums. NOTE: assets are "
@@ -934,9 +987,6 @@ class TimeoutConfig(BaseModel):
 class CredentialsConfig(BaseModel):
     """Secure credentials configuration."""
 
-    google_genai_api_key: str | None = Field(
-        default=None, description="Google Generative AI API key"
-    )
     custom_api_keys: dict[str, str] = Field(
         default_factory=dict, description="Additional API keys for custom integrations"
     )
@@ -969,6 +1019,7 @@ class SandroidConfig(BaseModel):
     analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     trigdroid: TrigDroidConfig = Field(default_factory=TrigDroidConfig)
     ai: AIConfig = Field(default_factory=AIConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     report: ReportConfig = Field(default_factory=ReportConfig)
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
     theme: ThemeConfig = Field(default_factory=ThemeConfig)

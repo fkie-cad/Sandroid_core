@@ -1,0 +1,1071 @@
+"""TUI panel for the AI Chat tab: a streaming, tool-calling chat with Sandroid.
+
+Backed by ``sandroid.ai`` (see that package's own docstring for the full
+public surface): an OpenAI-compatible streaming client, a hand-rolled
+tool-calling loop (:func:`sandroid.ai.run_agent_turn`), and a merged
+native + MCP :class:`~sandroid.ai.tools.registry.ToolRegistry`.
+
+Structurally mirrors ``FriTapPanel``/``MitmproxyPanel`` (header ``Static``
+reflecting live state + a ``RichLog`` tail), but adds an ``Input`` for the
+message box, since this is the first panel that needs one -- plus a small
+animated mascot ``Static`` sharing that same bottom row, right beside the
+prompt (see the ``_MASCOT_*`` constants and ``_update_mascot`` below).
+
+**Event-handling note (read before touching ``on_event`` below):** the
+plan this was built from assumed ``on_event`` would see a ``tool_call_done``
+*and* would somehow get told the tool's result. In reality,
+:func:`sandroid.ai.loop.run_agent_turn` only ever calls its ``on_event``
+callback for ``text_delta``, ``reasoning_delta``, ``tool_call_done``, and
+``error`` -- ``client.py``'s own ``tool_call_delta``/``done`` events are
+consumed internally by the loop and never forwarded, and a tool's *result*
+is appended straight to the ``messages`` list with no matching event at
+all (see ``loop._dispatch_tool_calls``). So a tool call is shown live the
+moment it's dispatched, but its result is only ever visible indirectly,
+via the model's next streamed reply -- there is no "tool-result" line in
+this transcript, because the interface genuinely has nothing to render one
+from.
+
+**RichLog has no "edit the last line" API** -- ``write()`` only appends,
+and the only way to revise already-written content is ``clear()`` + full
+rewrite. So token-by-token streaming is implemented as: keep every
+*completed* line in ``self._history_lines`` (immutable once finalized),
+keep the in-progress reasoning/reply text in two small buffers, and redraw
+(``clear()`` + rewrite history + rewrite the live buffers) on every delta.
+This keeps history and the live tail visually consistent with no private
+API access, at the cost of a full redraw per token -- acceptable for a
+chat transcript's realistic length/rate.
+
+**Markdown rendering:** the model's actual reply/reasoning text is real
+Markdown (``**bold**``, lists, code fences, ...), which is a different
+language from Rich's console markup (``[bold]...[/]``) used for our own
+UI chrome. So ``self._history_lines`` holds a mix of plain markup
+*strings* (for chrome: the tool-call/error lines), ``rich.text.Text``
+(the user's own echoed input -- see ``_format_user_line``), and
+``rich.markdown.Markdown`` renderables (for LLM-authored prose) --
+``RichLog.write()`` accepts all three uniformly (see ``_make_renderable``:
+non-str ``RenderableType``s pass straight through, untouched by the
+``markup=True`` flag). Re-parsing Markdown on every streamed token would
+be wasteful and can render oddly mid-stream (unclosed ``**``/code fences),
+so the *live* buffers stay plain escaped text while streaming and only
+become real ``Markdown(...)`` once folded into history at
+``_finalize_live``.
+
+**Theming:** the transcript/header colors below are read live from
+``self.app.sandroid_theme`` (see ``_theme()``) every time a new line is
+built, so freshly-rendered content always follows whichever theme is
+active *at that moment*. ``self._history_lines`` only ever stores already
+fully-rendered ``Text``/``Markdown``/markup-string objects once a line is
+finalized (see above), so switching themes mid-conversation does NOT
+retroactively recolor lines already folded into history -- only new
+content picks up the new theme. Fixing that would mean storing semantic
+roles instead of pre-rendered content and re-rendering all of history on
+every theme change; a deliberate scope cut, not an oversight.
+
+**Verbose thinking:** ``config.ai.show_verbose_thinking`` (default
+``False``) controls whether a finished reasoning phase gets dumped into
+the transcript verbatim (as ``Markdown``, verbose) or collapsed into one
+compact "Thought for Ns" line (default) -- see ``_finalize_reasoning_only``.
+There is no explicit "reasoning phase ended" event from ``loop.py``; it's
+derived purely from event sequencing here: a reasoning phase ends the
+moment a ``text_delta`` or ``tool_call_done`` shows up after some
+``reasoning_delta``s were buffered.
+"""
+
+from __future__ import annotations
+
+import functools
+import json
+import logging
+import threading
+import time
+from typing import TYPE_CHECKING
+
+from rich.markdown import Markdown
+from rich.markup import escape
+from rich.text import Text
+from textual.app import ComposeResult
+from textual.containers import Horizontal
+from textual.widget import Widget
+from textual.widgets import Input, RichLog, Static
+
+from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agent_turn
+from sandroid.ai.context import build_ambient_block
+from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+from sandroid.core.console import SANDROID_LOGO
+from sandroid.tui.themes import DEFAULT_THEME
+from sandroid.tui.widgets.tool_permission_prompt import (
+    _DESCRIPTION_MAX_LEN,
+    ToolPermissionPrompt,
+    _format_args_preview,
+    _truncate,
+)
+
+if TYPE_CHECKING:
+    from rich.console import RenderableType
+    from textual.timer import Timer
+
+    from sandroid.ai.tools.registry import ToolSpec
+    from sandroid.tui.themes import Theme
+
+logger = logging.getLogger(__name__)
+
+# Seconds between talk frames while the mascot is "talking" -- brisk enough
+# to read as animated/lively rather than a slow, barely-perceptible blink.
+_MASCOT_FRAME_INTERVAL = 0.35
+
+# Hard ceiling on how long a pending tool-permission prompt may block the
+# worker thread before giving up and treating it as cancelled -- matches
+# UIRequestBus's own default timeout (see core/ui_request_bus.py), so this
+# bespoke mechanism gets the same shutdown/hang safety net that bus gets for
+# free from `result_event.wait(timeout=300.0)`.
+_APPROVAL_HARD_TIMEOUT_SECONDS = 300.0
+
+# How often the wait loop below wakes up to re-check cancel_event/the hard
+# ceiling while polling for the user's choice.
+_APPROVAL_POLL_INTERVAL_SECONDS = 0.3
+
+# The mascot is NOT a hand-drawn approximation -- it is an actual crop of
+# ``core.console.SANDROID_LOGO`` (the exact Braille-block asset the startup
+# banner renders), so it is guaranteed to read as a small version of the real
+# Sandroid android head. The android is the left figure in that banner; its
+# antenna + rounded head + eyes occupy rows 0-4, columns 3-18, so that
+# 16-wide x 5-tall rectangle is sliced out verbatim as the idle frame:
+#
+#     ⠀⢀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⡀⠀   row 0: the two antennae
+#     ⠀⠀⠙⢷⣤⣤⣴⣶⣶⣦⣤⣤⡾⠋⠀⠀   row 1: rounded top of the head
+#     ⠀⠀⣴⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣦⠀⠀   row 2: solid crown
+#     ⠀⣼⣿⣿⣉⣹⣿⣿⣿⣿⣏⣉⣿⣿⣧⠀   row 3: the face, with the two eyes (⣉⣹ / ⣏⣉)
+#     ⢸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡇   row 4: the solid jaw/base it "stands" on
+_MASCOT_IDLE_FRAME: tuple[str, ...] = tuple(
+    line[3:19] for line in SANDROID_LOGO.splitlines()[0:5]
+)
+
+_BRAILLE_BLANK = "⠀"  # U+2800, the "blank" Braille cell used as filler
+_SOLID_BLOCK = "⣿"  # U+28FF, the full 8-dot block used all over the logo
+
+
+def _blink(frame: tuple[str, ...]) -> tuple[str, ...]:
+    """Return ``frame`` with the head's two eyes filled in (a single blink).
+
+    The eye row is row 3 of the head slice; within the 16-column crop the
+    left eye sits at columns 4-5 and the right eye at columns 10-11. Filling
+    exactly those four cells with the logo's own solid block shuts the eyes
+    for one frame without moving anything else -- the same little robot,
+    mid-blink.
+
+    Args:
+        frame: A mascot frame (tuple of equal-width Braille rows).
+
+    Returns:
+        A new frame identical to ``frame`` except for the blinked eye row.
+    """
+    rows = list(frame)
+    eye_row = list(rows[3])
+    for col in (4, 5, 10, 11):
+        eye_row[col] = _SOLID_BLOCK
+    rows[3] = "".join(eye_row)
+    return tuple(rows)
+
+
+def _tilt(frame: tuple[str, ...], dx: int) -> tuple[str, ...]:
+    """Return ``frame`` with only the antenna row (row 0) shifted ``dx`` cols.
+
+    The head stays put; just the two antennae slide left (``dx < 0``) or
+    right (``dx > 0``) by a cell, kept at the original width by padding/
+    trimming the blank edges -- a tiny "alive" sway, not a redraw.
+
+    Args:
+        frame: A mascot frame (tuple of equal-width Braille rows).
+        dx: Column shift for the antenna row; positive is rightward.
+
+    Returns:
+        A new frame identical to ``frame`` except for the shifted antennae.
+    """
+    rows = list(frame)
+    antenna = rows[0]
+    width = len(antenna)
+    if dx > 0:
+        antenna = (_BRAILLE_BLANK * dx + antenna)[:width]
+    elif dx < 0:
+        antenna = antenna[-dx:] + _BRAILLE_BLANK * (-dx)
+    rows[0] = antenna
+    return tuple(rows)
+
+
+# Idle frame first (so index 0 is also the resting pose), then a blink and a
+# right/left antenna sway -- cycled while a turn is streaming/thinking so the
+# robot visibly blinks and sways instead of sitting frozen, while staying
+# recognizably the same cropped-from-the-logo figure throughout (each talk
+# frame differs from idle by a single row).
+_MASCOT_TALK_FRAMES: tuple[tuple[str, ...], ...] = (
+    _MASCOT_IDLE_FRAME,
+    _blink(_MASCOT_IDLE_FRAME),
+    _tilt(_MASCOT_IDLE_FRAME, 1),
+    _tilt(_MASCOT_IDLE_FRAME, -1),
+)
+
+# Small allowlist of acronyms `str.title()` mangles (e.g. "Pid" instead of
+# "PID") -- looked up per whole word (not a substring replace), so an
+# ordinary word that merely contains one of these as a substring (e.g.
+# "Rapid") is never touched.
+_TOOL_NAME_ACRONYM_FIXUPS: dict[str, str] = {
+    "Pid": "PID",
+    "Uid": "UID",
+    "Gid": "GID",
+    "Apk": "APK",
+    "Adb": "ADB",
+    "Gms": "GMS",
+    "Ssl": "SSL",
+    "Tls": "TLS",
+    "Mcp": "MCP",
+    "Url": "URL",
+    "Ip": "IP",
+    "Id": "ID",
+}
+
+
+def _humanize_tool_name(name: str) -> str:
+    """Render a snake_case tool name as a human-readable title.
+
+    E.g. ``get_package_pid`` -> ``"Get Package PID"``,
+    ``get_emulator_status`` -> ``"Get Emulator Status"``. Title-cases the
+    underscore-separated name, then fixes up a small allowlist of
+    acronyms (see ``_TOOL_NAME_ACRONYM_FIXUPS``) that ``str.title()``
+    otherwise mangles into e.g. "Pid" instead of "PID".
+
+    Args:
+        name: The raw tool name (e.g. from a ``tool_call_done`` event).
+
+    Returns:
+        A human-readable, title-cased rendering of ``name``.
+    """
+    words = name.replace("_", " ").title().split(" ")
+    return " ".join(_TOOL_NAME_ACRONYM_FIXUPS.get(word, word) for word in words)
+
+
+#: Overall cap on how many `key: value` argument lines are shown per tool
+#: call -- a tool with a huge args dict shouldn't be able to blow up the
+#: transcript.
+_TOOL_ARGS_MAX_LINES = 6
+
+
+def _format_tool_args_lines(args: dict) -> list[str]:
+    """Render a tool call's arguments as sorted ``key: value`` lines.
+
+    One pair per line (rather than one big ``json.dumps`` blob) so string
+    values stay individually quoted/readable without dumping the whole
+    object as one blob. Each value is capped at
+    ``tool_permission_prompt._DESCRIPTION_MAX_LEN`` characters (reused here
+    for consistency with that widget's own truncation ceiling), and the
+    overall number of lines is capped at ``_TOOL_ARGS_MAX_LINES`` with a
+    trailing ``"… N more"`` line if there were more.
+
+    Args:
+        args: The tool call's arguments.
+
+    Returns:
+        A list of formatted ``"key: value"`` lines, or ``[]`` if ``args``
+        is empty (so the caller can skip the indented block entirely).
+    """
+    if not args:
+        return []
+    items = sorted(args.items())
+    lines = [
+        f"{key}: {_truncate(json.dumps(value), _DESCRIPTION_MAX_LEN)}"
+        for key, value in items[:_TOOL_ARGS_MAX_LINES]
+    ]
+    remaining = len(items) - _TOOL_ARGS_MAX_LINES
+    if remaining > 0:
+        lines.append(f"… {remaining} more")
+    return lines
+
+
+class ChatTurnHandle:
+    """Cancellation handle for one active top-level chat turn.
+
+    Registered with ``Toolbox`` as the ``"chat"`` background task so an
+    in-flight turn shows up in the StatusBar for free (see
+    ``Toolbox.register_background_task``); ``stop()`` is the
+    ``stop_callback`` Toolbox calls, and is also what Ctrl+X calls directly.
+    """
+
+    def __init__(self) -> None:
+        self.cancel_event = threading.Event()
+
+    def stop(self) -> None:
+        self.cancel_event.set()
+
+
+class ChatPanel(Widget):
+    """Bottom-left panel: AI Chat header + transcript + message input.
+
+    Holds ``self._messages`` (OpenAI-style role/content history) as
+    instance state across turns -- safe because ``ContentSwitcher`` children
+    are composed once at screen mount and persist for the app's lifetime
+    (same assumption ``FriTapPanel`` makes).
+
+    Bindings (when focused):
+        Ctrl+X: stop the active turn
+        Ctrl+L: clear the transcript AND reset conversation history -- the
+            model forgets everything said so far, so what's on screen
+            always matches what it actually knows. Refused while a turn is
+            in flight (see ``action_clear_log``).
+    """
+
+    DEFAULT_CSS = """
+    ChatPanel {
+        layout: vertical;
+        height: 1fr;
+        background: #080c18;
+        /* Two layers: everything (header/log/input-bar) sits on the implicit
+           "default" layer; #chat-mascot is the only thing on "overlay",
+           declared last so it always composites in front and can visually
+           stand on top of the input bar instead of being clipped into its
+           own row. */
+        layers: default overlay;
+        /* Pins the one auto-sized overlay child (#chat-mascot) to the
+           bottom-right corner; its own `offset` then lifts it onto the input
+           bar's top edge (see the #chat-mascot rule). A no-op for the
+           default-layer children, which already fill their own width/height. */
+        align: right bottom;
+    }
+    ChatPanel > #chat-header {
+        height: 1;
+        color: #38bdf8;
+        text-style: bold;
+        padding: 0 1;
+    }
+    ChatPanel > #chat-log {
+        height: 1fr;
+        background: #050811;
+        scrollbar-size: 1 1;
+        /* RichLog's own default is `overflow-y: scroll` -- an
+           always-visible scrollbar regardless of whether there's
+           anything to scroll. With the dock sitting directly under the
+           Activity Log (also a RichLog, also always-on), that read as
+           two permanently-visible scrollbar tracks stacked on the right
+           edge. `auto` only shows this one when the transcript actually
+           overflows. */
+        overflow-y: auto;
+    }
+    ChatPanel > #chat-input-bar {
+        height: 3;
+    }
+    ChatPanel > #chat-input-bar > #chat-input {
+        width: 1fr;
+        height: 3;
+        border: solid #1f2d4d;
+        background: #0a1124;
+    }
+    ChatPanel > #chat-mascot {
+        /* A direct sibling of #chat-input-bar (NOT nested inside it) on its
+           own "overlay" layer. ChatPanel's `align: right bottom` pins this
+           auto-width box to the bottom-right corner; `offset: 0 -2` then
+           lifts it two rows so only its bottom row (the robot's solid
+           base/"feet") rests on the input bar's top border -- it stands ON
+           the bar rather than covering the text field on the row below.
+
+           The background MUST equal #chat-log's (#050811), NOT ChatPanel's
+           (#080c18): Textual composites sibling layers front-to-back per
+           strip with no per-cell transparency (a widget always paints its
+           whole region, and `background: transparent` only resolves against
+           ancestors, i.e. ChatPanel), so any other colour would paint a
+           visible lighter rectangle -- "a box" -- over the darker log.
+           Matching the log makes that box vanish, leaving only the teal
+           glyphs floating over the transcript: no border, no panel, no box
+           edges. (Keep this in sync with #chat-log's background above.)
+
+           This same invariant applies per-theme, not just here: each of the
+           8 .tcss files (styles.tcss + themes/*.tcss) defines its own
+           #chat-mascot/#chat-log rules for ChatPanel -- and since a loaded
+           stylesheet file always beats this DEFAULT_CSS in Textual's
+           cascade, those file-level values (not these Python ones) are what
+           actually render for every theme. Any edit to one theme's
+           #chat-log background must be mirrored onto that same theme's
+           #chat-mascot background, or that theme grows the exact box
+           artifact described above.
+
+           Deliberately auto-width, NOT `width: 100%` + `dock: bottom` (an
+           earlier version): a full-width box made the *hit-test* region span
+           the whole row too (Textual's mouse targeting is purely
+           region-based, with no click-through for a widget's blank cells),
+           silently eating every click meant for #chat-input underneath it.
+           Auto-sizing keeps that hit-test box tight to the robot's own
+           glyphs, so clicks elsewhere on the input bar still reach it. */
+        layer: overlay;
+        width: auto;
+        height: 5;
+        offset: 0 -2;
+        background: #050811;
+        color: #38bdf8;
+    }
+    """
+
+    BINDINGS = [
+        ("ctrl+x", "stop_turn", "Stop"),
+        ("ctrl+l", "clear_log", "Clear log"),
+    ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.can_focus = True
+        # OpenAI-style role/content conversation history, across turns.
+        # Seeded with the orchestrator system prompt so the model actually
+        # knows its role/tools/sample-data caveat -- previously never sent.
+        self._messages: list[dict] = [
+            {"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}
+        ]
+        # Finalized transcript lines -- the single source of truth for
+        # what's on screen; see module docstring for why a full
+        # redraw-on-delta is used instead of live line edits. A mix of
+        # plain markup strings (our own UI chrome), ``Text`` (the user's
+        # own echoed input, see ``_format_user_line``), and ``Markdown``
+        # renderables (LLM-authored prose) -- ``RichLog.write()`` accepts
+        # all three uniformly.
+        self._history_lines: list[str | Markdown | Text] = []
+        self._live_reasoning: str = ""
+        self._live_text: str = ""
+        # Wall-clock (monotonic) start of the current reasoning phase, for
+        # the collapsed "Thought for Ns" summary -- see
+        # ``_finalize_reasoning_only``.
+        self._reasoning_started_at: float | None = None
+        self._header_state = "idle"
+        # idle | streaming | thinking | tool | awaiting-approval | error
+        self._header_detail = ""
+        self._turn_in_progress = False
+        self._active_handle: ChatTurnHandle | None = None
+        self._mascot_timer: Timer | None = None
+        self._mascot_frame_index: int = 0
+
+    # -- theming ------------------------------------------------------------
+
+    def _theme(self) -> Theme:
+        """Return the currently active theme for coloring transcript/header
+        markup built in Python (see the module docstring's "Theming" note).
+
+        ``self.app.sandroid_theme`` is a real, live-updated property on
+        ``SandroidTUI`` (see ``app.py``), but several existing tests mount a
+        bare ``ChatPanel`` under a plain ``textual.app.App()`` instead --
+        which has no such attribute at all -- and some construct a
+        ``ChatPanel`` directly with no app running at all, in which case
+        ``self.app`` itself raises Textual's own ``NoActiveAppError``
+        (a ``RuntimeError``) rather than anything ``getattr`` alone can
+        catch. Either way this falls back to ``DEFAULT_THEME``, which
+        carries the exact original hardcoded hex values this file used
+        before theming existed, so rendering stays identical for anything
+        not running under the real ``SandroidTUI``.
+        """
+        try:
+            app = self.app
+        except Exception:
+            return DEFAULT_THEME
+        return getattr(app, "sandroid_theme", None) or DEFAULT_THEME
+
+    def _header_idle_markup(self) -> str:
+        return f"[{self._theme().muted_status_color}]○ idle[/]"
+
+    def _header_error_markup(self) -> str:
+        return f"[{self._theme().error}]○ error[/]"
+
+    # -- compose / mount --------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._header_idle_markup(), id="chat-header")
+        yield RichLog(
+            markup=True,
+            wrap=True,
+            auto_scroll=True,
+            id="chat-log",
+        )
+        with Horizontal(id="chat-input-bar"):
+            yield Input(
+                placeholder="Ask Sandroid… (Enter to send, Ctrl+X to stop)",
+                id="chat-input",
+            )
+        # Mascot is a sibling of #chat-input-bar (not nested inside it) so it
+        # isn't confined to -- or clipped by -- the input row's own bounds.
+        # It's positioned entirely via CSS (a separate "overlay" layer +
+        # `align: right bottom` + `offset`, see DEFAULT_CSS on #chat-mascot):
+        # a small crop of the real SANDROID_LOGO android head, background
+        # matched to the log so no box shows, perched with its feet on the
+        # input bar's top edge near the right side.
+        yield Static("\n".join(_MASCOT_IDLE_FRAME), id="chat-mascot")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#chat-log", RichLog).write(
+                f"[{self._theme().muted_status_color}]"
+                "Enter: send · Ctrl+X: stop · Ctrl+L: clear[/]"
+            )
+        except Exception:
+            pass
+        self._update_mascot()
+
+    def on_unmount(self) -> None:
+        self._stop_mascot_timer()
+
+    # -- submit -------------------------------------------------------
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "chat-input":
+            return
+        event.stop()
+
+        text = event.value.strip()
+        if not text:
+            return
+
+        # Concurrent-turn guard: exclusive=True on run_worker only cancels a
+        # same-named *worker*, it cannot force-kill the raw OS thread a prior
+        # turn is running on -- only the cooperative cancel_event actually
+        # stops it. So refuse a second submit outright while one is active
+        # (the Input is also disabled below, this is defense in depth).
+        if self._turn_in_progress:
+            return
+
+        from sandroid.core.toolbox import Toolbox
+
+        ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
+        base_url = getattr(ai_cfg, "base_url", None)
+        api_key = getattr(ai_cfg, "api_key", None)
+        model = getattr(ai_cfg, "model", None)
+        if not (base_url and api_key and model):
+            self._push_history(
+                f"[{self._theme().error}]Set config.ai.base_url/api_key/model "
+                "to use Chat — see `sandroid-config` docs[/]"
+            )
+            return
+
+        event.input.value = ""
+        event.input.disabled = True
+        self._turn_in_progress = True
+        self._header_state = "streaming"
+        self._header_detail = ""
+        self.refresh_header()
+
+        # Blank line before each new turn (skipped for the very first one)
+        # so consecutive turns read as visually distinct blocks in the
+        # transcript, on top of the user's highlighted input band.
+        if self._history_lines:
+            self._push_history("")
+        self._push_history(self._format_user_line(text))
+
+        handle = ChatTurnHandle()
+        self._active_handle = handle
+
+        self.run_worker(
+            functools.partial(
+                self._run_turn_sync, text, handle, base_url, api_key, model
+            ),
+            name="chat_turn",
+            exclusive=True,
+            thread=True,
+        )
+
+    # -- worker thread ------------------------------------------------
+
+    def _run_turn_sync(
+        self,
+        text: str,
+        handle: ChatTurnHandle,
+        base_url: str,
+        api_key: str,
+        model: str,
+    ) -> None:
+        """Run one full agent turn to completion. Runs on a worker thread."""
+        from sandroid.core.toolbox import Toolbox
+
+        try:
+            Toolbox.register_background_task(
+                name="chat",
+                display_name="AI Chat",
+                instance=handle,
+                stop_callback=handle.stop,
+            )
+        except Exception as exc:
+            logger.debug("Failed to register 'chat' background task: %s", exc)
+
+        def on_event(event: dict) -> None:
+            self.app.call_from_thread(self._append_ui_event, event)
+
+        def approve_tool_call(spec: ToolSpec, arguments: dict) -> str:
+            """Gate one pending tool call that needs a human decision.
+
+            Called synchronously by ``run_agent_turn`` (via
+            ``ai.loop._dispatch_one``) from this same worker thread whenever
+            :func:`~sandroid.ai.tool_permissions.resolve_tool_policy` returns
+            ``"ask"``. Mounts a :class:`ToolPermissionPrompt` between the
+            transcript and the input box, blocks this thread until it's
+            resolved, then unmounts it and restores whatever header state was
+            active beforehand.
+
+            Returns:
+                ``"once"`` / ``"always"`` / ``"decline"`` / ``"cancelled"`` --
+                the loop's own vocabulary (see
+                :data:`sandroid.ai.loop.ApproveCallback`), translated from
+                the widget's ``"once"``/``"always"``/``"never"`` choices.
+            """
+            args_preview = _format_args_preview(arguments)
+            logger.debug(
+                "Awaiting tool-permission decision for %r (args: %s)",
+                spec.name,
+                args_preview,
+            )
+
+            done = threading.Event()
+            outcome: dict[str, str] = {}
+
+            def on_choice(choice: str) -> None:
+                # The widget only ever calls back with once/always/never --
+                # translate "never" into "decline" here, the loop's own
+                # vocabulary, so ai.loop._dispatch_one can tell an explicit
+                # decline (which persists a "never" policy) apart from
+                # "cancelled" (cancel/timeout below, which must never
+                # persist -- see that function's docstring).
+                outcome["choice"] = "decline" if choice == "never" else choice
+                done.set()
+
+            prompt = ToolPermissionPrompt(spec, arguments, on_choice)
+            previous_state = self._header_state
+            previous_detail = self._header_detail
+
+            async def mount_prompt_and_set_state() -> None:
+                # Positioned between the transcript and the input bar --
+                # a sibling of both under ChatPanel's own vertical layout.
+                # Mounting and the header-state flip happen in the SAME
+                # call_from_thread round-trip (not two separate ones): a
+                # widget-mounted-but-header-still-idle window, even a brief
+                # one, is a real observable inconsistency (and made an
+                # earlier version of this test flaky).
+                await self.mount(prompt, before="#chat-input-bar")
+                self._header_state = "awaiting-approval"
+                self._header_detail = spec.name
+                self.refresh_header()
+
+            # Awaited via call_from_thread (Textual awaits a coroutine
+            # function callback) rather than a bare synchronous
+            # self.mount(...): that call isn't guaranteed to have actually
+            # attached the widget before this thread proceeds to wait on it.
+            self.app.call_from_thread(mount_prompt_and_set_state)
+
+            # Blocks this worker thread until resolved by a button (sets
+            # `done` via on_choice), the turn's own cancel_event, or an
+            # overall hard ceiling -- the shutdown/hang safety net
+            # UIRequestBus gets for free (see its own `timeout=300.0`) and
+            # this bespoke mechanism must build in explicitly instead.
+            choice = "cancelled"
+            start = time.monotonic()
+            while not done.wait(timeout=_APPROVAL_POLL_INTERVAL_SECONDS):
+                if handle.cancel_event.is_set():
+                    break
+                if time.monotonic() - start > _APPROVAL_HARD_TIMEOUT_SECONDS:
+                    logger.warning(
+                        "Tool-permission prompt for %r timed out after %.0fs",
+                        spec.name,
+                        _APPROVAL_HARD_TIMEOUT_SECONDS,
+                    )
+                    break
+            else:
+                # The while loop only exits without `break` when
+                # done.wait(...) finally returned True -- i.e. on_choice ran.
+                choice = outcome.get("choice", "cancelled")
+
+            async def unmount_prompt_and_restore_state() -> None:
+                # Same reasoning as the mount above: unmounting and
+                # restoring the header state happen in one round-trip so
+                # there's no window where the prompt is gone but the header
+                # still reads "awaiting-approval".
+                try:
+                    await prompt.remove()
+                except Exception:
+                    logger.debug(
+                        "Failed to unmount ToolPermissionPrompt", exc_info=True
+                    )
+                self._header_state = previous_state
+                self._header_detail = previous_detail
+                self.refresh_header()
+
+            self.app.call_from_thread(unmount_prompt_and_restore_state)
+
+            return choice
+
+        try:
+            client = OpenAIClient(base_url, api_key, model)
+            tools = get_tool_registry().openai_tools_schema()
+            # Rebuilt fresh every turn from cheap in-memory state -- see
+            # ai/context.py's module docstring. Merged straight into the
+            # SAME system message as `self._messages[0]` (the persisted
+            # ORCHESTRATOR_SYSTEM_PROMPT) rather than sent as a second,
+            # separate system message: the actually-configured production
+            # model only attends to the first system-role message in the
+            # list and silently ignores any later one (confirmed against
+            # the real backend), so a second system message is worse than
+            # useless -- it just never gets read. `self._messages[0]`
+            # itself is never mutated, so the persisted history stays the
+            # pure, unmodified prompt -- only this turn's local
+            # `combined_system_msg` carries the ambient text, and it never
+            # survives into `self._messages` below.
+            combined_system_msg = {
+                "role": "system",
+                "content": f"{ORCHESTRATOR_SYSTEM_PROMPT}\n\n{build_ambient_block()}",
+            }
+            turn_messages = [
+                combined_system_msg,
+                *self._messages[1:],
+                {"role": "user", "content": text},
+            ]
+
+            result = run_agent_turn(
+                turn_messages,
+                tools,
+                client,
+                handle.cancel_event,
+                on_event=on_event,
+                approve=approve_tool_call,
+            )
+            if result:
+                turn_messages.append({"role": "assistant", "content": result})
+            self._messages = [self._messages[0], *turn_messages[1:]]
+        except AIClientError as exc:
+            self.app.call_from_thread(
+                self._report_turn_error, f"AI backend error: {exc}"
+            )
+        except Exception as exc:  # must never crash the worker thread
+            logger.exception("Chat turn failed")
+            self.app.call_from_thread(
+                self._report_turn_error, f"Chat turn failed: {exc}"
+            )
+        finally:
+            try:
+                Toolbox.unregister_background_task("chat")
+            except Exception:
+                pass
+            self._active_handle = None
+            self.app.call_from_thread(self._finish_turn)
+
+    # -- UI-thread event handling --------------------------------------
+
+    def _append_ui_event(self, event: dict) -> None:
+        """Handle one streamed ChatEvent. Always runs on the UI thread.
+
+        Only ever sees ``text_delta``/``reasoning_delta``/``tool_call_done``/
+        ``error`` -- see the module docstring for why (loop.py's real event
+        surface, not client.py's raw one).
+        """
+        etype = event.get("type")
+        if etype == "text_delta":
+            if not self._live_text and self._live_reasoning:
+                # First text token after a reasoning phase -- that phase is
+                # now over, fold it in (verbatim or collapsed) before the
+                # reply itself starts accumulating.
+                self._finalize_reasoning_only()
+            self._live_text += event.get("content", "")
+            self._header_state = "streaming"
+            self.refresh_header()
+            self._redraw()
+        elif etype == "reasoning_delta":
+            if not self._live_reasoning:
+                self._reasoning_started_at = time.monotonic()
+            self._live_reasoning += event.get("content", "")
+            self._header_state = "thinking"
+            self.refresh_header()
+            self._redraw()
+        elif etype == "tool_call_done":
+            self._finalize_live()
+            name = event.get("name") or "?"
+            args = event.get("arguments") or {}
+            tool_color = self._theme().tool_color
+            self._push_history(
+                f"[bold {tool_color}]● {escape(_humanize_tool_name(name))}[/]"
+            )
+            arg_lines = _format_tool_args_lines(args)
+            if arg_lines:
+                body = "\n".join(f"    [dim]{escape(line)}[/]" for line in arg_lines)
+                self._push_history(body)
+            self._header_state = "tool"
+            self._header_detail = name
+            self.refresh_header()
+        elif etype == "error":
+            self._finalize_live()
+            message = event.get("message", "unknown error")
+            self._push_history(f"[{self._theme().error}]error: {escape(message)}[/]")
+            self._header_state = "error"
+            self.refresh_header()
+
+    def _report_turn_error(self, message: str) -> None:
+        self._finalize_live()
+        self._push_history(f"[{self._theme().error}]{escape(message)}[/]")
+        self._header_state = "error"
+        self.refresh_header()
+
+    def _finish_turn(self) -> None:
+        self._finalize_live()
+        self._turn_in_progress = False
+        if self._header_state != "error":
+            self._header_state = "idle"
+            self._header_detail = ""
+            self.refresh_header()
+        try:
+            input_widget = self.query_one("#chat-input", Input)
+            input_widget.disabled = False
+            input_widget.focus()
+        except Exception:
+            pass
+
+    # -- transcript rendering -------------------------------------------
+
+    def _format_user_line(self, text: str) -> str | RenderableType:
+        """Render one user turn, Claude-Code-CLI style: a ``>``-prefixed,
+        bold line sitting inside a full-width band that's a subtly lighter
+        neutral shade than the surrounding background -- no border, no box,
+        no per-role hue, just a plain background shift. The assistant's
+        reply carries no label at all -- with the user's own line this
+        clearly marked, anything else in the transcript is unambiguously
+        the reply, so a "Sandroid:" tag would be redundant.
+
+        A ``rich.text.Text`` shorter than the log's own width only paints
+        its background behind its own characters -- ``RichLog.write()``
+        pads a rendered line out to the target width using the *renderable's*
+        trailing style, which defaults to ``None`` (see
+        ``Strip.adjust_cell_length``), so without explicit padding here the
+        highlight would show as a short island hugging the text instead of
+        spanning the whole row. Padding is done per physical line (split on
+        newlines) so a pasted multi-line message gets a full-width band on
+        every row, not just the first.
+
+        Args:
+            text: The raw, already-stripped text the user submitted.
+
+        Returns:
+            A ``Text`` renderable ready to hand to ``RichLog.write()``
+            (accepted uniformly alongside plain markup strings and
+            ``Markdown``, see the module docstring).
+        """
+        width = 0
+        try:
+            log = self.query_one("#chat-log", RichLog)
+            width = log.scrollable_content_region.width
+        except Exception:
+            width = 0
+
+        highlight_bg = self._theme().user_highlight_background
+        line = Text(style=f"bold white on {highlight_bg}", no_wrap=True)
+        for i, row in enumerate(text.split("\n")):
+            if i == 0:
+                row = f"> {row}"
+            if i:
+                line.append("\n")
+            line.append(row)
+            if width > len(row):
+                line.append(" " * (width - len(row)))
+        return line
+
+    def _finalize_live(self) -> None:
+        """Fold any in-progress reasoning/reply buffers into history."""
+        changed = self._finalize_reasoning_only()
+        if self._live_text:
+            # No "Sandroid:" label -- the user's own line already stands
+            # out via its highlight band (see ``_format_user_line``), so
+            # anything else in the transcript is unambiguously the reply.
+            # ``style=`` is still required here -- Markdown() defaults to
+            # "none" (the console's default foreground), so without it the
+            # reply body would render plain white instead of green.
+            self._history_lines.append(
+                Markdown(self._live_text, style=self._theme().assistant_reply_color)
+            )
+            self._live_text = ""
+            changed = True
+        if changed:
+            self._redraw()
+
+    def _finalize_reasoning_only(self) -> bool:
+        """Fold the in-progress reasoning buffer into history, if any.
+
+        With ``config.ai.show_verbose_thinking`` on, the raw reasoning text
+        is kept (rendered as ``Markdown``, same as the final reply). Off
+        (the default), it collapses into a single Claude-Code-style
+        "Thought for Ns" line, timed with ``time.monotonic()`` (never
+        ``time.time()`` -- durations must never be skewed by clock
+        adjustments) from the first ``reasoning_delta`` of this phase.
+
+        Returns:
+            True if a reasoning buffer was folded in (i.e. history changed).
+        """
+        if not self._live_reasoning:
+            return False
+        if self._show_verbose_thinking():
+            warning_color = self._theme().warning
+            self._history_lines.append(f"[italic {warning_color}]thinking:[/]")
+            # Same reasoning as the reply body above: an explicit ``style``
+            # is needed or this renders in the default foreground instead
+            # of matching the "thinking:" label's italic yellow.
+            self._history_lines.append(
+                Markdown(self._live_reasoning, style=f"italic {warning_color}")
+            )
+        else:
+            duration = 0.0
+            if self._reasoning_started_at is not None:
+                duration = max(0.0, time.monotonic() - self._reasoning_started_at)
+            self._history_lines.append(f"[dim]✧ Thought for {round(duration)}s[/]")
+        self._live_reasoning = ""
+        self._reasoning_started_at = None
+        return True
+
+    def _show_verbose_thinking(self) -> bool:
+        """Read ``config.ai.show_verbose_thinking`` (default off)."""
+        from sandroid.core.toolbox import Toolbox
+
+        ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
+        return bool(getattr(ai_cfg, "show_verbose_thinking", False))
+
+    def _push_history(self, line: str) -> None:
+        self._history_lines.append(line)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        try:
+            log = self.query_one("#chat-log", RichLog)
+        except Exception:
+            return
+        log.clear()
+        for line in self._history_lines:
+            log.write(line)
+        theme = self._theme()
+        if self._live_reasoning:
+            log.write(
+                f"[italic {theme.warning}]thinking: {escape(self._live_reasoning)}[/]"
+            )
+        if self._live_text:
+            log.write(f"[{theme.assistant_reply_color}]{escape(self._live_text)}[/]")
+
+    # -- header -----------------------------------------------------------
+
+    def _render_header(self) -> str:
+        theme = self._theme()
+        if self._header_state == "streaming":
+            return f"[{theme.assistant_reply_color}]● streaming…[/]"
+        if self._header_state == "thinking":
+            return f"[{theme.warning}]● thinking…[/]"
+        if self._header_state == "tool":
+            return f"[{theme.tool_color}]● tool: `{escape(self._header_detail)}`[/]"
+        if self._header_state == "awaiting-approval":
+            detail = escape(self._header_detail)
+            return f"[{theme.waiting_color}]● waiting on you: `{detail}`[/]"
+        if self._header_state == "error":
+            return self._header_error_markup()
+        return self._header_idle_markup()
+
+    def refresh_header(self) -> None:
+        """Re-render the status header (main thread; best-effort).
+
+        Public so ``MainScreen.toggle_chat_panel`` can refresh it the moment
+        the Chat dock is opened (mirrors ``FriTapPanel``).
+
+        Also the single choke point that syncs the mascot to
+        ``_header_state`` -- every place that changes header state already
+        calls this right after, so it's the natural spot to start/stop the
+        wiggle animation too instead of a separate polling loop.
+        """
+        try:
+            self.query_one("#chat-header", Static).update(self._render_header())
+        except Exception:
+            pass
+        self._update_mascot()
+
+    # -- mascot -------------------------------------------------------------
+
+    def _mascot_enabled(self) -> bool:
+        """Read ``config.ai.show_chat_mascot`` (default on)."""
+        from sandroid.core.toolbox import Toolbox
+
+        ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
+        return bool(getattr(ai_cfg, "show_chat_mascot", True))
+
+    def _update_mascot(self) -> None:
+        """Sync the mascot widget's visibility + animation to current state.
+
+        Streaming/thinking starts the wiggle timer; anything else (idle,
+        tool, error) stops it and shows the single idle frame -- no timer
+        ticks wasted animating nothing. Also hides the widget outright when
+        ``show_chat_mascot`` is off.
+        """
+        try:
+            mascot = self.query_one("#chat-mascot", Static)
+        except Exception:
+            return
+
+        if not self._mascot_enabled():
+            mascot.display = False
+            self._stop_mascot_timer()
+            return
+
+        mascot.display = True
+        active = self._header_state in ("streaming", "thinking")
+        if active:
+            if self._mascot_timer is None:
+                self._mascot_frame_index = 0
+                mascot.update("\n".join(_MASCOT_TALK_FRAMES[0]))
+                self._mascot_timer = self.set_interval(
+                    _MASCOT_FRAME_INTERVAL, self._tick_mascot
+                )
+        else:
+            self._stop_mascot_timer()
+            mascot.update("\n".join(_MASCOT_IDLE_FRAME))
+
+    def _tick_mascot(self) -> None:
+        """Timer callback: advance to the next blink/bounce/tilt frame."""
+        self._mascot_frame_index = (self._mascot_frame_index + 1) % len(
+            _MASCOT_TALK_FRAMES
+        )
+        try:
+            self.query_one("#chat-mascot", Static).update(
+                "\n".join(_MASCOT_TALK_FRAMES[self._mascot_frame_index])
+            )
+        except Exception:
+            self._stop_mascot_timer()
+
+    def _stop_mascot_timer(self) -> None:
+        if self._mascot_timer is not None:
+            try:
+                self._mascot_timer.stop()
+            except Exception:
+                pass
+            self._mascot_timer = None
+
+    # -- actions ----------------------------------------------------------
+
+    def action_stop_turn(self) -> None:
+        """Ctrl+X — stop the active turn, if any."""
+        handle = self._active_handle
+        if handle is not None:
+            handle.stop()
+
+    def action_clear_log(self) -> None:
+        """Ctrl+L — clear the transcript AND reset conversation history.
+
+        Clearing only the on-screen log while ``self._messages`` kept
+        growing was actively misleading: the model would keep referencing
+        things no longer visible on screen, and there'd be no way to tell
+        what it still "knows". So both are reset together, back to the
+        same state as a freshly-mounted panel (just the system prompt).
+
+        Refused while a turn is in flight: ``_run_turn_sync`` (on its own
+        worker thread) commits its own ``turn_messages`` copy back to
+        ``self._messages`` when it finishes, which would silently undo a
+        clear that happened underneath it a moment earlier.
+        """
+        if self._turn_in_progress:
+            self._push_history(
+                "[dim]Can't clear while a reply is in progress -- wait for "
+                "it to finish, or Ctrl+X to stop it first.[/]"
+            )
+            return
+        self._messages = [{"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}]
+        self._history_lines = []
+        self._live_reasoning = ""
+        self._live_text = ""
+        self._reasoning_started_at = None
+        try:
+            self.query_one("#chat-log", RichLog).clear()
+        except Exception:
+            pass

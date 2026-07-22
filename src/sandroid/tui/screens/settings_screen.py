@@ -125,6 +125,14 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         width: auto;
     }
 
+    .setting-help {
+        width: 100%;
+        height: auto;
+        content-align: left top;
+        padding: 0 0 0 1;
+        margin-bottom: 1;
+    }
+
     .theme-option {
         height: 1;
         margin-bottom: 0;
@@ -155,6 +163,17 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         Binding("ctrl+s", "save", "Save", priority=True),
     ]
 
+    # Dotted config keys that must take effect immediately (not just on
+    # Save) because a live, already-mounted widget reads them straight off
+    # ``Toolbox.config`` -- e.g. ``ChatPanel._mascot_enabled``/
+    # ``_show_verbose_thinking`` -- and would otherwise silently keep
+    # showing/using the stale value for the rest of the session (SAVE only
+    # rewrites the on-disk file plus the app's own ``SandroidConfig`` copy;
+    # it never touches ``Toolbox.config``, see ``_apply_ai_toggle_live``).
+    _LIVE_AI_TOGGLE_KEYS = frozenset(
+        {"ai.show_chat_mascot", "ai.show_verbose_thinking"}
+    )
+
     def __init__(
         self,
         name: str | None = None,
@@ -165,6 +184,12 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         super().__init__(name=name, id=id, classes=classes)
         self._pending: dict[str, Any] = {}
         self._controller: SettingsController | None = None
+        # Original values of any ``_LIVE_AI_TOGGLE_KEYS`` overwritten via
+        # ``_apply_ai_toggle_live`` (parallel to the theme's
+        # ``_original_theme_name``) -- restored by
+        # ``_revert_ai_toggle_previews`` if the user cancels instead of
+        # saving.
+        self._ai_toggle_originals: dict[str, bool] = {}
 
     def _get_config(self) -> SandroidConfig:
         """Get current config, falling back to defaults."""
@@ -198,6 +223,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 with TabPane("MVT", id="tab-mvt"):
                     with ScrollableContainer():
                         yield from self._compose_mvt_tab(config)
+                with TabPane("AI Chat", id="tab-ai-chat"):
+                    with ScrollableContainer():
+                        yield from self._compose_ai_chat_tab(config)
                 with TabPane("Timeouts", id="tab-timeouts"):
                     with ScrollableContainer():
                         yield from self._compose_timeouts_tab(config)
@@ -609,6 +637,40 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-select",
             )
 
+    def _compose_ai_chat_tab(self, config: SandroidConfig) -> ComposeResult:
+        """Compose the AI Chat settings tab."""
+        yield Static("AI Chat", classes="section-header")
+
+        # Show Verbose Thinking
+        with Horizontal(classes="setting-row"):
+            yield Label("Show Verbose Thinking:", classes="setting-label")
+            yield Switch(
+                value=config.ai.show_verbose_thinking,
+                id="setting-ai--show_verbose_thinking",
+                classes="setting-switch",
+            )
+        yield Static(
+            "[dim]When on, the model's full reasoning/thinking text stays "
+            "visible in the transcript. When off (default), it collapses "
+            "into a single 'Thought for Ns' line once the reasoning phase "
+            "ends.[/dim]",
+            classes="setting-help",
+        )
+
+        # Show Chat Mascot
+        with Horizontal(classes="setting-row"):
+            yield Label("Show Chat Mascot:", classes="setting-label")
+            yield Switch(
+                value=config.ai.show_chat_mascot,
+                id="setting-ai--show_chat_mascot",
+                classes="setting-switch",
+            )
+        yield Static(
+            "[dim]Show the small animated mascot beside the Chat panel's "
+            "message input while Sandroid is thinking or replying.[/dim]",
+            classes="setting-help",
+        )
+
     def _compose_timeouts_tab(self, config: SandroidConfig) -> ComposeResult:
         """Compose the Timeouts settings tab."""
         timeouts = config.timeouts
@@ -752,11 +814,104 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         return widget_id[len("setting-") :].replace("--", ".")
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        """Track switch changes."""
+        """Track switch changes.
+
+        Most switches only stage into ``self._pending`` (applied on Save).
+        The AI Chat switches are the exception -- ``ChatPanel`` reads
+        ``Toolbox.config.ai.*`` live off whichever object is currently
+        installed there, so those two apply immediately, mirroring how the
+        Appearance tab's theme radio already live-previews before Save (see
+        ``_apply_ai_toggle_live``).
+        """
         widget_id = event.switch.id
         if widget_id and widget_id.startswith("setting-"):
             key = self._id_to_key(widget_id)
             self._pending[key] = event.value
+            if key in self._LIVE_AI_TOGGLE_KEYS:
+                self._apply_ai_toggle_live(key, event.value)
+
+    def _apply_ai_toggle_live(self, key: str, value: bool) -> None:
+        """Apply an AI Chat switch to the live config, then repaint ChatPanel.
+
+        ``ChatPanel._mascot_enabled``/``_show_verbose_thinking`` read
+        ``Toolbox.config.ai`` at the moment they're needed -- not
+        ``self.app.sandroid_config`` and not ``get_config()``'s cache -- so
+        a value that only sits in ``self._pending`` (or even one that's been
+        saved: ``SettingsController.save()`` builds an entirely new
+        ``SandroidConfig`` from disk and never reassigns ``Toolbox.config``)
+        would stay invisible to the live Chat tab until the app restarts.
+        Writing the live object's attribute directly is what actually makes
+        the toggle real *right now*; poking the mounted ``ChatPanel``
+        afterwards (mascot only -- see its docstring for why verbose
+        thinking needs no repaint) is what makes that take visible effect
+        without waiting for the next chat turn.
+        """
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
+        except Exception:
+            ai_cfg = None
+        if ai_cfg is None:
+            return
+
+        field = key.split(".", 1)[1]
+        if key not in self._ai_toggle_originals:
+            self._ai_toggle_originals[key] = getattr(ai_cfg, field, value)
+        setattr(ai_cfg, field, value)
+
+        if key == "ai.show_chat_mascot":
+            self._refresh_chat_panel()
+
+    def _revert_ai_toggle_previews(self) -> None:
+        """Undo any ``_apply_ai_toggle_live`` writes on Cancel.
+
+        Parallel to ``SettingsController.revert_theme_preview`` -- a switch
+        flipped live for preview but never saved must not silently stick.
+        """
+        if not self._ai_toggle_originals:
+            return
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
+        except Exception:
+            ai_cfg = None
+        if ai_cfg is not None:
+            for key, original in self._ai_toggle_originals.items():
+                setattr(ai_cfg, key.split(".", 1)[1], original)
+        self._ai_toggle_originals.clear()
+        self._refresh_chat_panel()
+
+    def _refresh_chat_panel(self) -> None:
+        """Best-effort: make an already-mounted ``ChatPanel`` re-sync its
+        mascot to whatever ``config.ai.show_chat_mascot`` is now.
+
+        ``ChatPanel`` lives on ``MainScreen``, underneath this modal in the
+        screen stack, so ``self.app.query_one`` (which only searches the
+        active/default screen) can't see it -- walking ``screen_stack`` is
+        the established fallback for reaching a widget on a screen below a
+        pushed modal (see ``HelpScreen._snapshots_panel``,
+        ``ProxyModal._set_glance_device_proxy``). A no-op if the Chat tab
+        was never mounted (e.g. another view is active, or no MainScreen at
+        all -- some tests push this screen standalone).
+        """
+        from sandroid.tui.widgets.chat_panel import ChatPanel
+
+        for screen in self.app.screen_stack:
+            try:
+                panel = screen.query_one(ChatPanel)
+            except Exception:
+                continue
+            # refresh_header() is ChatPanel's existing public repaint hook
+            # (already used cross-widget by MainScreen.toggle_chat_panel)
+            # -- it re-renders the header text (no-op here, header state is
+            # untouched) and, as its docstring says, is "the single choke
+            # point that syncs the mascot to _header_state", i.e. exactly
+            # the re-check-config-and-repaint this bug needs. No new
+            # cross-widget notification mechanism needed.
+            panel.refresh_header()
+            return
 
     def on_select_changed(self, event: Select.Changed) -> None:
         """Track select changes."""
@@ -874,9 +1029,10 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
     # -------------------------------------------------------------------------
 
     def action_cancel(self) -> None:
-        """Cancel settings - revert theme preview and dismiss."""
+        """Cancel settings - revert theme/AI-toggle previews and dismiss."""
         if self._controller:
             self._controller.revert_theme_preview()
+        self._revert_ai_toggle_previews()
         self.app.call_later(self._refresh_app)
         self.dismiss(None)
 
@@ -891,6 +1047,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         try:
             if self._controller:
                 updated_config = self._controller.save(self._pending)
+                # Values already applied live (see _apply_ai_toggle_live)
+                # are now persisted -- nothing left to revert.
+                self._ai_toggle_originals.clear()
                 self.app.call_later(self._refresh_app)
                 self.dismiss(updated_config)
             else:

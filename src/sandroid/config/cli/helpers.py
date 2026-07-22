@@ -179,7 +179,12 @@ def _show_config_rich(config: SandroidConfig) -> None:
 
 
 def _show_config_format(config: SandroidConfig, fmt: str) -> None:
-    """Show configuration in specified format with syntax highlighting."""
+    """Show configuration in specified format with syntax highlighting.
+
+    Secrets (AI API key, custom API keys) are redacted before display —
+    this writes to a throwaway temp file that is unlinked immediately
+    after being read back, never the real persisted config.
+    """
     import tempfile
 
     loader = ConfigLoader()
@@ -188,7 +193,7 @@ def _show_config_format(config: SandroidConfig, fmt: str) -> None:
     temp_file.close()
 
     try:
-        loader.save_config(config, temp_path, fmt)
+        loader.save_config(config, temp_path, fmt, redact_secrets=True)
         content = temp_path.read_text(encoding="utf-8")
         syntax = Syntax(content, fmt, theme="monokai", line_numbers=True)
         console.print(syntax)

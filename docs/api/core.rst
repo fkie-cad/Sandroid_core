@@ -243,38 +243,6 @@ APK download, installation, and management utilities.
    # Download and install APK
    downloader.download_and_install("https://example.com/app.apk")
 
-AI Processing
--------------
-
-.. automodule:: sandroid.core.AI_processing
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-AI-powered analysis and summarization capabilities.
-
-**Key Features:**
-
-- Automated threat detection
-- Behavioral pattern analysis
-- Natural language report generation
-- Machine learning-based classification
-
-**Basic Usage:**
-
-.. code-block:: python
-
-   from sandroid.core.AI_processing import AIProcessing
-
-   # Initialize AI processor
-   ai_processor = AIProcessing()
-
-   # Analyze results with AI
-   ai_analysis = ai_processor.analyze_results(analysis_data)
-
-   # Generate summary
-   summary = ai_processor.generate_summary(ai_analysis)
-
 File System Monitoring
 -----------------------
 
