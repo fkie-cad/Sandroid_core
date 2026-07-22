@@ -85,9 +85,9 @@ from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
-from textual.widgets import Input, RichLog, Static
+from textual.widgets import Button, Input, Label, RichLog, Static
 
 from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agent_turn
 from sandroid.ai.arbiter import get_arbiter
@@ -95,6 +95,7 @@ from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
 from sandroid.ai.subtasks import get_subtask_manager, should_reenter
 from sandroid.core.console import SANDROID_LOGO
+from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 from sandroid.tui.themes import DEFAULT_THEME
 from sandroid.tui.widgets.tool_permission_prompt import (
     _DESCRIPTION_MAX_LEN,
@@ -314,6 +315,108 @@ class ChatTurnHandle:
         self.cancel_event.set()
 
 
+class _SubtaskOutputModal(ForensicModal):
+    """Scrollable, dismissable view of a finished subtask's full output.
+
+    Pushed by :meth:`ChatPanel.action_reveal_subtask` when the analyst clicks
+    a completed subtask's compact ``↳ Subtask … finished.`` transcript line.
+    The full output is hidden by default (only the compact line shows on
+    completion) and surfaced here on demand. Non-destructive: it only reads
+    the already-stored output; dismissing it (Esc / Enter / Close) leaves the
+    transcript untouched. Subclasses :class:`ForensicModal` for the same
+    themed chrome + Esc-to-dismiss the app's other modals get.
+    """
+
+    BINDINGS = [
+        Binding("enter", "dismiss_modal", "Close", priority=True),
+    ]
+
+    AUTO_FOCUS = "#subtask-output-close"
+
+    DEFAULT_CSS = """
+    _SubtaskOutputModal .modal-container {
+        width: 100;
+        max-width: 90%;
+        max-height: 85%;
+    }
+
+    _SubtaskOutputModal .subtask-output-scroll {
+        height: auto;
+        max-height: 24;
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(
+        self,
+        subtask_id: str,
+        output: str,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+    ) -> None:
+        """Initialize the output view for one finished subtask.
+
+        Args:
+            subtask_id: The subtask's short opaque id (shown in the title).
+            output: The subtask's full final summary text.
+            name: Widget name.
+            id: Widget ID.
+            classes: CSS classes.
+        """
+        super().__init__(name=name, id=id, classes=classes)
+        self.subtask_id = subtask_id
+        self.output_text = output
+
+    def compose(self) -> ComposeResult:
+        """Build the titled, scrollable output view with a Close button."""
+        with Vertical(classes="modal-container"):
+            yield Label(f"↳ Subtask {self.subtask_id}", classes="modal-title")
+            with VerticalScroll(classes="subtask-output-scroll"):
+                # Model-authored prose, like the assistant's own reply -- render
+                # it as Markdown so it reads the same way (a blank output falls
+                # back to a plain note rather than an empty modal).
+                yield Static(
+                    (
+                        Markdown(self.output_text)
+                        if self.output_text
+                        else "[dim](no output)[/]"
+                    ),
+                    classes="modal-content",
+                )
+            with Vertical(classes="button-row"):
+                yield Button("Close", id="subtask-output-close", classes="-primary")
+            yield KeyHintFooter(hints={"button": "[dim]Enter=Close  Esc=Close[/dim]"})
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Dismiss on the Close button."""
+        self._dismiss_with_refresh(None)
+
+    def action_dismiss_modal(self) -> None:
+        """Dismiss on Enter (see BINDINGS)."""
+        self._dismiss_with_refresh(None)
+
+
+class _ChatLog(RichLog):
+    """The chat transcript log, with click-to-reveal subtask-output support.
+
+    A plain :class:`RichLog` cannot route the ``@click`` action links used by
+    the compact subtask-completion lines to :class:`ChatPanel`: Textual
+    dispatches a link's bare (un-namespaced) action to the widget the pointer
+    is over -- this log -- never to an ancestor, and the only recognised
+    action namespaces (``app``/``screen``/``focused``) don't map to ChatPanel.
+    So the log itself carries ``action_reveal_subtask`` and forwards it up to
+    its owning ChatPanel, which does the actual work.
+    """
+
+    def action_reveal_subtask(self, subtask_id: str) -> None:
+        """Forward a clicked ``↳ Subtask … finished.`` link to the ChatPanel."""
+        for node in self.ancestors_with_self:
+            if isinstance(node, ChatPanel):
+                node.action_reveal_subtask(subtask_id)
+                return
+
+
 class ChatPanel(Widget):
     """Bottom-left panel: AI Chat header + transcript + message input.
 
@@ -503,6 +606,12 @@ class ChatPanel(Widget):
         # Change-detection signature so the 1s refresh only re-renders the bar
         # when something visible actually changed (mirrors status_bar.py).
         self._subtask_bar_sig: tuple | None = None
+        # Full outputs of finished subtasks, keyed by subtask id, stashed by
+        # ``_drain_completions`` and revealed on demand by
+        # ``action_reveal_subtask`` (the compact completion line only shows a
+        # clickable "↳ Subtask … finished." -- the output stays hidden until
+        # clicked). Cleared on Ctrl+L alongside the rest of the state.
+        self._subtask_outputs: dict[str, str] = {}
 
     # -- theming ------------------------------------------------------------
 
@@ -538,7 +647,7 @@ class ChatPanel(Widget):
 
     def compose(self) -> ComposeResult:
         yield Static(self._header_idle_markup(), id="chat-header")
-        yield RichLog(
+        yield _ChatLog(
             markup=True,
             wrap=True,
             auto_scroll=True,
@@ -632,31 +741,61 @@ class ChatPanel(Widget):
         self._safe_call_from_thread(self._drain_completions)
 
     def _drain_completions(self) -> None:
-        """Splice finished subtask results back into the conversation.
+        """Announce finished subtasks as compact, click-to-reveal lines.
 
         UI thread only. If a turn is in flight, returns *before* draining so
         the records stay queued (``_finish_turn`` re-drains the moment the
-        turn ends) -- nothing is lost. All fresh records are batched into ONE
-        synthetic follow-up turn; results from a since-cleared conversation
-        (epoch mismatch) are dropped.
+        turn ends) -- nothing is lost. Results from a since-cleared
+        conversation (epoch mismatch) and analyst-cancelled subtasks are
+        dropped.
+
+        For each fresh, non-cancelled record: its full output is stashed in
+        ``self._subtask_outputs`` (keyed by subtask id) and one compact dim
+        line -- ``↳ Subtask <id> (<label>) finished.`` -- is pushed to the
+        transcript, whose descriptive text is a ``@click`` link that reveals
+        that stored output on demand (see ``action_reveal_subtask``). No
+        orchestrator turn is launched: the subtask's own summary IS the
+        deliverable, shown on click, so the old full-result re-dump + re-reply
+        is gone.
         """
         if self._turn_in_progress:
             return
         records = get_subtask_manager().take_all_completed()
         # Fresh (same-epoch) AND not analyst-cancelled: a cancelled subtask
-        # already showed a "cancelling…" line and must NOT spend a follow-up
-        # turn re-entering its partial/empty result.
+        # already showed a "cancelling…" line and must NOT surface its
+        # partial/empty result.
         fresh = [
             r
             for r in records
             if should_reenter(r.epoch, self._epoch) and not r.cancelled
         ]
-        if not fresh:
+        for r in fresh:
+            self._subtask_outputs[r.subtask_id] = r.result
+            # The id is a controlled hex string (uuid4().hex[:8]) so it's safe
+            # to drop straight into the @click action; only the visible text
+            # (id + free-text label) is escaped against console markup.
+            self._push_history(
+                f"[dim]↳ [@click=reveal_subtask('{r.subtask_id}')]"
+                f"Subtask {escape(r.subtask_id)} ({escape(r.label)}) finished."
+                "[/][/]"
+            )
+
+    def action_reveal_subtask(self, subtask_id: str) -> None:
+        """Reveal a finished subtask's full output in a dismissable modal.
+
+        Triggered by clicking the compact ``↳ Subtask <id> (…) finished.``
+        line in the transcript (dispatched here via ``_ChatLog``). Gracefully
+        a no-op for an unknown id -- e.g. its output was dropped by a Ctrl+L
+        clear -- distinguishing "not stored" (``None``) from a stored-but-empty
+        result ("").
+        """
+        output = self._subtask_outputs.get(subtask_id)
+        if output is None:
             return
-        text = "\n\n".join(
-            f"Subtask {r.subtask_id} ({r.label}) finished:\n{r.result}" for r in fresh
-        )
-        self._launch_turn(text, synthetic=True)
+        try:
+            self.app.push_screen(_SubtaskOutputModal(subtask_id, output))
+        except Exception:
+            logger.debug("Failed to open subtask output modal", exc_info=True)
 
     # -- submit -------------------------------------------------------
 
@@ -671,22 +810,16 @@ class ChatPanel(Widget):
 
         self._launch_turn(text)
 
-    def _launch_turn(self, text: str, *, synthetic: bool = False) -> None:
+    def _launch_turn(self, text: str) -> None:
         """Dispatch one agent turn on a worker thread.
 
-        Shared by a real user submit (``on_input_submitted``) and a synthetic
-        subtask-completion re-entry (``_drain_completions``). Reads and
-        validates the AI config here -- so completion turns validate too --
-        and bails gracefully (pushes an error line, resets nothing since no
-        state was mutated yet, returns) rather than crashing when it is
-        missing.
+        Driven by a real user submit (``on_input_submitted``). Reads and
+        validates the AI config here and bails gracefully (pushes an error
+        line, resets nothing since no state was mutated yet, returns) rather
+        than crashing when it is missing.
 
         Args:
-            text: The turn's user/injected content.
-            synthetic: When True this is a subtask-completion re-entry, echoed
-                as a muted "↳ " band instead of the highlighted user ``>``
-                band, and worded as an injected message rather than something
-                the analyst typed.
+            text: The user's submitted message content.
         """
         # Concurrent-turn guard: exclusive=True on run_worker only cancels a
         # same-named *worker*, it cannot force-kill the raw OS thread a prior
@@ -725,10 +858,7 @@ class ChatPanel(Widget):
         # transcript, on top of the user's highlighted input band.
         if self._history_lines:
             self._push_history("")
-        if synthetic:
-            self._push_history(self._format_synthetic_line(text))
-        else:
-            self._push_history(self._format_user_line(text))
+        self._push_history(self._format_user_line(text))
 
         handle = ChatTurnHandle()
         self._active_handle = handle
@@ -1057,22 +1187,6 @@ class ChatPanel(Widget):
                 line.append(" " * (width - len(row)))
         return line
 
-    def _format_synthetic_line(self, text: str) -> str:
-        """Render an injected (subtask-completion) turn as a muted band.
-
-        Unlike a real user submit (see ``_format_user_line``'s highlighted
-        ``>`` band), a synthetic re-entry was never typed by the analyst, so
-        it's echoed dim with a ``↳`` marker to read clearly as "this arrived
-        on its own, and here's exactly what the model is about to see".
-
-        Args:
-            text: The injected turn content (already-built subtask summary).
-
-        Returns:
-            A dim Rich-markup string ready for ``_push_history``.
-        """
-        return f"[dim]↳ {escape(text)}[/]"
-
     def _finalize_live(self) -> None:
         """Fold any in-progress reasoning/reply buffers into history."""
         changed = self._finalize_reasoning_only()
@@ -1322,6 +1436,9 @@ class ChatPanel(Widget):
         self._live_reasoning = ""
         self._live_text = ""
         self._reasoning_started_at = None
+        # Drop stashed subtask outputs too -- a cleared conversation must not
+        # keep revealing outputs from subtasks it no longer shows.
+        self._subtask_outputs.clear()
         # Reset the subtask-bar UI state too, then repaint it (a since-stopped
         # subtask should not linger selected/expanded on screen).
         self._subtasks_expanded = False

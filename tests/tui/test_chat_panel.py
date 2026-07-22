@@ -31,7 +31,12 @@ import sandroid.tui.widgets.chat_panel as chat_panel_module
 from sandroid.ai.subtasks import CompletionRecord
 from sandroid.ai.tools.registry import RiskTier, ToolSpec
 from sandroid.tui.screens.main_screen import MainScreen
-from sandroid.tui.widgets.chat_panel import ChatPanel, ChatTurnHandle
+from sandroid.tui.widgets.chat_panel import (
+    ChatPanel,
+    ChatTurnHandle,
+    _ChatLog,
+    _SubtaskOutputModal,
+)
 from sandroid.tui.widgets.tool_permission_prompt import ToolPermissionPrompt
 
 
@@ -871,12 +876,15 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
 #
 # These drive the completion scheduler (Phase 3) and the collapsible,
 # selection-aware subtask status bar (Phase 4) against a stub SubtaskManager
-# -- no real threads or network. The completion-scheduler tests deliberately
-# replace ``panel._launch_turn`` with a recorder instead of letting a real
-# worker thread run (this file already documents run_worker(thread=True) as a
-# flaky-under-test hazard for the blocks-on-a-round-trip pattern); the launch
-# decision is exactly what those tests assert, so recording the call is both
-# sufficient and deterministic.
+# -- no real threads or network. A finished subtask no longer launches an
+# orchestrator turn (that full-result re-dump + re-reply was the noise being
+# removed): it pushes ONE compact, clickable ``↳ Subtask … finished.`` line
+# into the transcript and stashes its full output for click-to-reveal (see
+# ``ChatPanel.action_reveal_subtask``). The tests below guard exactly that --
+# a line appears (never a turn), the output is stored, staleness/cancellation
+# suppress the line, and the reveal surfaces the stored output. A recorder is
+# still hung on ``panel._launch_turn`` in the completion tests purely to prove
+# it is never called anymore.
 
 
 class _StubSubtaskManager:
@@ -955,85 +963,182 @@ def stub_manager(monkeypatch):
     arbiter_mod._arbiter = None
 
 
-def test_completion_while_idle_launches_one_synthetic_turn(stub_manager):
-    """Idle + one finished subtask -> exactly one synthetic turn, carrying the
-    batched result text.
+def _completion_lines(panel: ChatPanel) -> list[str]:
+    """The compact ``↳ Subtask … finished.`` lines currently in the transcript."""
+    return [
+        line
+        for line in panel._history_lines
+        if isinstance(line, str) and "finished." in line
+    ]
+
+
+def test_completion_while_idle_pushes_one_compact_line_and_stores_output(stub_manager):
+    """Idle + one finished subtask -> exactly one compact, clickable
+    ``↳ Subtask … finished.`` line (a period, no result text inline), the full
+    output stashed for reveal, and NO orchestrator turn launched.
     """
     panel = ChatPanel(id="chat-panel")
-    calls: list[tuple[str, bool]] = []
-    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
-        (text, synthetic)
-    )
+    launches: list[str] = []
+    panel._launch_turn = launches.append
 
     stub_manager.add_completion("s1", "probe", "found 3 things", epoch=0)
     panel._drain_completions()
 
-    assert len(calls) == 1
-    text, synthetic = calls[0]
-    assert synthetic is True
-    assert "s1" in text
-    assert "probe" in text
-    assert "found 3 things" in text
+    lines = _completion_lines(panel)
+    assert len(lines) == 1
+    line = lines[0]
+    assert "s1" in line
+    assert "probe" in line
+    assert line.rstrip().endswith("finished.[/][/]")  # a period, not a colon
+    assert "found 3 things" not in line  # no result text dumped inline
+    # the full output is stashed for click-to-reveal, keyed by subtask id
+    assert panel._subtask_outputs == {"s1": "found 3 things"}
+    # the descriptive text is a @click link carrying the subtask id
+    assert "@click=reveal_subtask('s1')" in line
+    # and NO orchestrator turn was launched (the noise being removed)
+    assert launches == []
+    assert panel._turn_in_progress is False
 
 
-def test_completion_during_turn_defers_then_launches_once_after_finish(stub_manager):
-    """A completion arriving mid-turn is NOT launched immediately (and stays
-    queued, not lost); it launches exactly once after ``_finish_turn``.
+def test_completion_during_turn_defers_then_shows_line_after_finish(stub_manager):
+    """A completion arriving mid-turn is NOT surfaced immediately (and stays
+    queued, not lost); its line appears exactly once after ``_finish_turn``.
     """
     panel = ChatPanel(id="chat-panel")
-    calls: list[tuple[str, bool]] = []
-    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
-        (text, synthetic)
-    )
+    launches: list[str] = []
+    panel._launch_turn = launches.append
 
     panel._turn_in_progress = True
     stub_manager.add_completion("s1", "probe", "done", epoch=0)
 
     panel._drain_completions()
-    assert calls == []  # deferred while a turn is in progress
+    assert _completion_lines(panel) == []  # deferred while a turn is in progress
     assert len(stub_manager._completed) == 1  # left queued, not drained
 
     panel._finish_turn()  # flips _turn_in_progress off, then re-drains
-    assert len(calls) == 1
-    assert calls[0][1] is True
-    assert "done" in calls[0][0]
+    lines = _completion_lines(panel)
+    assert len(lines) == 1
+    assert "s1" in lines[0]
+    assert panel._subtask_outputs == {"s1": "done"}
+    assert launches == []  # still never an orchestrator turn
 
 
-def test_two_completions_are_batched_into_one_synthetic_turn(stub_manager):
-    """Two fresh completions collapse into ONE synthetic turn (neither lost)."""
+def test_two_completions_push_two_lines(stub_manager):
+    """Two fresh completions -> two compact lines (neither lost), two stored
+    outputs, and still no orchestrator turn.
+    """
     panel = ChatPanel(id="chat-panel")
-    calls: list[tuple[str, bool]] = []
-    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
-        (text, synthetic)
-    )
+    launches: list[str] = []
+    panel._launch_turn = launches.append
 
     stub_manager.add_completion("s1", "alpha", "resultA", epoch=0)
     stub_manager.add_completion("s2", "beta", "resultB", epoch=0)
     panel._drain_completions()
 
-    assert len(calls) == 1
-    text = calls[0][0]
-    assert "s1" in text
-    assert "resultA" in text
-    assert "s2" in text
-    assert "resultB" in text
+    lines = _completion_lines(panel)
+    assert len(lines) == 2
+    joined = "\n".join(lines)
+    assert "s1" in joined
+    assert "s2" in joined
+    assert "alpha" in joined
+    assert "beta" in joined
+    assert panel._subtask_outputs == {"s1": "resultA", "s2": "resultB"}
+    assert launches == []
 
 
 def test_stale_epoch_completion_is_dropped(stub_manager):
     """A completion whose epoch predates a Ctrl+L clear (epoch bumped) is
-    dropped -- no synthetic turn is launched.
+    dropped -- no line and no stored output.
     """
     panel = ChatPanel(id="chat-panel")
-    calls: list[tuple[str, bool]] = []
-    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
-        (text, synthetic)
-    )
-
     panel._epoch = 1  # conversation was cleared since the subtask was spawned
     stub_manager.add_completion("s1", "probe", "stale result", epoch=0)
     panel._drain_completions()
 
-    assert calls == []
+    assert _completion_lines(panel) == []
+    assert panel._subtask_outputs == {}
+
+
+def test_cancelled_completion_is_skipped(stub_manager):
+    """An analyst-cancelled subtask still enqueues a record (to free its lease)
+    but must NOT surface a completion line or stash its partial/empty result.
+    """
+    panel = ChatPanel(id="chat-panel")
+    stub_manager._completed.append(
+        CompletionRecord(
+            subtask_id="s1",
+            label="probe",
+            privileged=False,
+            result="partial",
+            epoch=0,
+            cancelled=True,
+        )
+    )
+    panel._drain_completions()
+
+    assert _completion_lines(panel) == []
+    assert panel._subtask_outputs == {}
+
+
+@pytest.mark.smoke
+async def test_reveal_subtask_opens_a_modal_with_the_stored_output(stub_manager):
+    """Invoking ``action_reveal_subtask`` (what a click on the compact line
+    ultimately does) surfaces that subtask's stored full output in a
+    dismissable modal; an unknown id is a graceful no-op.
+    """
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        stub_manager.add_completion("s1", "probe", "the full findings", epoch=0)
+        panel._drain_completions()
+        await pilot.pause()
+
+        # unknown id -> graceful no-op, no modal pushed
+        panel.action_reveal_subtask("nope")
+        await pilot.pause()
+        assert not isinstance(app.screen, _SubtaskOutputModal)
+
+        # known id -> the modal is pushed, carrying the stored output verbatim
+        panel.action_reveal_subtask("s1")
+        await pilot.pause()
+        assert isinstance(app.screen, _SubtaskOutputModal)
+        assert app.screen.output_text == "the full findings"
+        assert app.screen.subtask_id == "s1"
+
+
+@pytest.mark.smoke
+async def test_click_link_on_chat_log_delegates_reveal_to_the_panel(stub_manager):
+    """The transcript log (``_ChatLog``) carries the ``@click`` action and
+    forwards it up to its owning ChatPanel -- so a click on the compact line
+    reaches ``ChatPanel.action_reveal_subtask``. Exercising the log's own
+    action method proves that dispatch path lands on the panel.
+    """
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        log = app.query_one("#chat-log", _ChatLog)
+        stub_manager.add_completion("s1", "probe", "delegated output", epoch=0)
+        panel._drain_completions()
+        await pilot.pause()
+
+        log.action_reveal_subtask("s1")
+        await pilot.pause()
+
+        assert isinstance(app.screen, _SubtaskOutputModal)
+        assert app.screen.output_text == "delegated output"
+
+
+def test_ctrl_l_clears_stashed_subtask_outputs(stub_manager):
+    """Ctrl+L (``action_clear_log``) drops stashed subtask outputs too, so a
+    cleared conversation can't keep revealing outputs it no longer shows.
+    """
+    panel = ChatPanel(id="chat-panel")
+    stub_manager.add_completion("s1", "probe", "keep me? no", epoch=0)
+    panel._drain_completions()
+    assert panel._subtask_outputs == {"s1": "keep me? no"}
+
+    panel.action_clear_log()
+    assert panel._subtask_outputs == {}
 
 
 def test_ctrl_x_cancels_selected_subtask_not_the_turn(stub_manager):
