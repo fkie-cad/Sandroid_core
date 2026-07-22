@@ -1,15 +1,15 @@
-"""TUI panel for the "Files" tab — unifying fsmon, the Spotlight-Files
+"""TUI panel for the "Files" tab — unifying monitor, the Spotlight-Files
 watchlist, and Play's Changed/New/Deleted diffing under one home.
 
 This module is the **Foundation** slice of a larger plan (see the
 architecture doc this was built from): the outer tab wiring, the inner
 sub-tab switcher (``Monitor | Watchlist | Diffs``), and the shared glance
-strip. ``MonitorView`` (fsmon's live event stream), ``WatchlistView`` (the
+strip. ``MonitorView`` (monitor's live event stream), ``WatchlistView`` (the
 Spotlight-Files watchlist's CRUD/pull/diff), and ``DiffsView`` (Play's
 run-history) are all *real* implementations and live in their own modules —
 ``tui/widgets/monitor_view.py``, ``tui/widgets/watchlist_view.py``, and
 ``tui/widgets/diffs_view.py`` respectively — split out because each is
-substantial and each depends on other subsystems (fsmon's EventBus stream;
+substantial and each depends on other subsystems (monitor's EventBus stream;
 ``ForensicService``/``FileExtractionService``/``core/watchlist_store.py``;
 ``DiffView``/``core/run_history.py``). All three are imported lazily inside
 ``FilesPanel.compose()`` to avoid a circular import (each in turn imports
@@ -55,7 +55,7 @@ _GLANCE_INTERVAL = 3.0
 class FilesSubViewBase(Widget):
     """Shared base for the three Files sub-tab views (Monitor/Watchlist/Diffs).
 
-    Each real sub-view (``MonitorView`` on fsmon, ``WatchlistView`` on the
+    Each real sub-view (``MonitorView`` on monitor, ``WatchlistView`` on the
     Spotlight-Files watchlist, ``DiffsView`` on Play's run history) overrides
     ``compose()``/``glance_fragment()`` fully; this base's own
     ``compose()``/``glance_fragment()`` only exist as a minimal, safe default

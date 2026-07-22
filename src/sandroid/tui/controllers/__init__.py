@@ -8,7 +8,7 @@ Controllers:
     - DeviceController: Device/AVD lifecycle management
     - ForensicController: Forensic scanning orchestration
     - ForensicAPKController: Forensic APK management (pull, install, manage)
-    - FSMonController: Filesystem monitoring
+    - MonitorController: Filesystem monitoring
     - NetworkCaptureController: Network capture toggle, start/stop
     - ObjectionResumeController: Objection session resumption
     - ProxyController: Proxy configuration
@@ -25,7 +25,7 @@ Usage:
         DeviceController,
         ForensicController,
         RecordingController,
-        FSMonController,
+        MonitorController,
         NetworkCaptureController,
         ObjectionResumeController,
         ProxyController,
@@ -55,7 +55,7 @@ from .apk_install_controller import APKInstallController
 from .device_controller import DeviceController
 from .forensic_apk_controller import ForensicAPK, ForensicAPKController, MVTResult
 from .forensic_controller import ForensicController, ScanProgress, ScanResult
-from .fsmon_controller import FSMonConfig, FSMonController
+from .monitor_controller import MonitorConfig, MonitorController
 from .network_capture_controller import NetworkCaptureController
 from .objection_resume_controller import ObjectionResumeController
 from .proxy_controller import ProxyController
@@ -73,15 +73,15 @@ __all__ = [
     "APKInstallController",
     # Device
     "DeviceController",
-    "FSMonConfig",
-    # FSMon
-    "FSMonController",
     "ForensicAPK",
     # Forensic APK
     "ForensicAPKController",
     # Forensic
     "ForensicController",
     "MVTResult",
+    "MonitorConfig",
+    # Monitor
+    "MonitorController",
     # Network Capture
     "NetworkCaptureController",
     # Objection Resume

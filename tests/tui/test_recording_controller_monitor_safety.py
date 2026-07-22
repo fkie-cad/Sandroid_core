@@ -1,15 +1,15 @@
-"""Unit tests for RecordingController's fsmon Play-safety-net mechanism.
+"""Unit tests for RecordingController's monitor Play-safety-net mechanism.
 
-Covers the riskiest piece of the Files-tab plan (Build order step 6): fsmon's
+Covers the riskiest piece of the Files-tab plan (Build order step 6): monitor's
 live ``adb shell`` session cannot survive Play's snapshot revert
 (``EmulatorService.load_snapshot()`` has zero adb-reconnect logic), so
-``_stop_fsmon_before_revert()`` stops it cleanly *before* the revert instead
+``_stop_monitor_before_revert()`` stops it cleanly *before* the revert instead
 of letting it silently die, and ``_run_playback_analysis()`` offers a
 callback-driven "Resume monitoring" hand-off once Play finishes.
 
 Two independent things are exercised:
 
-1. ``_stop_fsmon_before_revert()`` in isolation — including a real
+1. ``_stop_monitor_before_revert()`` in isolation — including a real
    background-thread test that confirms the stop + notice actually marshal
    through ``call_from_thread`` from a non-main thread, the way
    ``_run_playback_analysis`` really calls it (``start_playback`` dispatches
@@ -17,15 +17,15 @@ Two independent things are exercised:
 2. ``_run_playback_analysis()`` end-to-end, with the analysis pipeline
    (``ChangedFiles``/``NewFiles``/``DeletedFiles``/``Player``/forensic
    service) monkeypatched to lightweight no-ops — this test is only about
-   the fsmon safety net wrapped around that pipeline, not the pipeline
+   the monitor safety net wrapped around that pipeline, not the pipeline
    itself (already covered elsewhere). Calls ``_run_playback_analysis()``
    directly rather than through ``start_playback()``, which additionally
    requires a real ``recording.txt`` on disk — orthogonal to what this file
    covers.
 
 No physical device involved anywhere: the real (process-wide) TaskService
-singleton is used with a fake fsmon "task" registered directly (same
-convention as ``test_fsmon_controller.py``), and an autouse fixture guards
+singleton is used with a fake monitor "task" registered directly (same
+convention as ``test_monitor_controller.py``), and an autouse fixture guards
 against cross-test leakage.
 """
 
@@ -41,17 +41,17 @@ from sandroid.analysis.deletedfiles import DeletedFiles
 from sandroid.analysis.newfiles import NewFiles
 from sandroid.features.player import Player
 from sandroid.services import get_task_service
-from sandroid.tui.controllers.fsmon_controller import FSMonConfig
+from sandroid.tui.controllers.monitor_controller import MonitorConfig
 from sandroid.tui.controllers.recording_controller import RecordingController
 
 
 @pytest.fixture(autouse=True)
-def _clean_fsmon_task():
+def _clean_monitor_task():
     """Guard the real (process-wide) TaskService singleton against leaks."""
     svc = get_task_service()
-    svc._tasks.pop("fsmon", None)
+    svc._tasks.pop("monitor", None)
     yield
-    svc._tasks.pop("fsmon", None)
+    svc._tasks.pop("monitor", None)
 
 
 class _FakeToolbox:
@@ -114,22 +114,24 @@ def _make_controller(
     return controller, toolbox, forensic
 
 
-def _register_fake_fsmon(config: FSMonConfig, stop_marker: list) -> None:
+def _register_fake_monitor(config: MonitorConfig, stop_marker: list) -> None:
     get_task_service().register(
-        name="fsmon",
-        display_name="FSMon",
+        name="monitor",
+        display_name="Monitor",
         instance=SimpleNamespace(config=config),
         stop_callback=lambda: stop_marker.append(True),
     )
 
 
 # =============================================================================
-# _stop_fsmon_before_revert in isolation
+# _stop_monitor_before_revert in isolation
 # =============================================================================
 
 
-def test_stop_fsmon_before_revert_is_true_noop_when_not_running(monkeypatch, tmp_path):
-    """(a) fsmon not running: zero TaskService.stop calls, zero notice, zero
+def test_stop_monitor_before_revert_is_true_noop_when_not_running(
+    monkeypatch, tmp_path
+):
+    """(a) monitor not running: zero TaskService.stop calls, zero notice, zero
     callback firing, zero call_from_thread invocations at all.
     """
     call_from_thread_calls: list = []
@@ -142,42 +144,44 @@ def test_stop_fsmon_before_revert_is_true_noop_when_not_running(monkeypatch, tmp
             call_from_thread_calls.append((fn, args)),
             fn(*args),
         )[1],
-        on_fsmon_stopped_for_playback=lambda: stopped_notice_calls.append(True),
+        on_monitor_stopped_for_playback=lambda: stopped_notice_calls.append(True),
     )
 
-    assert not get_task_service().is_running("fsmon")
+    assert not get_task_service().is_running("monitor")
 
-    result = controller._stop_fsmon_before_revert()
+    result = controller._stop_monitor_before_revert()
 
     assert result is None
     assert call_from_thread_calls == []
     assert stopped_notice_calls == []
 
 
-def test_stop_fsmon_before_revert_stops_task_and_returns_config(monkeypatch, tmp_path):
-    """(b) fsmon running: TaskService.stop() actually runs (stop_callback
+def test_stop_monitor_before_revert_stops_task_and_returns_config(
+    monkeypatch, tmp_path
+):
+    """(b) monitor running: TaskService.stop() actually runs (stop_callback
     fires, task is unregistered) and the notice callback fires.
     """
     stop_marker: list = []
     stopped_notice_calls: list = []
-    config = FSMonConfig(mode="path", target_path="/data/")
+    config = MonitorConfig(mode="path", target_path="/data/")
 
     controller, _toolbox, _forensic = _make_controller(
         monkeypatch,
         tmp_path,
-        on_fsmon_stopped_for_playback=lambda: stopped_notice_calls.append(True),
+        on_monitor_stopped_for_playback=lambda: stopped_notice_calls.append(True),
     )
-    _register_fake_fsmon(config, stop_marker)
+    _register_fake_monitor(config, stop_marker)
 
-    result = controller._stop_fsmon_before_revert()
+    result = controller._stop_monitor_before_revert()
 
     assert result is config
     assert stop_marker == [True]
-    assert not get_task_service().is_running("fsmon")
+    assert not get_task_service().is_running("monitor")
     assert stopped_notice_calls == [True]
 
 
-def test_stop_fsmon_before_revert_marshals_via_call_from_thread_off_main_thread(
+def test_stop_monitor_before_revert_marshals_via_call_from_thread_off_main_thread(
     monkeypatch, tmp_path
 ):
     """(b) continued: verify the stop + notice genuinely marshal through
@@ -185,7 +189,7 @@ def test_stop_fsmon_before_revert_marshals_via_call_from_thread_off_main_thread(
     actual shape of the call in production (start_playback dispatches
     _run_playback_analysis via run_worker(..., thread=True)).
     """
-    config = FSMonConfig(mode="path", target_path="/data/")
+    config = MonitorConfig(mode="path", target_path="/data/")
     stop_marker: list = []
     stopped_notice_calls: list = []
     caller_threads: list = []
@@ -200,14 +204,14 @@ def test_stop_fsmon_before_revert_marshals_via_call_from_thread_off_main_thread(
         monkeypatch,
         tmp_path,
         call_from_thread=call_from_thread,
-        on_fsmon_stopped_for_playback=lambda: stopped_notice_calls.append(True),
+        on_monitor_stopped_for_playback=lambda: stopped_notice_calls.append(True),
     )
-    _register_fake_fsmon(config, stop_marker)
+    _register_fake_monitor(config, stop_marker)
 
     result_holder: dict = {}
 
     def run_in_worker() -> None:
-        result_holder["config"] = controller._stop_fsmon_before_revert()
+        result_holder["config"] = controller._stop_monitor_before_revert()
 
     worker = threading.Thread(target=run_in_worker)
     worker.start()
@@ -230,8 +234,8 @@ def test_stop_fsmon_before_revert_marshals_via_call_from_thread_off_main_thread(
 # =============================================================================
 
 
-def test_run_playback_analysis_noop_when_fsmon_not_running(monkeypatch, tmp_path):
-    """(a) Full pipeline: with fsmon not running, behavior is identical to
+def test_run_playback_analysis_noop_when_monitor_not_running(monkeypatch, tmp_path):
+    """(a) Full pipeline: with monitor not running, behavior is identical to
     before this feature existed — no stop, no notice, no resume offer.
     """
     stopped_notice_calls: list = []
@@ -239,8 +243,8 @@ def test_run_playback_analysis_noop_when_fsmon_not_running(monkeypatch, tmp_path
     controller, toolbox, _forensic = _make_controller(
         monkeypatch,
         tmp_path,
-        on_fsmon_stopped_for_playback=lambda: stopped_notice_calls.append(True),
-        on_fsmon_resume_available=resume_calls.append,
+        on_monitor_stopped_for_playback=lambda: stopped_notice_calls.append(True),
+        on_monitor_resume_available=resume_calls.append,
     )
 
     controller._run_playback_analysis()
@@ -250,7 +254,7 @@ def test_run_playback_analysis_noop_when_fsmon_not_running(monkeypatch, tmp_path
     assert resume_calls == []
 
 
-def test_run_playback_analysis_stops_fsmon_and_offers_resume_on_success(
+def test_run_playback_analysis_stops_monitor_and_offers_resume_on_success(
     monkeypatch, tmp_path
 ):
     stopped_notice_calls: list = []
@@ -258,22 +262,22 @@ def test_run_playback_analysis_stops_fsmon_and_offers_resume_on_success(
     controller, toolbox, _forensic = _make_controller(
         monkeypatch,
         tmp_path,
-        on_fsmon_stopped_for_playback=lambda: stopped_notice_calls.append(True),
-        on_fsmon_resume_available=resume_calls.append,
+        on_monitor_stopped_for_playback=lambda: stopped_notice_calls.append(True),
+        on_monitor_resume_available=resume_calls.append,
     )
 
-    config = FSMonConfig(mode="pid", target_pid=1234, app_name="com.example.app")
+    config = MonitorConfig(mode="pid", target_pid=1234, app_name="com.example.app")
     stop_marker: list = []
-    _register_fake_fsmon(config, stop_marker)
+    _register_fake_monitor(config, stop_marker)
 
     controller._run_playback_analysis()
 
     # The safety-stop happened...
     assert stop_marker == [True]
-    assert not get_task_service().is_running("fsmon")
+    assert not get_task_service().is_running("monitor")
     assert stopped_notice_calls == [True]
     # ...the rest of the pipeline still ran normally (load_snapshot etc. is
-    # unaffected by whether fsmon was running)...
+    # unaffected by whether monitor was running)...
     assert toolbox.load_snapshot_calls == [b"tmp"]
     # ...and the Resume offer fires exactly once, with the original config.
     assert resume_calls == [config]
@@ -282,7 +286,7 @@ def test_run_playback_analysis_stops_fsmon_and_offers_resume_on_success(
 def test_run_playback_analysis_offers_resume_even_when_pipeline_errors(
     monkeypatch, tmp_path
 ):
-    """Resuming fsmon is orthogonal to whether the diff analysis itself
+    """Resuming monitor is orthogonal to whether the diff analysis itself
     errored — the offer must still fire on a failed/partial run (the plan
     only requires "at minimum on success"; this deliberately does both).
     """
@@ -296,11 +300,11 @@ def test_run_playback_analysis_offers_resume_even_when_pipeline_errors(
     controller, _toolbox, _forensic = _make_controller(
         monkeypatch,
         tmp_path,
-        on_fsmon_resume_available=resume_calls.append,
+        on_monitor_resume_available=resume_calls.append,
     )
 
-    config = FSMonConfig(mode="path", target_path="/data/")
-    _register_fake_fsmon(config, [])
+    config = MonitorConfig(mode="path", target_path="/data/")
+    _register_fake_monitor(config, [])
 
     controller._run_playback_analysis()
 
@@ -310,13 +314,13 @@ def test_run_playback_analysis_offers_resume_even_when_pipeline_errors(
 def test_run_playback_analysis_resume_offer_absent_without_callback(
     monkeypatch, tmp_path
 ):
-    """on_fsmon_resume_available is optional — must not raise when unset,
-    even though fsmon was running and got auto-stopped.
+    """on_monitor_resume_available is optional — must not raise when unset,
+    even though monitor was running and got auto-stopped.
     """
     controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
-    config = FSMonConfig(mode="path", target_path="/data/")
-    _register_fake_fsmon(config, [])
+    config = MonitorConfig(mode="path", target_path="/data/")
+    _register_fake_monitor(config, [])
 
     controller._run_playback_analysis()  # must not raise
 
-    assert not get_task_service().is_running("fsmon")
+    assert not get_task_service().is_running("monitor")

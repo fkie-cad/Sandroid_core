@@ -33,12 +33,12 @@ from sandroid.tui.themes import THEME_ORDER, THEMES
 
 logger = logging.getLogger(__name__)
 
-# Per-category FSMon Monitor visibility rows. The widget id uses "__" (not
+# Per-category Monitor visibility rows. The widget id uses "__" (not
 # "--") after the field name so it doesn't collide with _id_to_key's "--"->"."
 # section-separator convention -- these 6 Selects are assembled into a single
-# dict and saved under one key ("tui.fsmon_event_visibility"), never routed
+# dict and saved under one key ("tui.monitor_event_visibility"), never routed
 # through the generic per-widget key path.
-_FSMON_VISIBILITY_CATEGORIES = (
+_MONITOR_VISIBILITY_CATEGORIES = (
     "create",
     "modify",
     "delete",
@@ -46,14 +46,14 @@ _FSMON_VISIBILITY_CATEGORIES = (
     "attrs",
     "noise",
 )
-_FSMON_VISIBILITY_ID_PREFIX = "setting-tui--fsmon_event_visibility__"
-_FSMON_VISIBILITY_LABELS = {
-    "create": "FSMon Create:",
-    "modify": "FSMon Modify:",
-    "delete": "FSMon Delete:",
-    "rename": "FSMon Rename:",
-    "attrs": "FSMon Attrs:",
-    "noise": "FSMon Noise (open/close):",
+_MONITOR_VISIBILITY_ID_PREFIX = "setting-tui--monitor_event_visibility__"
+_MONITOR_VISIBILITY_LABELS = {
+    "create": "Monitor Create:",
+    "modify": "Monitor Modify:",
+    "delete": "Monitor Delete:",
+    "rename": "Monitor Rename:",
+    "attrs": "Monitor Attrs:",
+    "noise": "Monitor Noise (open/close):",
 }
 
 
@@ -301,38 +301,40 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-switch",
             )
 
-        # FSMon Buffer Interval
+        # Monitor Buffer Interval
         with Horizontal(classes="setting-row"):
-            yield Label("FSMon Buffer (s):", classes="setting-label")
+            yield Label("Monitor Buffer (s):", classes="setting-label")
             yield Input(
-                value=str(config.tui.fsmon_buffer_interval),
-                id="setting-tui--fsmon_buffer_interval",
+                value=str(config.tui.monitor_buffer_interval),
+                id="setting-tui--monitor_buffer_interval",
                 type="number",
                 classes="setting-input",
             )
 
-        # FSMon Max Lines
+        # Monitor Max Lines
         with Horizontal(classes="setting-row"):
-            yield Label("FSMon Max Lines:", classes="setting-label")
+            yield Label("Monitor Max Lines:", classes="setting-label")
             yield Input(
-                value=str(config.tui.fsmon_max_lines),
-                id="setting-tui--fsmon_max_lines",
+                value=str(config.tui.monitor_max_lines),
+                id="setting-tui--monitor_max_lines",
                 type="integer",
                 classes="setting-input",
             )
 
-        # FSMon per-category event visibility (Always / Only in verbose / Never)
-        for category in _FSMON_VISIBILITY_CATEGORIES:
+        # Monitor per-category event visibility (Always / Only in verbose / Never)
+        for category in _MONITOR_VISIBILITY_CATEGORIES:
             with Horizontal(classes="setting-row"):
-                yield Label(_FSMON_VISIBILITY_LABELS[category], classes="setting-label")
+                yield Label(
+                    _MONITOR_VISIBILITY_LABELS[category], classes="setting-label"
+                )
                 yield Select(
                     [
                         ("Always", "always"),
                         ("Only in verbose", "verbose"),
                         ("Never", "never"),
                     ],
-                    value=config.tui.fsmon_event_visibility.get(category, "always"),
-                    id=f"{_FSMON_VISIBILITY_ID_PREFIX}{category}",
+                    value=config.tui.monitor_event_visibility.get(category, "always"),
+                    id=f"{_MONITOR_VISIBILITY_ID_PREFIX}{category}",
                     classes="setting-select",
                 )
 
@@ -944,9 +946,9 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             if custom_row is not None:
                 custom_row.display = False
 
-        # FSMon per-category visibility Selects don't map to a single flat
+        # Monitor per-category visibility Selects don't map to a single flat
         # key -- they must be assembled into one dict written under
-        # "tui.fsmon_event_visibility". SettingsController._apply_setting
+        # "tui.monitor_event_visibility". SettingsController._apply_setting
         # does a full setattr() REPLACE (not a merge), so re-read ALL 6
         # Selects' *current* values every time any one of them fires
         # Changed (the one that just changed has already updated its
@@ -954,17 +956,17 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # self-contained and correct regardless of save/reload timing --
         # never accumulate partial state across edits, or a save would
         # silently wipe the other categories.
-        if widget_id.startswith(_FSMON_VISIBILITY_ID_PREFIX):
+        if widget_id.startswith(_MONITOR_VISIBILITY_ID_PREFIX):
             visibility: dict[str, str] = {}
-            for category in _FSMON_VISIBILITY_CATEGORIES:
+            for category in _MONITOR_VISIBILITY_CATEGORIES:
                 try:
                     select = self.query_one(
-                        f"#{_FSMON_VISIBILITY_ID_PREFIX}{category}", Select
+                        f"#{_MONITOR_VISIBILITY_ID_PREFIX}{category}", Select
                     )
                     visibility[category] = select.value
                 except Exception:
                     pass
-            self._pending["tui.fsmon_event_visibility"] = visibility
+            self._pending["tui.monitor_event_visibility"] = visibility
             return
 
         self._pending[key] = event.value

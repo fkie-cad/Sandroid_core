@@ -4,8 +4,8 @@ This package provides Textual-native modal dialogs that replace
 Rich-based dialogs when running in TUI mode.
 """
 
-# FSMonConfig is canonically defined in the controller; re-export for convenience
-from sandroid.tui.controllers.fsmon_controller import FSMonConfig
+# MonitorConfig is canonically defined in the controller; re-export for convenience
+from sandroid.tui.controllers.monitor_controller import MonitorConfig
 
 from .apk_install_modal import APKInstallModal, APKInstallResult
 from .apk_selection_modal import APKSelectionModal, APKSelectionResult
@@ -41,13 +41,13 @@ from .frida_install_modal import (
     FridaInstallResult,
     ensure_frida_running,
 )
-from .fsmon_modal import FSMonConfigModal
 from .input_modal import InputModal
 from .install_warning_modal import InstallWarningModal, InstallWarningResult
 from .ioc_choice_modal import IOCChoiceModal, IOCChoiceResult
 from .ioc_setup_modal import IOCSetupModal, IOCSetupResult
 from .message_modal import ErrorModal, MessageModal
 from .mitmproxy_addons_modal import MitmproxyAddonsModal, MitmproxyAddonsResult
+from .monitor_modal import MonitorConfigModal
 from .mvt_results_modal import MVTResultsAction, MVTResultsModal
 from .network_capture_modal import NetworkCaptureModal, NetworkCaptureResult
 from .objection_modal import ObjectionConfig, ObjectionModal, build_objection_command
@@ -92,8 +92,6 @@ __all__ = [
     "ErrorModal",
     "ExportModal",
     "ExportResult",
-    "FSMonConfig",
-    "FSMonConfigModal",
     "FolderSelectModal",
     "FolderSelectResult",
     "ForensicAPKAction",
@@ -113,6 +111,8 @@ __all__ = [
     "MessageModal",
     "MitmproxyAddonsModal",
     "MitmproxyAddonsResult",
+    "MonitorConfig",
+    "MonitorConfigModal",
     "NetworkCaptureModal",
     "NetworkCaptureResult",
     "ObjectionConfig",
