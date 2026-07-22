@@ -302,6 +302,7 @@ class SandroidTUI(App):
             get_current_view=cb.get_current_view,
             open_files_tab=self._open_monitor_tab,
             on_pid_mode_fallback=self._notify_pid_mode_fallback,
+            on_backend_fallback=self._notify_backend_fallback,
         )
 
         self._spotlight_controller = SpotlightController(
@@ -1495,6 +1496,31 @@ class SandroidTUI(App):
             except Exception:
                 logger.warning(
                     "MonitorView.notify_pid_mode_fallback failed", exc_info=True
+                )
+
+    def _notify_backend_fallback(self, reason: str) -> None:
+        """MonitorController's ``on_backend_fallback``.
+
+        Fires when the requested/auto-selected kprobe backend is unavailable
+        and the monitor falls back to fsmon. Marshaled back onto the main
+        thread by ``MonitorController._start_monitor`` before this is called,
+        so it dispatches straight into the concrete widget (same query_one +
+        hasattr-guard pattern as ``_notify_pid_mode_fallback``). Distinct from
+        that path-only, fanotify-worded notice.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-monitor")
+        except Exception:
+            return
+        if hasattr(view, "notify_backend_fallback"):
+            try:
+                view.notify_backend_fallback(reason)
+            except Exception:
+                logger.warning(
+                    "MonitorView.notify_backend_fallback failed", exc_info=True
                 )
 
     def _notify_monitor_resume_available(self, config) -> None:

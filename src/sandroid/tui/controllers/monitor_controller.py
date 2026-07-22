@@ -48,6 +48,13 @@ class MonitorConfig:
     target_pid: int | None = None
     app_name: str = ""
     cancelled: bool = False
+    # Which backend this session resolved to. Starts "auto" (the modal doesn't
+    # set it); _start_monitor rewrites it to the concrete backend it launched
+    # ("fsmon"/"kprobe"), and it is threaded through every config rebuild
+    # (fanotify fallback + both resume rebuilds) so resume doesn't reset the
+    # backend or re-run the (expensive) kprobe preflight for a session that
+    # already fell back to fsmon.
+    backend: str = "auto"
 
 
 # Regex to strip ANSI escape sequences and carriage returns from PTY output.
@@ -416,6 +423,195 @@ def build_monitor_item(
     )
 
 
+# Maps each kprobe trace event name to the ``FSE_*`` token whose
+# MONITOR_EVENT_INFO metadata (label/color/category) it should reuse, so
+# kprobe rows render identically to fsmon rows. ``dfo``/``dfor``/``fput`` are
+# correlation-only (no emitted row). ``openat2`` splits at translate time
+# (O_CREAT vs plain open).
+_KPROBE_EVENT_TO_FSE: dict[str, str] = {
+    "mkdir": "FSE_CREATE_DIR",
+    "unlink": "FSE_DELETE",
+    "rmdir": "FSE_DELETE",
+    "rename": "FSE_RENAME",
+    "vw": "FSE_CONTENT_MODIFIED",
+    "diw": "FSE_CONTENT_MODIFIED",
+    "nc": "FSE_STAT_CHANGED",
+    "sx": "FSE_XATTR_MODIFIED",
+}
+
+# One ftrace ``trace_pipe`` line, e.g.::
+#
+#   <...>-1234  [000] ...1 12345.678901: openat2: (do_sys_openat2+0x0/0x..) fname="/x" flags=0x241
+#
+# The ``.*?`` after ``[cpu]`` non-greedily absorbs the (kernel-version-varying)
+# latency-flags column(s) up to the timestamp.
+_KPROBE_HEADER_RE = re.compile(
+    r"^\s*(?P<comm>.+?)-(?P<tid>\d+)\s+\[\d+\]\s+.*?\s+[\d.]+:\s+"
+    r"(?P<event>\w+):\s+(?P<rest>.*)$"
+)
+
+# ``field=value`` pairs; a value is either a double-quoted string (``:string``/
+# ``:ustring`` args) or a bare token (``:x64``/``:u64`` hex/decimal). The
+# leading ``(symbol+0x../0x..)`` has no ``=`` and is skipped.
+_KPROBE_FIELD_RE = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
+
+# O_CREAT bit in openat2 flags (create vs plain open).
+_O_CREAT = 0x40
+
+
+def _parse_kprobe_fields(rest: str) -> dict[str, str]:
+    """Extract ``field=value`` pairs from a trace line's payload."""
+    fields: dict[str, str] = {}
+    for key, value in _KPROBE_FIELD_RE.findall(rest):
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1]
+        fields[key] = value
+    return fields
+
+
+class KprobeStreamTranslator:
+    """Correlate a raw kprobe ``trace_pipe`` stream into FileSystemMonitorItems.
+
+    ONE long-lived instance per monitor session (stored on the
+    MonitorProcessWrapper, reset on each start). It MUST run in the reader
+    thread AHEAD of the ``deque(maxlen=...)`` ring buffer: a dropped
+    ``do_filp_open``-return or ``__fput`` line would corrupt the
+    ``file* -> (path, tgid)`` map and defeat ``__fput`` invalidation, so the
+    ring buffer must never sit between the raw stream and this correlator.
+
+    Correlation:
+      * ``dfo`` (do_filp_open entry)  -> ``pending[tid] = path``
+      * ``dfor`` (do_filp_open return)-> ``filemap[file] = (pending.pop(tid), tid)``
+      * ``fput`` (__fput)             -> ``del filemap[file]`` (MANDATORY: file*
+        values are reused by the kernel, so without this a later write to a
+        recycled ``file*`` would be mis-attributed to the old path)
+      * ``vw`` / ``diw`` (writes)     -> look up ``filemap[file]`` for the path
+
+    Reuses ``_strip_prefix`` / ``_split_dir_filename`` and MONITOR_EVENT_INFO
+    for display parity with fsmon. Emits ``FileSystemMonitorItem(source=
+    "kprobe")``. MonitorView is unchanged.
+    """
+
+    def __init__(self) -> None:
+        self.reset(None)
+
+    def reset(self, config: Any) -> None:
+        """Clear all correlation state and recompute path-prefix candidates.
+
+        Called on each session start. ``config`` (an ``MonitorConfig`` or
+        None) drives the redundant-prefix stripping so kprobe paths display
+        exactly like fsmon paths.
+        """
+        self._pending: dict[int, str] = {}
+        self._filemap: dict[str, tuple[str, int]] = {}
+        self._prefix = _resolve_prefix_candidates(config) if config is not None else ()
+
+    def _item(
+        self, fse_token: str, path: str, new_path: str | None = None
+    ) -> FileSystemMonitorItem:
+        meta = MONITOR_EVENT_INFO.get(fse_token)
+        label = meta.label if meta is not None else fse_token
+        color = meta.color if meta is not None else None
+        category = meta.category if meta is not None else None
+        directory, filename = _split_dir_filename(_strip_prefix(path, self._prefix))
+        new_directory: str | None = None
+        new_filename: str | None = None
+        if new_path is not None:
+            new_directory, new_filename = _split_dir_filename(
+                _strip_prefix(new_path, self._prefix)
+            )
+        return FileSystemMonitorItem(
+            label=label,
+            color=color,
+            category=category,
+            source="kprobe",
+            directory=directory,
+            filename=filename,
+            new_directory=new_directory,
+            new_filename=new_filename,
+        )
+
+    def feed(self, line: str) -> list[FileSystemMonitorItem]:
+        """Consume one raw trace_pipe line, returning 0+ display items.
+
+        Never raises -- a line that doesn't parse yields ``[]`` so the reader
+        thread degrades gracefully instead of dying.
+        """
+        try:
+            return self._feed(line)
+        except Exception:
+            logger.debug("KprobeStreamTranslator failed on a line", exc_info=True)
+            return []
+
+    def _feed(self, line: str) -> list[FileSystemMonitorItem]:
+        m = _KPROBE_HEADER_RE.match(line)
+        if m is None:
+            return []
+        tid = int(m.group("tid"))
+        event = m.group("event")
+        fields = _parse_kprobe_fields(m.group("rest"))
+
+        # --- correlation-only events (never emit a row directly) ---
+        if event == "dfo":
+            path = fields.get("path")
+            if path:
+                self._pending[tid] = path
+            return []
+        if event == "dfor":
+            file_ptr = fields.get("file")
+            path = self._pending.pop(tid, None)
+            if file_ptr and path is not None:
+                self._filemap[file_ptr] = (path, tid)
+            return []
+        if event == "fput":
+            file_ptr = fields.get("file")
+            if file_ptr:
+                self._filemap.pop(file_ptr, None)
+            return []
+
+        # --- write events: resolve the full path via the file* map ---
+        if event in ("vw", "diw"):
+            file_ptr = fields.get("file")
+            entry = self._filemap.get(file_ptr) if file_ptr else None
+            if entry is None:
+                # Pre-existing fd (opened before the monitor started) or a
+                # dropped control line -> unattributed; skip rather than emit a
+                # pathless row (path mode covers only files we saw opened).
+                return []
+            return [self._item("FSE_CONTENT_MODIFIED", entry[0])]
+
+        # --- openat2: CREATE (O_CREAT) vs plain OPEN (noise) ---
+        if event == "openat2":
+            fname = fields.get("fname")
+            if not fname:
+                return []
+            flags_raw = fields.get("flags", "0")
+            try:
+                flags = (
+                    int(flags_raw, 16) if flags_raw.startswith("0x") else int(flags_raw)
+                )
+            except ValueError:
+                flags = 0
+            token = "FSE_CREATE_FILE" if flags & _O_CREAT else "FSE_OPEN"
+            return [self._item(token, fname)]
+
+        # --- rename: old + new path ---
+        if event == "rename":
+            frm = fields.get("from")
+            if not frm:
+                return []
+            return [self._item("FSE_RENAME", frm, new_path=fields.get("to"))]
+
+        # --- direct metadata / attrs events ---
+        token = _KPROBE_EVENT_TO_FSE.get(event)
+        if token is None:
+            return []
+        value = fields.get("name") or fields.get("dentry")
+        if not value:
+            return []
+        return [self._item(token, value)]
+
+
 def _publish_monitor_batch(items: list[FileSystemMonitorItem]) -> None:
     """Publish a WHOLE BATCH of parsed monitor items as a single EventBus event.
 
@@ -488,6 +684,8 @@ class MonitorController:
         get_current_view: Callable[[], str] | None = None,
         open_files_tab: Callable[[], None] | None = None,
         on_pid_mode_fallback: Callable[[str], None] | None = None,
+        on_backend_fallback: Callable[[str], None] | None = None,
+        run_off_thread: Callable[[Callable[[], None]], None] | None = None,
     ):
         """Initialize MonitorController with UI callbacks.
 
@@ -517,6 +715,20 @@ class MonitorController:
                 runs on the main thread (see the ``_open_files_tab`` callback
                 above for the same reasoning), so this is invoked directly,
                 no ``call_from_thread`` marshaling needed.
+            on_backend_fallback: Callback invoked (with a human-readable
+                reason) when the requested/auto-selected kprobe backend is
+                unavailable and the monitor falls back to fsmon. Distinct from
+                ``on_pid_mode_fallback`` (which is path-only and hardcodes the
+                fanotify wording); both can fire in ``auto`` mode (backend
+                fallback first, then the fsmon pid->path notice). Invoked from
+                the preflight-completion callback, which is already marshaled
+                back to the main thread.
+            run_off_thread: Runs a zero-arg callable off the UI thread. The
+                kprobe preflight (kallsyms scan + test-attach + offset
+                self-check) is several adb round-trips and would freeze
+                Textual if run on the main thread where ``_start_monitor``
+                lives. Defaults to spawning a daemon thread; tests inject a
+                synchronous runner.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -530,6 +742,15 @@ class MonitorController:
         self._get_current_view = get_current_view
         self._open_files_tab = open_files_tab
         self._on_pid_mode_fallback = on_pid_mode_fallback
+        self._on_backend_fallback = on_backend_fallback
+        self._run_off_thread = run_off_thread or self._default_run_off_thread
+
+    @staticmethod
+    def _default_run_off_thread(target: Callable[[], None]) -> None:
+        """Run ``target`` on a daemon thread (production default)."""
+        threading.Thread(
+            target=target, daemon=True, name="monitor-kprobe-preflight"
+        ).start()
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -619,18 +840,149 @@ class MonitorController:
         except Exception:
             return 0.15
 
+    def _get_monitor_backend(self) -> str:
+        """Read ``tui.monitor_backend`` from config (default ``"auto"``)."""
+        try:
+            from sandroid.config.loader import ConfigLoader
+
+            return ConfigLoader().load().tui.monitor_backend
+        except Exception:
+            return "auto"
+
+    def _resolve_backend_pref(self, config: MonitorConfig) -> str:
+        """Resolve the effective backend preference for this start.
+
+        A config whose ``backend`` was already resolved to a concrete backend
+        (``"fsmon"``/``"kprobe"``) -- e.g. a resume after a prior run/fallback
+        -- is honored directly, so resume doesn't reset the backend or re-run
+        the (expensive) kprobe preflight for a session that already fell back
+        to fsmon. Otherwise (``"auto"``, the modal default) the global
+        ``tui.monitor_backend`` preference decides.
+        """
+        pref = getattr(config, "backend", None) or "auto"
+        if pref == "auto":
+            pref = self._get_monitor_backend()
+        return pref if pref in ("auto", "fsmon", "kprobe") else "auto"
+
     def _start_monitor(self, config: MonitorConfig) -> bool:
-        """Start Monitor with the given configuration.
+        """Start Monitor, selecting the backend ABOVE any fsmon binary install.
+
+        The backend decision precedes ``FSMon.check_and_install_fsmon`` so a
+        kprobe session pushes no ELF. For an fsmon-resolved preference the
+        start is fully synchronous. For kprobe/auto the preflight (kallsyms
+        scan + test-attach + offset self-check -- several adb round-trips) runs
+        OFF the UI thread via ``run_off_thread``; the actual launch then
+        finalizes back on the main thread via ``call_from_thread``. In that
+        async case ``_start_monitor`` returns ``True`` optimistically; when the
+        runner + marshaler are synchronous (tests) the return reflects the real
+        launch outcome.
 
         Args:
-            config: MonitorConfig from the configuration modal
+            config: MonitorConfig from the configuration modal.
 
         Returns:
-            True if Monitor was started successfully
+            True if Monitor was started (or a kprobe start was initiated).
         """
+        pref = self._resolve_backend_pref(config)
+
+        if pref == "fsmon":
+            # No preflight needed -> fully synchronous fsmon start (unchanged).
+            return self._launch_fsmon(config)
+
+        # kprobe or auto: preflight off the UI thread, finalize on main thread.
+        result = {"ok": True}
+
+        def _preflight_worker() -> None:
+            supported = False
+            try:
+                from sandroid.core.kprobe_tracer import KprobeTracer
+
+                supported = KprobeTracer.kprobe_supported()
+            except Exception:
+                logger.debug("kprobe preflight errored", exc_info=True)
+                supported = False
+
+            def _finish() -> None:
+                result["ok"] = self._finish_backend_selection(config, pref, supported)
+
+            try:
+                self._call_from_thread(_finish)
+            except Exception:
+                logger.debug("kprobe preflight finalize failed", exc_info=True)
+
+        self._run_off_thread(_preflight_worker)
+        return result["ok"]
+
+    def _finish_backend_selection(
+        self, config: MonitorConfig, pref: str, supported: bool
+    ) -> bool:
+        """Main-thread continuation once the kprobe preflight has completed."""
+        if supported:
+            return self._launch_kprobe(config)
+
+        # kprobe unavailable (auto -> not supported, or explicit kprobe ->
+        # preflight failed): fall back to fsmon AND surface a reason-carrying
+        # notice (distinct from the fsmon pid->path notice, which may ALSO fire
+        # afterwards inside _launch_fsmon in auto mode).
+        if pref == "kprobe":
+            reason = (
+                "kprobe backend was requested but this device's kernel lacks "
+                "the required tracefs/kprobe support — using fsmon instead."
+            )
+        else:
+            reason = "kprobe backend unavailable on this device — using fsmon instead."
+        if self._on_backend_fallback:
+            try:
+                self._on_backend_fallback(reason)
+            except Exception:
+                logger.debug("on_backend_fallback callback failed", exc_info=True)
+        return self._launch_fsmon(config)
+
+    def _register_and_start(
+        self, config: MonitorConfig, wrapper: Any, mode_desc: str
+    ) -> bool:
+        """Shared finalize: log started, register the task, start the reader,
+        and jump to the Monitor sub-tab. Backend-agnostic.
+        """
+        if self._log_task_started:
+            self._log_task_started("Monitor", mode_desc)
+        else:
+            self._log_info(f"Monitor started monitoring {mode_desc}")
+
+        # Register as background task
+        self._get_task_service().register(
+            name="monitor",
+            display_name="Monitor",
+            instance=wrapper,
+            stop_callback=wrapper.stop,
+            app_name=config.app_name if config.app_name else config.target_path,
+        )
+
+        # Start output reader thread
+        self._start_output_reader(wrapper)
+
+        # monitor actually STARTED (not just the config modal opening) —
+        # jump to the Files tab's Monitor sub-tab so the live stream is
+        # immediately visible, mirroring "h" (friTap) ->
+        # MainScreen.open_fritap_tab(). This runs on the main thread (fsmon
+        # path: direct from the modal dismiss callback; kprobe path: marshaled
+        # back via call_from_thread in _start_monitor), so invoke directly.
+        if self._open_files_tab:
+            try:
+                self._open_files_tab()
+            except Exception:
+                logger.debug(
+                    "Failed to open Files tab after monitor start", exc_info=True
+                )
+
+        return True
+
+    def _launch_fsmon(self, config: MonitorConfig) -> bool:
+        """Start the fsmon backend (unchanged behavior; now behind the selector)."""
         from sandroid.core.fsmon import FSMon
         from sandroid.tui.utils import MonitorProcessWrapper
 
+        config.backend = "fsmon"
         self._log_info("Installing/checking monitor binary...")
 
         # Check and install monitor binary
@@ -656,10 +1008,10 @@ class MonitorController:
                     # honest everywhere it's visible: mode_desc here, and
                     # the MonitorConfig registered below (so the header/
                     # resume-after-playback logic sees the actual running
-                    # mode, not the originally requested one). See
-                    # core/fsmon.py's TODO on run_fsmon_by_pid for the
-                    # tracked future-work path to real fanotify-less PID
-                    # attribution (tracefs kprobes).
+                    # mode, not the originally requested one). Real
+                    # fanotify-less PID attribution is what the kprobe backend
+                    # (KprobeTracer) provides -- this notice is the fsmon-only
+                    # path.
                     #
                     # Known caveat (found via real on-device E2E testing,
                     # not fixed here -- an upstream monitor/inotify limitation,
@@ -681,6 +1033,7 @@ class MonitorController:
                         target_path=config.target_path,
                         target_pid=None,
                         app_name=config.app_name,
+                        backend="fsmon",
                     )
                     if self._on_pid_mode_fallback:
                         try:
@@ -693,48 +1046,56 @@ class MonitorController:
                 process = FSMon.run_fsmon_by_path(config.target_path)
                 mode_desc = f"path {config.target_path}"
 
-            if self._log_task_started:
-                self._log_task_started("Monitor", mode_desc)
-            else:
-                self._log_info(f"Monitor started monitoring {mode_desc}")
-
-            # Create wrapper to manage the process
-            monitor_process_wrapper = MonitorProcessWrapper(process, config)
-
-            # Register as background task
-            self._get_task_service().register(
-                name="monitor",
-                display_name="Monitor",
-                instance=monitor_process_wrapper,
-                stop_callback=monitor_process_wrapper.stop,
-                app_name=config.app_name if config.app_name else config.target_path,
-            )
-
-            # Start output reader thread
-            self._start_output_reader(monitor_process_wrapper)
-
-            # monitor actually STARTED (not just the config modal opening) —
-            # jump to the Files tab's Monitor sub-tab so the live stream is
-            # immediately visible, mirroring "h" (friTap) ->
-            # MainScreen.open_fritap_tab(). This whole call chain runs on the
-            # main thread already (originates from MonitorConfigModal's
-            # push_modal dismiss callback — same reasoning as the
-            # log_task_started call above needing no call_from_thread), so
-            # invoke directly rather than via self._call_from_thread (which
-            # asserts it is being called from a DIFFERENT thread than the
-            # app's own and would raise here).
-            if self._open_files_tab:
-                try:
-                    self._open_files_tab()
-                except Exception:
-                    logger.debug(
-                        "Failed to open Files tab after monitor start", exc_info=True
-                    )
-
-            return True
+            wrapper = MonitorProcessWrapper(process, config)
+            return self._register_and_start(config, wrapper, mode_desc)
 
         except Exception as e:
             self._log_error(f"Failed to start monitor: {e}")
+            return False
+
+    def _launch_kprobe(self, config: MonitorConfig) -> bool:
+        """Start the kprobe backend (no ELF pushed).
+
+        Builds the per-session ``KprobeStreamTranslator`` and a wrapper that
+        carries ``KprobeTracer.teardown`` (run AFTER the pipe is killed).
+        """
+        from sandroid.core.kprobe_tracer import KprobeTracer
+        from sandroid.tui.utils import MonitorProcessWrapper
+
+        config.backend = "kprobe"
+        self._log_info("Starting kprobe filesystem monitor (no binary pushed)…")
+
+        try:
+            if config.mode == "pid" and config.target_pid:
+                process = KprobeTracer.run_by_pid(
+                    config.target_pid, config.target_path or None
+                )
+                mode_desc = f"PID {config.target_pid} + children (kprobe)"
+            elif config.mode == "path" and config.target_path:
+                process = KprobeTracer.run_by_path(config.target_path)
+                mode_desc = f"path {config.target_path} (kprobe)"
+            else:
+                process = KprobeTracer.run_capture_all()
+                mode_desc = "all processes (kprobe)"
+
+            if process is None:
+                self._log_error("Failed to start kprobe monitor")
+                return False
+
+            # One long-lived translator per session, reset now; the reader
+            # thread runs it AHEAD of its ring buffer (see _start_output_reader).
+            translator = KprobeStreamTranslator()
+            translator.reset(config)
+            wrapper = MonitorProcessWrapper(
+                process,
+                config,
+                teardown=KprobeTracer.teardown,
+                translator=translator,
+            )
+            return self._register_and_start(config, wrapper, mode_desc)
+
+        except Exception as e:
+            self._log_error(f"Failed to start kprobe monitor: {e}")
             return False
 
     def _start_output_reader(self, monitor_process_wrapper: Any) -> None:
@@ -742,27 +1103,64 @@ class MonitorController:
 
         Instead of calling ``call_from_thread`` for every single monitor line
         (which floods Textual's event loop at high event rates), the reader
-        thread accumulates lines in a thread-safe deque and flushes them to
-        the main thread in a single batch every ``flush_interval`` seconds.
+        thread accumulates output in a thread-safe deque and flushes it to the
+        main thread in a single batch every ``flush_interval`` seconds.
+
+        Two backends, two pipelines:
+          * **fsmon** (no translator): the deque holds RAW lines; the main
+            thread turns them into items (``_log_monitor_output_batch`` ->
+            ``build_monitor_item``) -- stateless, so the ring buffer sitting
+            before it is harmless.
+          * **kprobe** (wrapper carries a translator): each raw line is run
+            through the per-session ``KprobeStreamTranslator`` IN THIS READER
+            THREAD, AHEAD of the deque, and the deque holds already-correlated
+            ITEMS. This is mandatory -- a dropped ``do_filp_open``-return or
+            ``__fput`` line would corrupt the file* map and defeat ``__fput``
+            invalidation, so the bounded ring buffer must never sit between the
+            raw stream and the correlator.
 
         Args:
             monitor_process_wrapper: MonitorProcessWrapper instance
         """
         import time
 
-        line_buffer: deque[str] = deque(maxlen=2000)
+        translator = getattr(monitor_process_wrapper, "translator", None)
         flush_interval = self._get_buffer_interval()
 
-        def flush_to_ui() -> None:
-            """Send accumulated lines to main thread in one batch."""
-            if not line_buffer:
-                return
-            batch = list(line_buffer)
-            line_buffer.clear()
-            try:
-                self._call_from_thread(self._log_monitor_output_batch, batch)
-            except Exception:
-                logger.debug("Failed to flush monitor batch to UI", exc_info=True)
+        if translator is not None:
+            # kprobe: deque of already-correlated items (translate-ahead).
+            item_buffer: deque[FileSystemMonitorItem] = deque(maxlen=2000)
+
+            def ingest(line_str: str) -> None:
+                for item in translator.feed(line_str):
+                    item_buffer.append(item)
+
+            def flush_to_ui() -> None:
+                if not item_buffer:
+                    return
+                batch = list(item_buffer)
+                item_buffer.clear()
+                try:
+                    self._call_from_thread(_publish_monitor_batch, batch)
+                except Exception:
+                    logger.debug("Failed to flush kprobe batch to UI", exc_info=True)
+
+        else:
+            # fsmon: deque of raw lines; items built on the main thread.
+            line_buffer: deque[str] = deque(maxlen=2000)
+
+            def ingest(line_str: str) -> None:
+                line_buffer.append(line_str)
+
+            def flush_to_ui() -> None:
+                if not line_buffer:
+                    return
+                batch = list(line_buffer)
+                line_buffer.clear()
+                try:
+                    self._call_from_thread(self._log_monitor_output_batch, batch)
+                except Exception:
+                    logger.debug("Failed to flush monitor batch to UI", exc_info=True)
 
         def read_output():
             """Read monitor output in background thread."""
@@ -782,7 +1180,7 @@ class MonitorController:
                         logger.info("monitor reader: first output line received")
                         first_line = False
                     if line_str:
-                        line_buffer.append(line_str)
+                        ingest(line_str)
                         now = time.monotonic()
                         if now - last_flush >= flush_interval:
                             flush_to_ui()
@@ -790,7 +1188,7 @@ class MonitorController:
                 else:
                     time.sleep(0.01)
 
-            # Final flush of remaining lines
+            # Final flush of remaining output
             flush_to_ui()
 
             # Drain remaining buffered output after process exits
@@ -798,7 +1196,7 @@ class MonitorController:
                 for line in process.stdout:
                     line_str = _ANSI_RE.sub("", line).strip()
                     if line_str:
-                        line_buffer.append(line_str)
+                        ingest(line_str)
                 flush_to_ui()
             except Exception:
                 logger.debug("Failed to drain monitor output", exc_info=True)
@@ -892,8 +1290,24 @@ class MonitorController:
         else:
             self._log_info("Monitor stopped")
 
-        # Unregister background task
         task_service = self._get_task_service()
+
+        # Teardown on the natural-exit path (process died / adb death). This
+        # path calls unregister() and does NOT trigger stop_callback, so
+        # without this a kprobe session's instance/probes/set_event_pid/buffer
+        # would leak and wedge the next start. Idempotent (guarded by the
+        # wrapper's _torn_down), so double-firing with stop() is harmless; a
+        # no-op for fsmon (teardown=None). Run BEFORE unregister so the
+        # instance is still fetchable.
+        try:
+            task = task_service.get_task("monitor")
+            inst = getattr(task, "instance", None)
+            if inst is not None and hasattr(inst, "run_teardown"):
+                inst.run_teardown()
+        except Exception:
+            logger.debug("monitor teardown on natural exit failed", exc_info=True)
+
+        # Unregister background task
         if task_service.is_running("monitor"):
             task_service.unregister("monitor")
 
@@ -983,6 +1397,9 @@ class MonitorController:
                     target_path=config.target_path,
                     target_pid=new_pid,
                     app_name=config.app_name,
+                    # Preserve the resolved backend so resume doesn't reset it
+                    # (or re-run the kprobe preflight for an fsmon session).
+                    backend=config.backend,
                 )
             elif config.target_path:
                 self._log_warning(
@@ -995,6 +1412,7 @@ class MonitorController:
                     target_path=config.target_path,
                     target_pid=None,
                     app_name=config.app_name,
+                    backend=config.backend,
                 )
             else:
                 self._log_warning(
@@ -1010,6 +1428,7 @@ class MonitorController:
 __all__ = [
     "MONITOR_EVENT_INFO",
     "FileSystemMonitorItem",
+    "KprobeStreamTranslator",
     "MonitorConfig",
     "MonitorController",
     "MonitorEvent",

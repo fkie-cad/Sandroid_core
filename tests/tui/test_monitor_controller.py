@@ -34,10 +34,12 @@ import pytest
 
 from sandroid.core.events import Event, EventBus, EventType
 from sandroid.core.fsmon import FSMon
+from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.services import get_task_service
 from sandroid.tui.controllers.monitor_controller import (
     MONITOR_EVENT_INFO,
     FileSystemMonitorItem,
+    KprobeStreamTranslator,
     MonitorConfig,
     MonitorController,
     MonitorEvent,
@@ -72,6 +74,24 @@ def _clean_eventbus_history():
     EventBus.get().clear_history()
 
 
+@pytest.fixture(autouse=True)
+def _default_kprobe_unsupported(monkeypatch):
+    """Default every test in this file to the fsmon path.
+
+    ``_start_monitor`` now selects a backend: in "auto" (the default) it runs
+    the kprobe preflight first. These controller tests exercise the fsmon
+    behavior, so default ``kprobe_supported`` to False (device lacks kprobe
+    support -> falls back to fsmon). The backend-selection tests below override
+    this in-body. Also guards KprobeTracer's per-serial cache across tests.
+    """
+    KprobeTracer._kprobe_cache.clear()
+    monkeypatch.setattr(
+        KprobeTracer, "kprobe_supported", classmethod(lambda cls: False)
+    )
+    yield
+    KprobeTracer._kprobe_cache.clear()
+
+
 def _make_controller(**overrides) -> MonitorController:
     defaults: dict = {
         "log_info": lambda *_: None,
@@ -79,6 +99,9 @@ def _make_controller(**overrides) -> MonitorController:
         "log_error": lambda *_: None,
         "log_success": lambda *_: None,
         "call_from_thread": lambda fn, *args: fn(*args),
+        # Run the (normally off-thread) kprobe preflight synchronously so tests
+        # are deterministic; production defaults to a daemon thread.
+        "run_off_thread": lambda fn: fn(),
     }
     defaults.update(overrides)
     return MonitorController(**defaults)
@@ -728,3 +751,392 @@ def test_resume_after_playback_refuses_to_start_when_nothing_resolvable(monkeypa
     assert controller.resume_after_playback(stale_config) is False
     assert start_calls == []
     assert any("Could not resume" in w for w in warnings)
+
+
+# =============================================================================
+# KprobeStreamTranslator -- raw trace_pipe lines -> FileSystemMonitorItem
+# =============================================================================
+
+
+def _kp(event: str, tid: int, payload: str) -> str:
+    """Build a realistic ftrace trace_pipe line for the given probe event."""
+    return f"   comm-{tid}    [000] ...1 12345.678901: {event}: (sym+0x0/0x1) {payload}"
+
+
+def test_translator_correlates_writes_via_file_pointer_map():
+    """do_filp_open(entry->return) populates the file* map; a later vfs_write on
+    that file* recovers the FULL path (not just a basename).
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    assert t.feed(_kp("dfo", 100, 'path="/data/data/com.x/notes.db"')) == []
+    assert t.feed(_kp("dfor", 100, "file=0xffffaaa0")) == []
+    items = t.feed(_kp("vw", 100, "file=0xffffaaa0 count=0x40"))
+
+    assert len(items) == 1
+    assert items[0].source == "kprobe"
+    assert items[0].category == "modify"
+    assert items[0].directory == "/data/data/com.x"
+    assert items[0].filename == "notes.db"
+
+
+def test_translator_fput_invalidation_prevents_file_pointer_reuse_false_positive():
+    """__fput MUST invalidate the file* map: the kernel reuses ``file*`` values,
+    so without invalidation a write to a recycled pointer would be attributed to
+    the OLD path. After __fput, a write to the same file* yields nothing until it
+    is re-mapped to the NEW path.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    # First open/write of /a on file* 0xAAA.
+    t.feed(_kp("dfo", 100, 'path="/data/a.txt"'))
+    t.feed(_kp("dfor", 100, "file=0xaaa"))
+    first = t.feed(_kp("vw", 100, "file=0xaaa count=0x10"))
+    assert [i.filename for i in first] == ["a.txt"]
+
+    # File closed -> map invalidated. A stale write to 0xAAA must NOT map to /a.
+    t.feed(_kp("fput", 100, "file=0xaaa"))
+    stale = t.feed(_kp("vw", 100, "file=0xaaa count=0x10"))
+    assert stale == []  # no false positive
+
+    # Kernel recycles the SAME file* value 0xAAA for /b -> now writes are /b.
+    t.feed(_kp("dfo", 100, 'path="/data/b.txt"'))
+    t.feed(_kp("dfor", 100, "file=0xaaa"))
+    reused = t.feed(_kp("vw", 100, "file=0xaaa count=0x10"))
+    assert [i.filename for i in reused] == ["b.txt"]
+
+
+def test_translator_dropped_control_line_shows_write_becomes_unattributed():
+    """A vfs_write whose do_filp_open-return was never seen (e.g. a dropped
+    control line) has no file* map entry and is correctly emitted as NOTHING
+    rather than mis-attributed.
+
+    This is exactly why the translator MUST sit AHEAD of the reader thread's
+    bounded ring buffer: if control lines (dfor/__fput) could be dropped by the
+    ring buffer before correlation, the file* map would be corrupted. Here we
+    prove the correlation genuinely depends on the control line -- with it the
+    write is attributed, without it the write is dropped.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    # do_filp_open ENTRY seen, but its RETURN (dfor) dropped -> no file* entry.
+    t.feed(_kp("dfo", 100, 'path="/data/x.bin"'))
+    dropped = t.feed(_kp("vw", 100, "file=0xbbb count=0x10"))
+    assert dropped == []
+
+    # With the return present, the very same write IS attributed.
+    t.feed(_kp("dfor", 100, "file=0xbbb"))
+    ok = t.feed(_kp("vw", 100, "file=0xbbb count=0x10"))
+    assert [i.filename for i in ok] == ["x.bin"]
+
+
+def test_translator_openat2_create_vs_open():
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    created = t.feed(_kp("openat2", 5, 'fname="/data/new.txt" flags=0x241'))
+    opened = t.feed(_kp("openat2", 5, 'fname="/data/ro.txt" flags=0x0'))
+
+    assert created[0].category == "create"
+    assert created[0].filename == "new.txt"
+    assert opened[0].category == "noise"  # plain OPEN (no O_CREAT)
+
+
+def test_translator_metadata_and_rename_events():
+    t = KprobeStreamTranslator()
+    t.reset(None)
+
+    mkdir = t.feed(_kp("mkdir", 5, 'name="/data/sub"'))
+    unlink = t.feed(_kp("unlink", 5, 'name="/data/gone"'))
+    rename = t.feed(_kp("rename", 5, 'from="/data/old" to="/data/new"'))
+
+    assert mkdir[0].category == "create"
+    assert mkdir[0].label == "CREATE DIR"
+    assert unlink[0].category == "delete"
+    assert rename[0].category == "rename"
+    assert rename[0].filename == "old"
+    assert rename[0].new_filename == "new"
+
+
+def test_translator_reset_clears_correlation_state():
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    t.feed(_kp("dfo", 1, 'path="/data/a"'))
+    t.feed(_kp("dfor", 1, "file=0xaaa"))
+
+    t.reset(None)  # new session -> map wiped
+    assert t.feed(_kp("vw", 1, "file=0xaaa count=0x10")) == []
+
+
+def test_translator_strips_prefix_from_config():
+    """reset(config) drives the same redundant-prefix stripping fsmon uses, so
+    kprobe rows display identically.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(
+        MonitorConfig(mode="path", target_path="/data/data/com.x/", app_name="com.x")
+    )
+
+    t.feed(_kp("dfo", 1, 'path="/data/data/com.x/cache/f.txt"'))
+    t.feed(_kp("dfor", 1, "file=0xaaa"))
+    items = t.feed(_kp("vw", 1, "file=0xaaa count=0x10"))
+    assert items[0].directory == "cache"
+    assert items[0].filename == "f.txt"
+
+
+def test_translator_never_raises_on_garbage():
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    assert t.feed("not a trace line at all") == []
+    assert t.feed("") == []
+
+
+# =============================================================================
+# _start_monitor -- backend selection (kprobe / auto / fallback)
+# =============================================================================
+
+
+def _patch_kprobe_launch(monkeypatch):
+    """Make a kprobe launch succeed without touching adb/a real process."""
+    monkeypatch.setattr(
+        KprobeTracer, "run_by_path", classmethod(lambda cls, path: object())
+    )
+    monkeypatch.setattr(
+        KprobeTracer, "run_by_pid", classmethod(lambda cls, pid, path=None: object())
+    )
+    monkeypatch.setattr(
+        KprobeTracer, "run_capture_all", classmethod(lambda cls: object())
+    )
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+
+def test_start_monitor_auto_uses_kprobe_when_supported(monkeypatch):
+    """Auto + kprobe_supported() True -> kprobe backend, no fsmon ELF install,
+    no backend-fallback notice, and the registered wrapper carries a translator
+    + teardown.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    _patch_kprobe_launch(monkeypatch)
+
+    # fsmon must NOT be touched on the kprobe path.
+    def _fsmon_boom(cls):
+        raise AssertionError("fsmon must not be installed on the kprobe path")
+
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(_fsmon_boom))
+
+    backend_fallbacks: list[str] = []
+    controller = _make_controller(on_backend_fallback=backend_fallbacks.append)
+    config = MonitorConfig(mode="path", target_path="/data/data/com.x")
+
+    assert controller._start_monitor(config) is True
+    assert backend_fallbacks == []
+
+    task = get_task_service().get_task("monitor")
+    wrapper = task.instance
+    assert isinstance(wrapper.translator, KprobeStreamTranslator)
+    assert wrapper._teardown is not None
+    assert wrapper.config.backend == "kprobe"
+
+
+def test_start_monitor_auto_falls_back_to_fsmon_when_kprobe_unsupported(monkeypatch):
+    """Auto + kprobe unsupported -> fsmon path AND on_backend_fallback fires."""
+    monkeypatch.setattr(
+        KprobeTracer, "kprobe_supported", classmethod(lambda cls: False)
+    )
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+    path_calls = []
+    monkeypatch.setattr(
+        FSMon,
+        "run_fsmon_by_path",
+        classmethod(lambda cls, path: path_calls.append(path) or object()),
+    )
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    backend_fallbacks: list[str] = []
+    controller = _make_controller(on_backend_fallback=backend_fallbacks.append)
+    config = MonitorConfig(mode="path", target_path="/data/x")
+
+    assert controller._start_monitor(config) is True
+    assert path_calls == ["/data/x"]
+    assert len(backend_fallbacks) == 1
+    assert "fsmon" in backend_fallbacks[0]
+
+    task = get_task_service().get_task("monitor")
+    assert task.instance.translator is None  # fsmon wrapper: no translator
+    assert task.instance.config.backend == "fsmon"
+
+
+def test_start_monitor_explicit_kprobe_preflight_fail_fires_fallback(monkeypatch):
+    """backend=kprobe but preflight fails -> fsmon + a 'requested' fallback."""
+    monkeypatch.setattr(
+        KprobeTracer, "kprobe_supported", classmethod(lambda cls: False)
+    )
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        FSMon, "run_fsmon_by_path", classmethod(lambda cls, path: object())
+    )
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    backend_fallbacks: list[str] = []
+    controller = _make_controller(on_backend_fallback=backend_fallbacks.append)
+    # Explicit kprobe request via the config's resolved backend field.
+    config = MonitorConfig(mode="path", target_path="/data/x", backend="kprobe")
+
+    assert controller._start_monitor(config) is True
+    assert len(backend_fallbacks) == 1
+    assert "requested" in backend_fallbacks[0]
+
+
+def test_start_monitor_explicit_fsmon_skips_kprobe_preflight(monkeypatch):
+    """backend=fsmon -> fully synchronous fsmon, kprobe preflight never called."""
+
+    def _preflight_boom(cls):
+        raise AssertionError("kprobe preflight must not run for backend=fsmon")
+
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(_preflight_boom))
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        FSMon, "run_fsmon_by_path", classmethod(lambda cls, path: object())
+    )
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    controller = _make_controller()
+    config = MonitorConfig(mode="path", target_path="/data/x", backend="fsmon")
+    assert controller._start_monitor(config) is True
+    assert get_task_service().get_task("monitor").instance.config.backend == "fsmon"
+
+
+def test_start_monitor_kprobe_reader_routes_through_translator(monkeypatch):
+    """The kprobe wrapper's translator is wired to the reader thread: the reader
+    ingests raw lines through it (ahead of the deque) and publishes correlated
+    items. We drive one dfo->dfor->vw sequence and assert a modify item is
+    published on the bus.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+
+    class _FakeProc:
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self.stdout = self
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else ""
+
+        def poll(self):
+            return None if self._lines else 0
+
+        def __iter__(self):
+            return iter([])
+
+    lines = [
+        _kp("dfo", 7, 'path="/data/data/com.x/w.db"') + "\n",
+        _kp("dfor", 7, "file=0xcafe") + "\n",
+        _kp("vw", 7, "file=0xcafe count=0x8") + "\n",
+    ]
+    monkeypatch.setattr(
+        KprobeTracer, "run_by_path", classmethod(lambda cls, path: _FakeProc(lines))
+    )
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+
+    received: list[Event] = []
+    EventBus.get().subscribe(EventType.TASK_OUTPUT, received.append)
+    try:
+        # Reader runs inline (its thread is a real thread; drive it synchronously
+        # by invoking the wrapper's process through the started reader). Use a
+        # tiny buffer interval so the first line flushes immediately.
+        controller = _make_controller()
+        monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+
+        config = MonitorConfig(mode="path", target_path="/data/data/com.x")
+        controller._launch_kprobe(config)
+
+        # The reader thread is real; give it a brief moment to drain 3 lines.
+        import time
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not received:
+            time.sleep(0.01)
+
+        assert received, "no batch published"
+        batch = received[-1].data["batch"]
+        modifies = [it for it in batch if it.category == "modify"]
+        assert modifies, f"expected a correlated modify item, got {batch}"
+        assert modifies[0].filename == "w.db"
+        assert modifies[0].source == "kprobe"
+    finally:
+        EventBus.get().unsubscribe(EventType.TASK_OUTPUT, received.append)
+
+
+# =============================================================================
+# Teardown runs on the natural-exit path (_monitor_ended), not just stop()
+# =============================================================================
+
+
+def test_monitor_ended_runs_teardown_on_natural_exit(monkeypatch):
+    """The natural-exit path (process died / adb death) calls unregister() and
+    does NOT go through stop_callback, so _monitor_ended must invoke the
+    wrapper's teardown itself -- else the kprobe session state leaks and wedges
+    the next start.
+    """
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    teardown_calls = {"n": 0}
+
+    class _DeadProc:
+        def poll(self):
+            return 0
+
+    wrapper = MonitorProcessWrapper(
+        _DeadProc(),
+        config=MonitorConfig(mode="path", target_path="/data/x", backend="kprobe"),
+        teardown=lambda: teardown_calls.__setitem__("n", teardown_calls["n"] + 1),
+        translator=KprobeStreamTranslator(),
+    )
+
+    svc = get_task_service()
+    svc.register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=wrapper.stop,
+        app_name="/data/x",
+    )
+
+    controller = _make_controller()
+    controller._monitor_ended()
+
+    assert teardown_calls["n"] == 1
+    assert not svc.is_running("monitor")  # unregistered afterwards
+
+
+def test_monitor_ended_teardown_noop_for_fsmon_wrapper():
+    """Fsmon wrappers pass teardown=None -> _monitor_ended must not raise."""
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    class _DeadProc:
+        def poll(self):
+            return 0
+
+    wrapper = MonitorProcessWrapper(_DeadProc(), config=MonitorConfig())
+    svc = get_task_service()
+    svc.register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=wrapper.stop,
+        app_name="/data/",
+    )
+    _make_controller()._monitor_ended()
+    assert not svc.is_running("monitor")

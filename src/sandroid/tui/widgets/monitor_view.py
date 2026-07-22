@@ -427,6 +427,32 @@ class MonitorView(FilesSubViewBase):
             pass
         self.refresh_header()
 
+    def notify_backend_fallback(self, reason: str) -> None:
+        """Inline notice: the kprobe backend was unavailable, using fsmon.
+
+        Invoked via app.py's ``_notify_backend_fallback`` callback (itself
+        marshaled onto the main thread by
+        ``MonitorController._start_monitor``) when ``monitor_backend`` is
+        ``kprobe``/``auto`` but the device fails the kprobe preflight. Distinct
+        from ``notify_pid_mode_fallback`` (which is path-only and hardcodes the
+        fanotify wording); this carries the backend-specific reason. Written
+        directly to the log (same slash-wrapping as
+        ``notify_pid_mode_fallback``) so it does NOT bump the live-event
+        tally/category counters -- it is a backend-lifecycle notice, not an
+        observed filesystem event.
+        """
+        try:
+            log = self.query_one("#monitor-log", RichLog)
+            message = f"⚠ {reason}"
+            for i, line in enumerate(
+                self._wrap_text_on_slash(message, self._content_width())
+            ):
+                prefix = "  " if i > 0 else ""
+                log.write(f"[#facc15]{prefix}{escape(line)}[/]")
+        except Exception:
+            pass
+        self.refresh_header()
+
     def offer_resume(self, config: Any) -> None:
         """Show the one-click "Resume monitoring" bar once Play has finished.
 
