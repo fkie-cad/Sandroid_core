@@ -133,6 +133,31 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
     .setting-switch {
         width: auto;
+        background: $panel;
+        border: none;
+        padding: 0 1;
+        height: 1;
+        min-height: 1;
+    }
+
+    .setting-switch:focus {
+        background: $panel-lighten-1;
+        border: none;
+    }
+
+    .switch-state {
+        width: auto;
+        height: 1;
+        padding: 0 0 0 1;
+    }
+
+    .switch-state-on {
+        color: $success;
+        text-style: bold;
+    }
+
+    .switch-state-off {
+        color: $text-muted;
     }
 
     .setting-help {
@@ -217,6 +242,20 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             pass
         return get_config()
 
+    def _switch_with_state(self, value: bool, id: str) -> ComposeResult:
+        """Yield a Switch plus a live 'ON'/'OFF' label reflecting its value.
+
+        The Switch's own slider is subtle at a glance, so every switch row
+        gets a colored text label beside it (kept in sync by
+        ``on_switch_changed`` via the ``f"{id}-state"`` id convention).
+        """
+        yield Switch(value=value, id=id, classes="setting-switch")
+        yield Static(
+            "ON" if value else "OFF",
+            id=f"{id}-state",
+            classes=f"switch-state {'switch-state-on' if value else 'switch-state-off'}",
+        )
+
     def compose(self) -> ComposeResult:
         """Build the settings screen layout."""
         config = self._get_config()
@@ -297,28 +336,22 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # AVD Headless
         with Horizontal(classes="setting-row"):
             yield Label("AVD Headless:", classes="setting-label")
-            yield Switch(
-                value=config.emulator.avd_headless,
-                id="setting-emulator--avd_headless",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.emulator.avd_headless, "setting-emulator--avd_headless"
             )
 
         # AVD Auto-Start
         with Horizontal(classes="setting-row"):
             yield Label("AVD Auto-Start:", classes="setting-label")
-            yield Switch(
-                value=config.emulator.avd_auto_start,
-                id="setting-emulator--avd_auto_start",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.emulator.avd_auto_start, "setting-emulator--avd_auto_start"
             )
 
         # Frida Auto-Start
         with Horizontal(classes="setting-row"):
             yield Label("Frida Auto-Start:", classes="setting-label")
-            yield Switch(
-                value=config.frida.server_auto_start,
-                id="setting-frida--server_auto_start",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.frida.server_auto_start, "setting-frida--server_auto_start"
             )
 
         # Flush Package Cache
@@ -422,55 +455,44 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Capture Processes
         with Horizontal(classes="setting-row"):
             yield Label("Capture Processes:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.capture_processes,
-                id="setting-analysis--capture_processes",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.capture_processes, "setting-analysis--capture_processes"
             )
 
         # Capture Sockets
         with Horizontal(classes="setting-row"):
             yield Label("Capture Sockets:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.capture_sockets,
-                id="setting-analysis--capture_sockets",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.capture_sockets, "setting-analysis--capture_sockets"
             )
 
         # Capture Network Traffic
         with Horizontal(classes="setting-row"):
             yield Label("Capture Network Traffic:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.capture_network,
-                id="setting-analysis--capture_network",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.capture_network, "setting-analysis--capture_network"
             )
 
         # Hash Files
         with Horizontal(classes="setting-row"):
             yield Label("Hash Files:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.hash_files,
-                id="setting-analysis--hash_files",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.hash_files, "setting-analysis--hash_files"
             )
 
         # Show Deleted Files
         with Horizontal(classes="setting-row"):
             yield Label("Show Deleted Files:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.show_deleted_files,
-                id="setting-analysis--show_deleted_files",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.show_deleted_files,
+                "setting-analysis--show_deleted_files",
             )
 
         # List APKs
         with Horizontal(classes="setting-row"):
             yield Label("List APKs:", classes="setting-label")
-            yield Switch(
-                value=config.analysis.list_apks,
-                id="setting-analysis--list_apks",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.analysis.list_apks, "setting-analysis--list_apks"
             )
 
         # Results Path (§11 configurable data-storage root). Run bundles
@@ -643,19 +665,17 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Show Theme Indicator
         with Horizontal(classes="setting-row"):
             yield Label("Show Theme Indicator:", classes="setting-label")
-            yield Switch(
-                value=config.tui.show_theme_indicator if config.tui else False,
-                id="setting-tui--show_theme_indicator",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.tui.show_theme_indicator if config.tui else False,
+                "setting-tui--show_theme_indicator",
             )
 
         # Immediate Exit on Ctrl+C
         with Horizontal(classes="setting-row"):
             yield Label("Immediate Ctrl+C Exit:", classes="setting-label")
-            yield Switch(
-                value=config.tui.immediate_exit_on_ctrl_c if config.tui else False,
-                id="setting-tui--immediate_exit_on_ctrl_c",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.tui.immediate_exit_on_ctrl_c if config.tui else False,
+                "setting-tui--immediate_exit_on_ctrl_c",
             )
 
     def _compose_mvt_tab(self, config: SandroidConfig) -> ComposeResult:
@@ -665,46 +685,30 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # MVT Enabled
         with Horizontal(classes="setting-row"):
             yield Label("MVT Enabled:", classes="setting-label")
-            yield Switch(
-                value=mvt.enabled,
-                id="setting-mvt--enabled",
-                classes="setting-switch",
-            )
+            yield from self._switch_with_state(mvt.enabled, "setting-mvt--enabled")
 
         # Scan SMS
         with Horizontal(classes="setting-row"):
             yield Label("Scan SMS:", classes="setting-label")
-            yield Switch(
-                value=mvt.scan_sms,
-                id="setting-mvt--scan_sms",
-                classes="setting-switch",
-            )
+            yield from self._switch_with_state(mvt.scan_sms, "setting-mvt--scan_sms")
 
         # Scan Calls
         with Horizontal(classes="setting-row"):
             yield Label("Scan Calls:", classes="setting-label")
-            yield Switch(
-                value=mvt.scan_calls,
-                id="setting-mvt--scan_calls",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                mvt.scan_calls, "setting-mvt--scan_calls"
             )
 
         # Scan Apps
         with Horizontal(classes="setting-row"):
             yield Label("Scan Apps:", classes="setting-label")
-            yield Switch(
-                value=mvt.scan_apps,
-                id="setting-mvt--scan_apps",
-                classes="setting-switch",
-            )
+            yield from self._switch_with_state(mvt.scan_apps, "setting-mvt--scan_apps")
 
         # Scan Files
         with Horizontal(classes="setting-row"):
             yield Label("Scan Files:", classes="setting-label")
-            yield Switch(
-                value=mvt.scan_files,
-                id="setting-mvt--scan_files",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                mvt.scan_files, "setting-mvt--scan_files"
             )
 
         # Output Format
@@ -724,10 +728,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Show Verbose Thinking
         with Horizontal(classes="setting-row"):
             yield Label("Show Verbose Thinking:", classes="setting-label")
-            yield Switch(
-                value=config.ai.show_verbose_thinking,
-                id="setting-ai--show_verbose_thinking",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.ai.show_verbose_thinking, "setting-ai--show_verbose_thinking"
             )
         yield Static(
             "[dim]When on, the model's full reasoning/thinking text stays "
@@ -740,10 +742,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Show Chat Mascot
         with Horizontal(classes="setting-row"):
             yield Label("Show Chat Mascot:", classes="setting-label")
-            yield Switch(
-                value=config.ai.show_chat_mascot,
-                id="setting-ai--show_chat_mascot",
-                classes="setting-switch",
+            yield from self._switch_with_state(
+                config.ai.show_chat_mascot, "setting-ai--show_chat_mascot"
             )
         yield Static(
             "[dim]Show the small animated mascot beside the Chat panel's "
@@ -1091,6 +1091,13 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             self._pending[key] = event.value
             if key in self._LIVE_AI_TOGGLE_KEYS:
                 self._apply_ai_toggle_live(key, event.value)
+            try:
+                state_label = self.query_one(f"#{widget_id}-state", Static)
+                state_label.update("ON" if event.value else "OFF")
+                state_label.set_class(event.value, "switch-state-on")
+                state_label.set_class(not event.value, "switch-state-off")
+            except Exception:
+                pass
 
     def _apply_ai_toggle_live(self, key: str, value: bool) -> None:
         """Apply an AI Chat switch to the live config, then repaint ChatPanel.

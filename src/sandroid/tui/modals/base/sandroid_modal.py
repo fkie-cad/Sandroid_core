@@ -162,6 +162,23 @@ class SandroidModal(ModalScreen[T], Generic[T]):
         border: solid $primary-lighten-1;
     }
 
+    /*
+      Switch has no built-in "compact" mode (unlike Input/Select/RadioSet/
+      Button) -- its stock border+padding wraps a 4x1 content box in a much
+      bigger box, so it's slimmed by hand here instead.
+    */
+    SandroidModal Switch {
+        background: $panel;
+        border: none;
+        padding: 0 1;
+        height: 1;
+        min-height: 1;
+    }
+    SandroidModal Switch:focus {
+        background: $panel-lighten-1;
+        border: none;
+    }
+
     /* Disabled state styling - consistent across all themes */
     SandroidModal Button:disabled {
         background: $surface;
