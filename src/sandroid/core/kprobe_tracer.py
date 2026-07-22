@@ -343,12 +343,20 @@ class KprobeTracer:
         basename = cls._CHECK_FILE.rsplit("/", 1)[-1]
 
         def _cleanup() -> None:
-            cls._shell(f"echo 0 > {inst}/tracing_on 2>/dev/null")
-            cls._shell(f"echo 0 > {inst}/events/kprobes/kpck_vw/enable 2>/dev/null")
-            cls._shell(f"echo 0 > {inst}/events/kprobes/kpck_dfo/enable 2>/dev/null")
-            cls._shell(f"rmdir {inst} 2>/dev/null")
-            cls._shell(f"echo {cls._dq('-:kpck_vw')} >> {events} 2>/dev/null")
-            cls._shell(f"echo {cls._dq('-:kpck_dfo')} >> {events} 2>/dev/null")
+            # Guarded existence tests (see _self_clean): _cleanup runs once up
+            # front to scrub a leaked prior check, when the sandroid_kpcheck
+            # instance usually does NOT exist -- an unguarded `echo 0 > missing`
+            # fails its redirect before `2>/dev/null` applies and warns.
+            for probe in ("kpck_vw", "kpck_dfo"):
+                enable = f"{inst}/events/kprobes/{probe}/enable"
+                cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
+            cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
+            cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+            for probe in ("kpck_vw", "kpck_dfo"):
+                cls._shell(
+                    f'grep -q "kprobes/{probe} " {events} 2>/dev/null '
+                    f"&& echo {cls._dq('-:' + probe)} >> {events}"
+                )
             cls._shell(f"rm -f {cls._CHECK_FILE} 2>/dev/null")
 
         _cleanup()  # scrub any leaked prior check
