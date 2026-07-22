@@ -1,22 +1,20 @@
 Analysis API
 ============
 
-The Sandroid analysis API provides modules for gathering forensic data from Android devices. All analysis modules inherit from the base DataGather class and follow a consistent interface.
+The Sandroid analysis API provides modules for gathering forensic data from Android devices. All analysis modules inherit from the base DataGatherBase class and follow a consistent interface.
 
 Base Data Gathering Class
 --------------------------
 
-.. automodule:: sandroid.analysis.datagather
+.. automodule:: sandroid.analysis.base_di
    :members:
    :undoc-members:
    :show-inheritance:
 
-All analysis modules inherit from DataGather, which provides the common interface:
+All analysis modules inherit from DataGatherBase, which provides the common interface:
 
 - ``gather()`` - Collect data from the device
 - ``return_data()`` - Return structured analysis results
-- ``pretty_print()`` - Generate formatted output for display
-- ``process_data()`` - Process and filter collected data
 
 File System Analysis
 --------------------
@@ -509,14 +507,14 @@ Data Processing and Filtering
 
 .. code-block:: python
 
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
 
    class AnalysisAggregator:
        def __init__(self):
            self.analyzers = []
 
        def add_analyzer(self, analyzer):
-           if isinstance(analyzer, DataGather):
+           if isinstance(analyzer, DataGatherBase):
                self.analyzers.append(analyzer)
 
        def run_all(self):
@@ -614,7 +612,7 @@ Error Handling in Analysis
 
 .. code-block:: python
 
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
    import logging
 
    class RobustAnalyzer:

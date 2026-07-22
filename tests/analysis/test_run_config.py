@@ -24,9 +24,9 @@ def test_from_sandroid_config_defaults_map_correctly():
     assert rc.number_of_runs == cfg.analysis.number_of_runs
     # Default avoid_strong_noise_filter=False -> noise_filter=True.
     assert rc.noise_filter is True
-    assert rc.network == cfg.analysis.monitor_network
-    assert rc.processes == cfg.analysis.monitor_processes
-    assert rc.sockets == cfg.analysis.monitor_sockets
+    assert rc.network == cfg.analysis.capture_network
+    assert rc.processes == cfg.analysis.capture_processes
+    assert rc.sockets == cfg.analysis.capture_sockets
     assert rc.show_deleted == cfg.analysis.show_deleted_files
     assert rc.hash_files == cfg.analysis.hash_files
     assert rc.pull_apk == cfg.analysis.list_apks
@@ -58,9 +58,9 @@ def test_from_sandroid_config_non_default_fields():
         whitelist_file="/tmp/whitelist.txt",
         analysis=SchemaAnalysisConfig(
             number_of_runs=5,
-            monitor_network=True,
-            monitor_processes=False,
-            monitor_sockets=True,
+            capture_network=True,
+            capture_processes=False,
+            capture_sockets=True,
             show_deleted_files=True,
             hash_files=True,
             list_apks=True,
@@ -118,9 +118,9 @@ def test_from_analysis_config_field_maps():
     """Monitor toggles and counts map from AnalysisConfig."""
     ac = AnalysisConfig(
         number_of_runs=3,
-        monitor_network=True,
-        monitor_processes=False,
-        monitor_sockets=True,
+        capture_network=True,
+        capture_processes=False,
+        capture_sockets=True,
         show_deleted=True,
         hash_files=True,
         pull_apk=True,

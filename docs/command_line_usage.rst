@@ -53,13 +53,6 @@ Set logging verbosity. Options: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``C
 
 Set the initial TUI view mode. Default is from config or forensic.
 
-**Interactive Mode**::
-
-   sandroid -i
-   sandroid --interactive
-
-Start in legacy Rich interactive mode. Without ``-i``, Sandroid launches the Textual TUI by default.
-
 **Fresh Start**::
 
    sandroid --fresh
@@ -320,13 +313,6 @@ Enable debug/verbose mode for detailed output.
    sandroid --log
 
 Show log messages directly in the terminal. Useful for debugging TUI display issues.
-
-**Legacy Interactive Mode**::
-
-   sandroid --interactive
-   sandroid -i
-
-Start in the legacy Rich interactive menu. Note: running ``sandroid`` without ``-i`` launches the modern Textual TUI instead.
 
 Common Usage Patterns
 ----------------------

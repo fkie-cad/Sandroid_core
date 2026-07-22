@@ -128,9 +128,9 @@ async def run_malware_analysis(
     screenshot_interval = kwargs.get("screenshot_interval")
     ac = AnalysisConfig(
         number_of_runs=runs,
-        monitor_network=capture_network,
-        monitor_processes=kwargs.get("monitor_processes", True),
-        monitor_sockets=kwargs.get("monitor_sockets", False),
+        capture_network=capture_network,
+        capture_processes=kwargs.get("monitor_processes", True),
+        capture_sockets=kwargs.get("monitor_sockets", False),
         show_deleted=kwargs.get("track_deleted", False),
         take_screenshots=screenshot_interval is not None,
         screenshot_interval=screenshot_interval or 3,
@@ -197,9 +197,9 @@ async def run_forensic_analysis(
     screenshot_interval = kwargs.get("screenshot_interval")
     ac = AnalysisConfig(
         number_of_runs=runs,
-        monitor_network=kwargs.get("capture_network", False),
-        monitor_processes=kwargs.get("monitor_processes", False),
-        monitor_sockets=kwargs.get("monitor_sockets", False),
+        capture_network=kwargs.get("capture_network", False),
+        capture_processes=kwargs.get("monitor_processes", False),
+        capture_sockets=kwargs.get("monitor_sockets", False),
         show_deleted=track_deleted,
         take_screenshots=screenshot_interval is not None,
         screenshot_interval=screenshot_interval or 3,

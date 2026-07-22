@@ -125,16 +125,17 @@ Package Structure Migration
 .. code-block:: text
 
    Sandroid_core/
-   ├── src/sandroid/
-   │   ├── core/           # Was: src/utils/ (15 modules)
-   │   ├── analysis/       # Was: src/datagather/ (10 modules)
-   │   ├── features/       # Was: src/functionality/ (5 modules)
-   │   ├── config/         # New: Configuration system
-   │   └── cli.py          # New: Modern CLI entry point
-   ├── src/utils/          # Compatibility aliases
-   ├── src/datagather/     # Compatibility aliases
-   ├── src/functionality/  # Compatibility aliases
-   └── sandroid            # Still works (legacy compatibility)
+   └── src/sandroid/
+       ├── core/           # Was: src/utils/ (15 modules)
+       ├── analysis/       # Was: src/datagather/ (10 modules)
+       ├── features/       # Was: src/functionality/ (5 modules)
+       ├── config/         # New: Configuration system
+       └── cli.py          # New: Modern CLI entry point
+
+The ``src/utils/``, ``src/datagather/``, ``src/functionality/`` compatibility
+aliases and the legacy ``./sandroid`` launcher have since been removed
+entirely; ``sandroid``/``sandroid-config`` (installed via ``pip install -e .``)
+are the only supported entry points.
 
 **Import Path Changes:**
 
@@ -341,12 +342,12 @@ API Migration Guide
 
    # modern_custom_module.py
    from sandroid.core.toolbox import Toolbox
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
    from sandroid.config.loader import load_config
 
-   class CustomAnalyzer(DataGather):
-       def __init__(self):
-           super().__init__()
+   class CustomAnalyzer(DataGatherBase):
+       def __init__(self, **kwargs):
+           super().__init__(**kwargs)
            self.config = load_config()
 
        def gather(self):

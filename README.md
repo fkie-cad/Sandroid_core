@@ -34,7 +34,7 @@ Common operations are a single keypress (run an analysis, set the proxy, attach 
 
 The **Snapshots** tab keeps an 8-slot snapshot memory per AVD: `1`–`8` load a slot, `Ctrl+1`–`Ctrl+8` save into a slot, and `a` assigns the highlighted snapshot to a slot.
 
-> A legacy Rich interface is still available via `sandroid -i`, and fully non-interactive runs via `--headless`.
+> Fully non-interactive runs are also available via `--headless`.
 
 <p align="center">
   <img src="assets/screenshots/sandroid_tui.png" alt="Sandroid TUI" width="700"/>
@@ -70,7 +70,6 @@ Core Options:
                                   Set the log level
   --view [forensic|malware|security]
                                   Set the initial view mode
-  -i, --interactive               Start in legacy Rich interactive mode
   --fresh                         Start as if running for the first time
   --version                       Show the version and exit
 
@@ -118,7 +117,7 @@ Output & Debugging:
   --log                           Show log messages in terminal
 ```
 
-> **Note:** `--view` and `--mode` only affect the legacy Rich interface (`sandroid -i`) and headless runs. The default TUI uses a flat, customisable action catalog (press `?`) rather than switchable views.
+> **Note:** `--mode` only affects headless runs. The default TUI uses a flat, customisable action catalog (press `?`) rather than switchable views.
 
 
 ## Network Interception & Bypass
@@ -193,21 +192,13 @@ Simply press the corresponding button to generate the Artefact
 - **[SETUP.md](SETUP.md)** - Complete setup guide for new installation method
 - **[CHANGELOG.md](CHANGELOG.md)** - Detailed release notes and version history
 
-## Installation Options
+## Installation
 
-### Option 1: PyPI Installation (Recommended)
 ```bash
 pip install sandroid
 sandroid-config init
 sandroid --help
 sandroid # starting sandroid in interactive mode (default)
-```
-
-### Option 2: Legacy Installation (Still Supported)
-```bash
-git clone <repository>
-./install-requirements.sh
-./sandroid.legacy
 ```
 
 ## Configuration Management

@@ -6,17 +6,17 @@ This guide shows how to create custom analysis modules and extend Sandroid's cap
 Creating Custom Analysis Modules
 ---------------------------------
 
-All analysis modules inherit from the ``DataGather`` base class:
+All analysis modules inherit from the ``DataGatherBase`` base class:
 
 .. code-block:: python
 
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
    from sandroid.core.toolbox import Toolbox
    from logging import getLogger
 
-   class CustomAnalyzer(DataGather):
-       def __init__(self):
-           super().__init__()
+   class CustomAnalyzer(DataGatherBase):
+       def __init__(self, **kwargs):
+           super().__init__(**kwargs)
            self.logger = getLogger(__name__)
 
        def gather(self):
@@ -38,12 +38,12 @@ Example: Custom File Monitor
 .. code-block:: python
 
    import os
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
    from sandroid.core.adb import Adb
 
-   class CustomFileMonitor(DataGather):
-       def __init__(self, watch_paths=None):
-           super().__init__()
+   class CustomFileMonitor(DataGatherBase):
+       def __init__(self, watch_paths=None, **kwargs):
+           super().__init__(**kwargs)
            self.watch_paths = watch_paths or ["/sdcard/", "/data/local/tmp/"]
            self.initial_files = {}
            self.final_files = {}
@@ -116,16 +116,19 @@ To integrate your custom modules:
 
 .. code-block:: python
 
-   from sandroid.core.actionQ import ActionQ
    from your_module import CustomAnalyzer, CustomFeature
 
-   # Add to analysis workflow
-   action_queue = ActionQ()
    custom_analyzer = CustomAnalyzer()
    custom_feature = CustomFeature()
 
    # Use in analysis
    custom_analyzer.gather()
    results = custom_analyzer.return_data()
+
+To have :class:`~sandroid.analysis.engine.AnalysisEngine` run your analyzer as
+part of every ``Record``/CLI/headless run, add it to the gatherer classes it
+constructs (see ``sandroid.analysis.engine``); the engine calls ``gather()``/
+``return_data()``/``pretty_print()`` on each configured gatherer instance
+itself.
 
 For more detailed examples and advanced topics, see the API documentation.

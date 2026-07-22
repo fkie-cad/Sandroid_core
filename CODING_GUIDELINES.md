@@ -59,7 +59,7 @@ import requests
 from pydantic import BaseModel
 
 from sandroid.core.toolbox import Toolbox
-from sandroid.analysis.datagather import DataGather
+from sandroid.analysis.base_di import DataGatherBase
 ```
 
 ### Naming Conventions
@@ -148,7 +148,7 @@ Sandroid follows a specific architecture pattern:
 ```
 src/sandroid/
 ├── core/           # Core functionality (Toolbox, ADB, ActionQ)
-├── analysis/       # Data gathering modules (inherit from DataGather)
+├── analysis/       # Data gathering modules (inherit from DataGatherBase)
 ├── features/       # Enhanced functionality (inherit from Functionality)
 ├── config/         # Configuration management
 └── cli.py          # Command-line interface
@@ -156,15 +156,15 @@ src/sandroid/
 
 ### Base Class Inheritance
 
-All analysis modules must inherit from `DataGather`:
+All analysis modules must inherit from `DataGatherBase`:
 
 ```python
-from sandroid.analysis.datagather import DataGather
+from sandroid.analysis.base_di import DataGatherBase
 from logging import getLogger
 
-class CustomAnalyzer(DataGather):
-    def __init__(self):
-        super().__init__()
+class CustomAnalyzer(DataGatherBase):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.logger = getLogger(__name__)
 
     def gather(self) -> None:

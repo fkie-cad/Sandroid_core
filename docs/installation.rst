@@ -111,16 +111,6 @@ System Requirements
    # Install SQLite tools from https://sqlite.org/download.html
    # Add to PATH
 
-Legacy Installation (Still Supported)
---------------------------------------
-
-For users who prefer the original installation method::
-
-   git clone https://github.com/fkie-cad/Sandroid_core.git
-   cd Sandroid_core
-   ./install-requirements.sh
-   ./sandroid.legacy
-
 Configuration
 -------------
 

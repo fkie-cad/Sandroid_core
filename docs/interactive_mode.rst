@@ -6,30 +6,20 @@ Sandroid's interactive mode provides a user-friendly menu-driven interface for p
 Starting Interactive Mode
 --------------------------
 
-Sandroid has two interactive modes:
-
-**Default: Textual TUI** (recommended)::
+Sandroid's interactive mode is a Textual TUI::
 
    sandroid
 
 The Textual TUI provides a modern terminal user interface with three specialized analysis views (Forensic, Malware, Security), a status bar, activity log, and keyboard-driven navigation.
 
-**Legacy: Rich Interactive Menu**::
-
-   sandroid -i
-   sandroid --interactive
-
-The legacy Rich mode provides the classic single-page menu interface.
-
 **With Custom Configuration**::
 
    sandroid --config my-analysis.toml
-   sandroid --config my-analysis.toml -i   # For legacy mode
 
 The Textual TUI
 -----------------
 
-When you start Sandroid (without ``-i``), the Textual TUI launches with:
+When you start Sandroid, the Textual TUI launches with:
 
 - **Header Bar**: Shows Sandroid logo and current view mode
 - **Status Bar**: Displays Frida server status, HTTP proxy, spotlight app, and spotlight files
