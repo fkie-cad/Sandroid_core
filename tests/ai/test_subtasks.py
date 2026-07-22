@@ -199,6 +199,38 @@ def test_no_subtask_view_can_nest_a_subtask():
     assert _SPAWN_TOOL_NAMES.isdisjoint(priv)
 
 
+#: Registered RiskTier.READ_ONLY tools deliberately left out of
+#: READ_ONLY_SUBTASK_TOOLS, per that constant's own docstring -- anything
+#: READ_ONLY and NOT in this set must be in the allow-list, or this test
+#: fails. This is what catches a newly added READ_ONLY tool silently never
+#: being wired into the allow-list (a real gap a verification pass found:
+#: an entire feature's worth of new READ_ONLY tools went unregistered here
+#: for a time because nothing asserted the allow-list's exhaustiveness).
+_DELIBERATELY_EXCLUDED_READ_ONLY_TOOLS = frozenset(
+    {"take_screenshot", "list_snapshots", "check_frida_server_status"}
+)
+
+
+def test_read_only_allowlist_covers_every_registered_read_only_tool():
+    reg = get_tool_registry()
+    read_only_names = {
+        name for name in reg.names() if reg.get_spec(name).risk == RiskTier.READ_ONLY
+    }
+    accounted_for = (
+        READ_ONLY_SUBTASK_TOOLS
+        | _SPAWN_TOOL_NAMES
+        | _DELIBERATELY_EXCLUDED_READ_ONLY_TOOLS
+    )
+    missing = read_only_names - accounted_for
+    assert missing == set(), (
+        f"{missing} are RiskTier.READ_ONLY but neither in "
+        "READ_ONLY_SUBTASK_TOOLS nor in this test's own "
+        "_DELIBERATELY_EXCLUDED_READ_ONLY_TOOLS -- a read-only subtask has "
+        "no way to call them. Either add them to the allow-list, or add "
+        "them to _DELIBERATELY_EXCLUDED_READ_ONLY_TOOLS with a reason."
+    )
+
+
 # -- privileged behaviour ----------------------------------------------------
 
 

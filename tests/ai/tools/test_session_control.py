@@ -22,13 +22,26 @@ it actually lives on rather than on ``session_control`` itself:
   reads ``resolve_proxy_host_ip`` as a module-level global, so patching that
   attribute on the ``proxy_manager`` module affects both the tool's own call
   and ``classify_device_proxy``'s internal call consistently.
+- ``get_focus_manager`` -> monkeypatch ``sandroid.core.proxy_manager``
+  directly, same as ``ProxyManager`` above.
+- ``get_config`` (App-Proxy tools only) -> monkeypatch ``sandroid.config``
+  directly (the module ``get_config`` is defined on).
+- ``_current_owner_id`` (the resource-arbiter owner ``ContextVar`` App-Proxy
+  tools read via a lazy ``from sandroid.ai.loop import _current_owner_id``)
+  -> tests import the very same ``ContextVar`` object from
+  ``sandroid.ai.loop`` and drive it directly with ``.set()``/``.reset()``
+  (see the ``_as_owner`` context manager below); a lazy import re-fetches the
+  same singleton object from ``sys.modules``, so this affects the tool's own
+  read too, not just the test's.
 """
 
 from types import SimpleNamespace
 
 import pytest
 
+from sandroid import config as sandroid_config
 from sandroid import services
+from sandroid.ai import loop as ai_loop
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools import session_control
 from sandroid.core import proxy_manager
@@ -89,6 +102,7 @@ class _FakeMitmproxyState:
         pid=None,
         flows_seen=0,
         tls_failures=0,
+        flow_errors=0,
         last_error=None,
         running=False,
     ):
@@ -98,6 +112,7 @@ class _FakeMitmproxyState:
         self.pid = pid
         self.flows_seen = flows_seen
         self.tls_failures = tls_failures
+        self.flow_errors = flow_errors
         self.last_error = last_error
         self.running = running
 
@@ -386,6 +401,7 @@ def test_get_mitmproxy_status_prefers_is_running_over_state_running(monkeypatch)
         pid=555,
         flows_seen=3,
         tls_failures=1,
+        flow_errors=2,
         last_error=None,
         running=True,
     )
@@ -403,6 +419,7 @@ def test_get_mitmproxy_status_prefers_is_running_over_state_running(monkeypatch)
         "pid": 555,
         "flows_seen": 3,
         "tls_failures": 1,
+        "flow_errors": 2,
         "last_error": None,
     }
 
@@ -589,3 +606,485 @@ def test_get_device_proxy_status_none_when_error(monkeypatch):
     result = session_control.get_device_proxy_status()
 
     assert result == {"state": "none", "addr": "", "mitmproxy_proxy_port": 8080}
+
+
+# =============================================================================
+# App proxies (Focus lanes): fakes + helpers
+# =============================================================================
+
+
+class _FakeFocusManager:
+    """Records ``enable_focus``/``disable_focus``/``set_quic_blocking`` calls
+    in order and mirrors the real ``FocusManager``'s ``(ok, message)``
+    return shape, plus ``app_proxies()``/``lane_for()`` reads over the same
+    in-memory ``{package: target}`` state -- close enough to the real
+    ``FocusManager`` for these tools' own dispatch logic (which never
+    inspects ``FocusManager`` internals beyond its public API).
+    """
+
+    def __init__(
+        self,
+        *,
+        lanes: dict[str, str] | None = None,
+        spotlight_package: str | None = "com.spotlighted.app",
+        lane_ports: dict[str, int] | None = None,
+    ):
+        self._apps: dict[str, str] = dict(lanes or {})
+        self._spotlight_package = spotlight_package
+        self._lane_ports = dict(lane_ports or {})
+        self.enable_calls: list[tuple] = []
+        self.disable_calls: list = []
+        self.quic_calls: list[bool] = []
+
+    def enable_focus(self, package=None, target=None):
+        self.enable_calls.append((package, target))
+        pkg = package or self._spotlight_package
+        if not pkg:
+            return False, "No spotlight app set — pick one first."
+        if pkg in self._apps:
+            return True, f"{pkg} already proxied"
+        self._apps[pkg] = "ours" if target is None else target
+        label = pkg if target is None else f"{pkg} -> {target}"
+        return True, f"App proxy -> {label} (lane 0)"
+
+    def disable_focus(self, package=None):
+        self.disable_calls.append(package)
+        if package is None:
+            if not self._apps:
+                return True, "No app proxies to disable"
+            self._apps.clear()
+            return True, "App proxies disabled (all lanes freed)"
+        if package not in self._apps:
+            return True, f"{package} has no app proxy"
+        del self._apps[package]
+        return True, f"App proxy removed for {package}"
+
+    def app_proxies(self):
+        return dict(self._apps)
+
+    def lane_for(self, package):
+        # Matches the real FocusManager's contract: None for a package with
+        # no active lane, not just a default port irrespective of state --
+        # enable_app_proxy's own "was this already active before this call"
+        # pre-check relies on that distinction.
+        if package not in self._apps:
+            return None
+        return self._lane_ports.get(package, 8082)
+
+    def set_quic_blocking(self, enabled):
+        self.quic_calls.append(enabled)
+
+
+def _as_owner(owner_id: str | None):
+    """Context manager: run the block with ``_current_owner_id`` set.
+
+    Drives the *actual* ``ContextVar`` App-Proxy tools read (imported lazily
+    inside each tool as ``from sandroid.ai.loop import _current_owner_id`` --
+    the same singleton object as ``ai_loop._current_owner_id`` here), then
+    restores the previous value on exit via the token, mirroring
+    ``sandroid.ai.loop.run_agent_turn``'s own set/reset pairing.
+    """
+
+    class _OwnerContext:
+        def __enter__(self):
+            self._token = ai_loop._current_owner_id.set(owner_id)
+            return self
+
+        def __exit__(self, *exc_info):
+            ai_loop._current_owner_id.reset(self._token)
+
+    return _OwnerContext()
+
+
+@pytest.fixture(autouse=True)
+def _reset_app_proxy_ownership():
+    """Isolate the module-level ownership map across tests in this file."""
+    session_control._app_proxy_owner_by_package.clear()
+    yield
+    session_control._app_proxy_owner_by_package.clear()
+
+
+# =============================================================================
+# enable_app_proxy
+# =============================================================================
+
+
+def test_enable_app_proxy_success_records_ownership(monkeypatch):
+    fake = _FakeFocusManager()
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    with _as_owner("owner-A"):
+        result = session_control.enable_app_proxy(package="com.example.app")
+
+    assert result == {
+        "success": True,
+        "message": "App proxy -> com.example.app (lane 0)",
+        "package": "com.example.app",
+        "target": None,
+        "lane_socks_port": 8082,
+    }
+    assert fake.enable_calls == [("com.example.app", None)]
+    assert session_control._app_proxy_owner_by_package == {"com.example.app": "owner-A"}
+
+
+def test_enable_app_proxy_resolves_spotlight_app_when_package_omitted(monkeypatch):
+    fake = _FakeFocusManager(spotlight_package="com.spotlighted.app")
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    monkeypatch.setattr(
+        services,
+        "get_spotlight_service",
+        lambda: SimpleNamespace(get_effective_package=lambda: "com.spotlighted.app"),
+    )
+
+    with _as_owner("owner-A"):
+        result = session_control.enable_app_proxy()
+
+    assert result["success"] is True
+    assert result["package"] == "com.spotlighted.app"
+    assert session_control._app_proxy_owner_by_package == {
+        "com.spotlighted.app": "owner-A"
+    }
+
+
+def test_enable_app_proxy_no_spotlight_app_fails_without_recording_ownership(
+    monkeypatch,
+):
+    fake = _FakeFocusManager(spotlight_package=None)
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    monkeypatch.setattr(
+        services,
+        "get_spotlight_service",
+        lambda: SimpleNamespace(get_effective_package=lambda: None),
+    )
+
+    with _as_owner("owner-A"):
+        result = session_control.enable_app_proxy()
+
+    assert result["success"] is False
+    assert result["package"] is None
+    assert result["lane_socks_port"] is None
+    assert session_control._app_proxy_owner_by_package == {}
+
+
+def test_enable_app_proxy_already_proxied_is_idempotent(monkeypatch):
+    fake = _FakeFocusManager(lanes={"com.example.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    result = session_control.enable_app_proxy(package="com.example.app")
+
+    assert result["success"] is True
+    assert "already proxied" in result["message"]
+    assert result["package"] == "com.example.app"
+    assert result["lane_socks_port"] == 8082
+
+
+def test_enable_app_proxy_idempotent_hit_never_adopts_a_foreign_owned_lane(
+    monkeypatch,
+):
+    # Regression: a lane already active (whether TUI-created, i.e. no
+    # ownership entry at all, or created by a *different* owner) must not be
+    # silently "adopted" into the calling owner's ownership map just
+    # because enable_focus's idempotent branch reports success. Otherwise
+    # this owner's later unscoped disable_app_proxy would tear down a lane
+    # it never actually created.
+    fake = _FakeFocusManager(lanes={"com.example.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.example.app"] = "owner-A"
+
+    with _as_owner("owner-B"):
+        result = session_control.enable_app_proxy(package="com.example.app")
+
+    assert result["success"] is True
+    assert session_control._app_proxy_owner_by_package == {"com.example.app": "owner-A"}
+
+
+def test_enable_app_proxy_idempotent_hit_on_tui_created_lane_stays_unowned(
+    monkeypatch,
+):
+    # Same regression, but for a lane with NO ownership entry at all (the
+    # TUI-created case) -- an idempotent re-enable must not create one.
+    fake = _FakeFocusManager(lanes={"com.example.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    with _as_owner("owner-A"):
+        result = session_control.enable_app_proxy(package="com.example.app")
+
+    assert result["success"] is True
+    assert session_control._app_proxy_owner_by_package == {}
+
+
+def test_enable_app_proxy_external_target_reported_and_not_recorded_as_ours(
+    monkeypatch,
+):
+    fake = _FakeFocusManager()
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    result = session_control.enable_app_proxy(
+        package="com.example.app", target="http://127.0.0.1:8888"
+    )
+
+    assert result["success"] is True
+    assert result["target"] == "http://127.0.0.1:8888"
+    assert fake.app_proxies() == {"com.example.app": "http://127.0.0.1:8888"}
+
+
+def test_enable_app_proxy_no_owner_context_never_records_ownership(monkeypatch):
+    fake = _FakeFocusManager()
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    # No _as_owner context -- _current_owner_id.get() is None here.
+    result = session_control.enable_app_proxy(package="com.example.app")
+
+    assert result["success"] is True
+    assert session_control._app_proxy_owner_by_package == {}
+
+
+# =============================================================================
+# disable_app_proxy
+# =============================================================================
+
+
+def test_disable_app_proxy_named_package_always_allowed(monkeypatch):
+    fake = _FakeFocusManager(lanes={"com.example.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.example.app"] = "owner-A"
+
+    # Called under a DIFFERENT owner -- a named package is always allowed,
+    # regardless of ownership.
+    with _as_owner("owner-B"):
+        result = session_control.disable_app_proxy(package="com.example.app")
+
+    assert result == {
+        "success": True,
+        "message": "App proxy removed for com.example.app",
+        "package": "com.example.app",
+        "scope": "one",
+    }
+    assert fake.disable_calls == ["com.example.app"]
+    assert "com.example.app" not in session_control._app_proxy_owner_by_package
+
+
+def test_disable_app_proxy_named_package_idempotent_when_not_proxied(monkeypatch):
+    fake = _FakeFocusManager(lanes={})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+
+    result = session_control.disable_app_proxy(package="com.example.app")
+
+    assert result["success"] is True
+    assert result["scope"] == "one"
+
+
+def test_disable_app_proxy_default_scope_only_frees_callers_own_lanes(monkeypatch):
+    """Regression: two packages enabled under two different simulated owner
+    contexts -- an unscoped disable_app_proxy(package=None) call made under
+    owner A must only free A's lane; B's lane must survive untouched.
+    """
+    fake = _FakeFocusManager(lanes={"com.a.app": "ours", "com.b.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.a.app"] = "owner-A"
+    session_control._app_proxy_owner_by_package["com.b.app"] = "owner-B"
+
+    with _as_owner("owner-A"):
+        result = session_control.disable_app_proxy()
+
+    assert result["scope"] == "own"
+    assert result["package"] is None
+    assert result["freed"] == ["com.a.app"]
+    assert fake.disable_calls == ["com.a.app"]
+    assert fake.app_proxies() == {"com.b.app": "ours"}
+    assert "com.a.app" not in session_control._app_proxy_owner_by_package
+    assert session_control._app_proxy_owner_by_package["com.b.app"] == "owner-B"
+
+
+def test_disable_app_proxy_force_frees_everything_regardless_of_owner(monkeypatch):
+    fake = _FakeFocusManager(lanes={"com.a.app": "ours", "com.b.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.a.app"] = "owner-A"
+    session_control._app_proxy_owner_by_package["com.b.app"] = "owner-B"
+
+    with _as_owner("owner-A"):
+        result = session_control.disable_app_proxy(force=True)
+
+    assert result["scope"] == "all"
+    assert result["package"] is None
+    assert fake.disable_calls == [None]
+    assert fake.app_proxies() == {}
+    assert session_control._app_proxy_owner_by_package == {}
+
+
+def test_disable_app_proxy_no_owner_context_falls_back_to_blanket(monkeypatch):
+    fake = _FakeFocusManager(lanes={"com.a.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.a.app"] = "owner-A"
+
+    # No _as_owner context -- _current_owner_id.get() is None here, so even
+    # though force=False, there is no owner to scope the teardown to.
+    result = session_control.disable_app_proxy()
+
+    assert result["scope"] == "all"
+    assert fake.disable_calls == [None]
+    assert fake.app_proxies() == {}
+    assert session_control._app_proxy_owner_by_package == {}
+
+
+def test_disable_app_proxy_never_touches_tui_created_lane(monkeypatch):
+    """A lane present in FocusManager but absent from
+    _app_proxy_owner_by_package (simulating a TUI-created lane) must survive
+    an unscoped disable_app_proxy(package=None) call.
+    """
+    fake = _FakeFocusManager(lanes={"com.owned.app": "ours", "com.tui.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    session_control._app_proxy_owner_by_package["com.owned.app"] = "owner-A"
+    # com.tui.app deliberately has no ownership entry.
+
+    with _as_owner("owner-A"):
+        result = session_control.disable_app_proxy()
+
+    assert result["scope"] == "own"
+    assert result["freed"] == ["com.owned.app"]
+    assert fake.disable_calls == ["com.owned.app"]
+    assert fake.app_proxies() == {"com.tui.app": "ours"}
+
+
+def test_disable_app_proxy_own_scope_with_no_owned_lanes_is_a_benign_no_op(
+    monkeypatch,
+):
+    fake = _FakeFocusManager(lanes={"com.tui.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    # No ownership entries at all -- everything live is TUI/foreign-owned.
+
+    with _as_owner("owner-A"):
+        result = session_control.disable_app_proxy()
+
+    assert result["success"] is True
+    assert result["scope"] == "own"
+    assert result["freed"] == []
+    assert fake.disable_calls == []
+    assert fake.app_proxies() == {"com.tui.app": "ours"}
+
+
+# =============================================================================
+# get_app_proxy_status
+# =============================================================================
+
+
+def test_get_app_proxy_status_shape_and_owned_by_caller(monkeypatch):
+    fake = _FakeFocusManager(
+        lanes={"com.a.app": "ours", "com.b.app": "http://1.2.3.4:8888"}
+    )
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    monkeypatch.setattr(
+        sandroid_config,
+        "get_config",
+        lambda: SimpleNamespace(mitmproxy=SimpleNamespace(focus_lanes=5)),
+    )
+    # com.a.app is owned by the calling owner; com.b.app has no entry at all
+    # (simulating a TUI-created or foreign-owned lane).
+    session_control._app_proxy_owner_by_package["com.a.app"] = "owner-A"
+
+    with _as_owner("owner-A"):
+        result = session_control.get_app_proxy_status()
+
+    assert result == {
+        "active": True,
+        "apps": {
+            "com.a.app": {"target": "ours", "owned_by_caller": True},
+            "com.b.app": {
+                "target": "http://1.2.3.4:8888",
+                "owned_by_caller": False,
+            },
+        },
+        "lanes_used": 2,
+        "lanes_total": 5,
+        "lanes_free": 3,
+    }
+
+
+def test_get_app_proxy_status_empty_when_no_lanes_active(monkeypatch):
+    fake = _FakeFocusManager(lanes={})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    monkeypatch.setattr(
+        sandroid_config,
+        "get_config",
+        lambda: SimpleNamespace(mitmproxy=SimpleNamespace(focus_lanes=5)),
+    )
+
+    result = session_control.get_app_proxy_status()
+
+    assert result == {
+        "active": False,
+        "apps": {},
+        "lanes_used": 0,
+        "lanes_total": 5,
+        "lanes_free": 5,
+    }
+
+
+def test_get_app_proxy_status_owned_by_caller_false_with_no_owner_context(
+    monkeypatch,
+):
+    """A lane recorded as owned by some owner must report
+    owned_by_caller=False when THIS call has no owner context at all --
+    None must never spuriously match an absent/foreign ownership entry.
+    """
+    fake = _FakeFocusManager(lanes={"com.a.app": "ours"})
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake)
+    monkeypatch.setattr(
+        sandroid_config,
+        "get_config",
+        lambda: SimpleNamespace(mitmproxy=SimpleNamespace(focus_lanes=5)),
+    )
+    # No ownership entry recorded for com.a.app at all.
+
+    result = session_control.get_app_proxy_status()
+
+    assert result["apps"]["com.a.app"]["owned_by_caller"] is False
+
+
+# =============================================================================
+# set_app_proxy_quic_blocking
+# =============================================================================
+
+
+def test_set_app_proxy_quic_blocking_persists_config_before_calling_manager(
+    monkeypatch,
+):
+    """Regression: the config value must already be committed by the time
+    FocusManager.set_quic_blocking() runs, mirroring proxy_modal.py's own
+    commit order -- so lanes enabled after this call also pick it up.
+    """
+    fake_focus_cfg = SimpleNamespace(block_quic=False)
+    fake_cfg = SimpleNamespace(focus=fake_focus_cfg)
+    monkeypatch.setattr(sandroid_config, "get_config", lambda: fake_cfg)
+
+    seen_during_call = {}
+
+    class _OrderCheckingFocusManager:
+        def set_quic_blocking(self, enabled):
+            seen_during_call["enabled_arg"] = enabled
+            seen_during_call["config_value_at_call_time"] = fake_focus_cfg.block_quic
+
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", _OrderCheckingFocusManager)
+
+    result = session_control.set_app_proxy_quic_blocking(True)
+
+    assert result == {"success": True, "enabled": True}
+    assert fake_focus_cfg.block_quic is True
+    assert seen_during_call == {
+        "enabled_arg": True,
+        "config_value_at_call_time": True,
+    }
+
+
+def test_set_app_proxy_quic_blocking_false(monkeypatch):
+    fake_focus_cfg = SimpleNamespace(block_quic=True)
+    fake_cfg = SimpleNamespace(focus=fake_focus_cfg)
+    monkeypatch.setattr(sandroid_config, "get_config", lambda: fake_cfg)
+    fake_manager = _FakeFocusManager()
+    monkeypatch.setattr(proxy_manager, "get_focus_manager", lambda: fake_manager)
+
+    result = session_control.set_app_proxy_quic_blocking(False)
+
+    assert result == {"success": True, "enabled": False}
+    assert fake_focus_cfg.block_quic is False
+    assert fake_manager.quic_calls == [False]

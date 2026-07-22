@@ -1,13 +1,13 @@
 """Frida-server lifecycle, screen-capture/snapshot, and emulator-control tools
 for the AI chat.
 
-Importing this module registers all fifteen tools into the
+Importing this module registers all eighteen tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator).
 
 Three categories:
 
-- ``category="frida"`` (6 tools): ``check_frida_server_status``,
+- ``category="frida"`` (9 tools): ``check_frida_server_status``,
   ``start_frida_server``, ``stop_frida_server``, ``install_frida_server``,
   ``get_running_frida_jobs``, ``check_hook_conflicts`` --
   ``RiskTier.READ_ONLY``/``REVERSIBLE``/``REVERSIBLE``/``CONSEQUENTIAL``/
@@ -17,13 +17,28 @@ Three categories:
   :meth:`sandroid.services.frida_session_service.FridaSessionService.get_frida_manager`.
   ``install_frida_server`` has ``can_remember_choice=False`` -- its risk
   varies with the (optional) ``version`` argument and device state, so an
-  "allow always" choice must not be persisted. The last two,
+  "allow always" choice must not be persisted. The next two,
   ``get_running_frida_jobs``/``check_hook_conflicts``, are thin wraps of
   :meth:`~sandroid.services.frida_session_service.FridaSessionService.get_running_jobs`/
   :meth:`~sandroid.services.frida_session_service.FridaSessionService.check_hook_conflicts`
   -- both already job-manager-null-checked and exception-safe inside the
   service itself, so neither needs the ``_get_frida_manager`` construction
-  guard the first four rely on.
+  guard the first four rely on. The last three,
+  ``start_ssl_unpin``/``stop_ssl_unpin``/``get_ssl_unpin_status`` --
+  ``RiskTier.REVERSIBLE``/``REVERSIBLE``/``READ_ONLY`` respectively --
+  dispatch through
+  :meth:`sandroid.services.mitmproxy_service.MitmproxyService.start_ssl_unpin`/
+  :meth:`~sandroid.services.mitmproxy_service.MitmproxyService.stop_ssl_unpin`/
+  :meth:`~sandroid.services.mitmproxy_service.MitmproxyService.ssl_unpin_is_active`,
+  which forward to the shared
+  :class:`~sandroid.analysis.detection_bypass.BypassService`'s ``"ssl"``
+  category -- the same Frida job-manager machinery the first four tools
+  administer, hence living in this category despite being defined in the
+  mitmproxy service rather than going through ``_get_frida_manager``. No
+  directionless ``toggle_ssl_unpin`` tool is exposed: a bidirectional toggle
+  cannot cleanly declare one static ``resources=``/``releases=`` pair for the
+  arbiter, so directional start/stop mirrors ``start_frida_server``/
+  ``stop_frida_server`` instead.
 - ``category="capture"`` (6 tools): ``take_screenshot``,
   ``start_screen_recording``, ``stop_screen_recording``, ``create_snapshot``,
   ``load_snapshot``, ``list_snapshots`` -- ``RiskTier.READ_ONLY``/
@@ -377,6 +392,128 @@ def check_hook_conflicts(hooks: list[str]) -> dict[str, Any]:
 
     conflicts = get_frida_session_service().check_hook_conflicts(hooks)
     return {"conflicts": conflicts}
+
+
+@sandroid_tool(
+    name="start_ssl_unpin",
+    description=(
+        "Start SSL pinning bypass (SSL unpin) for the current spotlight app "
+        "via a Frida script. Idempotent -- a no-op if already active."
+    ),
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.REVERSIBLE,
+    category="frida",
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
+)
+def start_ssl_unpin() -> dict[str, Any]:
+    """Start SSL pinning bypass for the current spotlight app.
+
+    Real integration point:
+    :meth:`sandroid.services.mitmproxy_service.MitmproxyService.start_ssl_unpin`,
+    which forwards to the shared
+    :class:`~sandroid.analysis.detection_bypass.BypassService` under its
+    ``"ssl"`` category -- the same Frida job-manager machinery
+    :func:`start_frida_server` administers, hence this tool living in the
+    ``"frida"`` category despite being defined on the mitmproxy service.
+    Idempotent: returns success with an "already active" message if a bypass
+    job is already running rather than starting a second one. Never raises.
+
+    ``FRIDA_SERVER`` is claimed here rather than a dedicated SSL-unpin
+    resource: genuine contention exists against another task calling
+    ``stop_frida_server``/``install_frida_server`` concurrently, which could
+    pull the daemon out from under an in-flight attach -- a different hazard
+    than ``BypassService``'s own internal mutation lock, which only
+    serializes concurrent SSL-unpin mutations against each other.
+
+    Returns:
+        ``{"success": bool, "message": str, "target": str | None}`` --
+        ``target`` is the spotlighted app's package name once active, or
+        ``None`` when ``success`` is ``False``.
+    """
+    from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+    service = get_mitmproxy_service()
+    success, message = service.start_ssl_unpin()
+    return {
+        "success": success,
+        "message": message,
+        "target": service.ssl_unpin_target() if success else None,
+    }
+
+
+@sandroid_tool(
+    name="stop_ssl_unpin",
+    description="Stop an active SSL pinning bypass (SSL unpin), if one is running.",
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.REVERSIBLE,
+    category="frida",
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
+    releases=frozenset({ResourceId.FRIDA_SERVER}),
+)
+def stop_ssl_unpin() -> dict[str, Any]:
+    """Stop the active SSL pinning bypass, pre-checking whether one is active.
+
+    Real integration point:
+    :meth:`sandroid.services.mitmproxy_service.MitmproxyService.stop_ssl_unpin`,
+    which forwards to the shared ``BypassService``'s ``"ssl"`` category.
+    ``ssl_unpin_is_active()`` is checked *before* calling ``stop_ssl_unpin()``
+    so "nothing was active" reads as a benign no-op rather than a failure --
+    mirroring :func:`stop_frida_server`'s ``was_running`` guard.
+
+    Returns:
+        ``{"stopped": False, "was_active": False}`` if no bypass was active
+        (``stop_ssl_unpin()`` is never called in this case -- no ``"error"``
+        key).
+        ``{"stopped": False, "was_active": True, "error": str}`` if a bypass
+        was active but the stop call itself raised, or reported failure.
+        ``{"stopped": True, "was_active": True}`` on a confirmed stop.
+    """
+    from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+    service = get_mitmproxy_service()
+    was_active = service.ssl_unpin_is_active()
+    if not was_active:
+        return {"stopped": False, "was_active": False}
+
+    try:
+        stopped = service.stop_ssl_unpin()
+    except Exception as exc:
+        return {"stopped": False, "was_active": True, "error": str(exc)}
+
+    if not stopped:
+        return {
+            "stopped": False,
+            "was_active": True,
+            "error": "SSL pinning bypass stop failed",
+        }
+    return {"stopped": True, "was_active": True}
+
+
+@sandroid_tool(
+    name="get_ssl_unpin_status",
+    description="Check whether SSL pinning bypass (SSL unpin) is currently active.",
+    parameters={"type": "object", "properties": {}, "required": []},
+    risk=RiskTier.READ_ONLY,
+    category="frida",
+)
+def get_ssl_unpin_status() -> dict[str, Any]:
+    """Report SSL unpin's current active state and target app.
+
+    Real integration point:
+    :meth:`sandroid.services.mitmproxy_service.MitmproxyService.ssl_unpin_is_active`/
+    :meth:`~sandroid.services.mitmproxy_service.MitmproxyService.ssl_unpin_target`.
+    Neither raises on its own.
+
+    Returns:
+        ``{"active": bool, "target": str | None}``.
+    """
+    from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+    service = get_mitmproxy_service()
+    return {
+        "active": service.ssl_unpin_is_active(),
+        "target": service.ssl_unpin_target(),
+    }
 
 
 @sandroid_tool(

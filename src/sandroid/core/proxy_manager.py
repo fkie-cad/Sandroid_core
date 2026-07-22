@@ -1562,6 +1562,37 @@ class FocusManager:
                 if pkg
             }
 
+    def app_proxies_nonblocking(self, timeout: float = 0.05) -> dict[str, str] | None:
+        """Best-effort :meth:`app_proxies` read that never blocks the caller.
+
+        ``enable_focus``/``disable_focus``/``set_quic_blocking`` hold
+        ``self._lock`` for their entire (potentially multi-second) body — root
+        probes, binary pushes, listen polling, a device-reachability probe,
+        iptables installs. A plain :meth:`app_proxies` call from a per-turn hot
+        path (the ambient-context builder) would block for however long a
+        concurrent mutation elsewhere takes. This returns ``None`` on lock
+        contention instead of blocking; callers needing a guaranteed read
+        should use :meth:`app_proxies` instead.
+
+        Args:
+            timeout: Max seconds to wait for the lock before giving up.
+
+        Returns:
+            The same ``{package: "ours" | "http://ip:port"}`` shape as
+            :meth:`app_proxies`, or ``None`` if the lock could not be
+            acquired within ``timeout``.
+        """
+        if not self._lock.acquire(timeout=timeout):
+            return None
+        try:
+            return {
+                pkg: self._lane_targets.get(lane, "ours")
+                for lane, pkg in self._lanes.items()
+                if pkg
+            }
+        finally:
+            self._lock.release()
+
     def lane_for(self, package: str) -> int | None:
         """Return the host SOCKS port serving ``package``, or None."""
         with self._lock:
@@ -1798,22 +1829,30 @@ class FocusManager:
                 return False, msg
 
         # Push to the device (rm -f first, then push, then chmod 755 as root).
+        # Goes through Adb.send_adb_command (not a bare `adb` subprocess.run)
+        # so Adb.set_target_device()'s -s <serial> targeting actually applies
+        # here too, matching every other push call-site in this file
+        # (push_cert_to_device, etc.) -- a bare subprocess.run bypassed that
+        # entirely and always failed with "more than one device/emulator"
+        # whenever a second device/emulator was attached, regardless of
+        # which one Sandroid considered active.
+        #
+        # Verified via a follow-up `ls`, not push's own stdout/stderr --
+        # Adb.send_adb_command discards the subprocess's exit code, and
+        # `adb push` can write benign progress text to stderr even on
+        # success, so treating any stderr output as failure would be a false
+        # positive. This mirrors push_cert_to_device's own verify-by-ls
+        # pattern just above.
         dst = self._binary_dst
         try:
             Adb.send_adb_command(
                 f"shell {self._ca._root_cmd(f'rm -f {dst}')}"
             )
-            push_out = subprocess.run(
-                ["adb", "push", cached, dst],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if push_out.returncode != 0:
-                return False, (
-                    "Failed to push gost: "
-                    f"{(push_out.stderr or push_out.stdout or '').strip()}"
-                )
+            Adb.send_adb_command(f"push {cached} {dst}")
+            check_stdout, check_stderr = Adb.send_adb_command(f"shell ls {dst}")
+            if dst not in (check_stdout or ""):
+                detail = check_stderr or check_stdout or "file not found after push"
+                return False, f"Failed to push gost: {detail.strip()}"
             Adb.send_adb_command(
                 f"shell {self._ca._root_cmd(f'chmod 755 {dst}')}"
             )

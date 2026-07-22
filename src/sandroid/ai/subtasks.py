@@ -79,6 +79,12 @@ READ_ONLY_SUBTASK_TOOLS: frozenset[str] = frozenset(
         "get_process_detail",
         "list_services",
         "get_activity_stack",
+        "get_app_proxy_status",
+        "get_ssl_unpin_status",
+        "list_detected_ca_certificates",
+        "check_ca_injection_status",
+        "get_captured_flows",
+        "get_flow_detail",
     }
 )
 

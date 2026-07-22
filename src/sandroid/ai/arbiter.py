@@ -3,12 +3,12 @@
 The async-subtasks feature lets more than one agent turn (the top-level
 orchestrator plus any concurrently running subtasks) reach for the same
 physical device resources -- the device's global HTTP proxy, the mitmproxy
-subprocess, frida-server, the spotlight selection, screen recording, or the
-whole "world" (a snapshot restore / emulator restart that invalidates
-everything). Two turns mutating the same resource at once is a correctness
-hazard, so this module hands out short-lived, owner-scoped *leases* and
-refuses (fail-fast, never blocks) a claim that would collide with a lease
-another owner already holds.
+subprocess, frida-server, the spotlight selection, screen recording, the
+App-Proxy ("Focus") lane pool, or the whole "world" (a snapshot restore /
+emulator restart that invalidates everything). Two turns mutating the same
+resource at once is a correctness hazard, so this module hands out
+short-lived, owner-scoped *leases* and refuses (fail-fast, never blocks) a
+claim that would collide with a lease another owner already holds.
 
 Design notes:
 
@@ -52,6 +52,7 @@ class ResourceId(Enum):
     FRIDA_SERVER = "frida_server"
     SPOTLIGHT = "spotlight"
     SCREEN_RECORDING = "screen_recording"
+    FOCUS = "focus"
     WORLD = "world"
 
 
