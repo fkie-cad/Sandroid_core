@@ -25,7 +25,7 @@ Module Architecture
 -------------------
 
 **Analysis Modules (sandroid.analysis)**
-   - Inherit from DataGather base class
+   - Inherit from DataGatherBase base class
    - Follow consistent interface pattern
    - Modular and extensible design
 

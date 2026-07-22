@@ -2,15 +2,24 @@
 
 Each completed Play produces a :class:`RunRecord` — the full, un-flattened
 Changed/New/Deleted results (see ``analysis/changedfiles.py``'s native
-``{file: [diff_lines]} | str`` shape) plus label/timing metadata. Records are
-persisted as one JSON file per run under ``RESULTS_PATH/runs/``, alongside a
-lightweight ``index.json`` used for cheap rail rendering (label/timestamps/
-counts only — never the full diff text).
+``{file: [diff_lines]} | str`` shape) plus label/timing metadata. Each run
+owns a *bundle directory* holding its manifest, the recording that produced
+it, and the raw pull tree the diff engine wrote (see ``core/run_bundle.py``);
+this module persists the manifest and a lightweight ``index.json`` used for
+cheap rail rendering (label/timestamps/counts only — never the full diff
+text).
 
-Storage layout::
+Storage layout (schema v2)::
 
-    RESULTS_PATH/runs/run_<run_id>.json   # one full RunRecord per Play
-    RESULTS_PATH/runs/index.json          # [{run_id, label, ...}, ...]
+    <results_path>/runs/<run_id>/run.json   # one full RunRecord per Play
+    <results_path>/runs/<run_id>/...        # recording.txt + raw/ (run_bundle)
+    <results_path>/runs/index.json          # [{run_id, label, ...}, ...]
+
+The storage root ``<results_path>`` is resolved config-first from
+``get_config().paths.results_path`` (§11) so the bundle location is stable and
+independent of the per-run ``RAW_RESULTS_PATH``/``RESULTS_PATH`` env pinning
+the analysis engine does mid-run; the ``RESULTS_PATH`` env var and
+``./results/`` are used only as fallbacks.
 
 Atomicity: ``save_run`` writes the run file *first*, then atomically replaces
 ``index.json`` (temp file in the same directory + ``os.replace``). A crash
@@ -20,20 +29,22 @@ missing run. Every JSON write in this module goes through the same
 ``_atomic_write_json`` helper for that reason.
 
 Corruption safety: a missing ``index.json`` is rebuilt by scanning
-``runs/run_*.json``; any individual run file that fails to parse is skipped
-with a logged warning rather than aborting the whole rebuild.
+``runs/*/run.json`` (with a one-time fallback scan of the pre-v2 flat
+``runs/run_*.json`` layout so old runs still appear); any individual run file
+that fails to parse is skipped with a logged warning rather than aborting the
+whole rebuild.
 
 Device scoping: every record carries ``device_name``, and every reader here
-accepts an optional ``device_name`` filter. Runs from every device live in
-the same ``runs/`` directory (one file-per-run, not one-directory-per-device
-— simpler on disk), but callers scope reads/writes by the *currently active*
-device so switching devices mid-session shows that device's own history
-rather than a mixed list.
+accepts an optional ``device_name`` filter. Runs from every device live under
+the same ``runs/`` directory (one directory-per-run), but callers scope reads/
+writes by the *currently active* device so switching devices mid-session shows
+that device's own history rather than a mixed list.
 
 No auto-eviction: runs are kept forever unless explicitly removed via
-``delete_run``/``clear_all``. ``is_run_count_high`` is a cheap soft-warning
-flag (past ``RUN_COUNT_WARNING_THRESHOLD``) for callers that want to nudge
-the user toward pruning — this module never deletes anything on its own.
+``delete_run``/``clear_all`` (each ``rmtree``s the whole ``<run_id>/`` bundle).
+``is_run_count_high`` is a cheap soft-warning flag (past
+``RUN_COUNT_WARNING_THRESHOLD``) for callers that want to nudge the user toward
+pruning — this module never deletes anything on its own.
 """
 
 from __future__ import annotations
@@ -42,6 +53,7 @@ import dataclasses
 import json
 import logging
 import os
+import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -51,7 +63,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 #: Bumped whenever RunRecord's on-disk shape changes incompatibly.
-SCHEMA_VERSION = 1
+#: v2: per-run bundle directories (``runs/<id>/run.json`` + ``recording.txt`` +
+#: ``raw/``) replacing the flat ``runs/run_<id>.json`` layout; ``RunRecord``
+#: gains ``bundle_dir`` and ``recording_path`` is now the absolute in-bundle
+#: copy.
+SCHEMA_VERSION = 2
 
 #: Soft warning threshold — the UI may show a "consider pruning" banner past
 #: this; this module itself never evicts anything automatically.
@@ -73,6 +89,13 @@ class RunRecord:
     threads all the way through, instead of the old
     ``_extract_file_names()``/``_flatten_file_list()`` that discarded the
     diff text.
+
+    ``recording_path`` is the absolute path of the recording *inside the run
+    bundle* (``run_bundle.import_recording`` copies the live recording there
+    at run start), and ``bundle_dir`` is the absolute bundle root
+    (``<results_path>/runs/<run_id>/``). ``bundle_dir`` defaults to ``""`` so
+    pre-v2 records (which lack it) still load via :meth:`from_dict` instead of
+    being treated as corrupt.
     """
 
     schema_version: int
@@ -83,6 +106,7 @@ class RunRecord:
     device_name: str
     recording_path: str
     duration: int
+    bundle_dir: str = ""
     error: str | None = None
     changed_files: Any = field(default_factory=list)
     new_files: list[str] = field(default_factory=list)
@@ -118,7 +142,30 @@ def new_run_id() -> str:
 
 
 def _results_path() -> Path:
-    return Path(os.environ.get("RESULTS_PATH", "./results/")).expanduser()
+    """Resolve the run-storage root directory, config-first.
+
+    Order (§11): the configured ``paths.results_path`` — the source of truth
+    that keeps the bundle location stable and independent of the analysis
+    engine's per-run ``RESULTS_PATH`` env pinning — then the ``RESULTS_PATH``
+    env var, then ``./results/``. A config-load failure degrades gracefully to
+    the env/default path so a broken config never crashes run-history reads.
+
+    ``run_bundle`` shares this helper so manifests and bundle directories
+    always resolve to the same root.
+    """
+    try:
+        from sandroid.config import get_config
+
+        configured = get_config().paths.results_path
+    except Exception as exc:  # config unavailable/broken -> fall back below
+        logger.debug("run_history: config results_path unavailable (%s)", exc)
+        configured = None
+    if configured:
+        return Path(configured).expanduser()
+    env_value = os.environ.get("RESULTS_PATH")
+    if env_value:
+        return Path(env_value).expanduser()
+    return Path("./results/").expanduser()
 
 
 def _runs_dir() -> Path:
@@ -127,8 +174,18 @@ def _runs_dir() -> Path:
     return directory
 
 
-def _run_file(run_id: str) -> Path:
+def _bundle_dir(run_id: str) -> Path:
+    """Absolute bundle directory for a run (``runs/<run_id>/``)."""
+    return _runs_dir() / run_id
+
+
+def _legacy_run_file(run_id: str) -> Path:
+    """Pre-v2 flat run-file path (``runs/run_<run_id>.json``)."""
     return _runs_dir() / f"run_{run_id}.json"
+
+
+def _run_file(run_id: str) -> Path:
+    return _bundle_dir(run_id) / "run.json"
 
 
 def _index_file() -> Path:
@@ -138,10 +195,13 @@ def _index_file() -> Path:
 def _atomic_write_json(path: Path, data: Any) -> None:
     """Write ``data`` as JSON to ``path`` atomically.
 
-    Writes to a temp file in the *same* directory (so ``os.replace`` is a
-    same-filesystem rename, never a cross-device copy) then replaces the
-    real file in one step — a crash mid-write leaves the original untouched.
+    Ensures the parent directory exists (per-run bundle dirs are created
+    on first manifest write), then writes to a temp file in the *same*
+    directory (so ``os.replace`` is a same-filesystem rename, never a
+    cross-device copy) and replaces the real file in one step — a crash
+    mid-write leaves the original untouched.
     """
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:8]}")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
@@ -184,23 +244,46 @@ def _read_index_raw() -> list[dict[str, Any]] | None:
         return None
 
 
-def _rebuild_index() -> list[dict[str, Any]]:
-    """Scan ``runs/run_*.json`` and rebuild the index from scratch.
+def _safe_load_record(path: Path) -> RunRecord | None:
+    """Parse one run file, returning ``None`` (with a warning) if corrupt.
 
     A run file that fails to parse (truncated write, hand-edited garbage) is
-    skipped with a warning — one bad file must never take down the whole
-    rail.
+    skipped rather than aborting a bulk rebuild — one bad file must never take
+    down the whole rail.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return RunRecord.from_dict(data)
+    except Exception as exc:
+        logger.warning("run_history: skipping corrupt run file %s: %s", path, exc)
+        return None
+
+
+def _rebuild_index() -> list[dict[str, Any]]:
+    """Scan the ``runs/`` tree and rebuild the index from scratch.
+
+    Globs the v2 layout (``runs/<id>/run.json``) first, then does a one-time
+    fallback scan of the pre-v2 flat layout (``runs/run_*.json``) so runs
+    written before the bundle migration still appear in the rail. A run whose
+    id was already seen in the v2 pass wins over any stale flat file.
     """
     entries: list[dict[str, Any]] = []
-    for path in sorted(_runs_dir().glob("run_*.json")):
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            record = RunRecord.from_dict(data)
-        except Exception as exc:
-            logger.warning("run_history: skipping corrupt run file %s: %s", path, exc)
-            continue
+    seen_ids: set[str] = set()
+
+    def _collect(path: Path) -> None:
+        record = _safe_load_record(path)
+        if record is None or record.run_id in seen_ids:
+            return
+        seen_ids.add(record.run_id)
         entries.append(_summary_from_record(record))
+
+    for path in sorted(_runs_dir().glob("*/run.json")):
+        _collect(path)
+    # Legacy fallback: pre-v2 flat run files (one-time until re-saved).
+    for path in sorted(_runs_dir().glob("run_*.json")):
+        _collect(path)
+
     try:
         _atomic_write_json(
             _index_file(), {"schema_version": SCHEMA_VERSION, "runs": entries}
@@ -281,12 +364,31 @@ def update_label(run_id: str, label: str) -> RunRecord:
     return record
 
 
-def delete_run(run_id: str) -> None:
-    """Remove one run's on-disk file and its index entry."""
+def _remove_run_storage(run_id: str) -> None:
+    """Delete a run's whole bundle dir (v2) plus any pre-v2 flat file.
+
+    Each removal is guarded so a missing dir/file is a no-op, and a failure
+    to remove one form never blocks the other or the index update.
+    """
+    bundle = _bundle_dir(run_id)
     try:
-        _run_file(run_id).unlink(missing_ok=True)
+        if bundle.exists():
+            shutil.rmtree(bundle)
     except Exception as exc:
-        logger.warning("run_history: could not remove run file for %s: %s", run_id, exc)
+        logger.warning(
+            "run_history: could not remove bundle dir for %s: %s", run_id, exc
+        )
+    try:
+        _legacy_run_file(run_id).unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning(
+            "run_history: could not remove legacy run file for %s: %s", run_id, exc
+        )
+
+
+def delete_run(run_id: str) -> None:
+    """Remove one run's whole on-disk bundle and its index entry."""
+    _remove_run_storage(run_id)
     entries = _load_all_index_entries()
     entries = [e for e in entries if e.get("run_id") != run_id]
     _atomic_write_json(
@@ -307,12 +409,7 @@ def clear_all(device_name: str | None = None) -> None:
             continue
         run_id = entry.get("run_id")
         if run_id:
-            try:
-                _run_file(run_id).unlink(missing_ok=True)
-            except Exception as exc:
-                logger.warning(
-                    "run_history: could not remove run file for %s: %s", run_id, exc
-                )
+            _remove_run_storage(run_id)
     _atomic_write_json(_index_file(), {"schema_version": SCHEMA_VERSION, "runs": keep})
 
 

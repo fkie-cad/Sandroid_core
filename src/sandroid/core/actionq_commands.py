@@ -19,7 +19,7 @@ Return:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from sandroid.commands import CommandRegistry, CommandResult
@@ -162,7 +162,9 @@ def get_command_registry() -> CommandRegistry:
     return registry
 
 
-def execute_command_from_actionq(action_queue: ActionQ, char: str) -> CommandResult:
+def execute_command_from_actionq(
+    action_queue: ActionQ, char: str, app: Any | None = None
+) -> CommandResult:
     """Execute a command from ActionQ context.
 
     This function bridges ActionQ's parse_interactive_char method with
@@ -173,6 +175,10 @@ def execute_command_from_actionq(action_queue: ActionQ, char: str) -> CommandRes
     Args:
         action_queue: The ActionQ instance managing the analysis queue
         char: The character/key pressed by the user
+        app: Optional reference to the running ``SandroidTUI`` app instance
+            (passed through to the built ``CommandContext``). Only the TUI's
+            live worker-thread dispatch (``MainScreen._execute_action_sync``)
+            has one to pass.
 
     Returns:
         CommandResult containing:
@@ -207,7 +213,7 @@ def execute_command_from_actionq(action_queue: ActionQ, char: str) -> CommandRes
             )
 
         # Create context from ActionQ
-        context = create_context_from_actionq(action_queue)
+        context = create_context_from_actionq(action_queue, app=app)
 
         # Execute the command synchronously (ActionQ is not async)
         result = registry.execute_sync(char, context)

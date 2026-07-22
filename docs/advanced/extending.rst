@@ -10,11 +10,11 @@ Create reusable extensions for Sandroid:
 
 .. code-block:: python
 
-   from sandroid.analysis.datagather import DataGather
+   from sandroid.analysis.base_di import DataGatherBase
 
-   class MyPlugin(DataGather):
-       def __init__(self, config=None):
-           super().__init__()
+   class MyPlugin(DataGatherBase):
+       def __init__(self, config=None, **kwargs):
+           super().__init__(**kwargs)
            self.config = config or {}
 
        def gather(self):

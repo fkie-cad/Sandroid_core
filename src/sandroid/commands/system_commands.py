@@ -19,31 +19,23 @@ class QuitCommand(CommandHandler):
     async def execute(self, ctx: CommandContext) -> CommandResult:
         """Signal the application to exit.
 
-        Sets the action_queue.finished flag to True, which signals
-        the main loop to terminate gracefully.
+        The legacy ``do_next`` loop that read ``action_queue.finished`` is gone;
+        actual quitting is owned by the TUI (``app.action_quit`` / the ``q``
+        binding). This handler just reports the intent via ``data``.
 
         Args:
-            ctx: Command context with access to action_queue
+            ctx: Command context
 
         Returns:
             CommandResult indicating the quit was initiated
         """
         logger.info("Quit command executed - signaling application exit")
 
-        if ctx.action_queue is not None:
-            ctx.action_queue.finished = True
-            return CommandResult(
-                success=True,
-                message="Exiting application...",
-                data={"action": "quit"},
-                should_return_to_menu=False,
-            )
-        logger.warning("No action_queue available in context")
         return CommandResult(
-            success=False,
-            message="Could not signal quit - no action queue available",
-            error="action_queue is None",
-            should_return_to_menu=True,
+            success=True,
+            message="Exiting application...",
+            data={"action": "quit"},
+            should_return_to_menu=False,
         )
 
 

@@ -42,10 +42,6 @@ Sandroid launches in the Textual TUI by default, providing a modern terminal use
 
 Use ``TAB`` to switch between views and single-key shortcuts to execute commands.
 
-For the legacy Rich interactive menu, use::
-
-   sandroid -i
-
 First Analysis - Recording User Actions
 ---------------------------------------
 

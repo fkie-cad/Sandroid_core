@@ -472,6 +472,24 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-switch",
             )
 
+        # Results Path (§11 configurable data-storage root). Run bundles
+        # (runs/<id>/) live under this directory; run_history/run_bundle
+        # resolve their storage root from get_config().paths.results_path, so
+        # saving here (SettingsController.save -> reset_config_cache) moves
+        # future Record->Play runs to the new root on the next get_config().
+        with Horizontal(classes="setting-row"):
+            yield Label("Results Path:", classes="setting-label")
+            yield Input(
+                value=str(config.paths.results_path),
+                id="setting-paths--results_path",
+                classes="setting-input",
+            )
+        yield Static(
+            "[dim]Root directory for analysis results and Record->Play run "
+            "bundles. Takes effect on the next run after Save.[/dim]",
+            classes="setting-help",
+        )
+
     def _compose_network_tab(self, config: SandroidConfig) -> ComposeResult:
         """Compose the Network & Frida settings tab."""
         yield Static("Frida", classes="section-header")

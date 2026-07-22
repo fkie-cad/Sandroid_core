@@ -134,6 +134,12 @@ class CommandContext:
         is_tui_mode: Whether running in TUI mode
         action_queue: Reference to ActionQ for queue management
         logger: Logger instance
+        app: Reference to the running ``SandroidTUI`` app instance, if reachable.
+            Only populated on the TUI's live worker-thread key-dispatch path
+            (``MainScreen._execute_action_sync``); headless/API/test contexts
+            leave this ``None``. A handful of commands (recorder/player/
+            trigdroid) use it to drive the real ``action_*`` methods via
+            ``app.call_from_thread`` instead of returning an inert message.
     """
 
     # Services (new architecture)
@@ -150,6 +156,9 @@ class CommandContext:
     # Runtime state
     is_tui_mode: bool = False
     action_queue: Any | None = None  # ActionQ instance
+    app: Any | None = (
+        None  # SandroidTUI instance, only set on the TUI's live dispatch path
+    )
 
     # Helpers
     logger: Any | None = None

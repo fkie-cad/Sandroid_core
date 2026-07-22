@@ -13,15 +13,34 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Button, Checkbox, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, Static
 
 from sandroid.core.toolbox import Toolbox
 from sandroid.services import get_task_service
-from sandroid.tui.modals.base import ExtractionModal, KeyHintFooter
+from sandroid.tui.modals.base import ExtractionModal, ForensicModal, KeyHintFooter
 from sandroid.tui.utils.recording_wrapper import RecordingWrapper
 
 if TYPE_CHECKING:
     from textual.timer import Timer
+
+
+@dataclass
+class RecordSettings:
+    """The Record-settings form's captured values (idea B combined form).
+
+    Dismissed from :class:`RecordSettingsModal` and forwarded live to the
+    controller via ``on_settings_chosen``; also folded into the final
+    :class:`RecordingResult` at Stop time.
+
+    Attributes:
+        label: Run name (kept as the auto-generated default if left blank).
+        number_of_runs: Number of playback replays to perform.
+        noise_filter: Whether the dry-run noise-subtraction pass runs.
+    """
+
+    label: str
+    number_of_runs: int
+    noise_filter: bool
 
 
 @dataclass
@@ -34,10 +53,140 @@ class RecordingResult:
     event_count: int = 0
     output_file: str = ""
     #: The label chosen (or kept as the auto-generated default) via the
-    #: "Label this run" prompt shown right after recording starts. Seeds
-    #: RecordingController's ``_current_recording_label`` for every
+    #: combined Record-settings form shown right after recording starts.
+    #: Seeds RecordingController's ``_current_recording_label`` for every
     #: subsequent Play of this recording.
     label: str = ""
+    #: Number of playback replays chosen in the Record-settings form. Drives
+    #: the auto-chained playback (and every later manual Play of this
+    #: recording) via ``RunConfig.for_playback(number_of_runs=...)``.
+    number_of_runs: int = 2
+    #: Whether the dry-run noise-subtraction pass runs during playback.
+    #: Maps to ``RunConfig.for_playback(noise_filter=...)``.
+    noise_filter: bool = True
+
+
+class RecordSettingsModal(ForensicModal[RecordSettings]):
+    """Combined Record-settings form (idea B): name + replays + dry-run.
+
+    Replaces the old single-field "Label this run" prompt. Shown
+    non-blockingly right after recording starts (recording captures *device*
+    interaction, so a stacked form blocks nothing time-sensitive), it collects
+    the three things the auto-chained playback needs. Modelled on
+    :class:`~sandroid.tui.modals.export_modal.ExportModal`'s Checkbox+Input
+    layout. Dismisses with a :class:`RecordSettings`, or ``None`` on cancel
+    (the caller keeps its defaults).
+    """
+
+    DEFAULT_CSS = """
+    RecordSettingsModal .modal-container {
+        width: 64;
+    }
+
+    RecordSettingsModal .rs-field-label {
+        color: $foreground-muted;
+        padding-top: 1;
+    }
+
+    RecordSettingsModal #rs-dryrun-row {
+        width: 100%;
+        height: auto;
+        padding: 1 0;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        default_label: str = "",
+        default_number_of_runs: int = 2,
+        default_noise_filter: bool = True,
+        name: str = None,
+        id: str = None,
+        classes: str = None,
+    ) -> None:
+        """Initialize the Record-settings form.
+
+        Args:
+            default_label: Auto-generated default run name (kept if left blank).
+            default_number_of_runs: Default number of playback replays.
+            default_noise_filter: Default dry-run noise-filter state.
+        """
+        super().__init__(name=name, id=id, classes=classes)
+        self._default_label = default_label
+        self._default_number_of_runs = default_number_of_runs
+        self._default_noise_filter = default_noise_filter
+
+    def compose(self) -> ComposeResult:
+        """Create the settings form layout."""
+        with Vertical(classes="modal-container"):
+            yield Label("Record settings", classes="modal-title")
+            yield Label(
+                "Recording is running — these apply when you Stop.",
+                classes="modal-message",
+            )
+            yield Label("Run name:", classes="rs-field-label")
+            yield Input(
+                value=self._default_label,
+                placeholder=self._default_label or "run label",
+                id="rs-name-input",
+            )
+            yield Label("Number of replays:", classes="rs-field-label")
+            yield Input(
+                value=str(self._default_number_of_runs),
+                type="integer",
+                id="rs-runs-input",
+            )
+            with Horizontal(id="rs-dryrun-row"):
+                yield Checkbox(
+                    "Dry-run noise filter",
+                    value=self._default_noise_filter,
+                    id="rs-dryrun",
+                )
+            with Horizontal(classes="button-row"):
+                yield Button("Save", id="rs-save", classes="-primary")
+                yield Button("Cancel", id="rs-cancel", classes="-secondary")
+            yield KeyHintFooter()
+
+    def on_mount(self) -> None:
+        """Focus the name input on mount."""
+        super().on_mount()
+        try:
+            self.query_one("#rs-name-input", Input).focus()
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle Save/Cancel."""
+        if event.button.id == "rs-save":
+            self._submit()
+        elif event.button.id == "rs-cancel":
+            self.action_cancel()
+
+    def _submit(self) -> None:
+        """Read the fields and dismiss with a :class:`RecordSettings`."""
+        try:
+            name = self.query_one("#rs-name-input", Input).value.strip()
+            runs_raw = self.query_one("#rs-runs-input", Input).value.strip()
+            noise = self.query_one("#rs-dryrun", Checkbox).value
+        except Exception:
+            self._dismiss_with_refresh(None)
+            return
+
+        label = name or self._default_label
+        try:
+            number_of_runs = int(runs_raw)
+        except (TypeError, ValueError):
+            number_of_runs = self._default_number_of_runs
+        number_of_runs = max(1, number_of_runs)
+
+        self._dismiss_with_refresh(
+            RecordSettings(
+                label=label,
+                number_of_runs=number_of_runs,
+                noise_filter=bool(noise),
+            )
+        )
 
 
 class RecordingModal(ExtractionModal[RecordingResult]):
@@ -164,7 +313,9 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         classes: str = None,
         auto_start: bool = False,
         default_label: str = "",
-        on_label_chosen: Callable[[str], None] | None = None,
+        default_number_of_runs: int = 2,
+        default_noise_filter: bool = True,
+        on_settings_chosen: Callable[[str, int, bool], None] | None = None,
     ):
         """Initialize the recording modal.
 
@@ -174,11 +325,17 @@ class RecordingModal(ExtractionModal[RecordingResult]):
                 by ``RecordingController.start_recording()`` so pressing
                 Record starts the device capture with no extra step.
             default_label: Auto-generated default name (e.g.
-                ``"Run 3 · 14:22"``) shown as the label prompt's placeholder.
-            on_label_chosen: Called with the final label (custom or the
-                default) the moment the non-blocking "Label this run" prompt
-                is dismissed — fires well before Stop/dismiss, since
-                recording is device-driven and unaffected by a stacked modal.
+                ``"Run 3 · 14:22"``) shown as the settings form's placeholder.
+            default_number_of_runs: Default number of playback replays shown
+                in the combined Record-settings form.
+            default_noise_filter: Default dry-run noise-filter state shown in
+                the combined Record-settings form.
+            on_settings_chosen: Called with ``(label, number_of_runs,
+                noise_filter)`` the moment the non-blocking combined
+                Record-settings form is dismissed — fires well before
+                Stop/dismiss, since recording is device-driven and unaffected
+                by a stacked modal, so the controller can seed every
+                subsequent manual Play of this recording.
         """
         super().__init__(name=name, id=id, classes=classes)
         self._wrapper: RecordingWrapper | None = None
@@ -191,8 +348,12 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self._auto_start = auto_start
         self._default_label = default_label
         self._chosen_label = default_label
-        self._on_label_chosen = on_label_chosen
-        self._label_prompted = False
+        self._default_number_of_runs = default_number_of_runs
+        self._default_noise_filter = default_noise_filter
+        self._number_of_runs = default_number_of_runs
+        self._noise_filter = default_noise_filter
+        self._on_settings_chosen = on_settings_chosen
+        self._settings_prompted = False
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -236,8 +397,9 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             pass
         if self._auto_start and not self.is_recording:
             # Pressing Record starts device capture immediately — no extra
-            # "press Start" step. _start_recording() itself prompts for the
-            # run label right after (see its docstring / class docstring).
+            # "press Start" step. _start_recording() itself pops the combined
+            # Record-settings form right after (see its docstring / class
+            # docstring).
             self._start_recording()
 
     def watch_is_recording(self, recording: bool) -> None:
@@ -366,40 +528,48 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self.event_count = 0
 
         # Non-blocking: recording is already running in the background
-        # (RecordingWrapper is device-driven), so stacking this prompt on
+        # (RecordingWrapper is device-driven), so stacking this form on
         # top right now costs nothing time-sensitive.
-        self._prompt_label()
+        self._prompt_settings()
 
-    def _prompt_label(self) -> None:
-        """Pop the (non-blocking) "Label this run" prompt.
+    def _prompt_settings(self) -> None:
+        """Pop the (non-blocking) combined Record-settings form (idea B).
 
-        Only ever shown once per recording session. The chosen label (or the
-        auto-generated default, kept on Esc/blank) is cached on
-        ``self._chosen_label`` and forwarded live via ``on_label_chosen`` —
-        see ``RecordingController.start_recording()`` for why the label
-        needs to seed future Plays before this whole modal even dismisses.
+        Only ever shown once per recording session. The chosen name (or the
+        auto-generated default, kept on Esc/blank), replay count and dry-run
+        flag are cached on ``self`` and forwarded live via
+        ``on_settings_chosen`` — see ``RecordingController.start_recording()``
+        for why they need to seed future Plays before this whole modal even
+        dismisses.
         """
-        if self._label_prompted:
+        if self._settings_prompted:
             return
-        self._label_prompted = True
-        from sandroid.tui.modals.input_modal import InputModal
+        self._settings_prompted = True
 
-        def on_result(value: str | None) -> None:
-            label = value.strip() if value else ""
-            if not label:
+        def on_result(settings: RecordSettings | None) -> None:
+            if settings is None:
+                # Cancelled — keep the auto-generated defaults untouched.
                 label = self._default_label
+                number_of_runs = self._default_number_of_runs
+                noise_filter = self._default_noise_filter
+            else:
+                label = settings.label or self._default_label
+                number_of_runs = settings.number_of_runs
+                noise_filter = settings.noise_filter
             self._chosen_label = label
-            if self._on_label_chosen:
+            self._number_of_runs = number_of_runs
+            self._noise_filter = noise_filter
+            if self._on_settings_chosen:
                 try:
-                    self._on_label_chosen(label)
+                    self._on_settings_chosen(label, number_of_runs, noise_filter)
                 except Exception:
                     pass
 
         self.app.push_screen(
-            InputModal(
-                title="Label this run",
-                message="Seeds the default label for every Play of this recording.",
-                placeholder=self._default_label or "run label",
+            RecordSettingsModal(
+                default_label=self._default_label,
+                default_number_of_runs=self._default_number_of_runs,
+                default_noise_filter=self._default_noise_filter,
             ),
             on_result,
         )
@@ -433,6 +603,8 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             event_count=event_count,
             output_file=self._output_file,
             label=self._chosen_label,
+            number_of_runs=self._number_of_runs,
+            noise_filter=self._noise_filter,
         )
         self._dismiss_with_refresh(result)
 

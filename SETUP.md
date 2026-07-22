@@ -296,25 +296,6 @@ sandroid-config init --skip-avd-setup
 
 ## 🔧 Advanced Setup
 
-### Legacy Installation Method (Still Supported)
-
-For users who prefer the original installation method:
-
-```bash
-# Clone the repository
-git clone https://github.com/fkie-cad/Sandroid_core.git
-cd Sandroid_core
-
-# Install system dependencies
-./install-requirements.sh
-
-# Install Python dependencies manually
-pip install -r docker/requirements.txt
-
-# Use the legacy CLI directly
-./sandroid.legacy
-```
-
 ### Docker Deployment
 
 For containerized environments:
