@@ -170,7 +170,12 @@ def install_apk(apk_path: str) -> dict[str, Any]:
 
 @sandroid_tool(
     name="uninstall_apk",
-    description="Uninstall a package from the device.",
+    description=(
+        "Uninstall a package from the device by its package name. "
+        "Removes the app and its data; a no-op (reported as success) if "
+        "the package is not installed. Requires package_name explicitly -- "
+        "there is no spotlight-app fallback for this destructive action."
+    ),
     parameters={
         "type": "object",
         "properties": {
