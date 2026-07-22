@@ -605,6 +605,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         placeholder="mitmproxy (default) — or http://host:port",
                         id=f"app-target-{idx}",
                         classes="app-proxy-target",
+                        compact=True,
                     )
                 )
                 controls.mount(

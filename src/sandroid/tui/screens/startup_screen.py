@@ -42,7 +42,8 @@ class StartupScreen(Screen):
     }
 
     #startup-logo {
-        text-align: center;
+        text-align: left;
+        content-align-horizontal: center;
         color: $success;
         margin-bottom: 1;
     }

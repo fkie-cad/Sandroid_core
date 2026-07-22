@@ -122,6 +122,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         width: 1fr;
         background: $panel;
         border: solid $foreground-muted;
+        margin: 0;
     }
 
     MonitorConfigModal .path-input:focus {
@@ -136,6 +137,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         width: 5;
         min-width: 5;
         margin-left: 1;
+        margin-top: 1;
         background: $panel;
         color: $error;
     }
@@ -301,7 +303,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         path_input = Input(
             value=value,
             placeholder="/data/data/com.example.app or /sdcard/",
-            classes="path-input",
+            classes="path-input no-compact",
         )
         remove_btn = Button("−", classes="path-remove")
         if not self._effective_kprobe:
@@ -339,7 +341,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 yield Label("Monitoring Mode:", id="mode-label")
                 # Only show RadioSet if we have both options available
                 if self._spotlight_pid:
-                    with RadioSet(id="mode-select"):
+                    with RadioSet(id="mode-select", classes="no-compact"):
                         yield RadioButton(
                             f"Monitor by PID ({self._spotlight_pid})",
                             id="mode-pid",

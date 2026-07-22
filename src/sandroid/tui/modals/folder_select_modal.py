@@ -118,6 +118,7 @@ class FolderSelectModal(ExtractionModal[FolderSelectResult]):
                 value=self.default_path,
                 placeholder="e.g., ./results/forensic_apks/",
                 id="folder-input",
+                classes="no-compact",
             )
             yield Label(
                 "[dim]Folder will be created if it doesn't exist[/dim]",

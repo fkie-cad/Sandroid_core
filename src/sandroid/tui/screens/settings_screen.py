@@ -32,6 +32,7 @@ from sandroid.core.adb import Adb
 from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.tui.controllers.settings_controller import SettingsController
 from sandroid.tui.themes import THEME_ORDER, THEMES
+from sandroid.tui.utils import apply_compact_widgets
 
 logger = logging.getLogger(__name__)
 
@@ -787,6 +788,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
     def on_mount(self) -> None:
         """Initialize controller after mount."""
+        apply_compact_widgets(self)
         self._controller = SettingsController(self.app)
         # Hide the custom-version input until the user picks "Custom…"
         try:

@@ -13,6 +13,8 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input
 
+from sandroid.tui.utils import apply_compact_widgets
+
 from .key_hint_footer import KeyHintFooter
 
 if TYPE_CHECKING:
@@ -94,7 +96,7 @@ class SandroidModal(ModalScreen[T], Generic[T]):
       1-line Button baseline:
       (No line-pad here; your Textual version rejects line-pad: 0.)
     */
-    SandroidModal .button-row Button {
+    SandroidModal Button {
         height: 1;
         min-height: 1;
         min-width: 14;
@@ -116,9 +118,9 @@ class SandroidModal(ModalScreen[T], Generic[T]):
       That rule is MORE specific than "SandroidModal Button.-primary",
       so we override it with an even more specific selector.
     */
-    SandroidModal .button-row Button.-style-default.-primary,
-    SandroidModal .button-row Button.-style-default.-primary:hover,
-    SandroidModal .button-row Button.-style-default.-primary:focus {
+    SandroidModal Button.-style-default.-primary,
+    SandroidModal Button.-style-default.-primary:hover,
+    SandroidModal Button.-style-default.-primary:focus {
         border: none;
         padding: 0 1;
         height: 1;
@@ -128,7 +130,7 @@ class SandroidModal(ModalScreen[T], Generic[T]):
     }
 
     /* Zero out padding/margins on internals regardless of structure */
-    SandroidModal .button-row Button * {
+    SandroidModal Button * {
         padding: 0 0;
         margin: 0 0;
     }
@@ -183,8 +185,8 @@ class SandroidModal(ModalScreen[T], Generic[T]):
     }
 
     /* Also override the primary button disabled state */
-    SandroidModal .button-row Button.-style-default.-primary:disabled,
-    SandroidModal .button-row Button.-style-default.-primary:disabled:hover {
+    SandroidModal Button.-style-default.-primary:disabled,
+    SandroidModal Button.-style-default.-primary:disabled:hover {
         background: $surface;
         color: $foreground-disabled;
         border: none;
@@ -205,6 +207,7 @@ class SandroidModal(ModalScreen[T], Generic[T]):
         self._dismiss_with_refresh(None)
 
     def on_mount(self) -> None:
+        apply_compact_widgets(self)
         self._auto_focus()
 
     def on_key(self, event: events.Key) -> None:

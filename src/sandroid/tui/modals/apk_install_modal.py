@@ -250,6 +250,7 @@ class APKInstallModal(ExtractionModal[APKInstallResult]):
             yield Input(
                 placeholder="e.g., ~/Downloads/app.apk or firefox",
                 id="apk-input",
+                classes="no-compact",
             )
             yield Label(
                 "[dim]Searches: APKPure, F-Droid, Aptoide[/dim]",
