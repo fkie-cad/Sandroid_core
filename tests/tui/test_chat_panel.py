@@ -876,15 +876,21 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
 #
 # These drive the completion scheduler (Phase 3) and the collapsible,
 # selection-aware subtask status bar (Phase 4) against a stub SubtaskManager
-# -- no real threads or network. A finished subtask no longer launches an
-# orchestrator turn (that full-result re-dump + re-reply was the noise being
-# removed): it pushes ONE compact, clickable ``↳ Subtask … finished.`` line
-# into the transcript and stashes its full output for click-to-reveal (see
-# ``ChatPanel.action_reveal_subtask``). The tests below guard exactly that --
-# a line appears (never a turn), the output is stored, staleness/cancellation
-# suppress the line, and the reveal surfaces the stored output. A recorder is
-# still hung on ``panel._launch_turn`` in the completion tests purely to prove
-# it is never called anymore.
+# -- no real threads or network. On completion a subtask pushes ONE compact,
+# clickable ``↳ Subtask … finished.`` line into the transcript and stashes its
+# full output for click-to-reveal (see ``ChatPanel.action_reveal_subtask``),
+# AND re-enters the orchestrator with the COMPLETE result as a HIDDEN injected
+# turn: the model is notified and gets the full output, but that raw blob is
+# never rendered as a visible transcript line -- only the compact line(s) and
+# the orchestrator's own reply show. The tests below guard exactly that -- the
+# compact line appears, the output is stored, a hidden turn carrying the full
+# result IS launched, that full result stays out of the visible history, and
+# staleness/cancellation suppress both the line AND the turn. The completion
+# tests that assert on the injected turn run the real ``_launch_turn`` /
+# ``_run_turn_sync`` with ``run_agent_turn`` monkeypatched so no real network/
+# tool call happens; they capture the messages that reach ``run_agent_turn``
+# to prove the full result is in the injected user message yet absent from the
+# visible transcript.
 
 
 class _StubSubtaskManager:
@@ -972,98 +978,248 @@ def _completion_lines(panel: ChatPanel) -> list[str]:
     ]
 
 
-def test_completion_while_idle_pushes_one_compact_line_and_stores_output(stub_manager):
-    """Idle + one finished subtask -> exactly one compact, clickable
-    ``↳ Subtask … finished.`` line (a period, no result text inline), the full
-    output stashed for reveal, and NO orchestrator turn launched.
+def _history_text(panel: ChatPanel) -> str:
+    """All visible transcript text joined, whatever the renderable's type.
+
+    History lines are a mix of plain markup strings (chrome), ``Text`` (the
+    echoed user band), and ``Markdown`` (LLM prose); flatten each to its own
+    text so a test can assert a raw subtask result never appears *anywhere*
+    on screen.
     """
-    panel = ChatPanel(id="chat-panel")
-    launches: list[str] = []
-    panel._launch_turn = launches.append
-
-    stub_manager.add_completion("s1", "probe", "found 3 things", epoch=0)
-    panel._drain_completions()
-
-    lines = _completion_lines(panel)
-    assert len(lines) == 1
-    line = lines[0]
-    assert "s1" in line
-    assert "probe" in line
-    assert line.rstrip().endswith("finished.[/][/]")  # a period, not a colon
-    assert "found 3 things" not in line  # no result text dumped inline
-    # the full output is stashed for click-to-reveal, keyed by subtask id
-    assert panel._subtask_outputs == {"s1": "found 3 things"}
-    # the descriptive text is a @click link carrying the subtask id
-    assert "@click=reveal_subtask('s1')" in line
-    # and NO orchestrator turn was launched (the noise being removed)
-    assert launches == []
-    assert panel._turn_in_progress is False
+    parts: list[str] = []
+    for line in panel._history_lines:
+        if isinstance(line, Markdown):
+            parts.append(line.markup)
+        elif isinstance(line, Text):
+            parts.append(line.plain)
+        elif isinstance(line, str):
+            parts.append(line)
+    return "\n".join(parts)
 
 
-def test_completion_during_turn_defers_then_shows_line_after_finish(stub_manager):
+async def _wait_for_turn_done(panel: ChatPanel, captured: list) -> None:
+    """Cooperatively wait for one injected turn's worker to finish.
+
+    ``_drain_completions`` launches the turn via ``_launch_turn`` ->
+    ``run_worker(thread=True)``; the worker sets ``_turn_in_progress`` back to
+    ``False`` (and populates ``captured`` via the monkeypatched
+    ``run_agent_turn``) once it finishes. Poll for both with short
+    ``asyncio.sleep``s so ``call_from_thread`` callbacks keep draining.
+    """
+    for _ in range(300):
+        if captured and not panel._turn_in_progress:
+            return
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.smoke
+async def test_completion_while_idle_pushes_line_and_launches_hidden_turn(
+    stub_manager, monkeypatch
+):
+    """Idle + one finished subtask -> (a) exactly one compact, clickable
+    ``↳ Subtask … finished.`` line (a period, no result text inline), (b) the
+    full output stashed for reveal, (c) ONE orchestrator turn launched whose
+    injected user message carries the FULL result text, and (d) that full
+    result NEVER appears as a visible transcript line (it is fed hidden).
+    """
+    from sandroid.core.toolbox import Toolbox
+
+    monkeypatch.setattr(
+        Toolbox,
+        "config",
+        SimpleNamespace(
+            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
+
+    captured_calls: list[list[dict]] = []
+
+    def fake_run_agent_turn(messages, *args, **kwargs):
+        captured_calls.append(list(messages))
+        return "orchestrator reply"
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        stub_manager.add_completion("s1", "probe", "found 3 things", epoch=0)
+
+        panel._drain_completions()
+        await _wait_for_turn_done(panel, captured_calls)
+        await pilot.pause()
+
+        # (a) exactly one compact, clickable completion line
+        lines = _completion_lines(panel)
+        assert len(lines) == 1
+        line = lines[0]
+        assert "s1" in line
+        assert "probe" in line
+        assert line.rstrip().endswith("finished.[/][/]")  # a period, not a colon
+        assert "found 3 things" not in line  # no result text dumped inline
+        assert "@click=reveal_subtask('s1')" in line
+
+        # (b) the full output stashed for click-to-reveal, keyed by subtask id
+        assert panel._subtask_outputs == {"s1": "found 3 things"}
+
+        # (c) ONE orchestrator turn launched; its injected user message carries
+        #     the subtask's FULL result verbatim (so the model is notified).
+        assert len(captured_calls) == 1
+        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert "found 3 things" in user_msgs[0]["content"]
+        assert "s1" in user_msgs[0]["content"]
+
+        # the injected result also persists into self._messages for context
+        assert any("found 3 things" in m.get("content", "") for m in panel._messages)
+
+        # (d) but the raw result is NOT present anywhere in the visible history
+        assert "found 3 things" not in _history_text(panel)
+        assert panel._turn_in_progress is False
+
+
+@pytest.mark.smoke
+async def test_completion_during_turn_defers_then_surfaces_and_launches(
+    stub_manager, monkeypatch
+):
     """A completion arriving mid-turn is NOT surfaced immediately (and stays
-    queued, not lost); its line appears exactly once after ``_finish_turn``.
+    queued, not lost); after ``_finish_turn`` flips the turn off it surfaces
+    exactly once AND launches exactly one hidden orchestrator turn.
     """
-    panel = ChatPanel(id="chat-panel")
-    launches: list[str] = []
-    panel._launch_turn = launches.append
+    from sandroid.core.toolbox import Toolbox
 
-    panel._turn_in_progress = True
-    stub_manager.add_completion("s1", "probe", "done", epoch=0)
+    monkeypatch.setattr(
+        Toolbox,
+        "config",
+        SimpleNamespace(
+            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
 
-    panel._drain_completions()
-    assert _completion_lines(panel) == []  # deferred while a turn is in progress
-    assert len(stub_manager._completed) == 1  # left queued, not drained
+    captured_calls: list[list[dict]] = []
 
-    panel._finish_turn()  # flips _turn_in_progress off, then re-drains
-    lines = _completion_lines(panel)
-    assert len(lines) == 1
-    assert "s1" in lines[0]
-    assert panel._subtask_outputs == {"s1": "done"}
-    assert launches == []  # still never an orchestrator turn
+    def fake_run_agent_turn(messages, *args, **kwargs):
+        captured_calls.append(list(messages))
+        return "orchestrator reply"
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        panel._turn_in_progress = True
+        stub_manager.add_completion("s1", "probe", "done", epoch=0)
+
+        panel._drain_completions()
+        assert _completion_lines(panel) == []  # deferred while a turn is running
+        assert len(stub_manager._completed) == 1  # left queued, not drained
+        assert captured_calls == []  # and nothing launched yet
+
+        panel._finish_turn()  # flips _turn_in_progress off, then re-drains
+        await _wait_for_turn_done(panel, captured_calls)
+        await pilot.pause()
+
+        lines = _completion_lines(panel)
+        assert len(lines) == 1
+        assert "s1" in lines[0]
+        assert panel._subtask_outputs == {"s1": "done"}
+        # exactly one hidden turn, carrying the full result, nothing leaked
+        assert len(captured_calls) == 1
+        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert "done" in user_msgs[0]["content"]
+        assert "done" not in _history_text(panel)
 
 
-def test_two_completions_push_two_lines(stub_manager):
+@pytest.mark.smoke
+async def test_two_completions_push_two_lines_and_one_batched_hidden_turn(
+    stub_manager, monkeypatch
+):
     """Two fresh completions -> two compact lines (neither lost), two stored
-    outputs, and still no orchestrator turn.
+    outputs, and ONE batched hidden orchestrator turn whose injected user
+    message carries BOTH results (nothing lost, nothing dumped visibly).
     """
-    panel = ChatPanel(id="chat-panel")
-    launches: list[str] = []
-    panel._launch_turn = launches.append
+    from sandroid.core.toolbox import Toolbox
 
-    stub_manager.add_completion("s1", "alpha", "resultA", epoch=0)
-    stub_manager.add_completion("s2", "beta", "resultB", epoch=0)
-    panel._drain_completions()
+    monkeypatch.setattr(
+        Toolbox,
+        "config",
+        SimpleNamespace(
+            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(chat_panel_module, "build_ambient_block", lambda: "")
 
-    lines = _completion_lines(panel)
-    assert len(lines) == 2
-    joined = "\n".join(lines)
-    assert "s1" in joined
-    assert "s2" in joined
-    assert "alpha" in joined
-    assert "beta" in joined
-    assert panel._subtask_outputs == {"s1": "resultA", "s2": "resultB"}
-    assert launches == []
+    captured_calls: list[list[dict]] = []
+
+    def fake_run_agent_turn(messages, *args, **kwargs):
+        captured_calls.append(list(messages))
+        return "orchestrator reply"
+
+    monkeypatch.setattr(chat_panel_module, "run_agent_turn", fake_run_agent_turn)
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        stub_manager.add_completion("s1", "alpha", "resultA", epoch=0)
+        stub_manager.add_completion("s2", "beta", "resultB", epoch=0)
+
+        panel._drain_completions()
+        await _wait_for_turn_done(panel, captured_calls)
+        await pilot.pause()
+
+        lines = _completion_lines(panel)
+        assert len(lines) == 2
+        joined = "\n".join(lines)
+        assert "s1" in joined
+        assert "s2" in joined
+        assert "alpha" in joined
+        assert "beta" in joined
+        assert panel._subtask_outputs == {"s1": "resultA", "s2": "resultB"}
+
+        # exactly ONE batched turn, its injected user message carrying BOTH
+        # full results (neither dropped when they arrive in the same batch)
+        assert len(captured_calls) == 1
+        user_msgs = [m for m in captured_calls[0] if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert "resultA" in user_msgs[0]["content"]
+        assert "resultB" in user_msgs[0]["content"]
+
+        # neither raw result leaks into the visible transcript
+        history_text = _history_text(panel)
+        assert "resultA" not in history_text
+        assert "resultB" not in history_text
 
 
 def test_stale_epoch_completion_is_dropped(stub_manager):
     """A completion whose epoch predates a Ctrl+L clear (epoch bumped) is
-    dropped -- no line and no stored output.
+    dropped -- no line, no stored output, and NO orchestrator turn.
     """
     panel = ChatPanel(id="chat-panel")
+    launches: list = []
+    panel._launch_turn = lambda *a, **kw: launches.append((a, kw))
     panel._epoch = 1  # conversation was cleared since the subtask was spawned
     stub_manager.add_completion("s1", "probe", "stale result", epoch=0)
     panel._drain_completions()
 
     assert _completion_lines(panel) == []
     assert panel._subtask_outputs == {}
+    assert launches == []  # a stale result must never re-enter the orchestrator
 
 
 def test_cancelled_completion_is_skipped(stub_manager):
     """An analyst-cancelled subtask still enqueues a record (to free its lease)
-    but must NOT surface a completion line or stash its partial/empty result.
+    but must NOT surface a completion line, stash its partial/empty result, or
+    launch an orchestrator turn.
     """
     panel = ChatPanel(id="chat-panel")
+    launches: list = []
+    panel._launch_turn = lambda *a, **kw: launches.append((a, kw))
     stub_manager._completed.append(
         CompletionRecord(
             subtask_id="s1",
@@ -1078,6 +1234,7 @@ def test_cancelled_completion_is_skipped(stub_manager):
 
     assert _completion_lines(panel) == []
     assert panel._subtask_outputs == {}
+    assert launches == []
 
 
 @pytest.mark.smoke
@@ -1089,6 +1246,9 @@ async def test_reveal_subtask_opens_a_modal_with_the_stored_output(stub_manager)
     app = _ChatPanelHarness()
     async with app.run_test(size=(100, 30)) as pilot:
         panel = app.query_one("#chat-panel", ChatPanel)
+        # Only the compact-line/stash half of _drain_completions is under test
+        # here -- neutralize the injected orchestrator turn it now also fires.
+        panel._launch_turn = lambda *a, **kw: None
         stub_manager.add_completion("s1", "probe", "the full findings", epoch=0)
         panel._drain_completions()
         await pilot.pause()
@@ -1117,6 +1277,9 @@ async def test_click_link_on_chat_log_delegates_reveal_to_the_panel(stub_manager
     async with app.run_test(size=(100, 30)) as pilot:
         panel = app.query_one("#chat-panel", ChatPanel)
         log = app.query_one("#chat-log", _ChatLog)
+        # Only the compact-line/stash half of _drain_completions is under test
+        # here -- neutralize the injected orchestrator turn it now also fires.
+        panel._launch_turn = lambda *a, **kw: None
         stub_manager.add_completion("s1", "probe", "delegated output", epoch=0)
         panel._drain_completions()
         await pilot.pause()
@@ -1133,6 +1296,10 @@ def test_ctrl_l_clears_stashed_subtask_outputs(stub_manager):
     cleared conversation can't keep revealing outputs it no longer shows.
     """
     panel = ChatPanel(id="chat-panel")
+    # Only the stash-then-clear behavior is under test here -- neutralize the
+    # injected orchestrator turn _drain_completions now also fires (and which
+    # would otherwise reach run_worker on this unmounted panel).
+    panel._launch_turn = lambda *a, **kw: None
     stub_manager.add_completion("s1", "probe", "keep me? no", epoch=0)
     panel._drain_completions()
     assert panel._subtask_outputs == {"s1": "keep me? no"}

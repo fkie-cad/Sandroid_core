@@ -741,7 +741,7 @@ class ChatPanel(Widget):
         self._safe_call_from_thread(self._drain_completions)
 
     def _drain_completions(self) -> None:
-        """Announce finished subtasks as compact, click-to-reveal lines.
+        """Surface finished subtasks and re-enter the orchestrator with them.
 
         UI thread only. If a turn is in flight, returns *before* draining so
         the records stay queued (``_finish_turn`` re-drains the moment the
@@ -753,10 +753,16 @@ class ChatPanel(Widget):
         ``self._subtask_outputs`` (keyed by subtask id) and one compact dim
         line -- ``↳ Subtask <id> (<label>) finished.`` -- is pushed to the
         transcript, whose descriptive text is a ``@click`` link that reveals
-        that stored output on demand (see ``action_reveal_subtask``). No
-        orchestrator turn is launched: the subtask's own summary IS the
-        deliverable, shown on click, so the old full-result re-dump + re-reply
-        is gone.
+        that stored output on demand (see ``action_reveal_subtask``).
+
+        Then ONE orchestrator turn is launched whose injected user message is
+        the FULL batched result text of every fresh record -- so the model is
+        notified and receives the complete output to reason/act on -- but that
+        raw blob is HIDDEN (``echo_input=False``): it never becomes a visible
+        transcript line. Only the compact clickable line(s) above and the
+        orchestrator's own streamed reply are visible; the reply (and the
+        injected result) land in ``self._messages`` for future context (see
+        ``_launch_turn``).
         """
         if self._turn_in_progress:
             return
@@ -769,6 +775,8 @@ class ChatPanel(Widget):
             for r in records
             if should_reenter(r.epoch, self._epoch) and not r.cancelled
         ]
+        if not fresh:
+            return
         for r in fresh:
             self._subtask_outputs[r.subtask_id] = r.result
             # The id is a controlled hex string (uuid4().hex[:8]) so it's safe
@@ -779,6 +787,16 @@ class ChatPanel(Widget):
                 f"Subtask {escape(r.subtask_id)} ({escape(r.label)}) finished."
                 "[/][/]"
             )
+        # Re-enter the orchestrator with the COMPLETE batched result as a
+        # HIDDEN injected message (echo_input=False): the model is notified and
+        # gets every subtask's full output to reason/act on, but that raw blob
+        # is never rendered as a transcript line -- the compact clickable
+        # line(s) above are its only visible marker. The orchestrator's own
+        # reply streams in and displays normally.
+        full_text = "\n\n".join(
+            f"Subtask {r.subtask_id} ({r.label}) finished:\n{r.result}" for r in fresh
+        )
+        self._launch_turn(full_text, echo_input=False)
 
     def action_reveal_subtask(self, subtask_id: str) -> None:
         """Reveal a finished subtask's full output in a dismissable modal.
@@ -810,16 +828,27 @@ class ChatPanel(Widget):
 
         self._launch_turn(text)
 
-    def _launch_turn(self, text: str) -> None:
+    def _launch_turn(self, text: str, *, echo_input: bool = True) -> None:
         """Dispatch one agent turn on a worker thread.
 
-        Driven by a real user submit (``on_input_submitted``). Reads and
-        validates the AI config here and bails gracefully (pushes an error
-        line, resets nothing since no state was mutated yet, returns) rather
-        than crashing when it is missing.
+        Reads and validates the AI config here and bails gracefully (pushes an
+        error line, resets nothing since no state was mutated yet, returns)
+        rather than crashing when it is missing.
 
         Args:
-            text: The user's submitted message content.
+            text: The message content sent to the model as this turn's user
+                message.
+            echo_input: When ``True`` (a real user submit via
+                ``on_input_submitted``), ``text`` is echoed into the transcript
+                as the highlighted ``>`` user band. When ``False`` (a
+                subtask-completion turn injected by ``_drain_completions``),
+                ``text`` is the full batched subtask result: the orchestrator
+                still receives it verbatim as this turn's user message (so it's
+                notified and can reason/act on it), but it is NEVER rendered as
+                a visible transcript line -- the compact clickable
+                ``↳ Subtask … finished.`` line(s) are the raw output's only
+                visible marker, and only the orchestrator's streamed reply
+                shows.
         """
         # Concurrent-turn guard: exclusive=True on run_worker only cancels a
         # same-named *worker*, it cannot force-kill the raw OS thread a prior
@@ -844,7 +873,11 @@ class ChatPanel(Widget):
 
         try:
             input_widget = self.query_one("#chat-input", Input)
-            input_widget.value = ""
+            # A real user submit's text is already captured in `text` (and
+            # echoed below), so clear the box. An injected subtask-completion
+            # turn must NOT wipe whatever the user may be mid-typing.
+            if echo_input:
+                input_widget.value = ""
             input_widget.disabled = True
         except Exception:
             pass
@@ -853,12 +886,17 @@ class ChatPanel(Widget):
         self._header_detail = ""
         self.refresh_header()
 
-        # Blank line before each new turn (skipped for the very first one)
-        # so consecutive turns read as visually distinct blocks in the
-        # transcript, on top of the user's highlighted input band.
+        # Blank line before each new turn (skipped for the very first one) so
+        # consecutive turns read as visually distinct blocks in the transcript.
         if self._history_lines:
             self._push_history("")
-        self._push_history(self._format_user_line(text))
+        # Only a real user submit echoes its text as the highlighted `>` band;
+        # an injected subtask-completion turn keeps `text` (the raw result
+        # blob) OUT of the visible transcript entirely -- the orchestrator
+        # still gets it as this turn's user message (see the echo_input note in
+        # this method's docstring), it just never renders as a line.
+        if echo_input:
+            self._push_history(self._format_user_line(text))
 
         handle = ChatTurnHandle()
         self._active_handle = handle
