@@ -84,13 +84,16 @@ from rich.markdown import Markdown
 from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
 
 from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agent_turn
+from sandroid.ai.arbiter import get_arbiter
 from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+from sandroid.ai.subtasks import get_subtask_manager, should_reenter
 from sandroid.core.console import SANDROID_LOGO
 from sandroid.tui.themes import DEFAULT_THEME
 from sandroid.tui.widgets.tool_permission_prompt import (
@@ -108,6 +111,21 @@ if TYPE_CHECKING:
     from sandroid.tui.themes import Theme
 
 logger = logging.getLogger(__name__)
+
+#: The resource-arbiter owner id for the top-level chat turn (see
+#: :mod:`sandroid.ai.arbiter`). Deliberately NOT registered as a live subtask
+#: via ``note_subtask`` -- the orchestrator holding a lease still blocks a
+#: subtask claiming the same resource, but an *idle* orchestrator (no lease)
+#: must not block a subtask's WORLD-level operation.
+ORCHESTRATOR_OWNER_ID = "orchestrator"
+
+#: The two subtask-spawning tool names (kept in sync with
+#: :data:`sandroid.ai.subtasks._SPAWN_TOOL_NAMES`). A local copy so the
+#: transcript can single out a spawn tool-call and show its FULL prompt --
+#: the ``_format_tool_args_lines`` preview truncates it to 150 chars, but an
+#: autonomous (possibly privileged) subtask's whole instruction should be
+#: visible to the analyst who is about to let it run.
+_SPAWN_TOOL_NAMES = frozenset({"spawn_subtask", "spawn_privileged_subtask"})
 
 # Seconds between talk frames while the mascot is "talking" -- brisk enough
 # to read as animated/lively rather than a slow, barely-perceptible blink.
@@ -348,6 +366,23 @@ class ChatPanel(Widget):
            overflows. */
         overflow-y: auto;
     }
+    ChatPanel > #chat-subtask-bar {
+        /* Collapsible running-subtask status line, a vertical sibling
+           immediately above #chat-input-bar (the same slot the approval
+           prompt mounts into). `height: auto` means it's effectively one
+           line when collapsed and grows per row when expanded; it hides
+           itself outright (display:false) when no subtask is running, so it
+           costs no rows at all in the common case. `background: transparent`
+           resolves against ChatPanel's own (per-theme) background rather
+           than painting a fixed colour, so it blends in every theme with no
+           per-theme .tcss edit -- all its text colour comes from _theme()
+           markup. The mascot is gated off whenever this bar is shown (see
+           _update_mascot), so the two never fight for the bottom-right
+           corner and the opaque-mascot-over-text invariant never applies. */
+        height: auto;
+        padding: 0 1;
+        background: transparent;
+    }
     ChatPanel > #chat-input-bar {
         height: 3;
     }
@@ -402,8 +437,24 @@ class ChatPanel(Widget):
     """
 
     BINDINGS = [
-        ("ctrl+x", "stop_turn", "Stop"),
+        # priority=True so it beats the focused Input's built-in `ctrl+x` ->
+        # `cut` binding. Textual dispatches the focused widget's own key
+        # bindings before an ancestor's non-priority ones, so a plain
+        # ("ctrl+x", ...) here is silently shadowed by Input.action_cut the
+        # whole time #chat-input holds focus (which is always, once the dock
+        # is open); priority bindings run App->focused FIRST, so this wins.
+        # It stays scoped to the chat dock -- a priority binding only fires
+        # when its owner is in the focused widget's ancestor chain, so it
+        # does not hijack ctrl+x elsewhere in the app.
+        Binding("ctrl+x", "stop_turn", "Stop", priority=True),
         ("ctrl+l", "clear_log", "Clear log"),
+        # Bare up/down are unbound app-level (only shift+up/down are used, see
+        # app.py/main_screen.py) and a single-line Input never consumes them,
+        # so they bubble from the focused Input up to this panel. They drive
+        # the collapsible subtask bar and are harmless no-ops when no subtask
+        # is running.
+        ("up", "subtasks_up", "Prev subtask"),
+        ("down", "subtasks_down", "Next subtask"),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -436,6 +487,22 @@ class ChatPanel(Widget):
         self._active_handle: ChatTurnHandle | None = None
         self._mascot_timer: Timer | None = None
         self._mascot_frame_index: int = 0
+        # Conversation epoch: bumped on every Ctrl+L clear (see
+        # ``action_clear_log``). A subtask captures the epoch at spawn and
+        # carries it on its ``CompletionRecord``; ``should_reenter`` drops a
+        # result whose epoch no longer matches, so a subtask spawned into a
+        # since-cleared conversation never splices into an unrelated one.
+        self._epoch: int = 0
+        # Collapsible running-subtask status bar state (see
+        # ``_refresh_subtask_bar`` / ``action_subtasks_up``/``_down``).
+        self._subtasks_expanded: bool = False
+        self._selected_subtask_id: str | None = None
+        # Whether the subtask bar is currently shown (>=1 running subtask) --
+        # used to gate the mascot off so they never share the corner.
+        self._subtask_bar_shown: bool = False
+        # Change-detection signature so the 1s refresh only re-renders the bar
+        # when something visible actually changed (mirrors status_bar.py).
+        self._subtask_bar_sig: tuple | None = None
 
     # -- theming ------------------------------------------------------------
 
@@ -477,6 +544,12 @@ class ChatPanel(Widget):
             auto_scroll=True,
             id="chat-log",
         )
+        # Collapsible running-subtask status line, immediately before the
+        # input bar (the same slot the approval prompt mounts into). Starts
+        # hidden; ``_refresh_subtask_bar`` shows/populates it when a subtask
+        # is running. A plain Static re-rendered by hand so we fully control
+        # the selection highlight.
+        yield Static("", id="chat-subtask-bar")
         with Horizontal(id="chat-input-bar"):
             yield Input(
                 placeholder="Ask Sandroid… (Enter to send, Ctrl+X to stop)",
@@ -500,9 +573,90 @@ class ChatPanel(Widget):
         except Exception:
             pass
         self._update_mascot()
+        # Wire the subtask manager to this panel: it probes our live epoch at
+        # spawn time and calls back (on a subtask thread) when a subtask
+        # finishes. Leave client_factory at its default (it reads
+        # Toolbox.config.ai, same as this panel does).
+        try:
+            get_subtask_manager().configure(
+                epoch_probe=lambda: self._epoch,
+                on_complete=self._on_subtask_complete,
+            )
+        except Exception:
+            logger.debug("Failed to configure subtask manager", exc_info=True)
+        # Keep the subtask status bar live (a completion callback is a
+        # point-in-time signal; elapsed times and last-activity change
+        # continuously). Mirrors status_bar.py's cheap change-detected poll.
+        self._refresh_subtask_bar()
+        self.set_interval(1.0, self._refresh_subtask_bar)
 
     def on_unmount(self) -> None:
         self._stop_mascot_timer()
+        # Stop every running subtask -- none should outlive the panel. stop_all
+        # sets each cancel Event then joins with a short per-thread timeout
+        # (daemon threads die with the process anyway), so this cannot hang
+        # shutdown.
+        try:
+            get_subtask_manager().stop_all()
+        except Exception:
+            logger.debug("Failed to stop subtasks on unmount", exc_info=True)
+        # Drop any resource leases the orchestrator still holds, so a torn-
+        # down panel never strands a lease that would block a future turn.
+        try:
+            get_arbiter().release_all(ORCHESTRATOR_OWNER_ID)
+        except Exception:
+            logger.debug("Failed to release orchestrator leases on unmount")
+
+    # -- subtask completion scheduler -------------------------------------
+
+    def _safe_call_from_thread(self, fn, *args) -> None:
+        """Marshal ``fn`` onto the UI thread, tolerating app teardown.
+
+        A subtask thread may fire its completion callback while the app is
+        already tearing down (no running loop, no active app), in which case
+        ``call_from_thread`` raises -- swallow it, since the panel is going
+        away anyway. There is no existing ``_safe_ui`` helper in this file, so
+        this is the one place that abstraction lives.
+        """
+        try:
+            self.app.call_from_thread(fn, *args)
+        except Exception:
+            logger.debug("call_from_thread failed (app tearing down?)", exc_info=True)
+
+    def _on_subtask_complete(self) -> None:
+        """SubtaskManager ``on_complete`` hook -- runs on a SUBTASK thread.
+
+        Marshals to the UI thread to drain finished records; must never assume
+        an event loop is still alive (see ``_safe_call_from_thread``).
+        """
+        self._safe_call_from_thread(self._drain_completions)
+
+    def _drain_completions(self) -> None:
+        """Splice finished subtask results back into the conversation.
+
+        UI thread only. If a turn is in flight, returns *before* draining so
+        the records stay queued (``_finish_turn`` re-drains the moment the
+        turn ends) -- nothing is lost. All fresh records are batched into ONE
+        synthetic follow-up turn; results from a since-cleared conversation
+        (epoch mismatch) are dropped.
+        """
+        if self._turn_in_progress:
+            return
+        records = get_subtask_manager().take_all_completed()
+        # Fresh (same-epoch) AND not analyst-cancelled: a cancelled subtask
+        # already showed a "cancelling…" line and must NOT spend a follow-up
+        # turn re-entering its partial/empty result.
+        fresh = [
+            r
+            for r in records
+            if should_reenter(r.epoch, self._epoch) and not r.cancelled
+        ]
+        if not fresh:
+            return
+        text = "\n\n".join(
+            f"Subtask {r.subtask_id} ({r.label}) finished:\n{r.result}" for r in fresh
+        )
+        self._launch_turn(text, synthetic=True)
 
     # -- submit -------------------------------------------------------
 
@@ -515,10 +669,29 @@ class ChatPanel(Widget):
         if not text:
             return
 
+        self._launch_turn(text)
+
+    def _launch_turn(self, text: str, *, synthetic: bool = False) -> None:
+        """Dispatch one agent turn on a worker thread.
+
+        Shared by a real user submit (``on_input_submitted``) and a synthetic
+        subtask-completion re-entry (``_drain_completions``). Reads and
+        validates the AI config here -- so completion turns validate too --
+        and bails gracefully (pushes an error line, resets nothing since no
+        state was mutated yet, returns) rather than crashing when it is
+        missing.
+
+        Args:
+            text: The turn's user/injected content.
+            synthetic: When True this is a subtask-completion re-entry, echoed
+                as a muted "↳ " band instead of the highlighted user ``>``
+                band, and worded as an injected message rather than something
+                the analyst typed.
+        """
         # Concurrent-turn guard: exclusive=True on run_worker only cancels a
         # same-named *worker*, it cannot force-kill the raw OS thread a prior
         # turn is running on -- only the cooperative cancel_event actually
-        # stops it. So refuse a second submit outright while one is active
+        # stops it. So refuse a second launch outright while one is active
         # (the Input is also disabled below, this is defense in depth).
         if self._turn_in_progress:
             return
@@ -536,8 +709,12 @@ class ChatPanel(Widget):
             )
             return
 
-        event.input.value = ""
-        event.input.disabled = True
+        try:
+            input_widget = self.query_one("#chat-input", Input)
+            input_widget.value = ""
+            input_widget.disabled = True
+        except Exception:
+            pass
         self._turn_in_progress = True
         self._header_state = "streaming"
         self._header_detail = ""
@@ -548,7 +725,10 @@ class ChatPanel(Widget):
         # transcript, on top of the user's highlighted input band.
         if self._history_lines:
             self._push_history("")
-        self._push_history(self._format_user_line(text))
+        if synthetic:
+            self._push_history(self._format_synthetic_line(text))
+        else:
+            self._push_history(self._format_user_line(text))
 
         handle = ChatTurnHandle()
         self._active_handle = handle
@@ -722,6 +902,7 @@ class ChatPanel(Widget):
                 handle.cancel_event,
                 on_event=on_event,
                 approve=approve_tool_call,
+                owner_id=ORCHESTRATOR_OWNER_ID,
             )
             if result:
                 turn_messages.append({"role": "assistant", "content": result})
@@ -782,6 +963,16 @@ class ChatPanel(Widget):
             if arg_lines:
                 body = "\n".join(f"    [dim]{escape(line)}[/]" for line in arg_lines)
                 self._push_history(body)
+            # Transparency: a spawned subtask then runs autonomously (a
+            # privileged one with no further confirmation), so surface its
+            # FULL prompt here -- the args preview above truncates it to 150
+            # chars, hiding exactly what the analyst is letting loose.
+            if name in _SPAWN_TOOL_NAMES:
+                prompt = args.get("prompt")
+                if prompt:
+                    self._push_history(
+                        f"    [dim]↳ full prompt: {escape(str(prompt))}[/]"
+                    )
             self._header_state = "tool"
             self._header_detail = name
             self.refresh_header()
@@ -811,6 +1002,12 @@ class ChatPanel(Widget):
             input_widget.focus()
         except Exception:
             pass
+        # A subtask may have finished while this turn was running; its result
+        # was left queued by _drain_completions' turn-in-progress guard. Now
+        # that the turn is over (_turn_in_progress is False above), drain it
+        # so the follow-up runs immediately rather than waiting for the next
+        # 1s poll or the next completion.
+        self._drain_completions()
 
     # -- transcript rendering -------------------------------------------
 
@@ -859,6 +1056,22 @@ class ChatPanel(Widget):
             if width > len(row):
                 line.append(" " * (width - len(row)))
         return line
+
+    def _format_synthetic_line(self, text: str) -> str:
+        """Render an injected (subtask-completion) turn as a muted band.
+
+        Unlike a real user submit (see ``_format_user_line``'s highlighted
+        ``>`` band), a synthetic re-entry was never typed by the analyst, so
+        it's echoed dim with a ``↳`` marker to read clearly as "this arrived
+        on its own, and here's exactly what the model is about to see".
+
+        Args:
+            text: The injected turn content (already-built subtask summary).
+
+        Returns:
+            A dim Rich-markup string ready for ``_push_history``.
+        """
+        return f"[dim]↳ {escape(text)}[/]"
 
     def _finalize_live(self) -> None:
         """Fold any in-progress reasoning/reply buffers into history."""
@@ -994,7 +1207,13 @@ class ChatPanel(Widget):
         except Exception:
             return
 
-        if not self._mascot_enabled():
+        # Gate the mascot off while the subtask bar is shown: both live in the
+        # bottom-right region just above the input bar, and the mascot paints
+        # an opaque rectangle there. Rather than force the bar's background to
+        # track the mascot's per-theme colour (a brittle invariant across all
+        # 8 themes), just hide the decorative mascot whenever the functional
+        # subtask bar has something to show.
+        if not self._mascot_enabled() or self._subtask_bar_shown:
             mascot.display = False
             self._stop_mascot_timer()
             return
@@ -1035,7 +1254,27 @@ class ChatPanel(Widget):
     # -- actions ----------------------------------------------------------
 
     def action_stop_turn(self) -> None:
-        """Ctrl+X — stop the active turn, if any."""
+        """Ctrl+X — cancel a selected subtask, else stop the active turn.
+
+        Selection-aware: with a subtask highlighted in the status bar (via
+        the up/down keys), Ctrl+X cancels THAT subtask and leaves the reply
+        running; with no selection it stops the active chat turn, as before.
+        """
+        manager = get_subtask_manager()
+        selected = self._selected_subtask_id
+        if selected is not None:
+            # Subtask-selection mode: Ctrl+X targets the subtask, never the
+            # reply. If the selection is still running, cancel it; if it
+            # already finished (a narrow window before the 1s refresh clears
+            # the stale selection), just drop the selection -- do NOT fall
+            # through and kill the reply the analyst didn't mean to stop.
+            running_ids = {row["subtask_id"] for row in manager.running()}
+            if selected in running_ids:
+                manager.cancel(selected)
+                self._push_history(f"[dim]cancelling subtask {selected}…[/]")
+            self._selected_subtask_id = None
+            self._refresh_subtask_bar()
+            return
         handle = self._active_handle
         if handle is not None:
             handle.stop()
@@ -1060,12 +1299,190 @@ class ChatPanel(Widget):
                 "it to finish, or Ctrl+X to stop it first.[/]"
             )
             return
+        # Bump the epoch and stop every subtask BEFORE dropping state: a
+        # subtask spawned into the old conversation must not splice its result
+        # into the fresh one, and none should keep running against a
+        # conversation the analyst has walked away from. Stale results still
+        # in flight are dropped by should_reenter (epoch mismatch); stop_all
+        # bounds its join, so this cannot hang.
+        self._epoch += 1
+        try:
+            get_subtask_manager().stop_all()
+        except Exception:
+            logger.debug("Failed to stop subtasks on clear", exc_info=True)
+        # Clearing the conversation also drops any resource leases the
+        # orchestrator still holds -- a fresh conversation starts from a
+        # clean slate, with nothing left claimed on its behalf.
+        try:
+            get_arbiter().release_all(ORCHESTRATOR_OWNER_ID)
+        except Exception:
+            logger.debug("Failed to release orchestrator leases on clear")
         self._messages = [{"role": "system", "content": ORCHESTRATOR_SYSTEM_PROMPT}]
         self._history_lines = []
         self._live_reasoning = ""
         self._live_text = ""
         self._reasoning_started_at = None
+        # Reset the subtask-bar UI state too, then repaint it (a since-stopped
+        # subtask should not linger selected/expanded on screen).
+        self._subtasks_expanded = False
+        self._selected_subtask_id = None
+        self._subtask_bar_sig = None
         try:
             self.query_one("#chat-log", RichLog).clear()
         except Exception:
             pass
+        self._refresh_subtask_bar()
+
+    # -- subtask status bar -----------------------------------------------
+
+    def action_subtasks_up(self) -> None:
+        """Up — expand the subtask bar / move the selection to the previous row.
+
+        No subtasks: a harmless no-op. Collapsed: expand and select the first
+        (most recent) row. Expanded: move the selection one row up, clamped at
+        the top.
+        """
+        rows = get_subtask_manager().running()
+        if not rows:
+            return
+        ids = [row["subtask_id"] for row in rows]
+        if not self._subtasks_expanded:
+            self._subtasks_expanded = True
+            self._selected_subtask_id = ids[0]
+        elif self._selected_subtask_id in ids:
+            idx = ids.index(self._selected_subtask_id)
+            self._selected_subtask_id = ids[max(0, idx - 1)]
+        else:
+            self._selected_subtask_id = ids[0]
+        self._refresh_subtask_bar()
+
+    def action_subtasks_down(self) -> None:
+        """Down — move the selection to the next row (past the last collapses).
+
+        No subtasks, or collapsed: a harmless no-op (up is what expands).
+        Expanded: move the selection one row down; moving past the last row
+        collapses the bar and clears the selection.
+        """
+        rows = get_subtask_manager().running()
+        if not rows or not self._subtasks_expanded:
+            return
+        ids = [row["subtask_id"] for row in rows]
+        if self._selected_subtask_id in ids:
+            idx = ids.index(self._selected_subtask_id)
+            if idx >= len(ids) - 1:
+                self._subtasks_expanded = False
+                self._selected_subtask_id = None
+            else:
+                self._selected_subtask_id = ids[idx + 1]
+        else:
+            self._selected_subtask_id = ids[0]
+        self._refresh_subtask_bar()
+
+    def _refresh_subtask_bar(self) -> None:
+        """Re-render the running-subtask status bar if it changed (UI thread).
+
+        Called on a 1s interval, after a spawn/cancel, and from
+        ``_drain_completions``. Also runs the leaked-lease safety net
+        (``arbiter.reconcile``) so a subtask that died without its ``finally``
+        can never strand a device lease. Change-detected like status_bar.py so
+        an idle (or unchanged) bar does no rendering work.
+        """
+        manager = get_subtask_manager()
+        rows = manager.running()
+
+        # Leaked-lease backstop: the live owners are the orchestrator plus
+        # every running subtask; anything else holding a lease is stale.
+        try:
+            get_arbiter().reconcile(
+                {ORCHESTRATOR_OWNER_ID} | manager.active_owner_ids()
+            )
+        except Exception:
+            logger.debug("Arbiter reconcile failed", exc_info=True)
+
+        ids = [row["subtask_id"] for row in rows]
+        self._subtask_bar_shown = bool(rows)
+        # A selection that no longer exists (subtask finished/cancelled) is
+        # cleared; an empty bar also resets its expand/select state.
+        if (
+            self._selected_subtask_id is not None
+            and self._selected_subtask_id not in ids
+        ):
+            self._selected_subtask_id = None
+        if not rows:
+            self._subtasks_expanded = False
+            self._selected_subtask_id = None
+
+        # Signature: collapsed depends only on the count + privileged count
+        # (so it never re-renders just because elapsed ticked); expanded
+        # includes per-row elapsed/activity so the visible detail stays live.
+        if self._subtasks_expanded:
+            sig: tuple = (
+                True,
+                self._selected_subtask_id,
+                tuple(
+                    (
+                        row["subtask_id"],
+                        row["privileged"],
+                        int(row["elapsed"]),
+                        row["last_activity"],
+                    )
+                    for row in rows
+                ),
+            )
+        else:
+            n_priv = sum(1 for row in rows if row["privileged"])
+            sig = (False, len(rows), n_priv)
+
+        if sig == self._subtask_bar_sig:
+            return
+        self._subtask_bar_sig = sig
+        self._render_subtask_bar(rows)
+
+    def _render_subtask_bar(self, rows: list[dict]) -> None:
+        """Paint the subtask bar from ``rows`` (or hide it when empty)."""
+        try:
+            bar = self.query_one("#chat-subtask-bar", Static)
+        except Exception:
+            return
+
+        if not rows:
+            bar.display = False
+            self._update_mascot()
+            return
+
+        theme = self._theme()
+        tool = theme.tool_color
+        muted = theme.muted_status_color
+        warn = theme.warning
+
+        if not self._subtasks_expanded:
+            n = len(rows)
+            n_priv = sum(1 for row in rows if row["privileged"])
+            noun = "subtask" if n == 1 else "subtasks"
+            priv = f" [{warn}]⚠ {n_priv} privileged[/]" if n_priv else ""
+            markup = f"[{tool}]▸ {n} {noun} running[/]{priv} " f"[{muted}](↑ expand)[/]"
+        else:
+            header = (
+                f"[{tool}]▾ {len(rows)} running[/] "
+                f"[{muted}](↑/↓ select · Ctrl+X cancel selected)[/]"
+            )
+            lines = [header]
+            for row in rows:
+                sid = row["subtask_id"]
+                prefix = f"[{warn}]⚠ [/]" if row["privileged"] else ""
+                elapsed = int(row["elapsed"])
+                activity = row["last_activity"]
+                act = f" [{muted}]· {escape(str(activity))}[/]" if activity else ""
+                body = (
+                    f"{prefix}{escape(str(row['label']))} "
+                    f"[{muted}]{escape(str(sid))} · {elapsed}s[/]{act}"
+                )
+                if sid == self._selected_subtask_id:
+                    lines.append(f"[reverse bold]  {body}  [/]")
+                else:
+                    lines.append(f"  {body}")
+            markup = "\n".join(lines)
+
+        bar.display = True
+        bar.update(Text.from_markup(markup))
+        self._update_mascot()

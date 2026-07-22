@@ -28,6 +28,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, Input, RichLog, Static
 
 import sandroid.tui.widgets.chat_panel as chat_panel_module
+from sandroid.ai.subtasks import CompletionRecord
 from sandroid.ai.tools.registry import RiskTier, ToolSpec
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.widgets.chat_panel import ChatPanel, ChatTurnHandle
@@ -173,7 +174,14 @@ async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
     captured_calls = []
 
     def fake_run_agent_turn(
-        messages, tools, client, cancel_event, on_event=None, approve=None
+        messages,
+        tools,
+        client,
+        cancel_event,
+        on_event=None,
+        approve=None,
+        owner_id=None,
+        **kwargs,
     ):
         captured_calls.append(list(messages))
         return "assistant reply"
@@ -710,7 +718,14 @@ async def test_approve_tool_call_resolves_via_real_button_click(monkeypatch):
     )
 
     def fake_run_agent_turn(
-        messages, tools, client, cancel_event, on_event=None, approve=None
+        messages,
+        tools,
+        client,
+        cancel_event,
+        on_event=None,
+        approve=None,
+        owner_id=None,
+        **kwargs,
     ):
         assert approve is not None, "approve_tool_call was not passed through"
         captured["choice"] = approve(spec, {"target": "thing"})
@@ -800,7 +815,14 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
     )
 
     def fake_run_agent_turn(
-        messages, tools, client, cancel_event, on_event=None, approve=None
+        messages,
+        tools,
+        client,
+        cancel_event,
+        on_event=None,
+        approve=None,
+        owner_id=None,
+        **kwargs,
     ):
         assert approve is not None
         captured["choice"] = approve(spec, {"target": "thing"})
@@ -843,3 +865,275 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
                 app.query_one(ToolPermissionPrompt)
 
     await asyncio.wait_for(scenario(), timeout=15)
+
+
+# -- Phase 3/4: async-subtask integration ---------------------------------
+#
+# These drive the completion scheduler (Phase 3) and the collapsible,
+# selection-aware subtask status bar (Phase 4) against a stub SubtaskManager
+# -- no real threads or network. The completion-scheduler tests deliberately
+# replace ``panel._launch_turn`` with a recorder instead of letting a real
+# worker thread run (this file already documents run_worker(thread=True) as a
+# flaky-under-test hazard for the blocks-on-a-round-trip pattern); the launch
+# decision is exactly what those tests assert, so recording the call is both
+# sufficient and deterministic.
+
+
+class _StubSubtaskManager:
+    """Minimal SubtaskManager stand-in for the Phase 3/4 ChatPanel tests.
+
+    Records spawn/cancel/stop calls and lets a test inject completion records
+    and a running-row snapshot, with no real threads, arbiter, or network.
+    Only the surface ChatPanel actually calls is implemented.
+    """
+
+    def __init__(self) -> None:
+        self._completed: list[CompletionRecord] = []
+        self._running_rows: list[dict] = []
+        self.cancelled: list[str] = []
+        self.stop_all_calls = 0
+        self.on_complete = None
+        self.epoch_probe = None
+
+    def configure(self, *, client_factory=None, epoch_probe=None, on_complete=None):
+        if epoch_probe is not None:
+            self.epoch_probe = epoch_probe
+        if on_complete is not None:
+            self.on_complete = on_complete
+
+    def take_all_completed(self) -> list[CompletionRecord]:
+        drained = list(self._completed)
+        self._completed.clear()
+        return drained
+
+    def running(self) -> list[dict]:
+        return [dict(row) for row in self._running_rows]
+
+    def active_owner_ids(self) -> set[str]:
+        return {row["subtask_id"] for row in self._running_rows}
+
+    def cancel(self, subtask_id: str) -> bool:
+        self.cancelled.append(subtask_id)
+        return True
+
+    def stop_all(self) -> None:
+        self.stop_all_calls += 1
+
+    # -- test helpers --
+    def add_completion(self, subtask_id, label, result, epoch, privileged=False):
+        self._completed.append(
+            CompletionRecord(
+                subtask_id=subtask_id,
+                label=label,
+                privileged=privileged,
+                result=result,
+                epoch=epoch,
+            )
+        )
+
+    def set_running(self, rows: list[dict]) -> None:
+        self._running_rows = rows
+
+
+@pytest.fixture
+def stub_manager(monkeypatch):
+    """Point ChatPanel at a stub SubtaskManager and reset the real singletons.
+
+    Resetting ``subtasks._subtask_manager`` / ``arbiter._arbiter`` before and
+    after keeps the process-wide singletons from leaking configured callbacks
+    or leases across tests.
+    """
+    import sandroid.ai.arbiter as arbiter_mod
+    import sandroid.ai.subtasks as subtasks_mod
+
+    subtasks_mod._subtask_manager = None
+    arbiter_mod._arbiter = None
+    stub = _StubSubtaskManager()
+    monkeypatch.setattr(chat_panel_module, "get_subtask_manager", lambda: stub)
+    yield stub
+    subtasks_mod._subtask_manager = None
+    arbiter_mod._arbiter = None
+
+
+def test_completion_while_idle_launches_one_synthetic_turn(stub_manager):
+    """Idle + one finished subtask -> exactly one synthetic turn, carrying the
+    batched result text.
+    """
+    panel = ChatPanel(id="chat-panel")
+    calls: list[tuple[str, bool]] = []
+    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
+        (text, synthetic)
+    )
+
+    stub_manager.add_completion("s1", "probe", "found 3 things", epoch=0)
+    panel._drain_completions()
+
+    assert len(calls) == 1
+    text, synthetic = calls[0]
+    assert synthetic is True
+    assert "s1" in text
+    assert "probe" in text
+    assert "found 3 things" in text
+
+
+def test_completion_during_turn_defers_then_launches_once_after_finish(stub_manager):
+    """A completion arriving mid-turn is NOT launched immediately (and stays
+    queued, not lost); it launches exactly once after ``_finish_turn``.
+    """
+    panel = ChatPanel(id="chat-panel")
+    calls: list[tuple[str, bool]] = []
+    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
+        (text, synthetic)
+    )
+
+    panel._turn_in_progress = True
+    stub_manager.add_completion("s1", "probe", "done", epoch=0)
+
+    panel._drain_completions()
+    assert calls == []  # deferred while a turn is in progress
+    assert len(stub_manager._completed) == 1  # left queued, not drained
+
+    panel._finish_turn()  # flips _turn_in_progress off, then re-drains
+    assert len(calls) == 1
+    assert calls[0][1] is True
+    assert "done" in calls[0][0]
+
+
+def test_two_completions_are_batched_into_one_synthetic_turn(stub_manager):
+    """Two fresh completions collapse into ONE synthetic turn (neither lost)."""
+    panel = ChatPanel(id="chat-panel")
+    calls: list[tuple[str, bool]] = []
+    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
+        (text, synthetic)
+    )
+
+    stub_manager.add_completion("s1", "alpha", "resultA", epoch=0)
+    stub_manager.add_completion("s2", "beta", "resultB", epoch=0)
+    panel._drain_completions()
+
+    assert len(calls) == 1
+    text = calls[0][0]
+    assert "s1" in text
+    assert "resultA" in text
+    assert "s2" in text
+    assert "resultB" in text
+
+
+def test_stale_epoch_completion_is_dropped(stub_manager):
+    """A completion whose epoch predates a Ctrl+L clear (epoch bumped) is
+    dropped -- no synthetic turn is launched.
+    """
+    panel = ChatPanel(id="chat-panel")
+    calls: list[tuple[str, bool]] = []
+    panel._launch_turn = lambda text, *, synthetic=False: calls.append(
+        (text, synthetic)
+    )
+
+    panel._epoch = 1  # conversation was cleared since the subtask was spawned
+    stub_manager.add_completion("s1", "probe", "stale result", epoch=0)
+    panel._drain_completions()
+
+    assert calls == []
+
+
+def test_ctrl_x_cancels_selected_subtask_not_the_turn(stub_manager):
+    """Ctrl+X with a subtask selected cancels THAT subtask and leaves the
+    active turn running.
+    """
+    panel = ChatPanel(id="chat-panel")
+    stub_manager.set_running(
+        [
+            {
+                "subtask_id": "s1",
+                "label": "probe",
+                "privileged": False,
+                "elapsed": 2.0,
+                "last_activity": None,
+            }
+        ]
+    )
+    panel._selected_subtask_id = "s1"
+    handle = ChatTurnHandle()
+    panel._active_handle = handle
+
+    panel.action_stop_turn()
+
+    assert stub_manager.cancelled == ["s1"]
+    assert not handle.cancel_event.is_set()  # the reply was NOT stopped
+    assert panel._selected_subtask_id is None
+
+
+def test_ctrl_x_with_no_selection_stops_the_turn(stub_manager):
+    """Ctrl+X with nothing selected preserves the original behavior: stop the
+    active turn, cancel no subtask.
+    """
+    panel = ChatPanel(id="chat-panel")
+    panel._selected_subtask_id = None
+    handle = ChatTurnHandle()
+    panel._active_handle = handle
+
+    panel.action_stop_turn()
+
+    assert handle.cancel_event.is_set()
+    assert stub_manager.cancelled == []
+
+
+@pytest.mark.smoke
+async def test_subtask_bar_hides_shows_count_and_lists_rows(stub_manager):
+    """The bar hides at 0 subtasks, shows a count collapsed, lists rows when
+    expanded, and gates the mascot off whenever it is shown.
+    """
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        bar = app.query_one("#chat-subtask-bar", Static)
+        mascot = app.query_one("#chat-mascot", Static)
+        await pilot.pause()
+
+        # 0 rows -> hidden (on_mount already refreshed against the empty stub)
+        assert bar.display is False
+
+        # collapsed: a count line, privileged note, mascot gated off
+        stub_manager.set_running(
+            [
+                {
+                    "subtask_id": "s1",
+                    "label": "probe",
+                    "privileged": False,
+                    "elapsed": 1.0,
+                    "last_activity": "list_processes",
+                },
+                {
+                    "subtask_id": "s2",
+                    "label": "deep",
+                    "privileged": True,
+                    "elapsed": 5.0,
+                    "last_activity": None,
+                },
+            ]
+        )
+        panel._refresh_subtask_bar()
+        await pilot.pause()
+        assert bar.display is True
+        collapsed = bar.content.plain
+        assert "2 subtasks running" in collapsed
+        assert "privileged" in collapsed
+        assert mascot.display is False  # gated off while the bar is shown
+
+        # expanded: header + one row per subtask
+        panel.action_subtasks_up()
+        await pilot.pause()
+        assert panel._subtasks_expanded is True
+        assert panel._selected_subtask_id == "s1"
+        expanded = bar.content.plain
+        assert "s1" in expanded
+        assert "s2" in expanded
+        assert "probe" in expanded
+        assert "deep" in expanded
+
+        # back to 0 -> hidden again, mascot restored
+        stub_manager.set_running([])
+        panel._refresh_subtask_bar()
+        await pilot.pause()
+        assert bar.display is False
+        assert mascot.display is True

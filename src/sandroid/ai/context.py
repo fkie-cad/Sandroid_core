@@ -19,8 +19,8 @@ Design rules (see each ``_describe_*`` helper below):
   with no caching).
 - **Never persisted**: callers must rebuild this fresh every turn and must
   never let it leak into stored conversation history, or it goes stale and
-  accumulates (see ``chat_panel.py``'s identity-based filter and
-  ``subagents.py``'s one-shot splice).
+  accumulates (see ``chat_panel.py``'s identity-based filter and a subtask's
+  one-shot splice).
 - **Explicit state for boolean facts**: for a fact that's a direct yes/no
   question a user can ask ("is mitmproxy running?", "is a Frida session
   attached?", "is it recording?", "what's the current spotlight app?"), the

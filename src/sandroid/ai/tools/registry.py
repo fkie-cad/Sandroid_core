@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
 
+from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ class ToolSpec:
         func: Callable dispatched with ``func(**arguments)``.
         risk: Safety tier (see :class:`RiskTier`). Defaults to read-only.
         category: Free-form grouping label (e.g. ``"general"``, ``"mcp"``,
-            ``"subagent"``), used for display/filtering, not enforced.
+            ``"subtask"``), used for display/filtering, not enforced.
         can_remember_choice: Whether a user's "Allow always"/"Never" choice
             for this tool may be persisted and reused on future calls (see
             :mod:`sandroid.ai.tool_permissions`). Defaults to ``True``. Set
@@ -76,6 +77,18 @@ class ToolSpec:
             with different, unreviewed arguments): such a tool always
             resolves to ``"ask"`` and its decline is call-scoped only, never
             written to the permission store.
+        resources: Device resources (see
+            :class:`~sandroid.ai.arbiter.ResourceId`) this tool needs an
+            exclusive lease on for the duration of its dispatch. The loop
+            claims them from the :class:`~sandroid.ai.arbiter.DeviceResourceArbiter`
+            after the permission gate and before dispatch, and rolls the
+            newly-acquired ones back on failure. Empty (the default) means a
+            read-only tool that touches no shared resource and skips the
+            arbiter entirely. Never sent to the model.
+        releases: Device resources this tool *releases* on a successful
+            dispatch (e.g. ``clear_device_proxy`` releases
+            :attr:`~sandroid.ai.arbiter.ResourceId.DEVICE_PROXY`). Empty by
+            default. Never sent to the model.
     """
 
     name: str
@@ -85,6 +98,8 @@ class ToolSpec:
     risk: RiskTier = RiskTier.READ_ONLY
     category: str = "general"
     can_remember_choice: bool = True
+    resources: frozenset[ResourceId] = frozenset()
+    releases: frozenset[ResourceId] = frozenset()
 
 
 class ToolRegistry:
@@ -119,11 +134,11 @@ class ToolRegistry:
     def subset(self, names: list[str]) -> list[dict]:
         """Same schema shape as :meth:`openai_tools_schema`, filtered by name.
 
-        Used to build a subagent's narrower tool view. Names not currently
+        Used to build a subtask's narrower tool view. Names not currently
         registered are silently skipped (e.g. an MCP tool listed in a
-        subagent template before :func:`bridge_mcp_tools` has run yet) rather
-        than raising, so a template can be defined before every one of its
-        tools necessarily exists.
+        subtask's tool set before :func:`bridge_mcp_tools` has run yet)
+        rather than raising, so a tool set can be defined before every one of
+        its tools necessarily exists.
         """
         wanted = set(names)
         return [
@@ -131,6 +146,15 @@ class ToolRegistry:
             for spec in self._tools.values()
             if spec.name in wanted
         ]
+
+    def names(self) -> list[str]:
+        """Return the names of every currently registered tool.
+
+        Used to compute a privileged tool subset dynamically (e.g. a
+        subtask's allowed set), so the caller does not have to hardcode a
+        list that would drift as tools are added or MCP tools bridged in.
+        """
+        return list(self._tools.keys())
 
     def dispatch(self, name: str, arguments: dict) -> Any:
         """Look up and call a tool by name.
@@ -206,6 +230,8 @@ def sandroid_tool(
     risk: RiskTier = RiskTier.READ_ONLY,
     category: str = "general",
     can_remember_choice: bool = True,
+    resources: frozenset[ResourceId] = frozenset(),
+    releases: frozenset[ResourceId] = frozenset(),
 ) -> Callable:
     """Decorator that wraps a function and registers it as a tool.
 
@@ -221,6 +247,10 @@ def sandroid_tool(
         category: Free-form grouping label.
         can_remember_choice: Whether an "Allow always"/"Never" choice for
             this tool may be persisted, see :attr:`ToolSpec.can_remember_choice`.
+        resources: Device resources this tool needs an exclusive lease on,
+            see :attr:`ToolSpec.resources`.
+        releases: Device resources this tool releases on success, see
+            :attr:`ToolSpec.releases`.
 
     Returns:
         A decorator that returns the original function unchanged.
@@ -236,6 +266,8 @@ def sandroid_tool(
                 risk=risk,
                 category=category,
                 can_remember_choice=can_remember_choice,
+                resources=resources,
+                releases=releases,
             )
         )
         return func

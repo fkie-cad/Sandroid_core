@@ -8,6 +8,7 @@ management, and network capture.
 from __future__ import annotations
 
 import re
+import threading
 from logging import getLogger
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,15 @@ if TYPE_CHECKING:
 from sandroid.core.adb_utils import is_adb_error_actionable
 
 logger = getLogger(__name__)
+
+#: Serializes ALL telnet-console traffic. The emulator console is a single
+#: stateful connection, and with async subtasks more than one thread can now
+#: reach for it at once; interleaved commands corrupt each other's responses.
+#: A plain ``Lock`` (not ``RLock``) is correct because no telnet command runs
+#: another telnet command while inside ``send_telnet_command`` -- its body
+#: only calls ``send_command`` (an ADB, not telnet, round-trip), so the lock
+#: is never re-entered on the same thread.
+_TELNET_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -30,7 +40,10 @@ def send_telnet_command(
 ) -> tuple[str, str]:
     """Send a telnet command to the Android emulator console.
 
-    Uses ADB's ``emu`` command to send telnet commands to the emulator.
+    Uses ADB's ``emu`` command to send telnet commands to the emulator. All
+    telnet traffic is serialized through :data:`_TELNET_LOCK` so concurrent
+    callers (e.g. async subtasks) can't interleave commands on the single
+    stateful emulator console.
 
     Args:
         send_command: Callable that sends an ADB command and returns
@@ -40,14 +53,15 @@ def send_telnet_command(
     Returns:
         A tuple of (stdout, stderr).
     """
-    if isinstance(command, bytes):
-        command = command.decode("utf-8")
-    stdout, stderr = send_command("emu " + command)
-    if stderr and is_adb_error_actionable(stderr):
-        logger.error(f'Telnet command "{command}" failed: {stderr.strip()}')
-    elif stderr:
-        logger.debug(f'Telnet command "{command}" info: {stderr.strip()}')
-    return stdout, stderr
+    with _TELNET_LOCK:
+        if isinstance(command, bytes):
+            command = command.decode("utf-8")
+        stdout, stderr = send_command("emu " + command)
+        if stderr and is_adb_error_actionable(stderr):
+            logger.error(f'Telnet command "{command}" failed: {stderr.strip()}')
+        elif stderr:
+            logger.debug(f'Telnet command "{command}" info: {stderr.strip()}')
+        return stdout, stderr
 
 
 def _get_avd_property(

@@ -2,10 +2,10 @@
 
 Deliberately does not import :mod:`sandroid.core.toolbox` -- Toolbox
 integration (registering a running turn as a background task so it shows up
-in the StatusBar) is the caller's concern, not this loop's. See
-:mod:`sandroid.ai.subagents`, which recurses into :func:`run_agent_turn` for
-subagent dispatch and *does* import Toolbox, since that is exactly where the
-Toolbox integration belongs.
+in the StatusBar) is the caller's concern, not this loop's. A subtask is just
+another :func:`run_agent_turn` call recursed into by a spawn tool, which
+*does* import Toolbox, since that is exactly where the Toolbox integration
+belongs.
 
 The loop is a hand-rolled while-loop, not a framework (no LangChain/LangGraph/
 OpenAI Agents SDK): stream a response, forward text as it arrives, accumulate
@@ -20,6 +20,7 @@ import threading
 from collections.abc import Callable
 from contextvars import ContextVar
 
+from sandroid.ai.arbiter import Conflict, get_arbiter
 from sandroid.ai.client import OpenAIClient
 from sandroid.ai.tool_permissions import get_tool_permission_store, resolve_tool_policy
 from sandroid.ai.tools.registry import ToolSpec, get_tool_registry
@@ -36,16 +37,26 @@ MAX_ITERATIONS_DEFAULT = 8
 ApproveCallback = Callable[[ToolSpec, dict], str]
 
 #: (client, cancel_event, approve) for the turn currently executing on this
-#: thread. Subagent tool dispatch (sandroid.ai.subagents) reads this via
-#: get_current_turn_context() to recurse into run_agent_turn with the same
-#: client, a cancel_event that ORs the parent's, and the same approve
-#: callback (so the tool-permission gate applies uniformly to subagent
-#: dispatch too). Deliberately lives here (not in subagents.py) so this
-#: module has zero knowledge of subagents -- the dependency points one way:
-#: subagents.py -> loop.py.
+#: thread. A subtask spawn tool reads this via get_current_turn_context() to
+#: recurse into run_agent_turn with the same client, a cancel_event that ORs
+#: the parent's, and the same approve callback (so the tool-permission gate
+#: applies uniformly to subtask dispatch too). Deliberately lives here so
+#: this module has zero knowledge of subtasks -- the dependency points one
+#: way: the spawn tool -> loop.py.
 _current_turn_context: ContextVar[
     tuple[OpenAIClient, threading.Event, ApproveCallback | None] | None
 ] = ContextVar("_current_turn_context", default=None)
+
+#: The resource-arbiter owner id of the turn currently executing on this
+#: thread, or ``None`` for a non-chat caller (or a test) that isn't
+#: participating in resource arbitration. Deliberately a SEPARATE ContextVar
+#: from _current_turn_context (whose exact 3-tuple shape a test asserts) so
+#: adding owner plumbing does not change that tuple. Read in _dispatch_one to
+#: claim/release a tool's declared resource leases; ``None`` skips the
+#: arbiter entirely, so read-only/non-chat paths are unaffected.
+_current_owner_id: ContextVar[str | None] = ContextVar(
+    "_current_owner_id", default=None
+)
 
 
 def get_current_turn_context() -> (
@@ -55,7 +66,7 @@ def get_current_turn_context() -> (
 
     Returns:
         The active turn's context, or ``None`` if no :func:`run_agent_turn`
-        call is currently on the stack for this thread (subagent recursion is
+        call is currently on the stack for this thread (subtask recursion is
         plain synchronous Python on the same worker thread, so a
         ``contextvars.ContextVar`` correctly scopes this to "the call
         currently in progress here" without any explicit passing through
@@ -73,6 +84,7 @@ def run_agent_turn(
     on_event: Callable[[dict], None] | None = None,
     max_iterations: int = MAX_ITERATIONS_DEFAULT,
     approve: ApproveCallback | None = None,
+    owner_id: str | None = None,
 ) -> str:
     """Drive one full agent turn (streaming + tool-calling) to completion.
 
@@ -101,6 +113,12 @@ def run_agent_turn(
             ``None`` (the default) means no UI is available to ask, so any
             tool needing confirmation is refused outright rather than
             dispatched.
+        owner_id: The resource-arbiter owner id for this turn (see
+            :mod:`sandroid.ai.arbiter`). When set, a tool that declares
+            ``resources`` claims an exclusive lease on them before dispatch
+            and rolls back on failure. ``None`` (the default) opts out of
+            resource arbitration entirely -- used by non-chat callers and
+            tests, and unchanged from the loop's pre-arbiter behavior.
 
     Returns:
         The final reply text not yet reflected in ``messages`` -- i.e. only
@@ -119,13 +137,14 @@ def run_agent_turn(
             on_event(event)
 
     # The exact name set offered to the model this turn -- dispatch refuses
-    # anything outside it, so a narrower subset (e.g. a subagent's, built via
+    # anything outside it, so a narrower subset (e.g. a subtask's, built via
     # ToolRegistry.subset()) is an enforced boundary, not just advisory.
     allowed_names = {
         t["function"]["name"] for t in tools if t.get("type") == "function"
     }
 
     token = _current_turn_context.set((client, cancel_event, approve))
+    owner_token = _current_owner_id.set(owner_id)
     try:
         return _run_iterations(
             messages,
@@ -138,6 +157,7 @@ def run_agent_turn(
             approve,
         )
     finally:
+        _current_owner_id.reset(owner_token)
         _current_turn_context.reset(token)
 
 
@@ -313,7 +333,7 @@ def _dispatch_one(
     If ``allowed_names`` is given (the name set actually offered to the
     model this turn -- see :func:`run_agent_turn`'s ``tools`` argument), a
     call to anything outside it is refused rather than dispatched: a
-    narrower tool subset (e.g. a subagent's) is meant to be an enforced
+    narrower tool subset (e.g. a subtask's) is meant to be an enforced
     boundary, not just an advisory hint in the schema the model was shown.
 
     Before dispatch, the tool-permission gate is consulted (see
@@ -355,12 +375,63 @@ def _dispatch_one(
             if choice == "always" and spec.can_remember_choice:
                 get_tool_permission_store().mark_allowed(spec.name)
 
+    # Resource arbitration happens AFTER the permission gate (so a lease is
+    # never held across a human-approval wait) and BEFORE dispatch. A read-
+    # only tool (empty spec.resources) or a non-chat/test caller (owner is
+    # None) skips the arbiter entirely, leaving the pre-arbiter behavior --
+    # and every existing loop test -- unaffected.
+    owner = _current_owner_id.get()
+    newly: frozenset = frozenset()
+    if spec is not None and spec.resources and owner is not None:
+        claimed = get_arbiter().claim(owner, spec.resources)
+        if isinstance(claimed, Conflict):
+            return json.dumps(
+                {
+                    "error": (
+                        f"resource {claimed.resource.value!r} is in use by "
+                        "another task; it must be released before this tool "
+                        "can run"
+                    )
+                }
+            )
+        newly = claimed
+
     try:
         result = registry.dispatch(name, arguments)
-        return json.dumps(result)
     except Exception as exc:
+        # Roll back only the leases THIS call newly acquired -- never leases
+        # the owner already held coming in.
+        if newly and owner is not None:
+            get_arbiter().release_resources(owner, newly)
         logger.debug("Tool %r raised during dispatch: %s", name, exc)
         return json.dumps({"error": str(exc)})
+
+    # Decide keep-vs-release based on whether the tool actually took effect.
+    # A dict result signals logical failure via error/success/started -- but a
+    # "started: False" that also reports "running: True" is a benign "already
+    # running" no-op (the resource IS up and this owner should keep its lease),
+    # so a truthy "running" vetoes the failure verdict.
+    is_failure = (
+        isinstance(result, dict)
+        and not result.get("running")
+        and bool(
+            result.get("error")
+            or result.get("success") is False
+            or result.get("started") is False
+        )
+    )
+    if owner is not None:
+        if is_failure:
+            # The tool ran but didn't take effect: roll back only what THIS
+            # call newly acquired, and do NOT apply the tool's declared
+            # releases (a failed stop/clear leaves the resource in place, so
+            # its lease must stay with whoever owns it).
+            if newly:
+                get_arbiter().release_resources(owner, newly)
+        elif spec is not None and spec.releases:
+            get_arbiter().release_resources(owner, spec.releases)
+
+    return json.dumps(result)
 
 
 def _parse_arguments(raw_arguments: str) -> dict:

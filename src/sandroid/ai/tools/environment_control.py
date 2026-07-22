@@ -57,6 +57,7 @@ import os
 import time
 from typing import Any
 
+from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 
@@ -142,6 +143,7 @@ def check_frida_server_status() -> dict[str, Any]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="frida",
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
 )
 def start_frida_server() -> dict[str, Any]:
     """Start frida-server on the device.
@@ -179,6 +181,8 @@ def start_frida_server() -> dict[str, Any]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="frida",
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
+    releases=frozenset({ResourceId.FRIDA_SERVER}),
 )
 def stop_frida_server() -> dict[str, Any]:
     """Stop frida-server on the device, pre/post-checking its running state.
@@ -262,6 +266,7 @@ def stop_frida_server() -> dict[str, Any]:
     risk=RiskTier.CONSEQUENTIAL,
     category="frida",
     can_remember_choice=False,
+    resources=frozenset({ResourceId.FRIDA_SERVER}),
 )
 def install_frida_server(version: str | None = None) -> dict[str, Any]:
     """Download and install a frida-server binary on the device.
@@ -448,6 +453,7 @@ def take_screenshot() -> dict[str, str]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="capture",
+    resources=frozenset({ResourceId.SCREEN_RECORDING}),
 )
 def start_screen_recording() -> dict[str, Any]:
     """Start a real ``adb shell screenrecord``-backed screen recording.
@@ -480,6 +486,8 @@ def start_screen_recording() -> dict[str, Any]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,
     category="capture",
+    resources=frozenset({ResourceId.SCREEN_RECORDING}),
+    releases=frozenset({ResourceId.SCREEN_RECORDING}),
 )
 def stop_screen_recording() -> dict[str, Any]:
     """Stop the active screen recording and pull the file off the device.
@@ -595,6 +603,8 @@ def create_snapshot(name: str) -> dict[str, Any]:
     risk=RiskTier.CONSEQUENTIAL,
     category="capture",
     can_remember_choice=False,
+    resources=frozenset({ResourceId.WORLD}),
+    releases=frozenset({ResourceId.WORLD}),
 )
 def load_snapshot(name: str) -> dict[str, Any]:
     """Restore the emulator to a previously created named snapshot.
@@ -749,6 +759,8 @@ def delete_snapshot(name: str) -> dict[str, Any]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.CONSEQUENTIAL,
     category="emulator_control",
+    resources=frozenset({ResourceId.WORLD}),
+    releases=frozenset({ResourceId.WORLD}),
 )
 def restart_emulator() -> dict[str, Any]:
     """Kill the current emulator instance and start a new one.
@@ -792,6 +804,8 @@ def restart_emulator() -> dict[str, Any]:
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.CONSEQUENTIAL,
     category="emulator_control",
+    resources=frozenset({ResourceId.WORLD}),
+    releases=frozenset({ResourceId.WORLD}),
 )
 def kill_emulator() -> dict[str, Any]:
     """Send a kill command to the running emulator over its telnet console.

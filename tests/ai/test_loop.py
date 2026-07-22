@@ -12,8 +12,10 @@ import threading
 
 import pytest
 
+import sandroid.ai.arbiter as arbiter_module
 import sandroid.ai.loop as loop_module
 import sandroid.ai.tool_permissions as tool_permissions_module
+from sandroid.ai.arbiter import DeviceResourceArbiter, ResourceId
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.loop import run_agent_turn
 from sandroid.ai.tool_permissions import ToolPermissionStore
@@ -56,6 +58,20 @@ def permission_store(tmp_path, monkeypatch):
         tool_permissions_module, "get_tool_permission_store", lambda: instance
     )
     monkeypatch.setattr(loop_module, "get_tool_permission_store", lambda: instance)
+    return instance
+
+
+@pytest.fixture
+def arbiter(monkeypatch):
+    """A fresh DeviceResourceArbiter as the process-wide singleton.
+
+    `loop._dispatch_one` calls `get_arbiter()` (imported into loop.py's
+    globals), which reads `arbiter_module._arbiter`; monkeypatching that
+    module global to a fresh instance keeps each test isolated from the real
+    singleton and from every other test.
+    """
+    instance = DeviceResourceArbiter()
+    monkeypatch.setattr(arbiter_module, "_arbiter", instance)
     return instance
 
 
@@ -831,3 +847,334 @@ def test_can_remember_choice_false_still_asks_despite_prior_allowed_entry(
         "can_remember_choice=False must always ask, even against a stored "
         "'allowed' entry under the same name"
     )
+
+
+# -- Resource arbiter: leases claimed/released around tool dispatch ----------
+
+
+def test_read_only_tool_never_touches_the_arbiter(
+    test_registry, permission_store, arbiter
+):
+    """A tool with no declared resources must skip the arbiter entirely,
+    even when the turn runs under an owner id.
+    """
+    claim_calls = []
+    original_claim = arbiter.claim
+    arbiter.claim = lambda owner, resources: (
+        claim_calls.append((owner, resources)) or original_claim(owner, resources)
+    )
+
+    def read_only_tool(**kwargs):
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="read_only_tool",
+            description="A read-only tool with no resources.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=read_only_tool,
+            risk=RiskTier.READ_ONLY,
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("read_only_tool"))
+
+    result = run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert result == "done"
+    assert claim_calls == [], "a resourceless tool must never call claim()"
+    assert arbiter.snapshot() == {}
+
+
+def test_tool_with_resources_claims_lease_when_owner_set(
+    test_registry, permission_store, arbiter
+):
+    def proxy_tool(**kwargs):
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="proxy_tool",
+            description="A tool that needs the device proxy.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=proxy_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.DEVICE_PROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("proxy_tool"))
+
+    result = run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert result == "done"
+    # A successful, non-releasing tool keeps its lease after the turn.
+    assert arbiter.snapshot() == {ResourceId.DEVICE_PROXY: "A"}
+
+
+def test_no_owner_skips_the_arbiter_even_with_declared_resources(
+    test_registry, permission_store, arbiter
+):
+    """owner_id defaulting to None (non-chat callers/tests) must skip the
+    arbiter, so a tool with declared resources still runs and leases nothing.
+    """
+    func_calls = []
+
+    def proxy_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="proxy_tool",
+            description="A tool that needs the device proxy.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=proxy_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.DEVICE_PROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("proxy_tool"))
+
+    run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        # owner_id omitted -> None
+    )
+
+    assert func_calls == ["ran"]
+    assert arbiter.snapshot() == {}
+
+
+def test_conflict_refuses_dispatch_and_returns_conflict_error(
+    test_registry, permission_store, arbiter
+):
+    # A different owner already holds the resource this tool needs.
+    arbiter.claim("B", frozenset({ResourceId.DEVICE_PROXY}))
+
+    func_calls = []
+
+    def proxy_tool(**kwargs):
+        func_calls.append("ran")
+        return {"ok": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="proxy_tool",
+            description="A tool that needs the device proxy.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=proxy_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.DEVICE_PROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("proxy_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert func_calls == [], "a conflicting claim must refuse dispatch"
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "error" in payload
+    assert "in use by another task" in payload["error"]
+    # B still holds the lease; A never acquired it.
+    assert arbiter.snapshot() == {ResourceId.DEVICE_PROXY: "B"}
+
+
+def test_releases_tool_frees_the_lease(test_registry, permission_store, arbiter):
+    # The owner already holds the lease coming in.
+    arbiter.claim("A", frozenset({ResourceId.DEVICE_PROXY}))
+
+    def clear_tool(**kwargs):
+        return {"success": True}
+
+    test_registry.register(
+        ToolSpec(
+            name="clear_tool",
+            description="A tool that releases the device proxy.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=clear_tool,
+            risk=RiskTier.READ_ONLY,
+            releases=frozenset({ResourceId.DEVICE_PROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("clear_tool"))
+
+    run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert arbiter.snapshot() == {}, "a releases-tool must free the lease"
+
+
+def test_logical_failure_result_releases_newly_acquired_lease(
+    test_registry, permission_store, arbiter
+):
+    """A tool that ran without raising but returned a genuine logical failure
+    (``{"started": False, "error": ...}`` with no ``running`` flag) never truly
+    took the resource, so its newly-acquired lease must be rolled back.
+    """
+
+    def failing_start_tool(**kwargs):
+        return {"started": False, "error": "port already in use"}
+
+    test_registry.register(
+        ToolSpec(
+            name="failing_start_tool",
+            description="A tool that reports a logical failure.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=failing_start_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.MITMPROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("failing_start_tool"))
+
+    run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert (
+        arbiter.snapshot() == {}
+    ), "a genuine {'started': False} failure must release the newly-acquired lease"
+
+
+def test_benign_already_running_result_keeps_the_lease(
+    test_registry, permission_store, arbiter
+):
+    """A ``{"started": False, "running": True}`` result is a benign no-op (the
+    resource IS up), so the owner must KEEP the lease it just acquired rather
+    than have it wrongly released as a logical failure.
+    """
+
+    def already_running_tool(**kwargs):
+        return {"started": False, "running": True, "error": "already running"}
+
+    test_registry.register(
+        ToolSpec(
+            name="already_running_tool",
+            description="A start tool that reports it was already running.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=already_running_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.MITMPROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("already_running_tool"))
+
+    run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert arbiter.snapshot() == {
+        ResourceId.MITMPROXY: "A"
+    }, "a benign 'running: True' result must keep the newly-acquired lease"
+
+
+def test_raising_tool_rolls_back_newly_acquired_lease(
+    test_registry, permission_store, arbiter
+):
+    """A tool that raises after claiming must have its newly-acquired lease
+    rolled back (and the error still fed back to the model).
+    """
+
+    def boom_tool(**kwargs):
+        raise ValueError("boom")
+
+    test_registry.register(
+        ToolSpec(
+            name="boom_tool",
+            description="A tool that raises after claiming.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=boom_tool,
+            risk=RiskTier.READ_ONLY,
+            resources=frozenset({ResourceId.MITMPROXY}),
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("boom_tool"))
+    messages = [{"role": "user", "content": "hi"}]
+
+    run_agent_turn(
+        messages=messages,
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=threading.Event(),
+        owner_id="A",
+    )
+
+    assert arbiter.snapshot() == {}
+    tool_message = next(m for m in messages if m.get("role") == "tool")
+    payload = json.loads(tool_message["content"])
+    assert "boom" in payload["error"]
+
+
+def test_owner_context_var_does_not_change_turn_context_tuple(test_registry, arbiter):
+    """Setting owner_id must NOT alter the existing 3-tuple turn context
+    (client, cancel_event, approve) -- it lives in a separate ContextVar.
+    """
+    seen = {}
+
+    def probe(**kwargs):
+        seen["context"] = loop_module.get_current_turn_context()
+        return "ok"
+
+    test_registry.register(
+        ToolSpec(
+            name="probe",
+            description="Reads the active turn context.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=probe,
+        )
+    )
+
+    client = FakeOpenAIClient(_single_tool_call_then_text("probe"))
+    cancel_event = threading.Event()
+
+    run_agent_turn(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=test_registry.openai_tools_schema(),
+        client=client,
+        cancel_event=cancel_event,
+        owner_id="A",
+    )
+
+    assert seen["context"] == (client, cancel_event, None)

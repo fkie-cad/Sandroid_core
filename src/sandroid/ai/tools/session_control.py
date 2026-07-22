@@ -28,6 +28,7 @@ remembered allow/deny choice is safe to reuse across future calls.
 import time
 from typing import Any
 
+from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.enums import SpawnMode
@@ -132,6 +133,8 @@ def _curated_spotlight_state(service: Any) -> dict[str, Any]:
     risk=RiskTier.REVERSIBLE,
     category="spotlight",
     can_remember_choice=True,
+    resources=frozenset({ResourceId.SPOTLIGHT}),
+    releases=frozenset({ResourceId.SPOTLIGHT}),
 )
 def set_spotlight_app(
     package_name: str,
@@ -237,6 +240,7 @@ def get_spotlight_app() -> dict[str, Any]:
     risk=RiskTier.CONSEQUENTIAL,
     category="network_control",
     can_remember_choice=True,
+    resources=frozenset({ResourceId.MITMPROXY}),
 )
 def start_mitmproxy() -> dict[str, Any]:
     """Start the mitmweb subprocess with config-file ports.
@@ -295,6 +299,8 @@ def start_mitmproxy() -> dict[str, Any]:
     risk=RiskTier.REVERSIBLE,
     category="network_control",
     can_remember_choice=True,
+    resources=frozenset({ResourceId.MITMPROXY}),
+    releases=frozenset({ResourceId.MITMPROXY}),
 )
 def stop_mitmproxy() -> dict[str, Any]:
     """Stop the mitmweb subprocess if it is running.
@@ -378,6 +384,7 @@ def get_mitmproxy_status() -> dict[str, Any]:
     risk=RiskTier.REVERSIBLE,
     category="network_control",
     can_remember_choice=True,
+    resources=frozenset({ResourceId.DEVICE_PROXY}),
 )
 def set_device_proxy() -> dict[str, Any]:
     """Route the device's global HTTP proxy to our mitmproxy instance.
@@ -448,6 +455,8 @@ def set_device_proxy() -> dict[str, Any]:
     risk=RiskTier.REVERSIBLE,
     category="network_control",
     can_remember_choice=True,
+    resources=frozenset({ResourceId.DEVICE_PROXY}),
+    releases=frozenset({ResourceId.DEVICE_PROXY}),
 )
 def clear_device_proxy() -> dict[str, Any]:
     """Clear the device's global HTTP proxy setting.

@@ -25,6 +25,7 @@ Usage:
 """
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -124,6 +125,14 @@ class SpotlightService:
             job_manager_factory: Optional factory callable to get JobManager instance.
                                  If not provided, will use Toolbox.get_frida_job_manager().
         """
+        # Guards the multi-attribute state below so concurrent callers (e.g.
+        # async subtasks plus the orchestrator) can't read/write a torn
+        # combination of _current_app/_spawn_* fields. An RLock, NOT a plain
+        # Lock: composite methods like reset()/get_state_dict() call the
+        # (also-locked) get_effective_package(), which would self-deadlock
+        # under a non-reentrant lock. Event publishing always happens OUTSIDE
+        # this lock (repo convention: snapshot under lock, publish after).
+        self._lock = threading.RLock()
         self._current_app: SpotlightApp | None = None
         self._spawn_package: str | None = None
         # PID for a spawn-selected app (Shift+C), which has no _current_app.
@@ -167,13 +176,15 @@ class SpotlightService:
         # Convert string to SpawnMode for backwards compatibility
         if isinstance(mode, str):
             mode = SpawnMode(mode)
-        previous = self._current_app
-        self._current_app = SpotlightApp(
-            package_name=package_name,
-            activity_name=activity_name,
-            pid=pid,
-            mode=mode,
-        )
+        with self._lock:
+            previous = self._current_app
+            self._current_app = SpotlightApp(
+                package_name=package_name,
+                activity_name=activity_name,
+                pid=pid,
+                mode=mode,
+            )
+            previous_package = previous.package_name if previous else None
         self._logger.debug(
             f"Set spotlight app: {package_name}"
             + (f" (PID: {pid})" if pid else "")
@@ -182,7 +193,7 @@ class SpotlightService:
 
         self._publish_app_changed(
             package_name=package_name,
-            previous_package=previous.package_name if previous else None,
+            previous_package=previous_package,
             mode=mode.value,  # Pass string value for event serialization
             pid=pid,
         )
@@ -231,9 +242,10 @@ class SpotlightService:
         Returns:
             PID integer or None
         """
-        if self._current_app:
-            return self._current_app.pid
-        return self._spawn_pid
+        with self._lock:
+            if self._current_app:
+                return self._current_app.pid
+            return self._spawn_pid
 
     def set_pid(self, pid: int | None) -> None:
         """Update the PID of the current spotlight app.
@@ -250,9 +262,10 @@ class SpotlightService:
         Args:
             pid: New process ID, or None to clear it.
         """
-        if self._current_app:
-            self._current_app.pid = pid
-        self._spawn_pid = pid
+        with self._lock:
+            if self._current_app:
+                self._current_app.pid = pid
+            self._spawn_pid = pid
         if pid:
             self._logger.debug(f"Updated spotlight PID to {pid}")
         else:
@@ -275,14 +288,18 @@ class SpotlightService:
         Returns:
             Tuple of (package_name, activity_name) or None
         """
-        # Handle spawn mode first
-        if self._spawn_mode and self._spawn_package:
-            return (self._spawn_package, "")
+        with self._lock:
+            # Handle spawn mode first
+            if self._spawn_mode and self._spawn_package:
+                return (self._spawn_package, "")
 
-        # Fall back to attach mode
-        if not self._current_app:
-            return None
-        return (self._current_app.package_name, self._current_app.activity_name or "")
+            # Fall back to attach mode
+            if not self._current_app:
+                return None
+            return (
+                self._current_app.package_name,
+                self._current_app.activity_name or "",
+            )
 
     # =========================================================================
     # Spawn Mode
@@ -302,11 +319,12 @@ class SpotlightService:
             package_name: Package name to spawn
             auto_resume: Whether to auto-resume after hooks load
         """
-        previous = self._spawn_package
-        self._spawn_package = package_name
-        self._spawn_pid = None  # New spawn target -> any prior PID is stale
-        self._spawn_mode = True
-        self._auto_resume = auto_resume
+        with self._lock:
+            previous = self._spawn_package
+            self._spawn_package = package_name
+            self._spawn_pid = None  # New spawn target -> any prior PID is stale
+            self._spawn_mode = True
+            self._auto_resume = auto_resume
 
         self._logger.info(f"Set spawn app: {package_name} (auto_resume: {auto_resume})")
 
@@ -532,11 +550,12 @@ class SpotlightService:
 
         Also resets spawn mode and spawn application.
         """
-        self._spotlight_application = None
-        self._spotlight_application_pid = None
-        self._spawn_mode = False
-        self._spawn_pid = None
-        self._spotlight_spawn_application = None
+        with self._lock:
+            self._spotlight_application = None
+            self._spotlight_application_pid = None
+            self._spawn_mode = False
+            self._spawn_pid = None
+            self._spotlight_spawn_application = None
 
     def set_spawn_application(self, package_name: str) -> None:
         """Set the application to be spawned when using Frida-based tools.
@@ -677,21 +696,22 @@ class SpotlightService:
 
         Clears the current app, spawn configuration, and mode.
         """
-        previous_pkg = self.get_effective_package()
-        self._current_app = None
-        self._spawn_package = None
-        self._spawn_pid = None
-        self._spawn_mode = False
-        self._auto_resume = True
+        with self._lock:
+            previous_pkg = self.get_effective_package()
+            self._current_app = None
+            self._spawn_package = None
+            self._spawn_pid = None
+            self._spawn_mode = False
+            self._auto_resume = True
 
-        # Reset Toolbox-migrated state
-        self._spotlight_application = None
-        self._spotlight_application_pid = None
-        self._spotlight_spawn_application = None
-        self._auto_resume_after_spawn = True
-        self._spotlight_files = []
-        self._spotlight_pull_one = None
-        self._spotlight_pull_two = None
+            # Reset Toolbox-migrated state
+            self._spotlight_application = None
+            self._spotlight_application_pid = None
+            self._spotlight_spawn_application = None
+            self._auto_resume_after_spawn = True
+            self._spotlight_files = []
+            self._spotlight_pull_one = None
+            self._spotlight_pull_two = None
 
         self._logger.info("Reset spotlight application")
 
@@ -716,9 +736,10 @@ class SpotlightService:
         Returns:
             Package name string or None
         """
-        if self._spawn_mode and self._spawn_package:
-            return self._spawn_package
-        return self.get_package_name()
+        with self._lock:
+            if self._spawn_mode and self._spawn_package:
+                return self._spawn_package
+            return self.get_package_name()
 
     def get_effective_mode(self) -> SpawnMode:
         """Get the effective mode.
@@ -726,7 +747,8 @@ class SpotlightService:
         Returns:
             SpawnMode.SPAWN if spawn mode active, otherwise SpawnMode.ATTACH
         """
-        return SpawnMode.SPAWN if self._spawn_mode else SpawnMode.ATTACH
+        with self._lock:
+            return SpawnMode.SPAWN if self._spawn_mode else SpawnMode.ATTACH
 
     def get_state_dict(self) -> dict[str, Any]:
         """Get the complete spotlight state as a dictionary.
@@ -736,27 +758,28 @@ class SpotlightService:
         Returns:
             Dictionary with all spotlight state
         """
-        return {
-            "has_app": self.has_app(),
-            "package_name": self.get_effective_package(),
-            "activity_name": self.get_activity_name(),
-            "pid": self.get_pid(),
-            "mode": self.get_effective_mode(),
-            "spawn_mode": self._spawn_mode,
-            "spawn_package": self._spawn_package,
-            "auto_resume": self._auto_resume,
-            "set_at": (
-                self._current_app.set_at.isoformat() if self._current_app else None
-            ),
-            # Toolbox-migrated state
-            "spotlight_application": self._spotlight_application,
-            "spotlight_application_pid": self._spotlight_application_pid,
-            "spotlight_spawn_application": self._spotlight_spawn_application,
-            "auto_resume_after_spawn": self._auto_resume_after_spawn,
-            "spotlight_files": self._spotlight_files.copy(),
-            "spotlight_pull_one": self._spotlight_pull_one,
-            "spotlight_pull_two": self._spotlight_pull_two,
-        }
+        with self._lock:
+            return {
+                "has_app": self.has_app(),
+                "package_name": self.get_effective_package(),
+                "activity_name": self.get_activity_name(),
+                "pid": self.get_pid(),
+                "mode": self.get_effective_mode(),
+                "spawn_mode": self._spawn_mode,
+                "spawn_package": self._spawn_package,
+                "auto_resume": self._auto_resume,
+                "set_at": (
+                    self._current_app.set_at.isoformat() if self._current_app else None
+                ),
+                # Toolbox-migrated state
+                "spotlight_application": self._spotlight_application,
+                "spotlight_application_pid": self._spotlight_application_pid,
+                "spotlight_spawn_application": self._spotlight_spawn_application,
+                "auto_resume_after_spawn": self._auto_resume_after_spawn,
+                "spotlight_files": self._spotlight_files.copy(),
+                "spotlight_pull_one": self._spotlight_pull_one,
+                "spotlight_pull_two": self._spotlight_pull_two,
+            }
 
     # =========================================================================
     # Event Publishing (Private)

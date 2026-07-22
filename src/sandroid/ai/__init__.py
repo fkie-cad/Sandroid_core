@@ -1,8 +1,8 @@
 """Sandroid AI package.
 
 An OpenAI-compatible streaming chat client, a hand-rolled tool-calling loop,
-a merged native + MCP tool registry, and a subagent ("agent-as-tool")
-mechanism -- the building blocks behind Sandroid's Chat tab.
+and a merged native + MCP tool registry -- the building blocks behind
+Sandroid's Chat tab.
 
 Public surface (the contract downstream code -- including the TUI chat
 panel -- should build against)::
@@ -43,21 +43,14 @@ panel -- should build against)::
                                   # the ToolRegistry as "mcp:<server>:<tool>". Call once, after
                                   # get_mcp_client_manager().start() has connected. NOT called
                                   # automatically by importing this package.
-
-        SUBAGENT_TEMPLATES,       # subagents.SUBAGENT_TEMPLATES: dict[str, SubagentTemplate]
-                                  # Available subagent templates (currently: "device-inspector").
-        SubagentTemplate,         # subagents.SubagentTemplate dataclass (name, system_prompt,
-                                  # tool_names) -- for defining new templates later.
     )
 
 Import-time side effects (deliberate, see each module's own docstring for
 why): importing this package eagerly registers every native tool (via
 :mod:`sandroid.ai.tools.app_query` and :mod:`sandroid.ai.tools.device_query`)
-AND one orchestrator-facing tool per subagent template (via
-:func:`sandroid.ai.subagents.register_subagent_tools`)
 into the :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton. So a
-bare ``import sandroid.ai`` is enough to populate native + subagent tools,
-and never touches config or spawns a subprocess.
+bare ``import sandroid.ai`` is enough to populate the native tools, and never
+touches config or spawns a subprocess.
 
 MCP tools are the one thing NOT populated at import time: they require a
 connected :class:`~sandroid.ai.mcp_client.MCPClientManager`, which needs
@@ -70,31 +63,25 @@ The caller must explicitly::
 before ``mcp:sandroid-dummy:*``-style tools appear in the registry.
 """
 
+from sandroid.ai import subtasks  # side-effect: registers the two spawn tools
 from sandroid.ai.client import OpenAIClient
 from sandroid.ai.errors import AIClientError, ToolExecutionError
 from sandroid.ai.loop import run_agent_turn
 from sandroid.ai.mcp_client import MCPClientManager, get_mcp_client_manager
-from sandroid.ai.subagents import (
-    SUBAGENT_TEMPLATES,
-    SubagentTemplate,
-    register_subagent_tools,
-)
+from sandroid.ai.subtasks import get_subtask_manager
 from sandroid.ai.tools import (  # also imports app_query, device_query
     bridge_mcp_tools,
     get_tool_registry,
 )
 
-register_subagent_tools()
-
 __all__ = [
-    "SUBAGENT_TEMPLATES",
     "AIClientError",
     "MCPClientManager",
     "OpenAIClient",
-    "SubagentTemplate",
     "ToolExecutionError",
     "bridge_mcp_tools",
     "get_mcp_client_manager",
+    "get_subtask_manager",
     "get_tool_registry",
     "run_agent_turn",
 ]
