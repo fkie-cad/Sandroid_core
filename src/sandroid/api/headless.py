@@ -562,7 +562,7 @@ class SandroidHeadlessAPI(SandroidAPI):
             await self.run_analysis(
                 mode=mode,
                 runs=config.number_of_runs,
-                capture_network=config.monitor_network,
+                capture_network=config.capture_network,
                 compute_hashes=config.hash_files,
                 track_deleted=config.show_deleted,
             )

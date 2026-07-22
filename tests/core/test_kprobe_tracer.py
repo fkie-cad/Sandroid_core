@@ -18,6 +18,8 @@ trace_pipe`` Popen) are monkeypatched. Covers:
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 
 import pytest
 
@@ -96,7 +98,10 @@ def _symbol_loop(cmd):
 
 
 def _trace_read(cmd):
-    return "cat " in cmd and "/trace'" in cmd
+    # The check-instance snapshot read is ``cat .../trace`` -- now suffixed with
+    # ``2>/dev/null`` to keep a failed read quiet, so match ``/trace'`` (bare) OR
+    # ``/trace 2>`` (silenced). Still excludes ``/trace_pipe'`` and ``tracing_on``.
+    return "cat " in cmd and ("/trace'" in cmd or "/trace 2>" in cmd)
 
 
 def _make_success_fake(basename="sandroid_kpcheck", *, present_symbols=None):
@@ -215,25 +220,78 @@ def test_offset_self_check_disables_tracing_before_reading_trace(monkeypatch):
     assert KprobeTracer.kprobe_supported() is True
 
     cmds = fake.commands
-    # The snapshot read of the CHECK instance's `trace`.
+    inst = f"instances/{KprobeTracer._CHECK_INSTANCE}"
+    # The snapshot read of the CHECK instance's `trace` (now suffixed 2>/dev/null).
     read_idx = next(
         i
         for i, c in enumerate(cmds)
-        if "cat " in c and f"instances/{KprobeTracer._CHECK_INSTANCE}/trace'" in c
+        if "cat " in c and (f"{inst}/trace'" in c or f"{inst}/trace 2>" in c)
     )
     # The write trigger that must precede everything.
     trigger_idx = next(i for i, c in enumerate(cmds) if "echo sandroid_canary" in c)
-    # The `echo 0 > .../tracing_on` that must sit between trigger and read
-    # (NOT one of the _cleanup 2>/dev/null disables, which come after the read).
+    # The `echo 0 > .../tracing_on` that must sit between trigger and read. Both
+    # this main-body disable and the post-read _cleanup one now carry
+    # ``2>/dev/null``, so we identify it purely by position: the FIRST tracing-off
+    # after the trigger is the main-body one (the up-front _cleanup runs before
+    # the trigger; the other _cleanup runs after the read).
     tracing_off_idx = next(
         i
         for i, c in enumerate(cmds)
-        if i > trigger_idx
-        and "echo 0 >" in c
-        and f"instances/{KprobeTracer._CHECK_INSTANCE}/tracing_on" in c
-        and "2>/dev/null" not in c
+        if i > trigger_idx and "echo 0 >" in c and f"{inst}/tracing_on" in c
     )
     assert trigger_idx < tracing_off_idx < read_idx
+
+
+def test_offset_self_check_writes_are_silenced(monkeypatch):
+    """The eager preflight must be quiet: every check-instance write to
+    filter/enable/tracing_on is guarded by ``[ -e path ] && echo ... 2>/dev/null``
+    -- the SAME existence-guard idiom ``_cleanup``/``_self_clean``/``teardown``
+    already use -- so a device that can't register the check probes (their
+    ``events/kprobes/kpck_*`` dirs never appear under the instance) doesn't
+    flood the activity log with ADB WARNINGs.
+
+    A bare ``echo ... > missing/path 2>/dev/null`` does NOT suppress that
+    failure: the shell's own redirect-open fails (ENOENT on the containing
+    directory) BEFORE the trailing ``2>`` redirect is even set up, so the
+    "can't create ... No such file or directory" diagnostic reaches the
+    ORIGINAL stderr regardless -- this is the real, load-bearing fix (not
+    just the ``2>/dev/null`` suffix, confirmed insufficient in isolation).
+    The two probe-INSTALL lines keep their stderr (the bogus-symbol signature
+    is read from it).
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake = _install(monkeypatch, _make_success_fake())
+    assert KprobeTracer.kprobe_supported() is True
+
+    inst = f"instances/{KprobeTracer._CHECK_INSTANCE}"
+    filter_enable_tracing_writes = [
+        c
+        for c in fake.commands
+        if inst in c
+        and ("/filter" in c or "/enable" in c or "/tracing_on" in c)
+        and "echo" in c
+        and "-:kpck" not in c  # excludes the unrelated _cleanup probe-removal
+    ]
+    assert filter_enable_tracing_writes
+    for c in filter_enable_tracing_writes:
+        # Load-bearing: an existence guard on the SAME path being written,
+        # not merely a trailing 2>/dev/null.
+        assert "[ -e " in c, f"missing existence guard: {c}"
+        assert "] && echo" in c, f"missing existence guard: {c}"
+        assert "2>/dev/null" in c, f"missing secondary suppression: {c}"
+    # The probe DEFINITION installs (echo "p:kpck_..." >> kprobe_events) must
+    # NOT be silenced (the bogus-symbol signature is read from their stderr).
+    # Matched by the literal probe-definition text, not just "kpck" + ">>" --
+    # the (unrelated, pre-existing) cleanup's conditional probe-removal line
+    # also contains both and legitimately carries its own "2>/dev/null" on the
+    # `grep` redirect.
+    installs = [
+        c
+        for c in fake.commands
+        if ">>" in c and ("vfs_write name=" in c or "do_filp_open path=" in c)
+    ]
+    assert installs
+    assert all("2>/dev/null" not in c for c in installs)
 
 
 def test_kprobe_supported_inconclusive_self_check_not_memoized(monkeypatch):
@@ -267,6 +325,70 @@ def test_kprobe_supported_memoizes_per_serial(monkeypatch):
     # Second call served from cache -> no new device round-trips.
     assert KprobeTracer.kprobe_supported() is True
     assert len(fake.commands) == n_after_first
+
+
+def test_kprobe_supported_serializes_concurrent_probes_for_same_serial(monkeypatch):
+    """Two threads racing kprobe_supported() for the SAME unprobed serial must
+    not both run the full device preflight concurrently (they'd collide on the
+    SAME fixed on-device check-instance/probe names) -- the second thread
+    should block on ``_probe_lock`` and then serve the first thread's memoized
+    verdict instead of re-probing.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    monkeypatch.setattr(KprobeTracer, "_kprobe_cache", {})
+
+    # Widen the race window: sleep briefly inside the symbol-loop step so a
+    # second thread's call has time to reach (and block on) the lock while
+    # the first is still mid-preflight.
+    def _slow_symbol_loop(cmd):
+        if _symbol_loop(cmd):
+            time.sleep(0.05)
+            return True
+        return False
+
+    fake = _FakeShell(
+        [
+            (_root_ok, ("restarting adbd as root", "")),
+            (_id_ok, ("uid=0(root)", "")),
+            (_tracefs_probe, ("OK", "")),
+            (
+                _slow_symbol_loop,
+                ("\n".join(KprobeTracer._REQUIRED_SYMBOLS), ""),
+            ),
+            (
+                _trace_read,
+                (
+                    "   sh-999 [000] ...1 1.1: kpck_dfo: (do_filp_open+0x0/0x1) "
+                    'path="/data/local/tmp/sandroid_kpcheck"\n'
+                    "   sh-999 [000] ...1 1.2: kpck_vw: (vfs_write+0x0/0x1) "
+                    'name="sandroid_kpcheck"\n',
+                    "",
+                ),
+            ),
+        ]
+    )
+    _install(monkeypatch, fake)
+
+    results: list[bool] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(KprobeTracer.kprobe_supported()))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert results == [True, True]
+    assert KprobeTracer._kprobe_cache["emulator-5556"] is True
+    # Exactly one full preflight ran: the root-check command appears once,
+    # not twice (the second thread's double-checked cache read short-circuits
+    # before repeating any device round-trip).
+    root_checks = [c for c in fake.commands if c == "root"]
+    assert len(root_checks) == 1, (
+        f"expected exactly one preflight run, got {len(root_checks)}: "
+        f"{fake.commands}"
+    )
 
 
 def test_kprobe_supported_reprobes_for_a_different_serial(monkeypatch):
@@ -331,6 +453,44 @@ def test_kprobe_supported_root_exception_not_memoized(monkeypatch):
     monkeypatch.setattr(Adb, "send_adb_command", _boom)
     assert KprobeTracer.kprobe_supported() is False
     assert "emulator-5556" not in KprobeTracer._kprobe_cache
+
+
+# =============================================================================
+# cached_availability() -- pure per-serial cache read, no probe/adb
+# =============================================================================
+
+
+def test_cached_availability_returns_cached_verdict_for_current_serial(monkeypatch):
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    KprobeTracer._kprobe_cache["emulator-5556"] = True
+    assert KprobeTracer.cached_availability() is True
+
+    KprobeTracer._kprobe_cache["emulator-5556"] = False
+    assert KprobeTracer.cached_availability() is False
+
+
+def test_cached_availability_none_when_serial_absent(monkeypatch):
+    monkeypatch.setattr(Adb, "_target_device", "emulator-9999")
+    # Nothing memoized for this serial (even if another serial is cached).
+    KprobeTracer._kprobe_cache["emulator-5556"] = True
+    assert KprobeTracer.cached_availability() is None
+
+
+def test_cached_availability_never_invokes_adb(monkeypatch):
+    """It is a pure cache read -- it must not probe. Patch every adb entry point
+    to raise and assert the read still succeeds (and returns the cached value).
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    KprobeTracer._kprobe_cache["emulator-5556"] = True
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("cached_availability must not touch adb")
+
+    monkeypatch.setattr(Adb, "send_adb_command", _boom)
+    monkeypatch.setattr(KprobeTracer, "_root_status", classmethod(_boom))
+    monkeypatch.setattr(KprobeTracer, "_resolve_tracefs", classmethod(_boom))
+
+    assert KprobeTracer.cached_availability() is True
 
 
 # =============================================================================
@@ -479,6 +639,42 @@ def test_run_by_pid_with_path_also_applies_path_glob(monkeypatch):
     joined = "\n".join(fake.commands)
     assert "set_event_pid" in joined
     assert "/data/data/com.x/*" in joined
+
+
+def test_run_by_path_single_path_has_no_or(monkeypatch):
+    """A single path must produce a plain single-glob filter (no ``||``) --
+    byte-identical to the pre-multi-path behaviour.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, _ = _capture_run(monkeypatch)
+
+    KprobeTracer.run_by_path("/data/data/com.example.app")
+
+    filter_cmds = [c for c in fake.commands if "/filter" in c]
+    assert filter_cmds
+    for cmd in filter_cmds:
+        assert "||" not in cmd
+        assert "/data/data/com.example.app/*" in cmd
+
+
+def test_run_by_path_multi_path_ors_globs_per_field(monkeypatch):
+    """A list of paths is OR'd (ftrace ``||``) into ONE filter per scoped field,
+    each field name repeated once per glob (e.g. ``fname ~ "a/*" || fname ~
+    "b/*"``).
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, _ = _capture_run(monkeypatch)
+
+    KprobeTracer.run_by_path(["/data/data/com.x", "/sdcard/Download"])
+
+    # The scoped fields (see _PATH_FILTER_FIELDS) each get one OR'd filter.
+    for name, field in KprobeTracer._PATH_FILTER_FIELDS.items():
+        cmd = next(c for c in fake.commands if f"/events/kprobes/{name}/filter" in c)
+        # Both globs present, OR'd together, field repeated per glob.
+        assert "/data/data/com.x/*" in cmd
+        assert "/sdcard/Download/*" in cmd
+        assert " || " in cmd
+        assert cmd.count(f"{field} ~ ") == 2
 
 
 def test_run_capture_all_has_no_pid_or_path_filter(monkeypatch):

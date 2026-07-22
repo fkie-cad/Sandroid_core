@@ -651,6 +651,9 @@ class SandroidTUI(App):
                 if device:
                     logger.info(f"Device changed to: {device.serial}")
                     frida_service.update_device_serial(device.serial)
+                    # Re-warm the per-serial kprobe availability cache for the
+                    # new device (off-thread) and re-sync an open SettingsScreen.
+                    self._warm_kprobe_cache_on_device_change()
                 else:
                     logger.info("Device changed to: None")
 
@@ -764,9 +767,74 @@ class SandroidTUI(App):
         def _background_check():
             self._device_controller.check_devices_on_startup()
             self._run_deferred_setup_checks()
+            self._warm_kprobe_cache_on_startup()
 
         thread = threading.Thread(target=_background_check, daemon=True)
         thread.start()
+
+    def _warm_kprobe_cache_on_startup(self) -> None:
+        """Warm the per-serial kprobe availability cache at startup.
+
+        Runs inside the already-off-thread startup check, so the heavy adb
+        probe never touches the UI thread. Skips the probe when no device is
+        active: an inconclusive probe would not memoize, and the device-change
+        path warms the cache once a device appears.
+        """
+        try:
+            from sandroid.core.adb import Adb
+
+            if not Adb.get_target_device():
+                return
+            from sandroid.core.kprobe_tracer import KprobeTracer
+
+            KprobeTracer.kprobe_supported()
+        except Exception as exc:
+            logger.debug(f"Startup kprobe availability probe failed: {exc}")
+
+    def _warm_kprobe_cache_on_device_change(self) -> None:
+        """Warm the kprobe availability cache for the newly active device.
+
+        Spawns a short daemon thread so the heavy adb probe never stalls the
+        device-change callback chain. ``Adb.set_target_device`` has already run
+        before callbacks fire, so ``kprobe_supported`` reads the new serial.
+        Afterwards, if a ``SettingsScreen`` is open, its Source disabled-state
+        is re-synced on the UI thread.
+        """
+        import threading
+
+        def _probe() -> None:
+            try:
+                from sandroid.core.kprobe_tracer import KprobeTracer
+
+                KprobeTracer.kprobe_supported()
+            except Exception as exc:
+                logger.debug(f"Device-change kprobe probe failed: {exc}")
+            self._refresh_open_settings_backend()
+
+        threading.Thread(target=_probe, daemon=True).start()
+
+    def _refresh_open_settings_backend(self) -> None:
+        """Re-sync an open SettingsScreen's backend availability (UI thread).
+
+        The stack scan and the refresh call both run on the UI thread via
+        ``call_from_thread``. No-op (guarded) when no SettingsScreen is open or
+        the method is absent.
+        """
+
+        def _do_refresh() -> None:
+            from sandroid.tui.screens.settings_screen import SettingsScreen
+
+            for screen in self.screen_stack:
+                if isinstance(screen, SettingsScreen):
+                    refresh = getattr(screen, "refresh_backend_availability", None)
+                    if callable(refresh):
+                        refresh()
+                    break
+
+        try:
+            self.call_from_thread(_do_refresh)
+        except Exception as exc:
+            logger.debug(f"Settings backend availability refresh failed: {exc}")
 
     def _run_deferred_setup_checks(self) -> None:
         """Run deferred (non-critical) setup checks in background."""

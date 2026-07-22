@@ -122,13 +122,13 @@ def build_cli_overrides(
     if avoid_strong_noise_filter:
         analysis_overrides["avoid_strong_noise_filter"] = True
     if network:
-        analysis_overrides["monitor_network"] = True
+        analysis_overrides["capture_network"] = True
     if show_deleted:
         analysis_overrides["show_deleted_files"] = True
     if no_processes:
-        analysis_overrides["monitor_processes"] = False
+        analysis_overrides["capture_processes"] = False
     if sockets:
-        analysis_overrides["monitor_sockets"] = True
+        analysis_overrides["capture_sockets"] = True
     if screenshot:
         analysis_overrides["screenshot_interval"] = screenshot
     if hash_files:

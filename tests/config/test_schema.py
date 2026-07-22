@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from sandroid.config.schema import TUIConfig
+from sandroid.config.schema import AnalysisConfig, TUIConfig
 
 
 class TestMonitorEventVisibility:
@@ -37,15 +37,67 @@ class TestMonitorEventVisibility:
 
 class TestMonitorBackend:
     def test_default_value(self):
-        assert TUIConfig().monitor_backend == "auto"
+        assert TUIConfig().monitor_backend == "kprobe"
 
     def test_invalid_backend_raises_validation_error(self):
         with pytest.raises(ValidationError):
             TUIConfig(monitor_backend="bogus")
 
-    @pytest.mark.parametrize("backend", ["auto", "fsmon", "kprobe"])
+    @pytest.mark.parametrize("backend", ["fsmon", "kprobe"])
     def test_valid_backends_round_trip(self, backend):
         assert TUIConfig(monitor_backend=backend).monitor_backend == backend
+
+    def test_legacy_auto_migrates_to_kprobe(self):
+        """A config carrying the dropped ``"auto"`` value normalizes in-memory
+        to ``"kprobe"``, while an unknown value still raises.
+        """
+        assert TUIConfig(monitor_backend="auto").monitor_backend == "kprobe"
+        with pytest.raises(ValidationError):
+            TUIConfig(monitor_backend="bogus")
+
+
+class TestAnalysisCaptureKeys:
+    """The automated-analysis-run toggles were renamed ``monitor_*`` ->
+    ``capture_*``; new-name construction works with the documented defaults and
+    a config dict carrying the legacy ``monitor_*`` keys back-fills them.
+    """
+
+    def test_new_name_defaults(self):
+        config = AnalysisConfig()
+
+        assert config.capture_processes is True
+        assert config.capture_sockets is False
+        assert config.capture_network is False
+
+    def test_new_name_construction_round_trips(self):
+        config = AnalysisConfig(
+            capture_processes=False,
+            capture_sockets=True,
+            capture_network=True,
+        )
+
+        assert config.capture_processes is False
+        assert config.capture_sockets is True
+        assert config.capture_network is True
+
+    def test_legacy_monitor_keys_backfill(self):
+        config = AnalysisConfig(
+            monitor_processes=False,
+            monitor_sockets=True,
+            monitor_network=True,
+        )
+
+        assert config.capture_processes is False
+        assert config.capture_sockets is True
+        assert config.capture_network is True
+
+    def test_new_key_wins_when_both_present(self):
+        config = AnalysisConfig(
+            monitor_network=True,
+            capture_network=False,
+        )
+
+        assert config.capture_network is False
 
 
 class TestLegacyMonitorKeyBackfill:

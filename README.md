@@ -222,7 +222,7 @@ sandroid-config init
 sandroid-config show
 
 # Modify settings
-sandroid-config set analysis.monitor_network true
+sandroid-config set analysis.capture_network true
 sandroid-config set emulator.device_name "Pixel_8_Pro_API_34"
 
 # Validate configuration

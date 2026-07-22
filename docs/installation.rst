@@ -141,8 +141,8 @@ This creates a configuration file at ``~/.config/sandroid/sandroid.toml``. Edit 
 
    [analysis]
    number_of_runs = 2
-   monitor_processes = true
-   monitor_network = false
+   capture_processes = true
+   capture_network = false
 
    [paths]
    results_path = "./results/"

@@ -1039,6 +1039,201 @@ def test_start_monitor_explicit_fsmon_skips_kprobe_preflight(monkeypatch):
     assert get_task_service().get_task("monitor").instance.config.backend == "fsmon"
 
 
+# =============================================================================
+# Backend-preference resolution + multi-path forwarding (new default: kprobe)
+# =============================================================================
+
+
+def test_resolve_backend_pref_normalizes_to_kprobe_default(monkeypatch):
+    """The on-disk default is now ``"kprobe"``; the ``"auto"`` sentinel consults
+    the global preference and any legacy/unknown value normalizes to kprobe. A
+    concrete per-session backend is honored directly.
+    """
+    controller = _make_controller()
+
+    # Sentinel -> consult the global preference; legacy/unknown -> kprobe.
+    monkeypatch.setattr(controller, "_get_monitor_backend", lambda: "auto")
+    assert controller._resolve_backend_pref(MonitorConfig(backend="auto")) == "kprobe"
+    monkeypatch.setattr(controller, "_get_monitor_backend", lambda: "fsmon")
+    assert controller._resolve_backend_pref(MonitorConfig(backend="auto")) == "fsmon"
+
+    # An explicitly-resolved concrete backend is honored directly.
+    assert controller._resolve_backend_pref(MonitorConfig(backend="fsmon")) == "fsmon"
+    assert controller._resolve_backend_pref(MonitorConfig(backend="kprobe")) == "kprobe"
+
+
+def test_kprobe_setup_path_mode_forwards_target_paths_list(monkeypatch):
+    """A multi-path config in pure path mode forwards the whole ``target_paths``
+    LIST (not just the primary str) to ``run_by_path``, and the extra paths are
+    reflected in the mode description.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    by_path: list = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_path",
+        classmethod(lambda cls, path: by_path.append(path) or object()),
+    )
+
+    descs: list[str] = []
+    controller = _make_controller(
+        log_task_started=lambda name, desc: descs.append(desc)
+    )
+    config = MonitorConfig(
+        mode="path",
+        target_path="/data/a",
+        target_paths=["/data/a", "/data/b"],
+    )
+    assert controller._start_monitor(config) is True
+
+    # The forwarded argument is the LIST, not a single str.
+    assert by_path == [["/data/a", "/data/b"]]
+    assert descs
+    assert "+2 paths" in descs[0]
+
+
+def test_kprobe_setup_pid_mode_forwards_target_paths_list(monkeypatch):
+    """When a target PID is known, the multi-path LIST rides along on
+    ``run_by_pid(pid, paths)`` (set_event_pid + OR'd path glob).
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    monkeypatch.setattr(KprobeTracer, "teardown", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+
+    by_pid: list = []
+    by_path: list = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_pid",
+        classmethod(lambda cls, pid, path=None: by_pid.append((pid, path)) or object()),
+    )
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_path",
+        classmethod(lambda cls, path: by_path.append(path) or object()),
+    )
+
+    controller = _make_controller()
+    config = MonitorConfig(
+        mode="path",
+        target_path="/data/a",
+        target_paths=["/data/a", "/data/b"],
+        target_pid=4321,
+    )
+    assert controller._start_monitor(config) is True
+
+    assert by_pid == [(4321, ["/data/a", "/data/b"])]
+    assert by_path == []  # PID path preferred; pure run_by_path not used
+
+
+def test_launch_fsmon_ignores_extra_target_paths(monkeypatch):
+    """Fsmon stays single-path: even with a multi-path config it consumes only
+    the primary ``target_path`` (a str), never the ``target_paths`` list.
+    """
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        MonitorController, "_start_output_reader", lambda self, wrapper: None
+    )
+    path_calls: list = []
+    monkeypatch.setattr(
+        FSMon,
+        "run_fsmon_by_path",
+        classmethod(lambda cls, path: path_calls.append(path) or object()),
+    )
+
+    controller = _make_controller()
+    # backend="fsmon" -> straight to _launch_fsmon, no kprobe preflight.
+    config = MonitorConfig(
+        mode="path",
+        target_path="/data/a",
+        target_paths=["/data/a", "/data/b"],
+        backend="fsmon",
+    )
+    assert controller._start_monitor(config) is True
+    assert path_calls == ["/data/a"]  # only the primary path, as a str
+
+
+def test_resume_after_playback_pid_rebuild_carries_target_paths(monkeypatch):
+    """The PID-mode resume rebuild (fresh PID re-resolved) preserves
+    ``target_paths`` so a resumed multi-path kprobe session keeps its extras.
+    """
+    _patch_start_monitor_ok(monkeypatch)
+
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(
+        Adb,
+        "get_pid_for_package_name",
+        classmethod(lambda cls, pkg, use_frida_fallback=True, quiet=False: 9999),
+    )
+
+    start_calls = []
+    monkeypatch.setattr(
+        MonitorController,
+        "_start_monitor",
+        lambda self, cfg: start_calls.append(cfg) or True,
+    )
+
+    controller = _make_controller()
+    config = MonitorConfig(
+        mode="pid",
+        target_pid=1111,
+        app_name="com.example.app",
+        target_path="/data/a",
+        target_paths=["/data/a", "/data/b"],
+        backend="kprobe",
+    )
+    assert controller.resume_after_playback(config) is True
+    resolved = start_calls[0]
+    assert resolved.mode == "pid"
+    assert resolved.target_pid == 9999
+    assert resolved.target_paths == ["/data/a", "/data/b"]
+
+
+def test_resume_after_playback_path_fallback_rebuild_carries_target_paths(monkeypatch):
+    """The PID->path fallback resume rebuild (app gone) also preserves
+    ``target_paths``.
+    """
+    _patch_start_monitor_ok(monkeypatch)
+
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(
+        Adb,
+        "get_pid_for_package_name",
+        classmethod(lambda cls, pkg, use_frida_fallback=True, quiet=False: None),
+    )
+
+    start_calls = []
+    monkeypatch.setattr(
+        MonitorController,
+        "_start_monitor",
+        lambda self, cfg: start_calls.append(cfg) or True,
+    )
+
+    controller = _make_controller()
+    config = MonitorConfig(
+        mode="pid",
+        target_pid=1111,
+        app_name="com.example.app",
+        target_path="/data/a",
+        target_paths=["/data/a", "/data/b"],
+        backend="kprobe",
+    )
+    assert controller.resume_after_playback(config) is True
+    resolved = start_calls[0]
+    assert resolved.mode == "path"
+    assert resolved.target_pid is None
+    assert resolved.target_paths == ["/data/a", "/data/b"]
+
+
 def test_start_monitor_kprobe_reader_routes_through_translator(monkeypatch):
     """The kprobe wrapper's translator is wired to the reader thread: the reader
     ingests raw lines through it (ahead of the deque) and publishes correlated

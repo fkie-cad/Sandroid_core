@@ -111,9 +111,9 @@ class AnalysisConfig:
 
     Attributes:
         number_of_runs: Number of analysis runs to perform
-        monitor_network: Whether to capture network traffic
-        monitor_processes: Whether to monitor processes
-        monitor_sockets: Whether to monitor sockets
+        capture_network: Whether to capture network traffic
+        capture_processes: Whether to capture processes
+        capture_sockets: Whether to capture sockets
         show_deleted: Whether to show deleted files
         take_screenshots: Whether to take screenshots
         screenshot_interval: Interval between screenshots (seconds)
@@ -123,9 +123,9 @@ class AnalysisConfig:
     """
 
     number_of_runs: int = 2
-    monitor_network: bool = False
-    monitor_processes: bool = True
-    monitor_sockets: bool = False
+    capture_network: bool = False
+    capture_processes: bool = True
+    capture_sockets: bool = False
     show_deleted: bool = False
     take_screenshots: bool = False
     screenshot_interval: int = 3

@@ -142,8 +142,8 @@ Configuration Structure
 
        "analysis": {
            "number_of_runs": 2,
-           "monitor_processes": True,
-           "monitor_network": False,
+           "capture_processes": True,
+           "capture_network": False,
            "show_deleted_files": False,
            "calculate_hashes": False,
            "list_apks": False,
@@ -245,8 +245,8 @@ Configuration File Formats
 
    [analysis]
    number_of_runs = 2
-   monitor_processes = true
-   monitor_network = false
+   capture_processes = true
+   capture_network = false
 
    [paths]
    results_path = "./results/"
@@ -270,8 +270,8 @@ Configuration File Formats
 
    analysis:
      number_of_runs: 2
-     monitor_processes: true
-     monitor_network: false
+     capture_processes: true
+     capture_network: false
 
    paths:
      results_path: ./results/
@@ -290,8 +290,8 @@ Configuration File Formats
      },
      "analysis": {
        "number_of_runs": 2,
-       "monitor_processes": true,
-       "monitor_network": false
+       "capture_processes": true,
+       "capture_network": false
      },
      "paths": {
        "results_path": "./results/",
@@ -397,7 +397,7 @@ Dynamic Configuration
 
    # Modify configuration
    config.analysis.number_of_runs = 5
-   config.analysis.monitor_network = True
+   config.analysis.capture_network = True
    config.log_level = "DEBUG"
 
    # Save updated configuration
@@ -421,7 +421,7 @@ Dynamic Configuration
        # Malware analysis settings
        config.log_level = "DEBUG"
        config.analysis.number_of_runs = 3
-       config.analysis.monitor_network = True
+       config.analysis.capture_network = True
        config.analysis.show_deleted_files = True
        config.analysis.calculate_hashes = True
        config.analysis.avoid_noise_filter = True
@@ -443,7 +443,7 @@ Dynamic Configuration
        # Development settings
        config.log_level = "INFO"
        config.analysis.number_of_runs = 1
-       config.analysis.monitor_processes = False
+       config.analysis.capture_processes = False
        config.features.screenshot_interval = 10
 
        # Faster analysis
@@ -478,7 +478,7 @@ Configuration Integration
        Toolbox.configure(config)
 
        # Configure network monitoring
-       if config.analysis.monitor_network:
+       if config.analysis.capture_network:
            network_monitor = Network()
            network_monitor.configure(config.network)
            network_monitor.gather()
@@ -492,7 +492,7 @@ Configuration Integration
        # Run analysis with configured parameters
        return Toolbox.run_analysis(
            runs=config.analysis.number_of_runs,
-           monitor_processes=config.analysis.monitor_processes
+           capture_processes=config.analysis.capture_processes
        )
 
 **Configuration-Aware Classes:**
@@ -511,10 +511,10 @@ Configuration Integration
 
            # Use configuration values
            runs = self.config.analysis.number_of_runs
-           monitor_network = self.config.analysis.monitor_network
+           capture_network = self.config.analysis.capture_network
 
            print(f"Running {runs} analysis iterations")
-           print(f"Network monitoring: {'enabled' if monitor_network else 'disabled'}")
+           print(f"Network monitoring: {'enabled' if capture_network else 'disabled'}")
 
            # Implementation here...
 

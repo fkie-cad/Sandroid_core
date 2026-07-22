@@ -37,9 +37,9 @@ paths:
 analysis:
   number_of_runs: 2
   avoid_strong_noise_filter: false
-  monitor_processes: true
-  monitor_sockets: false
-  monitor_network: false
+  capture_processes: true
+  capture_sockets: false
+  capture_network: false
   show_deleted_files: false
   hash_files: false
   list_apks: false

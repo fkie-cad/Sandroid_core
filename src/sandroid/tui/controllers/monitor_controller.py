@@ -30,7 +30,7 @@ import re
 import threading
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -45,15 +45,22 @@ class MonitorConfig:
 
     mode: str = "path"  # "pid" or "path"
     target_path: str = "/data/"
+    # Canonical multi-path list (kprobe-only; fsmon stays single-path). When
+    # set, the invariant ``target_paths[0] == target_path`` holds -- ``target_path``
+    # remains the PRIMARY/first path used by ``_resolve_prefix_candidates``,
+    # MonitorView display, and the fsmon single-path launch. Empty by default,
+    # in which case only ``target_path`` is consulted.
+    target_paths: list[str] = field(default_factory=list)
     target_pid: int | None = None
     app_name: str = ""
     cancelled: bool = False
-    # Which backend this session resolved to. Starts "auto" (the modal doesn't
-    # set it); _start_monitor rewrites it to the concrete backend it launched
-    # ("fsmon"/"kprobe"), and it is threaded through every config rebuild
-    # (fanotify fallback + both resume rebuilds) so resume doesn't reset the
-    # backend or re-run the (expensive) kprobe preflight for a session that
-    # already fell back to fsmon.
+    # Which backend this session resolved to. Starts "auto", the internal
+    # unresolved sentinel (the modal doesn't set it) -- it is NEVER persisted;
+    # the on-disk config value is only ever "fsmon"/"kprobe". _start_monitor
+    # rewrites it to the concrete backend it launched ("fsmon"/"kprobe"), and
+    # it is threaded through every config rebuild (fanotify fallback + both
+    # resume rebuilds) so resume doesn't reset the backend or re-run the
+    # (expensive) kprobe preflight for a session that already fell back to fsmon.
     backend: str = "auto"
 
 
@@ -886,13 +893,18 @@ class MonitorController:
             return 0.15
 
     def _get_monitor_backend(self) -> str:
-        """Read ``tui.monitor_backend`` from config (default ``"auto"``)."""
+        """Read ``tui.monitor_backend`` from config (default ``"kprobe"``).
+
+        On any read error the preference falls back to ``"kprobe"`` (the schema
+        default), which the start path preflights and auto-falls-back to fsmon
+        when the kernel lacks kprobe support.
+        """
         try:
             from sandroid.config.loader import ConfigLoader
 
             return ConfigLoader().load().tui.monitor_backend
         except Exception:
-            return "auto"
+            return "kprobe"
 
     def _resolve_backend_pref(self, config: MonitorConfig) -> str:
         """Resolve the effective backend preference for this start.
@@ -907,7 +919,7 @@ class MonitorController:
         pref = getattr(config, "backend", None) or "auto"
         if pref == "auto":
             pref = self._get_monitor_backend()
-        return pref if pref in ("auto", "fsmon", "kprobe") else "auto"
+        return pref if pref in ("fsmon", "kprobe") else "kprobe"
 
     def _start_monitor(self, config: MonitorConfig) -> bool:
         """Start Monitor, selecting the backend ABOVE any fsmon binary install.
@@ -1009,8 +1021,16 @@ class MonitorController:
         Surfaces a reason-carrying notice (distinct from the fsmon pid->path
         notice, which may ALSO fire afterwards inside ``_launch_fsmon`` in auto
         mode) then launches fsmon.
+
+        With ``tui.monitor_backend`` now defaulting to ``"kprobe"``, the resolved
+        ``pref`` is ``"kprobe"`` for nearly every session, so it can no longer
+        tell an explicit per-session request apart from the default. The
+        distinguishing signal is the session's own ``MonitorConfig.backend``:
+        ``"kprobe"`` means the user explicitly chose it, while the ``"auto"``
+        sentinel means it merely landed on the default. Only the explicit case
+        says "kprobe backend was requested".
         """
-        if pref == "kprobe":
+        if getattr(config, "backend", None) == "kprobe":
             reason = (
                 "kprobe backend was requested but this device's kernel lacks "
                 "the required tracefs/kprobe support — using fsmon instead."
@@ -1162,10 +1182,14 @@ class MonitorController:
 
         config.backend = "kprobe"
 
+        # kprobe is the multi-path backend: forward the canonical
+        # ``target_paths`` list when it is set (its OR-filter matches every
+        # path), otherwise the single primary ``target_path``. fsmon stays
+        # single-path (``_launch_fsmon`` consumes only ``target_path``).
+        paths = config.target_paths or config.target_path
+
         if config.target_pid:
-            process = KprobeTracer.run_by_pid(
-                config.target_pid, config.target_path or None
-            )
+            process = KprobeTracer.run_by_pid(config.target_pid, paths or None)
             if config.mode == "pid":
                 mode_desc = f"PID {config.target_pid} + children (kprobe)"
             else:
@@ -1173,11 +1197,16 @@ class MonitorController:
                     f"path {config.target_path} + PID {config.target_pid} (kprobe)"
                 )
         elif config.mode == "path" and config.target_path:
-            process = KprobeTracer.run_by_path(config.target_path)
+            process = KprobeTracer.run_by_path(paths)
             mode_desc = f"path {config.target_path} (kprobe)"
         else:
             process = KprobeTracer.run_capture_all()
             mode_desc = "all processes (kprobe)"
+
+        # Surface the extra paths in the mode description (the primary path is
+        # already shown above); only when there is genuinely more than one.
+        if len(config.target_paths) > 1:
+            mode_desc += f" (+{len(config.target_paths)} paths)"
 
         if process is None:
             return None
@@ -1526,6 +1555,7 @@ class MonitorController:
                 resolved = MonitorConfig(
                     mode="pid",
                     target_path=config.target_path,
+                    target_paths=config.target_paths,
                     target_pid=new_pid,
                     app_name=config.app_name,
                     # Preserve the resolved backend so resume doesn't reset it
@@ -1541,6 +1571,7 @@ class MonitorController:
                 resolved = MonitorConfig(
                     mode="path",
                     target_path=config.target_path,
+                    target_paths=config.target_paths,
                     target_pid=None,
                     app_name=config.app_name,
                     backend=config.backend,

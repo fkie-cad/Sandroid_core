@@ -192,13 +192,15 @@ class AnalysisConfig(BaseModel):
     hash_files: bool = Field(
         default=False, description="Generate MD5 hashes of changed/new files"
     )
-    monitor_processes: bool = Field(
-        default=True, description="Monitor active processes during analysis"
+    capture_processes: bool = Field(
+        default=True, description="Capture active processes during analysis run"
     )
-    monitor_sockets: bool = Field(
-        default=False, description="Monitor listening sockets"
+    capture_sockets: bool = Field(
+        default=False, description="Capture listening sockets during analysis run"
     )
-    monitor_network: bool = Field(default=False, description="Capture network traffic")
+    capture_network: bool = Field(
+        default=False, description="Capture network traffic during analysis run"
+    )
     show_deleted_files: bool = Field(
         default=False, description="Perform full filesystem checks for deleted files"
     )
@@ -211,6 +213,28 @@ class AnalysisConfig(BaseModel):
         description="Default view mode for interactive menu (forensic, malware, or security)",
         pattern=r"^(forensic|malware|security)$",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_legacy_capture_keys(cls, data):
+        """Back-fill legacy ``monitor_*`` keys onto their ``capture_*`` names.
+
+        The automated-analysis-run artifact toggles were renamed from
+        ``monitor_*`` to ``capture_*`` (ending the name collision with the live
+        FS Monitor). Sub-models default to ``extra="ignore"``, so without this a
+        legacy ``monitor_processes`` (etc.) would be silently dropped. Copy each
+        legacy key to its new name only when the new key isn't already present.
+        """
+        if isinstance(data, dict):
+            aliases = {
+                "monitor_processes": "capture_processes",
+                "monitor_sockets": "capture_sockets",
+                "monitor_network": "capture_network",
+            }
+            for old, new in aliases.items():
+                if old in data and new not in data:
+                    data[new] = data[old]
+        return data
 
 
 class TrigDroidConfig(BaseModel):
@@ -398,9 +422,10 @@ class TUIConfig(BaseModel):
         "Categories: create, modify, delete, rename, attrs, noise (monitor OPEN/CLOSE).",
     )
     monitor_backend: str = Field(
-        default="auto",
-        description="Filesystem monitor backend: 'auto' (pick the best available), "
-        "'fsmon' (the fsmon binary), or 'kprobe' (kernel tracefs kprobes).",
+        default="kprobe",
+        description="Filesystem monitor backend: 'kprobe' (kernel tracefs "
+        "kprobes; prefer kprobe, auto-fall-back to fsmon when the kernel lacks "
+        "support) or 'fsmon' (the fsmon binary).",
     )
     keybindings: dict[str, str] = Field(
         default_factory=dict,
@@ -450,8 +475,15 @@ class TUIConfig(BaseModel):
 
     @validator("monitor_backend")
     def validate_monitor_backend(cls, v):
-        """Validate filesystem monitor backend setting."""
-        valid = {"auto", "fsmon", "kprobe"}
+        """Validate filesystem monitor backend setting.
+
+        The legacy ``"auto"`` value is normalized to ``"kprobe"`` before the
+        membership check (a transform-in-validator, like ``validate_theme``),
+        so existing configs self-heal to the two-way selector on load.
+        """
+        if v == "auto":
+            v = "kprobe"
+        valid = {"fsmon", "kprobe"}
         if v not in valid:
             raise ValueError(
                 f"Invalid monitor_backend: {v}. Must be one of: "

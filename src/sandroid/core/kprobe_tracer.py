@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 
 from .adb import Adb
 
@@ -163,6 +164,15 @@ class KprobeTracer:
     # active device (the 'D' key) never reuses a stale verdict. Inconclusive
     # probes (adb unreachable) are NOT memoized (mirrors FSMon._fanotify_cache).
     _kprobe_cache: dict[str, bool] = {}
+
+    # Serializes kprobe_supported() across its several independent callers
+    # (app startup warm-up, device-change warm-up, Settings-tab warm-up, the
+    # interactive select-probe, and _start_monitor's own preflight) -- without
+    # it, two concurrent probes for the SAME serial would race on the SAME
+    # fixed, non-namespaced on-device check-instance/probe names
+    # (_CHECK_INSTANCE/_CHECK_FILE), each tearing down the other's in-flight
+    # probes mid-check and risking a spurious verdict.
+    _probe_lock = threading.Lock()
 
     # Resolved tracefs mount + captured original buffer size, stored so an
     # idempotent teardown (which has no other state) can reach the right paths
@@ -349,8 +359,10 @@ class KprobeTracer:
             # fails its redirect before `2>/dev/null` applies and warns.
             for probe in ("kpck_vw", "kpck_dfo"):
                 enable = f"{inst}/events/kprobes/{probe}/enable"
-                cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
-            cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
+                cls._shell(f"[ -e {enable} ] && echo 0 > {enable} 2>/dev/null")
+            cls._shell(
+                f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on 2>/dev/null"
+            )
             cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
             for probe in ("kpck_vw", "kpck_dfo"):
                 cls._shell(
@@ -370,24 +382,65 @@ class KprobeTracer:
             return False
 
         cls._shell(f"mkdir -p {inst}")
+        # Every device write below to a path INSIDE the check instance is
+        # guarded by ``[ -e path ] && echo ... 2>/dev/null`` -- the SAME
+        # existence-guard idiom ``_cleanup``/``_self_clean``/``teardown`` already
+        # use, and for the same documented reason (see ``_cleanup`` above): this
+        # preflight runs eagerly (at startup + on device change), and on a
+        # device where the check probes don't register -- so
+        # ``events/kprobes/kpck_vw/`` etc. never appear under the instance --
+        # a BARE ``echo ... > missing/path 2>/dev/null`` does NOT suppress the
+        # failure. The shell's own redirect-open fails (ENOENT on the
+        # containing directory) BEFORE the trailing ``2>`` redirect is even
+        # set up, so the "can't create ... No such file or directory"
+        # diagnostic reaches the ORIGINAL stderr regardless -- empirically
+        # confirmed (unlike a spawned command's own stderr, e.g. ``cat``,
+        # which IS 2>/dev/null-suppressible because its fd already points at
+        # /dev/null before it runs). The existence guard is therefore load
+        # -bearing, not just defense in depth; ``2>/dev/null`` is kept only as
+        # a secondary guard against any OTHER write failure once the path is
+        # confirmed present. The verdict is still derived purely from the
+        # ``trace`` snapshot below, so silencing these writes cannot mask a
+        # real result. (The two probe-install lines above deliberately KEEP
+        # their stderr -- the bogus-symbol signature is read from it.)
+        #
         # Scope BOTH check probes to our one marker file so the ambient
         # device-wide write firehose can never bury the record we look for
         # (belt-and-suspenders on top of the tracing-off-before-read fix).
         vw_filter = f'name ~ "*{basename}*"'
         dfo_filter = f'path ~ "*{basename}*"'
-        cls._shell(f"echo {cls._dq(vw_filter)} > {inst}/events/kprobes/kpck_vw/filter")
+        vw_filter_path = f"{inst}/events/kprobes/kpck_vw/filter"
+        dfo_filter_path = f"{inst}/events/kprobes/kpck_dfo/filter"
+        vw_enable_path = f"{inst}/events/kprobes/kpck_vw/enable"
+        dfo_enable_path = f"{inst}/events/kprobes/kpck_dfo/enable"
+        tracing_on_path = f"{inst}/tracing_on"
         cls._shell(
-            f"echo {cls._dq(dfo_filter)} > {inst}/events/kprobes/kpck_dfo/filter"
+            f"[ -e {vw_filter_path} ] && echo {cls._dq(vw_filter)} > "
+            f"{vw_filter_path} 2>/dev/null"
         )
-        cls._shell(f"echo 1 > {inst}/events/kprobes/kpck_vw/enable")
-        cls._shell(f"echo 1 > {inst}/events/kprobes/kpck_dfo/enable")
-        cls._shell(f"echo 1 > {inst}/tracing_on")
-        # Trigger both do_filp_open (open path) and vfs_write (name) on the file.
-        cls._shell(f"echo sandroid_canary > {cls._CHECK_FILE}")
+        cls._shell(
+            f"[ -e {dfo_filter_path} ] && echo {cls._dq(dfo_filter)} > "
+            f"{dfo_filter_path} 2>/dev/null"
+        )
+        cls._shell(f"[ -e {vw_enable_path} ] && echo 1 > {vw_enable_path} 2>/dev/null")
+        cls._shell(
+            f"[ -e {dfo_enable_path} ] && echo 1 > {dfo_enable_path} 2>/dev/null"
+        )
+        cls._shell(
+            f"[ -e {tracing_on_path} ] && echo 1 > {tracing_on_path} 2>/dev/null"
+        )
+        # Trigger both do_filp_open (open path) and vfs_write (name) on the
+        # file. This CREATES a new file under /data/local/tmp (always
+        # writable on Android) -- no existence guard applies here.
+        cls._shell(f"echo sandroid_canary > {cls._CHECK_FILE} 2>/dev/null")
         # Disable tracing BEFORE reading so `cat trace` (the static snapshot)
         # returns at EOF immediately instead of blocking on the live firehose.
-        cls._shell(f"echo 0 > {inst}/tracing_on")
-        trace = cls._shell(f"cat {inst}/trace")
+        cls._shell(
+            f"[ -e {tracing_on_path} ] && echo 0 > {tracing_on_path} 2>/dev/null"
+        )
+        # `cat`'s own "No such file" IS 2>/dev/null-suppressible (its stderr fd
+        # is already redirected before it runs) -- no existence guard needed.
+        trace = cls._shell(f"cat {inst}/trace 2>/dev/null")
         _cleanup()
 
         # The vfs_write probe's name= field must recover the basename (proves
@@ -418,54 +471,90 @@ class KprobeTracer:
         ``FSMon.fanotify_supported``). MUST be run off the UI thread by the
         controller (several adb round-trips: kallsyms scan + test-attach +
         offset self-check).
+
+        Serialized by :attr:`_probe_lock` -- several independent callers
+        (app startup, device-change, the Settings warm-up, the interactive
+        select-probe, ``_start_monitor``'s own preflight) can invoke this for
+        the same serial around the same time; without the lock, two
+        concurrent runs would race on the SAME fixed on-device check-instance
+        and could corrupt each other's verdict.
         """
         serial = Adb.get_target_device() or ""
         if serial in cls._kprobe_cache:
             return cls._kprobe_cache[serial]
 
-        # 1. Root. Only a GENUINE "device can't grant root" verdict is memoized
-        # for this serial; a transient/timeout adb failure is inconclusive and
-        # must NOT be cached (else a later start can never retry once adb
-        # recovers) -- same no-memoize-on-inconclusive rule as the tracefs-None
-        # branch below.
-        status = cls._root_status()
-        if status == "denied":
-            cls._kprobe_cache[serial] = False
-            return False
-        if status != "root":
-            return False
+        with cls._probe_lock:
+            # Double-checked: another thread may have completed (and
+            # memoized) a probe for this serial while we were waiting for the
+            # lock -- serve its verdict instead of redundantly re-running the
+            # whole preflight.
+            if serial in cls._kprobe_cache:
+                return cls._kprobe_cache[serial]
 
-        # 2. Writable tracefs.
-        tracefs = cls._resolve_tracefs()
-        if tracefs is None:
-            # No writable kprobe_events reachable. Could be a transient adb
-            # failure -> inconclusive, do not memoize.
-            return False
-        cls._tracefs = tracefs
+            # 1. Root. Only a GENUINE "device can't grant root" verdict is
+            # memoized for this serial; a transient/timeout adb failure is
+            # inconclusive and must NOT be cached (else a later start can
+            # never retry once adb recovers) -- same no-memoize-on-inconclusive
+            # rule as the tracefs-None branch below.
+            status = cls._root_status()
+            if status == "denied":
+                cls._kprobe_cache[serial] = False
+                return False
+            if status != "root":
+                return False
 
-        # 3. Required kernel symbols present.
-        missing = cls._missing_symbols(tracefs)
-        if missing:
-            cls.logger.info("kprobe unsupported: missing symbols %s", missing)
-            cls._kprobe_cache[serial] = False
-            return False
+            # 2. Writable tracefs.
+            tracefs = cls._resolve_tracefs()
+            if tracefs is None:
+                # No writable kprobe_events reachable. Could be a transient
+                # adb failure -> inconclusive, do not memoize.
+                return False
+            cls._tracefs = tracefs
 
-        # 4. Offset self-check (dentry offsets + write hot-path canary).
-        # Tri-state: True/False are DEFINITIVE verdicts (memoized for this
-        # serial); None is INCONCLUSIVE (the check couldn't run to a verdict --
-        # adb fault, failed trigger, empty/unreadable trace) and is NOT
-        # memoized, so a later start re-checks once the device settles (same
-        # no-memoize-on-inconclusive rule as the root/tracefs branches above).
-        try:
-            result = cls._offset_self_check(tracefs)
-        except Exception:
-            cls.logger.debug("kprobe offset self-check errored", exc_info=True)
-            result = None
+            # 3. Required kernel symbols present.
+            missing = cls._missing_symbols(tracefs)
+            if missing:
+                cls.logger.info("kprobe unsupported: missing symbols %s", missing)
+                cls._kprobe_cache[serial] = False
+                return False
 
-        if result is None:
-            return False
-        cls._kprobe_cache[serial] = result
-        return result
+            # 4. Offset self-check (dentry offsets + write hot-path canary).
+            # Tri-state: True/False are DEFINITIVE verdicts (memoized for this
+            # serial); None is INCONCLUSIVE (the check couldn't run to a
+            # verdict -- adb fault, failed trigger, empty/unreadable trace)
+            # and is NOT memoized, so a later start re-checks once the device
+            # settles (same no-memoize-on-inconclusive rule as the
+            # root/tracefs branches above).
+            try:
+                result = cls._offset_self_check(tracefs)
+            except Exception:
+                cls.logger.debug("kprobe offset self-check errored", exc_info=True)
+                result = None
+
+            if result is None:
+                return False
+            cls._kprobe_cache[serial] = result
+            return result
+
+    @classmethod
+    def cached_availability(cls) -> bool | None:
+        """Return the memoized kprobe verdict for the CURRENT serial (no probe).
+
+        A pure read of :attr:`_kprobe_cache` for the active target serial --
+        NEVER runs ``adb``, never triggers a probe, so it is safe to call on the
+        UI thread. The heavy :meth:`kprobe_supported` (which fills the cache)
+        must be run off-thread; this only surfaces what it already learned.
+
+        The verdict is per current serial: switching the active device (the
+        ``D`` key) changes what this returns, and a serial never probed on (or
+        only probed inconclusively) is absent from the cache.
+
+        Returns:
+            ``True``/``False`` -- the memoized definitive verdict for this
+            serial. ``None`` -- this serial has never been probed to a
+            definitive verdict (never probed, or every probe was inconclusive).
+        """
+        return cls._kprobe_cache.get(Adb.get_target_device() or "")
 
     # =========================================================================
     # Session setup / teardown
@@ -538,12 +627,20 @@ class KprobeTracer:
             cls._shell(f"echo 1 > {inst}/events/kprobes/{name}/enable")
 
     @classmethod
-    def _apply_path_filter(cls, tracefs: str, path: str) -> None:
-        """Install an in-kernel ``field ~ "<path>/*"`` glob on the scoped probes."""
+    def _apply_path_filter(cls, tracefs: str, paths: str | list[str]) -> None:
+        """Install an in-kernel ``field ~ "<path>/*"`` glob on the scoped probes.
+
+        Accepts a single path or a list. Each path becomes one ``<p>/*`` glob;
+        the per-field globs are OR'd with ftrace's ``||`` so a single filter
+        matches files under ANY of the target paths. A single path yields a
+        one-element join, i.e. exactly the old single-glob string (byte-for-byte)
+        so nothing changes for the common single-path case.
+        """
         inst = cls._instance_dir(tracefs)
-        glob = f'{path.rstrip("/")}/*'
+        path_list = [paths] if isinstance(paths, str) else list(paths)
+        globs = [f'{p.rstrip("/")}/*' for p in path_list]
         for name, field in cls._PATH_FILTER_FIELDS.items():
-            expr = f'{field} ~ "{glob}"'
+            expr = " || ".join(f'{field} ~ "{g}"' for g in globs)
             cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
 
     @classmethod
@@ -585,13 +682,17 @@ class KprobeTracer:
         return cls._start_process(cmd)
 
     @classmethod
-    def run_by_pid(cls, pid: int, path: str | None = None) -> subprocess.Popen | None:
+    def run_by_pid(
+        cls, pid: int, path: str | list[str] | None = None
+    ) -> subprocess.Popen | None:
         """Start kprobe tracing scoped to ``pid`` and its whole child tree.
 
         Optionally also constrains to files under ``path`` (a glob on the
-        metadata + do_filp_open probes). PID mode keeps the FULL probe set --
-        the ATTRS/XATTR probes (nc/sx) are scoped by ``set_event_pid`` here, so
-        (unlike pure path mode) they don't leak device-wide.
+        metadata + do_filp_open probes). ``path`` may be a single path or a list
+        of paths, which are OR'd into one per-field filter. PID mode keeps the
+        FULL probe set -- the ATTRS/XATTR probes (nc/sx) are scoped by
+        ``set_event_pid`` here, so (unlike pure path mode) they don't leak
+        device-wide.
         """
         tracefs = cls._tracefs or cls._resolve_tracefs()
         if tracefs is None:
@@ -606,8 +707,12 @@ class KprobeTracer:
         return cls._finish_session(tracefs, probe_names)
 
     @classmethod
-    def run_by_path(cls, path: str) -> subprocess.Popen | None:
+    def run_by_path(cls, path: str | list[str]) -> subprocess.Popen | None:
         """Start kprobe tracing scoped (in-kernel) to files under ``path``.
+
+        ``path`` may be a single path or a list of paths; a list is OR'd into
+        one per-field filter so files under ANY listed path are captured. An
+        empty string or empty list is guarded (logged + ``None``).
 
         Two path-mode caveats callers should know about:
 
