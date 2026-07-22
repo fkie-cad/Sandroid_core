@@ -7,6 +7,7 @@ and a tail of mitmweb's log output.
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import os
@@ -112,6 +113,10 @@ class MitmproxyPanel(Widget):
         # Re-entrancy guard: an injection runs in a worker thread, so a second
         # Ctrl+N confirm must not spawn a parallel Zygote-kill.
         self._injecting = False
+        # Captured in on_mount(); lets background threads marshal log lines
+        # onto the main loop with a non-blocking call_soon_threadsafe instead
+        # of call_from_thread (see _on_service_line).
+        self._main_loop: asyncio.AbstractEventLoop | None = None
         self.can_focus = True
 
     def compose(self) -> ComposeResult:
@@ -125,6 +130,10 @@ class MitmproxyPanel(Widget):
         )
 
     def on_mount(self) -> None:
+        try:
+            self._main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._main_loop = None
         self._service.add_listener(self._on_service_line)
         self._refresh_header()
         try:
@@ -202,10 +211,18 @@ class MitmproxyPanel(Widget):
         self._remove_our_reverse()
 
     def _on_service_line(self, line: str) -> None:
-        # Reader thread → marshal to Textual's main thread
+        # Reader/AI-tool-worker thread → non-blocking schedule onto the main
+        # loop. NOT call_from_thread: start()/stop() call _emit() (which
+        # invokes this listener) while holding MitmproxyService._lock, and
+        # call_from_thread blocks the caller until the main loop runs it —
+        # if StatusBar's poll timer (main thread) tries to acquire that same
+        # lock via is_running() in that window, the two threads deadlock and
+        # the whole TUI freezes.
+        loop = self._main_loop
         try:
-            self.app.call_from_thread(self._append_line, line)
-        except Exception:
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(self._append_line, line)
+        except RuntimeError:
             pass
 
     def _append_line(self, line: str) -> None:
@@ -1220,9 +1237,11 @@ class MitmproxyPanel(Widget):
             line = f"[INFO] {payload.get('message', 'SSL hooks loaded')}"
         else:
             return
+        loop = self._main_loop
         try:
-            self.app.call_from_thread(self._append_line, line)
-        except Exception:
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(self._append_line, line)
+        except RuntimeError:
             pass
 
     def action_restart(self) -> None:
