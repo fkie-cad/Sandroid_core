@@ -178,9 +178,13 @@ def test_kprobe_supported_false_on_bogus_symbol_test_attach(monkeypatch):
 
 def test_kprobe_supported_false_on_offset_self_check_mismatch(monkeypatch):
     monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
-    # Everything installs fine, but the recovered name= is garbage (wrong
-    # offset) -> basename does not match -> False.
+    # DEFINITIVE mismatch: the do_filp_open path canary (a KNOWN-GOOD offset)
+    # fires and recovers the marker path -- proving the trigger + tracing +
+    # snapshot read all worked -- but the dentry-offset name= is garbage (wrong
+    # +0xb0/+0x28). That is a genuine wrong-offset verdict -> False AND memoized.
     bad_trace = (
+        "   sh-999 [000] ...1 1.1: kpck_dfo: (do_filp_open+0x0/0x1) "
+        'path="/data/local/tmp/sandroid_kpcheck"\n'
         '   sh-999 [000] ...1 1.2: kpck_vw: (vfs_write+0x0/0x1) name="\\xef\\xbf"\n'
     )
     fake = _FakeShell(
@@ -194,6 +198,64 @@ def test_kprobe_supported_false_on_offset_self_check_mismatch(monkeypatch):
     )
     _install(monkeypatch, fake)
     assert KprobeTracer.kprobe_supported() is False
+    # A definitive wrong-offset verdict for this serial IS memoized.
+    assert KprobeTracer._kprobe_cache["emulator-5556"] is False
+
+
+def test_offset_self_check_disables_tracing_before_reading_trace(monkeypatch):
+    """The fix: `cat .../trace` (the static snapshot) must be read only AFTER
+    tracing_on is set back to 0. Reading it while tracing is on hangs on a live
+    device (the no-filter check probe records the ambient write firehose so the
+    snapshot never reaches EOF). Assert the issued command sequence disables
+    tracing before the snapshot read -- and after the write trigger.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake = _install(monkeypatch, _make_success_fake())
+
+    assert KprobeTracer.kprobe_supported() is True
+
+    cmds = fake.commands
+    # The snapshot read of the CHECK instance's `trace`.
+    read_idx = next(
+        i
+        for i, c in enumerate(cmds)
+        if "cat " in c and f"instances/{KprobeTracer._CHECK_INSTANCE}/trace'" in c
+    )
+    # The write trigger that must precede everything.
+    trigger_idx = next(i for i, c in enumerate(cmds) if "echo sandroid_canary" in c)
+    # The `echo 0 > .../tracing_on` that must sit between trigger and read
+    # (NOT one of the _cleanup 2>/dev/null disables, which come after the read).
+    tracing_off_idx = next(
+        i
+        for i, c in enumerate(cmds)
+        if i > trigger_idx
+        and "echo 0 >" in c
+        and f"instances/{KprobeTracer._CHECK_INSTANCE}/tracing_on" in c
+        and "2>/dev/null" not in c
+    )
+    assert trigger_idx < tracing_off_idx < read_idx
+
+
+def test_kprobe_supported_inconclusive_self_check_not_memoized(monkeypatch):
+    """An inconclusive self-check (empty/unreadable trace -- e.g. the snapshot
+    read timed out or the trigger never landed, so NOT even the do_filp_open
+    path canary recovered) returns False WITHOUT memoizing, so a later start
+    re-checks once the device settles.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake = _FakeShell(
+        [
+            (_root_ok, ("restarting adbd as root", "")),
+            (_id_ok, ("uid=0(root)", "")),
+            (_tracefs_probe, ("OK", "")),
+            (_symbol_loop, ("\n".join(_SYMBOLS), "")),
+            # No path canary and no name -> neither recovered -> inconclusive.
+            (_trace_read, ("", "")),
+        ]
+    )
+    _install(monkeypatch, fake)
+    assert KprobeTracer.kprobe_supported() is False
+    assert "emulator-5556" not in KprobeTracer._kprobe_cache
 
 
 def test_kprobe_supported_memoizes_per_serial(monkeypatch):

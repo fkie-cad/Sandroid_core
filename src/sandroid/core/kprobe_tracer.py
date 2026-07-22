@@ -307,14 +307,36 @@ class KprobeTracer:
         return [s for s in cls._REQUIRED_SYMBOLS if s not in present]
 
     @classmethod
-    def _offset_self_check(cls, tracefs: str) -> bool:
+    def _offset_self_check(cls, tracefs: str) -> bool | None:
         """Validate the dentry offsets AND the do_filp_open write hot-path.
 
         Creates a known-named temp file, installs a temp ``vfs_write`` probe
         recovering the basename via ``f_path.dentry +0xb0`` / ``d_name.name
-        +0x28`` AND a ``do_filp_open`` path-string canary, triggers a write,
-        and confirms the recovered basename matches. A wrong offset yields
-        garbage in ``name=`` / an empty capture, so a mismatch -> False.
+        +0x28`` AND a ``do_filp_open`` path-string canary, both scoped by an
+        in-kernel filter to our one marker file, triggers a write, disables
+        tracing, then reads the finite ``trace`` snapshot and confirms the
+        recovered basename matches.
+
+        Ordering is load-bearing: trigger the known write, THEN ``tracing_on=0``,
+        THEN ``cat trace``, THEN parse. Reading ``cat trace`` while tracing is
+        still on hangs on a live device -- the check probe records ambient
+        device-wide writes (logd/adbd/system_server) so the snapshot never
+        reaches EOF and the read blocks until the adb timeout. Disabling tracing
+        first makes ``trace`` (the static snapshot file) return at EOF at once.
+        The marker-scoped filter is defense in depth: even a race can't bury our
+        one record under the ambient firehose.
+
+        Returns:
+            ``True``  -- offsets verified (basename AND path both recovered).
+            ``False`` -- DEFINITIVE mismatch: the do_filp_open path canary (a
+            KNOWN-GOOD offset) fired and recovered the marker path, proving the
+            trigger + tracing + snapshot read all worked, yet the dentry-offset
+            basename did not match -- a genuine wrong-offset verdict the caller
+            memoizes. Also returned when the kernel rejects the check-probe
+            attach outright (bogus-symbol signature -- a real capability fault).
+            ``None``  -- INCONCLUSIVE: the check could not reach a verdict (empty
+            or unreadable trace, the trigger/canary never landed, adb fault);
+            the caller must NOT memoize so a later start re-checks.
         """
         events = f"{tracefs}/kprobe_events"
         inst = f"{tracefs}/instances/{cls._CHECK_INSTANCE}"
@@ -340,11 +362,23 @@ class KprobeTracer:
             return False
 
         cls._shell(f"mkdir -p {inst}")
+        # Scope BOTH check probes to our one marker file so the ambient
+        # device-wide write firehose can never bury the record we look for
+        # (belt-and-suspenders on top of the tracing-off-before-read fix).
+        vw_filter = f'name ~ "*{basename}*"'
+        dfo_filter = f'path ~ "*{basename}*"'
+        cls._shell(f"echo {cls._dq(vw_filter)} > {inst}/events/kprobes/kpck_vw/filter")
+        cls._shell(
+            f"echo {cls._dq(dfo_filter)} > {inst}/events/kprobes/kpck_dfo/filter"
+        )
         cls._shell(f"echo 1 > {inst}/events/kprobes/kpck_vw/enable")
         cls._shell(f"echo 1 > {inst}/events/kprobes/kpck_dfo/enable")
         cls._shell(f"echo 1 > {inst}/tracing_on")
         # Trigger both do_filp_open (open path) and vfs_write (name) on the file.
         cls._shell(f"echo sandroid_canary > {cls._CHECK_FILE}")
+        # Disable tracing BEFORE reading so `cat trace` (the static snapshot)
+        # returns at EOF immediately instead of blocking on the live firehose.
+        cls._shell(f"echo 0 > {inst}/tracing_on")
         trace = cls._shell(f"cat {inst}/trace")
         _cleanup()
 
@@ -356,7 +390,16 @@ class KprobeTracer:
             for val in _extract_field_values(trace, "name")
         )
         path_ok = any(basename in val for val in _extract_field_values(trace, "path"))
-        return name_ok and path_ok
+        if name_ok and path_ok:
+            return True
+        # do_filp_open's path uses a KNOWN-GOOD offset and fires on the very
+        # open that precedes our write. If it recovered the marker path, the
+        # trigger + tracing + snapshot read all demonstrably worked, so a
+        # missing/garbage basename is a genuine dentry-offset MISMATCH
+        # (memoizable False). If not even the path canary landed, the check
+        # never reached a verdict (empty/unreadable trace, failed trigger, adb
+        # fault) -> INCONCLUSIVE (None) -> caller must not memoize.
+        return False if path_ok else None
 
     @classmethod
     def kprobe_supported(cls) -> bool:
@@ -400,14 +443,21 @@ class KprobeTracer:
             return False
 
         # 4. Offset self-check (dentry offsets + write hot-path canary).
+        # Tri-state: True/False are DEFINITIVE verdicts (memoized for this
+        # serial); None is INCONCLUSIVE (the check couldn't run to a verdict --
+        # adb fault, failed trigger, empty/unreadable trace) and is NOT
+        # memoized, so a later start re-checks once the device settles (same
+        # no-memoize-on-inconclusive rule as the root/tracefs branches above).
         try:
-            ok = cls._offset_self_check(tracefs)
+            result = cls._offset_self_check(tracefs)
         except Exception:
             cls.logger.debug("kprobe offset self-check errored", exc_info=True)
-            ok = False
+            result = None
 
-        cls._kprobe_cache[serial] = ok
-        return ok
+        if result is None:
+            return False
+        cls._kprobe_cache[serial] = result
+        return result
 
     # =========================================================================
     # Session setup / teardown
