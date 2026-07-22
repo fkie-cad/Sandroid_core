@@ -33,6 +33,29 @@ from sandroid.tui.themes import THEME_ORDER, THEMES
 
 logger = logging.getLogger(__name__)
 
+# Per-category FSMon Monitor visibility rows. The widget id uses "__" (not
+# "--") after the field name so it doesn't collide with _id_to_key's "--"->"."
+# section-separator convention -- these 6 Selects are assembled into a single
+# dict and saved under one key ("tui.fsmon_event_visibility"), never routed
+# through the generic per-widget key path.
+_FSMON_VISIBILITY_CATEGORIES = (
+    "create",
+    "modify",
+    "delete",
+    "rename",
+    "attrs",
+    "noise",
+)
+_FSMON_VISIBILITY_ID_PREFIX = "setting-tui--fsmon_event_visibility__"
+_FSMON_VISIBILITY_LABELS = {
+    "create": "FSMon Create:",
+    "modify": "FSMon Modify:",
+    "delete": "FSMon Delete:",
+    "rename": "FSMon Rename:",
+    "attrs": "FSMon Attrs:",
+    "noise": "FSMon Noise (open/close):",
+}
+
 
 class SettingsScreen(ModalScreen[SandroidConfig | None]):
     """Modal settings screen with tabbed configuration panels.
@@ -269,6 +292,21 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 type="integer",
                 classes="setting-input",
             )
+
+        # FSMon per-category event visibility (Always / Only in verbose / Never)
+        for category in _FSMON_VISIBILITY_CATEGORIES:
+            with Horizontal(classes="setting-row"):
+                yield Label(_FSMON_VISIBILITY_LABELS[category], classes="setting-label")
+                yield Select(
+                    [
+                        ("Always", "always"),
+                        ("Only in verbose", "verbose"),
+                        ("Never", "never"),
+                    ],
+                    value=config.tui.fsmon_event_visibility.get(category, "always"),
+                    id=f"{_FSMON_VISIBILITY_ID_PREFIX}{category}",
+                    classes="setting-select",
+                )
 
         # Flush Package Cache
         with Horizontal(classes="setting-row"):
@@ -645,16 +683,12 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             logger.debug(f"Could not access FridaSessionService: {e}")
 
         try:
-            self.app.call_from_thread(
-                self._populate_frida_versions, tags, installed
-            )
+            self.app.call_from_thread(self._populate_frida_versions, tags, installed)
         except Exception:
             # Screen already dismissed
             pass
 
-    def _populate_frida_versions(
-        self, tags: list[str], installed: str | None
-    ) -> None:
+    def _populate_frida_versions(self, tags: list[str], installed: str | None) -> None:
         """UI-thread callback: rebuild the version Select and info lines."""
         try:
             select = self.query_one("#setting-frida--server_version", Select)
@@ -669,9 +703,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         except Exception:
             pass
 
-        latest_label = (
-            f"Latest ({tags[0]})" if tags else "Latest (offline)"
-        )
+        latest_label = f"Latest ({tags[0]})" if tags else "Latest (offline)"
         current = select.value
         options: list[tuple[str, str]] = [
             (f"Match host ({host_ver})", "host"),
@@ -683,11 +715,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Preserve the currently-selected explicit version if it would
         # otherwise disappear from the list
         existing_values = {v for _, v in options}
-        if (
-            current
-            and current not in existing_values
-            and current != "__custom__"
-        ):
+        if current and current not in existing_values and current != "__custom__":
             options.append((str(current), str(current)))
         options.append(("Custom…", "__custom__"))
 
@@ -743,9 +771,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # visibility based on the selection.
         if key == "frida.server_version":
             try:
-                custom_row = self.query_one(
-                    "#frida-version-custom-row", Horizontal
-                )
+                custom_row = self.query_one("#frida-version-custom-row", Horizontal)
                 custom_input = self.query_one(
                     "#setting-frida--server_version_custom", Input
                 )
@@ -763,6 +789,29 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             if custom_row is not None:
                 custom_row.display = False
 
+        # FSMon per-category visibility Selects don't map to a single flat
+        # key -- they must be assembled into one dict written under
+        # "tui.fsmon_event_visibility". SettingsController._apply_setting
+        # does a full setattr() REPLACE (not a merge), so re-read ALL 6
+        # Selects' *current* values every time any one of them fires
+        # Changed (the one that just changed has already updated its
+        # .value by now) and write the complete dict. This makes each edit
+        # self-contained and correct regardless of save/reload timing --
+        # never accumulate partial state across edits, or a save would
+        # silently wipe the other categories.
+        if widget_id.startswith(_FSMON_VISIBILITY_ID_PREFIX):
+            visibility: dict[str, str] = {}
+            for category in _FSMON_VISIBILITY_CATEGORIES:
+                try:
+                    select = self.query_one(
+                        f"#{_FSMON_VISIBILITY_ID_PREFIX}{category}", Select
+                    )
+                    visibility[category] = select.value
+                except Exception:
+                    pass
+            self._pending["tui.fsmon_event_visibility"] = visibility
+            return
+
         self._pending[key] = event.value
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -775,9 +824,7 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # its own key) so the saved config never contains "__custom__".
         if widget_id == "setting-frida--server_version_custom":
             try:
-                select = self.query_one(
-                    "#setting-frida--server_version", Select
-                )
+                select = self.query_one("#setting-frida--server_version", Select)
             except Exception:
                 select = None
             if select is not None and select.value == "__custom__":

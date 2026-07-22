@@ -312,6 +312,18 @@ class TUIConfig(BaseModel):
         description="Maximum lines kept in FSMon observer log. "
         "Higher values use more memory but allow scrolling back further.",
     )
+    fsmon_event_visibility: dict[str, str] = Field(
+        default_factory=lambda: {
+            "create": "always",
+            "modify": "always",
+            "delete": "always",
+            "rename": "always",
+            "attrs": "always",
+            "noise": "verbose",
+        },
+        description="Per-category Monitor visibility: 'always', 'verbose', or 'never'. "
+        "Categories: create, modify, delete, rename, attrs, noise (fsmon OPEN/CLOSE).",
+    )
     keybindings: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -344,6 +356,18 @@ class TUIConfig(BaseModel):
                 f"Invalid snapshot_save_mode: {v}. Must be one of: "
                 f"{', '.join(sorted(valid))}"
             )
+        return v
+
+    @validator("fsmon_event_visibility")
+    def validate_fsmon_event_visibility(cls, v):
+        """Validate FSMon per-category visibility modes."""
+        valid = {"always", "verbose", "never"}
+        for category, mode in v.items():
+            if mode not in valid:
+                raise ValueError(
+                    f"Invalid fsmon_event_visibility mode for '{category}': {mode}. "
+                    f"Must be one of: {', '.join(sorted(valid))}"
+                )
         return v
 
     @validator("custom_css_path", pre=True)

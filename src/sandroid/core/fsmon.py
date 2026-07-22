@@ -252,6 +252,22 @@ class FSMon:
         cls.logger.debug(f"Monitoring path: {path}")
         return cls._start_process(cmd)
 
+    # Per-device-serial memoization for fanotify_supported(), so switching
+    # the active device (the 'D' key) never reuses a stale verdict from a
+    # previously-connected device.
+    _fanotify_cache: dict[str, bool] = {}
+
+    # TODO: on fanotify-less devices, real per-PID attribution is achievable
+    # via kernel tracefs kprobes (do_sys_openat2/do_unlinkat/do_renameat2/
+    # do_mkdirat + common_pid filtering via /sys/kernel/tracing/kprobe_events
+    # +trace_pipe) -- tested and confirmed viable (kernel-verified
+    # attribution, ~single-digit-15% overhead, zero binaries pushed to the
+    # device). Would need a new KprobeTracer class (mirroring FSMon's shape)
+    # producing the same FSMonEvent shape this module already parses into.
+    # strace/ptrace was also tested and rejected as a default (~67x overhead,
+    # needs 9 pushed shared-library dependencies) -- worth keeping only as a
+    # separate, manually-invoked "deep single-PID capture" tool, never wired
+    # into automatic PID-mode.
     @classmethod
     def run_fsmon_by_pid(cls, pid, path=None):
         """Starts fsmon in a subprocess via 'adb shell -tt', monitoring the specified process ID.
@@ -269,7 +285,97 @@ class FSMon:
         if path is None:
             path = cls._get_monitor_path()
         cmd = cls._build_adb_cmd(
-            "shell", "-tt", cls.FS_MON_BINARY, "-p", str(pid), path
+            "shell", "-tt", cls.FS_MON_BINARY, "-B", "fanotify", "-p", str(pid), path
         )
         cls.logger.debug(f"Monitoring process with PID: {pid}")
         return cls._start_process(cmd)
+
+    # Signature fsmon prints near-instantly when the device kernel doesn't
+    # support fanotify at all (confirmed empirically against production
+    # fsmon builds 1.8.6/1.8.8, which otherwise silently produce wrong data
+    # under -p with an inotify backend instead of erroring cleanly).
+    _FANOTIFY_UNSUPPORTED_SIGNATURE = "fanotify_init"
+
+    @classmethod
+    def fanotify_supported(cls) -> bool:
+        """Probe whether the active device's kernel supports fanotify.
+
+        Runs a minimal, one-shot preflight (``fsmon -B fanotify -a 1
+        /data/local/tmp``) via ``subprocess.run`` (NOT ``_start_process`` --
+        that returns a long-lived streaming ``Popen`` meant for the real
+        reader thread, the wrong shape for a one-shot capture-and-check
+        probe). On a fanotify-capable device this same command blocks
+        waiting for a real filesystem event on the probed (idle) path, so a
+        ``subprocess.TimeoutExpired`` is treated as "supported" (no ENOSYS
+        signature appeared in the time given -- fanotify itself initialized
+        fine, it's just waiting on real activity). Only a clean, fast exit
+        containing the ``fanotify_init``/"not implemented" signature is
+        treated as "unsupported".
+
+        Memoized per device serial (``Adb.get_target_device()``) rather than
+        a bare process-lifetime bool, since Sandroid supports switching the
+        active device mid-session (the 'D' key) and a stale verdict from one
+        device must not silently apply to another.
+
+        Returns:
+            True if fanotify appears supported (or the probe timed out
+            without an ENOSYS-style signature), False if the device
+            explicitly reported fanotify as unsupported.
+        """
+        serial = Adb.get_target_device() or ""
+        if serial in cls._fanotify_cache:
+            return cls._fanotify_cache[serial]
+
+        cmd = cls._build_adb_cmd(
+            "shell",
+            "-tt",
+            cls.FS_MON_BINARY,
+            "-B",
+            "fanotify",
+            "-a",
+            "1",
+            "/data/local/tmp",
+        )
+        supported = True
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+            combined = ((result.stdout or "") + (result.stderr or "")).lower()
+            if (
+                cls._FANOTIFY_UNSUPPORTED_SIGNATURE in combined
+                or "not implemented" in combined
+            ):
+                supported = False
+            elif (
+                not combined.strip()
+                or "no such file or directory" in combined
+                or "not found" in combined
+                or "permission denied" in combined
+            ):
+                # The probe didn't actually run fsmon at all (binary missing
+                # -- e.g. called before check_and_install_fsmon() -- or some
+                # other shell-level failure) -- this is inconclusive, not a
+                # real fanotify verdict. Caching "supported" here would wrongly
+                # poison every later call for this serial (confirmed by a real
+                # on-device repro: a stale True cached from a pre-install probe
+                # let a real PID-mode session spawn against a device that
+                # actually lacks fanotify, dying immediately). Return without
+                # memoizing so a later, real probe (after the binary is
+                # installed) gets a genuine answer.
+                return False
+        except subprocess.TimeoutExpired:
+            # No ENOSYS-style signature appeared before the timeout fired --
+            # fanotify itself initialized fine, it's just blocked waiting for
+            # a real filesystem event on the idle probed path (expected,
+            # working behavior). subprocess.run()'s own timeout handling
+            # already kills the child and waits on it (Popen.communicate()
+            # calls process.kill() + process.wait() internally before
+            # re-raising TimeoutExpired) -- nothing further to clean up here.
+            supported = True
+        except (OSError, subprocess.SubprocessError) as e:
+            cls.logger.warning(
+                f"fanotify_supported probe failed, assuming supported: {e}"
+            )
+            supported = True
+
+        cls._fanotify_cache[serial] = supported
+        return supported

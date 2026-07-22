@@ -251,6 +251,10 @@ class FSMonConfigModal(ForensicModal[FSMonConfig]):
                             "Monitor by Path",
                             id="mode-path",
                         )
+                    yield Label(
+                        "[dim]PID mode falls back to path-mode on devices without fanotify support.[/dim]",
+                        id="pid-mode-hint",
+                    )
                 else:
                     # Only path mode available - show as info, not a radio set
                     yield Static(

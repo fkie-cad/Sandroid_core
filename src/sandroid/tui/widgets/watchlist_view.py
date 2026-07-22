@@ -182,7 +182,7 @@ class RowState(Enum):
 
 
 #: RowState -> (glyph, Rich-markup color). Colors match this app's existing
-#: semantic palette (see fsmon_controller.FSMON_COLOR_RULES / diffs_view.py's
+#: semantic palette (see fsmon_controller.FSMON_EVENT_INFO / diffs_view.py's
 #: category colors): gray for "nothing new to look at", yellow for
 #: "changed", red for "error", dim-yellow for "changed but still settling".
 _GLYPH: dict[RowState, tuple[str, str]] = {

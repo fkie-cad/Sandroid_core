@@ -31,6 +31,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from rich.markup import escape
@@ -52,22 +53,112 @@ class FSMonConfig:
 # Regex to strip ANSI escape sequences and carriage returns from PTY output.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
 
-# Shared color rules for fsmon event colorization.
-# Used by both the controller (activity log) and the Files tab's Monitor
-# sub-tab (tui/widgets/monitor_view.py).
-FSMON_COLOR_RULES: list[tuple[tuple[str, ...], str]] = [
-    (("CREATE", "WRITE", "MODIFY"), "green"),
-    (("DELETE", "REMOVE", "UNLINK"), "red"),
-    (("RENAME", "MOVE"), "yellow"),
-    (("OPEN", "ACCESS", "READ"), "cyan"),
-]
+# Regex matching a package-scoped Android data directory prefix, e.g.
+# "/data/data/com.example.app/" or "/data/user/0/com.example.app/".
+_PKG_PATH_RE = re.compile(r"^(/data/(?:data|user/\d+)/[^/]+/)")
+
+
+@dataclass(frozen=True)
+class FSMonEvent:
+    r"""A parsed fsmon filesystem-event line.
+
+    fsmon's raw wire format is tab-separated:
+    ``<FSE_EVENT_TYPE>\t<pid>\t"<process_name>"\t<path>``, or for renames:
+    ``FSE_RENAME\t<pid>\t"<process_name>"\t<old_path> -> <new_path>``.
+    """
+
+    event_type: str
+    pid: int | None
+    process: str
+    path: str
+    new_path: str | None = None
+
+
+@dataclass(frozen=True)
+class FSMonEventMeta:
+    """Display metadata for one ``FSE_*`` token."""
+
+    label: str
+    color: str
+    category: str
+
+
+# Exact-token lookup for fsmon event metadata (fixes the old substring-keyword
+# matching, which silently missed real tokens like FSE_CONTENT_MODIFIED and
+# FSE_CLOSE). No icon glyphs -- plain colored uppercase labels only (explicit
+# user feedback rejecting an earlier icon-based design).
+FSMON_EVENT_INFO: dict[str, FSMonEventMeta] = {
+    "FSE_CREATE_FILE": FSMonEventMeta("CREATE", "#4ade80", "create"),
+    "FSE_CREATE_DIR": FSMonEventMeta("CREATE DIR", "#4ade80", "create"),
+    "FSE_CONTENT_MODIFIED": FSMonEventMeta("MODIFY", "#a78bfa", "modify"),
+    "FSE_DELETE": FSMonEventMeta("DELETE", "#fb7185", "delete"),
+    "FSE_RENAME": FSMonEventMeta("RENAME", "#facc15", "rename"),
+    "FSE_STAT_CHANGED": FSMonEventMeta("ATTRS", "#7dd3fc", "attrs"),
+    "FSE_ATTRIB": FSMonEventMeta("ATTRS", "#7dd3fc", "attrs"),
+    "FSE_XATTR_MODIFIED": FSMonEventMeta("XATTR", "#7dd3fc", "attrs"),
+    "FSE_OPEN": FSMonEventMeta("OPEN", "#5b6479", "noise"),
+    "FSE_CLOSE": FSMonEventMeta("CLOSE", "#5b6479", "noise"),
+}
+
+
+def parse_fsmon_line(line: str) -> FSMonEvent | None:
+    """Tokenize one raw fsmon output line into an :class:`FSMonEvent`.
+
+    Defensive by design: a future fsmon version drifting slightly in its
+    wire format must degrade gracefully (return ``None``) rather than crash
+    the reader thread.
+
+    Args:
+        line: Raw (already ANSI-stripped) fsmon output line.
+
+    Returns:
+        The parsed event, or ``None`` if the line doesn't look like a valid
+        fsmon event line.
+    """
+    try:
+        parts = line.split("\t")
+        if len(parts) < 4:
+            return None
+
+        event_type = parts[0].strip()
+        pid_str = parts[1].strip()
+        process = parts[2].strip().strip('"')
+        rest = "\t".join(parts[3:]).strip()
+
+        pid: int | None
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            pid = None
+
+        new_path: str | None = None
+        if event_type == "FSE_RENAME" and " -> " in rest:
+            old_path, new_path = rest.split(" -> ", 1)
+            path = old_path.strip()
+            new_path = new_path.strip()
+        else:
+            path = rest
+
+        if not event_type or not path:
+            return None
+
+        return FSMonEvent(
+            event_type=event_type,
+            pid=pid,
+            process=process,
+            path=path,
+            new_path=new_path,
+        )
+    except Exception:
+        return None
 
 
 def colorize_fsmon_line(line: str, max_width: int = 0) -> str:
     """Apply color markup to an fsmon output line.
 
     Escapes raw content first to prevent Rich markup interpretation,
-    then wraps in color tags based on filesystem event keywords.
+    then wraps in color tags based on the parsed event's exact ``FSE_*``
+    token (via :func:`parse_fsmon_line`/``FSMON_EVENT_INFO``).
 
     Args:
         line: Raw fsmon output line.
@@ -78,34 +169,264 @@ def colorize_fsmon_line(line: str, max_width: int = 0) -> str:
     """
     truncated = line[:max_width] if max_width > 0 else line
     escaped = escape(truncated)
-    for keywords, color in FSMON_COLOR_RULES:
-        if any(kw in line for kw in keywords):
-            return f"[{color}]{escaped}[/{color}]"
+    event = parse_fsmon_line(line)
+    if event is not None:
+        meta = FSMON_EVENT_INFO.get(event.event_type)
+        if meta is not None:
+            return f"[{meta.color}]{escaped}[/{meta.color}]"
     return escaped
 
 
-def _publish_fsmon_event(message: str) -> None:
-    """Publish an fsmon TASK_OUTPUT event to the EventBus.
+def _resolve_prefix_candidates(config: Any) -> tuple[str, ...]:
+    """Build redundant-path-prefix candidates from an ``FSMonConfig``-like object.
 
-    Mirrors ``analysis/fritap.py``'s ``_publish_fritap_event`` — the Monitor
-    sub-tab (``tui/widgets/monitor_view.py``) subscribes to
-    ``EventType.TASK_OUTPUT`` filtered by ``source == "fsmon"``, the same
-    idiom ``FriTapPanel`` uses for ``source == "fritap"``. Lazy import
-    (matches every other EventBus/TaskService touch in this controller, e.g.
-    ``_get_task_service``) to avoid a module-level dependency on the core
-    event system.
+    Used to strip a redundant ``/data/data/<pkg>/`` or ``/data/user/0/<pkg>/``
+    prefix from displayed paths in Monitor's compact row -- computed once per
+    batch flush (not per line).
 
     Args:
-        message: Already-colorized (``colorize_fsmon_line``) Rich markup
-            message for the line.
+        config: An ``FSMonConfig`` (or duck-typed equivalent) with optional
+            ``app_name``/``target_path`` attributes.
+
+    Returns:
+        A tuple of candidate prefixes (longest-match stripping is done by the
+        caller).
     """
+    candidates: list[str] = []
+    if config is None:
+        return ()
+
+    app_name = getattr(config, "app_name", None)
+    if app_name:
+        candidates.append(f"/data/data/{app_name}/")
+        candidates.append(f"/data/user/0/{app_name}/")
+
+    target_path = getattr(config, "target_path", None)
+    if target_path:
+        match = _PKG_PATH_RE.match(target_path)
+        if match:
+            candidates.append(match.group(1))
+
+    return tuple(candidates)
+
+
+def _strip_prefix(path: str, prefix_candidates: tuple[str, ...]) -> str:
+    """Strip the longest matching redundant path prefix (strip-only step).
+
+    Split out of the old ``_display_path`` (which coupled prefix-stripping
+    with truncate-keep-tail) so the strip step can be reused standalone --
+    the grouped view's directory/filename split and the full-path view's
+    untruncated display both need prefix-stripped (but NOT truncated)
+    paths; ``_display_path`` below now just layers truncation on top of
+    this.
+    """
+    best = ""
+    for prefix in prefix_candidates:
+        if path.startswith(prefix) and len(prefix) > len(best):
+            best = prefix
+    return path[len(best) :] if best else path
+
+
+def _display_path(
+    path: str, prefix_candidates: tuple[str, ...], width: int = 36
+) -> str:
+    """Strip the longest matching prefix, then left-truncate keeping the tail.
+
+    Mirrors the truncate-keep-tail idiom in ``tui/widgets/watchlist_view.py``
+    (``_row_label``), since the filename/extension is the distinguishing part
+    of long Android cache/data paths.
+    """
+    display = _strip_prefix(path, prefix_candidates)
+
+    if len(display) > width:
+        display = "…" + display[-(width - 1) :]
+    return display
+
+
+def _split_dir_filename(path: str) -> tuple[str, str]:
+    """Split an already prefix-stripped path into ``(directory, filename)``.
+
+    Used by :func:`build_fsmon_display_item` for MonitorView's own
+    grouping/breadcrumb pass (Part B) -- the view groups consecutive items
+    by exact ``directory`` match and renders a ``▸ <directory>/`` breadcrumb
+    for runs of 2+. ``directory`` has no trailing slash (the view adds its
+    own when rendering the breadcrumb); a bare filename with no ``/`` at
+    all yields an empty directory string (never groups into a breadcrumb
+    run with anything else, which is correct -- it has no directory to
+    share).
+    """
+    if "/" in path:
+        directory, _, filename = path.rpartition("/")
+        return directory, filename
+    return "", path
+
+
+def format_fsmon_event_row(
+    line: str, prefix_candidates: tuple[str, ...] = ()
+) -> tuple[str, str | None]:
+    """Format one raw fsmon line into Monitor's compact row.
+
+    Format: ``HH:MM:SS  [color]LABEL[/]  <path>`` (renames show
+    ``old -> new``, a plain ASCII arrow matching fsmon's own raw format).
+    Unparseable lines or tokens missing from ``FSMON_EVENT_INFO`` still
+    produce a row (falling back to a plain, uncolored line) -- a line is
+    never silently dropped.
+
+    Args:
+        line: Raw (already ANSI-stripped) fsmon output line.
+        prefix_candidates: Redundant path prefixes to strip before display
+            (see :func:`_resolve_prefix_candidates`).
+
+    Returns:
+        A ``(rich_markup_row, category)`` tuple. ``category`` is ``None`` if
+        the line is unparseable or its token is unknown.
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    event = parse_fsmon_line(line)
+
+    if event is None:
+        return f"{timestamp}  {escape(line)}", None
+
+    meta = FSMON_EVENT_INFO.get(event.event_type)
+
+    if event.new_path is not None:
+        old_display = _display_path(event.path, prefix_candidates)
+        new_display = _display_path(event.new_path, prefix_candidates)
+        path_display = f"{old_display} -> {new_display}"
+    else:
+        path_display = _display_path(event.path, prefix_candidates)
+
+    escaped_path = escape(path_display)
+
+    if meta is None:
+        label = event.event_type
+        return f"{timestamp}  {escape(label):<10}  {escaped_path}", None
+
+    label = f"{meta.label:<10}"
+    return f"{timestamp}  [{meta.color}]{label}[/]  {escaped_path}", meta.category
+
+
+@dataclass(frozen=True)
+class FSMonDisplayItem:
+    """One parsed+categorized fsmon line, structured for MonitorView's own
+    grouping/dedup/visibility-filtering/tallying/width-aware rendering
+    pipeline (Part B of the monitor follow-up plan).
+
+    NOT a final rendered string -- see B1's "Defect 1"/"Defect 2" for why:
+    grouping, dedup, visibility filtering, tallying, and width-aware
+    formatting all need to live in ``MonitorView`` (the only place with a
+    real widget reference and the "always tally, conditionally render"
+    invariant the header/badge depend on), so the controller hands over
+    parsed, prefix-stripped, directory/filename-split data instead of a
+    finished row.
+
+    ``directory``/``filename`` are prefix-stripped (see ``_strip_prefix``)
+    but deliberately NOT truncated -- MonitorView decides truncation width
+    itself (from its own RichLog's rendered content width) and whether to
+    truncate at all (the 'u' full-path toggle bypasses truncation
+    entirely).
+
+    For a plain create/modify/delete/attrs event, only ``directory``/
+    ``filename`` are set. For ``FSE_RENAME``, ``new_directory``/
+    ``new_filename`` are also set (the new path, same prefix-stripping
+    treatment) -- ``directory``/``filename`` describe the OLD path, which
+    is what determines whether the rename joins the current directory-run
+    (a rename groups based on where it originated).
+    """
+
+    label: str
+    color: str | None
+    category: str | None
+    directory: str
+    filename: str
+    new_directory: str | None = None
+    new_filename: str | None = None
+
+
+def build_fsmon_display_item(
+    line: str, prefix_candidates: tuple[str, ...] = ()
+) -> FSMonDisplayItem:
+    """Parse+categorize one raw fsmon line into a structured display item.
+
+    Supersedes ``format_fsmon_event_row`` for production wiring (Part B):
+    grouping/dedup/tallying/width-aware truncation all now live in
+    MonitorView, so the controller only needs to hand over parsed,
+    prefix-stripped, directory/filename-split data -- not a final Rich
+    markup string. ``format_fsmon_event_row`` itself is left unchanged
+    (still directly exercised by tests and available as a standalone
+    formatter), it's simply no longer called by ``_log_fsmon_output_batch``.
+
+    Args:
+        line: Raw (already ANSI-stripped) fsmon output line.
+        prefix_candidates: Redundant path prefixes to strip before display
+            (see :func:`_resolve_prefix_candidates`).
+
+    Returns:
+        A structured :class:`FSMonDisplayItem`. Malformed/unparseable
+        input never raises and is never silently dropped -- it becomes an
+        item with the raw line as its ``filename`` (no directory to
+        derive), matching ``format_fsmon_event_row``'s own "never drop a
+        line" contract.
+    """
+    event = parse_fsmon_line(line)
+
+    if event is None:
+        return FSMonDisplayItem(
+            label="", color=None, category=None, directory="", filename=line
+        )
+
+    meta = FSMON_EVENT_INFO.get(event.event_type)
+    label = meta.label if meta is not None else event.event_type
+    color = meta.color if meta is not None else None
+    category = meta.category if meta is not None else None
+
+    directory, filename = _split_dir_filename(
+        _strip_prefix(event.path, prefix_candidates)
+    )
+
+    new_directory: str | None = None
+    new_filename: str | None = None
+    if event.new_path is not None:
+        new_directory, new_filename = _split_dir_filename(
+            _strip_prefix(event.new_path, prefix_candidates)
+        )
+
+    return FSMonDisplayItem(
+        label=label,
+        color=color,
+        category=category,
+        directory=directory,
+        filename=filename,
+        new_directory=new_directory,
+        new_filename=new_filename,
+    )
+
+
+def _publish_fsmon_batch(items: list[FSMonDisplayItem]) -> None:
+    """Publish a WHOLE BATCH of parsed fsmon items as a single EventBus event.
+
+    Supersedes the old per-line ``_publish_fsmon_event`` (Part B, see B1):
+    one call per BATCH, not one per line -- ``MonitorView`` needs the
+    batch's items in order (with a real widget reference) to run its own
+    grouping/dedup/visibility-filtering/tallying/width-aware rendering
+    pass, none of which can happen here anymore. Mirrors
+    ``analysis/fritap.py``'s ``_publish_fritap_event`` for the EventBus
+    idiom itself (lazy import, ``source="fsmon"``, silently-logged
+    failure).
+
+    Args:
+        items: The batch's parsed items, in the original line order.
+            A no-op on an empty list (nothing to publish).
+    """
+    if not items:
+        return
     try:
         from sandroid.core.events import Event, EventBus, EventType
 
         EventBus.get().publish(
             Event(
                 type=EventType.TASK_OUTPUT,
-                data={"task_name": "FSMon", "message": message},
+                data={"task_name": "FSMon", "batch": items},
                 source="fsmon",
             )
         )
@@ -145,7 +466,6 @@ class FSMonController:
         log_warning: Callable[[str], None] | None = None,
         log_error: Callable[[str], None] | None = None,
         log_success: Callable[[str], None] | None = None,
-        log_message: Callable[[str, str], None] | None = None,
         log_task_started: Callable[[str, str], None] | None = None,
         log_task_stopped: Callable[[str], None] | None = None,
         push_modal: Callable[[Any, Callable], None] | None = None,
@@ -153,6 +473,7 @@ class FSMonController:
         force_ui_refresh: Callable[[], None] | None = None,
         get_current_view: Callable[[], str] | None = None,
         open_files_tab: Callable[[], None] | None = None,
+        on_pid_mode_fallback: Callable[[str], None] | None = None,
     ):
         """Initialize FSMonController with UI callbacks.
 
@@ -161,7 +482,6 @@ class FSMonController:
             log_warning: Callback for warning-level logging to UI
             log_error: Callback for error-level logging to UI
             log_success: Callback for success-level logging to UI
-            log_message: Callback for generic message logging (message, source)
             log_task_started: Callback when task starts (name, description)
             log_task_stopped: Callback when task stops (name)
             push_modal: Callback to push a modal screen with result callback
@@ -176,12 +496,18 @@ class FSMonController:
                 (``app.py``'s ``action_action_key``). Injected rather than
                 importing ``app.py``/``MainScreen`` directly here, same
                 reasoning as every other UI callback on this controller.
+            on_pid_mode_fallback: Callback invoked (with the path now being
+                monitored instead) when a PID-mode start silently falls back
+                to path-mode because ``FSMon.fanotify_supported()`` reports
+                the device's kernel lacks fanotify. ``_start_fsmon`` already
+                runs on the main thread (see the ``_open_files_tab`` callback
+                above for the same reasoning), so this is invoked directly,
+                no ``call_from_thread`` marshaling needed.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
         self._log_error = log_error or self._default_log
         self._log_success = log_success or self._default_log
-        self._log_message = log_message
         self._log_task_started = log_task_started
         self._log_task_stopped = log_task_stopped
         self._push_modal = push_modal
@@ -189,6 +515,7 @@ class FSMonController:
         self._force_ui_refresh = force_ui_refresh
         self._get_current_view = get_current_view
         self._open_files_tab = open_files_tab
+        self._on_pid_mode_fallback = on_pid_mode_fallback
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -302,8 +629,52 @@ class FSMonController:
         # Start fsmon based on mode
         try:
             if config.mode == "pid" and config.target_pid:
-                process = FSMon.run_fsmon_by_pid(config.target_pid, config.target_path)
-                mode_desc = f"PID {config.target_pid}"
+                if FSMon.fanotify_supported():
+                    process = FSMon.run_fsmon_by_pid(
+                        config.target_pid, config.target_path
+                    )
+                    mode_desc = f"PID {config.target_pid}"
+                else:
+                    # No fanotify on this device -- PID-mode attribution
+                    # would silently be wrong (production fsmon builds fall
+                    # back to inotify and never error cleanly on -p). Fall
+                    # back to path-mode instead, and make the substitution
+                    # honest everywhere it's visible: mode_desc here, and
+                    # the FSMonConfig registered below (so the header/
+                    # resume-after-playback logic sees the actual running
+                    # mode, not the originally requested one). See
+                    # core/fsmon.py's TODO on run_fsmon_by_pid for the
+                    # tracked future-work path to real fanotify-less PID
+                    # attribution (tracefs kprobes).
+                    #
+                    # Known caveat (found via real on-device E2E testing,
+                    # not fixed here -- an upstream fsmon/inotify limitation,
+                    # not something this fallback introduces): fsmon adds
+                    # inotify watches dynamically as new directories appear.
+                    # If a brand-new, multi-level-deep directory tree is
+                    # created and immediately written into (no delay between
+                    # mkdir and the write), the deepest directory's contents
+                    # can be silently missed -- a real forensic blind spot
+                    # specific to the inotify backend this fallback relies
+                    # on. Not present on real fanotify-backed PID-mode.
+                    process = FSMon.run_fsmon_by_path(config.target_path)
+                    mode_desc = (
+                        f"path {config.target_path} "
+                        "(PID mode unavailable — no fanotify on this device)"
+                    )
+                    config = FSMonConfig(
+                        mode="path",
+                        target_path=config.target_path,
+                        target_pid=None,
+                        app_name=config.app_name,
+                    )
+                    if self._on_pid_mode_fallback:
+                        try:
+                            self._on_pid_mode_fallback(config.target_path)
+                        except Exception:
+                            logger.debug(
+                                "on_pid_mode_fallback callback failed", exc_info=True
+                            )
             else:
                 process = FSMon.run_fsmon_by_path(config.target_path)
                 mode_desc = f"path {config.target_path}"
@@ -439,6 +810,19 @@ class FSMonController:
         thread = threading.Thread(target=read_output, daemon=True)
         thread.start()
 
+    def _get_running_fsmon_config(self) -> Any:
+        """Best-effort fetch of the running fsmon task's ``FSMonConfig``.
+
+        Used once per batch flush to compute path-prefix candidates for
+        ``build_fsmon_display_item`` -- not looked up per line.
+        """
+        try:
+            task = self._get_task_service().get_task("fsmon")
+            inst = getattr(task, "instance", None)
+            return getattr(inst, "config", None)
+        except Exception:
+            return None
+
     def _log_fsmon_output_batch(self, lines: list[str]) -> None:
         """Process a batch of fsmon output lines (called from main thread).
 
@@ -446,34 +830,36 @@ class FSMonController:
         Textual's event loop. One ``call_from_thread`` delivers the entire
         batch instead of one message per event.
 
+        Part B change: instead of formatting a final Rich-markup string per
+        line and publishing one EventBus event per line, each line is
+        parsed+categorized+prefix-stripped into a structured
+        ``FSMonDisplayItem`` (see ``build_fsmon_display_item``), and the
+        WHOLE BATCH is published as a SINGLE event (``_publish_fsmon_batch``)
+        -- grouping/dedup/visibility-filtering/tallying/width-aware
+        rendering all now live in ``MonitorView`` (see B1), which needs the
+        batch's items in order, with a real widget reference, to do any of
+        that. Bus-publish only -- the old direct call into the Background
+        Activity log was removed (that log now gets fsmon lines a second
+        time via the bus if not filtered by source, see
+        ``MainScreen._handle_task_output``'s
+        ``_ACTIVITY_LOG_EXCLUDED_SOURCES`` guard).
+
         Args:
             lines: Batch of output lines from the reader thread
         """
-        for line in lines:
-            # Stream every line to the EventBus (additive — alongside, not
-            # instead of, the activity-log routing below) so the
-            # Files tab's Monitor sub-tab (tui/widgets/monitor_view.py) gets
-            # the full live stream, not just the throttled last-5-per-batch
-            # slice the activity log gets below. Reuses colorize_fsmon_line
-            # so Monitor's colors stay identical to the activity log's.
-            try:
-                _publish_fsmon_event(colorize_fsmon_line(line))
-            except Exception:
-                logger.debug("Failed to publish fsmon line to EventBus", exc_info=True)
+        prefix_candidates = _resolve_prefix_candidates(self._get_running_fsmon_config())
 
-        # Route last few lines to activity log (throttled to avoid flooding)
-        if lines:
-            for line in lines[-5:]:
-                try:
-                    if self._log_message:
-                        self._log_message(colorize_fsmon_line(line), "FSMon")
-                    else:
-                        self._log_info(f"[FSMon] {escape(line)}")
-                except Exception:
-                    logger.debug(
-                        "Failed to log FSMon output to activity log",
-                        exc_info=True,
-                    )
+        items: list[FSMonDisplayItem] = []
+        for line in lines:
+            try:
+                items.append(build_fsmon_display_item(line, prefix_candidates))
+            except Exception:
+                logger.debug("Failed to parse fsmon line for batch", exc_info=True)
+
+        # _publish_fsmon_batch is a no-op on an empty list and swallows its
+        # own EventBus-publish failures internally (matches the old
+        # per-line _publish_fsmon_event's error handling).
+        _publish_fsmon_batch(items)
 
     def _log_fsmon_error(self, error: str) -> None:
         """Log fsmon error to activity log.
@@ -606,8 +992,13 @@ class FSMonController:
 
 
 __all__ = [
-    "FSMON_COLOR_RULES",
+    "FSMON_EVENT_INFO",
     "FSMonConfig",
     "FSMonController",
+    "FSMonDisplayItem",
+    "FSMonEvent",
+    "build_fsmon_display_item",
     "colorize_fsmon_line",
+    "format_fsmon_event_row",
+    "parse_fsmon_line",
 ]

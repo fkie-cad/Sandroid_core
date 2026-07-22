@@ -285,7 +285,6 @@ class SandroidTUI(App):
             log_warning=cb.log_warning,
             log_error=cb.log_error,
             log_success=cb.log_success,
-            log_message=cb.log_message,
             log_task_started=cb.log_task_started,
             log_task_stopped=cb.log_task_stopped,
             push_modal=cb.push_modal,
@@ -293,6 +292,7 @@ class SandroidTUI(App):
             force_ui_refresh=cb.force_ui_refresh,
             get_current_view=cb.get_current_view,
             open_files_tab=self._open_monitor_tab,
+            on_pid_mode_fallback=self._notify_pid_mode_fallback,
         )
 
         self._spotlight_controller = SpotlightController(
@@ -1341,6 +1341,31 @@ class SandroidTUI(App):
                 logger.warning(
                     "MonitorView.notify_fsmon_stopped_for_playback failed",
                     exc_info=True,
+                )
+
+    def _notify_pid_mode_fallback(self, path: str) -> None:
+        """FSMonController's ``on_pid_mode_fallback``.
+
+        Fires the moment ``FSMonController._start_fsmon``'s PID-mode branch
+        silently substitutes path-mode because ``FSMon.fanotify_supported()``
+        reports the device's kernel lacks fanotify. Same query_one +
+        hasattr-guard dispatch pattern as ``_notify_fsmon_stopped_for_playback``
+        — the controller only knows about a plain callback, app.py owns
+        reaching into the concrete widget.
+        """
+        ms = self._get_main_screen()
+        if ms is None:
+            return
+        try:
+            view = ms.query_one("#files-monitor")
+        except Exception:
+            return
+        if hasattr(view, "notify_pid_mode_fallback"):
+            try:
+                view.notify_pid_mode_fallback(path)
+            except Exception:
+                logger.warning(
+                    "MonitorView.notify_pid_mode_fallback failed", exc_info=True
                 )
 
     def _notify_fsmon_resume_available(self, config) -> None:
