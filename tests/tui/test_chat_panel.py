@@ -62,7 +62,7 @@ async def test_chat_panel_mounts_without_error():
 def test_chat_tab_registered_in_tool_tabs():
     """Chat is no longer one of the left tool tabs -- it docks separately
     (see ``MainScreen.toggle_chat_panel``) -- so it must never reappear in
-    ``_TOOL_TABS`` (the 4-way Spotlight/Mitmproxy/friTap/Snapshots cycle).
+    ``_TOOL_TABS`` (the 4-way Spotlight/Network/Snapshots/Files cycle).
     """
     assert "tab-chat" not in MainScreen._TOOL_TABS
 

@@ -37,9 +37,12 @@ priority phase finds nothing, the key is forwarded to the focused widget's
 own (non-priority) ``BINDINGS``, which are never filtered from the widget's
 *own* map. So ``_AddPathInput`` declares its own non-priority ``escape``
 binding and handles it itself — cleanly intercepting Escape while it has
-focus, without touching any global app code, and without needing Tab-based
-focus traversal (``FilesPanel`` already claims Tab/Shift+Tab for cycling
-Monitor/Watchlist/Diffs).
+focus, without touching any global app code. This is independent of plain
+Tab, which is unclaimed at the ``FilesPanel`` level (sub-tab cycling is
+driven externally via Shift+Left/Right, not Tab — see ``FilesPanel``'s class
+docstring) and would blur this Input via normal focus traversal regardless;
+Escape is needed here specifically for the App-level priority-escape hijack
+described above, not as a substitute for Tab.
 
 Key scoping note (same non-priority-binding-on-a-focused-ancestor mechanism
 ``SnapshotsPanel``/``DiffsView`` already use elsewhere in this app): ``d``

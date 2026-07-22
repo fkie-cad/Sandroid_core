@@ -65,7 +65,8 @@ class SnapshotsPanel(Widget):
     non-priority pass — so these shadow the globals only while the snapshots
     panel is focused. ``OptionList`` binds only navigation keys (up/down/enter/
     home/end/pageup/pagedown), so the letter keys never clash with it nor with
-    ``_ToolPanel``'s Left/Right tab cycling. The action row is also clickable.
+    ``_ToolPanel``'s Shift+Arrow level/tab cycling. The action row is also
+    clickable.
     """
 
     can_focus = True

@@ -27,7 +27,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
@@ -45,7 +44,7 @@ _SUBTAB_TO_PANEL = {
     "files-tab-diffs": "files-diffs",
 }
 
-# Cycling order for Tab/Shift+Tab.
+# Cycling order for Shift+Left/Right while the inner level is active.
 _SUBTAB_ORDER = ["files-monitor", "files-watchlist", "files-diffs"]
 
 # How often the glance strip re-renders while the Files tab is on screen.
@@ -99,24 +98,22 @@ class FilesSubViewBase(Widget):
 class FilesPanel(Widget):
     """Outer "Files" tab: inner Monitor/Watchlist/Diffs switcher + glance strip.
 
-    Bindings (when focused):
-        Tab / Shift+Tab: cycle the inner sub-tab switcher.
+    Owns no bindings of its own — sub-tab cycling and the active-level
+    highlight are driven externally by ``MainScreen.shift_nav_level``/
+    ``cycle_active_level`` (Shift+Up/Down/Left/Right), via ``cycle_subtab``/
+    ``set_subtab_bar_active`` below (the duck-typed contract
+    ``NetworkPanel`` also implements). See ``_ToolPanel``'s class docstring
+    (``tui/screens/main_screen.py``) for the full navigation scheme.
 
-    Deliberately **not** Left/Right — those are already claimed by
-    ``_ToolPanel`` (``tui/screens/main_screen.py``) for cycling the OUTER
-    tool tabs, and reusing them here would collide. Textual binds
-    ``Tab``/``Shift+Tab`` to app-wide ``focus_next``/``focus_previous`` by
-    default, and ``SandroidModal`` rebinds them to
-    ``modal_focus_next``/``_previous`` for modals — this binding
-    intentionally shadows that *within the Files tab only* (it is a non-
-    priority binding on an ancestor of whatever sub-view is focused, so it
-    only fires while focus is inside this panel). This is fine as long as
-    each sub-view stays effectively single-focus (arrow-key list/log
-    navigation, matching every other panel in this app) — any sub-view with
-    its own internal focus-traversal need must use Escape to return focus
-    instead of Tab. Watchlist's inline "add path" Input is exactly this
-    case (see ``watchlist_view.py``'s module docstring for why plain Escape
-    handling needs a small trick there, not just a BINDINGS entry).
+    This frees plain ``Tab``/``Shift+Tab`` back up for normal Textual focus
+    traversal inside this panel — each sub-view still stays effectively
+    single-focus (arrow-key list/log navigation, matching every other panel
+    in this app), so nothing inside actually relies on Tab traversal today.
+    Any sub-view with its own internal focus-traversal need must use Escape
+    to return focus instead of Tab. Watchlist's inline "add path" Input is
+    exactly this case (see ``watchlist_view.py``'s module docstring for why
+    plain Escape handling needs a small trick there, not just a BINDINGS
+    entry).
     """
 
     can_focus = True
@@ -131,6 +128,9 @@ class FilesPanel(Widget):
         height: 1;
         background: #0a1124;
         padding: 0 0 0 1;
+    }
+    FilesPanel > #files-tabbar.-level-active {
+        border-bottom: solid #38bdf8;
     }
     FilesPanel .files-subtab {
         width: auto;
@@ -159,11 +159,6 @@ class FilesPanel(Widget):
         height: 1fr;
     }
     """
-
-    BINDINGS = [
-        Binding("tab", "next_subtab", "Next sub-tab", show=False),
-        Binding("shift+tab", "prev_subtab", "Prev sub-tab", show=False),
-    ]
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -273,6 +268,15 @@ class FilesPanel(Widget):
         # the next interval (same reasoning as MainScreen's tab-activation
         # refresh_snapshots()/refresh_header() hooks).
         self.refresh_glance()
+        # Clicking a sub-tab directly is "entering" the inner level, not
+        # staying at outer -- highlight this bar and tell MainScreen the
+        # active level moved, without it touching this bar's class itself
+        # (we just set that above).
+        self.set_subtab_bar_active(True)
+        try:
+            self.screen.set_nav_level_inner()
+        except Exception:
+            pass
 
     def select_subtab(self, panel_id: str) -> None:
         """Public: switch to a specific inner Files sub-tab from outside.
@@ -284,13 +288,12 @@ class FilesPanel(Widget):
         """
         self._select_subtab(panel_id)
 
-    def action_next_subtab(self) -> None:
-        self._cycle_subtab(1)
+    def cycle_subtab(self, delta: int) -> None:
+        """Cycle the inner sub-tab by *delta*.
 
-    def action_prev_subtab(self) -> None:
-        self._cycle_subtab(-1)
-
-    def _cycle_subtab(self, delta: int) -> None:
+        Called by ``MainScreen.cycle_active_level`` (Shift+Left/Right) while
+        this panel is the current outer tab and the inner level is active.
+        """
         try:
             switcher = self.query_one("#files-body", ContentSwitcher)
         except Exception:
@@ -301,6 +304,17 @@ class FilesPanel(Widget):
         except ValueError:
             idx = 0
         self._select_subtab(_SUBTAB_ORDER[(idx + delta) % len(_SUBTAB_ORDER)])
+
+    def set_subtab_bar_active(self, active: bool) -> None:
+        """Toggle this panel's own inner tab bar highlight.
+
+        Called by ``MainScreen.shift_nav_level`` when moving the active level
+        onto/off this panel's inner bar.
+        """
+        try:
+            self.query_one("#files-tabbar").set_class(active, "-level-active")
+        except Exception:
+            pass
 
     # -- glance strip --------------------------------------------------------
     #

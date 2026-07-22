@@ -1039,8 +1039,9 @@ class SandroidTUI(App):
         """Focus the active tool panel (Ctrl+B).
 
         The tool strip is always visible now; this just moves focus into it so
-        Left/Right tab-cycling and per-panel keys work. All tool logic lives on
-        MainScreen (which owns the widgets); the app just forwards the key.
+        Shift+Arrow level/tab-cycling and per-panel keys work. All tool logic
+        lives on MainScreen (which owns the widgets); the app just forwards
+        the key.
         """
         ms = self._get_main_screen()
         if ms is None:

@@ -10,6 +10,7 @@ from sandroid.tui.widgets.files_panel import FilesPanel
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.loading_spinner import LoadingSpinner
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+from sandroid.tui.widgets.network_panel import NetworkPanel
 from sandroid.tui.widgets.sandroid_footer import SandroidFooter
 from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
 from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
@@ -23,6 +24,7 @@ __all__ = [
     "FriTapPanel",
     "LoadingSpinner",
     "MitmproxyPanel",
+    "NetworkPanel",
     "SandroidFooter",
     "SnapshotsPanel",
     "SpotlightPanel",

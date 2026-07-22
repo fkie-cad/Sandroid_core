@@ -15,8 +15,7 @@ from sandroid.tui.widgets import (
     ActivityLog,
     ChatPanel,
     FilesPanel,
-    FriTapPanel,
-    MitmproxyPanel,
+    NetworkPanel,
     SandroidFooter,
     SnapshotsPanel,
     SpotlightPanel,
@@ -41,23 +40,49 @@ _ACTIVITY_LOG_EXCLUDED_SOURCES = frozenset({"fsmon"})
 class _ToolPanel(Vertical):
     """Wrapper for the permanent tool area (tab strip + tool body).
 
-    Owns Left/Right tab-switching bindings. Because they live here (an
-    ancestor of the focused inner panel) they only fire when focus is inside
-    the tool area — Left/Right are never stolen from the activity log, which
-    keeps its normal behaviour. The inner panels are plain focusable Widgets
-    with no arrow bindings, so Left/Right bubble up to here.
+    Owns the Shift+Arrow level-navigation bindings. Because they live here
+    (an ancestor of the focused inner panel) they only fire when focus is
+    inside the tool area — never stolen from the activity log, which keeps
+    its normal behaviour.
+
+    Shift+Up/Down move the active "nav level" between the outer tool-tab bar
+    and the current tab's own inner sub-tab bar (where it has one; a no-op
+    otherwise). Shift+Left/Right cycle whichever level is currently active:
+    the outer tool tabs, or the current tab's own sub-tabs. All four are
+    one-line delegations to ``MainScreen``, which owns the actual level state
+    and cycling logic (``shift_nav_level``/``cycle_active_level``).
+
+    Deliberately **not** plain Left/Right/Tab/Shift+Tab (the retired scheme):
+    Watchlist/Diffs (inside the Files tab) hand keyboard focus to a child
+    ``OptionList``, whose *built-in* plain Up/Down row-navigation would
+    silently swallow a plain-arrow level-switching binding whenever
+    Watchlist/Diffs is the visible sub-tab. Textual's ``OptionList``/
+    ``RichLog`` do not bind any Shift-modified arrow key, so
+    Shift+Up/Down/Left/Right bubble up through the DOM to here exactly like
+    plain Left/Right used to — this is the mechanism the whole scheme relies
+    on. As a side effect, this also frees ``Tab`` back up for normal Textual
+    focus traversal inside the Files tab instead of being overloaded for
+    sub-tab cycling.
     """
 
     BINDINGS = [
-        Binding("left", "prev_tab", "Prev tab", show=False),
-        Binding("right", "next_tab", "Next tab", show=False),
+        Binding("shift+up", "nav_level_up", "Level up", show=False),
+        Binding("shift+down", "nav_level_down", "Level down", show=False),
+        Binding("shift+left", "cycle_prev", "Prev", show=False),
+        Binding("shift+right", "cycle_next", "Next", show=False),
     ]
 
-    def action_prev_tab(self) -> None:
-        self.screen.cycle_bottom_tab(-1)
+    def action_nav_level_up(self) -> None:
+        self.screen.shift_nav_level(-1)
 
-    def action_next_tab(self) -> None:
-        self.screen.cycle_bottom_tab(1)
+    def action_nav_level_down(self) -> None:
+        self.screen.shift_nav_level(1)
+
+    def action_cycle_prev(self) -> None:
+        self.screen.cycle_active_level(-1)
+
+    def action_cycle_next(self) -> None:
+        self.screen.cycle_active_level(1)
 
 
 class MainScreen(Screen):
@@ -81,7 +106,9 @@ class MainScreen(Screen):
     # whose styles.tcss rules reproduce the exact hex below). The values here
     # now only serve as a fallback/default-theme baseline -- e.g. if a theme
     # file ever fails to load, the UI still renders with a sensible look
-    # instead of blank/unstyled widgets.
+    # instead of blank/unstyled widgets. None of the 8 theme files define a
+    # ``.-level-active`` rule, though, so that one rule below is what
+    # actually wins at runtime for every theme -- no theme-file edits needed.
     #
     # #tool-panel is a plain Vertical that fills the space below the dock:top
     # status band: a single-row tab strip (#tool-tabbar) on top and the active
@@ -92,6 +119,9 @@ class MainScreen(Screen):
         height: 1;
         background: #0a1124;
         padding: 0 0 0 1;
+    }
+    #tool-tabbar.-level-active {
+        border-bottom: solid #38bdf8;
     }
     .tool-tab {
         width: auto;
@@ -145,6 +175,10 @@ class MainScreen(Screen):
         self.action_queue = action_queue
         self._controller = MenuController.get()
         self._event_handlers = []
+        # Active Shift+Arrow nav level: "outer" (the tool-tab bar) or "inner"
+        # (the current tab's own sub-tab bar, where it has one). See
+        # shift_nav_level()/cycle_active_level().
+        self._nav_level = "outer"
         logger.debug("[MAIN_SCREEN] __init__ complete")
 
     def compose(self) -> ComposeResult:
@@ -156,25 +190,29 @@ class MainScreen(Screen):
             with Vertical(id="left-panel"):
                 yield StatusBar(id="status-bar")
                 # Permanent tool area: a single-row tab strip + the active
-                # tool body. Nothing collapses; Left/Right (or clicking a tab)
-                # switch tabs. A ContentSwitcher holds the three bodies.
+                # tool body. Nothing collapses; Shift+Up/Down move the active
+                # nav level between this outer bar and a tab's own inner
+                # sub-tab bar (where it has one), Shift+Left/Right cycle
+                # whichever level is active, and clicking a tab works too.
+                # A ContentSwitcher holds the four bodies.
                 with _ToolPanel(id="tool-panel"):
-                    with Horizontal(id="tool-tabbar"):
+                    # Starts "-level-active" to match the default nav level
+                    # ("outer", set in __init__) so the highlight is correct
+                    # from the very first render.
+                    with Horizontal(id="tool-tabbar", classes="-level-active"):
                         yield Static(
                             "Spotlight",
                             id="tab-spotlight",
                             classes="tool-tab -active",
                         )
-                        yield Static("Mitmproxy", id="tab-mitm", classes="tool-tab")
-                        yield Static("friTap", id="tab-fritap", classes="tool-tab")
+                        yield Static("Network", id="tab-network", classes="tool-tab")
                         yield Static(
                             "Snapshots", id="tab-snapshots", classes="tool-tab"
                         )
                         yield Static("Files", id="tab-files", classes="tool-tab")
                     with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
                         yield SpotlightPanel(id="spotlight-panel")
-                        yield MitmproxyPanel(id="mitm-panel")
-                        yield FriTapPanel(id="fritap-panel")
+                        yield NetworkPanel(id="network-panel")
                         yield SnapshotsPanel(id="snapshots-panel")
                         yield FilesPanel(id="files-panel")
 
@@ -220,10 +258,11 @@ class MainScreen(Screen):
         logger.debug("[MAIN_SCREEN] on_mount complete, deferred updates scheduled")
 
     # Clickable tab id -> ContentSwitcher child id (the panel widget's id).
+    # Insertion order must match the visible tab-bar order -- cycle_bottom_tab
+    # cycles in this dict's order.
     _TOOL_TABS = {
         "tab-spotlight": "spotlight-panel",
-        "tab-mitm": "mitm-panel",
-        "tab-fritap": "fritap-panel",
+        "tab-network": "network-panel",
         "tab-snapshots": "snapshots-panel",
         "tab-files": "files-panel",
     }
@@ -257,6 +296,16 @@ class MainScreen(Screen):
         except Exception:
             return None
 
+    def _current_panel_widget(self):
+        """Return the currently active tool-body panel widget, if any."""
+        current = self._bottom_current()
+        if not current:
+            return None
+        try:
+            return self.query_one(f"#{current}")
+        except Exception:
+            return None
+
     def _select_bottom_tab(self, panel_id: str) -> None:
         """Switch the active tool tab and focus its panel."""
         try:
@@ -286,14 +335,136 @@ class MainScreen(Screen):
                 panel_widget.refresh_glance()
         except Exception:
             pass
+        # Whenever the OUTER tab changes -- by any means (keyboard via
+        # cycle_bottom_tab, mouse via on_click's tab-bar routing, or a
+        # programmatic jump like open_fritap_tab/open_files_tab) -- force the
+        # active nav level back to "outer" and clear any stale inner
+        # highlight, so a highlight never points at a sub-tab bar that's no
+        # longer the visible one. A subsequent select_subtab() call (e.g.
+        # open_fritap_tab landing on friTap) will re-enter "inner" itself via
+        # set_nav_level_inner(), so this ordering is correct either way.
+        self._reset_nav_level_to_outer()
+
+    def _reset_nav_level_to_outer(self) -> None:
+        """Force the active nav level back to "outer" + clear stale highlights.
+
+        Clears the inner highlight on EVERY panel that has one, not just
+        whichever is current -- by the time this runs (called from
+        ``_select_bottom_tab``, after ``#tool-body`` has already switched),
+        the panel that actually held a stale highlight is the one we just
+        navigated AWAY from, not the newly-active one. All current
+        implementers (``FilesPanel``/``NetworkPanel``) are cheap,
+        idempotent no-ops when already inactive, so clearing all of them
+        unconditionally is simpler and correct regardless of direction.
+        """
+        self._nav_level = "outer"
+        try:
+            self.query_one("#tool-tabbar").set_class(True, "-level-active")
+        except Exception:
+            pass
+        for pid in self._TOOL_TABS.values():
+            try:
+                panel = self.query_one(f"#{pid}")
+            except Exception:
+                continue
+            if hasattr(panel, "set_subtab_bar_active"):
+                try:
+                    panel.set_subtab_bar_active(False)
+                except Exception:
+                    pass
+
+    def shift_nav_level(self, delta: int) -> None:
+        """Move the active nav level (Shift+Up/Down).
+
+        ``delta=-1`` (up) moves to the outer tool-tab bar; ``delta=+1``
+        (down) moves to the current tab's own inner sub-tab bar. No-ops the
+        down transition if the current outer panel widget doesn't implement
+        the duck-typed ``set_subtab_bar_active`` hook (e.g. Spotlight,
+        Snapshots have no inner sub-tab bar of their own). Updates the
+        ``-level-active`` CSS class on ``#tool-tabbar`` and, if applicable,
+        on the current panel's own sub-tab bar (via
+        ``set_subtab_bar_active``).
+        """
+        panel = self._current_panel_widget()
+        has_inner_bar = panel is not None and hasattr(panel, "set_subtab_bar_active")
+
+        if delta < 0:
+            new_level = "outer"
+        elif has_inner_bar:
+            new_level = "inner"
+        else:
+            return  # No inner sub-tab bar on this tab; nothing to move to.
+
+        if new_level == self._nav_level:
+            return
+
+        self._nav_level = new_level
+        try:
+            self.query_one("#tool-tabbar").set_class(
+                new_level == "outer", "-level-active"
+            )
+        except Exception:
+            pass
+        if has_inner_bar:
+            try:
+                panel.set_subtab_bar_active(new_level == "inner")
+            except Exception:
+                pass
+
+    def cycle_active_level(self, delta: int) -> None:
+        """Cycle whichever level is currently active (Shift+Left/Right).
+
+        Outer active: cycles the outer tool tabs (today's
+        ``cycle_bottom_tab``). Inner active: cycles the current tab's own
+        sub-tabs via its duck-typed ``cycle_subtab`` hook.
+        """
+        if self._nav_level == "inner":
+            panel = self._current_panel_widget()
+            if panel is not None and hasattr(panel, "cycle_subtab"):
+                try:
+                    panel.cycle_subtab(delta)
+                except Exception:
+                    pass
+            return
+        self.cycle_bottom_tab(delta)
+
+    def set_nav_level_inner(self) -> None:
+        """Move the active nav level to "inner" (called by a panel's own click).
+
+        ``FilesPanel``/``NetworkPanel``'s own ``_select_subtab`` calls this
+        right after already highlighting its own sub-tab bar directly --
+        clicking a sub-tab is "entering" that level, not staying at outer, so
+        this only clears ``#tool-tabbar``'s own highlight and updates the
+        tracked level; it deliberately does NOT touch the panel's own bar
+        class, since the panel just set that itself.
+        """
+        self._nav_level = "inner"
+        try:
+            self.query_one("#tool-tabbar").set_class(False, "-level-active")
+        except Exception:
+            pass
 
     def open_snapshots_tab(self) -> None:
         """Switch to the Snapshots tab (key 0)."""
         self._select_bottom_tab("snapshots-panel")
 
     def open_fritap_tab(self) -> None:
-        """Switch to the friTap tab (key h)."""
-        self._select_bottom_tab("fritap-panel")
+        """Switch to the Network tab and land on its friTap sub-tab (key h).
+
+        friTap no longer has its own outer tab -- it's nested inside
+        ``NetworkPanel`` alongside Mitmproxy -- so this now mirrors
+        ``open_files_tab``'s ``sub_tab`` pattern: switch the outer tab, then
+        drive the panel's own inner switcher. Real, live call site:
+        ``app.py``'s ``action_action_key`` calls this whenever the ``h`` key
+        toggles friTap, specifically so the toggle has a visible home.
+        """
+        self._select_bottom_tab("network-panel")
+        try:
+            panel = self.query_one("#network-panel")
+            if hasattr(panel, "select_subtab"):
+                panel.select_subtab("fritap-panel")
+        except Exception:
+            pass
 
     def open_files_tab(self, sub_tab: str | None = None) -> None:
         """Switch to the Files tab, optionally landing on a specific inner sub-tab.
@@ -316,10 +487,11 @@ class MainScreen(Screen):
                 pass
 
     def cycle_bottom_tab(self, delta: int) -> None:
-        """Switch the active tab by *delta* (Left/Right while focus is inside).
+        """Switch the active tab by *delta* (outer level of Shift+Left/Right).
 
-        Bound on the tool-panel wrapper so it only fires when focus is inside
-        the tool area; never steals Left/Right from the activity log.
+        Bound on the tool-panel wrapper (via ``cycle_active_level``) so it
+        only fires when focus is inside the tool area; never steals
+        Shift+Left/Right from the activity log.
         """
         order = list(self._TOOL_TABS.values())
         current = self._bottom_current() or order[0]
