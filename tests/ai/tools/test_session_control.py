@@ -122,8 +122,17 @@ class _FakeMitmproxyService:
         self.state = state or _FakeMitmproxyState()
         self._start_result = start_result
         self.stop_called = False
+        # Records the exact (proxy_port, web_port, web_host) kwargs the last
+        # start() call was made with, so tests can assert session_control
+        # always forwards three concrete values -- never bare defaults.
+        self.start_calls: list[tuple] = []
 
-    def start(self):
+    def start(self, proxy_port=8080, web_port=8081, web_host="127.0.0.1"):
+        self.start_calls.append((proxy_port, web_port, web_host))
+        if self._start_result:
+            self.state.proxy_port = proxy_port
+            self.state.web_port = web_port
+            self.state.web_host = web_host
         return self._start_result
 
     def stop(self):
@@ -305,8 +314,32 @@ def test_get_spotlight_app_masks_stale_set_at_in_spawn_mode(monkeypatch):
 # =============================================================================
 
 
+def _mock_mitmproxy_config(
+    monkeypatch, *, proxy_port=8080, web_port=8081, web_host="127.0.0.1"
+):
+    """Monkeypatch ``get_config().mitmproxy`` with fixed, known port values.
+
+    Every ``start_mitmproxy`` test needs this -- unlike the other tools in
+    this module, ``start_mitmproxy`` now reads config itself (via
+    ``_resolve_mitmproxy_start_ports``) whenever a port argument is omitted,
+    so leaving this unmocked would fall through to the real
+    ``sandroid.config.get_config()`` singleton and make the test depend on
+    whatever config happens to be cached/on disk.
+    """
+    monkeypatch.setattr(
+        sandroid_config,
+        "get_config",
+        lambda: SimpleNamespace(
+            mitmproxy=SimpleNamespace(
+                proxy_port=proxy_port, web_port=web_port, web_host=web_host
+            )
+        ),
+    )
+
+
 def test_start_mitmproxy_success_shape(monkeypatch):
     monkeypatch.setattr(session_control.time, "sleep", lambda _s: None)
+    _mock_mitmproxy_config(monkeypatch)
     fake = _FakeMitmproxyService(
         start_result=True, state=_FakeMitmproxyState(running=True)
     )
@@ -322,11 +355,13 @@ def test_start_mitmproxy_success_shape(monkeypatch):
         "web_host": "127.0.0.1",
         "error": None,
     }
+    assert fake.start_calls == [(8080, 8081, "127.0.0.1")]
 
 
 def test_start_mitmproxy_surfaces_last_error_when_start_returns_false(monkeypatch):
     # "already running" is the benign no-op case: started=False but
     # running=True, error explains why -- not a real failure.
+    _mock_mitmproxy_config(monkeypatch)
     state = _FakeMitmproxyState(last_error="already running", running=True)
     fake = _FakeMitmproxyService(start_result=False, state=state)
     monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake)
@@ -351,6 +386,7 @@ def test_start_mitmproxy_settle_detects_post_start_crash(monkeypatch):
     message when the service itself never recorded one.
     """
     monkeypatch.setattr(session_control.time, "sleep", lambda _s: None)
+    _mock_mitmproxy_config(monkeypatch)
     state = _FakeMitmproxyState(running=False, last_error=None)
     fake = _FakeMitmproxyService(start_result=True, state=state)
     monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake)
@@ -361,6 +397,90 @@ def test_start_mitmproxy_settle_detects_post_start_crash(monkeypatch):
     assert result["running"] is False
     assert result["error"] is not None
     assert "port" in result["error"].lower()
+    # The synthesized error must tell the model what lever to pull instead
+    # of blindly retrying the identical call (the real-world failure mode
+    # this tool exists to fix).
+    assert "proxy_port" in result["error"]
+    assert "web_port" in result["error"]
+
+
+def test_start_mitmproxy_explicit_ports_forwarded_as_concrete_ints(monkeypatch):
+    """Explicit proxy_port/web_port must win over whatever config says, and
+    be forwarded to MitmproxyService.start() verbatim as concrete ints --
+    even though config (here deliberately set to two DIFFERENT port numbers)
+    is still consulted for web_host, since that is never an overridable tool
+    argument.
+    """
+    monkeypatch.setattr(session_control.time, "sleep", lambda _s: None)
+    _mock_mitmproxy_config(
+        monkeypatch, proxy_port=1111, web_port=2222, web_host="0.0.0.0"
+    )
+    fake = _FakeMitmproxyService(
+        start_result=True, state=_FakeMitmproxyState(running=True)
+    )
+    monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake)
+
+    result = session_control.start_mitmproxy(proxy_port=18080, web_port=18081)
+
+    assert fake.start_calls == [(18080, 18081, "0.0.0.0")]
+    assert result["proxy_port"] == 18080
+    assert result["web_port"] == 18081
+
+
+def test_start_mitmproxy_partial_override_does_not_drop_the_other_configured_port(
+    monkeypatch,
+):
+    """Regression (the sentinel-matching trap): passing only proxy_port must
+    not silently revert web_port to MitmproxyService.start()'s hardcoded
+    default (8081) instead of the value actually configured -- and
+    vice-versa.
+    """
+    monkeypatch.setattr(session_control.time, "sleep", lambda _s: None)
+    _mock_mitmproxy_config(
+        monkeypatch, proxy_port=9999, web_port=9998, web_host="0.0.0.0"
+    )
+    fake = _FakeMitmproxyService(
+        start_result=True, state=_FakeMitmproxyState(running=True)
+    )
+    monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake)
+
+    # Only proxy_port supplied -- web_port must come from config (9998), not
+    # the hardcoded default (8081).
+    session_control.start_mitmproxy(proxy_port=18080)
+    assert fake.start_calls == [(18080, 9998, "0.0.0.0")]
+
+    fake.start_calls.clear()
+
+    # Only web_port supplied -- proxy_port must come from config (9999), not
+    # the hardcoded default (8080).
+    session_control.start_mitmproxy(web_port=18081)
+    assert fake.start_calls == [(9999, 18081, "0.0.0.0")]
+
+
+def test_start_mitmproxy_falls_back_to_hardcoded_defaults_when_config_unavailable(
+    monkeypatch,
+):
+    """Defensive fallback: if get_config() itself raises, omitted ports must
+    still resolve to MitmproxyService.start()'s own hardcoded defaults
+    (8080/8081/"127.0.0.1"), mirroring the try/except already around that
+    same read in mitmproxy_service.py, rather than propagating the
+    exception.
+    """
+    monkeypatch.setattr(session_control.time, "sleep", lambda _s: None)
+
+    def _raising_get_config():
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(sandroid_config, "get_config", _raising_get_config)
+    fake = _FakeMitmproxyService(
+        start_result=True, state=_FakeMitmproxyState(running=True)
+    )
+    monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake)
+
+    result = session_control.start_mitmproxy()
+
+    assert fake.start_calls == [(8080, 8081, "127.0.0.1")]
+    assert result["started"] is True
 
 
 def test_stop_mitmproxy_already_stopped(monkeypatch):

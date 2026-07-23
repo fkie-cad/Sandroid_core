@@ -242,25 +242,115 @@ def get_spotlight_app() -> dict[str, Any]:
 # =============================================================================
 
 
+def _resolve_mitmproxy_start_ports(
+    proxy_port: int | None, web_port: int | None
+) -> tuple[int, int, str]:
+    """Resolve concrete ``(proxy_port, web_port, web_host)`` for ``start()``.
+
+    Mirrors :meth:`~sandroid.services.mitmproxy_service.MitmproxyService.start`'s
+    own override-on-default config read, but resolves ``proxy_port`` and
+    ``web_port`` independently rather than all-or-nothing. That method only
+    reads config when the caller passed the exact sentinel defaults for ALL
+    THREE of ``proxy_port``/``web_port``/``web_host`` -- so a caller
+    forwarding just one explicit port while leaving the other at its Python
+    default parameter value would silently skip the config read for BOTH,
+    reverting the port the caller did *not* ask to override back to the
+    hardcoded default (8080/8081) instead of the user's configured value.
+    Resolving each argument independently here -- and always calling
+    ``start()`` with three concrete keyword values -- avoids that trap.
+
+    ``web_host`` is not exposed as a tool parameter at all (only the two
+    ports are meaningful to override for a port-conflict retry), so it is
+    always sourced from config when available.
+
+    Args:
+        proxy_port: Caller-supplied proxy port, or ``None`` to read config.
+        web_port: Caller-supplied web port, or ``None`` to read config.
+
+    Returns:
+        ``(proxy_port, web_port, web_host)`` -- three concrete, non-``None``
+        values: whichever the caller passed explicitly, else the
+        config-resolved value, else ``MitmproxyService.start()``'s own
+        hardcoded defaults (``8080``/``8081``/``"127.0.0.1"``) if
+        ``get_config()`` itself raises or is unavailable -- mirroring the
+        defensive ``try/except`` around that same read in
+        ``mitmproxy_service.py``.
+    """
+    resolved_proxy_port = proxy_port
+    resolved_web_port = web_port
+    web_host = None
+    try:
+        from sandroid.config import get_config
+
+        cfg = get_config().mitmproxy
+        if resolved_proxy_port is None:
+            resolved_proxy_port = cfg.proxy_port
+        if resolved_web_port is None:
+            resolved_web_port = cfg.web_port
+        web_host = cfg.web_host
+    except Exception:
+        pass
+
+    return (
+        resolved_proxy_port if resolved_proxy_port is not None else 8080,
+        resolved_web_port if resolved_web_port is not None else 8081,
+        web_host if web_host is not None else "127.0.0.1",
+    )
+
+
 @sandroid_tool(
     name="start_mitmproxy",
     description=(
         "Start the embedded mitmweb (mitmproxy) subprocess used for traffic "
-        "interception. Ports are read from config, not passed explicitly."
+        "interception. Omit proxy_port/web_port to use the configured ports "
+        "(default behavior). If a previous call failed because a port was "
+        "already in use -- a common, ordinary conflict (e.g. Docker Desktop "
+        "often binds 8080) -- retry this tool with different "
+        "proxy_port/web_port values; retrying the identical call will never "
+        "succeed."
     ),
-    parameters={"type": "object", "properties": {}, "required": []},
+    parameters={
+        "type": "object",
+        "properties": {
+            "proxy_port": {
+                "type": "integer",
+                "description": (
+                    "TCP port for the intercepting HTTP(S) proxy. Omit to "
+                    "use the port from config. After a 'port already in "
+                    "use' failure, retry with a different port (e.g. 8082)."
+                ),
+            },
+            "web_port": {
+                "type": "integer",
+                "description": (
+                    "TCP port for mitmweb's web UI. Omit to use the port "
+                    "from config. After a 'port already in use' failure, "
+                    "retry with a different port (e.g. 8090)."
+                ),
+            },
+        },
+        "required": [],
+    },
     risk=RiskTier.CONSEQUENTIAL,
     category="network_control",
     can_remember_choice=True,
     resources=frozenset({ResourceId.MITMPROXY}),
 )
-def start_mitmproxy() -> dict[str, Any]:
-    """Start the mitmweb subprocess with config-file ports.
+def start_mitmproxy(
+    proxy_port: int | None = None, web_port: int | None = None
+) -> dict[str, Any]:
+    """Start the mitmweb subprocess, optionally overriding its ports.
 
     Real integration point:
     :meth:`sandroid.services.mitmproxy_service.MitmproxyService.start`,
-    called with no arguments so it reads proxy/web ports from config rather
-    than falling back to hardcoded defaults. Never raises.
+    always called with three concrete keyword arguments (``proxy_port``,
+    ``web_port``, ``web_host``) resolved by
+    :func:`_resolve_mitmproxy_start_ports` -- never with bare defaults, and
+    never relying on ``start()``'s own all-or-nothing sentinel-matching
+    heuristic to decide whether to read config (see that helper's docstring
+    for why). Omitting both ``proxy_port`` and ``web_port`` reproduces
+    exactly today's default behavior: both ports (and ``web_host``) come
+    from config. Never raises.
 
     A result of ``started=False`` together with ``running=True`` and
     ``error="already running"`` is a benign no-op (mitmproxy was already
@@ -269,7 +359,16 @@ def start_mitmproxy() -> dict[str, Any]:
     :data:`_MITMPROXY_SETTLE_S` before reading ``running`` -- found via E2E
     testing that mitmweb can crash shortly after a successful spawn (e.g. its
     configured port is already bound by another process), and an immediate
-    check can read ``running=True`` moments before that crash lands.
+    check can read ``running=True`` moments before that crash lands. The
+    synthesized error for that case explicitly names ``proxy_port``/
+    ``web_port`` as the retry levers, so the calling model knows what to
+    change instead of blindly retrying the identical call (the real-world
+    failure mode this tool exists to fix).
+
+    Args:
+        proxy_port: TCP port for the HTTP(S) proxy. Omit to read from
+            config.
+        web_port: TCP port for mitmweb's web UI. Omit to read from config.
 
     Returns:
         ``{"started": bool, "running": bool, "proxy_port": int,
@@ -277,13 +376,21 @@ def start_mitmproxy() -> dict[str, Any]:
         is meaningful (non-``None``) whenever ``started`` is ``False`` OR
         ``running`` is ``False`` -- the latter covers the settle-detected
         post-start crash case (``started=True`` but the process died before
-        settling), with a synthesized message if the service itself never
-        recorded one.
+        settling), with a synthesized message (naming the actual ports used
+        and suggesting a ``proxy_port``/``web_port`` retry) if the service
+        itself never recorded one.
     """
     from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
     service = get_mitmproxy_service()
-    started = service.start()
+    resolved_proxy_port, resolved_web_port, web_host = _resolve_mitmproxy_start_ports(
+        proxy_port, web_port
+    )
+    started = service.start(
+        proxy_port=resolved_proxy_port,
+        web_port=resolved_web_port,
+        web_host=web_host,
+    )
     if started:
         time.sleep(_MITMPROXY_SETTLE_S)
     running = service.is_running()
@@ -292,7 +399,8 @@ def start_mitmproxy() -> dict[str, Any]:
         error = (
             "mitmweb exited shortly after starting -- port "
             f"{service.state.proxy_port}/{service.state.web_port} may "
-            "already be in use by another process"
+            "already be in use by another process. Retry start_mitmproxy "
+            "with different proxy_port/web_port values."
         )
     return {
         "started": started,
