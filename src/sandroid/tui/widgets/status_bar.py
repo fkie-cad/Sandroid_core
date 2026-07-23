@@ -31,6 +31,8 @@ class StatusBar(Static):
     - Frida server status
     - Spotlight application name
     - Background tasks (when running)
+    - Record/Replay mode (only while one is active — see ``recording_active``/
+      ``replay_active``, set by app.py's ``_set_status_bar_mode``)
 
     Status indicators (running/stopped, spawn/attach) use fixed colors
     that don't change with theme for instant recognition.
@@ -73,6 +75,14 @@ class StatusBar(Static):
         self.mitmweb_address = ""
         self.network_capture_running = False
         self.network_capture_file = ""
+        # Record/Replay mode indicator — set directly by app.py's
+        # _set_status_bar_mode() (wired from RecordingController's
+        # set_recording_indicator/set_replay_indicator callbacks), never
+        # derived here in update_from_toolbox(). Independent booleans: both
+        # could in principle be true only very briefly around the auto-chain
+        # boundary, so render() checks each on its own.
+        self.recording_active = False
+        self.replay_active = False
         # Glance-band datums (cheap, in-process reads — no ADB):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
@@ -359,6 +369,17 @@ class StatusBar(Static):
         else:
             row("Net", f"[{muted}]○ idle[/]")
 
+        # -- Mode: Record/Replay indicator ---------------------------------
+        # Fixed colors (same convention as Proxy/Frida's running/spawn
+        # glyphs), shown only while one is active — an idle glance shows no
+        # Mode row at all. Recording wins if both were somehow true (they
+        # can't overlap in practice: replay only auto-chains once recording
+        # has fully stopped).
+        if self.recording_active:
+            row("Mode", f"[{stop} bold]● RECORDING[/]")
+        elif self.replay_active:
+            row("Mode", f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING[/]")
+
         # Optional theme indicator as its own row.
         if self.show_theme_indicator:
             row("Theme", f"[{primary}]{self.current_theme}[/] [{muted}](^t)[/]")
@@ -584,9 +605,7 @@ class StatusBar(Static):
             # Emulator-aware (10.0.2.2 on an emulator), so the glance agrees with
             # the Mitmproxy panel on which device proxy is "ours" — NOT the raw
             # host LAN/VPN IP, which the device can't reach.
-            self.mitmweb_address = (
-                f"{resolve_proxy_host_ip()}:{port}" if port else ""
-            )
+            self.mitmweb_address = f"{resolve_proxy_host_ip()}:{port}" if port else ""
             self.app_proxies = dict(get_focus_manager().app_proxies())
         except Exception:
             self.mitmweb_running = False

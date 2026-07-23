@@ -1,10 +1,12 @@
 """Diffs sub-tab: Play's persistent Changed/New/Deleted run history.
 
 Replaces the old one-shot ``AnalysisSummaryModal`` popup: every completed
-Play is now a row in a collapsible left "Runs" rail (an ``OptionList``,
+Play is now a row in a collapsible bottom "Runs" bar (an ``OptionList``,
 styled like :class:`~sandroid.tui.widgets.snapshots_panel.SnapshotsPanel`'s
-list), with the selected run's Changed/New/Deleted results on the right —
-each changed file with real diff content rendered via a
+bottom bar), with the selected run's Changed/New/Deleted results in a
+full-width diff pane above it — colored like
+:class:`~sandroid.tui.widgets.monitor_view.MonitorView` — each changed file
+with real diff content rendered via a
 :class:`~sandroid.tui.widgets.diff_view.DiffView`.
 
 Data flow: ``RecordingController._run_playback_analysis`` persists a
@@ -23,7 +25,7 @@ is irrelevant while reviewing Play results, the same precedent already
 established by Watchlist's ``a``/Analyze shadow over the global Analyze
 action. ``delete``/``backspace`` are unbound anywhere else in the app
 (``help_screen.py`` uses backspace on a separate screen), so no shadowing
-concern there. ``[`` (collapse the rail) is likewise confirmed unbound.
+concern there. ``[`` (collapse the Runs bar) is likewise confirmed unbound.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import ContentSwitcher, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -54,7 +56,7 @@ _EMPTY_OPTION_ID = "__no_runs__"
 
 
 class DiffsView(FilesSubViewBase):
-    """Play run-history sub-tab: Runs rail + Changed/New/Deleted detail.
+    """Play run-history sub-tab: full-width diff detail + bottom Runs bar.
 
     Bindings (when focused):
         r: start recording (idea A: panel-scoped, routes to ``app.record``;
@@ -66,8 +68,9 @@ class DiffsView(FilesSubViewBase):
            module docstring).
         delete / backspace: delete the selected run, through a ConfirmModal
            first (never on a bare keypress).
-        [: collapse/expand the Runs rail (reclaims width for wide diffs; a
-           "run i/N ▸" breadcrumb stays visible while collapsed).
+        [: collapse/expand the bottom Runs bar (reclaims height for a taller
+           diff pane; a "run i/N ▸" breadcrumb stays visible while
+           collapsed).
     """
 
     _LABEL = "Diffs"
@@ -93,31 +96,39 @@ class DiffsView(FilesSubViewBase):
         padding: 0;
     }
     DiffsView #diffs-body {
-        layout: horizontal;
+        layout: vertical;
         height: 1fr;
     }
-    DiffsView #diffs-rail {
-        width: 32;
+    DiffsView #diffs-detail {
         height: 1fr;
+        layout: vertical;
+        padding: 0 1;
+        background: #050811;
+    }
+    DiffsView #diffs-rail {
+        dock: bottom;
+        height: 12;
         background: #060a14;
-        border-right: solid #1f2937;
+        border-top: solid #1f2937;
     }
     DiffsView #diffs-rail.-collapsed {
         display: none;
     }
     DiffsView #diffs-rail-header {
         height: 1;
-        color: #8f9bb3;
+        color: #38bdf8;
+        text-style: bold;
         padding: 0 1;
     }
     DiffsView #runs-list {
         height: 1fr;
         background: #050811;
     }
-    DiffsView #diffs-detail {
-        width: 1fr;
-        height: 1fr;
-        layout: vertical;
+    DiffsView #diffs-actions {
+        height: 1;
+        dock: bottom;
+        background: #0b1628;
+        color: #93a4c3;
         padding: 0 1;
     }
     DiffsView #diffs-breadcrumb {
@@ -176,10 +187,7 @@ class DiffsView(FilesSubViewBase):
     # -- compose / mount ---------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="diffs-body"):
-            with Vertical(id="diffs-rail"):
-                yield Static("Runs", id="diffs-rail-header")
-                yield OptionList(id="runs-list")
+        with Vertical(id="diffs-body"):
             with Vertical(id="diffs-detail"):
                 yield Static("", id="diffs-breadcrumb")
                 yield Static("", id="diffs-banner")
@@ -189,6 +197,13 @@ class DiffsView(FilesSubViewBase):
                         "[b]p[/b] to replay.[/dim]",
                         id="diffs-empty",
                     )
+            with Vertical(id="diffs-rail"):
+                yield Static("Runs", id="diffs-rail-header")
+                yield OptionList(id="runs-list")
+                yield Static(
+                    "r record · p replay · n rename · del delete · [ collapse",
+                    id="diffs-actions",
+                )
 
     def on_mount(self) -> None:
         import asyncio
@@ -558,7 +573,9 @@ class DiffsView(FilesSubViewBase):
     # -- actions (main-thread entry points) ---------------------------------
 
     def action_toggle_rail(self) -> None:
-        """``[`` — collapse/expand the Runs rail to reclaim width for wide diffs."""
+        """``[`` — collapse/expand the bottom Runs bar to reclaim height for
+        a taller diff pane.
+        """
         self._rail_collapsed = not self._rail_collapsed
         try:
             self.query_one("#diffs-rail").set_class(self._rail_collapsed, "-collapsed")

@@ -69,13 +69,17 @@ class RecordingResult:
 class RecordSettingsModal(ForensicModal[RecordSettings]):
     """Combined Record-settings form (idea B): name + replays + dry-run.
 
-    Replaces the old single-field "Label this run" prompt. Shown
-    non-blockingly right after recording starts (recording captures *device*
-    interaction, so a stacked form blocks nothing time-sensitive), it collects
-    the three things the auto-chained playback needs. Modelled on
+    Replaces the old single-field "Label this run" prompt. Shown *before*
+    capture starts — pressing Record shows this form immediately, with no
+    blocking call ahead of it, and confirming it ("Start Recording") is what
+    triggers the pre-snapshot and the actual device capture (see
+    :meth:`RecordingModal._prompt_settings`/``_start_recording``) — it
+    collects the three things the auto-chained playback needs. Modelled on
     :class:`~sandroid.tui.modals.export_modal.ExportModal`'s Checkbox+Input
     layout. Dismisses with a :class:`RecordSettings`, or ``None`` on cancel
-    (the caller keeps its defaults).
+    (the caller keeps its defaults and still starts recording with them —
+    cancelling this form only means "skip customizing the name", not "abort
+    recording").
     """
 
     DEFAULT_CSS = """
@@ -122,7 +126,7 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
         with Vertical(classes="modal-container"):
             yield Label("Record settings", classes="modal-title")
             yield Label(
-                "Recording is running — these apply when you Stop.",
+                "Name this run, then press Start to begin recording.",
                 classes="modal-message",
             )
             yield Label("Run name:", classes="rs-field-label")
@@ -144,7 +148,7 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
                     id="rs-dryrun",
                 )
             with Horizontal(classes="button-row"):
-                yield Button("Save", id="rs-save", classes="-primary")
+                yield Button("Start Recording", id="rs-save", classes="-primary")
                 yield Button("Cancel", id="rs-cancel", classes="-secondary")
             yield KeyHintFooter()
 
@@ -196,7 +200,11 @@ class RecordingModal(ExtractionModal[RecordingResult]):
     - Simple status display (elapsed time, event count)
     - Toggle for live event display
     - Stop via button, Escape, or Ctrl+C
-    - Creates snapshot before recording starts
+    - Names the run *before* capture starts: pressing Record (or Start/Enter)
+      shows the combined Record-settings form immediately (nothing blocking
+      precedes it), and only once that form is resolved does
+      ``_start_recording()`` take the pre-snapshot and actually start
+      capturing — see ``_prompt_settings``/``_start_recording``.
     """
 
     BINDINGS = [
@@ -316,14 +324,16 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         default_number_of_runs: int = 2,
         default_noise_filter: bool = True,
         on_settings_chosen: Callable[[str, int, bool], None] | None = None,
+        on_recording_active_changed: Callable[[bool], None] | None = None,
+        suppress_disconnect_guard: Callable[[bool], None] | None = None,
     ):
         """Initialize the recording modal.
 
         Args:
-            auto_start: If True, start recording immediately on mount
-                instead of waiting for the "Start Recording" button — used
-                by ``RecordingController.start_recording()`` so pressing
-                Record starts the device capture with no extra step.
+            auto_start: If True, show the Record-settings form immediately on
+                mount instead of waiting for the "Start Recording" button —
+                used by ``RecordingController.start_recording()`` so pressing
+                Record goes straight to naming the run with no extra step.
             default_label: Auto-generated default name (e.g.
                 ``"Run 3 · 14:22"``) shown as the settings form's placeholder.
             default_number_of_runs: Default number of playback replays shown
@@ -331,11 +341,22 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             default_noise_filter: Default dry-run noise-filter state shown in
                 the combined Record-settings form.
             on_settings_chosen: Called with ``(label, number_of_runs,
-                noise_filter)`` the moment the non-blocking combined
-                Record-settings form is dismissed — fires well before
-                Stop/dismiss, since recording is device-driven and unaffected
-                by a stacked modal, so the controller can seed every
-                subsequent manual Play of this recording.
+                noise_filter)`` the moment the combined Record-settings form
+                is dismissed — fires before capture even starts (see
+                ``_prompt_settings``), so the controller can seed every
+                subsequent manual Play of this recording ahead of Stop.
+            on_recording_active_changed: Called with the new ``is_recording``
+                value from ``watch_is_recording`` — the same hook point the
+                modal already uses to flip its own Start/Stop UI — so a
+                caller (``RecordingController``) can drive a Recording
+                indicator (e.g. the status bar) in lockstep with real capture
+                start/stop, not with the modal merely being open.
+            suppress_disconnect_guard: Called with ``True``/``False`` around
+                the backgrounded pre-recording snapshot
+                (``Toolbox.create_snapshot``) — the same disruptive telnet
+                round-trip class as ``load_snapshot``, wrapped here so the
+                revert doesn't trip a false "Device disconnected" toast. Safe
+                to leave unset.
         """
         super().__init__(name=name, id=id, classes=classes)
         self._wrapper: RecordingWrapper | None = None
@@ -353,7 +374,15 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self._number_of_runs = default_number_of_runs
         self._noise_filter = default_noise_filter
         self._on_settings_chosen = on_settings_chosen
+        self._on_recording_active_changed = on_recording_active_changed
+        self._suppress_disconnect_guard = suppress_disconnect_guard
         self._settings_prompted = False
+        #: Set by _cancel(). The pre-recording snapshot now runs on a worker
+        #: thread (see _start_recording), which opens a window where the user
+        #: can Escape/Ctrl+C out *during* "Preparing snapshot…" -- checked by
+        #: _on_snapshot_ready() so a cancel there doesn't get silently
+        #: overridden by capture starting anyway once the worker finishes.
+        self._cancelled = False
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -396,14 +425,19 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         except Exception:
             pass
         if self._auto_start and not self.is_recording:
-            # Pressing Record starts device capture immediately — no extra
-            # "press Start" step. _start_recording() itself pops the combined
-            # Record-settings form right after (see its docstring / class
-            # docstring).
-            self._start_recording()
+            # Pressing Record shows the naming form immediately -- no
+            # blocking call precedes it, so it appears instantly. Capture
+            # itself (snapshot + wrapper start) only begins once that form is
+            # resolved -- see _prompt_settings()/_start_recording().
+            self._prompt_settings()
 
     def watch_is_recording(self, recording: bool) -> None:
         """React to recording state changes."""
+        if self._on_recording_active_changed:
+            try:
+                self._on_recording_active_changed(recording)
+            except Exception:
+                pass
         try:
             container = self.query_one(".modal-container")
             title = self.query_one(".modal-title", Label)
@@ -467,7 +501,7 @@ class RecordingModal(ExtractionModal[RecordingResult]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
         if event.button.id == "btn-start":
-            self._start_recording()
+            self._start_or_prompt()
         elif event.button.id == "btn-stop":
             self._stop_recording()
         elif event.button.id == "btn-cancel":
@@ -489,51 +523,38 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         if self.is_recording:
             self._stop_recording()
         else:
+            self._start_or_prompt()
+
+    def _start_or_prompt(self) -> None:
+        """Start-button/Enter handler while not recording.
+
+        The very first press (``_settings_prompted`` still ``False``) shows
+        the naming form via ``_prompt_settings()``. Once settings have been
+        resolved once, a later press means the *previous* attempt failed
+        (see ``_on_snapshot_ready``'s error branches) — retry
+        ``_start_recording()`` directly instead of re-prompting for a name.
+        Without this, ``_prompt_settings()``'s one-shot guard would make the
+        Start button/Enter a silent no-op forever after any snapshot/wrapper
+        failure, with Cancel-and-press-Record-again as the only way out.
+        """
+        if self._settings_prompted:
             self._start_recording()
-
-    def _start_recording(self) -> None:
-        """Start the recording process."""
-        # Create snapshot first
-        try:
-            Toolbox.create_snapshot(b"tmp")
-        except Exception as e:
-            self._show_error(f"Failed to create snapshot: {e}")
-            return
-
-        # Create wrapper with callbacks
-        self._wrapper = RecordingWrapper(
-            output_file=self._output_file,
-            on_event=self._on_event if self.show_live_events else None,
-            on_count_update=self._on_count_update,
-        )
-
-        # Start recording
-        if not self._wrapper.start():
-            self._show_error("Failed to start recording")
-            return
-
-        # Register as background task
-        get_task_service().register(
-            name="recording",
-            display_name="Recording",
-            instance=self._wrapper,
-            stop_callback=self._wrapper.stop,
-        )
-
-        # Start elapsed time timer
-        self._timer = self.set_interval(1.0, self._update_elapsed)
-
-        self.is_recording = True
-        self.elapsed_seconds = 0
-        self.event_count = 0
-
-        # Non-blocking: recording is already running in the background
-        # (RecordingWrapper is device-driven), so stacking this form on
-        # top right now costs nothing time-sensitive.
-        self._prompt_settings()
+        else:
+            self._prompt_settings()
 
     def _prompt_settings(self) -> None:
-        """Pop the (non-blocking) combined Record-settings form (idea B).
+        """Pop the combined Record-settings form (idea B) *before* capture
+        starts.
+
+        This is now the very first thing that happens (mount for
+        ``auto_start``, or Start-button/Enter otherwise) — nothing blocking
+        precedes it, so the form appears instantly. Only once it is
+        dismissed (Save *or* Cancel — Cancel just keeps the auto-generated
+        defaults, it does not abort the recording) does
+        :meth:`_start_recording` run: takes the pre-snapshot and actually
+        starts capturing. This fixes the old order, where the snapshot,
+        capture and elapsed timer silently ran first and the naming form
+        only appeared afterwards.
 
         Only ever shown once per recording session. The chosen name (or the
         auto-generated default, kept on Esc/blank), replay count and dry-run
@@ -564,6 +585,9 @@ class RecordingModal(ExtractionModal[RecordingResult]):
                     self._on_settings_chosen(label, number_of_runs, noise_filter)
                 except Exception:
                     pass
+            # Naming is resolved (chosen or defaulted) — only now do we take
+            # the pre-snapshot and actually start capturing.
+            self._start_recording()
 
         self.app.push_screen(
             RecordSettingsModal(
@@ -573,6 +597,90 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             ),
             on_result,
         )
+
+    def _start_recording(self) -> None:
+        """Take the pre-recording snapshot, then start capture.
+
+        Called only after the Record-settings form has been resolved — see
+        :meth:`_prompt_settings`. ``Toolbox.create_snapshot`` is a blocking
+        telnet round-trip that can take several seconds, so it now runs on a
+        worker thread (never the UI thread, which would otherwise freeze
+        with no modal visible at all): ``#elapsed-time`` shows "Preparing
+        snapshot…" while it runs, and ``RecordingWrapper``/task
+        registration/the elapsed timer/``is_recording`` only start once the
+        snapshot completes, marshaled back onto the UI thread via
+        ``call_from_thread``. Wrapped with the disconnect-guard suppression
+        (the same disruptive telnet-round-trip class of call as
+        ``load_snapshot``) so the revert doesn't trip a false "Device
+        disconnected" toast.
+        """
+        try:
+            elapsed_label = self.query_one("#elapsed-time", Static)
+            elapsed_label.update("Preparing snapshot…")
+        except Exception:
+            pass
+
+        self.run_worker(
+            self._create_snapshot_worker, name="record_snapshot", thread=True
+        )
+
+    def _create_snapshot_worker(self) -> None:
+        """Worker-thread body: create the pre-recording snapshot.
+
+        Runs off the UI thread (see ``_start_recording``); hands the result
+        back to :meth:`_on_snapshot_ready` via ``call_from_thread``.
+        """
+        if self._suppress_disconnect_guard:
+            self._suppress_disconnect_guard(True)
+        error: str | None = None
+        try:
+            Toolbox.create_snapshot(b"tmp")
+        except Exception as e:
+            error = str(e)
+        finally:
+            if self._suppress_disconnect_guard:
+                self._suppress_disconnect_guard(False)
+        self.app.call_from_thread(self._on_snapshot_ready, error)
+
+    def _on_snapshot_ready(self, error: str | None) -> None:
+        """Continue starting recording on the UI thread once the
+        pre-recording snapshot completes (see ``_start_recording``).
+        """
+        if self._cancelled:
+            # The user Escaped/Ctrl+C'd out while the snapshot worker was
+            # still running -- honor that instead of silently starting
+            # capture anyway now that it has finished.
+            return
+        if error is not None:
+            self._show_error(f"Failed to create snapshot: {error}")
+            return
+
+        # Create wrapper with callbacks
+        self._wrapper = RecordingWrapper(
+            output_file=self._output_file,
+            on_event=self._on_event if self.show_live_events else None,
+            on_count_update=self._on_count_update,
+        )
+
+        # Start recording
+        if not self._wrapper.start():
+            self._show_error("Failed to start recording")
+            return
+
+        # Register as background task
+        get_task_service().register(
+            name="recording",
+            display_name="Recording",
+            instance=self._wrapper,
+            stop_callback=self._wrapper.stop,
+        )
+
+        # Start elapsed time timer
+        self._timer = self.set_interval(1.0, self._update_elapsed)
+
+        self.is_recording = True
+        self.elapsed_seconds = 0
+        self.event_count = 0
 
     def _stop_recording(self) -> None:
         """Stop the recording process."""
@@ -610,6 +718,10 @@ class RecordingModal(ExtractionModal[RecordingResult]):
 
     def _cancel(self) -> None:
         """Cancel recording and close modal."""
+        # Set first: if a pre-recording snapshot worker is still running (see
+        # _start_recording/_on_snapshot_ready), this stops it from starting
+        # capture anyway once it finishes.
+        self._cancelled = True
         if self._wrapper and self._wrapper.is_running:
             self._wrapper.stop()
             try:

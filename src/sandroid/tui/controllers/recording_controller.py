@@ -103,6 +103,9 @@ class RecordingController:
         on_run_saved: Callable[[str], None] | None = None,
         on_monitor_stopped_for_playback: Callable[[], None] | None = None,
         on_monitor_resume_available: Callable[[Any], None] | None = None,
+        set_recording_indicator: Callable[[bool], None] | None = None,
+        set_replay_indicator: Callable[[bool], None] | None = None,
+        suppress_disconnect_guard: Callable[[bool], None] | None = None,
     ):
         """Initialize RecordingController with UI callbacks.
 
@@ -137,6 +140,27 @@ class RecordingController:
                 ``MonitorController.resume_after_playback``'s job, not this
                 controller's). Wired by app.py to MonitorView's one-click
                 "Resume monitoring" offer; safe to leave unset.
+            set_recording_indicator: Callback invoked with the modal's own
+                ``is_recording`` transitions (forwarded straight through to
+                ``RecordingModal``'s ``on_recording_active_changed``) so a UI
+                mode indicator (e.g. the status bar's "● RECORDING" row) can
+                track real capture start/stop rather than the modal merely
+                being open. Safe to leave unset.
+            set_replay_indicator: Callback invoked with ``True``/``False``
+                (via call_from_thread) around ``_run_playback_analysis``'s
+                ``AnalysisEngine(...).run()`` call, so a UI mode indicator
+                (e.g. "● REPLAYING") can track the auto-chained/manual replay
+                that otherwise has no visible indication beyond Activity Log
+                lines. Safe to leave unset.
+            suppress_disconnect_guard: Callback invoked with ``True``/
+                ``False`` around every disruptive snapshot revert this
+                controller performs (forwarded to ``RecordingModal`` for its
+                own pre-recording snapshot, and wrapped directly here around
+                ``_run_playback_analysis``'s engine run, which covers every
+                ``LoadSnapshotStep`` across all replay iterations) — stops
+                the transient ADB-transport blip a snapshot save/load causes
+                from tripping a false "Device disconnected" toast. Safe to
+                leave unset.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -150,6 +174,9 @@ class RecordingController:
         self._on_run_saved = on_run_saved
         self._on_monitor_stopped_for_playback = on_monitor_stopped_for_playback
         self._on_monitor_resume_available = on_monitor_resume_available
+        self._set_recording_indicator = set_recording_indicator
+        self._set_replay_indicator = set_replay_indicator
+        self._suppress_disconnect_guard = suppress_disconnect_guard
         # Recording-session bookkeeping for the settings-seed flow (see
         # start_recording()): a monotonic counter for the "Run N" default
         # name, the label seed, and the replay-count/dry-run settings that
@@ -209,11 +236,12 @@ class RecordingController:
         Shows recording modal that captures input events from the device.
         Creates a snapshot before recording starts.
 
-        Recording itself starts immediately and non-blockingly (the modal is
-        pushed with ``auto_start=True`` — see ``RecordingModal``), and the
-        combined Record-settings form (idea B: name + replays + dry-run) pops
-        right after: recording captures *device* interaction, not TUI input,
-        so stacking that form on top blocks nothing time-sensitive. The chosen
+        The modal is pushed with ``auto_start=True`` — see ``RecordingModal``
+        — which shows the combined Record-settings form (idea B: name +
+        replays + dry-run) *immediately*, before anything else happens.
+        Recording itself (the pre-snapshot and ``RecordingWrapper`` start)
+        only begins once that form is resolved (Save or Cancel — Cancel just
+        keeps the auto-generated defaults, it does not abort). The chosen
         name (or the auto-generated default if left blank/Escaped) seeds the
         default label for *every subsequent Play of this same recording* — it
         is not a one-time identity — and the replay-count/dry-run choices seed
@@ -288,6 +316,8 @@ class RecordingController:
                 default_number_of_runs=self._current_number_of_runs,
                 default_noise_filter=self._current_noise_filter,
                 on_settings_chosen=on_settings_chosen,
+                on_recording_active_changed=self._set_recording_indicator,
+                suppress_disconnect_guard=self._suppress_disconnect_guard,
             ),
             on_recording_result,
         )
@@ -472,7 +502,10 @@ class RecordingController:
         partial ``RunResult(error=...)`` rather than raising; that partial
         result is persisted too, so a failed run stays visible in Diffs with
         its error message. The monitor Play-safety-net (stop-before-revert +
-        resume offer) is preserved around the engine run.
+        resume offer) is preserved around the engine run, as are the Replay
+        UI indicator and the disconnect-guard suppression (both bracket the
+        actual ``AnalysisEngine(...).run()`` call — see the ``try/finally``
+        below).
         """
         from sandroid.analysis.engine import AnalysisEngine
         from sandroid.analysis.run_config import RunConfig
@@ -508,16 +541,37 @@ class RecordingController:
             config.results_path = str(run_bundle.bundle_dir(run_id))
             config.device_name = device_name
 
-            result = AnalysisEngine(
-                config,
-                progress=self._emit_progress,
-                toolbox=toolbox,
-                forensic_service=self._get_forensic_service(),
-                action_window_service=self._get_action_window_service(),
-            ).run()
-            # The engine returns a partial RunResult(error=...) for a fatal
-            # step instead of raising, so surface that as this run's error.
-            error = result.error
+            # Bracket the actual engine run with the Replay indicator and the
+            # disconnect-guard suppression: the engine's LoadSnapshotStep
+            # reverts the emulator (once per bracketed step, across every
+            # replay iteration), which transiently disrupts the ADB
+            # transport and would otherwise trip a false "Device
+            # disconnected" toast. Both the "arm" and the "disarm" calls live
+            # inside this try/finally (not just the disarm) so a raise from
+            # either arm call still reaches the finally instead of leaving
+            # the indicator/guard stuck on — the finally's own calls are
+            # idempotent when the matching arm never ran.
+            try:
+                if self._set_replay_indicator:
+                    self._call_from_thread(self._set_replay_indicator, True)
+                if self._suppress_disconnect_guard:
+                    self._suppress_disconnect_guard(True)
+                result = AnalysisEngine(
+                    config,
+                    progress=self._emit_progress,
+                    toolbox=toolbox,
+                    forensic_service=self._get_forensic_service(),
+                    action_window_service=self._get_action_window_service(),
+                ).run()
+                # The engine returns a partial RunResult(error=...) for a
+                # fatal step instead of raising, so surface that as this
+                # run's error.
+                error = result.error
+            finally:
+                if self._suppress_disconnect_guard:
+                    self._suppress_disconnect_guard(False)
+                if self._set_replay_indicator:
+                    self._call_from_thread(self._set_replay_indicator, False)
         except Exception as e:
             error = f"Playback failed: {e}"
             self._call_from_thread(self._log_error, error)

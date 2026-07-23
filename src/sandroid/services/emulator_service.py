@@ -77,12 +77,12 @@ class AdbProtocol(Protocol):
     """Protocol for ADB dependency injection."""
 
     @staticmethod
-    def send_telnet_command(command: Any) -> tuple[str, str]:
+    def send_telnet_command(command: Any, serial: str | None = None) -> tuple[str, str]:
         """Send a telnet command to the emulator."""
         ...
 
     @staticmethod
-    def send_adb_command(command: str) -> tuple[str, str]:
+    def send_adb_command(command: str, serial: str | None = None) -> tuple[str, str]:
         """Send an ADB command."""
         ...
 
@@ -510,11 +510,14 @@ class EmulatorService:
     # Snapshot Methods
     # =========================================================================
 
-    def create_snapshot(self, name: str) -> bool:
+    def create_snapshot(self, name: str, serial: str | None = None) -> bool:
         """Create a snapshot of the emulator state.
 
         Args:
             name: Name for the snapshot.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``Adb._target_device`` global. Omit to
+                use the current global target (default behavior, unchanged).
 
         Returns:
             True if snapshot was created successfully.
@@ -529,7 +532,7 @@ class EmulatorService:
             else:
                 command = b"avd snapshot save " + name
 
-            _stdout, stderr = adb.send_telnet_command(command)
+            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
             if stderr:
                 self._logger.error(f"Failed to create snapshot: {stderr}")
@@ -542,11 +545,14 @@ class EmulatorService:
             self._logger.error(f"Failed to create snapshot: {e}")
             return False
 
-    def load_snapshot(self, name: str) -> bool:
+    def load_snapshot(self, name: str, serial: str | None = None) -> bool:
         """Load a previously created snapshot.
 
         Args:
             name: Name of the snapshot to load.
+            serial: Device serial to target for this call only, without
+                mutating the shared ``Adb._target_device`` global. Omit to
+                use the current global target (default behavior, unchanged).
 
         Returns:
             True if snapshot was loaded successfully.
@@ -561,14 +567,18 @@ class EmulatorService:
             else:
                 command = b"avd snapshot load " + name
 
-            _stdout, stderr = adb.send_telnet_command(command)
+            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
             if stderr:
                 self._logger.error(f"Failed to load snapshot: {stderr}")
                 return False
 
-            # Give emulator time to restore state
-            time.sleep(2)
+            # Reverting VM state disrupts the ADB transport for a variable
+            # window (offline -> unauthorized -> device); poll get-state for
+            # real readiness instead of blindly sleeping a fixed 2s, which
+            # was sometimes too short (a race) and often too long (needless
+            # latency on a device that recovers quickly).
+            self._wait_for_device_ready(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -576,6 +586,49 @@ class EmulatorService:
         except Exception as e:
             self._logger.error(f"Failed to load snapshot: {e}")
             return False
+
+    def _wait_for_device_ready(
+        self,
+        adb: AdbProtocol,
+        serial: str | None,
+        timeout: float = 10.0,
+        interval: float = 0.4,
+    ) -> bool:
+        """Poll ``adb get-state`` until the device reports ``"device"``.
+
+        Used after a snapshot load in place of a blind ``time.sleep(2)`` —
+        reverting VM state disrupts the ADB transport for a variable window
+        (offline -> unauthorized -> occasionally a duplicate listing -> back
+        to device), so a fixed sleep is both a race (too short on a slow
+        revert) and needless latency (too long on a fast one).
+
+        Args:
+            adb: ADB interface to poll through.
+            serial: Device serial to target, or ``None`` for the current
+                global target.
+            timeout: Max seconds to wait before giving up.
+            interval: Seconds between polls.
+
+        Returns:
+            True if the device reported ready within ``timeout``; False if
+            the wait timed out. Never raises — a timeout is logged as a
+            warning only, since the snapshot load itself already succeeded
+            and the caller has no better fallback than "continue anyway".
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                stdout, _stderr = adb.send_adb_command("get-state", serial=serial)
+                if stdout.strip() == "device":
+                    return True
+            except Exception:
+                pass
+            time.sleep(interval)
+        self._logger.warning(
+            f"Device not confirmed ready within {timeout}s after snapshot "
+            "load -- continuing anyway"
+        )
+        return False
 
     def delete_snapshot(self, name: str) -> bool:
         """Delete a previously created snapshot.

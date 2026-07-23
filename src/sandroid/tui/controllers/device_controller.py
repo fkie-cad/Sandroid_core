@@ -635,6 +635,29 @@ class DeviceController:
         """Stop any active device polling."""
         self._polling_active = False
 
+    def suppress_disconnect_detection(self, active: bool) -> None:
+        """Suppress the periodic device-disconnect poll during a known-
+        disruptive ADB operation (snapshot save/load).
+
+        Reverting VM state genuinely disrupts the ADB transport for a window
+        (offline -> unauthorized -> occasionally a duplicate listing before
+        it settles), which the app's poll loop (``SandroidTUI.
+        _poll_device_state()``) can otherwise misread as a real device
+        disconnect and stop all running tasks. Reuses the exact
+        ``_polling_active`` flag :meth:`is_polling` already exposes for the
+        AVD-boot poll -- ``_poll_device_state()`` already checks it, so no
+        new plumbing is needed in the app's poll loop, just this call.
+
+        Callers must pair every ``True`` with a ``False`` (e.g. via
+        ``try/finally``), so normal disconnect detection resumes even if the
+        wrapped operation raises.
+
+        Args:
+            active: True to suppress polling (about to revert VM state);
+                False to resume normal disconnect detection.
+        """
+        self._polling_active = active
+
     # =========================================================================
     # Device Switching
     # =========================================================================

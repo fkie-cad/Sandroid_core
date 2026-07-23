@@ -286,6 +286,18 @@ class SandroidTUI(App):
             on_run_saved=self._notify_diffs_new_run,
             on_monitor_stopped_for_playback=self._notify_monitor_stopped_for_playback,
             on_monitor_resume_available=self._notify_monitor_resume_available,
+            set_recording_indicator=lambda active: self._set_status_bar_mode(
+                recording=active
+            ),
+            set_replay_indicator=lambda active: self._set_status_bar_mode(
+                replaying=active
+            ),
+            # Bound method, not a lambda over self._device_controller directly:
+            # DeviceController is constructed after RecordingController
+            # (below), so self._device_controller must be looked up lazily,
+            # at call time -- which a bound method already does (only its
+            # body runs later, not the attribute lookup inside it).
+            suppress_disconnect_guard=self._suppress_device_disconnect_detection,
         )
 
         self._monitor_controller = MonitorController(
@@ -1643,6 +1655,45 @@ class SandroidTUI(App):
                     bar.refresh_status()
         except Exception:
             pass
+
+    def _set_status_bar_mode(
+        self, *, recording: bool | None = None, replaying: bool | None = None
+    ) -> None:
+        """Update the status bar's Record/Replay "Mode" row.
+
+        Wired to ``RecordingController``'s ``set_recording_indicator``/
+        ``set_replay_indicator`` callbacks (see ``_init_controllers``) so the
+        indicator tracks real capture/playback state rather than the
+        recording modal merely being open. ``recording``/``replaying`` are
+        independent -- pass only the one that changed; the other is left at
+        its current value. Sets the attributes directly on the widget (same
+        precedent as ``StatusBar.set_device_proxy``), then reuses the
+        existing refresh plumbing so the repaint also picks up anything else
+        that changed meanwhile.
+        """
+        try:
+            ms = self._get_main_screen()
+            if not ms:
+                return
+            bar = ms.query_one("#status-bar")
+        except Exception:
+            return
+        if recording is not None:
+            bar.recording_active = recording
+        if replaying is not None:
+            bar.replay_active = replaying
+        self._widget_refresh_controller.refresh_status_bar()
+
+    def _suppress_device_disconnect_detection(self, active: bool) -> None:
+        """Toggle ``DeviceController``'s disconnect-poll suppression.
+
+        Wired as ``RecordingController``'s ``suppress_disconnect_guard``
+        callback (see ``_init_controllers``). Kept as a bound method rather
+        than a lambda closing directly over ``self._device_controller`` so
+        that attribute is resolved lazily, at call time -- ``DeviceController``
+        is constructed after ``RecordingController`` in ``_init_controllers``.
+        """
+        self._device_controller.suppress_disconnect_detection(active)
 
     def action_action_key(self, key: str) -> None:
         ms = self._get_main_screen()
