@@ -28,6 +28,7 @@ Usage:
 import logging
 import re
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -66,6 +67,11 @@ class MonitorConfig:
 
 # Regex to strip ANSI escape sequences and carriage returns from PTY output.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\r")
+
+#: Hard ceiling on ``MonitorController.get_recent_events``'s ``limit``,
+#: regardless of what is requested -- mirrors ``ai/tools/flow_query.py``'s
+#: ``_MAX_LIMIT`` hard-cap convention.
+_MAX_RECENT_EVENTS_LIMIT = 2000
 
 # Regex matching a package-scoped Android data directory prefix, e.g.
 # "/data/data/com.example.app/" or "/data/user/0/com.example.app/".
@@ -681,6 +687,75 @@ def _publish_monitor_batch(items: list[FileSystemMonitorItem]) -> None:
         logger.debug("Failed to publish monitor EventBus event", exc_info=True)
 
 
+def _recent_event_from_monitor_event(
+    event: MonitorEvent, source: str
+) -> dict[str, Any]:
+    """Build one ``MonitorProcessWrapper.recent_events`` entry from a raw fsmon event.
+
+    Unlike kprobe's already-correlated items (see
+    :func:`_recent_event_from_item`), fsmon's raw ``MonitorEvent`` still
+    carries the FULL, un-prefix-stripped on-device path -- kept as-is here
+    (not run through ``build_monitor_item``'s prefix stripping) since a full
+    absolute path is more useful to the AI chat's ``get_file_diff`` tool than
+    the display-truncated form MonitorView shows.
+
+    Args:
+        event: The parsed fsmon event (see :func:`parse_monitor_line`).
+        source: Backend tag, always ``"fsmon"`` for this helper.
+
+    Returns:
+        A plain dict (``seq`` is added later by
+        ``MonitorProcessWrapper.record_event``).
+    """
+    return {
+        "timestamp": time.time(),
+        "event_type": event.event_type,
+        "pid": event.pid,
+        "process": event.process,
+        "path": event.path,
+        "new_path": event.new_path,
+        "source": source,
+    }
+
+
+def _recent_event_from_item(item: FileSystemMonitorItem) -> dict[str, Any]:
+    """Build one ``MonitorProcessWrapper.recent_events`` entry from a kprobe item.
+
+    Unlike fsmon's raw-line path (:func:`_recent_event_from_monitor_event`),
+    kprobe's ``KprobeStreamTranslator`` only ever emits prefix-STRIPPED
+    ``FileSystemMonitorItem``s (correlated, display-ready) -- there is no raw
+    full-path equivalent available here without reaching into the
+    translator's own file*-map internals, which is out of scope for this
+    tool. ``path``/``new_path`` below are therefore reconstructed from the
+    already-stripped ``directory``/``filename`` fields, NOT the full
+    on-device absolute path.
+
+    Args:
+        item: One item yielded by ``KprobeStreamTranslator.feed()``.
+
+    Returns:
+        A plain dict (``seq`` is added later by
+        ``MonitorProcessWrapper.record_event``).
+    """
+    path = f"{item.directory}/{item.filename}" if item.directory else item.filename
+    new_path: str | None = None
+    if item.new_filename is not None:
+        new_path = (
+            f"{item.new_directory}/{item.new_filename}"
+            if item.new_directory
+            else item.new_filename
+        )
+    return {
+        "timestamp": time.time(),
+        "event_type": item.label,
+        "pid": None,
+        "process": None,
+        "path": path,
+        "new_path": new_path,
+        "source": item.source,
+    }
+
+
 class MonitorController:
     """Controller for Monitor filesystem monitoring.
 
@@ -840,9 +915,184 @@ class MonitorController:
 
         return True, ""
 
+    def get_status(self) -> dict[str, Any]:
+        """Return the running monitor session's status for the AI chat.
+
+        No new state needed: ``MonitorProcessWrapper`` already stores
+        ``self.config`` (already read elsewhere via
+        ``task.instance.config``, e.g. :meth:`_get_running_monitor_config`),
+        so this just reads it back out through ``TaskService``.
+
+        Returns:
+            ``{"running": bool, "backend": str | None, "mode": str | None,
+            "target_path": str | None, "target_paths": list[str],
+            "target_pid": int | None, "app_name": str | None}``. Every field
+            besides ``running`` is ``None``/empty when monitor isn't
+            running.
+        """
+        running = self.is_running()
+        task = self._get_task_service().get_task("monitor") if running else None
+        config = getattr(getattr(task, "instance", None), "config", None)
+        if config is None:
+            return {
+                "running": running,
+                "backend": None,
+                "mode": None,
+                "target_path": None,
+                "target_paths": [],
+                "target_pid": None,
+                "app_name": None,
+            }
+        return {
+            "running": running,
+            "backend": config.backend,
+            "mode": config.mode,
+            "target_path": config.target_path,
+            "target_paths": list(config.target_paths),
+            "target_pid": config.target_pid,
+            "app_name": config.app_name,
+        }
+
+    def get_recent_events(
+        self, since_seq: int | None = None, limit: int = 200
+    ) -> dict[str, Any]:
+        """Return recent parsed filesystem events for the AI chat.
+
+        Reads the bounded, non-cleared ``recent_events`` deque on the
+        running monitor's ``MonitorProcessWrapper`` -- NOT the transient
+        per-flush ``item_buffer``/``line_buffer`` closures inside
+        :meth:`_start_output_reader`, which are ``.clear()``-ed on every
+        ``flush_to_ui()`` call (every ~0.15s by default) and hold at most
+        one flush interval's worth of events at any instant.
+
+        Args:
+            since_seq: Only return events with ``seq`` strictly greater than
+                this value (cursor-style polling -- pass a prior call's
+                ``next_seq`` for "what's new"). ``None`` (the default)
+                returns the most recent ``limit`` events instead.
+            limit: Max events to return. Hard-capped at
+                :data:`_MAX_RECENT_EVENTS_LIMIT`, mirroring
+                ``ai/tools/flow_query.py``'s ``_MAX_LIMIT`` convention.
+
+        Returns:
+            ``{"events": [...], "next_seq": int, "count": int, "truncated":
+            bool}``. ``events`` is oldest-first. ``next_seq`` is the highest
+            ``seq`` currently in the underlying buffer (``0`` if empty or
+            monitor isn't running) -- pass it back as ``since_seq`` on the
+            next call to page forward. ``truncated`` is True when more
+            matching events existed than ``limit`` allowed through.
+        """
+        limit = max(1, min(int(limit), _MAX_RECENT_EVENTS_LIMIT))
+
+        task = self._get_task_service().get_task("monitor")
+        wrapper = getattr(task, "instance", None)
+        events: list[dict[str, Any]] = list(
+            getattr(wrapper, "recent_events", None) or []
+        )
+
+        next_seq = events[-1]["seq"] if events else 0
+
+        if since_seq is not None:
+            events = [e for e in events if e["seq"] > since_seq]
+
+        truncated = len(events) > limit
+        if truncated:
+            events = events[-limit:]
+
+        return {
+            "events": events,
+            "next_seq": next_seq,
+            "count": len(events),
+            "truncated": truncated,
+        }
+
     # =========================================================================
     # Monitor Operations
     # =========================================================================
+
+    def start_with_config(self, config: MonitorConfig) -> dict[str, Any]:
+        """Start monitor from the AI chat -- thin wrapper around ``_start_monitor``.
+
+        ``_start_monitor`` is already backend-agnostic and modal-free (the
+        UI-only piece is :meth:`show_config_modal`, which this bypasses
+        entirely). The kprobe/auto path resolves ASYNCHRONOUSLY: preflight +
+        session setup run on a spawned thread, and ``_start_monitor`` returns
+        ``True`` "optimistically" before the task actually registers (see
+        that method's own docstring). This method therefore does NOT report
+        ``success``/``backend`` as settled fact for that case -- it returns
+        ``pending=True`` when the concrete backend/registration isn't known
+        synchronously yet, and the AI is expected to follow up with
+        :meth:`get_status` (the ``get_file_monitor_status`` tool) rather than
+        trusting this return value alone.
+
+        Threading note: ``_start_monitor`` touches UI callbacks directly
+        (``_log_info``/``_log_task_started``/``_open_files_tab``/
+        ``_force_ui_refresh``) in its synchronous fsmon path (and one log
+        line at the top of the kprobe/auto path, before the off-thread
+        preflight is even spawned) -- safe when called from Textual's main
+        thread (the ``show_config_modal`` path), but a genuine cross-thread
+        Textual violation when called from the AI tool-dispatch thread
+        (never the main thread). Rather than splitting ``_launch_fsmon``
+        into a device-heavy/cheap-finalize pair the way the kprobe path
+        already is, this method marshals the ENTIRE ``_start_monitor`` call
+        through ``call_from_thread`` -- mirroring exactly how
+        ``RecordingController.start_playback_chat`` wraps its call to
+        ``start_playback``. This briefly blocks both the calling
+        (tool-dispatch) thread and the main thread for the fsmon branch's
+        adb push/spawn (the same blocking the manual/keybinding path already
+        does today), and merely marshals the cheap "kick off the off-thread
+        kprobe preflight" call for the async path -- so it's safe either way.
+
+        Args:
+            config: The ``MonitorConfig`` to start with (mode/target/app_name
+                already resolved by the caller -- see
+                ``ai/tools/monitor_control.py``'s ``start_file_monitor``).
+
+        Returns:
+            ``{"success": bool, "backend": str | None, "mode": str,
+            "target": str | int | None, "pending": bool}``. ``target`` is
+            the PID for ``mode == "pid"``, else the target path.
+            ``pending`` is True only for the async kprobe/auto case where
+            the real outcome isn't known yet.
+        """
+        launched = self._call_from_thread(self._start_monitor, config)
+        fallback_target = (
+            config.target_pid if config.mode == "pid" else config.target_path
+        )
+        if not launched:
+            return {
+                "success": False,
+                "backend": None,
+                "mode": config.mode,
+                "target": fallback_target,
+                "pending": False,
+            }
+
+        task = self._get_task_service().get_task("monitor")
+        resolved_config = getattr(getattr(task, "instance", None), "config", None)
+        if resolved_config is None:
+            # Async kprobe/auto path: preflight+setup still running off
+            # the main thread, the task hasn't registered yet.
+            return {
+                "success": True,
+                "backend": None,
+                "mode": config.mode,
+                "target": fallback_target,
+                "pending": True,
+            }
+
+        resolved_target = (
+            resolved_config.target_pid
+            if resolved_config.mode == "pid"
+            else resolved_config.target_path
+        )
+        return {
+            "success": True,
+            "backend": resolved_config.backend,
+            "mode": resolved_config.mode,
+            "target": resolved_target,
+            "pending": False,
+        }
 
     def show_config_modal(self) -> bool:
         """Show Monitor configuration modal.
@@ -1279,11 +1529,18 @@ class MonitorController:
             invalidation, so the bounded ring buffer must never sit between the
             raw stream and the correlator.
 
+        In BOTH pipelines, every parsed line/item is ALSO recorded into
+        ``monitor_process_wrapper.recent_events`` (via ``record_event()``) --
+        a genuinely separate, non-cleared per-session history for the AI
+        chat's ``get_recent_file_changes`` tool. This is IN ADDITION to (not
+        instead of) the transient ``item_buffer``/``line_buffer`` above,
+        which stay exactly as they were (cleared on every flush) since
+        MonitorView's own live-rendering pipeline still depends on that
+        batching behavior.
+
         Args:
             monitor_process_wrapper: MonitorProcessWrapper instance
         """
-        import time
-
         translator = getattr(monitor_process_wrapper, "translator", None)
         flush_interval = self._get_buffer_interval()
 
@@ -1294,6 +1551,14 @@ class MonitorController:
             def ingest(line_str: str) -> None:
                 for item in translator.feed(line_str):
                     item_buffer.append(item)
+                    try:
+                        monitor_process_wrapper.record_event(
+                            _recent_event_from_item(item)
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to record kprobe event history", exc_info=True
+                        )
 
             def flush_to_ui() -> None:
                 if not item_buffer:
@@ -1311,6 +1576,16 @@ class MonitorController:
 
             def ingest(line_str: str) -> None:
                 line_buffer.append(line_str)
+                event = parse_monitor_line(line_str)
+                if event is not None:
+                    try:
+                        monitor_process_wrapper.record_event(
+                            _recent_event_from_monitor_event(event, "fsmon")
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to record fsmon event history", exc_info=True
+                        )
 
             def flush_to_ui() -> None:
                 if not line_buffer:
@@ -1491,6 +1766,17 @@ class MonitorController:
             self._force_ui_refresh()
 
         return True
+
+    def stop_from_ai(self) -> bool:
+        """Stop the monitor from the AI tool-dispatch thread.
+
+        ``stop()`` touches ``_log_info``/``_force_ui_refresh`` directly and
+        assumes a main-thread caller, same class of issue as
+        ``start_with_config``'s docstring describes on the start side. This
+        marshals the whole call through ``call_from_thread`` instead of
+        calling ``stop()`` directly.
+        """
+        return self._call_from_thread(self.stop)
 
     # =========================================================================
     # Resume after Play's snapshot-revert safety stop

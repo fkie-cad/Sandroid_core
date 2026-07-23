@@ -217,19 +217,18 @@ class _RowInfo:
 def _compute_diff(previous_main: Path, current_main: Path) -> tuple[str, bool]:
     """Diff *current_main* against *previous_main*.
 
-    Uses the SAME extension/magic-header dispatch
-    ``ChangedFiles.return_data()`` uses (``core/changedfiles.py``):
-    ``is_sqlite_file`` -> ``db_diff``, ``.xml`` -> ``xml_diff``. Deliberately
-    **widened** from that dispatch's ``.txt``-only text fallback to *any*
-    other file (via the new ``file_diff.txt_diff_paths``) -- curated
-    Watchlist paths are frequently extension-less config/log files, and
-    ChangedFiles' own "no dispatch match -> no diff at all" behavior would
-    make the diffing feature nearly useless for exactly the files people are
-    most likely to hand-add here. This is the one deliberate deviation from
-    a literal reading of "the SAME dispatch logic".
+    Thin delegator to the shared :func:`sandroid.core.file_diff.diff_files`
+    -- promoted there (from what used to be this function's own body) so the
+    AI chat's ``get_file_diff`` tool
+    (:mod:`sandroid.ai.tools.monitor_control`) can reuse the exact same
+    extension/magic-header dispatch instead of a second, drifting copy. Kept
+    as a thin same-signature wrapper here (rather than deleting it and
+    updating the one call site directly) purely because existing tests
+    (``tests/tui/test_watchlist_view.py``) import it directly by this name.
 
-    Also deliberately uses ``file_extraction_service.is_sqlite_file`` (a
-    plain, uncached magic-header read) rather than ``file_diff.is_sqlite_file``:
+    Deliberately passes ``file_extraction_service.is_sqlite_file`` (a plain,
+    uncached magic-header read) rather than ``file_diff.is_sqlite_file`` --
+    see :func:`sandroid.core.file_diff.diff_files`'s own docstring for why:
     that module keeps a process-lifetime cache keyed by path string with no
     invalidation, which is safe for ``ChangedFiles``' one-shot-per-Play
     timestamped pull directories but NOT for Watchlist's fixed
@@ -238,20 +237,9 @@ def _compute_diff(previous_main: Path, current_main: Path) -> tuple[str, bool]:
     pull #2 actually wrote to that same path.
 
     Returns:
-        ``(diff_text, changed)`` -- ``changed`` is False when the
-        underlying diff function reports "no change(s)" in its own words
-        (its established convention), so the caller can show a plain
-        "unchanged" message instead of an empty/no-op ``DiffView``.
+        ``(diff_text, changed)`` -- see ``diff_files``'s own docstring.
     """
-    prev_str, cur_str = str(previous_main), str(current_main)
-    if is_sqlite_file(prev_str):
-        diff = file_diff.db_diff(prev_str, cur_str, "")
-    elif previous_main.suffix.lower() == ".xml":
-        diff = file_diff.xml_diff(prev_str, cur_str, "")
-    else:
-        diff = file_diff.txt_diff_paths(prev_str, cur_str)
-    changed = bool(diff.strip()) and "no change" not in diff.lower()
-    return diff, changed
+    return file_diff.diff_files(previous_main, current_main, is_sqlite_file)
 
 
 class _AddPathInput(Input):

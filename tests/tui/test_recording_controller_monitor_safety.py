@@ -58,16 +58,36 @@ def _clean_monitor_task():
     svc._tasks.pop("monitor", None)
 
 
+@pytest.fixture(autouse=True)
+def _clean_recording_task():
+    """Guard the real (process-wide) TaskService singleton against leaks.
+
+    Same reasoning as ``_clean_monitor_task`` above, for the "recording" task
+    the new ``start_recording_chat``/``stop_recording_chat`` tests register.
+    """
+    svc = get_task_service()
+    svc._tasks.pop("recording", None)
+    yield
+    svc._tasks.pop("recording", None)
+
+
 class _FakeToolbox:
     """Stand-in for Toolbox: just enough surface for _run_playback_analysis."""
 
     device_name = "fake-device"
 
-    def __init__(self) -> None:
+    def __init__(self, create_snapshot_error: Exception | None = None) -> None:
         self.load_snapshot_calls: list = []
+        self.create_snapshot_calls: list = []
+        self._create_snapshot_error = create_snapshot_error
 
     def load_snapshot(self, tag) -> None:
         self.load_snapshot_calls.append(tag)
+
+    def create_snapshot(self, tag) -> None:
+        self.create_snapshot_calls.append(tag)
+        if self._create_snapshot_error is not None:
+            raise self._create_snapshot_error
 
     def fetch_changed_files(self, fetch_all: bool = False) -> dict:
         return {}
@@ -370,3 +390,335 @@ def test_run_playback_analysis_resume_offer_absent_without_callback(
     controller._run_playback_analysis()  # must not raise
 
     assert not get_task_service().is_running("monitor")
+
+
+# =============================================================================
+# start_recording_chat / stop_recording_chat -- AI-chat headless entry points
+#
+# Both run on the AI tool-dispatch thread (never Textual's main thread), so
+# every call touching a UI callback must go through call_from_thread -- the
+# same threading-discipline contract _stop_monitor_before_revert's tests
+# above already verify for the modal-driven path. The tests below reuse that
+# real-background-thread verification technique for the new chat methods.
+# =============================================================================
+
+
+class _FakeRecordingWrapper:
+    """Stand-in for RecordingWrapper -- no real getevent process spawned."""
+
+    def __init__(self, output_file: str, start_ok: bool = True) -> None:
+        self.output_file = output_file
+        self._start_ok = start_ok
+        self.stop_calls = 0
+        self.event_count = 7
+        self.elapsed_seconds = 4.0
+
+    def start(self) -> bool:
+        return self._start_ok
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+
+
+def test_start_recording_chat_already_recording_returns_failure(monkeypatch, tmp_path):
+    call_from_thread_calls: list = []
+    controller, toolbox, _forensic = _make_controller(
+        monkeypatch,
+        tmp_path,
+        call_from_thread=lambda fn, *args: (
+            call_from_thread_calls.append((fn, args)),
+            fn(*args),
+        )[1],
+    )
+    get_task_service().register(
+        name="recording",
+        display_name="Recording",
+        instance=object(),
+        stop_callback=lambda: None,
+    )
+
+    result = controller.start_recording_chat("my run")
+
+    assert result == {"success": False, "message": "Recording already in progress"}
+    assert call_from_thread_calls == []
+    assert toolbox.create_snapshot_calls == []
+    get_task_service().stop("recording")
+
+
+def test_start_recording_chat_snapshot_failure_marshals_disconnect_guard(
+    monkeypatch, tmp_path
+):
+    """Both the arm (True) and disarm (False) of the disconnect guard must go
+    through call_from_thread -- even on the failure path, where the arm/
+    disarm bracket a raising create_snapshot() call rather than the recorder
+    itself.
+    """
+    guard_calls: list = []
+    call_from_thread_calls: list = []
+    controller, toolbox, _forensic = _make_controller(
+        monkeypatch,
+        tmp_path,
+        call_from_thread=lambda fn, *args: (
+            call_from_thread_calls.append((fn, args)),
+            fn(*args),
+        )[1],
+        suppress_disconnect_guard=guard_calls.append,
+    )
+    toolbox._create_snapshot_error = RuntimeError("adb wedged")
+
+    result = controller.start_recording_chat("my run")
+
+    assert result["success"] is False
+    assert "adb wedged" in result["message"]
+    assert guard_calls == [True, False]
+    assert len(call_from_thread_calls) == 2
+    assert not get_task_service().is_running("recording")
+
+
+def test_start_recording_chat_success_marshals_ui_via_call_from_thread_off_main_thread(
+    monkeypatch, tmp_path
+):
+    """End-to-end success path, invoked from a REAL background thread (the
+    actual shape in production: the AI tool-dispatch thread) -- confirms the
+    indicator/log calls genuinely marshal through call_from_thread rather
+    than merely being reachable in a single-threaded test.
+    """
+    indicator_calls: list = []
+    log_calls: list = []
+    caller_threads: list = []
+
+    def call_from_thread(fn, *args):
+        # Real Textual call_from_thread asserts the CALLER is not the main
+        # thread; emulate that contract-check here (same convention as
+        # test_stop_monitor_before_revert_marshals_via_call_from_thread_off_main_thread
+        # above).
+        caller_threads.append(threading.current_thread())
+        return fn(*args)
+
+    fake_wrapper = _FakeRecordingWrapper(output_file="/tmp/recording.txt")
+    monkeypatch.setattr(
+        "sandroid.tui.utils.recording_wrapper.RecordingWrapper",
+        lambda output_file: fake_wrapper,
+    )
+
+    controller, toolbox, _forensic = _make_controller(
+        monkeypatch,
+        tmp_path,
+        call_from_thread=call_from_thread,
+        set_recording_indicator=indicator_calls.append,
+        log_info=log_calls.append,
+    )
+
+    result_holder: dict = {}
+
+    def run_in_worker() -> None:
+        result_holder["result"] = controller.start_recording_chat(
+            "my run", number_of_runs=4, noise_filter=False
+        )
+
+    worker = threading.Thread(target=run_in_worker)
+    worker.start()
+    worker.join(timeout=5)
+
+    try:
+        assert not worker.is_alive()
+        result = result_holder["result"]
+        assert result == {"success": True, "label": "my run"}
+        assert toolbox.create_snapshot_calls == [b"tmp"]
+        assert get_task_service().is_running("recording")
+        assert indicator_calls == [True]
+        assert any("my run" in msg for msg in log_calls)
+        assert controller._current_number_of_runs == 4
+        assert controller._current_noise_filter is False
+        # Every UI-touching call was marshaled FROM the worker thread, never
+        # the thread running this test (standing in for "main").
+        assert caller_threads
+        for t in caller_threads:
+            assert t is worker
+            assert t is not threading.current_thread()
+    finally:
+        get_task_service().stop("recording")
+
+
+def test_stop_recording_chat_not_recording_returns_failure(monkeypatch, tmp_path):
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+
+    result = controller.stop_recording_chat()
+
+    assert result == {"success": False, "message": "No recording in progress"}
+
+
+def test_stop_recording_chat_success_marshals_via_call_from_thread_off_main_thread(
+    monkeypatch, tmp_path
+):
+    indicator_calls: list = []
+    log_calls: list = []
+    caller_threads: list = []
+
+    def call_from_thread(fn, *args):
+        caller_threads.append(threading.current_thread())
+        return fn(*args)
+
+    controller, _toolbox, _forensic = _make_controller(
+        monkeypatch,
+        tmp_path,
+        call_from_thread=call_from_thread,
+        set_recording_indicator=indicator_calls.append,
+        log_success=log_calls.append,
+    )
+    controller._current_recording_label = "my run"
+    fake_wrapper = _FakeRecordingWrapper(output_file="/tmp/recording.txt")
+    fake_wrapper.event_count = 12
+    fake_wrapper.elapsed_seconds = 9.0
+    get_task_service().register(
+        name="recording",
+        display_name="Recording",
+        instance=fake_wrapper,
+        stop_callback=fake_wrapper.stop,
+    )
+
+    result_holder: dict = {}
+
+    def run_in_worker() -> None:
+        result_holder["result"] = controller.stop_recording_chat()
+
+    worker = threading.Thread(target=run_in_worker)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    result = result_holder["result"]
+    assert result == {
+        "success": True,
+        "event_count": 12,
+        "duration": 9.0,
+        "label": "my run",
+    }
+    assert fake_wrapper.stop_calls == 1
+    assert not get_task_service().is_running("recording")
+    assert indicator_calls == [False]
+    assert log_calls
+    assert caller_threads
+    for t in caller_threads:
+        assert t is worker
+        assert t is not threading.current_thread()
+
+
+# =============================================================================
+# start_playback_chat / _release_replay_world_lease -- Part D's WORLD lease
+#
+# start_replay (ai/tools/recording_control.py) claims ResourceId.WORLD but
+# declares releases=frozenset() -- deliberately NOT auto-released when the
+# tool call itself returns, since the real replay work runs on a detached
+# background worker. These tests exercise the OTHER half of that pattern:
+# _run_playback_analysis's own finally releasing the lease once the replay
+# actually finishes. Since none of these tests inject run_worker,
+# start_playback() falls back to running _run_playback_analysis()
+# synchronously (see that method's own source) -- so by the time
+# start_playback_chat() returns here, the full deferred-release path has
+# already run, and the lease must already be gone.
+# =============================================================================
+
+
+def test_start_playback_chat_no_recording_does_not_stash_owner(monkeypatch, tmp_path):
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+    # _make_controller writes a real recording.txt for the common case --
+    # remove it so has_recording() is False for this one test.
+    (tmp_path / "recording.txt").unlink()
+
+    result = controller.start_playback_chat(owner_id="owner-A")
+
+    assert result == {
+        "success": False,
+        "message": "No recording found — record first",
+    }
+    assert controller._replay_owner_id is None
+
+
+def test_start_playback_chat_already_recording_does_not_stash_owner(
+    monkeypatch, tmp_path
+):
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+    get_task_service().register(
+        name="recording",
+        display_name="Recording",
+        instance=object(),
+        stop_callback=lambda: None,
+    )
+
+    result = controller.start_playback_chat(owner_id="owner-A")
+
+    assert result["success"] is False
+    assert controller._replay_owner_id is None
+    get_task_service().stop("recording")
+
+
+def test_start_playback_chat_releases_world_lease_once_replay_completes(
+    monkeypatch, tmp_path
+):
+    """The core of Part D's deferred-release pattern."""
+    from sandroid.ai import arbiter as ai_arbiter
+
+    fresh_arbiter = ai_arbiter.DeviceResourceArbiter()
+    monkeypatch.setattr(ai_arbiter, "get_arbiter", lambda: fresh_arbiter)
+    fresh_arbiter.claim("owner-A", frozenset({ai_arbiter.ResourceId.WORLD}))
+
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+
+    result = controller.start_playback_chat(owner_id="owner-A")
+
+    assert result["success"] is True
+    # No run_worker was injected, so start_playback() ran
+    # _run_playback_analysis() synchronously -- by the time this call
+    # returns, the lease has already been released.
+    assert fresh_arbiter.snapshot() == {}
+    assert controller._replay_owner_id is None
+
+
+def test_start_playback_chat_releases_world_lease_even_on_pipeline_error(
+    monkeypatch, tmp_path
+):
+    """_release_replay_world_lease must fire from the OUTERMOST finally --
+    a pipeline error must not leak the lease.
+    """
+    from sandroid.ai import arbiter as ai_arbiter
+
+    monkeypatch.setattr(
+        Player,
+        "perform",
+        lambda self: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    fresh_arbiter = ai_arbiter.DeviceResourceArbiter()
+    monkeypatch.setattr(ai_arbiter, "get_arbiter", lambda: fresh_arbiter)
+    fresh_arbiter.claim("owner-A", frozenset({ai_arbiter.ResourceId.WORLD}))
+
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+
+    controller.start_playback_chat(owner_id="owner-A")
+
+    assert fresh_arbiter.snapshot() == {}
+
+
+def test_start_playback_chat_manual_call_never_touches_arbiter(monkeypatch, tmp_path):
+    """owner_id=None (manual/keybinding replay) must never call the arbiter
+    at all -- guarded by ``if self._replay_owner_id:`` in
+    _release_replay_world_lease.
+    """
+    from sandroid.ai import arbiter as ai_arbiter
+
+    get_arbiter_calls: list = []
+
+    def _tracking_get_arbiter():
+        get_arbiter_calls.append(True)
+        return ai_arbiter.DeviceResourceArbiter()
+
+    monkeypatch.setattr(ai_arbiter, "get_arbiter", _tracking_get_arbiter)
+
+    controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
+
+    result = controller.start_playback_chat()  # owner_id defaults to None
+
+    assert result["success"] is True
+    assert controller._replay_owner_id is None
+    assert get_arbiter_calls == []

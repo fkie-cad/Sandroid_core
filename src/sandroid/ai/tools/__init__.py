@@ -7,8 +7,10 @@ importing :mod:`sandroid.ai.tools.app_lifecycle`,
 :mod:`sandroid.ai.tools.environment_control`,
 :mod:`sandroid.ai.tools.file_transfer`, :mod:`sandroid.ai.tools.flow_query`,
 :mod:`sandroid.ai.tools.host_files`,
+:mod:`sandroid.ai.tools.monitor_control`,
 :mod:`sandroid.ai.tools.network_query`,
-:mod:`sandroid.ai.tools.process_control`, and
+:mod:`sandroid.ai.tools.process_control`,
+:mod:`sandroid.ai.tools.recording_control`, and
 :mod:`sandroid.ai.tools.session_control`). It does NOT start the MCP
 client or bridge MCP tools -- that is an app-lifecycle action for the caller
 (start :class:`~sandroid.ai.mcp_client.MCPClientManager`, then call
@@ -25,8 +27,10 @@ from sandroid.ai.tools import (
     file_transfer,
     flow_query,
     host_files,
+    monitor_control,
     network_query,
     process_control,
+    recording_control,
     session_control,
 )
 from sandroid.ai.tools.mcp_bridge import bridge_mcp_tools

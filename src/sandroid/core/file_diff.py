@@ -3,7 +3,9 @@ import os.path
 import sqlite3
 import subprocess
 import tempfile
+from collections.abc import Callable
 from logging import getLogger
+from pathlib import Path
 
 from lxml import etree
 from xmldiff import formatting, main
@@ -625,6 +627,58 @@ def txt_diff_paths(old_path, new_path):
             parts.append(f"\t[LINE ADDED] {line}")
 
     return "".join(parts)
+
+
+def diff_files(
+    previous_main: Path, current_main: Path, is_sqlite_fn: Callable[[str], bool]
+) -> tuple[str, bool]:
+    """Diff *current_main* against *previous_main* by extension/magic-header dispatch.
+
+    Promoted from ``tui/widgets/watchlist_view.py``'s originally-private
+    ``_compute_diff`` (that function is now a thin delegator to this one) so
+    the AI chat's ``get_file_diff`` tool
+    (:mod:`sandroid.ai.tools.monitor_control`) can reuse the exact same
+    dispatch instead of a second, drifting copy.
+
+    Uses the SAME extension/magic-header dispatch
+    ``ChangedFiles.return_data()`` uses (``core/changedfiles.py``):
+    *is_sqlite_fn* -> :func:`db_diff`, ``.xml`` -> :func:`xml_diff`.
+    Deliberately **widened** from that dispatch's ``.txt``-only text
+    fallback to *any* other file (via :func:`txt_diff_paths`) -- both
+    Watchlist and the AI tool are frequently pointed at extension-less
+    config/log files, and ChangedFiles' own "no dispatch match -> no diff at
+    all" behavior would make diffing nearly useless for exactly the files
+    people are most likely to hand-add here. This is the one deliberate
+    deviation from a literal reading of "the SAME dispatch logic".
+
+    Args:
+        previous_main: The "before" file (the last-promoted baseline).
+        current_main: The "after" file (freshly pulled).
+        is_sqlite_fn: The magic-header sniff to use for the SQLite check.
+            Callers MUST pass an **uncached** check (e.g.
+            ``file_extraction_service.is_sqlite_file``), NOT this module's
+            own :func:`is_sqlite_file` -- that one keeps a process-lifetime
+            cache keyed by path string with no invalidation, which is wrong
+            here: both Watchlist's and this tool's ``current``/``previous``
+            paths are fixed and get overwritten in place on every pull, so a
+            cached answer from an earlier pull would silently outlive
+            whatever a later pull wrote to that same path.
+
+    Returns:
+        ``(diff_text, changed)`` -- ``changed`` is False when the
+        underlying diff function reports "no change(s)" in its own words
+        (its established convention), so the caller can show a plain
+        "unchanged" message instead of an empty/no-op diff view.
+    """
+    prev_str, cur_str = str(previous_main), str(current_main)
+    if is_sqlite_fn(prev_str):
+        diff = db_diff(prev_str, cur_str, "")
+    elif previous_main.suffix.lower() == ".xml":
+        diff = xml_diff(prev_str, cur_str, "")
+    else:
+        diff = txt_diff_paths(prev_str, cur_str)
+    changed = bool(diff.strip()) and "no change" not in diff.lower()
+    return diff, changed
 
 
 # to get the sqldiff tool, run "sudo apt install sqlite3-tools"

@@ -1501,3 +1501,284 @@ def test_monitor_ended_teardown_noop_for_fsmon_wrapper():
     )
     _make_controller()._monitor_ended()
     assert not svc.is_running("monitor")
+
+
+# =============================================================================
+# AI-chat additions (Part B1): start_with_config / get_status /
+# get_recent_events, and the new recent_events population inside
+# _start_output_reader's ingest() closures.
+# =============================================================================
+
+
+def test_get_status_when_not_running_is_all_empty():
+    controller = _make_controller()
+
+    assert controller.get_status() == {
+        "running": False,
+        "backend": None,
+        "mode": None,
+        "target_path": None,
+        "target_paths": [],
+        "target_pid": None,
+        "app_name": None,
+    }
+
+
+def test_get_status_reads_running_config():
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    class _DeadProc:
+        def poll(self):
+            return None  # still "running"
+
+    config = MonitorConfig(
+        mode="pid",
+        target_path="/data/data/com.example/",
+        target_paths=["/data/data/com.example/"],
+        target_pid=4321,
+        app_name="com.example.app",
+        backend="kprobe",
+    )
+    wrapper = MonitorProcessWrapper(_DeadProc(), config=config)
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=wrapper.stop,
+        app_name="com.example.app",
+    )
+
+    controller = _make_controller()
+
+    assert controller.get_status() == {
+        "running": True,
+        "backend": "kprobe",
+        "mode": "pid",
+        "target_path": "/data/data/com.example/",
+        "target_paths": ["/data/data/com.example/"],
+        "target_pid": 4321,
+        "app_name": "com.example.app",
+    }
+
+
+def test_get_recent_events_no_monitor_task_is_all_empty():
+    controller = _make_controller()
+
+    assert controller.get_recent_events() == {
+        "events": [],
+        "next_seq": 0,
+        "count": 0,
+        "truncated": False,
+    }
+
+
+def test_get_recent_events_default_and_since_seq_cursor():
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    class _DeadProc:
+        def poll(self):
+            return None
+
+    wrapper = MonitorProcessWrapper(_DeadProc(), config=MonitorConfig())
+    for i in range(5):
+        wrapper.record_event({"path": f"/data/f{i}.txt"})
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=wrapper.stop,
+        app_name="/data/",
+    )
+
+    controller = _make_controller()
+
+    # No since_cursor -> everything currently buffered, oldest-first.
+    result = controller.get_recent_events()
+    assert result["count"] == 5
+    assert result["next_seq"] == 5
+    assert result["truncated"] is False
+    assert [e["seq"] for e in result["events"]] == [1, 2, 3, 4, 5]
+
+    # since_seq=3 -> only seq 4 and 5, but next_seq is still the buffer's
+    # overall latest (5), not the filtered subset's latest.
+    result = controller.get_recent_events(since_seq=3)
+    assert [e["seq"] for e in result["events"]] == [4, 5]
+    assert result["next_seq"] == 5
+
+    # limit=1 -> truncated, keeps the MOST RECENT event (last of the
+    # oldest-first list), not the oldest.
+    result = controller.get_recent_events(limit=1)
+    assert result["truncated"] is True
+    assert [e["seq"] for e in result["events"]] == [5]
+
+
+def test_get_recent_events_limit_is_hard_capped(monkeypatch):
+    """Mirrors ai/tools/flow_query.py's _MAX_LIMIT hard-cap convention --
+    monkeypatch the (small, module-private) ceiling itself rather than
+    generating thousands of fake events just to exercise the clamp.
+    """
+    from sandroid.tui.controllers import monitor_controller as mc
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    monkeypatch.setattr(mc, "_MAX_RECENT_EVENTS_LIMIT", 3)
+
+    class _DeadProc:
+        def poll(self):
+            return None
+
+    wrapper = MonitorProcessWrapper(_DeadProc(), config=MonitorConfig())
+    for i in range(5):
+        wrapper.record_event({"path": f"/data/f{i}.txt"})
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=wrapper.stop,
+        app_name="/data/",
+    )
+
+    controller = _make_controller()
+
+    result = controller.get_recent_events(limit=999_999)
+
+    assert result["truncated"] is True
+    assert len(result["events"]) == 3
+    assert [e["seq"] for e in result["events"]] == [3, 4, 5]  # most recent 3
+
+
+def test_start_with_config_reports_failure_without_registering_task(monkeypatch):
+    def _boom(cls):
+        raise RuntimeError("no binary")
+
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(_boom))
+
+    controller = _make_controller()
+    config = MonitorConfig(mode="path", target_path="/data/")
+
+    result = controller.start_with_config(config)
+
+    assert result == {
+        "success": False,
+        "backend": None,
+        "mode": "path",
+        "target": "/data/",
+        "pending": False,
+    }
+    assert not get_task_service().is_running("monitor")
+
+
+def test_start_with_config_kprobe_async_path_reports_pending(monkeypatch):
+    """The kprobe/auto path resolves off-thread; if that off-thread work
+    never actually completes before start_with_config returns (the real
+    production shape -- a spawned daemon thread), the task hasn't
+    registered yet and this must report pending=True rather than treat the
+    optimistic `_start_monitor() -> True` as settled fact.
+    """
+    monkeypatch.setattr(KprobeTracer, "kprobe_supported", classmethod(lambda cls: True))
+    # Defer the off-thread preflight/setup indefinitely (never actually runs)
+    # -- unlike _make_controller's normal synchronous-for-tests default.
+    controller = _make_controller(run_off_thread=lambda fn: None)
+
+    config = MonitorConfig(mode="path", target_path="/data/", backend="auto")
+    result = controller.start_with_config(config)
+
+    assert result == {
+        "success": True,
+        "backend": None,
+        "mode": "path",
+        "target": "/data/",
+        "pending": True,
+    }
+    assert not get_task_service().is_running("monitor")
+
+
+def test_start_with_config_fsmon_resolves_backend_and_populates_recent_events(
+    monkeypatch,
+):
+    """End-to-end: a real reader thread ingests real fsmon wire-format lines
+    through start_with_config -> _start_monitor -> _start_output_reader, and
+    each parsed event lands in the new, non-cleared recent_events history --
+    readable afterwards via get_recent_events -- in ADDITION to (not instead
+    of) the existing transient flush-batch/EventBus publishing.
+    """
+    monkeypatch.setattr(FSMon, "check_and_install_fsmon", classmethod(lambda cls: None))
+
+    class _FakeProc:
+        """Stays "running" (poll() is None) until explicitly stopped, so the
+        real reader thread never races start_with_config's own post-launch
+        task lookup by spontaneously exiting and unregistering the task the
+        moment its (short, fixed) line list is exhausted.
+        """
+
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self.stdout = self
+            self._terminated = False
+
+        def readline(self):
+            return self._lines.pop(0) if self._lines else ""
+
+        def poll(self):
+            return 0 if self._terminated else None
+
+        def terminate(self):
+            self._terminated = True
+
+        def kill(self):
+            self._terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def __iter__(self):
+            return iter([])
+
+    lines = [
+        _fse("FSE_CREATE_FILE", "/data/data/com.example/f1.txt") + "\n",
+        _fse("FSE_CONTENT_MODIFIED", "/data/data/com.example/f2.txt") + "\n",
+    ]
+    monkeypatch.setattr(
+        FSMon, "run_fsmon_by_path", classmethod(lambda cls, path: _FakeProc(lines))
+    )
+
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+
+    config = MonitorConfig(mode="path", target_path="/data/data/com.example/")
+    try:
+        result = controller.start_with_config(config)
+
+        assert result["success"] is True
+        assert result["pending"] is False
+        assert result["backend"] == "fsmon"
+        assert result["mode"] == "path"
+
+        # The reader thread is real; wait for both lines to be ingested into
+        # recent_events (a genuinely separate destination from the transient
+        # flush-batch EventBus publish already covered by
+        # test_start_monitor_kprobe_reader_routes_through_translator above).
+        import time
+
+        deadline = time.monotonic() + 2.0
+        events: list = []
+        while time.monotonic() < deadline:
+            events = controller.get_recent_events()["events"]
+            if len(events) >= 2:
+                break
+            time.sleep(0.01)
+
+        assert len(events) == 2
+        assert [e["seq"] for e in events] == [1, 2]
+        assert events[0]["path"] == "/data/data/com.example/f1.txt"
+        assert events[0]["source"] == "fsmon"
+        assert events[1]["path"] == "/data/data/com.example/f2.txt"
+
+        status = controller.get_status()
+        assert status["running"] is True
+        assert status["backend"] == "fsmon"
+        assert status["target_path"] == "/data/data/com.example/"
+    finally:
+        # Clean up the real background reader thread/task rather than
+        # leaving a live daemon thread polling a fake process for the rest
+        # of the test session.
+        controller.stop()

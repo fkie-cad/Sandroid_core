@@ -187,6 +187,20 @@ class RecordingController:
         self._current_recording_label: str | None = None
         self._current_number_of_runs = 2
         self._current_noise_filter = True
+        # AI-chat replay state (see start_playback_chat/_run_playback_analysis):
+        # `_is_replaying` fixes get_replay_status() -- `TaskService.is_running(
+        # "playback_analysis")` would always read False, since that name is only
+        # ever a Textual `run_worker` name, never registered with TaskService.
+        # `_replay_owner_id` is the resource-arbiter owner id (see
+        # sandroid.ai.loop._current_owner_id) that claimed ResourceId.WORLD for
+        # the in-flight replay, stashed here at kickoff time so
+        # `_run_playback_analysis`'s completion path (which runs on a DETACHED
+        # worker thread that outlives the tool call's own synchronous dispatch)
+        # can release that lease itself once the replay actually finishes. Both
+        # are None/False for a manual/keybinding-triggered replay (no AI owner,
+        # nothing was ever claimed) -- see `_release_replay_world_lease`.
+        self._is_replaying = False
+        self._replay_owner_id: str | None = None
 
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
@@ -229,6 +243,26 @@ class RecordingController:
             True if recording is active
         """
         return self._get_task_service().is_running("recording")
+
+    @property
+    def is_replaying(self) -> bool:
+        """Whether a replay (Play) is currently in progress.
+
+        Backed by ``self._is_replaying`` -- set/cleared around
+        ``_run_playback_analysis``'s engine run (see that method), NOT
+        ``TaskService.is_running("playback_analysis")``: that name is only
+        ever a Textual ``run_worker`` name, never registered with
+        ``TaskService``, so that check would always read False.
+        """
+        return self._is_replaying
+
+    @property
+    def current_recording_label(self) -> str | None:
+        """The active (or most recently completed) recording's label.
+
+        ``None`` before any recording has ever been started this session.
+        """
+        return self._current_recording_label
 
     def start_recording(self) -> bool:
         """Start input event recording.
@@ -323,6 +357,123 @@ class RecordingController:
         )
         return True
 
+    def start_recording_chat(
+        self, label: str, number_of_runs: int = 2, noise_filter: bool = True
+    ) -> dict[str, Any]:
+        """Start a recording from the AI chat -- no modal, no auto-chained replay.
+
+        Headless counterpart to :meth:`start_recording` for the AI
+        tool-dispatch thread (confirmed to be a background worker thread,
+        never Textual's main thread -- see ``chat_panel.py``'s
+        ``run_worker(..., thread=True)``). There is deliberately no
+        ``RecordingModal`` here: the AI is expected to have already asked
+        the analyst for *label* in chat before calling this, and tells them
+        in chat when to perform the action and when to stop -- the modal's
+        job is replaced by the chat turn itself. Record and replay are
+        separate tool calls, never auto-chained in code (unlike
+        :meth:`start_recording`'s modal-driven "Stop -> auto-play"): the LLM
+        decides when to call :meth:`start_playback_chat`, typically right
+        after stopping but it may wait if asked to.
+
+        Threading discipline: every call here that touches a UI callback
+        (``_log_info``/``_log_success``/``_set_recording_indicator``/
+        ``_suppress_disconnect_guard``) is wrapped in
+        ``self._call_from_thread(...)``. The ADB-blocking calls
+        (``Toolbox.create_snapshot``, ``RecordingWrapper.start()``) are
+        deliberately NOT wrapped -- that dance in ``RecordingModal`` exists
+        only to avoid freezing the Textual UI thread, which is not a
+        concern here since the tool-dispatch thread is already off the main
+        thread (wrapping them would instead freeze the UI thread for the
+        duration of the ADB call, the opposite of what's needed).
+
+        Args:
+            label: Human-readable name for this run. Seeds the default
+                label for every subsequent Play of this recording, same as
+                the modal's chosen name.
+            number_of_runs: Replay-repeat count seeded for a later Play.
+            noise_filter: Dry-run noise-filter toggle seeded for a later
+                Play.
+
+        Returns:
+            ``{"success": False, "message": str}`` if a recording is already
+            in progress, the snapshot failed, or the recorder failed to
+            start; ``{"success": True, "label": str}`` once recording has
+            actually started.
+        """
+        if self.is_recording():
+            return {"success": False, "message": "Recording already in progress"}
+
+        self._recording_seq += 1
+        self._current_recording_label = label or f"Run {self._recording_seq}"
+        self._current_number_of_runs = number_of_runs
+        self._current_noise_filter = noise_filter
+
+        if self._suppress_disconnect_guard:
+            self._call_from_thread(self._suppress_disconnect_guard, True)
+        try:
+            self._get_toolbox().create_snapshot(b"tmp")
+        except Exception as e:
+            if self._suppress_disconnect_guard:
+                self._call_from_thread(self._suppress_disconnect_guard, False)
+            return {"success": False, "message": f"Failed to create snapshot: {e}"}
+        if self._suppress_disconnect_guard:
+            self._call_from_thread(self._suppress_disconnect_guard, False)
+
+        from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+        wrapper = RecordingWrapper(output_file=self.get_recording_path())
+        if not wrapper.start():
+            return {"success": False, "message": "Failed to start recording"}
+
+        self._get_task_service().register(
+            name="recording",
+            display_name="Recording",
+            instance=wrapper,
+            stop_callback=wrapper.stop,
+        )
+        if self._set_recording_indicator:
+            self._call_from_thread(self._set_recording_indicator, True)
+        self._call_from_thread(
+            self._log_info,
+            f"[AI] Recording '{self._current_recording_label}' started",
+        )
+        return {"success": True, "label": self._current_recording_label}
+
+    def stop_recording_chat(self) -> dict[str, Any]:
+        """Stop the current chat-triggered (or modal-driven) recording.
+
+        Headless counterpart to Stop for the AI tool-dispatch thread. Does
+        NOT auto-chain into playback -- call :meth:`start_playback_chat`
+        separately once the analyst says they're done (or immediately, if
+        that's the default the LLM has been told to use).
+
+        Returns:
+            ``{"success": False, "message": str}`` if nothing was
+            recording, else ``{"success": True, "event_count": int,
+            "duration": float, "label": str | None}``.
+        """
+        if not self.is_recording():
+            return {"success": False, "message": "No recording in progress"}
+
+        task = self._get_task_service().get_task("recording")
+        wrapper = task.instance if task else None
+        event_count = wrapper.event_count if wrapper else 0
+        self._get_task_service().stop("recording")
+        duration = wrapper.elapsed_seconds if wrapper else 0
+
+        if self._set_recording_indicator:
+            self._call_from_thread(self._set_recording_indicator, False)
+        self._call_from_thread(
+            self._log_success,
+            f"[AI] Recording stopped: {event_count} events, {duration}s",
+        )
+        return {
+            "success": True,
+            "event_count": event_count,
+            "duration": duration,
+            "label": self._current_recording_label,
+        }
+
     # =========================================================================
     # Playback Operations
     # =========================================================================
@@ -389,6 +540,79 @@ class RecordingController:
             self._run_playback_analysis()
 
         return True
+
+    def start_playback_chat(
+        self,
+        number_of_runs: int | None = None,
+        noise_filter: bool | None = None,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a replay from the AI chat.
+
+        Headless counterpart to Play for the AI tool-dispatch thread.
+        :meth:`start_playback` itself only pushes one ``run_worker(...,
+        thread=True)`` call -- cheap, but ``run_worker`` is a Textual API
+        that must be invoked from the main thread same as any other, so
+        that one call is wrapped in ``self._call_from_thread(...)`` here.
+        The actual replay work (:meth:`_run_playback_analysis`) then runs on
+        ITS OWN worker thread exactly as it does for a manual/keybinding
+        Play -- unaffected by which thread kicked it off.
+
+        *owner_id* is the resource-arbiter owner id that claimed
+        ``ResourceId.WORLD`` for this call (see
+        ``ai/tools/recording_control.py``'s ``start_replay``, which reads it
+        from ``sandroid.ai.loop._current_owner_id`` before calling this --
+        the same pattern ``enable_app_proxy`` already uses to capture an
+        owner id for later-attributed release). It is stashed on
+        ``self._replay_owner_id`` ONLY once every early-return check has
+        passed and the worker is actually about to be kicked off -- never
+        earlier -- so a rejected call (no recording / already recording)
+        never leaves a stale owner id lying around for a future unrelated
+        replay to pick up. :meth:`_run_playback_analysis` releases the
+        matching ``WORLD`` lease itself once the replay actually finishes
+        (see :meth:`_release_replay_world_lease`) -- this is a deliberately
+        held-across-the-async-worker lease, unlike every other AI tool's
+        claim/release, which happens within one synchronous dispatch.
+
+        Args:
+            number_of_runs: Override the seeded replay-repeat count for
+                this Play (and future ones, until the next Record). ``None``
+                keeps the current seed.
+            noise_filter: Override the seeded dry-run/noise-filter toggle.
+                ``None`` keeps the current seed.
+            owner_id: The AI resource-arbiter owner id that claimed
+                ``ResourceId.WORLD`` for this replay, or ``None`` for a
+                manual/keybinding-triggered call (nothing was claimed, so
+                nothing needs releasing later).
+
+        Returns:
+            ``{"success": False, "message": str}`` if there is no recording
+            to replay, or one is still in progress; otherwise
+            ``{"success": True, "number_of_runs": int, "noise_filter":
+            bool}`` once the replay worker has been kicked off -- the
+            worker itself runs in the background, poll
+            ``get_replay_status()`` for completion.
+        """
+        if not self.has_recording():
+            return {"success": False, "message": "No recording found — record first"}
+        if self.is_recording():
+            return {
+                "success": False,
+                "message": "Stop the current recording before replaying",
+            }
+
+        if number_of_runs is not None:
+            self._current_number_of_runs = number_of_runs
+        if noise_filter is not None:
+            self._current_noise_filter = noise_filter
+
+        self._replay_owner_id = owner_id
+        self._call_from_thread(self.start_playback)
+        return {
+            "success": True,
+            "number_of_runs": self._current_number_of_runs,
+            "noise_filter": self._current_noise_filter,
+        }
 
     def _verify_snapshot(self) -> bool:
         """Verify that a snapshot exists for playback.
@@ -483,6 +707,40 @@ class RecordingController:
             logger.debug(f"monitor auto-stop safety check failed: {e}", exc_info=True)
             return None
 
+    def _release_replay_world_lease(self) -> None:
+        """Release the AI-triggered replay's held ``ResourceId.WORLD`` lease, if any.
+
+        ``start_replay`` (``ai/tools/recording_control.py``) claims
+        ``ResourceId.WORLD`` at tool-dispatch time but declares
+        ``releases=frozenset()`` -- deliberately NOT auto-released when the
+        tool call itself returns, since ``start_playback_chat`` only kicks
+        off a detached background worker (:meth:`_run_playback_analysis`)
+        and returns immediately, long before the replay (and its
+        snapshot-reverting ``LoadSnapshotStep``, repeated across every
+        replay iteration) is actually done. This is the other half of that
+        deferred-release pattern: called from :meth:`_run_playback_analysis`'s
+        outermost ``finally`` (success, an engine-reported error, or an
+        earlier pre-engine setup failure all release the SAME lease exactly
+        once).
+
+        Guarded by ``self._replay_owner_id`` so a manual/keybinding-triggered
+        replay (no AI owner -- ``start_playback()`` called directly, never
+        through ``start_playback_chat``) never touches the arbiter at all.
+        Clears ``self._replay_owner_id`` unconditionally afterward so a
+        second, unrelated replay (AI- or manually-triggered) never re-releases
+        a stale id.
+        """
+        owner = self._replay_owner_id
+        self._replay_owner_id = None
+        if not owner:
+            return
+        try:
+            from sandroid.ai.arbiter import ResourceId, get_arbiter
+
+            get_arbiter().release_resources(owner, frozenset({ResourceId.WORLD}))
+        except Exception:
+            logger.debug("Failed to release replay WORLD lease", exc_info=True)
+
     def _run_playback_analysis(self) -> None:
         """Execute the playback analysis via the unified ``AnalysisEngine``.
 
@@ -506,6 +764,17 @@ class RecordingController:
         UI indicator and the disconnect-guard suppression (both bracket the
         actual ``AnalysisEngine(...).run()`` call — see the ``try/finally``
         below).
+
+        AI-chat replay tracking (Part D): ``self._is_replaying`` is set here
+        and cleared in the OUTERMOST ``finally`` below -- deliberately
+        wrapping the WHOLE pre-engine setup (monitor safety-net + run-bundle
+        creation) as well as the engine run itself, not just the inner
+        try/finally that brackets ``AnalysisEngine(...).run()``. A failure
+        in that pre-engine setup (e.g. ``run_bundle.create_bundle``/
+        ``import_recording`` raising) would otherwise skip the inner
+        try/finally entirely and leak the replay's held ``ResourceId.WORLD``
+        lease (see :meth:`_release_replay_world_lease`) forever, since no
+        other code path ever releases it for an AI-triggered replay.
         """
         from sandroid.analysis.engine import AnalysisEngine
         from sandroid.analysis.run_config import RunConfig
@@ -520,61 +789,66 @@ class RecordingController:
         abs_rec = self.get_recording_path()
         monitor_config_for_resume: Any = None
 
+        self._is_replaying = True
         try:
-            # Safety net (see _stop_monitor_before_revert's docstring): monitor
-            # cannot survive the snapshot revert the engine's first step does,
-            # so stop it cleanly *before* handing off to the engine rather than
-            # let it silently die. True no-op if monitor isn't running.
-            monitor_config_for_resume = self._stop_monitor_before_revert()
-
-            # Build the run bundle and copy the live recording into it up-front
-            # so every later step reads it by absolute path.
-            run_bundle.create_bundle(run_id)
-            abs_rec = run_bundle.import_recording(run_id, self.get_recording_path())
-
-            config = RunConfig.for_playback(
-                recording_path=abs_rec,
-                number_of_runs=self._current_number_of_runs,
-                noise_filter=self._current_noise_filter,
-            )
-            config.raw_results_path = run_bundle.raw_dir(run_id)
-            config.results_path = str(run_bundle.bundle_dir(run_id))
-            config.device_name = device_name
-
-            # Bracket the actual engine run with the Replay indicator and the
-            # disconnect-guard suppression: the engine's LoadSnapshotStep
-            # reverts the emulator (once per bracketed step, across every
-            # replay iteration), which transiently disrupts the ADB
-            # transport and would otherwise trip a false "Device
-            # disconnected" toast. Both the "arm" and the "disarm" calls live
-            # inside this try/finally (not just the disarm) so a raise from
-            # either arm call still reaches the finally instead of leaving
-            # the indicator/guard stuck on — the finally's own calls are
-            # idempotent when the matching arm never ran.
             try:
-                if self._set_replay_indicator:
-                    self._call_from_thread(self._set_replay_indicator, True)
-                if self._suppress_disconnect_guard:
-                    self._suppress_disconnect_guard(True)
-                result = AnalysisEngine(
-                    config,
-                    progress=self._emit_progress,
-                    toolbox=toolbox,
-                    forensic_service=self._get_forensic_service(),
-                    action_window_service=self._get_action_window_service(),
-                ).run()
-                # The engine returns a partial RunResult(error=...) for a
-                # fatal step instead of raising, so surface that as this
-                # run's error.
-                error = result.error
-            finally:
-                if self._suppress_disconnect_guard:
-                    self._suppress_disconnect_guard(False)
-                if self._set_replay_indicator:
-                    self._call_from_thread(self._set_replay_indicator, False)
-        except Exception as e:
-            error = f"Playback failed: {e}"
-            self._call_from_thread(self._log_error, error)
+                # Safety net (see _stop_monitor_before_revert's docstring): monitor
+                # cannot survive the snapshot revert the engine's first step does,
+                # so stop it cleanly *before* handing off to the engine rather than
+                # let it silently die. True no-op if monitor isn't running.
+                monitor_config_for_resume = self._stop_monitor_before_revert()
+
+                # Build the run bundle and copy the live recording into it up-front
+                # so every later step reads it by absolute path.
+                run_bundle.create_bundle(run_id)
+                abs_rec = run_bundle.import_recording(run_id, self.get_recording_path())
+
+                config = RunConfig.for_playback(
+                    recording_path=abs_rec,
+                    number_of_runs=self._current_number_of_runs,
+                    noise_filter=self._current_noise_filter,
+                )
+                config.raw_results_path = run_bundle.raw_dir(run_id)
+                config.results_path = str(run_bundle.bundle_dir(run_id))
+                config.device_name = device_name
+
+                # Bracket the actual engine run with the Replay indicator and the
+                # disconnect-guard suppression: the engine's LoadSnapshotStep
+                # reverts the emulator (once per bracketed step, across every
+                # replay iteration), which transiently disrupts the ADB
+                # transport and would otherwise trip a false "Device
+                # disconnected" toast. Both the "arm" and the "disarm" calls live
+                # inside this try/finally (not just the disarm) so a raise from
+                # either arm call still reaches the finally instead of leaving
+                # the indicator/guard stuck on — the finally's own calls are
+                # idempotent when the matching arm never ran.
+                try:
+                    if self._set_replay_indicator:
+                        self._call_from_thread(self._set_replay_indicator, True)
+                    if self._suppress_disconnect_guard:
+                        self._suppress_disconnect_guard(True)
+                    result = AnalysisEngine(
+                        config,
+                        progress=self._emit_progress,
+                        toolbox=toolbox,
+                        forensic_service=self._get_forensic_service(),
+                        action_window_service=self._get_action_window_service(),
+                    ).run()
+                    # The engine returns a partial RunResult(error=...) for a
+                    # fatal step instead of raising, so surface that as this
+                    # run's error.
+                    error = result.error
+                finally:
+                    if self._suppress_disconnect_guard:
+                        self._suppress_disconnect_guard(False)
+                    if self._set_replay_indicator:
+                        self._call_from_thread(self._set_replay_indicator, False)
+            except Exception as e:
+                error = f"Playback failed: {e}"
+                self._call_from_thread(self._log_error, error)
+        finally:
+            self._is_replaying = False
+            self._release_replay_world_lease()
 
         # Persist regardless of a mid-pipeline error, so a failed/partial run
         # is still visible in Diffs (with its error message) instead of

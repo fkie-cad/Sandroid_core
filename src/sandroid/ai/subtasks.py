@@ -85,12 +85,32 @@ READ_ONLY_SUBTASK_TOOLS: frozenset[str] = frozenset(
         "check_ca_injection_status",
         "get_captured_flows",
         "get_flow_detail",
+        "get_file_monitor_status",
+        "get_recent_file_changes",
+        "get_file_diff",
+        "get_recording_status",
+        "get_replay_status",
+        "list_recent_runs",
+        "get_run_detail",
     }
 )
 
 #: The spawn tools' own names -- excluded from every subtask's tool view so a
 #: subtask can never spawn a nested subtask.
 _SPAWN_TOOL_NAMES = frozenset({"spawn_subtask", "spawn_privileged_subtask"})
+
+#: Tools excluded from privileged subtasks specifically because they hold a
+#: device-resource lease across an ASYNC completion (released later, from a
+#: detached worker's own finally-block -- see
+#: ``ai/tools/recording_control.py``'s ``start_replay``/``ResourceId.WORLD``),
+#: not at tool-dispatch return time like every other tool. A subtask's own
+#: ``finally`` (below) calls ``forget_subtask`` -- which force-releases every
+#: lease that subtask holds -- the instant its turn ends, which can easily
+#: race ahead of the detached replay worker's own release. Restricting
+#: ``start_replay`` to the orchestrator (whose owner id is never subject to
+#: ``forget_subtask``) closes that race outright rather than leaving it as a
+#: documented-but-live gap.
+_ASYNC_LEASE_TOOL_NAMES = frozenset({"start_replay"})
 
 #: Cap on tool-calling round-trips within a single subtask turn -- higher than
 #: the orchestrator's default since an autonomous investigation legitimately
@@ -279,8 +299,12 @@ class SubtaskManager:
 
         Computed at run time (not import time) so MCP tools bridged in after
         this module imported are included, and so a subtask can never nest.
+        Also excludes ``_ASYNC_LEASE_TOOL_NAMES`` -- see that constant's
+        docstring for why ``start_replay`` specifically must stay
+        orchestrator-only.
         """
-        return [n for n in get_tool_registry().names() if n not in _SPAWN_TOOL_NAMES]
+        excluded = _SPAWN_TOOL_NAMES | _ASYNC_LEASE_TOOL_NAMES
+        return [n for n in get_tool_registry().names() if n not in excluded]
 
     def _run(
         self,

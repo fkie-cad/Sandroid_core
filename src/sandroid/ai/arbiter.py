@@ -54,6 +54,14 @@ class ResourceId(Enum):
     SCREEN_RECORDING = "screen_recording"
     FOCUS = "focus"
     WORLD = "world"
+    #: The filesystem monitor (kprobe/fsmon) background capture -- see
+    #: :mod:`sandroid.ai.tools.monitor_control`.
+    MONITOR = "monitor"
+    #: The device input-event recording (getevent capture) -- see
+    #: :mod:`sandroid.ai.tools.recording_control`. Named ``INPUT_RECORDING``
+    #: (not a bare ``RECORDING``) so it reads unambiguously next to
+    #: :attr:`SCREEN_RECORDING`, an unrelated video-capture feature.
+    INPUT_RECORDING = "input_recording"
 
 
 @dataclass(frozen=True)

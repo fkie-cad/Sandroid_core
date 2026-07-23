@@ -29,6 +29,10 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_spotlight_service, get_task_service, get_ui_service
 from sandroid.tui.activity_log_adapter import ActivityLogAdapter
 from sandroid.tui.callback_bundle import TUICallbackBundle
+from sandroid.tui.controller_registry import (
+    register_monitor_controller,
+    register_recording_controller,
+)
 from sandroid.tui.controllers import (
     APKInstallController,
     DeviceController,
@@ -299,6 +303,10 @@ class SandroidTUI(App):
             # body runs later, not the attribute lookup inside it).
             suppress_disconnect_guard=self._suppress_device_disconnect_detection,
         )
+        # Publish the singleton instance so the AI chat's recording_control
+        # tools can reach it without importing app.py/MainScreen directly
+        # (see controller_registry.py's module docstring).
+        register_recording_controller(self._recording_controller)
 
         self._monitor_controller = MonitorController(
             log_info=cb.log_info,
@@ -315,6 +323,8 @@ class SandroidTUI(App):
             on_pid_mode_fallback=self._notify_pid_mode_fallback,
             on_backend_fallback=self._notify_backend_fallback,
         )
+        # Same seam as above, for the AI chat's monitor_control tools.
+        register_monitor_controller(self._monitor_controller)
 
         self._spotlight_controller = SpotlightController(
             log_info=cb.log_info,

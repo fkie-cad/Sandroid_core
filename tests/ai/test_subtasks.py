@@ -20,6 +20,7 @@ import sandroid.ai.tool_permissions as tool_permissions_module
 import sandroid.ai.tools.registry as registry_module
 from sandroid.ai.arbiter import Conflict, DeviceResourceArbiter, ResourceId
 from sandroid.ai.subtasks import (
+    _ASYNC_LEASE_TOOL_NAMES,
     _SPAWN_TOOL_NAMES,
     READ_ONLY_SUBTASK_TOOLS,
     SubtaskManager,
@@ -183,13 +184,25 @@ def test_read_only_subset_excludes_disallowed_and_spawn_tools():
         assert name not in READ_ONLY_SUBTASK_TOOLS
 
 
-def test_privileged_subset_is_all_registered_minus_the_two_spawn_tools():
+def test_privileged_subset_is_all_registered_minus_spawn_and_async_lease_tools():
     all_names = set(get_tool_registry().names())
     # Sanity: the spawn tools really are registered on the live singleton.
     assert _SPAWN_TOOL_NAMES.issubset(all_names)
+    assert _ASYNC_LEASE_TOOL_NAMES.issubset(all_names)
 
     priv = set(SubtaskManager._privileged_tool_names())
-    assert priv == all_names - _SPAWN_TOOL_NAMES
+    assert priv == all_names - _SPAWN_TOOL_NAMES - _ASYNC_LEASE_TOOL_NAMES
+
+
+def test_start_replay_is_orchestrator_only():
+    """start_replay holds ResourceId.WORLD across an async completion released
+    later from a detached worker, not at tool-dispatch return -- a privileged
+    subtask's own forget_subtask (fired the instant its turn ends) would force-
+    release that lease early. Excluded from privileged subtasks to close the
+    race outright rather than leave it live.
+    """
+    priv = set(SubtaskManager._privileged_tool_names())
+    assert _ASYNC_LEASE_TOOL_NAMES.isdisjoint(priv)
 
 
 def test_no_subtask_view_can_nest_a_subtask():

@@ -2,10 +2,16 @@
 
 import logging
 import subprocess
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+#: Bound on the new, non-cleared ``recent_events`` history (see
+#: :attr:`MonitorProcessWrapper.recent_events`'s docstring). Mirrors
+#: ``ai/tools/flow_query.py``'s ``_MAX_LIMIT`` hard-cap convention.
+_MAX_RECENT_EVENTS = 2000
 
 
 class MonitorProcessWrapper:
@@ -18,6 +24,8 @@ class MonitorProcessWrapper:
     - Optional backend teardown (kprobe) run AFTER the process is killed
     - Optional per-session stream translator (kprobe), stored here so the
       reader thread can run it AHEAD of its ring buffer
+    - A bounded, non-cleared per-session event history for the AI chat's
+      ``get_recent_file_changes`` tool (see :attr:`recent_events`)
     """
 
     def __init__(
@@ -48,6 +56,39 @@ class MonitorProcessWrapper:
         self._teardown = teardown
         self._stopped = False
         self._torn_down = False
+        # Genuinely NEW, separately-maintained, append-only event history --
+        # NOT a rename/promotion of MonitorController._start_output_reader's
+        # `item_buffer`/`line_buffer` closures, which are transient per-flush
+        # batches `.clear()`-ed on every `flush_to_ui()` call (every ~0.15s
+        # by default) and hold at most one flush interval's worth of events
+        # at any instant. This deque is never cleared during a session (only
+        # bounded by `maxlen`, oldest-evicted), so the AI chat's
+        # `get_recent_file_changes` tool can read a real rolling window
+        # instead of whatever happens to be in-flight in the next flush.
+        # Populated from the reader thread via `record_event()` -- see
+        # `MonitorController._start_output_reader`'s `ingest()` closures.
+        self.recent_events: deque[dict] = deque(maxlen=_MAX_RECENT_EVENTS)
+        self._event_seq = 0
+
+    def record_event(self, event: dict) -> None:
+        """Append one parsed event to :attr:`recent_events`.
+
+        Tags *event* with the next monotonic ``seq`` (never reused, even
+        past the ``maxlen`` eviction horizon) so cursor-style polling ("give
+        me everything since seq N") works the same way
+        ``mitmproxy_flow_log``'s cursor convention does. Mutates *event* in
+        place (adds the ``"seq"`` key) purely to avoid an extra dict copy on
+        this hot reader-thread path.
+
+        Args:
+            event: The parsed event dict to record (no fixed schema is
+                enforced here -- see the two ``ingest()`` closures in
+                ``MonitorController._start_output_reader`` for the actual
+                shape each backend populates).
+        """
+        self._event_seq += 1
+        event["seq"] = self._event_seq
+        self.recent_events.append(event)
 
     @property
     def is_running(self) -> bool:
