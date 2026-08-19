@@ -164,6 +164,38 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 | [**friTap**](https://github.com/fkie-cad/friTap) | TLS key extraction and decrypted traffic interception for Android, enabling advanced network analysis in sandboxed environments. | ✅ Integrated |
 
 
+## AI Chat
+
+Sandroid includes an LLM-backed chat assistant that can drive the same device and analysis actions as the TUI, talking to any OpenAI-compatible chat-completions endpoint you configure.
+
+**Configuration.** Chat is inert until you set three connection fields — `base_url`, `api_key`, and `model`. There's no `sandroid-config` step for this yet; set them directly in your config file, or via environment variables:
+
+```toml
+# ~/.config/sandroid/sandroid.toml
+[ai]
+base_url = "https://api.your-provider.com/v1"
+api_key = "sk-..."
+model = "your-model-name"
+```
+
+```bash
+# equivalent env vars (preferred for api_key -- see the caveat below)
+export SANDROID_AI__BASE_URL="https://api.your-provider.com/v1"
+export SANDROID_AI__API_KEY="sk-..."
+export SANDROID_AI__MODEL="your-model-name"
+```
+
+**Opening it.** Press `Ctrl+Y` to open the Chat dock (a non-modal panel; the binding is rebindable like every other action -- see `?`).
+
+**What it can do.** Around 76 native tools spanning app/process lifecycle control, device/network/flow queries, certificate and environment control, host-device file transfer, and recording/session control -- plus two subagent tools that spawn read-only or (with approval) fully privileged background investigations, and anything exposed by MCP servers you configure.
+
+**Safety.** Every tool call passes a permission gate -- read-only calls run automatically, state-changing calls prompt for approval (optionally remembered) -- and a resource arbiter keeps the assistant and any concurrent subtasks from colliding on shared device resources such as the proxy, mitmproxy, frida-server, and snapshots.
+
+> The bundled `sandroid-dummy` MCP server is a demo only: everything it returns (e.g. its sample threat-intel lookup) is fabricated data, not a real result.
+
+> `api_key` is stored in plaintext in your config file unless set via `SANDROID_AI__API_KEY` (`sandroid-config show` only redacts it for display, not on disk) -- prefer the environment variable.
+
+
 # Ground Truth APK
 The framework also includes a custom Android app for testing and calibration.
 This app is designed to **create specific forensic artefacts with pinpoint accuracy** at the user's command, while being as minimal as possible to avoid unintended artefacts.
