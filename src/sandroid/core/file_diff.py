@@ -2,13 +2,15 @@ import os
 import os.path
 import sqlite3
 import subprocess
-import tempfile
+import xml.etree.ElementTree as xmltree
 from collections.abc import Callable
 from logging import getLogger
 from pathlib import Path
 
 from lxml import etree
 from xmldiff import formatting, main
+
+from sandroid.core.ccl_abx import AbxDecodeError, AbxReader
 
 logger = getLogger(__name__)
 
@@ -389,23 +391,55 @@ def txt_xml_diff(file_path1, file_path2):
 
     if changes == "":
         return "\tNo change detected\n"
+    return _format_xml_diff_output(changes)
 
-    s = changes.splitlines()
-    result = ""
-    for line in s:
-        result = result + "\t" + line + "\n"
-    return result
+
+def _format_xml_diff_output(changes):
+    """Format raw xmldiff output consistently for CLI/report consumption.
+
+    Shared by :func:`txt_xml_diff` and :func:`abx_xml_diff` so both XML-diff
+    code paths (plain-text XML vs. ABX-decoded XML) produce identically
+    tab-indented output, since :func:`xml_diff_helper` treats their return
+    values interchangeably.
+
+    :param changes: The raw formatted diff string from xmldiff's ``DiffFormatter``.
+    :type changes: str
+    :returns: A tab-indented, newline-terminated diff string, or a
+        "No change detected" message when *changes* is empty.
+    :rtype: str
+    """
+    if not changes:
+        return "\tNo change detected\n"
+    return "".join(f"\t{line}\n" for line in changes.splitlines())
+
+
+def _convert_abx_to_xml_string(file_path):
+    """Decode an ABX (Android Binary XML) file into a unicode XML string.
+
+    :param file_path: The full path to the ABX file to decode.
+    :type file_path: str
+    :returns: The decoded document as a unicode XML string.
+    :rtype: str
+    :raises OSError: If the file cannot be opened or read.
+    :raises ValueError: If the ABX magic header or a length field is invalid.
+    :raises AbxDecodeError: If the ABX token stream is structurally malformed.
+    """
+    with open(file_path, "rb") as abx_file:
+        reader = AbxReader(abx_file)
+        document = reader.read(is_multi_root=True)
+    return xmltree.tostring(document.getroot(), encoding="unicode")
 
 
 def abx_xml_diff(file_path1, file_path2):
     """Calculates the differences between two ABX XML files.
 
-    Converts ABX binary XML files to text XML using ccl_abx, then delegates
-    to txt_xml_diff for the actual comparison.
+    Decodes both files in-process using the repo's own ``AbxReader``
+    decoder (:mod:`sandroid.core.ccl_abx`) and diffs the resulting XML
+    strings directly -- no subprocess, no temporary files.
 
-    :param file_path1: The full path to the first ABX XML file.
+    :param file_path1: The full path to the first ABX file.
     :type file_path1: str
-    :param file_path2: The full path to the second ABX XML file.
+    :param file_path2: The full path to the second ABX file.
     :type file_path2: str
     :returns: A formatted string naming entries that have been added and removed.
     :rtype: str
@@ -413,56 +447,31 @@ def abx_xml_diff(file_path1, file_path2):
     logger.debug("Calculating ABX XML Diff between both versions of " + file_path1)
     logger.debug({"file_path1": file_path1, "file_path2": file_path2})
 
-    # Convert the ABX files to XML in memory
     try:
-        first_xml_result = subprocess.run(
-            ["python3", "src/utils/ccl_abx.py", file_path1, "-mr"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        first_xml = first_xml_result.stdout
-    except OSError as e:
-        logger.error(f"Failed to start ABX conversion process: {e}")
-        return "\tError: ABX conversion failed - python3 or ccl_abx.py not found"
-    except subprocess.SubprocessError as e:
-        logger.error(f"Subprocess error during ABX conversion: {e}")
-        return "\tError: ABX conversion subprocess failed"
+        first_xml = _convert_abx_to_xml_string(file_path1)
+        second_xml = _convert_abx_to_xml_string(file_path2)
+    except (OSError, ValueError, AbxDecodeError) as exc:
+        logger.error(f"Failed to convert ABX files for diff: {exc}")
+        return "\tFailed to convert ABX files for diff\n"
 
+    logger.debug("Converted ABX files to XML via AbxReader")
+    logger.debug(
+        {
+            "file_path1": file_path1,
+            "file_path2": file_path2,
+            "first_xml_length": len(first_xml),
+            "second_xml_length": len(second_xml),
+        }
+    )
+
+    formatter = formatting.DiffFormatter(pretty_print=True)
     try:
-        second_xml_result = subprocess.run(
-            ["python3", "src/utils/ccl_abx.py", file_path2, "-mr"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        second_xml = second_xml_result.stdout
-    except OSError as e:
-        logger.error(f"Failed to start ABX conversion process: {e}")
-        return "\tError: ABX conversion failed - python3 or ccl_abx.py not found"
-    except subprocess.SubprocessError as e:
-        logger.error(f"Subprocess error during ABX conversion: {e}")
-        return "\tError: ABX conversion subprocess failed"
-
-    logger.debug("Converting ABX files to XML")
-    logger.debug({"first_xml": first_xml, "second_xml": second_xml})
-
-    # Write the converted XML into temporary files.
-    with (
-        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp1,
-        tempfile.NamedTemporaryFile(mode="w", delete=True) as temp2,
-    ):
-        temp1.write(first_xml)
-        temp2.write(second_xml)
-        temp1.flush()
-        temp2.flush()
-        temp1_name = temp1.name
-        temp2_name = temp2.name
-        diff = txt_xml_diff(temp1.name, temp2.name)
-
-    if diff.strip() == "":
+        changes = main.diff_texts(first_xml, second_xml, formatter=formatter)
+    except etree.XMLSyntaxError as e:
+        logger.error(f"XML Syntax Error encountered while diffing ABX XML: {e}")
         return "\tNo change detected\n"
-    return diff
+
+    return _format_xml_diff_output(changes)
 
 
 def xml_diff_beautify(raw_diff_string):
