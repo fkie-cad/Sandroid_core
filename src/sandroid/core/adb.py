@@ -98,6 +98,21 @@ class Adb:
             return f"-s {target} {command}"
         return command
 
+    @classmethod
+    def _build_shell_command(cls, command: str) -> str:
+        """Return a shell-safe command string with a quoted ADB path.
+
+        ADB_PATH is concatenated directly into a shell=True subprocess
+        invocation at the call sites below; on Windows (or any POSIX install
+        under a space-containing path) an unquoted path would be split into
+        multiple shell tokens. Wraps the path in double quotes only when it
+        contains a space, so the common no-space case is unaffected.
+        """
+        adb_path = cls.ADB_PATH or "adb"
+        if " " in adb_path:
+            adb_path = f'"{adb_path}"'
+        return f"{adb_path} {command}"
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -155,7 +170,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             output = subprocess.run(
-                [cls.ADB_PATH + " " + full_command],
+                [cls._build_shell_command(full_command)],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -202,7 +217,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             process = subprocess.Popen(
-                [cls.ADB_PATH + " " + full_command],
+                [cls._build_shell_command(full_command)],
                 stdout=PIPE,
                 stdin=subprocess.DEVNULL,  # Changed from PIPE - ADB doesn't need stdin
                 stderr=PIPE,
@@ -241,7 +256,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             output = subprocess.run(
-                [cls.ADB_PATH + " " + full_command],
+                [cls._build_shell_command(full_command)],
                 check=False,
                 capture_output=True,
                 text=True,

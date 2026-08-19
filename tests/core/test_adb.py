@@ -208,3 +208,18 @@ def test_get_current_avd_name_default_forwards_no_serial(monkeypatch):
     Adb.get_current_avd_name()
 
     assert calls == [None]
+
+
+# ---------------------------------------------------------------------------
+# _build_shell_command
+# ---------------------------------------------------------------------------
+
+
+def test_build_shell_command_quotes_adb_path_only_when_it_has_a_space(monkeypatch):
+    monkeypatch.setattr(Adb, "ADB_PATH", "adb")
+    assert Adb._build_shell_command("shell getprop foo") == "adb shell getprop foo"
+
+    monkeypatch.setattr(Adb, "ADB_PATH", r"C:\Program Files\platform-tools\adb.exe")
+    assert Adb._build_shell_command("shell getprop foo") == (
+        '"C:\\Program Files\\platform-tools\\adb.exe" shell getprop foo'
+    )
