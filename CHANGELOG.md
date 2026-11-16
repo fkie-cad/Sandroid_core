@@ -17,7 +17,7 @@ persistent run history, and an experimental AI Chat assistant.
 - **Legacy Rich interactive mode removed**: `sandroid -i` / `--interactive` no longer exist — use the Textual TUI (`sandroid`) or `--headless`.
 - **`--ai` removed**: the Gemini-based video summarisation feature and its API-key setting are gone, superseded by the new (experimental) AI Chat.
 - **TUI views removed**: the Forensic / Malware / Security views (`TAB`) were replaced by a single flat action catalog; `--view` and `analysis.default_view` no longer have any effect in the TUI (`--mode` for `--headless` is unchanged).
-- **TUI layout changed**: the `Ctrl+B` bottom panel was replaced by always-on tool tabs (Spotlight / Network / Snapshots / Files) with `Shift+Arrow` navigation; Record/Play moved into **Files → Diffs**.
+- **TUI layout changed**: the `Ctrl+B` bottom panel was replaced by always-on tool tabs (Spotlight / Network / Snapshots / Files) with `Shift+Arrow` navigation; Record/Play results live in **Files → Diffs** (`r`/`p` work from every panel). Global `1`–`8` must be pressed twice to load a snapshot slot; Snapshots refresh is `Ctrl+R`, Watchlist pull is `u`/`U`.
 - The internal `ActionQ`/`DataGather` analysis pipeline was replaced by `AnalysisEngine`; third-party code importing those internals must be updated.
 - The on-device proxy redirector changed from `ipt2socks` to `gost`.
 

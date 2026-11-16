@@ -74,7 +74,7 @@ Navigation: `Ctrl+B` focuses the tool tabs, `Shift+←/→` cycles tabs/sub-tabs
 
 ### Record → Play and run history
 
-In **Files → Diffs**, `r` records your interactions with the device and `p` plays them back: Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Diffs tab's run history, scoped to the active device. Runs are never deleted automatically.
+From any panel, `r` records your interactions with the device (Esc/Enter in the recording window stops and saves) and `p` plays them back, landing on **Files → Diffs**: Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Diffs tab's run history, scoped to the active device. Runs are never deleted automatically.
 
 ### File monitor (kprobe)
 
@@ -236,22 +236,24 @@ This app is designed to **create specific forensic artefacts with pinpoint accur
 To use it, simply install it on the emulator using Sandroid's built-in APK installer and open the app.
 
 ## Supported Artefacts
-In the current version, the ground truth app supports nine different artefacts
-- Creating a new file
-- Adding an entry to a Database
-- Deleting an entry from a Database
-- Updating an entry in a Database
-- Sending a specific number of bytes to a specific URL
-- Starting a specific process
-- Adding an entry to a XML file
-- Deleting an entry from a XML file
-- Updating an entry in a XML file
-Simply press the corresponding button to generate the Artefact
+The app shows ten buttons; nine of them create an artefact (button label in quotes):
+- "Create a new file" – `files/file_<n>.txt`
+- "Add Database Entry" – row in `GroundTruth.db`
+- "Delete Database Entry" – row removed from `GroundTruth.db`
+- "Update Database Entry" – row updated in `GroundTruth.db`
+- "Send 42 Bytes to 'fkie.fraunhofer.de'" – 42 bytes over TCP to `fkie.fraunhofer.de:443`
+- "Start process 'yes'" – a running `yes` process
+- "Add XML Entry" – entry in `GroundTruth.xml`
+- "Delete XML Entry" – entry removed from `GroundTruth.xml`
+- "Update XML Entry" – entry updated in `GroundTruth.xml`
+
+The tenth button, "Download APK", is a placeholder and currently does nothing (no artefact).
+Simply press the corresponding button to generate the artefact.
 
 ## Some considerations
 - Values added to the XML file and the Database will be the current unix time on the emulator. It can deviate from the actual time but will be automatically be highlighted in the output.
 - The first time the application is launched after installation, the XML file and database will be initialised, and Android will create a profile for the application, so **it is recommended that you open the application first, and only then start any analysis.**
-- The XML and database files are called `GroundTruth.xml` and `GroundTruth.db` respectively and are stored in the applications directory.
+- The XML and database files are called `GroundTruth.xml` and `GroundTruth.db` respectively and are stored in the applications directory. `GroundTruth.db` is only created by the first database button, and SQLite keeps fresh writes in `GroundTruth.db-wal` (with `-shm`) until a checkpoint, so expect those files in the diff as well.
 
 ## Documentation
 

@@ -179,18 +179,22 @@ class FridaInstallModal(FridaModal[FridaInstallResult]):
         border: solid $success;
         width: 55;
         max-width: 80%;
-        max-height: 50%;
+        max-height: 80%;
     }
 
     FridaInstallModal .modal-title {
         color: $success;
     }
 
+    /* Full width so long messages ("Spawning an app requires Frida server
+       to be running.") wrap instead of being cut off at the border. */
     FridaInstallModal .modal-message {
+        width: 100%;
         margin-bottom: 1;
     }
 
     FridaInstallModal #frida-device {
+        width: 100%;
         color: $accent;
         text-align: center;
         margin-bottom: 1;

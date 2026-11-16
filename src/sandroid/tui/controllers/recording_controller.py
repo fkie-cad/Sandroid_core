@@ -274,9 +274,9 @@ class RecordingController:
         — which shows the combined Record-settings form (idea B: name +
         replays + dry-run) *immediately*, before anything else happens.
         Recording itself (the pre-snapshot and ``RecordingWrapper`` start)
-        only begins once that form is resolved (Save or Cancel — Cancel just
-        keeps the auto-generated defaults, it does not abort). The chosen
-        name (or the auto-generated default if left blank/Escaped) seeds the
+        only begins once that form is confirmed (Cancel/Esc there aborts the
+        recording -- reported as "Recording cancelled"). The chosen
+        name (or the auto-generated default if left blank) seeds the
         default label for *every subsequent Play of this same recording* — it
         is not a one-time identity — and the replay-count/dry-run choices seed
         both the auto-chained playback and every later manual Play. A per-run
@@ -521,8 +521,12 @@ class RecordingController:
         # Check if snapshot exists - but don't block if we can't verify
         snapshot_verified = self._verify_snapshot()
         if not snapshot_verified:
-            self._log_warning(
-                "Could not verify snapshot path - proceeding anyway (recording created it)"
+            # Expected whenever the host-side AVD dir isn't where we guess
+            # (custom ANDROID_AVD_HOME, AVD name != device name, ...); the
+            # engine loads the snapshot via the emulator console anyway.
+            logger.debug(
+                "Could not verify snapshot path - proceeding anyway "
+                "(recording created it)"
             )
 
         self._log_info("Starting playback analysis...")

@@ -408,7 +408,8 @@ class SpotlightService:
             enabled: True to enable auto-resume
         """
         self._auto_resume = enabled
-        self._logger.info(f"Auto-resume {'enabled' if enabled else 'disabled'}")
+        # debug: the UI that toggles it already reports the new state.
+        self._logger.debug(f"Auto-resume {'enabled' if enabled else 'disabled'}")
 
     def get_spawn_mode_string(self) -> str:
         """Get the current spawn mode setting as a descriptive string.

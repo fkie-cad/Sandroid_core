@@ -117,7 +117,9 @@ class SnapshotsPanel(Widget):
         ("l", "load", "Load"),
         ("d", "delete", "Delete"),
         ("a", "assign", "Assign slot"),
-        ("r", "refresh", "Refresh"),
+        # Ctrl+R, not r: plain r is the global Record key and must work on
+        # every panel.
+        ("ctrl+r", "refresh", "Refresh"),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -173,7 +175,7 @@ class SnapshotsPanel(Widget):
             yield Static("l load", id="snap-load", classes="act-cell")
             yield Static("d delete", id="snap-delete", classes="act-cell")
             yield Static("a slot", id="snap-assign", classes="act-cell")
-            yield Static("r refresh", id="snap-refresh", classes="act-cell")
+            yield Static("^r refresh", id="snap-refresh", classes="act-cell")
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -645,11 +647,27 @@ class SnapshotsPanel(Widget):
 
     # -- slot operations (load / save / assign) ---------------------------
 
+    def slot_tag(self, slot: int | str) -> str | None:
+        """Tag assigned to ``slot`` if it could be loaded right now, else None.
+
+        Used by the app's double-press guard for the global 1-8 keys: only a
+        loadable slot needs arming; anything else is reported immediately by
+        :meth:`load_slot`.
+        """
+        try:
+            if not self._emulator_available():
+                return None
+            return self._slot_map().get(str(slot)) or None
+        except Exception:
+            return None
+
     def load_slot(self, slot: int | str) -> None:
-        """Load the snapshot assigned to ``slot`` (no confirm — deliberate key).
+        """Load the snapshot assigned to ``slot`` (no confirm here).
 
         Reachable from the app's ``1``-``8`` bindings even when the tab is not
-        on screen, so it never depends on a populated list.
+        on screen, so it never depends on a populated list. The app arms the
+        load on the first digit and calls this on the second (see
+        ``SandroidTUI.action_load_slot``).
         """
         if not self._require_emulator():
             return

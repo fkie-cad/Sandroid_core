@@ -11,22 +11,12 @@ from textual.widgets import Input, Static
 
 from sandroid.core.enums import ViewMode
 from sandroid.core.menu_controller import Action, MenuController
+from sandroid.tui.key_display import format_key
 
 
 def _format_key_display(key: str) -> str:
-    """Format an action key for display.
-
-    Args:
-        key: Raw key string from Action
-
-    Returns:
-        Formatted display string
-    """
-    if len(key) > 1:
-        return key.upper()
-    if key == " ":
-        return "SPACE"
-    return key
+    """Format an action key for display (``C`` -> ``Shift+C``, ``c`` -> ``c``)."""
+    return format_key(key, "long")
 
 
 class CommandPalette(ModalScreen):

@@ -76,11 +76,16 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
     :meth:`RecordingModal._prompt_settings`/``_start_recording``) — it
     collects the three things the auto-chained playback needs. Modelled on
     :class:`~sandroid.tui.modals.export_modal.ExportModal`'s Checkbox+Input
-    layout. Dismisses with a :class:`RecordSettings`, or ``None`` on cancel
-    (the caller keeps its defaults and still starts recording with them —
-    cancelling this form only means "skip customizing the name", not "abort
-    recording").
+    layout. Dismisses with a :class:`RecordSettings`, or ``None`` on
+    Cancel/Esc, which aborts the recording (nothing is captured) -- exactly
+    what the button and the footer say.
     """
+
+    #: Same text for every focused widget type: Enter submits from the inputs
+    #: too (``ENTER_SUBMITS_FROM_INPUT``).
+    FOOTER_HINT = (
+        "[dim]Enter=Start  Tab=Next  Esc=Cancel (nothing recorded)[/dim]"
+    )
 
     DEFAULT_CSS = """
     RecordSettingsModal .modal-container {
@@ -126,7 +131,7 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
         with Vertical(classes="modal-container"):
             yield Label("Record settings", classes="modal-title")
             yield Label(
-                "Name this run, then press Start to begin recording.",
+                "Name this run, then press Start Recording (Enter).",
                 classes="modal-message",
             )
             yield Label("Run name:", classes="rs-field-label")
@@ -150,7 +155,12 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
             with Horizontal(classes="button-row"):
                 yield Button("Start Recording", id="rs-save", classes="-primary")
                 yield Button("Cancel", id="rs-cancel", classes="-secondary")
-            yield KeyHintFooter()
+            yield KeyHintFooter(
+                hints=dict.fromkeys(
+                    ("default", "input", "button", "list", "radioset"),
+                    self.FOOTER_HINT,
+                )
+            )
 
     def on_mount(self) -> None:
         """Focus the name input on mount."""
@@ -220,6 +230,13 @@ class RecordingModal(ExtractionModal[RecordingResult]):
 
     RecordingModal .modal-container.recording {
         border: solid $error;
+    }
+
+    /* While the Record-settings form is on top, the (still empty) recording
+       window behind it showed as a ghost box -- keep it hidden until capture
+       actually starts. */
+    RecordingModal .modal-container.awaiting-settings {
+        display: none;
     }
 
     RecordingModal .modal-title.recording {
@@ -433,6 +450,7 @@ class RecordingModal(ExtractionModal[RecordingResult]):
 
     def watch_is_recording(self, recording: bool) -> None:
         """React to recording state changes."""
+        self._update_key_hints(recording)
         if self._on_recording_active_changed:
             try:
                 self._on_recording_active_changed(recording)
@@ -451,7 +469,11 @@ class RecordingModal(ExtractionModal[RecordingResult]):
                 title.update("Recording...")
                 btn_start.add_class("hidden")
                 btn_stop.add_class("visible")
-                hint.update("[dim]Press Stop or Escape to stop recording[/dim]")
+                hint.update(
+                    "[dim]Stop, Enter or Esc = stop & save; the replay starts "
+                    "automatically. Discard throws the recording away.[/dim]"
+                )
+                self.query_one("#btn-cancel", Button).label = "Discard"
                 btn_stop.focus()
             else:
                 container.remove_class("recording")
@@ -459,11 +481,30 @@ class RecordingModal(ExtractionModal[RecordingResult]):
                 title.update("Record Input Events")
                 btn_start.remove_class("hidden")
                 btn_stop.remove_class("visible")
+                self.query_one("#btn-cancel", Button).label = "Cancel"
                 hint.update(
                     "[dim]Interact with the device to record input events[/dim]"
                 )
         except Exception:
             pass
+
+    #: Footer text per state. Esc/Enter/Ctrl+C STOP AND SAVE while
+    #: recording (they used to be labelled "Esc=Cancel").
+    HINT_IDLE = "[dim]Enter=Start  Tab=Next  Esc=Cancel[/dim]"
+    HINT_RECORDING = (
+        "[dim]Esc/Enter=Stop & save (then replay)  Tab=Next  Discard=throw away[/dim]"
+    )
+
+    def _update_key_hints(self, recording: bool) -> None:
+        """Make the footer describe what Esc/Enter really do right now."""
+        text = self.HINT_RECORDING if recording else self.HINT_IDLE
+        try:
+            footer = self.query_one(KeyHintFooter)
+        except Exception:
+            return
+        for kind in ("default", "input", "list", "button", "radioset"):
+            footer.set_hint(kind, text)
+        footer.update(text)
 
     def watch_elapsed_seconds(self, seconds: int) -> None:
         """Update elapsed time display."""
@@ -549,15 +590,14 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         This is now the very first thing that happens (mount for
         ``auto_start``, or Start-button/Enter otherwise) — nothing blocking
         precedes it, so the form appears instantly. Only once it is
-        dismissed (Save *or* Cancel — Cancel just keeps the auto-generated
-        defaults, it does not abort the recording) does
-        :meth:`_start_recording` run: takes the pre-snapshot and actually
-        starts capturing. This fixes the old order, where the snapshot,
-        capture and elapsed timer silently ran first and the naming form
-        only appeared afterwards.
+        confirmed (Start Recording / Enter) does :meth:`_start_recording`
+        run: takes the pre-snapshot and actually starts capturing. Cancel/Esc
+        on the form aborts the whole recording. This fixes the old order,
+        where the snapshot, capture and elapsed timer silently ran first and
+        the naming form only appeared afterwards.
 
         Only ever shown once per recording session. The chosen name (or the
-        auto-generated default, kept on Esc/blank), replay count and dry-run
+        auto-generated default, kept when blank), replay count and dry-run
         flag are cached on ``self`` and forwarded live via
         ``on_settings_chosen`` — see ``RecordingController.start_recording()``
         for why they need to seed future Plays before this whole modal even
@@ -566,17 +606,18 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         if self._settings_prompted:
             return
         self._settings_prompted = True
+        self._set_container_hidden(True)
 
         def on_result(settings: RecordSettings | None) -> None:
             if settings is None:
-                # Cancelled — keep the auto-generated defaults untouched.
-                label = self._default_label
-                number_of_runs = self._default_number_of_runs
-                noise_filter = self._default_noise_filter
-            else:
-                label = settings.label or self._default_label
-                number_of_runs = settings.number_of_runs
-                noise_filter = settings.noise_filter
+                # Cancel/Esc on the form aborts: nothing is recorded (the form
+                # says "Esc=Cancel (nothing recorded)").
+                self._cancel()
+                return
+            self._set_container_hidden(False)
+            label = settings.label or self._default_label
+            number_of_runs = settings.number_of_runs
+            noise_filter = settings.noise_filter
             self._chosen_label = label
             self._number_of_runs = number_of_runs
             self._noise_filter = noise_filter
@@ -597,6 +638,12 @@ class RecordingModal(ExtractionModal[RecordingResult]):
             ),
             on_result,
         )
+
+    def _set_container_hidden(self, hidden: bool) -> None:
+        try:
+            self.query_one(".modal-container").set_class(hidden, "awaiting-settings")
+        except Exception:
+            pass
 
     def _start_recording(self) -> None:
         """Take the pre-recording snapshot, then start capture.

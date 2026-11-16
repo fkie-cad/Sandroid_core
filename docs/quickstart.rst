@@ -69,9 +69,9 @@ First Analysis - Recording User Actions
 
 **2. Record User Interactions**
 
-   Open **Files -> Diffs** and press ``r``. Sandroid saves a snapshot of the
-   current device state, then records your touch input until you stop the
-   recording.
+   Press ``r`` (from any panel). Name the run, confirm with ``Enter``;
+   Sandroid saves a snapshot of the current device state, then records your
+   touch input until you stop the recording (``Esc``/``Enter``).
 
 **3. Perform Actions on Device**
 
@@ -82,7 +82,8 @@ First Analysis - Recording User Actions
 
 **4. Play and View Results**
 
-   Press ``p`` in **Files -> Diffs**. Sandroid reverts to the snapshot, replays
+   Stopping the recording starts the replay automatically; ``p`` replays it
+   again later. Sandroid opens **Files -> Diffs**, reverts to the snapshot, replays
    your recording, measures background noise with a dry run of the same
    duration and pulls/diffs everything that changed. The result shows:
 

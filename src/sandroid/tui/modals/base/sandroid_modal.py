@@ -116,8 +116,14 @@ class SandroidModal(ModalScreen[T], Generic[T]):
       Textual adds "-style-default" automatically and has a special rule
       for Button.-style-default.-primary that applies tall borders etc.
       That rule is MORE specific than "SandroidModal Button.-primary",
-      so we override it with an even more specific selector.
+      so we override it with an even more specific selector -- for every
+      button, not just -primary: a 1-line -secondary button kept Textual's
+      tall top/bottom borders, which ate its only row and rendered e.g.
+      "Cancel" as a blank bar.
     */
+    SandroidModal Button.-style-default,
+    SandroidModal Button.-style-default:hover,
+    SandroidModal Button.-style-default:focus,
     SandroidModal Button.-style-default.-primary,
     SandroidModal Button.-style-default.-primary:hover,
     SandroidModal Button.-style-default.-primary:focus {

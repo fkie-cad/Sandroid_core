@@ -16,6 +16,10 @@ Sandroid features a streamlined installation process with automatic Android envi
    # Initialize with automatic Android environment setup
    sandroid-config init
 
+Without a terminal (scripts, CI, ``docker run`` without ``-t``) or with
+``--yes``, ``sandroid-config init`` asks nothing: it uses the detected paths,
+the first existing AVD and default settings.
+
 The ``sandroid-config init`` command provides:
 
 - 🔍 **Automatic Android SDK detection**

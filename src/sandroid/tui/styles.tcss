@@ -447,6 +447,16 @@ Button.-primary {
     color: #050811;
 }
 
+/* Secondary (Cancel/Close/Discard) must not look like the primary action. */
+Button.-secondary {
+    background: #1f2a3d;
+    color: #cbd5e1;
+}
+
+Button.-secondary:hover {
+    background: #334155;
+}
+
 /* ========== Logo Styling ========== */
 /* Logo colors are defined in the theme and can be customized:
    - logo_color: Main ASCII art color (default: #00ff00 bright green)

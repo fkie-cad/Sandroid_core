@@ -16,6 +16,7 @@ from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
 
 from sandroid.core.menu_controller import Action, ActionCategory, MenuController
+from sandroid.tui.key_display import format_key
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,43 @@ _CATEGORY_ORDER: list[ActionCategory] = [
     ActionCategory.NAVIGATION,
 ]
 
+# Panel-scoped keys: read straight from each panel's own BINDINGS so the
+# catalog can never drift from what the panels actually do. Shown (fixed, not
+# rebindable) after the global categories: (heading, module, class name).
+_PANEL_SECTIONS: list[tuple[str, str, str]] = [
+    ("Tool panel navigation", "sandroid.tui.screens.main_screen", "_ToolPanel"),
+    ("Spotlight panel", "sandroid.tui.widgets.spotlight_panel", "SpotlightPanel"),
+    ("Files › Diffs", "sandroid.tui.widgets.diffs_view", "DiffsView"),
+    ("Files › Watchlist", "sandroid.tui.widgets.watchlist_view", "WatchlistView"),
+    ("Snapshots panel", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
+    ("Network › mitmproxy", "sandroid.tui.widgets.mitmproxy_panel", "MitmproxyPanel"),
+    ("Network › friTap", "sandroid.tui.widgets.fritap_panel", "FriTapPanel"),
+]
+
+
+#: Option-id prefix of the (non-rebindable) panel-key rows.
+_PANEL_PREFIX = "panel:"
+
+
+def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
+    """``[(key, description)]`` of a panel class's own BINDINGS (best effort)."""
+    import importlib
+
+    try:
+        cls = getattr(importlib.import_module(module), cls_name)
+    except Exception:
+        return []
+    rows: list[tuple[str, str]] = []
+    for entry in cls.__dict__.get("BINDINGS", []):
+        if isinstance(entry, Binding):
+            key, desc = entry.key, entry.description
+        else:
+            key, desc = entry[0], (entry[2] if len(entry) > 2 else "")
+        if desc:
+            rows.append((key, desc))
+    return rows
+
+
 # Column widths for the aligned row layout (command / description / key).
 # Sized for the wide modal so rows rarely truncate; the detail pane below the
 # list always shows the highlighted row's full, untruncated text regardless.
@@ -76,33 +114,13 @@ _KEY_W = 14
 
 
 def _format_key_display(key: str) -> str:
-    """Format a key string for human display.
+    """Format a key string for human display, keeping Shift visible.
 
-    Title-cases each ``+``-split part and humanises a few common keys
-    (e.g. ``ctrl+y`` -> ``Ctrl+Y``, ``space`` -> ``Space``).
-
-    Args:
-        key: Raw key string (e.g. ``"ctrl+y"``, ``" "``, ``"C"``).
-
-    Returns:
-        Human-readable representation of the key.
+    ``c`` stays ``c`` while ``C`` (Shift+C) becomes ``Shift+C`` -- the old
+    upper-casing made every lower/upper pair (c/C, e/E, f/F, g/G) look
+    identical. See :func:`sandroid.tui.key_display.format_key`.
     """
-    if not key:
-        return "—"
-    if key == " " or key == "space":
-        return "Space"
-    parts = key.split("+")
-    out: list[str] = []
-    for part in parts:
-        if not part:
-            continue
-        if len(part) == 1:
-            # Single chars: uppercase letters stay as-is (e.g. Shift+C is
-            # already represented by the raw "C"); just upper for display.
-            out.append(part.upper())
-        else:
-            out.append(part.title())
-    return "+".join(out)
+    return format_key(key, "long")
 
 
 class HelpScreen(ModalScreen):
@@ -289,7 +307,7 @@ class HelpScreen(ModalScreen):
         """Description-column text, with slot assignment for slot rows."""
         if action.name.startswith("load_slot_"):
             tag = slots.get(action.name.rsplit("_", 1)[-1])
-            return f"→ {tag}" if tag else "(empty)"
+            return f"→ {tag} (press twice)" if tag else "(empty)"
         if action.name.startswith("save_slot_"):
             return "save current state"
         return action.description or action.display_name
@@ -363,7 +381,15 @@ class HelpScreen(ModalScreen):
             option_list.add_option(Option(f"[dim]{header}[/]", disabled=True))
             index += 1
 
-            for action in sorted(actions, key=lambda a: a.display_name.lower()):
+            # The demo/main flow (Record, Play) leads; the rest alphabetical.
+            for action in sorted(
+                actions,
+                key=lambda a: (
+                    a.name not in ("record", "play"),
+                    a.name != "record",
+                    a.display_name.lower(),
+                ),
+            ):
                 rebindable = action.name in self._defaults
                 key = self._effective_key(action.name) if rebindable else action.key
                 key_display = _format_key_display(key)
@@ -382,6 +408,27 @@ class HelpScreen(ModalScreen):
                     option_list.add_option(
                         Option(f"[dim]{label}  (fixed)[/]", disabled=True)
                     )
+                index += 1
+
+        for heading, module, cls_name in _PANEL_SECTIONS:
+            rows = _panel_bindings(module, cls_name)
+            if not rows:
+                continue
+            option_list.add_option(
+                Option(f"[dim]── {heading} (when focused) ──[/]", disabled=True)
+            )
+            index += 1
+            for key, desc in rows:
+                label = self._columns(
+                    desc, heading, _format_key_display(key), colored=False
+                )
+                # Enabled (so the list can scroll down to it from the
+                # keyboard) but not rebindable: no id in self._defaults.
+                option_list.add_option(
+                    Option(
+                        f"[#8b949e]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{key}"
+                    )
+                )
                 index += 1
 
         # Restore / set highlight to a sane enabled index.
@@ -424,6 +471,15 @@ class HelpScreen(ModalScreen):
 
     def _detail_markup(self, action_id: str) -> str:
         """Full, untruncated detail for one action: name · category, description, key."""
+        if action_id.startswith(_PANEL_PREFIX):
+            heading, _, key = action_id[len(_PANEL_PREFIX) :].partition("|")
+            return (
+                f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
+                "[#c9d1d9]Works only while this panel has focus "
+                "(Shift+←/→ or a click switches panels).[/]\n\n"
+                f"[dim]Key[/]  [#8b949e]\\[{_format_key_display(key)}][/]"
+                "   [dim](fixed — cannot be rebound)[/]"
+            )
         action = self._controller.get_action_by_name(action_id)
         if action is None:
             return ""

@@ -224,13 +224,14 @@ async def test_rename_run_persists_via_run_history() -> None:
 
 
 class _RPHarness(App):
-    """Host app for the panel-scoped r/p bindings (idea A).
+    """Host app with *app-level* r/p bindings, like ``SandroidTUI``.
 
-    Exposes ``action_record``/``action_play`` (the App-namespace targets the
-    DiffsView bindings route to via ``app.record``/``app.play``) as call
-    counters, plus a non-Diffs focusable widget (an ``Input``) so we can prove
-    r/p are inert unless the Diff panel itself is focused.
+    Record/Play used to be panel-scoped to the Diffs view, which made them
+    undiscoverable (``r`` on the main screen did nothing). They are global
+    app bindings now; DiffsView no longer declares its own r/p.
     """
+
+    BINDINGS = [("r", "record", "Record"), ("p", "play", "Play")]
 
     def __init__(self) -> None:
         super().__init__()
@@ -248,29 +249,31 @@ class _RPHarness(App):
         self.play_calls += 1
 
 
-@pytest.mark.asyncio
-async def test_rp_bindings_are_panel_scoped_to_diffs() -> None:
-    """r/p fire only while the Diff panel is focused; inert elsewhere.
+def test_diffs_view_does_not_shadow_global_record_play() -> None:
+    keys = {(b[0] if isinstance(b, tuple) else b.key) for b in DiffsView.BINDINGS}
+    assert "r" not in keys
+    assert "p" not in keys
 
-    The global r/p bindings were removed from app.py, so with focus on an
-    unrelated widget pressing them must NOT reach app.record/app.play; with
-    the Diff panel focused they route through DiffsView.BINDINGS.
+
+@pytest.mark.asyncio
+async def test_rp_reach_app_from_diffs_but_not_from_text_input() -> None:
+    """r/p fire the app actions with the Diff panel focused.
+
+    Typing them into an Input still just types (Input consumes printable keys).
     """
     app = _RPHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
         await _wait_for(pilot, lambda: view._summaries is not None)
 
-        # Focus a non-Diffs widget: r/p are inert (no global binding).
         app.query_one("#other-widget", Input).focus()
         await pilot.pause()
-        await pilot.press("r")
-        await pilot.press("p")
+        await pilot.press("r", "p")
         await pilot.pause()
         assert app.record_calls == 0
         assert app.play_calls == 0
+        assert app.query_one("#other-widget", Input).value == "rp"
 
-        # Focus the Diff panel: r/p now route to app.record / app.play.
         view.focus()
         await pilot.pause()
         await pilot.press("r")

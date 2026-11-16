@@ -24,6 +24,7 @@ import threading
 import time
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
@@ -106,18 +107,24 @@ class SpotlightPanel(Widget):
     }
     """
 
+    # Only Start/Resume goes into the global footer: the bypass toggles and
+    # the Shift-letter actions are already shown (and clickable) inside the
+    # panel itself, and listing all 11 pushed the global keys (r Record,
+    # p Play, ? Help, ...) off a 200-column footer.
     BINDINGS = [
-        ("1", "toggle_bypass('ssl')", "SSL (exp.)"),
-        ("2", "toggle_bypass('root')", "Root (exp.)"),
-        ("3", "toggle_bypass('frida')", "Frida (exp.)"),
-        ("4", "toggle_bypass('debug')", "Debug (exp.)"),
-        ("5", "toggle_bypass('integrity')", "Integ (exp.)"),
-        ("enter", "primary", "Start/Resume"),
-        ("R", "restart_app", "Restart"),
-        ("A", "attach_app", "Attach"),
-        ("P", "start_paused", "Start paused"),
-        ("K", "kill_app", "Kill"),
-        ("X", "clear_spotlight", "Clear"),
+        Binding("1", "toggle_bypass('ssl')", "Bypass SSL (exp.)", show=False),
+        Binding("2", "toggle_bypass('root')", "Bypass root (exp.)", show=False),
+        Binding("3", "toggle_bypass('frida')", "Bypass Frida (exp.)", show=False),
+        Binding("4", "toggle_bypass('debug')", "Bypass debug (exp.)", show=False),
+        Binding(
+            "5", "toggle_bypass('integrity')", "Bypass integrity (exp.)", show=False
+        ),
+        Binding("enter", "primary", "Start/Resume"),
+        Binding("R", "restart_app", "Restart", show=False),
+        Binding("A", "attach_app", "Attach", show=False),
+        Binding("P", "start_paused", "Start paused", show=False),
+        Binding("K", "kill_app", "Kill", show=False),
+        Binding("X", "clear_spotlight", "Clear", show=False),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -159,11 +166,13 @@ class SpotlightPanel(Widget):
         yield Static(self._render_body(), id="spotlight-body")
         with Horizontal(id="spotlight-actions"):
             yield Static(self._primary_label(), id="act-primary", classes="act-cell")
-            yield Static("R restart", id="act-restart", classes="act-cell")
-            yield Static("A attach", id="act-attach", classes="act-cell")
-            yield Static("P pause", id="act-paused", classes="act-cell")
-            yield Static("K kill", id="act-kill", classes="act-cell")
-            yield Static("X clear", id="act-clear", classes="act-cell")
+            # Shift-letters, shown as ⇧X so they never read like the global
+            # lower-case r/p/a/k/x keys.
+            yield Static("⇧R restart", id="act-restart", classes="act-cell")
+            yield Static("⇧A attach", id="act-attach", classes="act-cell")
+            yield Static("⇧P pause", id="act-paused", classes="act-cell")
+            yield Static("⇧K kill", id="act-kill", classes="act-cell")
+            yield Static("⇧X clear", id="act-clear", classes="act-cell")
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -290,7 +299,7 @@ class SpotlightPanel(Widget):
     def _render_header(self) -> str:
         package = self._current_package()
         if not package:
-            return "[#fb7185]○ no app[/] — press [b]C[/] (attach) / [b]Shift+C[/] (spawn)"
+            return "[#fb7185]○ no app[/] — press [b]c[/] (attach) / [b]⇧C[/] (spawn)"
 
         pid = self._safe_pid()
         paused = self._is_paused()
@@ -318,7 +327,7 @@ class SpotlightPanel(Widget):
         if not package:
             return (
                 "[#5b6479]No spotlight app selected.\n\n"
-                "Press [b]C[/] to attach to the focused app, or [b]Shift+C[/] to "
+                "Press [b]c[/] to attach to the focused app, or [b]Shift+C[/] to "
                 "pick an app to spawn with hooks from the start.[/]"
             )
 
@@ -352,7 +361,7 @@ class SpotlightPanel(Widget):
         on = set(self._on_categories())
         lines.append(
             "[#7dd3fc bold]Bypass[/] "
-            "[#5b6479](1-5 toggle · armed applies on Start)[/]"
+            "[#5b6479](keys 1-5 in this panel · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:
@@ -567,7 +576,7 @@ class SpotlightPanel(Widget):
             self._run_action_bg(self._work_resume, "resume")
         elif self._safe_pid():
             self._notify(
-                "Already running — R restart · A re-attach · K kill",
+                "Already running — ⇧R restart · ⇧A re-attach · ⇧K kill",
                 "information",
             )
         else:
@@ -767,7 +776,7 @@ class SpotlightPanel(Widget):
     def _require_package(self) -> bool:
         if not self._current_package():
             self._notify(
-                "No spotlight app. Press C (attach) or Shift+C (spawn) first.",
+                "No spotlight app. Press c (attach) or Shift+C (spawn) first.",
                 "warning",
             )
             return False

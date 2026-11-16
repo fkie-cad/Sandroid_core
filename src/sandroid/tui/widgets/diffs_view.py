@@ -35,6 +35,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import ContentSwitcher, OptionList, Static
 from textual.widgets.option_list import Option
@@ -59,11 +60,8 @@ class DiffsView(FilesSubViewBase):
     """Play run-history sub-tab: full-width diff detail + bottom Runs bar.
 
     Bindings (when focused):
-        r: start recording (idea A: panel-scoped, routes to ``app.record``;
-           the global ``r`` binding was removed from ``app.py`` so Record
-           only fires while this Diff panel is focused).
-        p: replay the current recording (panel-scoped, routes to
-           ``app.play``; likewise removed from the global map).
+        r / p: Record / replay -- global app keys, they work here too.
+        P: generate the PDF report for the selected run (Shift+P).
         n: rename the selected run (shadows global "n"=Install APK — see
            module docstring).
         delete / backspace: delete the selected run, through a ConfirmModal
@@ -78,15 +76,12 @@ class DiffsView(FilesSubViewBase):
     can_focus = True
 
     BINDINGS = [
-        # Panel-scoped Record/Play (idea A). The ``app.`` namespace routes
-        # these to SandroidTUI.action_record / action_play; the global r/p
-        # bindings were removed from app.py so they fire only while the Diff
-        # panel is focused — the same focused-ancestor mechanism as n/[.
-        ("r", "app.record", "Record"),
-        ("p", "app.play", "Play"),
+        # Record/Play (r/p) are global app bindings (SandroidTUI.BINDINGS),
+        # so they work from every panel, not only here.
         ("n", "rename_run", "Rename run"),
         ("delete", "delete_run", "Delete run"),
-        ("backspace", "delete_run", "Delete run"),
+        # Same action as Del -- keep it out of the footer (listed once).
+        Binding("backspace", "delete_run", "Delete run", show=False),
         ("[", "toggle_rail", "Collapse rail"),
         ("P", "generate_pdf", "PDF report"),
     ]
@@ -203,7 +198,7 @@ class DiffsView(FilesSubViewBase):
                 yield OptionList(id="runs-list")
                 yield Static(
                     "r record · p replay · n rename · del delete · "
-                    "P pdf report · [ collapse",
+                    "⇧P pdf report · [ collapse",
                     id="diffs-actions",
                 )
 

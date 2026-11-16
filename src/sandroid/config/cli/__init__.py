@@ -106,6 +106,41 @@ def _setup_avd_config() -> dict:
     return android_config
 
 
+def _avd_config_from_detection() -> dict:
+    """Non-interactive counterpart of :func:`_setup_avd_config`.
+
+    Uses only what can be detected (SDK, adb, emulator, AVD home) and picks
+    the first existing AVD, with the same defaults the wizard offers (UI on,
+    no auto-start). Never prompts and never creates an AVD.
+    """
+    from sandroid.config.android_env import detect_android_environment
+
+    env = detect_android_environment()
+    android_config: dict = {}
+    for src, dst in (
+        ("sdk_path", "sdk_path"),
+        ("adb_path", "adb_path"),
+        ("emulator_path", "android_emulator_path"),
+        ("avd_home", "avd_home"),
+    ):
+        if env.get(src):
+            android_config[dst] = str(env[src])
+    avds = env.get("available_avds") or []
+    if avds:
+        android_config["selected_avd"] = avds[0]
+        android_config["device_name"] = avds[0]
+        android_config["avd_headless"] = False
+        android_config["avd_auto_start"] = False
+    return android_config
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
 def _setup_tui_config() -> dict:
     """Run the interactive TUI theme setup wizard.
 
@@ -296,6 +331,17 @@ def _assemble_and_save_config(
     is_flag=True,
     help="Skip MVT (Mobile Verification Toolkit) IOC setup during initialization",
 )
+@click.option(
+    "--yes",
+    "-y",
+    "--non-interactive",
+    "non_interactive",
+    is_flag=True,
+    help=(
+        "Don't ask anything: use detected Android paths, the first existing "
+        "AVD and default settings. Implied when stdin is not a terminal."
+    ),
+)
 def init(
     format: str,
     output: str | None,
@@ -303,6 +349,7 @@ def init(
     skip_avd_setup: bool,
     skip_tui_setup: bool,
     skip_mvt_setup: bool,
+    non_interactive: bool = False,
 ):
     """Initialize a new Sandroid configuration file with Android environment setup."""
     from sandroid.config.android_env import find_emulator_path, find_existing_sdk
@@ -320,22 +367,35 @@ def init(
         console.print("Use --force to overwrite or choose a different path.")
         sys.exit(1)
 
+    if not non_interactive and not _stdin_is_tty():
+        # Scripts, CI, `docker run` without -t: the wizard's first prompt
+        # used to die with EOF. Fall back to detection + defaults.
+        non_interactive = True
+        console.print(
+            "[dim]No terminal on stdin -- running non-interactively with "
+            "detected paths and defaults (same as --yes).[/dim]"
+        )
+
     console.print("[bold blue]Initializing Sandroid configuration...[/bold blue]")
 
     try:
         # ---- AVD setup ----
         android_config: dict = {}
         if not skip_avd_setup:
-            android_config = _setup_avd_config()
+            android_config = (
+                _avd_config_from_detection()
+                if non_interactive
+                else _setup_avd_config()
+            )
 
-        # ---- TUI setup ----
+        # ---- TUI setup ----  (defaults when non-interactive)
         tui_config: dict = {}
-        if not skip_tui_setup:
+        if not skip_tui_setup and not non_interactive:
             tui_config = _setup_tui_config()
 
-        # ---- MVT setup ----
+        # ---- MVT setup ----  (stays disabled when non-interactive)
         mvt_config: dict = {}
-        if not skip_mvt_setup:
+        if not skip_mvt_setup and not non_interactive:
             mvt_config = _setup_mvt_config()
 
         # ---- Assemble & save ----
@@ -370,8 +430,13 @@ def init(
                 )
 
         # Ask if user wants to start the AVD now
-        if android_config.get("selected_avd") and Confirm.ask(
-            f"\nStart AVD '{android_config['selected_avd']}' now?", default=False
+        if (
+            android_config.get("selected_avd")
+            and not non_interactive
+            and Confirm.ask(
+                f"\nStart AVD '{android_config['selected_avd']}' now?",
+                default=False,
+            )
         ):
             android_env = {
                 "emulator_path": android_config.get("android_emulator_path")
@@ -402,7 +467,7 @@ def init(
             "\u2022 Use [cyan]sandroid-config ioc[/cyan] to manage IOC files for MVT"
         )
         console.print(
-            "\u2022 Run [cyan]sandroid -i[/cyan] to start Sandroid in TUI mode"
+            "\u2022 Run [cyan]sandroid[/cyan] to start Sandroid (TUI)"
         )
 
     except KeyboardInterrupt:

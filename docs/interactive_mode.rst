@@ -38,18 +38,22 @@ Navigation
 ==========================  ==================================================
 Key                         Action
 ==========================  ==================================================
+``r`` / ``p``               Record / Play (replay + diff) -- from any panel
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
 ``Ctrl+B``                  Focus the tool tabs
 ``Shift+Left/Right``        Previous/next tab (or sub-tab)
 ``Shift+Up/Down``           Move between tab levels (tabs / sub-tabs)
 ``Ctrl+Y``                  Toggle the AI Chat dock
-``D``                       Switch device
+``D`` (Shift+D)             Switch device
 ``q`` / ``Ctrl+C``          Quit
 ==========================  ==================================================
 
 Every binding can be changed in the ``?`` editor (with live conflict
-detection); overrides are stored in ``tui.keybindings`` in your config.
+detection); overrides are stored in ``tui.keybindings`` in your config. Keys
+are case-sensitive: an upper-case key means Shift+key and is shown as ``⇧R``
+in the footer and ``Shift+R`` in the ``?`` list. The ``?`` list also shows
+each panel's own keys (they only work while that panel has focus).
 
 Tool Tabs
 ---------
@@ -57,12 +61,12 @@ Tool Tabs
 Spotlight
 ~~~~~~~~~
 
-The app under investigation. ``c`` attaches to the foreground app, ``C`` spawns
-an installed app as spotlight. With the tab focused:
+The app under investigation. ``c`` attaches to the foreground app, ``C``
+(Shift+C) spawns an installed app as spotlight. With the tab focused:
 
-- ``Enter`` start (or resume a paused start), ``A`` attach, ``P`` start paused,
-  ``R`` restart with the armed hooks, ``K`` kill and tear down hooks, ``X``
-  clear the selection
+- ``Enter`` start (or resume a paused start), Shift+``A`` attach, Shift+``P``
+  start paused, Shift+``R`` restart with the armed hooks, Shift+``K`` kill and
+  tear down hooks, Shift+``X`` clear the selection
 - ``1``-``5`` toggle/arm the Frida bypass categories **SSL**, **Root**,
   **Frida**, **Debug** and **Integrity** (PairIP/licensing/attestation).
   ``Ctrl+P`` toggles SSL unpinning globally.
@@ -98,8 +102,10 @@ Snapshots
 ~~~~~~~~~
 
 AVD snapshot list: ``c`` create, ``l`` load, ``d`` delete, ``a`` assign to a
-slot, ``r`` refresh. Globally, ``0`` opens the tab, ``1``-``8`` load a slot
-and ``Ctrl+1``-``Ctrl+8`` save the current state into a slot (8 slots per AVD).
+slot, ``Ctrl+R`` refresh. Globally, ``0`` opens the tab, ``1``-``8`` **pressed
+twice** (within 3 s) load a slot -- the first press only asks, because loading
+reverts the emulator and ``1``-``5`` are also Spotlight's bypass toggles -- and
+``Ctrl+1``-``Ctrl+8`` save the current state into a slot (8 slots per AVD).
 Snapshots require an emulator.
 
 Files
@@ -110,13 +116,18 @@ Files
   child-tree attribution, path-scoped capture, nothing pushed to the device)
   and falls back to ``fsmon`` automatically (``tui.monitor_backend``).
   Per-category visibility is configurable in the Monitor settings.
-- **Watchlist** -- Spotlight Files: add device files to watch, pull and diff them
-  (``l`` opens the list).
-- **Diffs** -- Record/Play and the run history:
+- **Watchlist** -- Spotlight Files: add device files to watch (``n``), pull
+  and diff them (``u`` one, Shift+``U`` all; ``l`` opens the list).
+- **Diffs** -- Record/Play results and the run history (``r``/``p`` work from
+  every panel; Shift+``P`` here generates the PDF report of the selected run):
 
-  1. ``r`` **Record**: Sandroid snapshots the device and records your input.
-  2. Interact with the device, then stop the recording.
-  3. ``p`` **Play**: the emulator is reverted to the snapshot, the recording
+  1. ``r`` **Record**: name the run and the number of replays, then Sandroid
+     snapshots the device and records your input (Esc in the settings form
+     cancels without recording).
+  2. Interact with the device, then stop: ``Esc``/``Enter`` (or *Stop*) stop
+     and save, and the replay starts automatically; *Discard* throws the
+     recording away.
+  3. ``p`` **Play** (again): the emulator is reverted to the snapshot, the recording
      is replayed, background noise is measured with a dry run, and changed /
      new / deleted files (with inline diffs), processes, sockets and network
      activity are shown.

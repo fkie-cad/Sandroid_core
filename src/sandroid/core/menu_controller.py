@@ -117,7 +117,10 @@ class MenuController:
             "r",
             ActionCategory.RECORDING,
             ["forensic", "malware"],
-            description="Record user interactions for playback",
+            description=(
+                "Record device input (any panel). Esc/Enter in the recording "
+                "window stops & saves, then it replays automatically"
+            ),
             inline_text="[r]ecord an action",
         )
         self._register(
@@ -126,7 +129,10 @@ class MenuController:
             "p",
             ActionCategory.RECORDING,
             ["forensic", "malware"],
-            description="Replay previously recorded actions",
+            description=(
+                "Replay the current recording N times and diff the results "
+                "(opens Files > Diffs; Shift+P there = PDF report)"
+            ),
             inline_text="[p]lay the currently loaded action",
         )
         self._register(
@@ -438,11 +444,11 @@ class MenuController:
         self._register(
             "command_palette",
             "Open command palette",
-            "ctrl+p",
+            "ctrl+shift+p",
             ActionCategory.NAVIGATION,
             ["forensic", "malware", "security"],
             description="Search and execute commands",
-            inline_text="[Ctrl+P] command palette",
+            inline_text="[Ctrl+Shift+P] command palette",
         )
         self._register(
             "device_selector",
@@ -465,7 +471,9 @@ class MenuController:
             ActionCategory.SNAPSHOTS,
             ["forensic", "malware"],
             description="Open the Snapshots tab",
-            inline_text="key [0] opens snapshots, [1-8] load slots, [Ctrl+1-8] save",
+            inline_text=(
+                "key [0] opens snapshots, [1-8] twice loads a slot, [Ctrl+1-8] save"
+            ),
             required_capabilities=[DeviceCapability.SNAPSHOTS],
             unavailable_reason="Snapshots only available on emulators",
         )
@@ -476,8 +484,11 @@ class MenuController:
                 str(i),
                 ActionCategory.SNAPSHOTS,
                 ["forensic", "malware"],
-                description=f"Load the snapshot assigned to slot {i}",
-                inline_text=f"load slot [{i}]",
+                description=(
+                    f"Press {i} twice: load the snapshot in slot {i} "
+                    "(reverts the emulator)"
+                ),
+                inline_text=f"load slot [{i}] (press twice)",
                 required_capabilities=[DeviceCapability.SNAPSHOTS],
                 unavailable_reason="Snapshots only available on emulators",
             )
