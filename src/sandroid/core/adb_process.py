@@ -152,7 +152,7 @@ def _try_frida(package_name: str) -> int | None:
 
         from sandroid.core.adb import Adb
 
-        serial = Adb.get_target_device()
+        serial = Adb.selected_serial()
         device = frida.get_device(serial) if serial else frida.get_usb_device()
         processes = device.enumerate_processes()
         for proc in processes:

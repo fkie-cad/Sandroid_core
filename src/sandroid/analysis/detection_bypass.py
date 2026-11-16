@@ -2324,7 +2324,9 @@ class BypassService:
     def _frida_device():
         if Toolbox.frida_manager:
             return Toolbox.frida_manager.get_frida_device()
-        return frida.get_usb_device()
+        from sandroid.services.frida_device_manager import get_selected_frida_device
+
+        return get_selected_frida_device()
 
     def _register_task(self, display: str) -> None:
         try:
