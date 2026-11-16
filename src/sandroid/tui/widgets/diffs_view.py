@@ -88,6 +88,7 @@ class DiffsView(FilesSubViewBase):
         ("delete", "delete_run", "Delete run"),
         ("backspace", "delete_run", "Delete run"),
         ("[", "toggle_rail", "Collapse rail"),
+        ("P", "generate_pdf", "PDF report"),
     ]
 
     DEFAULT_CSS = """
@@ -201,7 +202,8 @@ class DiffsView(FilesSubViewBase):
                 yield Static("Runs", id="diffs-rail-header")
                 yield OptionList(id="runs-list")
                 yield Static(
-                    "r record · p replay · n rename · del delete · [ collapse",
+                    "r record · p replay · n rename · del delete · "
+                    "P pdf report · [ collapse",
                     id="diffs-actions",
                 )
 
@@ -635,6 +637,40 @@ class DiffsView(FilesSubViewBase):
                 self._detail_record.label = label
             self._reload_index()
         self._notify(msg, "information" if ok else "error")
+
+    def action_generate_pdf(self) -> None:
+        """``P`` -- (re)generate the PDF report for the selected run.
+
+        Falls back to the newest run when nothing is selected. Runs
+        :func:`sandroid.core.run_report.report_from_folder` on the run's
+        bundle directory in a worker thread.
+        """
+        run_id = self._selected_run_id or (
+            self._summaries[0]["run_id"] if self._summaries else None
+        )
+        if not run_id:
+            self._notify("No run to generate a report for.", "warning")
+            return
+        self._notify(f"Generating PDF report for {self._current_label(run_id)}...")
+        self._run_bg(
+            functools.partial(self._generate_pdf_worker, run_id), f"diffs_pdf_{run_id}"
+        )
+
+    def _generate_pdf_worker(self, run_id: str) -> None:
+        from sandroid.core import run_bundle, run_report
+
+        try:
+            outcome = run_report.report_from_folder(run_bundle.bundle_dir(run_id))
+        except Exception as e:
+            logger.warning("PDF report for %s failed: %s", run_id, e, exc_info=True)
+            self._post(self._notify, f"PDF report failed: {e}", "error")
+            return
+        message = f"PDF report written: {outcome.pdf}"
+        severity = "information"
+        if outcome.check.present and not outcome.check.ok:
+            message += " (WARNING: evidence manifest verification failed)"
+            severity = "warning"
+        self._post(self._notify, message, severity)
 
     def action_delete_run(self) -> None:
         """``delete``/``backspace`` — delete the selected run (confirm first).

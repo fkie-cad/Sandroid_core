@@ -46,6 +46,21 @@ RAW_PULL_SLOTS = ("first_pull", "second_pull", "noise_pull", "new_pull")
 #: Basename of the recording copy stored inside each bundle.
 RECORDING_FILENAME = "recording.txt"
 
+#: Bundles finalised in this process (for the exit summary), oldest first.
+_SESSION_BUNDLES: list[str] = []
+
+
+def record_session_bundle(path: str | Path) -> None:
+    """Remember a run bundle produced in this process (exit summary)."""
+    p = str(path)
+    if p not in _SESSION_BUNDLES:
+        _SESSION_BUNDLES.append(p)
+
+
+def session_bundles() -> list[str]:
+    """Return the run bundles produced in this process, oldest first."""
+    return list(_SESSION_BUNDLES)
+
 
 def bundle_dir(run_id: str) -> Path:
     """Absolute bundle directory for ``run_id`` (may not exist yet)."""
@@ -127,5 +142,7 @@ __all__ = [
     "create_bundle",
     "import_recording",
     "raw_dir",
+    "record_session_bundle",
+    "session_bundles",
     "write_manifest",
 ]
