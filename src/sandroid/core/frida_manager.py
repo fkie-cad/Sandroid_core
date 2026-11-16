@@ -19,6 +19,82 @@ try:
 except ImportError:
     get_config = None
 
+#: Env var honoured by AndroidFridaManager >= 2.0.6 to install a frida-server
+#: whose SHA-256 cannot be verified against the GitHub release metadata.
+AFM_ALLOW_UNVERIFIED_ENV = "AFM_ALLOW_UNVERIFIED_SERVER"
+
+_RATE_LIMIT_MARKERS = ("rate limit", "403", "429")
+
+
+def describe_frida_install_error(exc: BaseException) -> str:
+    """Turn an ``install_frida_server()`` failure into an actionable message.
+
+    AndroidFridaManager >= 2.0.6 downloads frida-server from GitHub and verifies
+    it against the SHA-256 digest from the GitHub *API* (fail-closed). That adds
+    failure modes users hit in practice -- offline hosts, the unauthenticated
+    GitHub API rate limit (60 requests/hour per IP), old frida releases without
+    digests -- whose raw exception text (``HTTPSConnectionPool(...)``, a 500
+    character verification error) is hard to act on in a TUI notification.
+
+    Args:
+        exc: The exception raised by ``FridaManager.install_frida_server``.
+
+    Returns:
+        A one/two sentence message suitable for logs, notifications and AI
+        tool results. Unknown exceptions fall back to ``str(exc)``.
+    """
+    text = str(exc) or exc.__class__.__name__
+    lowered = text.lower()
+
+    from AndroidFridaManager import (
+        FridaServerDownloadError,
+        FridaServerVerificationError,
+    )
+
+    if isinstance(exc, FridaServerVerificationError):
+        if "mismatch" in lowered:
+            return (
+                "The downloaded frida-server failed its SHA-256 check (corrupted "
+                "or tampered download) and was deleted; nothing was installed. "
+                "Retry the installation."
+            )
+        if "metadata unavailable" in lowered:
+            if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+                cause = (
+                    "the GitHub API rate limit is exhausted (60 unauthenticated "
+                    "requests/hour) -- try again later"
+                )
+            else:
+                cause = (
+                    "the GitHub API could not be reached -- check the host's "
+                    "network/proxy"
+                )
+        else:
+            cause = "GitHub publishes no digest for this (pre-June-2025) release"
+        return (
+            "Could not verify the frida-server download, so nothing was "
+            f"installed: {cause}. To install without verification anyway, set "
+            f"{AFM_ALLOW_UNVERIFIED_ENV}=1 (not recommended)."
+        )
+
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return (
+            "Could not download frida-server: GitHub is unreachable from this "
+            "host (offline, DNS or proxy problem). Check the network connection "
+            "or install frida-server manually to /data/local/tmp/frida-server."
+        )
+
+    if isinstance(exc, (requests.HTTPError, FridaServerDownloadError)):
+        if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+            return (
+                "Could not download frida-server: the GitHub API rate limit is "
+                "exhausted (60 unauthenticated requests/hour). Try again later."
+            )
+        return f"Could not download frida-server: {text}"
+
+    return text
+
+
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
 
@@ -61,12 +137,17 @@ class FridaManager:
     def _get_adb_base_cmd(self) -> list:
         """Get the base ADB command with device targeting if set.
 
+        Uses the configured/resolved ``Adb.ADB_PATH`` (an argv list, so no
+        quoting is needed for paths with spaces) and only falls back to a bare
+        ``adb`` from PATH when it has not been initialised.
+
         Returns:
-            List starting with 'adb' and optionally '-s <serial>'
+            List starting with the adb executable and optionally '-s <serial>'
         """
+        adb = Adb.ADB_PATH or "adb"
         if self.device_serial:
-            return ["adb", "-s", self.device_serial]
-        return ["adb"]
+            return [adb, "-s", self.device_serial]
+        return [adb]
 
     def run_frida_server(self, frida_server_path="/data/local/tmp/"):
         """This function is used to run the frida server on the connected device.

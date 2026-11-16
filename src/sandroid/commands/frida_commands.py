@@ -97,7 +97,11 @@ class FridaServerCommand(CommandHandler):
             )
 
         except Exception as e:
-            error_msg = f"Error managing Frida server: {e!s}"
+            from sandroid.core.frida_manager import describe_frida_install_error
+
+            error_msg = (
+                f"Error managing Frida server: {describe_frida_install_error(e)}"
+            )
             logger.exception(error_msg)
             return CommandResult(
                 success=False,

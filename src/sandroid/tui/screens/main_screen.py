@@ -1160,7 +1160,9 @@ class MainScreen(Screen):
             msg = f"Frida not available: {e}"
             self.app.call_from_thread(lambda: self._log_to_activity(msg, error=True))
         except Exception as e:
-            msg = f"Frida installation failed: {e}"
+            from sandroid.core.frida_manager import describe_frida_install_error
+
+            msg = f"Frida installation failed: {describe_frida_install_error(e)}"
             self.app.call_from_thread(lambda: self._log_to_activity(msg, error=True))
 
         # Refresh UI

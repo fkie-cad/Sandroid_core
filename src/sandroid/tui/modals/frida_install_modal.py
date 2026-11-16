@@ -119,9 +119,12 @@ def _install_frida_then(
                 except Exception:
                     pass
         except Exception as exc:
-            logger.warning("Frida install/start failed: %s", exc)
+            from sandroid.core.frida_manager import describe_frida_install_error
+
+            reason = describe_frida_install_error(exc)
+            logger.warning("Frida install/start failed: %s", reason)
             try:
-                app.notify(f"Frida install failed: {exc}", severity="error")
+                app.notify(f"Frida install failed: {reason}", severity="error")
             except Exception:
                 pass
 

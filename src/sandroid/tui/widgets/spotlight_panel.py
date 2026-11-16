@@ -914,8 +914,11 @@ class SpotlightPanel(Widget):
                     except Exception:
                         pass
             except Exception as exc:
-                logger.warning(f"Frida install/start failed: {exc}")
-                self._notify(f"Frida install failed: {exc}", "error")
+                from sandroid.core.frida_manager import describe_frida_install_error
+
+                reason = describe_frida_install_error(exc)
+                logger.warning(f"Frida install/start failed: {reason}")
+                self._notify(f"Frida install failed: {reason}", "error")
             finally:
                 self._action_inflight = False
                 self._post(self.refresh_panel)
