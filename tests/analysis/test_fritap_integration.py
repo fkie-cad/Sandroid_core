@@ -426,7 +426,7 @@ def test_attach_reresolves_a_stale_pid(monkeypatch, _fresh_pids):
 def test_attach_to_dead_app_is_refused_and_pid_cleared(monkeypatch, _fresh_pids):
     spot = _Spotlight(pid=9756)
     ft = _attach_check(monkeypatch, spot, live_pid=None)
-    with pytest.raises(ValueError, match="not running"):
+    with pytest.raises(fritap_mod.FriTapTargetError, match="not running"):
         ft._check_attach_target()
     assert spot.pid is None
 
@@ -434,7 +434,7 @@ def test_attach_to_dead_app_is_refused_and_pid_cleared(monkeypatch, _fresh_pids)
 def test_reattach_to_injected_pid_is_refused(monkeypatch, _fresh_pids):
     fritap_mod.remember_injected_pid(10588)
     ft = _attach_check(monkeypatch, _Spotlight(pid=10588), live_pid=10588)
-    with pytest.raises(RuntimeError, match="spawn mode"):
+    with pytest.raises(fritap_mod.FriTapTargetError, match="spawn mode"):
         ft._check_attach_target()
     fritap_mod.forget_injected_pid(10588)
     ft._check_attach_target()  # process gone/forgotten -> allowed again
@@ -442,7 +442,7 @@ def test_reattach_to_injected_pid_is_refused(monkeypatch, _fresh_pids):
 
 def test_leftover_agent_in_maps_is_refused(monkeypatch, _fresh_pids):
     ft = _attach_check(monkeypatch, _Spotlight(pid=7), live_pid=7, maps=True)
-    with pytest.raises(RuntimeError, match="earlier session"):
+    with pytest.raises(fritap_mod.FriTapTargetError, match="earlier session"):
         ft._check_attach_target()
 
 

@@ -208,7 +208,12 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                 error=f"Import error: {e}. Is friTap installed?",
             )
         except Exception as e:
-            logger.exception("Error starting FriTap")
+            if getattr(e, "expected", False):
+                # A refusal with guidance (app not running, agent already
+                # injected): the message is the whole story, no traceback.
+                logger.error(f"FriTap not started: {e}")
+            else:
+                logger.exception("Error starting FriTap")
             return CommandResult(
                 success=False,
                 message=f"FriTap startup failed: {e!s}",

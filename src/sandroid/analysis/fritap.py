@@ -58,6 +58,12 @@ _INJECTED_PIDS: dict[str, set[int]] = {}
 _INJECTED_LOCK = threading.Lock()
 
 
+class FriTapTargetError(RuntimeError):
+    """The target can't take friTap right now (user-actionable, no traceback)."""
+
+    expected = True
+
+
 def _device_key() -> str:
     try:
         from sandroid.core.adb import Adb
@@ -522,8 +528,8 @@ class FriTap(DataGatherBase):
           Frida agent: re-attaching crashed the app every time in phase 3.
 
         Raises:
-            ValueError: The app is not running.
-            RuntimeError: The process already carries an agent.
+            FriTapTargetError: The app is not running, or the process already
+                carries an agent.
         """
         from sandroid.services import get_spotlight_service
 
@@ -547,7 +553,7 @@ class FriTap(DataGatherBase):
                 )
             spotlight.announce_pid(live, package)
         if not live:
-            raise ValueError(
+            raise FriTapTargetError(
                 f"{package} is not running. Start it (Spotlight Enter) or use "
                 "spawn mode (Shift+C)."
             )
@@ -558,7 +564,7 @@ class FriTap(DataGatherBase):
         elif frida_agent_mapped(live) and not self._shared_live_session():
             why = "the process still carries a Frida agent from an earlier session"
         if why:
-            raise RuntimeError(
+            raise FriTapTargetError(
                 f"Not attaching friTap to {package} (PID {live}): {why}. "
                 "Injecting a second agent into the same process crashes the app. "
                 "Restart the app (Spotlight ⇧R) or use spawn mode (Shift+C) "
@@ -773,7 +779,7 @@ class FriTap(DataGatherBase):
                     "start friTap."
                 )
                 logger.error(msg)
-                raise RuntimeError(msg)
+                raise FriTapTargetError(msg)
 
             # Start the job with metadata for job coordination
             # Use wrapped handler that forwards to activity log if enabled
