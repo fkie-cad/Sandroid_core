@@ -128,6 +128,11 @@ def test_device_switch_releases_old_device_proxies(monkeypatch):
     monkeypatch.setattr(Toolbox, "switch_device_folder", staticmethod(lambda n: None))
     monkeypatch.setattr(dm_mod, "_active_device_name", None)
     monkeypatch.setattr(dm_mod, "_configured_device_name", None)
+    # set_active_device records the device name in the session state.
+    from sandroid.services import get_session_state_service
+
+    state = get_session_state_service()
+    monkeypatch.setattr(state, "_device_name", state.device_name)
 
     manager = dm_mod.DeviceManager()
     old = Device(serial=OLD, name="A", state="device")
