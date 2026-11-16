@@ -776,3 +776,29 @@ def test_spotlight_pid_poll_keeps_running_while_tab_is_hidden(
         panel._poll_running_state()
 
     assert polls == ["spotlight_pid_poll"] * expected_polls
+
+
+def test_replay_of_a_recording_gets_a_distinct_run_label(monkeypatch) -> None:
+    """Phase 4: a 'p' replay added a second 'Run 1 · 22:58' to the rail."""
+    from sandroid.core import run_history
+    from sandroid.tui.controllers import recording_controller as rc
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        run_history,
+        "load_index",
+        lambda device_name=None: [e for e in saved if e["device_name"] == device_name],
+    )
+
+    labels = []
+    for device in ("emu", "emu", "emu", "other"):
+        label = rc._unique_run_label("Run 1 · 22:58", device)
+        saved.append({"label": label, "device_name": device})
+        labels.append(label)
+
+    assert labels == [
+        "Run 1 · 22:58",
+        "Run 1 · 22:58 · play 2",
+        "Run 1 · 22:58 · play 3",
+        "Run 1 · 22:58",  # another device has its own rail
+    ]
