@@ -9,9 +9,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .interfaces import AnalysisMode
+
+if TYPE_CHECKING:
+    from sandroid.config import SandroidConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,7 @@ async def batch_analyze(
     capture_network: bool = False,
     output_dir: str = "results",
     config_path: str | None = None,
+    config: SandroidConfig | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Analyze multiple packages in batch.
 
@@ -36,6 +40,8 @@ async def batch_analyze(
         capture_network: Enable network capture.
         output_dir: Directory for individual result files.
         config_path: Optional path to configuration file.
+        config: Optional already-loaded configuration (takes precedence over
+            ``config_path``; avoids reloading and losing CLI overrides).
 
     Returns:
         Dictionary mapping package names to their analysis results or errors.
@@ -53,7 +59,7 @@ async def batch_analyze(
     """
     from .headless import SandroidHeadlessAPI
 
-    api = SandroidHeadlessAPI(config_path=config_path)
+    api = SandroidHeadlessAPI(config_path=config_path, config=config)
     init_result = await api.initialize()
 
     if not init_result.success:
@@ -68,11 +74,18 @@ async def batch_analyze(
     for package in packages:
         logger.info(f"Analyzing package: {package}")
         try:
+            # SECURITY mode takes the target as apk_path (local .apk file or
+            # installed package name), the other modes as package.
+            target_kw = (
+                {"apk_path": package}
+                if mode == AnalysisMode.SECURITY
+                else {"package": package}
+            )
             result = await api.run_analysis(
                 mode=mode,
-                package=package,
                 runs=runs,
                 capture_network=capture_network,
+                **target_kw,
             )
             results[package] = {"status": "success", "data": result}
 

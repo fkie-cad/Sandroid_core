@@ -35,7 +35,7 @@ def run_device_settings_headless(
     )
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
     svc = DeviceSettingsService()
 
     if settings_file:

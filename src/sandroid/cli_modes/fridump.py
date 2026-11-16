@@ -46,7 +46,7 @@ def run_fridump_headless(
         )
         sys.exit(1)
 
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
 
     # Check Frida server is running
     frida_manager = get_frida_session_service().get_frida_manager()

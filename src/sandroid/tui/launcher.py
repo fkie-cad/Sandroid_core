@@ -70,17 +70,22 @@ def run_tui(
     atexit.register(reset_terminal_hard)
     logger.debug("atexit registered")
 
-    # Load config to check for immediate exit preference
+    # Check the immediate-exit preference on the already-loaded config (the
+    # CLI's startup_config, else whatever Toolbox holds); only load from disk
+    # as a last resort.
     try:
-        from sandroid.config.loader import get_config
+        config = startup_config
+        if config is None:
+            from sandroid.core.toolbox import Toolbox
 
-        logger.debug("importing config")
+            config = getattr(Toolbox, "config", None)
+        if config is None:
+            from sandroid.config import ConfigLoader
 
-        config = get_config()
-        logger.debug("config loaded")
-        immediate_exit = config.tui.immediate_exit_on_ctrl_c
+            config = ConfigLoader().load()
+        immediate_exit = bool(config.tui.immediate_exit_on_ctrl_c)
     except Exception:
-        logger.debug("config load failed, using default")
+        logger.debug("config load failed, using default", exc_info=True)
         immediate_exit = False
 
     logger.debug("creating SandroidTUI instance")

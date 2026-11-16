@@ -42,6 +42,82 @@ def start_interactive_mode(
     _start_tui_mode(config, Toolbox, ActionQ)
 
 
+def _stop_capture_children() -> None:
+    """Terminate leftover host-side capture helpers (``adb ... tcpdump``)."""
+    try:
+        import psutil
+    except ImportError:
+        return
+    try:
+        children = psutil.Process().children(recursive=True)
+    except Exception:
+        return
+    victims = []
+    for child in children:
+        try:
+            cmd = " ".join(child.cmdline()).lower()
+        except Exception:
+            continue
+        if "tcpdump" in cmd:
+            victims.append(child)
+    for child in victims:
+        try:
+            child.terminate()
+        except Exception:
+            pass
+    try:
+        psutil.wait_procs(victims, timeout=2)
+    except Exception:
+        pass
+
+
+def _exit_without_lingering_threads(grace: float = 3.0) -> None:
+    """Make sure the process actually exits after the TUI is closed.
+
+    Background helpers (friTap, tcpdump readers, Frida/MCP clients, ...) can
+    leave non-daemon threads behind; the interpreter then waits for them
+    forever after "Session Complete" is printed. Give them ``grace`` seconds
+    to finish, then log what is still alive and hard-exit.
+    """
+    import os
+    import threading
+    import time
+
+    _stop_capture_children()
+
+    deadline = time.monotonic() + grace
+    for thread in threading.enumerate():
+        if thread is threading.main_thread() or thread.daemon:
+            continue
+        thread.join(max(0.0, deadline - time.monotonic()))
+
+    lingering = [
+        t
+        for t in threading.enumerate()
+        if t is not threading.main_thread() and t.is_alive() and not t.daemon
+    ]
+    if not lingering:
+        return
+    logger.warning(
+        "Forcing exit; %d background thread(s) did not stop: %s",
+        len(lingering),
+        ", ".join(t.name for t in lingering),
+    )
+    try:
+        # os._exit skips atexit handlers: restore the terminal ourselves.
+        from sandroid.tui.terminal_reset import reset_terminal_hard
+
+        reset_terminal_hard()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        logging.shutdown()
+    finally:
+        os._exit(0)
+
+
 def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
     """Launch the Textual TUI interface.
 
@@ -90,6 +166,7 @@ def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
 
         logger.info("Analysis completed successfully")
         get_ui_service().print_exit_summary(Toolbox.get_tools_used())
+        _exit_without_lingering_threads()
 
     except ImportError as e:
         logger.critical(f"Textual TUI is not available: {e}")

@@ -248,7 +248,7 @@ class MonitorCommand(ToggleCommand):
 
         def _reader():
             try:
-                from sandroid.core.sandroid_console import SandroidConsole
+                from sandroid.core.console import SandroidConsole
             except Exception:
                 logger.debug("SandroidConsole not available for rich output")
                 return

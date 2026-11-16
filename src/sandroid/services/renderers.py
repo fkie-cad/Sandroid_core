@@ -276,7 +276,17 @@ class ExitSummaryRenderer:
             "[bold cyan]\u2550\u2550\u2550 Sandroid Session Complete \u2550\u2550\u2550[/bold cyan]"
         )
         console.print()
-        console.print(f"[green]Results saved to:[/green] [bold]{results_path}[/bold]")
+        console.print(f"[green]Session folder:[/green] [bold]{results_path}[/bold]")
+        try:
+            from sandroid.core.run_bundle import session_bundles
+
+            bundles = session_bundles()
+        except Exception:
+            bundles = []
+        if bundles:
+            console.print("[green]Analysis runs (results, report, manifest):[/green]")
+            for bundle in bundles:
+                console.print(f"  \u2022 [bold]{bundle}[/bold]")
 
         if tools:
             console.print()

@@ -13,13 +13,13 @@ from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
 from sandroid.tui.widgets import (
     ActivityLog,
-    ChatPanel,
     FilesPanel,
     NetworkPanel,
     SandroidFooter,
     SnapshotsPanel,
     SpotlightPanel,
     StatusBar,
+    load_chat_panel_class,
 )
 
 if TYPE_CHECKING:
@@ -226,7 +226,7 @@ class MainScreen(Screen):
                 yield Static("[bold]Background Activity[/bold]", id="activity-title")
                 yield ActivityLog(id="activity-log")
                 with Vertical(id="chat-dock"):
-                    yield ChatPanel(id="chat-panel")
+                    yield self._make_chat_panel()
 
         yield SandroidFooter()
         logger.debug("[MAIN_SCREEN] compose complete")
@@ -252,7 +252,7 @@ class MainScreen(Screen):
             activity_log.show_welcome()
             activity_log.write(
                 "[dim]Press [bold #ff00ff]?[/] for help, "
-                "[bold #ff00ff]Ctrl+P[/] for command palette[/]"
+                "[bold #ff00ff]Ctrl+Shift+P[/] for command palette[/]"
             )
             logger.debug("[MAIN_SCREEN] on_mount: welcome shown")
         except Exception as e:
@@ -507,6 +507,28 @@ class MainScreen(Screen):
             idx = 0
         self._select_bottom_tab(order[(idx + delta) % len(order)])
 
+    @staticmethod
+    def _make_chat_panel() -> Static:
+        """Build the AI Chat panel, or a placeholder when its deps are missing.
+
+        The chat panel imports :mod:`sandroid.ai` (and optional packages such
+        as ``mcp``); a plain ``pip install sandroid`` without the AI extras
+        must still get a working TUI, so the import happens here, lazily.
+        """
+        from sandroid.tui import widgets as _widgets
+
+        chat_panel_cls = load_chat_panel_class()
+        if chat_panel_cls is not None:
+            return chat_panel_cls(id="chat-panel")
+        return Static(
+            "[bold]AI Chat unavailable[/bold]\n"
+            f"Missing optional dependency: {_widgets.CHAT_PANEL_IMPORT_ERROR}\n"
+            "Install the AI extras (e.g. [i]pip install 'sandroid[ai]'[/i]) "
+            "and restart Sandroid.",
+            id="chat-panel",
+            markup=True,
+        )
+
     def toggle_chat_panel(self) -> None:
         """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y).
 
@@ -524,7 +546,9 @@ class MainScreen(Screen):
 
         if showing:
             try:
-                self.query_one("#chat-panel", ChatPanel).refresh_header()
+                panel = self.query_one("#chat-panel")
+                if hasattr(panel, "refresh_header"):
+                    panel.refresh_header()
             except Exception:
                 pass
             try:

@@ -268,7 +268,11 @@ class MonitoringHandler:
         raw_path = os.getenv("RAW_RESULTS_PATH", ".")
         local_path = os.path.join(raw_path, "capture.pcap")
 
-        self._api._adb.send_adb_command(f"pull /sdcard/capture.pcap {local_path}")
+        from sandroid.core.adb_utils import quote_host_arg
+
+        self._api._adb.send_adb_command(
+            f"pull /sdcard/capture.pcap {quote_host_arg(local_path)}"
+        )
         self._api._adb.send_adb_command("shell rm /sdcard/capture.pcap")
 
         return CommandResult(

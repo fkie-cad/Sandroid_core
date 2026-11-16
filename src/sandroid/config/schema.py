@@ -29,6 +29,13 @@ class EmulatorConfig(BaseModel):
     device_name: str = Field(
         default="Pixel_6_Pro_API_31", description="Android Virtual Device name"
     )
+    serial: str | None = Field(
+        default=None,
+        description=(
+            "ADB serial of the device to use (e.g. emulator-5556). Overrides "
+            "automatic selection; --serial and ANDROID_SERIAL also work."
+        ),
+    )
     android_emulator_path: Path | None = Field(
         default=None,
         description="Path to Android emulator executable (auto-detected if not provided)",

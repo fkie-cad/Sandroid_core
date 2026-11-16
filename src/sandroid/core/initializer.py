@@ -16,7 +16,89 @@ from sandroid.config import SandroidConfig
 logger = logging.getLogger(__name__)
 
 
-def initialize_core(config: SandroidConfig) -> None:
+def apply_serial_selection(serial: str | None = None) -> str | None:
+    """Pin all adb traffic to an explicitly requested device.
+
+    ``serial`` (``--serial`` / config ``emulator.serial``) wins over the
+    ``ANDROID_SERIAL`` environment variable. The serial is set as the adb
+    target right away (so even pre-selection calls such as ``adb root`` use
+    ``-s``) and handed to the DeviceManager so auto-selection picks it.
+
+    Returns:
+        The serial in effect, or None for automatic selection.
+    """
+    import os
+
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_manager import DeviceManager
+
+    wanted = serial or os.environ.get("ANDROID_SERIAL") or None
+    DeviceManager.set_preferred_serial(serial or None)
+    if wanted:
+        Adb.set_target_device(wanted)
+        logger.info(f"Using device {wanted} (explicitly selected)")
+    return wanted
+
+
+def prepare_device(console: Any | None = None) -> bool:
+    """Ensure ``adb root`` and SELinux permissive mode on the active device.
+
+    On ``adb root``-capable emulators the SELinux policy still denies many
+    binder calls made from the root/su context unless the device is set to
+    permissive -- ``pm install`` then fails with ``Failed transaction
+    (2147483646)`` and Frida reports ``access: jailed``. The TUI/interactive
+    startup gets this via ``SetupService.check_critical_setup()``; every
+    one-shot headless path must do it as well, which is what this helper is
+    for.
+
+    Never raises and never exits: a device without root still works for
+    the operations that don't need it, so failures are only reported.
+
+    Args:
+        console: Optional SandroidConsole for user-facing status lines.
+
+    Returns:
+        True if root is available and SELinux is permissive.
+    """
+    from sandroid.core.adb import Adb
+    from sandroid.services.setup_checks import (
+        check_and_enable_root,
+        check_and_set_selinux,
+    )
+
+    def _say(markup: str, plain: str, level: int) -> None:
+        logger.log(level, plain)
+        if console is not None:
+            console.print(markup)
+
+    root = check_and_enable_root(Adb)
+    if not root.passed:
+        _say(
+            f"[warning]Root not available: {root.message}. Operations that "
+            "need root (APK install, Frida) may fail.[/warning]",
+            f"Root not available: {root.message}",
+            logging.WARNING,
+        )
+        return False
+
+    selinux = check_and_set_selinux(Adb)
+    if not selinux.passed:
+        _say(
+            f"[warning]{selinux.message}[/warning]",
+            selinux.message,
+            logging.WARNING,
+        )
+        return False
+
+    _say(
+        "[dim]Device prepared: adb root enabled, SELinux permissive[/dim]",
+        "Device prepared: adb root enabled, SELinux permissive",
+        logging.INFO,
+    )
+    return True
+
+
+def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
     """Initialize the Sandroid core subsystems in the required order.
 
     Performs the 3-step initialization sequence that must happen before
@@ -27,6 +109,9 @@ def initialize_core(config: SandroidConfig) -> None:
 
     Args:
         config: Loaded Sandroid configuration instance.
+        prepare: Also run :func:`prepare_device` (adb root + SELinux
+            permissive) between the Adb and Toolbox init steps. Headless
+            one-shot modes that install packages or use Frida need this.
 
     Example:
         >>> from sandroid.config import ConfigLoader
@@ -37,9 +122,20 @@ def initialize_core(config: SandroidConfig) -> None:
     from sandroid.core.toolbox import Toolbox
 
     Toolbox.config = config
+    emulator_cfg = getattr(config, "emulator", None)
+    adb_path = getattr(emulator_cfg, "adb_path", None)
+    if adb_path and not Adb.ADB_PATH:
+        Adb.ADB_PATH = str(adb_path)  # configured adb wins over PATH lookup
     # IMPORTANT: Adb.init() must come before Toolbox.init() because
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
+    apply_serial_selection(getattr(emulator_cfg, "serial", None))
+    if prepare:
+        # Before Toolbox.init(): that step creates the FridaManager, which
+        # should already see a rooted, permissive device.
+        from sandroid.core.console import SandroidConsole
+
+        prepare_device(SandroidConsole.get())
     Toolbox.init()
 
 

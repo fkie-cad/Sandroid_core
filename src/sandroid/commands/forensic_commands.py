@@ -15,6 +15,8 @@ import logging
 import os
 import time
 
+from sandroid.core.adb_utils import quote_host_arg
+
 from .base import CommandCategory, CommandContext, CommandHandler, CommandResult
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,9 @@ class PullSpotlightFileCommand(CommandHandler):
         logger.info(f"Pulling spotlight file: {file_to_pull} -> {target}")
 
         # Pull the main file
-        output, error = Adb.send_adb_command(f"pull {file_to_pull} {target}")
+        output, error = Adb.send_adb_command(
+            f"pull {quote_host_arg(file_to_pull)} {quote_host_arg(target)}"
+        )
 
         # Check for errors
         combined_output = str(output) + str(error)

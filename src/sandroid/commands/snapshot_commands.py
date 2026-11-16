@@ -121,7 +121,7 @@ class SnapshotListCommand(CommandHandler):
         try:
             import click
 
-            from sandroid.core.sandroid_console import SandroidConsole
+            from sandroid.core.console import SandroidConsole
 
             console = SandroidConsole.get()
 
@@ -286,7 +286,7 @@ class SnapshotCreateCommand(CommandHandler):
             Snapshot name, empty string, or None if cancelled
         """
         try:
-            from sandroid.core.sandroid_console import SandroidConsole
+            from sandroid.core.console import SandroidConsole
 
             console = SandroidConsole.get()
 
