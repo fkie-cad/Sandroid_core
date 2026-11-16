@@ -42,6 +42,52 @@ def intersect_file_lists(file_lists: list[list[str]]) -> list[str]:
     return list(result)
 
 
+#: Directory prefixes whose contents are runtime bookkeeping, not app
+#: artefacts: ART/JIT profiles (``primary.prof`` is rewritten whenever an app
+#: has run for a while, so it shows up in every replay but never in the
+#: app-less dry run) and the profman/dexopt scratch areas.
+STRUCTURAL_NOISE_PREFIXES: tuple[str, ...] = (
+    "/data/misc/profiles/",
+    "/data/misc/profman/",
+    # Battery-stats history chunks, rolled over on wall-clock changes (each
+    # snapshot revert + clock resync starts a new, differently named one).
+    "/data/system/battery-history/",
+)
+
+#: Exact files the package manager / ART rewrite on their own schedule.
+STRUCTURAL_NOISE_FILES: frozenset[str] = frozenset(
+    {
+        "/data/system/package-dex-usage.pb",
+        "/data/system/package-usage.list",
+        # Records wall-clock shifts -- rewritten by every guest clock resync.
+        "/data/system/monotonic_clock.xml",
+    }
+)
+
+#: File-name suffixes of ART profile files (also written next to app code).
+STRUCTURAL_NOISE_SUFFIXES: tuple[str, ...] = (".prof", ".prof.bak")
+
+
+def is_structural_noise(file_path: str) -> bool:
+    """Whether ``file_path`` is known runtime noise regardless of the dry run.
+
+    The dry-run noise pass only catches files that change *without* the app
+    running; ART profiles change *because* the app ran, so they survive the
+    noise subtraction and used to head the "Changed Files" list.
+
+    Args:
+        file_path: Absolute device path.
+
+    Returns:
+        True for ART/dexopt bookkeeping files that never carry app evidence.
+    """
+    return (
+        file_path.startswith(STRUCTURAL_NOISE_PREFIXES)
+        or file_path in STRUCTURAL_NOISE_FILES
+        or file_path.endswith(STRUCTURAL_NOISE_SUFFIXES)
+    )
+
+
 def filter_noise_files(
     files: list[str],
     noise_files: dict[str, str],
@@ -71,6 +117,8 @@ def filter_noise_files(
     result: list[str] = []
 
     for file_path in files:
+        if is_structural_noise(file_path):
+            continue
         if file_path not in noise_files:
             # File is not noise, keep it
             result.append(file_path)

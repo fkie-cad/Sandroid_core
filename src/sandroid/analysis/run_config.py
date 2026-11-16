@@ -221,11 +221,12 @@ class RunConfig:
         recording_path: str,
         number_of_runs: int = 2,
         noise_filter: bool = True,
-        show_deleted: bool = True,
-        network: bool = False,
-        processes: bool = False,
-        sockets: bool = False,
-        hash_files: bool = False,
+        show_deleted: bool | None = None,
+        network: bool | None = None,
+        processes: bool | None = None,
+        sockets: bool | None = None,
+        hash_files: bool | None = None,
+        pull_apk: bool | None = None,
     ) -> RunConfig:
         """Build a ``RunConfig`` for a TUI Record->Play playback analysis.
 
@@ -234,30 +235,72 @@ class RunConfig:
         the ``Player`` itself. This module never imports or constructs
         ``Player`` (its signature is being changed by a parallel phase).
 
+        Capture/finalize toggles left at ``None`` follow the user's
+        ``[analysis]`` configuration (the TUI Settings screen edits exactly
+        these keys), so enabling e.g. "capture network" there takes effect for
+        Record->Play too. Previously they were hard-coded off, silently
+        ignoring the settings. ``show_deleted`` stays on unless explicitly
+        disabled (playback default).
+
         Args:
             recording_path: Absolute path to the recording to replay.
             number_of_runs: Number of replays (TUI default 2).
             noise_filter: Whether to run the dry-run noise pass (TUI default on).
             show_deleted: Detect deleted files (default on for playback).
-            network: Capture network traffic.
-            processes: Monitor processes.
-            sockets: Monitor listening sockets.
-            hash_files: Compute file hashes.
+            network: Capture network traffic (``None`` -> config).
+            processes: Monitor processes (``None`` -> config).
+            sockets: Monitor listening sockets (``None`` -> config).
+            hash_files: Compute file hashes (``None`` -> config).
+            pull_apk: Pull and hash APKs (``None`` -> config).
 
         Returns:
             A populated ``RunConfig`` with ``action=None``.
         """
+        defaults = _analysis_toggle_defaults()
+
+        def pick(value: bool | None, key: str) -> bool:
+            return defaults[key] if value is None else bool(value)
+
         return cls(
             number_of_runs=number_of_runs,
             noise_filter=noise_filter,
-            network=network,
-            processes=processes,
-            sockets=sockets,
-            show_deleted=show_deleted,
-            hash_files=hash_files,
+            network=pick(network, "network"),
+            processes=pick(processes, "processes"),
+            sockets=pick(sockets, "sockets"),
+            show_deleted=True if show_deleted is None else bool(show_deleted),
+            hash_files=pick(hash_files, "hash_files"),
+            pull_apk=pick(pull_apk, "pull_apk"),
             action=None,
             recording_path=recording_path,
         )
+
+
+def _analysis_toggle_defaults() -> dict[str, bool]:
+    """Read the capture/finalize toggles from the user's ``[analysis]`` config.
+
+    Falls back to "all off" if the configuration cannot be loaded, which is
+    the previous hard-coded playback behaviour.
+    """
+    fallback = {
+        "network": False,
+        "processes": False,
+        "sockets": False,
+        "hash_files": False,
+        "pull_apk": False,
+    }
+    try:
+        from sandroid.config import get_config
+
+        analysis = get_config().analysis
+        return {
+            "network": bool(analysis.capture_network),
+            "processes": bool(analysis.capture_processes),
+            "sockets": bool(analysis.capture_sockets),
+            "hash_files": bool(analysis.hash_files),
+            "pull_apk": bool(analysis.list_apks),
+        }
+    except Exception:
+        return fallback
 
 
 @dataclass
