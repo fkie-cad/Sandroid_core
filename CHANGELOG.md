@@ -120,6 +120,7 @@ persistent run history, and an experimental AI Chat assistant.
 - dexray-intercept from the TUI no longer stalls for minutes, resumes its spawned app and removes its temporary snapshot; the hook modal only changes groups the user toggled; failure reasons are shown.
 - frida-server auto-start (`frida.server_auto_start`) works at TUI startup, on device change and in headless `--dexray`/`--fritap`; stale `frida-helper-*.dex` files are removed before a server (re)start.
 - friTap stop completes with one keypress and finalizes the keylog and `fritap_output.json` even when the agent unload blocks.
+- friTap no longer crashes the app on re-attach: attach mode refuses a process that already carried a friTap/Frida agent (restart the app or use spawn mode) and re-resolves a stale spotlight PID. When the target dies, friTap stops itself, finalizes its outputs and clears the PID. Each session writes its own `fritap_keylog_<timestamp>.log`, `fritap_output_<timestamp>.json` and `fritap_capture_<timestamp>_1.pcap` (the capture now stops with friTap). A previous session's detach no longer marks a new spawn as "target process gone", and the Spotlight shows the PID of a process re-spawned by friTap or dexray.
 - mitmproxy listens on `127.0.0.1` by default (`mitmproxy.listen_host`), the status shows the configured port while stopped, the device-reachability probe no longer reports false errors, and only a device proxy Sandroid set is cleared on stop/exit (`mitmproxy.auto_device_proxy` sets it on start).
 
 ### Removed
