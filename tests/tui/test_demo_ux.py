@@ -455,3 +455,44 @@ def test_tool_usage_lists_each_output_file_once() -> None:
     svc.mark_used("fritap", files=["a/fritap.log", "a/fritap_output.json"])
     svc.mark_used("fritap", files=["a/fritap.log", "a/fritap_output.json"])
     assert svc.get_files("fritap") == ["a/fritap.log", "a/fritap_output.json"]
+
+
+# --------------------------------------------------------------------------
+# quit cleanup must not kill emulators / the adb server
+# --------------------------------------------------------------------------
+
+
+class _FakeProc:
+    def __init__(self, pid: int, name: str, cmd: list[str]) -> None:
+        self.pid, self._name, self._cmd = pid, name, cmd
+
+    def name(self) -> str:
+        return self._name
+
+    def cmdline(self) -> list[str]:
+        return self._cmd
+
+
+def test_quit_cleanup_keeps_emulator_and_adb_server(monkeypatch) -> None:
+    import psutil
+
+    from sandroid.core.background_tracker import BackgroundWorkTracker
+
+    children = [
+        _FakeProc(10, "emulator", ["emulator", "-avd", "Pixel_6_Pro_API_31"]),
+        _FakeProc(11, "qemu-system-aarch64", ["qemu-system-aarch64", "-avd", "x"]),
+        _FakeProc(12, "adb", ["adb", "-L", "tcp:5037", "fork-server", "server"]),
+        _FakeProc(13, "adb", ["adb", "-s", "emulator-5554", "shell", "tcpdump"]),
+        _FakeProc(14, "tcpdump", ["tcpdump", "-w", "x.pcap"]),
+        _FakeProc(15, "mitmdump", ["mitmdump", "-p", "8080"]),
+        _FakeProc(16, "adb", ["adb", "-s", "emulator-5554", "shell", "getevent"]),
+    ]
+
+    class _Me:
+        def children(self, recursive: bool = False):
+            return children
+
+    monkeypatch.setattr(psutil, "Process", lambda *a, **k: _Me())
+    found = BackgroundWorkTracker()._detect_untracked_processes()
+    pids = {w.identifier for w in found}
+    assert pids == {13, 14, 15, 16}

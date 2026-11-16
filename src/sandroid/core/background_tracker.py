@@ -49,6 +49,22 @@ SANDROID_THREAD_PATTERNS = {
 }
 
 
+#: Host proxy helpers Sandroid spawns (mitmproxy, transparent-proxy relays).
+_PROXY_PROCESS_NAMES = ("mitmdump", "mitmweb", "mitmproxy", "gost", "ipt2socks")
+
+
+def is_persistent_device_process(name: str, cmdline: str) -> bool:
+    """True for emulator/qemu processes and the adb server.
+
+    Those may be children of the Sandroid process (an AVD started from the
+    TUI, an adb server auto-started by the first adb call) but must survive
+    quitting Sandroid. Both arguments are expected lower-cased.
+    """
+    if "emulator" in name or "qemu-system" in name or "qemu-system" in cmdline:
+        return True
+    return "adb" in name and ("fork-server" in cmdline or " server" in cmdline)
+
+
 @dataclass
 class UntrackedWork:
     """Represents untracked background work."""
@@ -239,16 +255,25 @@ class BackgroundWorkTracker:
                 try:
                     cmd = " ".join(child.cmdline())
                     name = child.name()
+                    lname, lcmd = name.lower(), cmd.lower()
 
-                    # Identify process type
-                    if "adb" in name.lower() or "adb" in cmd.lower():
-                        proc_type = "ADB Command"
-                    elif "emulator" in name.lower():
-                        proc_type = "Emulator"
-                    elif "frida" in name.lower():
-                        proc_type = "Frida Server"
-                    elif "tcpdump" in name.lower():
+                    # Never Sandroid's to kill on quit: an emulator/AVD the
+                    # user started from the TUI (Devices > Start AVD, its
+                    # qemu child) and the shared adb server (other tools and
+                    # emulators depend on it). They are long-lived device
+                    # infrastructure, not leaked helper jobs.
+                    if is_persistent_device_process(lname, lcmd):
+                        continue
+
+                    # Identify process type (Sandroid's own helpers only)
+                    if "tcpdump" in lname or "tcpdump" in lcmd:
                         proc_type = "Network Capture"
+                    elif "adb" in lname or "adb" in lcmd:
+                        proc_type = "ADB Command"
+                    elif "frida" in lname or "fritap" in lname:
+                        proc_type = "Frida Tool"
+                    elif any(p in lname for p in _PROXY_PROCESS_NAMES):
+                        proc_type = "Proxy"
                     else:
                         continue  # Skip unknown processes
 
