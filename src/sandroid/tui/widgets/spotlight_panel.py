@@ -856,7 +856,12 @@ class SpotlightPanel(Widget):
 
     def _prompt_install_frida(self, feature: str, then) -> None:
         """Show the FridaInstallModal; on confirm install+start, then run ``then``."""
+        from sandroid.core.frida_manager import frida_server_auto_start_enabled
         from sandroid.tui.modals import FridaInstallModal, FridaInstallResult
+
+        if frida_server_auto_start_enabled():  # frida.server_auto_start: no prompt
+            self._install_frida_then(then)
+            return
 
         device_name = "device"
         try:
@@ -901,11 +906,14 @@ class SpotlightPanel(Widget):
                 fm = svc.get_frida_manager()
                 if fm is None:
                     raise RuntimeError("Frida manager unavailable")
-                fm.install_frida_server()
+                from sandroid.core.frida_manager import (
+                    ensure_frida_server_started,
+                )
+
                 # run_frida_server now blocks until the frida CLIENT can reach
                 # the server, so its result reflects real readiness (not just
                 # that the process exists) — the next spawn won't race it.
-                ok = bool(fm.run_frida_server())
+                ok = ensure_frida_server_started(fm)
                 if ok:
                     # Drop any frida device handle cached while the server was
                     # down so the next spawn resolves a fresh, ready device.

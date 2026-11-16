@@ -117,6 +117,53 @@ def test_missing_asset_is_a_download_error():
     assert NAME in msg
 
 
+class _FM:
+    def __init__(self, installed):
+        self.installed = installed
+        self.calls = []
+
+    def get_installed_server_version(self):
+        return self.installed
+
+    def install_frida_server(self):
+        self.calls.append("install")
+
+    def run_frida_server(self):
+        self.calls.append("run")
+        return True
+
+
+def test_ensure_started_skips_download_when_versions_match():
+    import frida
+
+    from sandroid.core.frida_manager import ensure_frida_server_started
+
+    fm = _FM(frida.__version__)
+    assert ensure_frida_server_started(fm) is True
+    assert fm.calls == ["run"]
+
+
+@pytest.mark.parametrize("installed", [None, "16.0.0"])
+def test_ensure_started_installs_missing_or_mismatched_server(installed):
+    from sandroid.core.frida_manager import ensure_frida_server_started
+
+    fm = _FM(installed)
+    assert ensure_frida_server_started(fm) is True
+    assert fm.calls == ["install", "run"]
+
+
+def test_auto_start_reads_config(monkeypatch):
+    import types
+
+    from sandroid.core import frida_manager
+
+    cfg = types.SimpleNamespace(frida=types.SimpleNamespace(server_auto_start=False))
+    monkeypatch.setattr(frida_manager, "get_config", lambda: cfg)
+    assert frida_manager.frida_server_auto_start_enabled() is False
+    cfg.frida.server_auto_start = True
+    assert frida_manager.frida_server_auto_start_enabled() is True
+
+
 def test_unrelated_errors_pass_through():
     exc = RuntimeError("Cannot install frida-server: device not rooted")
     assert describe_frida_install_error(exc) == str(exc)

@@ -67,6 +67,12 @@ def ensure_frida_running(
         if on_cancel is not None:
             on_cancel()
 
+    from sandroid.core.frida_manager import frida_server_auto_start_enabled
+
+    if frida_server_auto_start_enabled():  # frida.server_auto_start: no prompt
+        _install_frida_then(app, on_ready, _cancel)
+        return
+
     def on_result(result: "FridaInstallResult | None") -> None:
         if not result or not result.install:
             _cancel()
@@ -106,11 +112,12 @@ def _install_frida_then(
             fm = svc.get_frida_manager()
             if fm is None:
                 raise RuntimeError("Frida manager unavailable")
-            fm.install_frida_server()
+            from sandroid.core.frida_manager import ensure_frida_server_started
+
             # run_frida_server blocks until the frida client can reach the
             # server, so ok reflects real readiness (not just that a process
             # exists) — the gated action won't race it.
-            ok = bool(fm.run_frida_server())
+            ok = ensure_frida_server_started(fm)
             if ok:
                 # Drop any frida device handle cached while the server was down
                 # so the next attach resolves a fresh, ready device.

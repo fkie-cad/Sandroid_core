@@ -98,6 +98,47 @@ def describe_frida_install_error(exc: BaseException) -> str:
     return text
 
 
+def frida_server_auto_start_enabled() -> bool:
+    """``frida.server_auto_start`` from the config (default True).
+
+    When enabled, UI entry points that need frida-server install/start it
+    directly instead of asking for confirmation first.
+    """
+    try:
+        if get_config is not None:
+            return bool(get_config().frida.server_auto_start)
+    except Exception:
+        pass
+    return True
+
+
+def ensure_frida_server_started(fm) -> bool:
+    """Install frida-server only if needed, then start it.
+
+    Skips the GitHub download (and its API/rate-limit dependency) when the
+    device already has a frida-server matching the host ``frida`` version.
+
+    Args:
+        fm: An ``AndroidFridaManager.FridaManager``.
+
+    Returns:
+        The result of ``fm.run_frida_server()`` (True once the client can
+        reach the server).
+
+    Raises:
+        Whatever ``install_frida_server`` raises; format it with
+        :func:`describe_frida_install_error`.
+    """
+    installed = None
+    try:
+        installed = fm.get_installed_server_version()
+    except Exception:
+        installed = None
+    if installed != frida.__version__:
+        fm.install_frida_server()
+    return bool(fm.run_frida_server())
+
+
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
 
