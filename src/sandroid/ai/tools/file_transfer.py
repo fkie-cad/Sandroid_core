@@ -67,22 +67,15 @@ reuses that same approach throughout, via :func:`_run_transfer_command` and
 the :class:`_LongTimeoutAdb` shim (see their docstrings for how each of the
 four tools gets it): none of the four bottom out in the bare 30s default.
 
-**Injection hardening**: ``FileExtractionService.pull_file``'s internal
-``f"pull {remote_path} {local_path}"`` is unquoted and is not modified here
-(confirmed scope: fix at new call sites only). Only
-``remote_path`` (the device-side path) is ``shlex.quote()``-d before being
-passed in -- ``local_path`` (the destination) is *also* used internally for
-plain filesystem calls (``Path(local_path).parent.mkdir(...)``,
-``os.path.exists(local_path)``), so quoting it would corrupt those checks
-without adding any real safety. Instead, the *basename* fragment that feeds
-into ``local_path`` (``local_filename`` or ``remote_path``'s own basename in
-``pull_path``; each split's device-side basename in ``pull_apk``) is
-sanitized down to a safe charset (:func:`_sanitize_basename`) before it is
-ever joined into a destination path -- this is what actually closes the
-host-side injection: a single ``shlex.quote()`` would have protected the
-``pull``'s shell-command embedding but *broken* the plain-Python
-``Path``/``os.path.exists`` uses of the same string (review-caught bug,
-fixed here). ``push_path`` does not
+**Injection hardening**: ``FileExtractionService.pull_file`` quotes both
+paths for the host shell itself (``file_extraction_service.pull_command``),
+so the device path is passed through unquoted (pre-quoting it here would
+quote it twice and make adb look for a name with literal quotes). As
+defence in depth, the *basename* fragment that feeds into ``local_path``
+(``local_filename`` or ``remote_path``'s own basename in ``pull_path``;
+each split's device-side basename in ``pull_apk``) is still sanitized down
+to a safe charset (:func:`_sanitize_basename`) before it is ever joined
+into a destination path. ``push_path`` does not
 call :meth:`sandroid.core.adb.Adb.push_file` directly -- confirmed by
 reading it, that classmethod already ``shlex.quote()``-s both of its
 arguments internally, but it bottoms out in ``Adb.send_adb_command``'s
@@ -127,14 +120,11 @@ logger = logging.getLogger(__name__)
 _TRANSFER_TIMEOUT_SECONDS = 180
 
 #: Characters allowed in a sanitized destination basename. Deliberately an
-#: *allowlist* (not a denylist of shell metacharacters) -- the same string
-#: this module builds from ends up embedded in a ``shell=True`` command
-#: string (``FileExtractionService.pull_file``'s internal
-#: ``f"pull {remote_path} {local_path}"``) *and* used in plain Python
-#: ``Path``/``os.path.exists`` calls, so there is no single quoting scheme
-#: that is simultaneously correct for both -- validating against a safe
-#: charset up front is (see the module docstring's injection-hardening
-#: section for the review finding that motivated this).
+#: *allowlist* (not a denylist of shell metacharacters): the destination
+#: ends up in a ``shell=True`` ``adb pull`` command (quoted there by
+#: ``FileExtractionService.pull_file``) and in plain ``Path`` calls, so a
+#: safe charset keeps it harmless in both (see the module docstring's
+#: injection-hardening section).
 _UNSAFE_BASENAME_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 
@@ -284,9 +274,8 @@ def _pull_result_dict(remote_path: str, result: ExtractionResult) -> dict[str, A
 
     Takes *remote_path* as a separate argument rather than reading
     ``result.source_path`` so callers can pass the original, unquoted device
-    path the model gave -- ``result.source_path`` reflects whatever string
-    was actually handed to ``FileExtractionService.pull_file``, which may be
-    ``shlex.quote()``-d.
+    path the model gave, independent of what ``FileExtractionService``
+    records as ``result.source_path``.
 
     Args:
         remote_path: The original (unquoted) device path.
@@ -385,7 +374,7 @@ def pull_path(remote_path: str, local_filename: str | None = None) -> dict[str, 
     confined_destination = resolve_confined_host_path(str(destination))
 
     result = _long_timeout_extraction_service().pull_file(
-        remote_path=shlex.quote(remote_path),
+        remote_path=remote_path,
         local_path=str(confined_destination),
         compute_hash=True,
     )
@@ -563,7 +552,7 @@ def pull_apk(package_name: str | None = None) -> dict[str, Any]:
         )
         confined_destination = resolve_confined_host_path(str(destination))
         result = service.pull_file(
-            remote_path=shlex.quote(device_path),
+            remote_path=device_path,
             local_path=str(confined_destination),
             compute_hash=True,
         )

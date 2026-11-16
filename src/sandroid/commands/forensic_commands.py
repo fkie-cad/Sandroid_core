@@ -204,7 +204,8 @@ class PullSpotlightFileCommand(CommandHandler):
                 companion_source = file_to_pull + suffix
                 companion_target = target + suffix
                 comp_output, comp_error = Adb.send_adb_command(
-                    f"pull {companion_source} {companion_target}"
+                    f"pull {quote_host_arg(companion_source)} "
+                    f"{quote_host_arg(companion_target)}"
                 )
                 if not _adb_pull_has_error(comp_output, comp_error):
                     logger.info(f"Pulled {suffix} file: {companion_source}")
