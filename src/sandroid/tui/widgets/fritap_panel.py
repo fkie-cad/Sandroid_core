@@ -262,7 +262,16 @@ class FriTapPanel(Widget):
             pid = getattr(inst, "process_id", None) or getattr(task, "target_pid", None)
             mode = getattr(inst, "mode", None)
             mode = getattr(mode, "value", mode)  # SpawnMode enum or str
-            head = f"[#4ade80]● running[/]   [b]{app}[/]"
+            problem = None
+            try:
+                problem = inst.target_problem() if inst is not None else None
+            except Exception:
+                problem = None
+            if isinstance(problem, str) and problem:
+                # Don't claim "running" for a job whose app/agent died.
+                head = f"[#fbbf24]▲ not capturing[/] ({problem[:60]})   [b]{app}[/]"
+            else:
+                head = f"[#4ade80]● running[/]   [b]{app}[/]"
             if mode:
                 head += f"  [#5b6479]{mode}[/]"
             if pid:

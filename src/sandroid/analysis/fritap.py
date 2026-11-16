@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+import time
 
 import click
 from friTap import SSL_Logger
@@ -34,6 +36,18 @@ def _get_display_value(field: str, default):
 
 
 logger = logging.getLogger(__name__)
+
+
+def _job_state(job) -> str | None:
+    """AFM Job state ("initialized", "running", "error", "stopping", "stopped").
+
+    AndroidFridaManager 2.0.7's ``Job`` exposes a plain ``state`` attribute
+    (no ``get_state()``); accept both.
+    """
+    get_state = getattr(job, "get_state", None)
+    if callable(get_state):
+        return get_state()
+    return getattr(job, "state", None)
 
 # FriTap hooks SSL/TLS functions - used for conflict detection with other Frida tools
 FRITAP_SSL_HOOKS = [
@@ -288,6 +302,9 @@ class FriTap(DataGatherBase):
         self.app_package = app_info["package_name"]
         self.mode = mode
         self.frida_device = app_info["device"]
+        # The device that spawned the target (kept: frida_device is replaced by
+        # the JobManager's device below).
+        self._spawn_device = app_info["device"]
 
         logger.debug(
             f"Frida session created: {self.app_package} "
@@ -417,7 +434,9 @@ class FriTap(DataGatherBase):
                 )
 
             # Check for hook conflicts with other running Frida jobs
-            conflicts = toolbox.check_frida_hook_conflicts(FRITAP_SSL_HOOKS)
+            conflicts = self._prune_dead_hook_owners(
+                toolbox, toolbox.check_frida_hook_conflicts(FRITAP_SSL_HOOKS)
+            )
             if conflicts:
                 conflict_details = ", ".join(
                     f"{hook} (job: {job_id[:8]}...)"
@@ -505,9 +524,7 @@ class FriTap(DataGatherBase):
 
             # Resume spawned process now that hooks are installed
             if self.mode == SpawnMode.SPAWN or self.mode == SpawnMode.SPAWN.value:
-                toolbox.resume_spawned_process_after_hooks(
-                    self.frida_device, self.process_id
-                )
+                self._resume_spawned_target(toolbox, job)
 
             # Register tool usage and files for exit summary
             files = [self.log_path]
@@ -550,6 +567,111 @@ class FriTap(DataGatherBase):
                 except Exception as cleanup_error:
                     logger.warning(f"Error during network cleanup: {cleanup_error}")
             raise  # Re-raise so the caller knows it failed
+
+    def _resume_spawned_target(self, toolbox, job, load_timeout: float = 5.0):
+        """Resume the spawned (paused) target once friTap's agent is loaded.
+
+        The spawn happens in ``FridaSessionService._spawn_session`` -- outside
+        AFM's JobManager, which then only *attaches* to the pid. JobManager
+        therefore neither auto-resumes it nor reports ``is_paused()``, so
+        ``resume_spawned_process_after_hooks`` skipped the resume and Android
+        killed the still-paused app ~10 s later ("start timeout"), leaving
+        friTap "running" on a dead pid with 0 keys.
+        """
+        if self.job_manager.is_paused():
+            # JobManager owns the spawn: keep the existing (A2-guarded) path.
+            toolbox.resume_spawned_process_after_hooks(
+                self.frida_device, self.process_id
+            )
+            return
+
+        try:
+            from sandroid.services import get_spotlight_service
+
+            auto_resume = get_spotlight_service().get_auto_resume()
+        except Exception:
+            auto_resume = True
+        if not auto_resume:
+            logger.info(
+                f"Process {self.process_id} remains PAUSED (auto-resume off). "
+                "Resume it manually -- Android kills a paused app after ~10 s."
+            )
+            return
+
+        # Give the agent a moment to install its hooks before the app runs, but
+        # stay well inside Android's 10 s process-start timeout.
+        deadline = time.monotonic() + load_timeout
+        while time.monotonic() < deadline:
+            if _job_state(job) in ("running", "error", "stopped", None):
+                break
+            time.sleep(0.1)
+
+        device = getattr(self, "_spawn_device", None) or self.frida_device
+        try:
+            device.resume(self.process_id)
+            logger.info(f"Resumed spawned process {self.process_id}")
+            time.sleep(1)  # let Java.perform settle (same as AFM/JobManager)
+        except Exception as e:  # e.g. already running
+            logger.debug(f"Resume of {self.process_id} skipped: {e}")
+
+    def target_problem(self) -> str | None:
+        """Why the friTap job is not actually capturing, or None if it is.
+
+        Cheap enough for UI refreshes: reads the JobManager's in-memory job
+        state and session flag only (no adb/frida round trips).
+        """
+        job_id = getattr(self, "job_id", None)
+        if not job_id:
+            return None
+        try:
+            job = self.job_manager.get_job_by_id(job_id)
+        except ValueError:
+            return "job ended"
+        except Exception:
+            return None
+        if _job_state(job) == "error":
+            error = job.get_error() if hasattr(job, "get_error") else None
+            return error or "agent error"
+        try:
+            if not self.job_manager.has_active_session():
+                return "target process gone"
+        except Exception:
+            pass
+        return None
+
+    _AFM_JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+    def _prune_dead_hook_owners(self, toolbox, conflicts: dict) -> dict:
+        """Drop hook registrations whose owning JobManager job is gone.
+
+        A friTap job that died with its app (or a previous run whose stop never
+        ran) kept its SSL_* hooks registered, so every later start logged ~15
+        bogus "already registered" conflicts. Only real JobManager job ids
+        (UUIDs) are pruned; virtual ids of other tools (e.g. MalwareMonitor's
+        hook registry) are left alone.
+        """
+        if not conflicts:
+            return conflicts
+        dead = set()
+        for job_id in set(conflicts.values()):
+            if not isinstance(job_id, str) or not self._AFM_JOB_ID.match(job_id):
+                continue
+            try:
+                job = self.job_manager.get_job_by_id(job_id)
+            except ValueError:
+                dead.add(job_id)
+                continue
+            except Exception:
+                continue
+            if _job_state(job) in ("error", "stopped"):
+                dead.add(job_id)
+        for job_id in dead:
+            try:
+                toolbox.unregister_frida_hooks(job_id)
+                logger.debug(f"Unregistered stale hooks of dead job {job_id}")
+            except Exception as e:
+                logger.debug(f"Could not unregister hooks of {job_id}: {e}")
+        return {hook: jid for hook, jid in conflicts.items() if jid not in dead}
 
     def stop(self):
         """Stop FriTap monitoring and finalize outputs.
@@ -597,9 +719,17 @@ class FriTap(DataGatherBase):
                 logger.warning(f"Jobs timed out: {timed_out}")
 
             self.job_manager.detach_from_app(timeout=2.0)
-            logger.info(f"FriTap detached from {self.app_package} (app still running)")
+            logger.info(f"FriTap detached from {self.app_package}")
         except Exception as e:
             logger.warning(f"Error stopping FriTap jobs: {e}")
+
+        # Release this job's hook registrations so the next start does not
+        # report conflicts with a job that no longer exists.
+        if getattr(self, "job_id", None):
+            try:
+                self._get_toolbox().unregister_frida_hooks(self.job_id)
+            except Exception as e:
+                logger.debug(f"Could not unregister friTap hooks: {e}")
 
         # Finalize outputs only after the agent is gone, so no late message
         # races the file close.

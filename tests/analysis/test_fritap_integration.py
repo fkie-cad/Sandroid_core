@@ -109,3 +109,114 @@ def test_console_detection():
     assert fritap_mod._is_console_message(console)
     assert not fritap_mod._is_console_message(keylog)
     assert not fritap_mod._is_console_message({"type": "error"})
+
+
+# --- H1: spawn done outside JobManager must still be resumed -----------------
+
+
+class _Device:
+    def __init__(self):
+        self.resumed = []
+
+    def resume(self, pid):
+        self.resumed.append(pid)
+
+
+def _spawned_fritap(paused_in_jm: bool):
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.process_id = 4242
+    ft._spawn_device = _Device()
+    ft.frida_device = object()
+    ft.job_manager = types.SimpleNamespace(is_paused=lambda: paused_in_jm)
+    return ft
+
+
+def test_spawned_target_is_resumed_when_jobmanager_did_not_spawn(monkeypatch):
+    monkeypatch.setattr(fritap_mod.time, "sleep", lambda s: None)
+    ft = _spawned_fritap(paused_in_jm=False)
+    toolbox = types.SimpleNamespace(
+        resume_spawned_process_after_hooks=lambda *a: pytest.fail("A2 path used")
+    )
+    job = types.SimpleNamespace(state="running")  # AFM 2.0.7 Job shape
+    ft._resume_spawned_target(toolbox, job)
+    assert ft._spawn_device.resumed == [4242]
+
+
+def test_jobmanager_owned_spawn_uses_existing_resume_path():
+    ft = _spawned_fritap(paused_in_jm=True)
+    calls = []
+    toolbox = types.SimpleNamespace(
+        resume_spawned_process_after_hooks=lambda dev, pid: calls.append(pid)
+    )
+    ft._resume_spawned_target(toolbox, types.SimpleNamespace())
+    assert calls == [4242]
+    assert ft._spawn_device.resumed == []
+
+
+# --- H2: hooks of dead jobs ----------------------------------------------------
+
+DEAD = "11111111-2222-3333-4444-555555555555"
+ALIVE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+ERRORED = "99999999-8888-7777-6666-555555555555"
+
+
+def test_prune_dead_hook_owners():
+    jobs = {
+        ALIVE: types.SimpleNamespace(get_state=lambda: "running"),
+        ERRORED: types.SimpleNamespace(get_state=lambda: "error"),
+    }
+
+    def get_job_by_id(job_id):
+        if job_id not in jobs:
+            raise ValueError(job_id)
+        return jobs[job_id]
+
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.job_manager = types.SimpleNamespace(get_job_by_id=get_job_by_id)
+    unregistered = []
+    toolbox = types.SimpleNamespace(unregister_frida_hooks=unregistered.append)
+    conflicts = {
+        "SSL_read": DEAD,
+        "SSL_write": ERRORED,
+        "SSL_new": ALIVE,
+        "open": "malwaremonitor-1a2b3c4d",  # virtual id: never pruned
+    }
+    left = ft._prune_dead_hook_owners(toolbox, conflicts)
+    assert sorted(unregistered) == sorted([DEAD, ERRORED])
+    assert left == {"SSL_new": ALIVE, "open": "malwaremonitor-1a2b3c4d"}
+
+
+def test_stop_unregisters_its_hooks():
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.show_in_activity_log = False
+    ft.job_id = ALIVE
+    ft.app_package = "com.example"
+    ft.ssl_log = None
+    ft.job_manager = types.SimpleNamespace(
+        get_job_by_id=lambda j: types.SimpleNamespace(get_state=lambda: "running"),
+        stop_jobs=lambda timeout_per_job: {},
+        detach_from_app=lambda timeout: None,
+    )
+    unregistered = []
+    ft._get_toolbox = lambda: types.SimpleNamespace(
+        unregister_frida_hooks=unregistered.append
+    )
+    ft.stop()
+    assert unregistered == [ALIVE]
+
+
+def test_target_problem_reports_dead_job():
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.job_id = ALIVE
+    state = {"s": "running", "session": True}
+    ft.job_manager = types.SimpleNamespace(
+        get_job_by_id=lambda j: types.SimpleNamespace(
+            get_state=lambda: state["s"], get_error=lambda: "TransportError"
+        ),
+        has_active_session=lambda: state["session"],
+    )
+    assert ft.target_problem() is None
+    state["session"] = False
+    assert ft.target_problem() == "target process gone"
+    state["s"] = "error"
+    assert ft.target_problem() == "TransportError"
