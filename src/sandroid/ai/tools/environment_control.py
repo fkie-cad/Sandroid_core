@@ -75,6 +75,20 @@ from typing import Any
 from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
+from sandroid.core.adb_utils import validate_snapshot_name
+
+
+def _checked_snapshot_name(name: str) -> str:
+    """Validate a snapshot name (``[A-Za-z0-9._-]``) or raise a tool error.
+
+    The name reaches the emulator console via ``adb emu`` and becomes an AVD
+    directory name, so arbitrary model-supplied strings are rejected up front.
+    """
+    try:
+        return validate_snapshot_name(name)
+    except ValueError as exc:
+        raise ToolExecutionError(str(exc)) from exc
+
 
 #: How long to poll for frida-server to actually exit after
 #: ``stop_frida_server()`` returns, before concluding the stop failed. Found
@@ -719,6 +733,7 @@ def create_snapshot(name: str) -> dict[str, Any]:
     """
     from sandroid.services import get_emulator_service
 
+    name = _checked_snapshot_name(name)
     created = get_emulator_service().create_snapshot(name)
     return {"created": created, "name": name}
 
@@ -765,6 +780,7 @@ def load_snapshot(name: str) -> dict[str, Any]:
     """
     from sandroid.services import get_emulator_service
 
+    name = _checked_snapshot_name(name)
     loaded = get_emulator_service().load_snapshot(name)
     return {"loaded": loaded, "name": name}
 
@@ -886,6 +902,7 @@ def delete_snapshot(name: str) -> dict[str, Any]:
     _require_emulator_device()
     from sandroid.services import get_emulator_service
 
+    name = _checked_snapshot_name(name)
     deleted = get_emulator_service().delete_snapshot(name)
     return {"deleted": deleted, "name": name}
 

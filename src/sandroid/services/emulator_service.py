@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from sandroid.core.adb_utils import quote_host_arg
+from sandroid.core.adb_utils import quote_host_arg, validate_snapshot_name
 from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,19 @@ class ConfigServiceProtocol(Protocol):
     def get_device_name(self) -> str:
         """Get the device name."""
         ...
+
+
+def _snapshot_command(verb: str, name: str | bytes) -> str:
+    """Build ``avd snapshot <verb> <name>`` for a validated snapshot name.
+
+    Snapshot names reach the emulator console through ``adb emu`` (host
+    shell) and become directory names in the AVD, so only
+    :data:`~sandroid.core.adb_utils.SNAPSHOT_NAME_RE` names are accepted.
+
+    Raises:
+        ValueError: *name* is not a safe snapshot name.
+    """
+    return f"avd snapshot {verb} {validate_snapshot_name(name)}"
 
 
 class EmulatorService:
@@ -533,11 +546,7 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot save {name}"
-            else:
-                command = b"avd snapshot save " + name
+            command = _snapshot_command("save", name)
 
             stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
@@ -569,11 +578,7 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot load {name}"
-            else:
-                command = b"avd snapshot load " + name
+            command = _snapshot_command("load", name)
 
             stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
@@ -695,16 +700,14 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot del {name}"
-            else:
-                command = b"avd snapshot del " + name
+            command = _snapshot_command("del", name)
 
-            _stdout, stderr = adb.send_telnet_command(command)
+            stdout, stderr = adb.send_telnet_command(command)
 
-            if stderr:
-                self._logger.error(f"Failed to delete snapshot: {stderr}")
+            # Like save/load, the console reports failures (unknown snapshot,
+            # bad sub-command) as "KO: ..." on stdout while adb exits 0.
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to delete snapshot: {stderr or stdout}")
                 return False
 
             self._logger.info(f"Snapshot '{name}' deleted successfully")

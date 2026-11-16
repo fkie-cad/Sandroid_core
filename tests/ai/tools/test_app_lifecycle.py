@@ -207,17 +207,23 @@ def test_launch_app_without_activity_passes_none_through(monkeypatch):
 
 
 def test_launch_app_quotes_activity_name_with_shell_metacharacters(monkeypatch):
-    captured = {}
+    """The core sink quotes the component for BOTH the host and device shell."""
+    import shlex
 
-    def fake_launch_app(package_name, activity_name=None):
-        captured["activity_name"] = activity_name
-        return True, "Launched"
-
-    monkeypatch.setattr(Adb, "launch_app", staticmethod(fake_launch_app))
+    sent = []
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, c: sent.append(c) or ("", ""))
+    )
 
     app_lifecycle.launch_app("com.example.app", activity_name=".Main; rm -rf /")
 
-    assert captured["activity_name"] == "'.Main; rm -rf /'"
+    assert len(sent) == 1
+    host_argv = shlex.split(sent[0])
+    # Host shell: one argv word for the component -- nothing executes host-side.
+    assert host_argv[:3] == ["shell", "am", "start"]
+    assert host_argv[-1] == shlex.quote("com.example.app/.Main; rm -rf /")
+    # Device shell: re-parsing that word yields the literal component.
+    assert shlex.split(host_argv[-1]) == ["com.example.app/.Main; rm -rf /"]
 
 
 def test_launch_app_rejects_malicious_package_name(monkeypatch):

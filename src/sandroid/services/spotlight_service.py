@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
+from sandroid.core.adb_utils import validate_package_name
 from sandroid.core.enums import SpawnMode
 from sandroid.services.protocols import EventBusProtocol
 
@@ -172,7 +173,13 @@ class SpotlightService:
             activity_name: Activity name (optional)
             pid: Process ID (optional)
             mode: SpawnMode.ATTACH or SpawnMode.SPAWN (accepts string for backwards compatibility)
+
+        Raises:
+            ValueError: *package_name* is not a valid Android package name.
+                The spotlight package is embedded in many device commands
+                (pidof, force-stop, proxy lanes), so it is validated here.
         """
+        validate_package_name(package_name)
         # Convert string to SpawnMode for backwards compatibility
         if isinstance(mode, str):
             mode = SpawnMode(mode)
@@ -356,7 +363,11 @@ class SpotlightService:
         Args:
             package_name: Package name to spawn
             auto_resume: Whether to auto-resume after hooks load
+
+        Raises:
+            ValueError: *package_name* is not a valid Android package name.
         """
+        validate_package_name(package_name)
         with self._lock:
             previous = self._spawn_package
             self._spawn_package = package_name
@@ -603,7 +614,11 @@ class SpotlightService:
 
         Args:
             package_name: The package name of the app to spawn.
+
+        Raises:
+            ValueError: *package_name* is not a valid Android package name.
         """
+        validate_package_name(package_name)
         self._spotlight_spawn_application = package_name
         self._spawn_mode = True
 

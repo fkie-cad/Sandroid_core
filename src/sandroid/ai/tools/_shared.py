@@ -6,9 +6,8 @@ its own and has no import-time side effects worth relying on -- it's a plain
 helper library other tool modules import from.
 """
 
-import re
-
 from sandroid.ai.errors import ToolExecutionError
+from sandroid.core.adb_utils import PACKAGE_NAME_RE, is_valid_package_name
 
 #: Android's real package-identifier format: two or more dot-separated
 #: segments, each segment starting with a letter and containing only
@@ -20,7 +19,8 @@ from sandroid.ai.errors import ToolExecutionError
 #: context it might later reach (shell=True command string, non-shell argv
 #: list, plain Path operation) -- see file_transfer.py's module docstring
 #: for the review finding that motivated this.
-_PACKAGE_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$")
+#: (Defined in :mod:`sandroid.core.adb_utils` so core sinks share it.)
+_PACKAGE_NAME_RE = PACKAGE_NAME_RE
 
 #: Shared JSON Schema fragment for an optional ``package_name`` tool
 #: parameter, used by every tool that accepts one (see
@@ -78,7 +78,7 @@ def resolve_package_name(package_name: str | None) -> str:
             app is currently selected.
     """
     if package_name:
-        return package_name
+        return validate_package_name(package_name)
 
     # Lazy import (matches the convention in ai/context.py's `_describe_*`
     # helpers): keeps this module import-cheap and lets tests monkeypatch
@@ -87,7 +87,9 @@ def resolve_package_name(package_name: str | None) -> str:
 
     effective = get_spotlight_service().get_effective_package()
     if effective:
-        return effective
+        # Validated too: the spotlight package can come from a restored
+        # session/config, and every caller embeds it in an adb command.
+        return validate_package_name(effective)
 
     raise ToolExecutionError(
         "no package_name given and no spotlight app is currently selected"
@@ -119,7 +121,7 @@ def validate_package_name(name: str) -> str:
             format (two or more dot-separated segments, each starting with
             a letter and containing only letters/digits/underscore).
     """
-    if not name or not _PACKAGE_NAME_RE.match(name):
+    if not is_valid_package_name(name):
         raise ToolExecutionError(
             f"invalid package_name {name!r}: must match Android's package "
             "identifier format (e.g. 'com.example.app')"

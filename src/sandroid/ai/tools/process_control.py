@@ -13,13 +13,13 @@ Importing this module registers all five tools into the
 """
 
 import logging
-import shlex
 from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools._shared import validate_package_name
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb import Adb
+from sandroid.core.adb_utils import validate_pid
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +106,13 @@ def get_process_detail(pid: int) -> dict[str, Any]:
         ``'map_region_count'``.
 
     Raises:
-        ToolExecutionError: The process is gone or ``/proc/<pid>/status`` is
-            otherwise unreadable.
+        ToolExecutionError: *pid* is not a positive integer, or the process
+            is gone or ``/proc/<pid>/status`` is otherwise unreadable.
     """
+    try:
+        pid = validate_pid(pid)
+    except ValueError as exc:
+        raise ToolExecutionError(str(exc)) from exc
     detail = Adb.get_process_detail(pid)
     if detail is None:
         raise ToolExecutionError(
@@ -259,13 +263,9 @@ def kill_process(
 
     Exactly one of ``package_name``/``pid`` must be given. The package path
     validates ``package_name`` against Android's real package-identifier
-    format (:func:`sandroid.ai.tools._shared.validate_package_name`) and
-    additionally quotes it with :func:`shlex.quote` before it reaches
-    ``Adb.force_stop``'s internal, unquoted f-string (per this task's
-    injection-hardening scope: fix at new call sites only, the shared ``Adb``
-    function itself is untouched) -- validation and quoting solve different
-    problems (device-side re-injection vs. host-side shell injection), so
-    both are kept. The pid path rejects ``pid <= 0`` outright (POSIX
+    format (:func:`sandroid.ai.tools._shared.validate_package_name`);
+    ``Adb.force_stop`` additionally quotes it for the device and host shell.
+    The pid path rejects ``pid <= 0`` outright (POSIX
     ``kill()`` gives 0 and negative pids special process-group-wide
     semantics -- never what a single-process "kill this pid" call should
     trigger) before ever reaching ``Adb.kill_pid``, whose own plain
@@ -299,7 +299,7 @@ def kill_process(
 
     if package_name:
         package_name = validate_package_name(package_name)
-        success, message = Adb.force_stop(shlex.quote(package_name))
+        success, message = Adb.force_stop(package_name)
         return {
             "method": "force_stop",
             "package_name": package_name,

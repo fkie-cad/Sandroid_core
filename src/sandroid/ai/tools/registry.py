@@ -167,7 +167,10 @@ class ToolRegistry:
             Whatever the tool's ``func`` returns.
 
         Raises:
-            ToolExecutionError: If no tool is registered under ``name``. Any
+            ToolExecutionError: If no tool is registered under ``name``, or
+                an argument does not match the JSON-schema ``type`` its tool
+                declares (defence in depth: e.g. a model-supplied ``"1;id"``
+                for an ``integer`` pid never reaches the tool). Any
                 exception raised by the tool's own ``func`` propagates
                 unchanged -- the caller (:mod:`sandroid.ai.loop`) is
                 responsible for catching and converting that into a
@@ -177,6 +180,7 @@ class ToolRegistry:
         spec = self._tools.get(name)
         if spec is None:
             raise ToolExecutionError(f"Unknown tool: {name!r}")
+        _check_argument_types(spec, arguments)
         return spec.func(**arguments)
 
     def get_spec(self, name: str) -> ToolSpec | None:
@@ -206,6 +210,77 @@ class ToolRegistry:
                 "parameters": spec.parameters,
             },
         }
+
+
+#: JSON-schema primitive type -> accepted Python types (``bool`` is an
+#: ``int`` subclass in Python but never a JSON integer/number).
+_JSON_TYPES: dict[str, tuple[type, ...]] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list, tuple),
+    "object": (dict,),
+    "null": (type(None),),
+}
+
+
+def _matches_json_type(value: Any, json_type: Any) -> bool:
+    """True if *value* matches a JSON-schema ``type`` (str or list of str).
+
+    Unknown/missing types match anything (the check is a minimal guard, not a
+    full validator). ``3.0`` counts as an ``integer`` like in JSON Schema.
+    """
+    types = json_type if isinstance(json_type, list) else [json_type]
+    for t in types:
+        accepted = _JSON_TYPES.get(t) if isinstance(t, str) else None
+        if accepted is None:
+            return True
+        if t in ("integer", "number") and isinstance(value, bool):
+            continue
+        if t == "integer" and isinstance(value, float) and value.is_integer():
+            return True
+        if isinstance(value, accepted):
+            return True
+    return False
+
+
+def _check_argument_types(spec: ToolSpec, arguments: dict) -> None:
+    """Reject arguments whose type contradicts the tool's declared schema.
+
+    Checks each top-level argument with a declared ``type`` (and, for arrays,
+    the declared ``items.type`` of each element). No jsonschema dependency;
+    anything the schema does not declare is left to the tool itself.
+
+    Raises:
+        ToolExecutionError: An argument has the wrong JSON type.
+    """
+    if not isinstance(arguments, dict):
+        raise ToolExecutionError(
+            f"{spec.name}: arguments must be a JSON object, "
+            f"got {type(arguments).__name__}"
+        )
+    properties = (spec.parameters or {}).get("properties") or {}
+    for key, value in arguments.items():
+        prop = properties.get(key)
+        if not isinstance(prop, dict) or "type" not in prop:
+            continue
+        if not _matches_json_type(value, prop["type"]):
+            raise ToolExecutionError(
+                f"{spec.name}: argument {key!r} must be of type "
+                f"{prop['type']}, got {type(value).__name__} {value!r}"
+            )
+        items = prop.get("items")
+        if isinstance(value, list | tuple) and isinstance(items, dict):
+            item_type = items.get("type")
+            if item_type is None:
+                continue
+            for item in value:
+                if not _matches_json_type(item, item_type):
+                    raise ToolExecutionError(
+                        f"{spec.name}: argument {key!r} items must be of type "
+                        f"{item_type}, got {type(item).__name__} {item!r}"
+                    )
 
 
 _tool_registry: ToolRegistry | None = None

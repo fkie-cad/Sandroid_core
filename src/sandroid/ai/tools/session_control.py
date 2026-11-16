@@ -42,7 +42,9 @@ from typing import Any
 
 from sandroid.ai.arbiter import ResourceId
 from sandroid.ai.errors import ToolExecutionError
+from sandroid.ai.tools._shared import validate_package_name
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
+from sandroid.core.adb_utils import is_valid_package_name
 from sandroid.core.enums import SpawnMode
 
 #: How long to let mitmweb settle after a successful ``start()`` before
@@ -182,10 +184,12 @@ def set_spotlight_app(
         :func:`_curated_spotlight_state`), reflecting the just-applied state.
 
     Raises:
-        ToolExecutionError: ``mode`` is neither ``"attach"`` nor ``"spawn"``.
+        ToolExecutionError: ``mode`` is neither ``"attach"`` nor ``"spawn"``,
+            or *package_name* is not a valid Android package name.
     """
     if mode not in ("attach", "spawn"):
         raise ToolExecutionError(f"invalid mode {mode!r}: must be 'attach' or 'spawn'")
+    package_name = validate_package_name(package_name)
 
     # Lazy import (matches the convention in `ai/tools/_shared.py` and
     # `ai/tools/device_query.py`): keeps this module import-cheap and lets
@@ -780,6 +784,14 @@ def enable_app_proxy(
             effective_package = get_spotlight_service().get_effective_package()
         except Exception:
             effective_package = None
+    if effective_package and not is_valid_package_name(effective_package):
+        return {
+            "success": False,
+            "message": f"Invalid package name {effective_package!r}.",
+            "package": effective_package,
+            "target": target,
+            "lane_socks_port": None,
+        }
 
     already_active = bool(effective_package) and (
         manager.lane_for(effective_package) is not None

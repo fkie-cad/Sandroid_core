@@ -348,7 +348,8 @@ def get_file_diff(path: str) -> dict[str, Any]:
     place on every call.
 
     Raises:
-        ToolExecutionError: *path* is empty, or the device pull failed
+        ToolExecutionError: *path* is empty/relative/contains a wildcard,
+            or the device pull failed
             (e.g. file not found, permission denied).
 
     Returns:
@@ -359,6 +360,14 @@ def get_file_diff(path: str) -> dict[str, Any]:
     """
     if not path:
         raise ToolExecutionError("path must not be empty")
+    # One literal file only: a wildcard would make add_spotlight_file expand
+    # it through a device shell listing, and control characters have no
+    # place in a device path.
+    if not path.startswith("/") or any(c in path for c in "*?\n\r\x00"):
+        raise ToolExecutionError(
+            f"path must be one absolute on-device file path without wildcards "
+            f"or control characters, got {path!r}"
+        )
 
     from sandroid.core import file_diff, watchlist_store
     from sandroid.core.adb import Adb
