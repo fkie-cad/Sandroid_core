@@ -293,11 +293,18 @@ def collect_device_metadata(
 ) -> dict[str, Any]:
     """Read identifying properties of the analysed device.
 
+    ``device_name`` is only a label the analysis carried (it may be the
+    config default ``emulator.device_name``), so it is recorded only when the
+    device confirms it: it must equal the AVD name or model the device
+    reports. Otherwise the reported AVD name (emulators) or model is used,
+    and when the device did not answer at all the name is ``None``; the
+    metadata never names a device nobody talked to.
+
     Args:
         adb: Object with ``send_adb_command(cmd) -> (stdout, stderr)``. When
-            ``None`` only ``device_name`` is recorded.
-        device_name: Name the analysis knows the device by (fallback for the
-            AVD name).
+            ``None`` only ``device_name`` is recorded (no device query was
+            requested, e.g. tests and offline tools).
+        device_name: Name the analysis knows the device by.
 
     Returns:
         Mapping with ``device_name``, ``serial``, ``avd_name``,
@@ -342,7 +349,30 @@ def collect_device_metadata(
             first = emu.splitlines()[0].strip()
             avd = first if first and first != "OK" else None
     meta["avd_name"] = avd
+    meta["device_name"] = _confirmed_device_name(meta, device_name)
     return meta
+
+
+def _confirmed_device_name(meta: dict[str, Any], label: str | None) -> str | None:
+    """``label`` if the device's own answers confirm it, else what it reported."""
+    model = meta.get("model")
+    safe_model = re.sub(r"[\s/\\]+", "_", model.strip()) if model else None
+    reported = {v for v in (meta.get("avd_name"), model, safe_model) if v}
+    if label and label in reported:
+        return label
+    answered = any(
+        meta.get(k) is not None
+        for k in ("serial", "avd_name", "model", "build_fingerprint", "api_level")
+    )
+    if not answered:
+        if label:
+            logger.warning(
+                "metadata: device did not answer; not recording the unverified "
+                "device name %r",
+                label,
+            )
+        return None
+    return meta.get("avd_name") or safe_model or None
 
 
 def _redact(value: Any, key: str | None = None) -> Any:
@@ -397,8 +427,16 @@ def build_run_metadata(
     run_id: str | None = None,
     mode: str | None = None,
     extra: dict[str, Any] | None = None,
+    run_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the ``"Run Metadata"`` block stored in the results JSON."""
+    """Assemble the ``"Run Metadata"`` block stored in the results JSON.
+
+    ``run_settings`` (see :func:`describe_run_settings`) are the settings the
+    analysis actually ran with. They are stored as ``"run_settings"`` and
+    override the matching keys of ``settings.analysis``, so the recorded
+    settings never claim a capture (or dry run) that did not happen just
+    because the config file has it switched on.
+    """
     started = to_iso(started_at)
     ended = to_iso(ended_at) or iso_now()
     duration = None
@@ -423,9 +461,42 @@ def build_run_metadata(
         "settings": sanitize_settings(config),
         "hash_algorithms": list(HASH_ALGORITHMS),
     }
+    if run_settings is not None:
+        used = _redact(dict(run_settings))
+        meta["run_settings"] = used
+        analysis = meta["settings"].setdefault("analysis", {})
+        if isinstance(analysis, dict):
+            analysis.update({k: v for k, v in used.items() if k != "whitelist_file"})
     if extra:
         meta.update(_redact(extra))
     return meta
+
+
+def describe_run_settings(run_config: Any) -> dict[str, Any]:
+    """The settings an analysis actually used, keyed like ``[analysis]``.
+
+    Args:
+        run_config: The :class:`~sandroid.analysis.run_config.RunConfig`
+            handed to the engine.
+    """
+    settings: dict[str, Any] = {
+        "number_of_runs": getattr(run_config, "number_of_runs", None),
+        "avoid_strong_noise_filter": not getattr(run_config, "noise_filter", True),
+        "capture_network": bool(getattr(run_config, "network", False)),
+        "capture_processes": bool(getattr(run_config, "processes", False)),
+        "capture_sockets": bool(getattr(run_config, "sockets", False)),
+        "show_deleted_files": bool(getattr(run_config, "show_deleted", False)),
+        "hash_files": bool(getattr(run_config, "hash_files", False)),
+        "list_apks": bool(getattr(run_config, "pull_apk", False)),
+        "screenshot_interval": getattr(run_config, "screenshot_interval", None),
+    }
+    window = getattr(run_config, "capture_window", 0)
+    action = getattr(run_config, "action", None)
+    if window and type(action).__name__ == "CaptureWindowAction":
+        settings["capture_window"] = window
+    whitelist = getattr(run_config, "whitelist", None)
+    settings["whitelist_file"] = str(whitelist) if whitelist else None
+    return settings
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +741,7 @@ def finalize_run(
     generate_pdf: bool = False,
     pdf_name: str = DEFAULT_PDF_NAME,
     write_manifest: bool = True,
+    run_settings: dict[str, Any] | None = None,
 ) -> FinalizeOutcome:
     """Write all evidence documentation for a finished analysis run.
 
@@ -692,6 +764,8 @@ def finalize_run(
         generate_pdf: Also render the PDF report.
         pdf_name: PDF file name inside ``result_dir``.
         write_manifest: Write ``manifest.json``/``SHA256SUMS`` at the end.
+        run_settings: Settings the analysis actually used
+            (:func:`describe_run_settings`); recorded in the metadata.
 
     Returns:
         A :class:`FinalizeOutcome`.
@@ -706,7 +780,19 @@ def finalize_run(
         ended_at=ended_at,
         run_id=run_id,
         mode=mode,
+        run_settings=run_settings,
     )
+    if adb is not None:
+        # The results' "Device Name" is a session label (it can still be the
+        # config default); keep it in line with what the device confirmed.
+        confirmed = metadata["device"].get("device_name") or "unknown"
+        if results.get("Device Name") != confirmed:
+            logger.warning(
+                "Device Name %r not confirmed by the device; recording %r",
+                results.get("Device Name"),
+                confirmed,
+            )
+            results = {**results, "Device Name": confirmed}
     out_json = Path(output_name)
     if not out_json.is_absolute():
         out_json = root / out_json
@@ -913,6 +999,7 @@ __all__ = [
     "build_run_metadata",
     "collect_device_metadata",
     "collect_host_metadata",
+    "describe_run_settings",
     "finalize_run",
     "hash_file",
     "iso_now",

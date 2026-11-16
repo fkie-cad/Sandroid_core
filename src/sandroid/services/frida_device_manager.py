@@ -132,34 +132,66 @@ class FridaDeviceManager:
     def get_device_for_session(self) -> Any:
         """Get Frida device for session operations (spawn/attach).
 
-        Tries DeviceManager for multi-device support, falls back to USB.
+        Uses the DeviceManager's active device, else the selected serial
+        (``--serial`` / ANDROID_SERIAL / last adb target). Only when no
+        device was selected at all does it fall back to frida's USB device.
 
         Returns:
             Frida device object.
 
         Raises:
-            frida.InvalidArgumentError: If device not found.
+            frida.InvalidArgumentError: If the selected device is not found.
+                There is deliberately no fallback to another device.
         """
         import frida
 
-        # Try DeviceManager for multi-device support
+        device_serial = None
         try:
             from sandroid.core.toolbox import Toolbox
 
             dm = Toolbox.get_device_manager()
             if dm and dm.active_device:
                 device_serial = dm.active_device.serial
-                device = self.lookup_device_by_serial(device_serial)
-                if device is not None:
-                    return device
-                self._logger.warning(
-                    f"Frida device '{device_serial}' not found, falling back to USB device"
-                )
         except Exception:
             pass
+        if not device_serial:
+            from sandroid.core.adb import Adb
 
-        # Default fallback to USB device
+            device_serial = Adb.selected_serial()
+        if device_serial:
+            device = self.lookup_device_by_serial(device_serial)
+            if device is None:
+                raise frida.InvalidArgumentError(
+                    f"Frida device '{device_serial}' not found (not falling "
+                    "back to another device)"
+                )
+            return device
         return frida.get_usb_device()
 
 
-__all__ = ["FridaDeviceManager"]
+def get_selected_frida_device(timeout: int | None = None) -> Any:
+    """Frida device for the selected adb serial (see ``Adb.selected_serial``).
+
+    Replaces bare ``frida.get_usb_device()`` calls, which pick the first
+    USB/emulator device frida sees, whatever device Sandroid was told to use.
+    Falls back to ``get_usb_device`` only when no device was selected.
+
+    Raises:
+        frida.InvalidArgumentError: The selected device is not visible to
+            frida.
+    """
+    import frida
+
+    from sandroid.core.adb import Adb
+
+    serial = Adb.selected_serial()
+    if serial:
+        if timeout is None:
+            return frida.get_device(serial)
+        return frida.get_device(serial, timeout=timeout)
+    if timeout is None:
+        return frida.get_usb_device()
+    return frida.get_usb_device(timeout=timeout)
+
+
+__all__ = ["FridaDeviceManager", "get_selected_frida_device"]

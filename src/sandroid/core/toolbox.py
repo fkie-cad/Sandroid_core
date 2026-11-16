@@ -246,12 +246,22 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def _get_active_device_serial(cls) -> str | None:
-        """Delegates to DeviceService to get the active device serial."""
+        """Serial for FridaManager: the active device, else the selected one.
+
+        Falls back to the explicitly requested serial (``Adb.selected_serial``)
+        so AndroidFridaManager never auto-selects "the single/first device"
+        when the requested device is missing: it then fails on the requested
+        serial instead of silently using another emulator.
+        """
+        from .adb import Adb
+
         try:
             device = _service("get_device_service").get_active_device()
-            return device.serial if device else None
+            if device:
+                return device.serial
         except Exception:
-            return None
+            pass
+        return Adb.selected_serial()
 
     # Standard folder structure for device-specific results
     _folders_for_raw = [

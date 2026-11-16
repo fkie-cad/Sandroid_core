@@ -204,14 +204,19 @@ def test_initialize_core_prepare_runs_before_toolbox_init(monkeypatch):
     monkeypatch.setattr(
         initializer, "prepare_device", lambda console=None: order.append("prep")
     )
+    monkeypatch.setattr(initializer, "require_device", lambda: order.append("require"))
     monkeypatch.setattr(Toolbox, "config", None, raising=False)
 
     initializer.initialize_core(SimpleNamespace(), prepare=True)
-    assert order == ["adb", "prep", "tb"]
+    assert order == ["adb", "require", "prep", "tb"]
 
     order.clear()
     initializer.initialize_core(SimpleNamespace())
     assert order == ["adb", "tb"]
+
+    order.clear()
+    initializer.initialize_core(SimpleNamespace(), require=True)
+    assert order == ["adb", "require", "tb"]
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +245,9 @@ def test_headless_initialize_keeps_supplied_config(monkeypatch):
     monkeypatch.setattr(
         SandroidHeadlessAPI, "is_device_connected", lambda self: _async(True)
     )
+    from sandroid.core import initializer
+
+    monkeypatch.setattr(initializer, "require_device", lambda: None)
 
     cfg = SimpleNamespace(emulator=SimpleNamespace(device_name="My_AVD"))
     api = SandroidHeadlessAPI(config=cfg)
@@ -253,6 +261,15 @@ async def _async(value):
     return value
 
 
+def _device_ok(monkeypatch):
+    """Pretend the selected device is connected (run_analysis checks it)."""
+    from sandroid.api import headless
+
+    monkeypatch.setattr(
+        headless.SandroidHeadlessAPI, "_require_device", staticmethod(lambda: None)
+    )
+
+
 def test_headless_forensic_forwards_capture_network(monkeypatch):
     from sandroid.api import headless
     from sandroid.api.interfaces import AnalysisMode
@@ -264,6 +281,7 @@ def test_headless_forensic_forwards_capture_network(monkeypatch):
         return {}
 
     monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    _device_ok(monkeypatch)
     api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
     api._initialized = True
     asyncio.run(api.run_analysis(AnalysisMode.FORENSIC, capture_network=True))
@@ -960,6 +978,7 @@ def test_headless_api_keeps_run_documentation(monkeypatch):
         return {}
 
     monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    _device_ok(monkeypatch)
     api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
     api._initialized = True
     asyncio.run(api.run_analysis(AnalysisMode.FORENSIC))

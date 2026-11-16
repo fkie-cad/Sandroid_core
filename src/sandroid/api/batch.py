@@ -25,7 +25,7 @@ async def batch_analyze(
     packages: list[str],
     mode: AnalysisMode = AnalysisMode.MALWARE,
     runs: int = 2,
-    capture_network: bool = False,
+    capture_network: bool | None = None,
     output_dir: str = "results",
     config_path: str | None = None,
     config: SandroidConfig | None = None,
@@ -39,7 +39,7 @@ async def batch_analyze(
         packages: List of package names to analyze.
         mode: Analysis mode to use for all packages.
         runs: Number of analysis runs per package.
-        capture_network: Enable network capture.
+        capture_network: Enable network capture (None: config ``analysis``).
         output_dir: Directory for individual result files.
         config_path: Optional path to configuration file.
         config: Optional already-loaded configuration (takes precedence over

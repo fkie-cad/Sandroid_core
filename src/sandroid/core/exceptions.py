@@ -5,6 +5,14 @@ class SandroidError(Exception):
     """Base exception for all Sandroid errors."""
 
 
+class DeviceNotAvailableError(SandroidError):
+    """The requested (or any) Android device is not connected and online.
+
+    Raised before any device work starts, so a headless run never documents
+    evidence for a device it could not reach.
+    """
+
+
 class APKDownloadError(SandroidError):
     """Base exception for APK download errors."""
 

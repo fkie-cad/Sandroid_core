@@ -377,7 +377,9 @@ class FridaManager:
         self.frida_install_dst = frida_install_dst
         self.frida_started_properly = False
         self.logger = logging.getLogger(__name__)
-        self.device_serial = device_serial  # For multi-device support
+        # For multi-device support; default to the selected device so the
+        # legacy helpers never act on "the first USB device".
+        self.device_serial = device_serial or Adb.selected_serial()
 
         if self.is_remote:
             frida.get_device_manager().add_remote_device(self.socket)

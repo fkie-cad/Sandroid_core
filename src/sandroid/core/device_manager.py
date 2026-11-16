@@ -274,9 +274,12 @@ class DeviceManager:
                     f"Active device {self._active_device.serial} disconnected"
                 )
                 self._active_device = None
-                # Clear the ADB target so later `adb -s <dead-serial>` calls
-                # don't block on the 30s transport timeout.
-                Adb.set_target_device(None)
+                # Keep the ADB target on the lost serial. A snapshot load
+                # drops the device from `adb devices` for about a second;
+                # clearing the target sent the calls in that window without
+                # `-s`, so adb picked whatever other device was attached (or
+                # failed with "more than one device"). `adb -s <gone-serial>`
+                # fails fast with "device not found", which is what we want.
                 device_lost = True
             elif (
                 self._active_device

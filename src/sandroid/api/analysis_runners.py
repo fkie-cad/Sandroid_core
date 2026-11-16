@@ -102,12 +102,99 @@ def _apply_network_degradation(degrade: bool) -> None:
         Adb.send_telnet_command("network speed full")
 
 
+_UNSET = object()
+
+
+def _analysis_section(toolbox: Any) -> tuple[Any, Any]:
+    """``(config, config.analysis)`` of the run (Toolbox config, else global)."""
+    cfg = getattr(toolbox, "config", None)
+    analysis = getattr(cfg, "analysis", None)
+    if analysis is None:
+        try:
+            from sandroid.config import get_config
+
+            cfg = cfg if cfg is not None else get_config()
+            analysis = get_config().analysis
+        except Exception:
+            analysis = None
+    return cfg, analysis
+
+
+def resolve_analysis_config(
+    toolbox: Any,
+    *,
+    runs: int,
+    capture_network: bool | None = None,
+    compute_hashes: bool | None = None,
+    track_deleted: bool | None = None,
+    **kwargs: Any,
+):
+    """Build the headless :class:`AnalysisConfig` from the ``[analysis]`` config.
+
+    Every toggle the caller leaves at ``None`` (or does not pass) follows the
+    user's ``[analysis]`` configuration, which already contains the CLI flags
+    (``--network``, ``--no-processes``, ``--avoid-strong-noise-filter``, ...)
+    as overrides -- the same rule the TUI applies (``RunConfig.for_playback``).
+    Previously headless runs hard-coded network/processes/dry run *off*
+    while the run metadata (a dump of the config) claimed they were on.
+
+    Keyword options: ``monitor_processes``, ``monitor_sockets``, ``dry_run``
+    (or the inverse ``skip_noise_filter``), ``pull_apk``,
+    ``screenshot_interval``, ``whitelist``, ``capture_window``.
+    """
+    from sandroid.api.interfaces import AnalysisConfig
+
+    cfg, analysis = _analysis_section(toolbox)
+
+    def pick(value: Any, attr: str, default: bool) -> bool:
+        if value is not None:
+            return bool(value)
+        return bool(getattr(analysis, attr, default)) if analysis else default
+
+    dry_run = kwargs.get("dry_run")
+    if dry_run is None and kwargs.get("skip_noise_filter") is not None:
+        dry_run = not kwargs["skip_noise_filter"]
+    if dry_run is None:
+        dry_run = not pick(None, "avoid_strong_noise_filter", False)
+    interval = kwargs.get("screenshot_interval", _UNSET)
+    if interval is _UNSET or interval is None:
+        interval = getattr(analysis, "screenshot_interval", None) if analysis else None
+    whitelist = kwargs.get("whitelist")
+    if whitelist is None:
+        wl_file = getattr(cfg, "whitelist_file", None)
+        whitelist = str(wl_file) if wl_file else None
+    return AnalysisConfig(
+        number_of_runs=runs,
+        capture_network=pick(capture_network, "capture_network", False),
+        capture_processes=pick(
+            kwargs.get("monitor_processes"), "capture_processes", True
+        ),
+        capture_sockets=pick(kwargs.get("monitor_sockets"), "capture_sockets", False),
+        show_deleted=pick(track_deleted, "show_deleted_files", False),
+        take_screenshots=bool(interval),
+        screenshot_interval=interval or 3,
+        hash_files=pick(compute_hashes, "hash_files", False),
+        pull_apk=pick(kwargs.get("pull_apk"), "list_apks", False),
+        dry_run=bool(dry_run),
+        whitelist=whitelist,
+        capture_window=kwargs.get("capture_window", 60),
+    )
+
+
+def _degrade_network_setting(toolbox: Any, value: bool | None) -> bool:
+    if value is not None:
+        return bool(value)
+    _cfg, analysis = _analysis_section(toolbox)
+    return bool(getattr(analysis, "degrade_network", False)) if analysis else False
+
+
 def _finalize_headless_run(
     toolbox: Any,
     result: Any,
     mode: str,
     started_at: str,
     on_finalized: Callable[[Any], None] | None = None,
+    run_config: Any = None,
 ) -> Any:
     """Write results JSON + metadata, optional PDF and manifest for a run.
 
@@ -142,6 +229,11 @@ def _finalize_headless_run(
             mode=mode,
             generate_pdf=bool(
                 getattr(getattr(cfg, "report", None), "generate_pdf", False)
+            ),
+            run_settings=(
+                run_report.describe_run_settings(run_config)
+                if run_config is not None
+                else None
             ),
         )
         logger.info(f"Run documentation written: {outcome.results_json}")
@@ -184,8 +276,8 @@ async def run_malware_analysis(
     toolbox: type[Toolbox],
     package: str,
     runs: int,
-    capture_network: bool,
-    compute_hashes: bool,
+    capture_network: bool | None,
+    compute_hashes: bool | None,
     current_run_setter: RunSetter = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -217,7 +309,6 @@ async def run_malware_analysis(
     """
     from sandroid.analysis.engine import AnalysisEngine
     from sandroid.analysis.run_config import RunConfig
-    from sandroid.api.interfaces import AnalysisConfig
     from sandroid.core.json_utils import json_encoder
     from sandroid.features.trigdroid import Trigdroid
     from sandroid.services import get_spotlight_service
@@ -239,22 +330,20 @@ async def run_malware_analysis(
     toolbox.create_snapshot(b"tmp")
 
     # 4. Optional network degradation (replicates legacy assembleQ).
-    _apply_network_degradation(kwargs.get("degrade_network", False))
+    _apply_network_degradation(
+        _degrade_network_setting(toolbox, kwargs.get("degrade_network"))
+    )
 
-    # 5. Build the typed config and run the unified engine.
-    screenshot_interval = kwargs.get("screenshot_interval")
-    ac = AnalysisConfig(
-        number_of_runs=runs,
+    # 5. Build the typed config (unset toggles follow [analysis]) and run the
+    #    unified engine.
+    options = {k: v for k, v in kwargs.items() if k != "track_deleted"}
+    ac = resolve_analysis_config(
+        toolbox,
+        runs=runs,
         capture_network=capture_network,
-        capture_processes=kwargs.get("monitor_processes", True),
-        capture_sockets=kwargs.get("monitor_sockets", False),
-        show_deleted=kwargs.get("track_deleted", False),
-        take_screenshots=screenshot_interval is not None,
-        screenshot_interval=screenshot_interval or 3,
-        hash_files=compute_hashes,
-        pull_apk=kwargs.get("pull_apk", False),
-        dry_run=not kwargs.get("skip_noise_filter", False),
-        whitelist=kwargs.get("whitelist"),
+        compute_hashes=compute_hashes,
+        track_deleted=kwargs.get("track_deleted"),
+        **options,
     )
     run_config = RunConfig.from_analysis_config(
         ac, action=Trigdroid(), whitelist=ac.whitelist
@@ -276,6 +365,7 @@ async def run_malware_analysis(
         "headless-malware",
         started_at,
         on_finalized=kwargs.get("on_finalized"),
+        run_config=run_config,
     )
 
     # Normalize to a JSON-safe dict (sets -> lists, etc.), matching the legacy
@@ -286,8 +376,8 @@ async def run_malware_analysis(
 async def run_forensic_analysis(
     toolbox: type[Toolbox],
     runs: int,
-    track_deleted: bool,
-    compute_hashes: bool,
+    track_deleted: bool | None,
+    compute_hashes: bool | None,
     current_run_setter: RunSetter = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -322,27 +412,21 @@ async def run_forensic_analysis(
     """
     from sandroid.analysis.engine import AnalysisEngine
     from sandroid.analysis.run_config import RunConfig
-    from sandroid.api.interfaces import AnalysisConfig
     from sandroid.core.json_utils import json_encoder
 
     # The engine reverts to the ``tmp`` snapshot on its first step (and between
     # runs), so it must exist before the run starts.
     toolbox.create_snapshot(b"tmp")
 
-    screenshot_interval = kwargs.get("screenshot_interval")
-    ac = AnalysisConfig(
-        number_of_runs=runs,
-        capture_network=kwargs.get("capture_network", False),
-        capture_processes=kwargs.get("monitor_processes", False),
-        capture_sockets=kwargs.get("monitor_sockets", False),
-        show_deleted=track_deleted,
-        take_screenshots=screenshot_interval is not None,
-        screenshot_interval=screenshot_interval or 3,
-        hash_files=compute_hashes,
-        pull_apk=kwargs.get("pull_apk", False),
-        dry_run=kwargs.get("dry_run", False),
-        whitelist=kwargs.get("whitelist"),
-        capture_window=kwargs.get("capture_window", 60),
+    # Unset toggles follow [analysis] (incl. CLI overrides), like the TUI.
+    options = {k: v for k, v in kwargs.items() if k != "capture_network"}
+    ac = resolve_analysis_config(
+        toolbox,
+        runs=runs,
+        capture_network=kwargs.get("capture_network"),
+        compute_hashes=compute_hashes,
+        track_deleted=track_deleted,
+        **options,
     )
     recording_path = kwargs.get("recording_path")
     if recording_path:
@@ -374,6 +458,7 @@ async def run_forensic_analysis(
         "headless-replay" if recording_path else "headless-forensic",
         started_at,
         on_finalized=kwargs.get("on_finalized"),
+        run_config=run_config,
     )
 
     data = json.loads(json.dumps(result.to_json_dict(), default=json_encoder))

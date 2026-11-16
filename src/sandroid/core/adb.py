@@ -82,6 +82,25 @@ class Adb:
         return cls._target_device
 
     @classmethod
+    def selected_serial(cls) -> str | None:
+        """Serial that device tooling (Frida, AndroidFridaManager) must use.
+
+        The current adb target, else the explicitly requested serial
+        (``--serial`` / config ``emulator.serial`` / ``ANDROID_SERIAL``).
+        ``None`` only when nothing was requested and no device was selected
+        yet. Callers that get a serial must never fall back to "the first
+        USB device": with several emulators attached that is someone else's.
+        """
+        if cls._target_device:
+            return cls._target_device
+        try:
+            from sandroid.core.device_manager import DeviceManager
+
+            return DeviceManager.preferred_serial()
+        except Exception:
+            return None
+
+    @classmethod
     def _build_command(cls, command: str, serial: str | None = None) -> str:
         """Build an ADB command with optional device targeting.
 
