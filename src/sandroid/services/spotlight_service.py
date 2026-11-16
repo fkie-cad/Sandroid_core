@@ -271,6 +271,44 @@ class SpotlightService:
         else:
             self._logger.debug("Cleared spotlight PID")
 
+    def announce_pid(self, pid: int | None, package: str | None = None) -> bool:
+        """Set the PID after a lifecycle change (spawn, respawn, process death).
+
+        Unlike :meth:`set_pid` this publishes ``STATE_CHANGED`` so the
+        Spotlight panel shows the new PID at once (dexray/friTap spawns used
+        to leave the pre-spawn PID on screen). Only for one-off lifecycle
+        events -- never from a poll (see :meth:`set_pid`).
+
+        Args:
+            pid: The new process ID, or None if the process is gone.
+            package: The package the PID belongs to. When given and it is not
+                the spotlight package, nothing is changed.
+
+        Returns:
+            True if the PID changed.
+        """
+        effective = self.get_effective_package()
+        if package and effective and package != effective:
+            return False
+        if self.get_pid() == pid:
+            return False
+        self.set_pid(pid)
+        if self._event_bus is not None:
+            from sandroid.core.events import Event, EventType
+
+            self._event_bus.publish(
+                Event(
+                    type=EventType.STATE_CHANGED,
+                    data={
+                        "change_type": "spotlight_pid",
+                        "package_name": effective,
+                        "pid": pid,
+                    },
+                    source="spotlight_service",
+                )
+            )
+        return True
+
     def has_app(self) -> bool:
         """Check if a spotlight app is currently set.
 
