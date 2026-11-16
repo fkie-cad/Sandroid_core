@@ -5,8 +5,36 @@ distinguishing benign informational messages from actionable errors.
 """
 
 import logging
+import os
+import shlex
+import subprocess
 
 logger = logging.getLogger(__name__)
+
+
+def quote_host_arg(arg: str, windows: bool | None = None) -> str:
+    """Quote one argument for the *host* shell used by ``shell=True``.
+
+    ``Adb.send_adb_command`` runs its command line through the host shell
+    (``/bin/sh`` on POSIX, ``cmd.exe`` on Windows), so host-side values that
+    may contain spaces or metacharacters (the adb executable path, local file
+    paths) must be quoted with that shell's rules: ``shlex.quote`` on POSIX
+    (a no-op for plain paths such as ``/usr/bin/adb``), double quotes on
+    Windows (``cmd.exe`` does not understand single quotes).
+
+    Args:
+        arg: The argument to quote.
+        windows: Force Windows (True) or POSIX (False) rules; defaults to the
+            running platform.
+
+    Returns:
+        The quoted argument.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        return subprocess.list2cmdline([arg])
+    return shlex.quote(arg)
 
 # Benign ADB patterns that should be logged but not treated as errors
 BENIGN_ADB_PATTERNS = [

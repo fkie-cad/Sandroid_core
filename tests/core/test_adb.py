@@ -16,6 +16,7 @@ import subprocess
 import pytest
 
 from sandroid.core.adb import Adb
+from sandroid.core.adb_utils import quote_host_arg
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +70,7 @@ def test_send_adb_command_serial_targets_without_mutating_global(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **_kwargs):
-        captured["cmd"] = cmd[0]
+        captured["cmd"] = cmd
         return _FakeCompletedProcess("out", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -88,7 +89,7 @@ def test_send_adb_command_default_uses_global_target(monkeypatch):
     captured = {}
 
     def fake_run(cmd, **_kwargs):
-        captured["cmd"] = cmd[0]
+        captured["cmd"] = cmd
         return _FakeCompletedProcess("out", "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -104,7 +105,7 @@ def test_send_adb_command_popen_serial_overrides_without_mutating_global(monkeyp
 
     class _FakePopen:
         def __init__(self, cmd, **_kwargs):
-            captured["cmd"] = cmd[0]
+            captured["cmd"] = cmd
 
     monkeypatch.setattr(subprocess, "Popen", _FakePopen)
 
@@ -215,11 +216,47 @@ def test_get_current_avd_name_default_forwards_no_serial(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_build_shell_command_quotes_adb_path_only_when_it_has_a_space(monkeypatch):
+def test_build_shell_command_quotes_adb_path_only_when_needed(monkeypatch):
     monkeypatch.setattr(Adb, "ADB_PATH", "adb")
     assert Adb._build_shell_command("shell getprop foo") == "adb shell getprop foo"
 
-    monkeypatch.setattr(Adb, "ADB_PATH", r"C:\Program Files\platform-tools\adb.exe")
+    monkeypatch.setattr(Adb, "ADB_PATH", "/opt/android sdk/platform-tools/adb")
     assert Adb._build_shell_command("shell getprop foo") == (
-        '"C:\\Program Files\\platform-tools\\adb.exe" shell getprop foo'
+        f"{quote_host_arg('/opt/android sdk/platform-tools/adb')} shell getprop foo"
     )
+
+
+def test_quote_host_arg_platform_rules():
+    win_path = r"C:\Program Files\platform-tools\adb.exe"
+    # cmd.exe: double quotes, backslashes preserved
+    assert quote_host_arg(win_path, windows=True) == f'"{win_path}"'
+    assert quote_host_arg("adb", windows=True) == "adb"
+    # POSIX sh: shlex rules, plain paths untouched
+    assert quote_host_arg("/usr/bin/adb", windows=False) == "/usr/bin/adb"
+    assert quote_host_arg("/a b/adb", windows=False) == "'/a b/adb'"
+
+
+def test_send_adb_command_passes_a_string_not_a_one_element_list(monkeypatch):
+    """A one-element list + shell=True breaks on Windows.
+
+    ``list2cmdline`` re-quotes the whole line, so it must be a plain string.
+    """
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["shell"] = kwargs.get("shell")
+        return _FakeCompletedProcess("", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    Adb.send_adb_command("devices -l")
+    assert captured["cmd"] == "adb devices -l"
+    assert captured["shell"] is True
+
+
+def test_base_argv_honors_adb_path_and_target(monkeypatch):
+    monkeypatch.setattr(Adb, "ADB_PATH", "/sdk/platform-tools/adb")
+    assert Adb.base_argv() == ["/sdk/platform-tools/adb"]
+    Adb.set_target_device("emulator-5554")
+    assert Adb.base_argv() == ["/sdk/platform-tools/adb", "-s", "emulator-5554"]
+    assert Adb.base_argv(serial="emulator-5556")[-1] == "emulator-5556"

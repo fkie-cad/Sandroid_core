@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from sandroid.core.adb_utils import quote_host_arg
 from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,9 @@ class EmulatorService:
         # Pull the recording from device
         try:
             adb = self._get_adb()
-            _stdout, stderr = adb.send_adb_command(f"pull {device_path} {local_path}")
+            _stdout, stderr = adb.send_adb_command(
+                f"pull {device_path} {quote_host_arg(str(local_path))}"
+            )
 
             if stderr and "error" in stderr.lower():
                 self._logger.error(f"Failed to pull recording: {stderr}")
@@ -418,9 +421,13 @@ class EmulatorService:
         Raises:
             RuntimeError: If the subprocess cannot be started.
         """
+        from sandroid.core.adb import Adb
+
         try:
+            # Honor ADB_PATH (adb may not be on PATH) and the active device
+            # (-s serial) instead of a bare "adb".
             return subprocess.Popen(
-                ["adb", "shell", "screenrecord", device_path],
+                [*Adb.base_argv(), "shell", "screenrecord", device_path],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

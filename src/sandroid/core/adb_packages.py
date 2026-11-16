@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from sandroid.core.adb_utils import is_adb_error_actionable
+from sandroid.core.adb_utils import is_adb_error_actionable, quote_host_arg
 
 logger = getLogger(__name__)
 
@@ -114,20 +114,32 @@ def install_apk(
     apk_file = os.path.basename(apk_path)
     logger.info(f"Installing local APK {apk_file}")
 
-    stdout, stderr = send_command(f"install -r {apk_path}")
+    stdout, stderr = send_command(f"install -r {quote_host_arg(apk_path)}")
 
-    if stderr:
-        stderr_lower = stderr.lower()
-        if "failed" in stderr_lower or "error" in stderr_lower:
-            if "INSTALL_FAILED_NO_MATCHING_ABIS" in stderr:
-                reason = "APK architecture not compatible with device (wrong CPU type)"
-            elif "INSTALL_FAILED_" in stderr:
-                match = re.search(r"INSTALL_FAILED_\w+", stderr)
-                reason = match.group(0) if match else stderr.strip()
-            else:
-                reason = stderr.strip()
-            logger.error(f"APK installation failed: {reason}")
-            raise APKInstallError(apk_file, reason)
+    # adb reports some failures on stdout ("Failure [...]", "adb: failed to
+    # install ...: Failed transaction (2147483646)"), so look at both streams.
+    combined = f"{stderr or ''}\n{stdout or ''}".strip()
+    combined_lower = combined.lower()
+    stdout_failed = "Success" not in (stdout or "") and (
+        "failure" in combined_lower or "failed" in combined_lower
+    )
+    if stdout_failed or (
+        stderr and ("failed" in stderr.lower() or "error" in stderr.lower())
+    ):
+        if "INSTALL_FAILED_NO_MATCHING_ABIS" in combined:
+            reason = "APK architecture not compatible with device (wrong CPU type)"
+        elif "INSTALL_FAILED_" in combined:
+            match = re.search(r"INSTALL_FAILED_\w+", combined)
+            reason = match.group(0) if match else combined
+        elif "failed transaction" in combined_lower:
+            reason = (
+                f"{combined} -- binder call denied; is SELinux permissive "
+                "(adb root + 'adb shell setenforce 0')?"
+            )
+        else:
+            reason = (stderr or "").strip() or combined
+        logger.error(f"APK installation failed: {reason}")
+        raise APKInstallError(apk_file, reason)
 
     if "Success" not in stdout:
         logger.warning(f"APK installation status unclear: {stdout}")
