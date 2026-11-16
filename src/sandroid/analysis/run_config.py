@@ -168,7 +168,9 @@ class RunConfig:
             recording_path=recording_path,
             results_path=str(cfg.paths.results_path),
             raw_results_path=str(cfg.paths.raw_results_path),
-            device_name=cfg.emulator.device_name,
+            # The connected device's real (AVD/model) name once one is
+            # active; the config value is only a fallback.
+            device_name=_connected_device_name() or cfg.emulator.device_name,
         )
 
     @classmethod
@@ -273,6 +275,16 @@ class RunConfig:
             action=None,
             recording_path=recording_path,
         )
+
+
+def _connected_device_name() -> str | None:
+    """Real name of the active device (AVD/model), or None if none is active."""
+    try:
+        from sandroid.core.device_manager import active_device_name
+
+        return active_device_name()
+    except Exception:
+        return None
 
 
 def _analysis_toggle_defaults() -> dict[str, bool]:

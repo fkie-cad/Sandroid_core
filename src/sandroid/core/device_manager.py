@@ -5,6 +5,7 @@ selection, and switching with proper state management.
 """
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -18,6 +19,35 @@ logger = logging.getLogger(__name__)
 #: Without this, a device that never actually finishes booting would be
 #: re-probed on every single refresh cycle indefinitely.
 PROBE_RETRY_COOLDOWN_SECONDS = 30.0
+
+#: Name of the connected/active device as recorded in runs and reports (AVD
+#: name for emulators, model for physical devices), or ``None`` while no
+#: device has been activated -- then config ``emulator.device_name`` is used.
+_active_device_name: str | None = None
+
+
+def resolve_device_name(device: Device) -> str | None:
+    """The name runs/reports should carry for ``device``.
+
+    Emulators: the AVD name (``ro.boot.qemu.avd_name`` / ``emu avd name``,
+    already stored in ``device.name`` by :meth:`DeviceManager.
+    get_avd_name_for_device`); if that is unknown (``name`` is just the
+    serial) the model. Physical devices: the model (``Pixel 6 Pro``), then
+    the product name. Whitespace/slashes become ``_`` so the value is also a
+    safe folder name.
+    """
+    if device.is_emulator:
+        name = device.name if device.name and device.name != device.serial else ""
+        name = name or device.model
+    else:
+        name = device.model or device.name
+    name = re.sub(r"[\s/\\]+", "_", (name or "").strip())
+    return name or None
+
+
+def active_device_name() -> str | None:
+    """Name of the active device (see :func:`resolve_device_name`) or None."""
+    return _active_device_name
 
 
 class DeviceManager:
@@ -352,7 +382,20 @@ class DeviceManager:
         # Only fetch for emulators that haven't had their AVD name fetched yet
         if device.is_emulator and not getattr(device, "_avd_name_fetched", False):
             try:
-                avd_name = Adb.get_current_avd_name(serial=device.serial)
+                # Fast path: the emulator exports its AVD name as a system
+                # property (API 31+: ro.boot.qemu.avd_name, older images:
+                # ro.kernel.qemu.avd_name) -- one adb round-trip instead of
+                # the 5-30 s telnet console call below.
+                avd_name = None
+                for prop in ("ro.boot.qemu.avd_name", "ro.kernel.qemu.avd_name"):
+                    out, _err = Adb.send_adb_command(
+                        f"shell getprop {prop}", serial=device.serial
+                    )
+                    avd_name = (out or "").strip() or None
+                    if avd_name:
+                        break
+                if not avd_name:
+                    avd_name = Adb.get_current_avd_name(serial=device.serial)
                 if avd_name:
                     device.name = avd_name
                     device._avd_name_fetched = True
@@ -476,6 +519,7 @@ class DeviceManager:
         # Fetch AVD name for emulators (replaces product name with user-given name)
         if device.is_emulator:
             self.get_avd_name_for_device(device)
+        self._sync_session_device_name(device)
 
         # Switch to device-specific results folder
         try:
@@ -495,6 +539,27 @@ class DeviceManager:
                 logger.warning(f"Device change callback failed: {e}")
 
         return True
+
+    @staticmethod
+    def _sync_session_device_name(device: Device) -> None:
+        """Record the connected device's real name for runs and reports.
+
+        ``Toolbox.device_name`` used to stay at config ``emulator.device_name``
+        (default ``Pixel_6_Pro_API_31``) whatever was connected, so run.json /
+        sandroid.json / reports named the wrong device and the snapshot-path
+        check looked in the wrong AVD folder.
+        """
+        global _active_device_name
+        name = resolve_device_name(device)
+        if not name:
+            return
+        _active_device_name = name
+        try:
+            from sandroid.services import get_session_state_service
+
+            get_session_state_service().device_name = name
+        except Exception as e:
+            logger.debug(f"Could not record device name {name!r}: {e}")
 
     def _reset_device_state(self) -> None:
         """Reset all device-specific state when switching devices.

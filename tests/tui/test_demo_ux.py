@@ -496,3 +496,63 @@ def test_quit_cleanup_keeps_emulator_and_adb_server(monkeypatch) -> None:
     found = BackgroundWorkTracker()._detect_untracked_processes()
     pids = {w.identifier for w in found}
     assert pids == {13, 14, 15, 16}
+
+
+# --------------------------------------------------------------------------
+# device name in runs/reports comes from the connected device
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("serial", "name", "model", "expected"),
+    [
+        ("emulator-5558", "Pixel_6_Pro", "sdk_gphone64_arm64", "Pixel_6_Pro"),
+        ("emulator-5558", "emulator-5558", "sdk_gphone64", "sdk_gphone64"),
+        ("1A2B3C", "raven", "Pixel 6 Pro", "Pixel_6_Pro"),
+        ("1A2B3C", "raven", "", "raven"),
+        ("emulator-5554", "", "", None),
+    ],
+)
+def test_resolve_device_name(serial, name, model, expected) -> None:
+    from sandroid.core.device import Device
+    from sandroid.core.device_manager import resolve_device_name
+
+    device = Device(serial=serial, name=name, model=model)
+    assert resolve_device_name(device) == expected
+
+
+def test_activating_device_records_its_avd_name(monkeypatch) -> None:
+    from sandroid.analysis.run_config import _connected_device_name
+    from sandroid.core import device_manager as dm_mod
+    from sandroid.core.adb import Adb
+    from sandroid.core.device import Device
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.services import get_session_state_service
+
+    def fake_adb(cmd, serial=None):
+        if "ro.boot.qemu.avd_name" in cmd:
+            return "Pixel_6_Pro\n", ""
+        return "", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(fake_adb))
+    monkeypatch.setattr(
+        Adb, "get_current_avd_name", staticmethod(lambda serial=None: "WRONG")
+    )
+    monkeypatch.setattr(Adb, "set_target_device", staticmethod(lambda serial: None))
+    monkeypatch.setattr(
+        Toolbox, "update_frida_device_serial", staticmethod(lambda s: None)
+    )
+    monkeypatch.setattr(Toolbox, "switch_device_folder", staticmethod(lambda n: None))
+    monkeypatch.setattr(dm_mod, "_active_device_name", None)
+    state = get_session_state_service()
+    monkeypatch.setattr(state, "_device_name", "Pixel_6_Pro_API_31")
+
+    manager = dm_mod.DeviceManager()
+    dev = Device(serial="emulator-5558", name="sdk_gphone64_arm64", state="device")
+    manager._devices = {"emulator-5558": dev}
+    assert manager.set_active_device("emulator-5558")
+
+    assert dev.name == "Pixel_6_Pro"
+    assert state.device_name == "Pixel_6_Pro"
+    assert dm_mod.active_device_name() == "Pixel_6_Pro"
+    assert _connected_device_name() == "Pixel_6_Pro"
