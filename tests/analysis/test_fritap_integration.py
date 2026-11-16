@@ -296,3 +296,273 @@ def test_target_problem_reports_dead_job():
     assert ft.target_problem() == "target process gone"
     state["s"] = "error"
     assert ft.target_problem() == "TransportError"
+
+
+# --- Phase 3: stale detach, re-attach guard, target death, per-session files --
+
+
+class _Session:
+    def __init__(self):
+        self.handlers = []
+        self.detached = False
+
+    def on(self, signal, cb):
+        assert signal == "detached"
+        self.handlers.append(cb)
+
+    def fire(self, reason, crash=None):
+        for cb in self.handlers:
+            cb(reason, crash)
+
+    def detach(self):
+        self.detached = True
+
+
+class _AfmJobManager:
+    """Shape of AFM 2.0.7's JobManager detach handling."""
+
+    def __init__(self):
+        self.jobs = {}
+        self.process_session = None
+        self._paused = True
+        self.device = types.SimpleNamespace(attach=lambda target: _Session())
+
+    def _attach_with_detach_handler(self, target):  # replaced by the guard
+        raise AssertionError("unguarded attach")
+
+    def _on_session_detached(self, reason, crash):
+        self.process_session = None
+        self._paused = False
+        for job in self.jobs.values():
+            if job.state == "running":
+                job._set_state("error", f"session detached: {reason}")
+
+
+class _AfmJob:
+    def __init__(self, session):
+        self.process_session = session
+        self.state = "running"
+
+    def _set_state(self, state, msg=None):
+        self.state = state
+
+
+def test_detach_of_previous_session_is_ignored():
+    """Spawn cycles 2-5: the old PID's detach must not fail the new job."""
+    from sandroid.core.frida_manager import install_stale_detach_guard
+
+    jm = _AfmJobManager()
+    assert install_stale_detach_guard(jm)
+    assert install_stale_detach_guard(jm)  # idempotent
+    old = jm._attach_with_detach_handler(1111)
+    old_job = _AfmJob(old)
+    new = jm._attach_with_detach_handler(2222)
+    new_job = _AfmJob(new)
+    jm.jobs = {"old": old_job, "new": new_job}
+    assert jm.process_session is new
+
+    old.fire("process-terminated")
+    assert jm.process_session is new
+    assert new_job.state == "running"
+    assert old_job.state == "error"
+
+    new.fire("process-terminated", types.SimpleNamespace(summary="SIGSEGV\nmore"))
+    assert jm.process_session is None
+    assert new_job.state == "error"
+
+
+@pytest.fixture
+def _fresh_pids(monkeypatch):
+    monkeypatch.setattr(fritap_mod, "_INJECTED_PIDS", {})
+    monkeypatch.setattr(fritap_mod, "_device_key", lambda: "emulator-5556")
+
+
+class _Spotlight:
+    def __init__(self, pid=None, spawn=False):
+        self.pid = pid
+        self.spawn = spawn
+        self.announced = []
+
+    def is_spawn_mode(self):
+        return self.spawn
+
+    def get_spawn_package(self):
+        return "org.wikipedia" if self.spawn else None
+
+    def get_app_tuple(self):
+        return ("org.wikipedia", "")
+
+    def get_pid(self):
+        return self.pid
+
+    def announce_pid(self, pid, package=None):
+        self.announced.append(pid)
+        self.pid = pid
+        return True
+
+
+def _attach_check(monkeypatch, spotlight, live_pid, maps=False, shared=False):
+    from sandroid import services
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: spotlight)
+    monkeypatch.setattr(
+        Adb, "get_pid_for_package_name", classmethod(lambda cls, p, **k: live_pid)
+    )
+    monkeypatch.setattr(fritap_mod, "frida_agent_mapped", lambda pid: maps)
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.job_manager = types.SimpleNamespace(
+        has_active_session=lambda: shared, running_jobs=lambda: [1] if shared else []
+    )
+    return ft
+
+
+def test_attach_reresolves_a_stale_pid(monkeypatch, _fresh_pids):
+    spot = _Spotlight(pid=9756)
+    _attach_check(monkeypatch, spot, live_pid=10588)._check_attach_target()
+    assert spot.announced == [10588]
+
+
+def test_attach_to_dead_app_is_refused_and_pid_cleared(monkeypatch, _fresh_pids):
+    spot = _Spotlight(pid=9756)
+    ft = _attach_check(monkeypatch, spot, live_pid=None)
+    with pytest.raises(fritap_mod.FriTapTargetError, match="not running"):
+        ft._check_attach_target()
+    assert spot.pid is None
+
+
+def test_reattach_to_injected_pid_is_refused(monkeypatch, _fresh_pids):
+    fritap_mod.remember_injected_pid(10588)
+    ft = _attach_check(monkeypatch, _Spotlight(pid=10588), live_pid=10588)
+    with pytest.raises(fritap_mod.FriTapTargetError, match="spawn mode"):
+        ft._check_attach_target()
+    fritap_mod.forget_injected_pid(10588)
+    ft._check_attach_target()  # process gone/forgotten -> allowed again
+
+
+def test_leftover_agent_in_maps_is_refused(monkeypatch, _fresh_pids):
+    ft = _attach_check(monkeypatch, _Spotlight(pid=7), live_pid=7, maps=True)
+    with pytest.raises(fritap_mod.FriTapTargetError, match="earlier session"):
+        ft._check_attach_target()
+
+
+def test_live_agent_of_another_tool_is_allowed(monkeypatch, _fresh_pids):
+    ft = _attach_check(monkeypatch, _Spotlight(pid=7), 7, maps=True, shared=True)
+    ft._check_attach_target()
+
+
+def test_spawn_mode_skips_the_attach_check(monkeypatch, _fresh_pids):
+    ft = _attach_check(monkeypatch, _Spotlight(pid=1, spawn=True), live_pid=None)
+    ft._check_attach_target()
+
+
+def test_frida_agent_mapped_reads_proc_maps(monkeypatch):
+    from sandroid.core.adb import Adb
+
+    cmds = []
+
+    def fake(cls, cmd, serial=None):
+        cmds.append(cmd)
+        return ("2\n", "") if "su 0" not in cmd else ("", "")
+
+    monkeypatch.setattr(Adb, "send_adb_command", classmethod(fake))
+    assert fritap_mod.frida_agent_mapped(42) is True
+    assert cmds == ["shell grep -c frida-agent /proc/42/maps"]
+
+
+def test_session_files_never_overwrite(tmp_path, monkeypatch):
+    monkeypatch.setattr(fritap_mod.time, "strftime", lambda fmt: "20261116_193000")
+    d = str(tmp_path) + "/"
+    first = fritap_mod._session_stamp(d)
+    (tmp_path / f"fritap_keylog_{first}.log").write_text("keys")
+    second = fritap_mod._session_stamp(d)
+    assert first == "20261116_193000"
+    assert second == "20261116_193000_2"
+
+
+class _TaskService:
+    def __init__(self):
+        self.tasks = {}
+        self.stopped = []
+
+    def get_task(self, name):
+        return self.tasks.get(name)
+
+    def stop(self, name):
+        task = self.tasks.pop(name)
+        self.stopped.append(name)
+        task.stop_callback()
+        return True
+
+
+def test_stop_stops_the_fritap_network_capture(monkeypatch):
+    calls = []
+    ft, _job_ = _fritap_with_job(calls)
+    net = types.SimpleNamespace(stop=lambda: calls.append("net_stop"))
+    ft._network_instance = net
+    ft.network_capture_path = None
+    tasks = _TaskService()
+    tasks.tasks["network"] = types.SimpleNamespace(instance=net, stop_callback=net.stop)
+    monkeypatch.setattr(fritap_mod, "get_task_service", lambda: tasks)
+    ft.stop()
+    ft.stop()  # idempotent
+    assert tasks.stopped == ["network"]
+    assert calls.count("net_stop") == 1
+    assert calls.index("finalize_json") < calls.index("net_stop")
+
+
+def test_target_death_stops_fritap_and_clears_pid(monkeypatch, _fresh_pids):
+    from sandroid import services
+
+    calls = []
+    ft, _job_ = _fritap_with_job(calls)
+    ft.process_id = 4242
+    fritap_mod.remember_injected_pid(4242)
+    spot = _Spotlight(pid=4242)
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: spot)
+    tasks = _TaskService()
+    tasks.tasks["fritap"] = types.SimpleNamespace(instance=ft, stop_callback=ft.stop)
+    monkeypatch.setattr(fritap_mod, "get_task_service", lambda: tasks)
+    monkeypatch.setattr(fritap_mod, "_publish_fritap_event", lambda *a: None)
+
+    ft._handle_target_death("process-terminated", None)
+    assert tasks.stopped == ["fritap"]
+    assert "finalize_json" in calls
+    assert spot.pid is None
+    assert not fritap_mod.was_injected(4242)
+    assert ft.target_gone == "process-terminated"
+
+
+def test_own_detach_and_post_stop_detach_are_ignored(monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        fritap_mod.threading,
+        "Thread",
+        lambda **kw: types.SimpleNamespace(start=lambda: started.append(kw)),
+    )
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    session = _Session()
+    ft._watch_target(session)
+    session.fire("application-requested")
+    assert started == []
+    session.fire("process-terminated")
+    assert len(started) == 1
+    ft._stopped = True
+    session.fire("process-terminated")
+    assert len(started) == 1
+
+
+def test_spotlight_announce_pid_publishes():
+    from sandroid.services.spotlight_service import SpotlightService
+
+    events = []
+    bus = types.SimpleNamespace(publish=events.append)
+    svc = SpotlightService(event_bus=bus)
+    svc.set_app("org.wikipedia", pid=3967)
+    events.clear()
+    assert svc.announce_pid(5927, "org.wikipedia")
+    assert svc.get_pid() == 5927
+    assert events[-1].data["pid"] == 5927
+    assert not svc.announce_pid(5927, "org.wikipedia")  # unchanged: no event
+    assert not svc.announce_pid(1, "com.other")  # other package: ignored
+    assert svc.get_pid() == 5927

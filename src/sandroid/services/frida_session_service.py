@@ -249,6 +249,11 @@ class FridaSessionService:
 
                     self._job_manager = JobManager(device_serial=device_serial)
                     self._logger.debug("JobManager initialized")
+                    from sandroid.core.frida_manager import (
+                        install_stale_detach_guard,
+                    )
+
+                    install_stale_detach_guard(self._job_manager)
                 except ImportError as e:
                     self._logger.error(f"Failed to import JobManager: {e}")
                     raise
@@ -710,6 +715,9 @@ class FridaSessionService:
         pid = device.spawn([spawn_package])
         self._logger.debug(f"Spawned process with PID: {pid}")
 
+        # The spawn replaced any earlier process: show the new PID.
+        self._announce_spawned_pid(spotlight, pid, spawn_package)
+
         # Attach to the spawned process
         session = device.attach(pid)
         self._logger.debug("Attached to spawned process")
@@ -732,6 +740,18 @@ class FridaSessionService:
         )
 
         return session, "spawn", app_info
+
+    def _announce_spawned_pid(self, spotlight: Any, pid: Any, package: str) -> None:
+        """Push a freshly spawned PID to the Spotlight (best-effort)."""
+        if not isinstance(pid, int) or pid <= 0:
+            return
+        announce = getattr(spotlight, "announce_pid", None)
+        if not callable(announce):
+            return
+        try:
+            announce(pid, package)
+        except Exception as e:
+            self._logger.debug(f"Could not update spotlight PID: {e}")
 
     def _attach_session(
         self, device: Any, spotlight: Any
@@ -866,6 +886,7 @@ class FridaSessionService:
             spotlight = self._spotlight
             if spotlight:
                 spotlight.set_spawn_app(package_name, auto_resume=False)
+                self._announce_spawned_pid(spotlight, pid, package_name)
 
             self._logger.info(f"Spawned {package_name} (PID {pid}) in paused state")
             self._publish_spawn_event(package_name, pid)

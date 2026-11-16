@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import threading
 import time
 
 import click
@@ -10,7 +11,11 @@ from sandroid.core.analysis_logging import setup_analysis_logging
 from sandroid.core.console import SandroidConsole
 from sandroid.core.enums import SpawnMode
 from sandroid.core.events import Event, EventBus, EventType
-from sandroid.core.frida_manager import stop_frida_job_bounded
+from sandroid.core.frida_manager import (
+    _crash_summary,
+    install_stale_detach_guard,
+    stop_frida_job_bounded,
+)
 from sandroid.services import (
     get_network_capture_service,
     get_task_service,
@@ -40,6 +45,86 @@ logger = logging.getLogger(__name__)
 
 #: Max seconds stop() waits for friTap's agent to unload before finalizing.
 _STOP_TIMEOUT = 4.0
+
+#: Max seconds the target-death handler waits for the command layer to
+#: register the task (the target can die while start() is still returning).
+_REGISTER_WAIT = 5.0
+
+#: PIDs that carried a friTap agent in this Sandroid process, per device.
+#: Loading friTap's agent a second time into the same process (re-attach after
+#: a stop) crashed the app 3/3 times in phase 3 (SIGSEGV in frida-agent, JNI
+#: GetStringChars); fresh processes 0/2.
+_INJECTED_PIDS: dict[str, set[int]] = {}
+_INJECTED_LOCK = threading.Lock()
+
+
+class FriTapTargetError(RuntimeError):
+    """The target can't take friTap right now (user-actionable, no traceback)."""
+
+    expected = True
+
+
+def _device_key() -> str:
+    try:
+        from sandroid.core.adb import Adb
+
+        return Adb.get_target_device() or "default"
+    except Exception:
+        return "default"
+
+
+def remember_injected_pid(pid: int | None) -> None:
+    """Record that friTap's agent was loaded into *pid* on the current device."""
+    if not pid:
+        return
+    with _INJECTED_LOCK:
+        _INJECTED_PIDS.setdefault(_device_key(), set()).add(int(pid))
+
+
+def forget_injected_pid(pid: int | None) -> None:
+    """Drop *pid* (its process is gone, the number may be reused)."""
+    if not pid:
+        return
+    with _INJECTED_LOCK:
+        _INJECTED_PIDS.get(_device_key(), set()).discard(int(pid))
+
+
+def was_injected(pid: int | None) -> bool:
+    """True if friTap's agent was loaded into *pid* earlier in this session."""
+    if not pid:
+        return False
+    with _INJECTED_LOCK:
+        return int(pid) in _INJECTED_PIDS.get(_device_key(), set())
+
+
+def frida_agent_mapped(pid: int) -> bool | None:
+    """True if ``/proc/<pid>/maps`` shows a loaded frida-agent.
+
+    Catches agents left behind by an earlier Sandroid process (or another
+    Frida client) that the in-memory PID set cannot know about. Returns None
+    if the maps could not be read (no root, adb error).
+    """
+    try:
+        from sandroid.core.adb import Adb
+    except Exception:
+        return None
+    for prefix in ("shell", "shell su 0"):
+        try:
+            out, err = Adb.send_adb_command(
+                f"{prefix} grep -c frida-agent /proc/{int(pid)}/maps"
+            )
+        except Exception as e:
+            logger.debug(f"Reading maps of {pid} failed: {e}")
+            return None
+        text = (out or "").strip().splitlines()
+        if text and text[-1].strip().isdigit():
+            return int(text[-1].strip()) > 0
+        if (
+            "denied" not in (err or "").lower()
+            and "not found" not in (err or "").lower()
+        ):
+            break
+    return None
 
 
 def _job_state(job) -> str | None:
@@ -134,6 +219,39 @@ def _get_device_results_path() -> str:
     return os.getenv("SESSION_PATH", "")
 
 
+def _session_stamp(fritap_dir: str) -> str:
+    """A timestamp naming one friTap session's files, unique in *fritap_dir*."""
+    base = time.strftime("%Y%m%d_%H%M%S")
+    stamp, n = base, 1
+    while any(
+        os.path.exists(os.path.join(fritap_dir, name))
+        for name in (
+            f"fritap_keylog_{stamp}.log",
+            f"fritap_output_{stamp}.json",
+            f"fritap_capture_{stamp}_1.pcap",
+        )
+    ):
+        n += 1
+        stamp = f"{base}_{n}"
+    return stamp
+
+
+def _detach_quietly(session, timeout: float = 2.0) -> None:
+    """Detach a frida session on a daemon thread, bounded (never raises)."""
+    if session is None or not hasattr(session, "detach"):
+        return
+
+    def _work() -> None:
+        try:
+            session.detach()
+        except Exception as e:
+            logger.debug(f"Detaching probe session: {e}")
+
+    worker = threading.Thread(target=_work, name="fritap-probe-detach", daemon=True)
+    worker.start()
+    worker.join(timeout)
+
+
 def _is_console_message(message: dict) -> bool:
     """True for agent ``console`` payloads (also emitted via the friTap logger)."""
     payload = message.get("payload") if isinstance(message, dict) else None
@@ -225,6 +343,16 @@ class FriTap(DataGatherBase):
         # Set once stop() gave up waiting for the agent: late messages from a
         # still-unloading agent must not race the finalized output files.
         self._outputs_closed = False
+        # Explicit keylog path (CLI --output) set before start(); kept.
+        self.keylog_path = None
+        self.json_output_path = None
+        self.network_capture_path = None
+        self._network_instance = None
+        self._target_session = None
+        self._stop_lock = threading.Lock()
+        self._stopping = False
+        self._stopped = False
+        self.target_gone: str | None = None
 
     def _create_activity_log_wrapper(self, original_handler):
         """Create a wrapper that forwards messages to the activity log and/or console.
@@ -297,17 +425,30 @@ class FriTap(DataGatherBase):
         # Set up file logging NOW (device path is available)
         _setup_fritap_logging()
 
-        # Use fritap folder in device-specific results path
+        # Use fritap folder in device-specific results path. Every session
+        # gets its own files: a later session must never overwrite the keys
+        # of an earlier one (phase 3 lost cycle 1's 20-key keylog).
         fritap_dir = f"{_get_device_results_path()}fritap/"
-        self.keylog_path = f"{fritap_dir}fritap_keylog.log" if output_keylog else None
-        self.json_output_path = (
-            f"{fritap_dir}fritap_output.json" if output_json else None
-        )
+        self.session_stamp = _session_stamp(fritap_dir)
+        if output_keylog and not self.keylog_path:
+            self.keylog_path = f"{fritap_dir}fritap_keylog_{self.session_stamp}.log"
+        elif not output_keylog:
+            self.keylog_path = None
+        if output_json and not self.json_output_path:
+            self.json_output_path = (
+                f"{fritap_dir}fritap_output_{self.session_stamp}.json"
+            )
+        elif not output_json:
+            self.json_output_path = None
         self.log_path = f"{fritap_dir}fritap.log"
+
+        # Attach mode: re-resolve the PID (the cached one may belong to a
+        # crashed process) and refuse a second friTap agent in one process.
+        self._check_attach_target()
 
         # Get session via unified getter (creates fresh device on worker thread)
         # This is the old proven pattern — no pre-initialized devices, no fork issues.
-        _session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
+        probe_session, mode, app_info = Toolbox.get_frida_session_for_spotlight()
         self.process_id = app_info["pid"]
         self.app_package = app_info["package_name"]
         self.mode = mode
@@ -360,17 +501,160 @@ class FriTap(DataGatherBase):
         # setup_frida_session(should_spawn=False) will:
         # 1. Call setup_frida_handler() → creates fresh device on worker thread
         # 2. Call attach_app() → does device.attach(pid) (second attach, harmless)
+        install_stale_detach_guard(self.job_manager)
         self.job_manager.setup_frida_session(
             self.process_id,
             self.message_handler,
             should_spawn=False,
         )
         self.frida_device = self.job_manager.device
+        # The getter's own session is not used by anyone; leaving it attached
+        # kept an agent session open in the app after friTap stopped.
+        _detach_quietly(probe_session)
+        self._watch_target(self.job_manager.process_session)
 
         logger.debug(
             f"FriTap initialized in {self.mode.upper()} mode for "
             f"{self.app_package} (PID: {self.process_id})"
         )
+
+    def _check_attach_target(self) -> None:
+        """Validate the attach target before any Frida session touches it.
+
+        - Re-resolves the spotlight PID: after a crash the cached PID belonged
+          to a dead process and every start failed with ProcessNotFoundError
+          until the app was re-selected.
+        - Refuses a PID that already carries friTap's (or another stale)
+          Frida agent: re-attaching crashed the app every time in phase 3.
+
+        Raises:
+            FriTapTargetError: The app is not running, or the process already
+                carries an agent.
+        """
+        from sandroid.services import get_spotlight_service
+
+        spotlight = get_spotlight_service()
+        if spotlight.is_spawn_mode() and spotlight.get_spawn_package():
+            return  # a spawn always gives a fresh process
+        app_tuple = spotlight.get_app_tuple()
+        if not app_tuple:
+            return  # the session getter raises its own guidance
+        package = app_tuple[0]
+        cached = spotlight.get_pid()
+
+        from sandroid.core.adb import Adb
+
+        live = Adb.get_pid_for_package_name(package, quiet=True)
+        if live != cached:
+            if cached:
+                logger.info(
+                    f"Spotlight PID {cached} of {package} is stale; "
+                    f"now {live or 'not running'}"
+                )
+            spotlight.announce_pid(live, package)
+        if not live:
+            raise FriTapTargetError(
+                f"{package} is not running. Start it (Spotlight Enter) or use "
+                "spawn mode (Shift+C)."
+            )
+
+        why = None
+        if was_injected(live):
+            why = "friTap already ran in this process earlier"
+        elif frida_agent_mapped(live) and not self._shared_live_session():
+            why = "the process still carries a Frida agent from an earlier session"
+        if why:
+            raise FriTapTargetError(
+                f"Not attaching friTap to {package} (PID {live}): {why}. "
+                "Injecting a second agent into the same process crashes the app. "
+                "Restart the app (Spotlight ⇧R) or use spawn mode (Shift+C) "
+                "for a fresh process."
+            )
+
+    def _shared_live_session(self) -> bool:
+        """True if another Sandroid tool has jobs running on the JobManager.
+
+        Its agent is live and wanted (multi-script on a running process is
+        fine); only a leftover agent from an earlier session is refused.
+        """
+        try:
+            return bool(
+                self.job_manager.has_active_session()
+                and self.job_manager.running_jobs()
+            )
+        except Exception:
+            return False
+
+    def _watch_target(self, session) -> None:
+        """Get told when the target process dies (crash, kill, respawn)."""
+        self._target_session = session
+        if session is None or not hasattr(session, "on"):
+            return
+        try:
+            session.on(
+                "detached",
+                lambda reason, crash=None: self._on_target_detached(reason, crash),
+            )
+        except Exception as e:
+            logger.debug(f"Could not watch the friTap target: {e}")
+
+    def _on_target_detached(self, reason, crash=None) -> None:
+        """Frida thread: the session ended. React off-thread (never blocks)."""
+        if getattr(self, "_stopping", False) or getattr(self, "_stopped", False):
+            return
+        if str(reason) == "application-requested":
+            return  # our own detach
+        threading.Thread(
+            target=self._handle_target_death,
+            args=(str(reason), crash),
+            name="fritap-target-gone",
+            daemon=True,
+        ).start()
+
+    def _handle_target_death(self, reason: str, crash=None) -> None:
+        """Stop friTap after its target died, so nothing stays "running".
+
+        Finalizes the outputs, stops the friTap network capture, unregisters
+        the task (the panel flips to stopped) and clears the dead PID from the
+        Spotlight so the next start re-resolves it.
+        """
+        pid, package = self.process_id, self.app_package
+        summary = _crash_summary(crash)
+        self.target_gone = reason
+        what = "crashed" if crash else "is gone"
+        msg = (
+            f"Target {package} (PID {pid}) {what} ({reason}"
+            + (f": {summary}" if summary else "")
+            + ") - friTap stopped, outputs finalized"
+        )
+        logger.warning(msg)
+        try:
+            _publish_fritap_event(EventBus.get(), f"[warning]{msg}[/warning]")
+        except Exception:
+            pass
+        forget_injected_pid(pid)
+        try:
+            from sandroid.services import get_spotlight_service
+
+            spotlight = get_spotlight_service()
+            if spotlight.get_pid() == pid:
+                spotlight.announce_pid(None, package)
+        except Exception as e:
+            logger.debug(f"Could not clear the spotlight PID: {e}")
+
+        # The command layer registers the task right after start() returns;
+        # an attach crash can beat it.
+        task_service = get_task_service()
+        deadline = time.monotonic() + _REGISTER_WAIT
+        while time.monotonic() < deadline:
+            task = task_service.get_task("fritap")
+            if task is not None and getattr(task, "instance", None) is self:
+                task_service.stop("fritap")
+                return
+            if getattr(self, "_stopping", False) or getattr(self, "_stopped", False):
+                return
+            time.sleep(0.2)
+        self.stop()
 
     def _interactive_configuration(self) -> dict | None:
         """Interactive configuration menu for FriTap options.
@@ -440,9 +724,21 @@ class FriTap(DataGatherBase):
                 from sandroid.analysis.network import Network
 
                 network_instance = Network()
+                # Own file next to the keylog: never network_trace_run_<n>.pcap,
+                # which the analysis runs write (and read back) themselves.
+                fritap_dir = os.path.dirname(self.log_path)
+                network_instance._get_path = lambda: f"{fritap_dir}/"
+                network_instance._trace_file_name = (
+                    f"fritap_capture_{self.session_stamp}_"
+                )
+                network_instance.internal_run_counter = 1
+                self.network_capture_path = network_instance.get_expected_capture_path()
                 network_instance.gather()  # This starts tcpdump capture
                 network_started = True
-                logger.info("Network capture started for FriTap")
+                self._network_instance = network_instance
+                logger.info(
+                    f"Network capture started for FriTap: {self.network_capture_path}"
+                )
 
                 # Register network as background task (started by fritap)
                 get_task_service().register(
@@ -483,7 +779,7 @@ class FriTap(DataGatherBase):
                     "start friTap."
                 )
                 logger.error(msg)
-                raise RuntimeError(msg)
+                raise FriTapTargetError(msg)
 
             # Start the job with metadata for job coordination
             # Use wrapped handler that forwards to activity log if enabled
@@ -541,6 +837,8 @@ class FriTap(DataGatherBase):
             # Register hooks for conflict detection by other tools
             if self.job_id:
                 toolbox.register_frida_hooks(self.job_id, FRITAP_SSL_HOOKS)
+            # This process now carries friTap's agent: never inject it twice.
+            remember_injected_pid(self.process_id)
 
             # Resume spawned process now that hooks are installed
             if self.mode == SpawnMode.SPAWN or self.mode == SpawnMode.SPAWN.value:
@@ -552,6 +850,8 @@ class FriTap(DataGatherBase):
                 files.append(self.keylog_path)
             if self.json_output_path:
                 files.append(self.json_output_path)
+            if self.network_capture_path:
+                files.append(self.network_capture_path)
             toolbox.mark_tool_used("fritap", files=files)
 
             # Note: Task registration is handled by the command layer (FriTapCommand.start_task)
@@ -576,16 +876,17 @@ class FriTap(DataGatherBase):
 
         except Exception as e:
             logger.error(f"Failed to start FriTap: {e}")
+            # Shown in the friTap panel, too (it only tails friTap events).
+            try:
+                _publish_fritap_event(
+                    EventBus.get(), f"[error]friTap not started: {e}[/error]"
+                )
+            except Exception:
+                pass
             # Clean up network capture if we started it
             if network_started and network_instance:
                 logger.info("Cleaning up network capture due to FriTap startup failure")
-                try:
-                    network_instance.stop()
-                    task_service = get_task_service()
-                    if task_service.is_running("network"):
-                        task_service.unregister("network")
-                except Exception as cleanup_error:
-                    logger.warning(f"Error during network cleanup: {cleanup_error}")
+                self._stop_network_capture()
             raise  # Re-raise so the caller knows it failed
 
     def _resume_spawned_target(self, toolbox, job, load_timeout: float = 5.0):
@@ -700,7 +1001,28 @@ class FriTap(DataGatherBase):
 
         Note: This stops Frida hooks but keeps the target app running.
         Uses timeout parameters for graceful shutdown even if Frida hangs.
+        Idempotent: the target-death handler and the user can both call it.
         """
+        with self._lock_for_stop():
+            if self._stopped or self._stopping:
+                return
+            self._stopping = True
+        try:
+            self._stop()
+        finally:
+            self._stopped = True
+
+    def _lock_for_stop(self):
+        # Instances built with __new__ (tests) have no lock yet.
+        lock = getattr(self, "_stop_lock", None)
+        if lock is None:
+            lock = self._stop_lock = threading.Lock()
+        for name in ("_stopping", "_stopped"):
+            if not hasattr(self, name):
+                setattr(self, name, False)
+        return lock
+
+    def _stop(self) -> None:
         # Remove activity log handler if it was added
         if self.show_in_activity_log:
             _remove_activity_log_handler()
@@ -761,6 +1083,38 @@ class FriTap(DataGatherBase):
         # Finalize outputs only after the agent is gone, so no late message
         # races the file close.
         self._finalize_outputs()
+
+        # A capture friTap started ends with friTap (it used to run on until
+        # the TUI quit).
+        self._stop_network_capture()
+
+    def _stop_network_capture(self) -> None:
+        """Stop the network capture this friTap session started. Idempotent.
+
+        Goes through TaskService when the capture is registered there (the
+        header/net indicator and TASK_STOPPED stay consistent), else stops the
+        instance directly. ``Network.stop`` sends the emulator's ``network
+        capture stop``, which closes the pcap, and joins the capture thread.
+        """
+        net = getattr(self, "_network_instance", None)
+        if net is None:
+            return
+        self._network_instance = None
+        try:
+            task_service = get_task_service()
+            task = task_service.get_task("network")
+            if task is not None and getattr(task, "instance", None) is net:
+                task_service.stop("network")
+            else:
+                net.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping the friTap network capture: {e}")
+            return
+        path = getattr(self, "network_capture_path", None)
+        if path and os.path.isfile(path):
+            logger.info(
+                f"FriTap network capture closed: {path} ({os.path.getsize(path)} bytes)"
+            )
 
     def _finalize_outputs(self) -> None:
         """Flush and close friTap's keylog/JSON writers. Idempotent.

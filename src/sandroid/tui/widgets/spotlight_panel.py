@@ -391,6 +391,12 @@ class SpotlightPanel(Widget):
             self.query_one("#act-primary", Static).update(self._primary_label())
         except Exception:
             pass
+        # The header's App row reads the same (cached) PID: keep both in step
+        # (it said "not running" while this panel showed the live PID).
+        try:
+            self.screen._safe_refresh_status_bar()
+        except Exception:
+            pass
 
     # -- live running-state poll (slow fallback) --------------------------
 
@@ -450,15 +456,19 @@ class SpotlightPanel(Widget):
             return
 
         try:
+            previous_pid = self._spotlight().get_pid()
             self._spotlight().set_pid(pid)
         except Exception:
-            pass
+            previous_pid = pid
 
         # Self-heal a stale "paused" indicator against the live process.
         self._reconcile_paused_flag(pid)
 
         running = pid is not None
-        if running != self._last_running_state:
+        # A respawn (dexray/friTap spawn, crash + relaunch) keeps the app
+        # "running" but changes its PID: repaint then too, or the panel keeps
+        # showing the old PID.
+        if running != self._last_running_state or pid != previous_pid:
             self._last_running_state = running
             self._post(self.refresh_panel)
 
