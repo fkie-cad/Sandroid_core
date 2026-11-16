@@ -85,6 +85,22 @@ def test_offline_download(exc):
     assert "HTTPSConnectionPool" not in msg
 
 
+def test_offline_latest_lookup_is_unwrapped():
+    # version="latest": AFM raises FridaServerDownloadError(...) from the
+    # requests error (seen live with an unreachable proxy).
+    try:
+        try:
+            raise requests.ConnectionError("HTTPSConnectionPool(...): ProxyError")
+        except requests.ConnectionError as inner:
+            raise FridaServerDownloadError(
+                "Failed to fetch Frida release information: " + str(inner)
+            ) from inner
+    except FridaServerDownloadError as exc:
+        msg = describe_frida_install_error(exc)
+    assert "unreachable" in msg
+    assert "HTTPSConnectionPool" not in msg
+
+
 def test_rate_limited_latest_lookup():
     exc = FridaServerDownloadError(
         "Failed to fetch Frida release information: 403 Client Error: "

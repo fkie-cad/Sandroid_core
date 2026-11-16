@@ -77,7 +77,10 @@ def describe_frida_install_error(exc: BaseException) -> str:
             f"{AFM_ALLOW_UNVERIFIED_ENV}=1 (not recommended)."
         )
 
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+    # AFM wraps a failed GitHub API lookup ("latest") in FridaServerDownloadError
+    # and chains the requests exception; treat both the same way.
+    offline_types = (requests.ConnectionError, requests.Timeout)
+    if isinstance(exc, offline_types) or isinstance(exc.__cause__, offline_types):
         return (
             "Could not download frida-server: GitHub is unreachable from this "
             "host (offline, DNS or proxy problem). Check the network connection "
