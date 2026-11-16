@@ -774,27 +774,45 @@ class FileExtractionService:
 
         # For each package: pull it, get its hash, delete it
         for package in list_of_all_packages:
-            package_path, _stderr = adb.send_adb_command("shell pm path " + package)
-            # Remove "package:" prefix and trailing newline
-            package_path = package_path[8:-1]
-            apk_file = base_folder / f"{package}.apk"
-
-            adb.send_adb_command(f"pull {package_path} {apk_file}")
-
-            if apk_file.exists():
-                self._logger.debug(f"Hashing apk {package}")
-                digests = self._hash_apk(apk_file)
-                names_and_hashes.append(f"{package}: {digests['md5']}")
-                names_and_sha256.append(f"{package}: {digests['sha256']}")
-                apk_file.unlink()
-            else:
-                self._logger.error(
-                    f"Something went wrong looking for a package: {package}"
-                )
+            pm_out, _stderr = adb.send_adb_command("shell pm path " + package)
+            apk_paths = self._parse_pm_path(pm_out)
+            if not apk_paths:
+                self._logger.error(f"No APK path found for package: {package}")
                 names_and_hashes.append(f"{package}: n/a")
                 names_and_sha256.append(f"{package}: n/a")
+                continue
+
+            # Split APKs: `pm path` lists base.apk plus split_*.apk, one per
+            # line. The base APK is reported under the bare package name, each
+            # split as "<package>/<split file name>".
+            for device_apk in apk_paths:
+                apk_name = device_apk.rsplit("/", 1)[-1]
+                label = package if apk_name == "base.apk" or len(apk_paths) == 1 else f"{package}/{apk_name}"
+                apk_file = base_folder / f"{package}__{apk_name}"
+
+                adb.send_adb_command(f"pull {device_apk} {apk_file}")
+
+                if apk_file.exists():
+                    self._logger.debug(f"Hashing apk {label}")
+                    digests = self._hash_apk(apk_file)
+                    names_and_hashes.append(f"{label}: {digests['md5']}")
+                    names_and_sha256.append(f"{label}: {digests['sha256']}")
+                    apk_file.unlink()
+                else:
+                    self._logger.error(f"Could not pull APK {device_apk} ({label})")
+                    names_and_hashes.append(f"{label}: n/a")
+                    names_and_sha256.append(f"{label}: n/a")
 
         return {"apk_hashes": names_and_hashes, "apk_hashes_sha256": names_and_sha256}
+
+    @staticmethod
+    def _parse_pm_path(pm_output: str) -> list[str]:
+        """Return the device APK paths from ``pm path`` output (handles splits)."""
+        return [
+            line.strip()[len("package:") :]
+            for line in (pm_output or "").splitlines()
+            if line.strip().startswith("package:")
+        ]
 
     @staticmethod
     def _hash_apk(apk_file: Path) -> dict[str, str]:

@@ -376,7 +376,33 @@ class TestServiceHashing:
         assert result["apk_hashes_sha256"] == [
             f"com.example: {hashlib.sha256(b'APKDATA').hexdigest()}"
         ]
-        assert not (tmp_path / "com.example.apk").exists()
+        assert not list(tmp_path.glob("*.apk"))
+
+    def test_pull_and_hash_apks_split_apks(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAW_RESULTS_PATH", str(tmp_path) + "/")
+        adb = FakeAdb(
+            {
+                "shell pm list packages": "package:com.split\npackage:com.gone\n",
+                "shell pm path com.split": (
+                    "package:/data/app/x/base.apk\n"
+                    "package:/data/app/x/split_config.arm64_v8a.apk\n"
+                ),
+                "shell pm path com.gone": "",
+            }
+        )
+        svc = _service()
+        svc._get_adb = lambda: adb
+        result = svc.pull_and_hash_apks()
+        md5 = hashlib.md5(b"APKDATA").hexdigest()
+        assert result["apk_hashes"] == [
+            f"com.split: {md5}",
+            f"com.split/split_config.arm64_v8a.apk: {md5}",
+            "com.gone: n/a",
+        ]
+        pulls = [c for c in adb.calls if c.startswith("pull ")]
+        assert pulls[0].startswith("pull /data/app/x/base.apk ")
+        assert pulls[1].startswith("pull /data/app/x/split_config.arm64_v8a.apk ")
+        assert not list(tmp_path.glob("*.apk"))
 
 
 # ---------------------------------------------------------------------------
