@@ -198,3 +198,95 @@ def test_engine_reports_network_noise_under_filtered_noise():
     assert report["Network"] == {"x.example.": "comparable to background"}
     assert report["Network IP:Port (send/recv)"] == {}
     assert "network_note" in report
+
+
+# ---------------------------------------------------------------------------
+# Phase-4 M1: dup-ACK / FIN storm on a half-open connection from the snapshot
+# ---------------------------------------------------------------------------
+
+
+def _storm_traffic(storm: int) -> list[Any]:
+    from scapy.all import IP, TCP, Ether, Raw
+
+    dev, lb = "10.0.2.16", "185.15.59.224"
+    packets = [
+        Ether() / IP(src=dev, dst=lb) / TCP(sport=50000, dport=443, flags="S"),
+        Ether() / IP(src=lb, dst=dev) / TCP(sport=443, dport=50000, flags="SA"),
+        Ether()
+        / IP(src=dev, dst=lb)
+        / TCP(sport=50000, dport=443, flags="PA", seq=1)
+        / Raw(b"a" * 300),
+        Ether()
+        / IP(src=lb, dst=dev)
+        / TCP(sport=443, dport=50000, flags="PA", seq=1)
+        / Raw(b"b" * 1400),
+    ]
+    # The connection restored half-open from the snapshot: the same ACK and
+    # FIN segments repeated over and over, no SYN in this capture.
+    ack = Ether() / IP(src=dev, dst=lb) / TCP(sport=41234, dport=443, flags="A")
+    fin = Ether() / IP(src=lb, dst=dev) / TCP(sport=443, dport=41234, flags="FA")
+    for _ in range(storm):
+        packets += [ack, fin]
+    return packets
+
+
+def test_dup_ack_storm_is_not_counted_as_traffic(tmp_path, monkeypatch):
+    from scapy.all import wrpcap
+
+    from sandroid.analysis.network import Network
+
+    monkeypatch.setenv("RAW_RESULTS_PATH", str(tmp_path) + "/")
+    monkeypatch.setattr(Network, "performed_diff", False)
+    folder = tmp_path / "network_trace_pull"
+    folder.mkdir()
+    wrpcap(str(folder / "network_trace_run_1.pcap"), _storm_traffic(3000))
+
+    summary = Network._summarise_pcap(str(folder / "network_trace_run_1.pcap"))
+    assert summary.packets == 6004
+    assert summary.duplicates == 5998  # all but the first ACK and FIN
+    volumes = summary.volumes(summary.targets)
+    assert volumes["185.15.59.224:443"].packets == 6  # 4 real + first ACK/FIN
+
+    targets = Network().return_data()["Network IP:Port (send/recv)"]
+    assert targets == ["185.15.59.224:443 (300B sent to / 1400B received from)"]
+
+
+def test_capture_over_the_packet_cap_is_reported_as_truncated(tmp_path, monkeypatch):
+    from scapy.all import wrpcap
+
+    from sandroid.analysis import network as network_module
+    from sandroid.analysis.network import Network
+
+    monkeypatch.setenv("RAW_RESULTS_PATH", str(tmp_path) + "/")
+    monkeypatch.setattr(Network, "performed_diff", False)
+    monkeypatch.setattr(network_module, "MAX_ANALYSED_PACKETS", 100)
+    folder = tmp_path / "network_trace_pull"
+    folder.mkdir()
+    pcap = folder / "network_trace_run_1.pcap"
+    wrpcap(str(pcap), _storm_traffic(500))
+
+    targets = Network().return_data()["Network IP:Port (send/recv)"]
+
+    assert targets[0].startswith("185.15.59.224:443 (300B sent to")
+    assert targets[-1].startswith(
+        "(network_trace_run_1.pcap: analysis truncated after 100 packets"
+    )
+    analysis = Network().analyze_pcap(str(pcap))
+    assert analysis["packets_analysed"] == 100
+    assert analysis["analysis_note"].startswith("analysis truncated after 100")
+
+
+def test_raw_ip_capture_is_parsed_like_ethernet(tmp_path):
+    """Captures of other link types (friTap, tcpdump -i any) are parsed."""
+    from scapy.all import IP, wrpcap
+
+    from sandroid.analysis.network import Network
+
+    pcap = tmp_path / "raw.pcap"
+    wrpcap(str(pcap), [p[IP] for p in _storm_traffic(10)], linktype=101)
+
+    analysis = Network().analyze_pcap(str(pcap))
+
+    assert analysis["tcp_connections"] == ["185.15.59.224:443"]
+    entry = analysis["ip_analysis"][0]
+    assert (entry["bytes_sent"], entry["bytes_received"]) == (300, 1400)
