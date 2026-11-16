@@ -59,7 +59,7 @@ class ToolSpec:
 
     Attributes:
         name: Unique tool name as seen by the LLM (e.g. ``get_emulator_status``
-            or ``mcp:sandroid-dummy:reverse_string``).
+            or ``mcp:<server>:<tool>``).
         description: Human/LLM-readable description of what the tool does.
         parameters: Hand-written JSON Schema for the tool's arguments -- the
             ``function.parameters`` shape from OpenAI's tool-calling spec,
