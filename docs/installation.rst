@@ -61,34 +61,57 @@ System Requirements
 
 **Prerequisites**
 
-- Python 3.10 or newer
-- Internet connection (for automated detection)
-- Linux, macOS, or Windows (WSL2 recommended for Windows)
+- **Python 3.12 or 3.13** (Python 3.10/3.11 are not supported since 2.1)
+- Android SDK platform-tools (``adb``) and the Android Emulator
+- A **rooted** Android emulator with snapshots enabled (see below)
+- Internet connection (for automated detection and tool downloads)
+- Linux or macOS (Windows: WSL2 recommended)
 
 **Optional Dependencies**
 
 .. code-block:: bash
 
-   # With AI analysis support
-   pip install sandroid[ai]
+   # Static-analysis extras (dexray-insight, androguard)
+   pip install "sandroid[full]"
 
-   # With development tools
-   pip install sandroid[dev]
+   # Development install from a source checkout (tests, linters)
+   pip install -e ".[dev,full]"
 
-   # With documentation tools
-   pip install sandroid[docs]
+   # Documentation tools
+   pip install "sandroid[docs]"
 
-   # Install everything
-   pip install sandroid[ai,dev,docs]
-   adb version
+.. _device-requirements:
 
-3. Create an Android Virtual Device (AVD)::
+Device Requirements
+-------------------
 
-   # List available AVDs
-   emulator -list-avds
+Sandroid needs **root on the device**: it runs ``adb root``, pushes and starts
+``frida-server``, injects CA certificates into the system trust store and sets
+SELinux to *permissive* (``setenforce 0``) itself. Two emulator setups are
+known to work:
 
-   # Create a new AVD (recommended: Pixel_6_Pro_API_31)
-   avdmanager create avd -n Pixel_6_Pro_API_31 -k "system-images;android-31;google_apis;x86_64"
+1. **Google APIs image** (simplest) -- a ``google_apis`` system image (*not*
+   ``google_apis_playstore``); ``adb root`` works out of the box::
+
+      sdkmanager "system-images;android-35;google_apis;arm64-v8a"   # or x86_64
+      avdmanager create avd -n sandroid_api35 \
+          -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_6
+
+2. **Google Play image rooted with rootAVD** -- root a Play Store image with
+   `rootAVD <https://gitlab.com/newbit/rootAVD>`_ (Magisk) and install the
+   **Magisk** ``adb_root`` **module**, so that ``adbd`` runs as root (Play
+   images otherwise refuse ``adb root`` as production builds). This is how the
+   Sandroid team's own AVDs are set up.
+
+Verify root with ``adb root && adb shell id`` (must report ``uid=0(root)``).
+
+**Snapshots are required** for the Record/Play workflow and the Snapshots tab.
+Do not start the emulator with ``-no-snapshot``; use ``-no-snapshot-save`` if
+you do not want the quick-boot snapshot overwritten, or start it with
+``sandroid-config avd start``.
+
+**Physical devices** (rooted) are only partially supported: snapshots,
+emulator-console network capture and ``--degrade-network`` are unavailable.
 
 **System Dependencies**
 
@@ -168,14 +191,8 @@ Test your installation::
 Docker Installation
 -------------------
 
-For containerized deployment::
-
-   # Build Docker image
-   ./build_and_export_docker.sh
-
-   # Deploy with Docker
-   cd deploy
-   ./deploy /path/to/output
+A Dockerfile is provided on a **best-effort** basis (not tested in CI); the
+emulator keeps running on the host. See :doc:`advanced/docker_deployment`.
 
 Troubleshooting
 ---------------
@@ -192,9 +209,9 @@ Troubleshooting
    - Start the emulator before running Sandroid
    - Verify with ``adb devices``
 
-3. **"Legacy analysis modules not available"**
-   - This was fixed in v1.1.0
-   - Upgrade with ``pip install --upgrade sandroid``
+3. **"adbd cannot run as root in production builds"**
+   - You are using a Google Play image without root
+   - Use a ``google_apis`` image or root the AVD (see :ref:`device-requirements`)
 
 4. **Permission errors**
    - On Linux, ensure your user is in the correct groups::
@@ -209,7 +226,7 @@ Troubleshooting
 
 - Check the troubleshooting guide: :doc:`troubleshooting`
 - Report issues: https://github.com/fkie-cad/Sandroid_core/issues
-- Review logs in ``~/.cache/sandroid/logs/``
+- Review the session logs in ``./results/<timestamp>/sandroid.log`` and ``sandroid_error.log``
 
 Next Steps
 ----------

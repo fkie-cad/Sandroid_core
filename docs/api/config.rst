@@ -156,12 +156,14 @@ Configuration Structure
            "trigger_sets": ["network", "filesystem", "permissions"]
        },
 
-       "ai": {
-           "enabled": False,
-           "provider": "google",
-           "model": "gemini-pro",
-           "api_key": None,
-           "temperature": 0.7
+       "ai": {  # AI Chat (experimental), OpenAI-compatible endpoint
+           "base_url": None,
+           "api_key": None,  # prefer SANDROID_AI__API_KEY
+           "model": None,
+           "show_verbose_thinking": False,
+           "show_chat_mascot": True,
+           "data_share_path": "~/Sandroid/ai_share/",
+           "extra_host_paths": []
        },
 
        "report": {
@@ -253,9 +255,9 @@ Configuration File Formats
    cache_path = "~/.cache/sandroid/"
 
    [ai]
-   enabled = false
-   provider = "google"
-   model = "gemini-pro"
+   # AI Chat (experimental); api_key via SANDROID_AI__API_KEY
+   base_url = "http://localhost:11434/v1"
+   model = "qwen2.5:14b"
 
 **YAML Format:**
 

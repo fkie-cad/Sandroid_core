@@ -1,352 +1,197 @@
-Interactive Mode
-================
+Interactive Mode (TUI)
+======================
 
-Sandroid's interactive mode provides a user-friendly menu-driven interface for performing forensic analysis. This mode is perfect for manual analysis, learning the tool, and complex investigations requiring multiple steps.
+Sandroid's default interface is a keyboard-driven terminal UI built with
+Textual. It is ideal for manual analysis, exploring an app, and complex
+investigations that need several tools at once.
 
-Starting Interactive Mode
---------------------------
+Starting the TUI
+----------------
 
-Sandroid's interactive mode is a Textual TUI::
+::
 
-   sandroid
+   sandroid                              # default config discovery
+   sandroid --config my-analysis.toml    # explicit config
+   sandroid --network --screenshot 5     # pre-configure analysis options
+   sandroid --log                        # also print log messages to the terminal
 
-The Textual TUI provides a modern terminal user interface with three specialized analysis views (Forensic, Malware, Security), a status bar, activity log, and keyboard-driven navigation.
+.. note::
 
-**With Custom Configuration**::
+   Sandroid 2.1 removed the legacy Rich menu (``sandroid -i``) and the
+   Forensic/Malware/Security *views* (``TAB`` / ``--view``). All actions now
+   live in one flat, rebindable catalog.
 
-   sandroid --config my-analysis.toml
+Screen Layout
+-------------
 
-The Textual TUI
------------------
+- **Glance band** (top, boxed, device name in the border): frida-server state,
+  mitmproxy engine, Device Proxy and App Proxies, spotlight app -- derived from
+  the live device state.
+- **Activity log**: real-time command output and status messages.
+- **Tool tabs** (always visible): **Spotlight**, **Network**, **Snapshots**,
+  **Files** -- see below.
+- **AI Chat dock** (optional, ``Ctrl+Y``, experimental): see :ref:`ai-chat`.
 
-When you start Sandroid, the Textual TUI launches with:
+Navigation
+~~~~~~~~~~
 
-- **Header Bar**: Shows Sandroid logo and current view mode
-- **Status Bar**: Displays Frida server status, HTTP proxy, spotlight app, and spotlight files
-- **Menu Panel**: Lists available commands organized by category for the current view
-- **Activity Log**: Shows real-time command output and status messages
-- **Footer**: Keyboard shortcuts (TAB to switch views, Q to quit)
+==========================  ==================================================
+Key                         Action
+==========================  ==================================================
+``?``                       Help & keybinding editor (all actions by category)
+``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
+``Ctrl+B``                  Focus the tool tabs
+``Shift+Left/Right``        Previous/next tab (or sub-tab)
+``Shift+Up/Down``           Move between tab levels (tabs / sub-tabs)
+``Ctrl+Y``                  Toggle the AI Chat dock
+``D``                       Switch device
+``q`` / ``Ctrl+C``          Quit
+==========================  ==================================================
 
-Three Analysis Views
-~~~~~~~~~~~~~~~~~~~~~
+Every binding can be changed in the ``?`` editor (with live conflict
+detection); overrides are stored in ``tui.keybindings`` in your config.
 
-The TUI provides three specialized views, each with its own set of commands. Switch between views using the ``TAB`` key.
+Tool Tabs
+---------
 
-**Forensic View**
-   Focus on forensic artifact extraction and file system analysis:
-   - Record and playback user actions
-   - File system monitoring with fsmon
-   - Spotlight file management
-   - Screenshot and video capture
-   - Forensic evidence scanning (MVT)
-   - Manage forensic APKs
+Spotlight
+~~~~~~~~~
 
-**Malware View**
-   Focus on malware behavioral analysis and instrumentation:
-   - Dexray-Intercept malware monitoring (formerly AM3)
-   - Dexray-Insight static analysis (formerly asam)
-   - Memory dumping with Fridump
-   - TrigDroid malware triggers
-   - Objection interactive shell
-   - FriTap SSL/TLS interception
+The app under investigation. ``c`` attaches to the foreground app, ``C`` spawns
+an installed app as spotlight. With the tab focused:
 
-**Security View** *(Early Stage)*
-   Focus on vulnerability scanning and security testing:
-   - Network proxy management
-   - Device settings and presets
-   - Security-focused analysis tools
+- ``Enter`` start (or resume a paused start), ``A`` attach, ``P`` start paused,
+  ``R`` restart with the armed hooks, ``K`` kill and tear down hooks, ``X``
+  clear the selection
+- ``1``-``5`` toggle/arm the Frida bypass categories **SSL**, **Root**,
+  **Frida**, **Debug** and **Integrity** (PairIP/licensing/attestation).
+  ``Ctrl+P`` toggles SSL unpinning globally.
 
-   .. note::
-      The Security view is in early development. Features are functional but the command set is still expanding.
+.. warning::
 
-Command Reference
--------------------
+   The bypass suite is **EXPERIMENTAL**. SSL unpinning covers Java/Conscrypt/
+   OkHttp/WebView/TrustKit/Certificate Transparency, native BoringSSL,
+   Chromium/cronet BoringSSL and mbedTLS / Meta Network Stack, but hardened
+   apps may still detect or defeat it. Verify results independently.
 
-Action Recording & Playback
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Network
+~~~~~~~
 
-**[r] Record an Action**
-   Records user interactions and system changes:
+Two sub-tabs:
 
-   1. Takes a baseline snapshot of the system
-   2. Starts monitoring file system changes, network connections, processes, and sockets
-   3. Waits for user interaction with the device
-   4. Analyzes changes when you press Enter
+**Mitmproxy** -- embedded ``mitmweb`` (requires ``pip install mitmproxy``):
 
-**[p] Play Currently Loaded Action**
-   Replays a previously recorded action sequence for regression testing.
+- ``Enter`` start/stop mitmweb (proxy ``:8080``, web UI ``http://127.0.0.1:8081/``)
+- ``Ctrl+D`` toggle the Device Proxy (global ``http_proxy``)
+- ``Ctrl+N`` install the mitmproxy CA into the system trust store (APEX
+  bind-mount on Android 14+, Zygote namespace on Android 10-13)
+- ``y`` Proxy Settings: Device Proxy, per-app **App Proxies** (iptables UID
+  rules + on-device ``gost`` redirector, to Sandroid's mitmproxy or an
+  external proxy such as Burp/ZAP; QUIC blocked by default) and CA
+- ``Ctrl+R`` restart and re-apply proxies, ``Ctrl+O`` open the web UI,
+  ``Ctrl+A`` manage custom mitmproxy addons, ``Ctrl+L`` clear the log
 
-**[x] Export Currently Loaded Action**
-   Saves recorded actions to a file for sharing or backup.
+**friTap** -- status header and live log tail of friTap TLS key extraction
+(``h`` starts friTap for the spotlight app).
 
-**[i] Import Action**
-   Loads previously saved action recordings.
+Snapshots
+~~~~~~~~~
 
-Spotlight Application
-~~~~~~~~~~~~~~~~~~~~~
+AVD snapshot list: ``c`` create, ``l`` load, ``d`` delete, ``a`` assign to a
+slot, ``r`` refresh. Globally, ``0`` opens the tab, ``1``-``8`` load a slot
+and ``Ctrl+1``-``Ctrl+8`` save the current state into a slot (8 slots per AVD).
+Snapshots require an emulator.
 
-**[c] / [C] Set Spotlight App**
-   - ``c``: Detect and set the foreground application as spotlight
-   - ``C``: Spawn a new application as spotlight (select from installed apps)
+Files
+~~~~~
 
-**[a] Analyze with Dexray-Insight**
-   Performs static analysis of the spotlight app's APK using Dexray-Insight (formerly asam).
+- **Monitor** -- live filesystem events (``o`` / ``Enter`` start/stop). The
+  default ``kprobe`` backend uses kernel tracefs kprobes (per-process and
+  child-tree attribution, path-scoped capture, nothing pushed to the device)
+  and falls back to ``fsmon`` automatically (``tui.monitor_backend``).
+  Per-category visibility is configurable in the Monitor settings.
+- **Watchlist** -- Spotlight Files: add device files to watch, pull and diff them
+  (``l`` opens the list).
+- **Diffs** -- Record/Play and the run history:
 
-**[d] Dump Memory (Fridump)**
-   Uses Fridump to extract memory contents of the spotlight app.
+  1. ``r`` **Record**: Sandroid snapshots the device and records your input.
+  2. Interact with the device, then stop the recording.
+  3. ``p`` **Play**: the emulator is reverted to the snapshot, the recording
+     is replayed, background noise is measured with a dry run, and changed /
+     new / deleted files (with inline diffs), processes, sockets and network
+     activity are shown.
 
-**[m] Dexray-Intercept Malware Monitor**
-   Start Dexray-Intercept dynamic hooking on the spotlight app (formerly Android Malware Motion Monitor / AM3). Intercepts sensitive data flows, network traffic, and runtime behaviors.
+  Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
+  and listed in the run history (per device). ``x`` / ``i`` export / import a
+  recording.
 
-**[b] / [O] Objection Shell**
-   - ``b``: Launch objection interactive shell for the spotlight app
-   - ``O``: Resume a previous objection session
+Other Actions
+-------------
 
-**[t] TrigDroid Malware Triggers**
-   Automatically execute malware trigger conditions for the spotlight app.
+==================  =========================================================
+Key                 Action
+==================  =========================================================
+``f``               Frida server: download, install, start
+``k``               Reconfigure Frida hooks
+``a``               Static analysis of the spotlight APK (Dexray-Insight)
+``m``               Dexray-Intercept malware monitor
+``d``               Dump memory (Fridump)
+``t``               TrigDroid malware triggers
+``b`` / ``O``       Objection shell / resume objection session
+``F``               Forensic evidence scan (MVT)
+``G``               Manage forensic APKs
+``e`` / ``E``       Emulator information / device settings & country presets
+``s`` / ``g``       Screenshot / screen recording
+``n``               Install APK
+``w``               Network capture (PCAP)
+``y`` / ``h``       Proxy settings / friTap
+==================  =========================================================
 
-Spotlight Files & Monitoring
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Press ``?`` for the authoritative, up-to-date list.
 
-**[l] List/Add Spotlight Files**
-   Add files on the device to monitor for changes.
+.. _ai-chat:
 
-**[v] Remove Spotlight File**
-   Remove files from the monitoring list.
-
-**[u] Pull Spotlight Files**
-   Download monitored files from the device.
-
-**[o] File System Monitor (fsmon)**
-   Real-time file system change monitoring with timestamps.
-
-**[F] Forensic Evidence Scan**
-   Run MVT (Mobile Verification Toolkit) forensic evidence scanning using configured IOCs.
-
-**[G] Manage Forensic APKs**
-   Manage APKs used for forensic testing and analysis.
-
-Device & Emulator Management
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-**[e] / [E] Device Information & Settings**
-   - ``e``: Show emulator/device information
-   - ``E``: Apply device settings (locale, timezone, country presets)
-
-**[1-8] Create Snapshots**
-   Save current emulator state for quick rollback.
-
-**[0] List/Load Snapshots**
-   Manage and restore saved snapshots.
-
-**[s] Take Screenshot**
-   Capture the current device screen.
-
-**[g] Grab Video**
-   Record screen activity.
-
-**[n] Install APK**
-   Install applications for analysis.
-
-**[f] Frida Server Management**
-   Download, install, and manage the Frida server on the device.
-
-**[k] Reconfigure Hooks**
-   Reconfigure Frida hook settings for the current session.
-
-Network Management
-~~~~~~~~~~~~~~~~~~
-
-**[y] Network Proxy**
-   Configure or clear HTTP/HTTPS proxy on the device.
-
-**[h] FriTap SSL/TLS Hooking**
-   Hook encryption routines for SSL/TLS traffic decryption.
-
-**[w] Write Network Capture**
-   Save network traffic to PCAP files.
-
-Step-by-Step Workflows
+AI Chat (EXPERIMENTAL)
 ----------------------
 
-Basic Analysis Workflow
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-1. **Initialize Frida** (if not running)::
-
-   Press 'f' → Install and start Frida server
-
-2. **Start Recording**::
-
-   Press 'r' → Begin monitoring system changes
-
-3. **Perform Analysis Target Actions**
-
-   - Install and run the target application
-   - Interact with features you want to analyze
-   - Generate the behaviors you want to capture
-
-4. **Complete Analysis**
-
-   Press Enter → Stop recording and generate results
-
-5. **Review Results**
-
-   Examine the generated JSON report and logs
-
-Malware Analysis Workflow
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-1. **Setup Baseline**::
-
-   Press '1' → Create clean snapshot
-
-2. **Install Frida**::
-
-   Press 'f' → Install Frida server
-
-3. **Set Spotlight App**::
-
-   # Install malware APK first
-   Press 'n' → Install malware APK
-   Press 'c' → Set as spotlight app
-
-4. **Configure Network Monitoring**::
-
-   Press 'y' → Set up proxy (optional)
-   Press 'h' → Enable friTap for SSL interception
-
-5. **Execute Triggers**::
-
-   Press 't' → Run TrigDroid automated triggers
-
-6. **Monitor Behavior**::
-
-   Press 'm' → Start malware motion monitor
-
-7. **Capture Evidence**::
-
-   Press 's' → Take screenshots
-   Press 'w' → Save network capture
-
-8. **Memory Analysis**::
-
-   Press 'd' → Dump memory for analysis
-
-9. **Clean Up**::
-
-   Press '0' → Restore clean snapshot
-
-App Development Testing Workflow
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-1. **Install Development APK**::
-
-   Press 'n' → Install your APK
-
-2. **Set as Spotlight**::
-
-   Press 'c' → Set your app as spotlight
-
-3. **Record User Flows**::
-
-   Press 'r' → Record specific user interactions
-
-4. **Static Analysis**::
-
-   Press 'a' → Analyze APK structure and permissions
-
-5. **Export Test Cases**::
-
-   Press 'x' → Export recorded interactions for regression testing
-
-Status Indicators
------------------
-
-The menu shows real-time status information:
-
-**Frida Server Status**
-   - ``[Running]`` - Frida server is active and ready
-   - ``[Not running]`` - Frida server needs to be started
-
-**HTTP Proxy Status**
-   - ``[Set]`` - Network proxy is configured
-   - ``[Not set]`` - No proxy configuration
-
-**Spotlight Application**
-   - Shows package name of currently monitored app
-   - ``[Not set]`` if no app is being monitored
-
-**Spotlight Files**
-   - Number of files being monitored
-   - ``[Not set]`` if no files are being watched
-
-Tips for Interactive Mode
---------------------------
-
-**Best Practices**
-
-1. **Start with Frida**: Always install Frida server first for dynamic analysis
-2. **Use Snapshots**: Create clean snapshots before analysis for repeatability
-3. **Set Spotlight Apps**: Focus analysis on specific applications for better results
-4. **Monitor Network**: Enable network monitoring for comprehensive analysis
-5. **Take Screenshots**: Document your analysis with visual evidence
-
-**Performance Tips**
-
-1. **Clean Baselines**: Use fresh snapshots to avoid noise from previous analysis
-2. **Focused Monitoring**: Only monitor specific files/apps when possible
-3. **Resource Management**: Close unnecessary apps during analysis
-
-**Troubleshooting**
-
-1. **Frida Connection Issues**: Restart Frida server with 'f'
-2. **No Device Detected**: Check ADB connection with 'e'
-3. **Permission Errors**: Ensure device is rooted for advanced features
-4. **Slow Performance**: Create a new snapshot and restart analysis
-
-**Advanced Tips**
-
-1. **Combine Tools**: Use objection ('b') with memory dumping ('d') for comprehensive analysis
-2. **Automate Triggers**: Use TrigDroid ('t') for consistent malware activation
-3. **Network Analysis**: Combine proxy ('y') with friTap ('h') for complete traffic visibility
-4. **Evidence Chain**: Use screenshots ('s') and network capture ('w') to document findings
-
-Keyboard Shortcuts
-------------------
-
-All commands use single-key shortcuts. Available keys depend on the current view:
-
-- **Navigation**: ``TAB`` (switch views), ``q`` (quit)
-- **Recording**: ``r``, ``p``, ``x``, ``i``
-- **App Analysis**: ``c``, ``C``, ``a``, ``d``, ``m``, ``b``, ``O``, ``t``
-- **File Monitoring**: ``l``, ``v``, ``u``, ``o``, ``F``, ``G``
-- **Device Management**: ``e``, ``E``, ``1-8``, ``0``, ``s``, ``g``, ``n``, ``f``, ``k``
-- **Network**: ``y``, ``h``, ``w``
-
-Configuration in Interactive Mode
-----------------------------------
-
-Interactive mode respects your configuration file settings. You can:
-
-1. **Modify behavior** with environment variables::
-
-   SANDROID_LOG_LEVEL=DEBUG sandroid
-
-2. **Use different configs**::
-
-   sandroid --config analysis-config.toml
-
-3. **Override settings**::
-
-   sandroid --network --screenshot 5
-
-The interactive mode will honor these settings while providing the menu interface.
-
-Getting Help
-------------
-
-- Press ``q`` to quit safely
-- Check logs at ``~/.cache/sandroid/logs/`` for detailed information
-- Use ``sandroid --help`` for command-line options
-- See :doc:`troubleshooting` for common issues
+``Ctrl+Y`` opens a chat dock backed by any OpenAI-compatible chat-completions
+endpoint. The assistant can query the device and drive ~76 Sandroid tools
+(app lifecycle, flows, certificates, file transfer, monitor, record/replay),
+spawn background subtasks, and use tools from configured MCP servers. Each
+state-changing tool call asks for approval (once / always / never).
+
+.. warning::
+
+   Prompts, the live device/session context and tool output (file contents,
+   flows, package data) are sent to the configured endpoint. Prefer a **local**
+   endpoint such as Ollama for sensitive evidence, and pass the API key via
+   ``SANDROID_AI__API_KEY`` instead of writing it into the config file.
+
+.. code-block:: toml
+
+   [ai]
+   base_url = "http://localhost:11434/v1"   # e.g. Ollama
+   model = "qwen2.5:14b"                     # a tool-calling capable model
+   # api_key via: export SANDROID_AI__API_KEY=...  (any non-empty value for Ollama)
+
+Tips
+----
+
+1. **Start with Frida**: install/start frida-server (``f``) before dynamic analysis.
+2. **Use snapshots**: save a clean state into a slot (``Ctrl+1``) before
+   each experiment and reload it (``1``) afterwards.
+3. **Focus on one app**: set a spotlight app; App Proxies and the kprobe
+   monitor can be scoped to it.
+4. **Combine tools**: App Proxy + CA injection + SSL bypass for HTTPS
+   inspection, friTap for apps that defeat proxies, the file monitor while
+   exercising features.
+
+Troubleshooting
+---------------
+
+- **frida-server does not start**: check root (``adb root && adb shell id``)
+  and see :ref:`device-requirements`.
+- **No device detected**: ``adb devices``; switch devices with ``D``.
+- **TUI rendering issues**: run with ``--log`` and check
+  ``results/<timestamp>/sandroid.log``.
+- See :doc:`troubleshooting` for more.

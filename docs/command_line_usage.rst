@@ -45,13 +45,12 @@ Specify where to save analysis results (default: ``sandroid.json``).
 
 Set logging verbosity. Options: ``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``.
 
-**View Mode**::
+.. note::
 
-   sandroid --view forensic
-   sandroid --view malware
-   sandroid --view security
-
-Set the initial TUI view mode. Default is from config or forensic.
+   The TUI view modes (Forensic/Malware/Security) and the legacy Rich menu
+   (``-i``) were removed in 2.1, as was ``--ai`` (Gemini video summaries).
+   ``--view`` no longer has an effect; ``--mode`` still selects the
+   headless analysis mode.
 
 **Fresh Start**::
 
@@ -560,12 +559,12 @@ Integration Examples
 **GitHub Actions**::
 
    - name: Run Sandroid Analysis
-     uses: actions/setup-python@v2
+     uses: actions/setup-python@v5
      with:
-       python-version: '3.10'
+       python-version: '3.12'
    - run: |
        sandroid --network --report
-   - uses: actions/upload-artifact@v2
+   - uses: actions/upload-artifact@v4
      with:
        name: analysis-results
        path: |
