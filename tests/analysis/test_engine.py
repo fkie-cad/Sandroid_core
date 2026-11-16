@@ -689,3 +689,17 @@ def test_settle_seconds_default_is_in_schema_and_default_toml():
     default = Path(__file__).resolve().parents[2] / "src/sandroid/config/default.toml"
     data = tomllib.loads(default.read_text())
     assert data["analysis"]["replay_settle_seconds"] == 8
+
+
+def test_dry_run_start_and_end_are_logged(monkeypatch, caplog):
+    """Headless only has the log: the dry run must show up there (phase 4)."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="sandroid.analysis.engine")
+    _settle_run(monkeypatch, settle=5)
+
+    messages = [r.getMessage() for r in caplog.records]
+    begin = "Dry run: measuring background noise (snapshot state, no replay)"
+    sleep = "Dry run: capturing for 21s, as long as one action run"
+    end = "Dry run finished (noise baseline captured)"
+    assert messages.index(begin) < messages.index(sleep) < messages.index(end)

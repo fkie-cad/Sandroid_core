@@ -430,6 +430,7 @@ class DryRunBeginStep(Step):
     path_sensitive = True
 
     def run(self, ctx: EngineContext) -> None:
+        logger.info("Dry run: measuring background noise (snapshot state, no replay)")
         ctx.action_window_service.start_dry_run()
         # Reset the action time to "now" on the device for the noise window.
         ctx.toolbox.set_action_time()
@@ -443,6 +444,7 @@ class DryRunSleepStep(Step):
 
     def run(self, ctx: EngineContext) -> None:
         duration = int(ctx.action_window_service.get_duration() or 0)
+        logger.info("Dry run: capturing for %ds, as long as one action run", duration)
         if duration > 0:
             time.sleep(duration)
 
@@ -455,6 +457,7 @@ class DryRunEndStep(Step):
 
     def run(self, ctx: EngineContext) -> None:
         ctx.action_window_service.end_dry_run()
+        logger.info("Dry run finished (noise baseline captured)")
 
 
 class StartScreenshotStep(Step):
