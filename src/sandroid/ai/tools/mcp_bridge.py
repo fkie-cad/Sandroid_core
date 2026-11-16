@@ -10,6 +10,13 @@ Not called automatically anywhere -- this is an explicit app-lifecycle action
 for whoever starts the MCP manager (see :func:`sandroid.ai.tools.bridge_mcp_tools`,
 re-exported from this module), since it requires the manager to already be
 started/connected.
+
+**Safety default:** every bridged tool is registered as
+:attr:`~sandroid.ai.tools.registry.RiskTier.CONSEQUENTIAL`, so the permission
+gate asks the analyst before each call (until they choose "allow always" for
+that tool). Sandroid cannot know what an external server's tool does -- its
+self-description is untrusted -- so it must never auto-run like a verified
+read-only native tool.
 """
 
 import json
@@ -17,7 +24,12 @@ import logging
 
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.mcp_client import MCPClientManager, get_mcp_client_manager
-from sandroid.ai.tools.registry import ToolRegistry, ToolSpec, get_tool_registry
+from sandroid.ai.tools.registry import (
+    RiskTier,
+    ToolRegistry,
+    ToolSpec,
+    get_tool_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +60,13 @@ def _register_one(
     registry.register(
         ToolSpec(
             name=qualified_name,
-            description=tool.description or "",
+            description=(
+                f"[external MCP server {server_name!r}] {tool.description or ''}"
+            ).strip(),
             parameters=tool.inputSchema,
             func=dispatch,
+            # Unknown external code: always behind the approval gate.
+            risk=RiskTier.CONSEQUENTIAL,
             category="mcp",
         )
     )
@@ -59,14 +75,14 @@ def _register_one(
 def _unwrap_call_tool_result(qualified_name: str, result):
     """Extract a JSON-friendly value from an MCP ``CallToolResult``.
 
-    Verified against the real bundled dummy server + installed ``mcp==1.28.1``:
+    Verified against the bundled demo fixture server + installed ``mcp==1.28.1``:
     ``result.content`` is a list of content blocks (``TextContent`` in every
     case exercised here, exposing ``.text``); ``result.structuredContent`` is
     populated inconsistently across return types (present for scalar returns,
     absent for plain-dict returns from a ``FastMCP`` tool without an explicit
     output schema) so it is not relied upon. Instead: take the first content
     block's text, try ``json.loads`` on it (recovers dict-shaped tool results
-    like ``sample_forensic_lookup``), and fall back to the raw string
+    like ``demo_fake_ioc_lookup``), and fall back to the raw string
     (recovers scalar results like ``reverse_string``).
 
     Raises:

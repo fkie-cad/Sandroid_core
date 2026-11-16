@@ -51,7 +51,9 @@ def run_analysis(
         Adb: The Adb class for Android Debug Bridge operations.
         ActionQ: The ActionQ class (retained for signature compatibility; the
             unified engine no longer uses it).
-        PDFReport: The PDFReport class for generating PDF reports.
+        PDFReport: Retained for signature compatibility; the PDF is now
+            rendered by :func:`sandroid.core.run_report.finalize_run` when
+            ``config.report.generate_pdf`` is set.
 
     Raises:
         SystemExit: If environment validation fails.
@@ -111,21 +113,38 @@ def run_analysis(
         run_config.results_path = ""
         run_config.raw_results_path = ""
 
-        result = AnalysisEngine(run_config).run()
+        from sandroid.core.run_report import finalize_run, iso_now
 
-        # Write results
+        started_at = iso_now()
+        result = AnalysisEngine(run_config).run()
+        ended_at = iso_now()
+
+        # Write results JSON (+ run metadata), optional PDF and the evidence
+        # manifest via the shared finalisation step.
         console = SandroidConsole.get()
         output_file = config.paths.results_path / config.output_file.name
-        results_json = json.dumps(result.to_json_dict(), indent=4, default=json_encoder)
-        _write_results(results_json, output_file, config, console)
+        try:
+            outcome = finalize_run(
+                config.paths.results_path,
+                result.to_json_dict(),
+                output_name=config.output_file.name,
+                adb=Adb,
+                config=config,
+                started_at=started_at,
+                ended_at=ended_at,
+                mode="cli-trigdroid",
+                generate_pdf=config.report.generate_pdf,
+            )
+            if outcome.pdf is not None:
+                console.print(f"[success]PDF report: {outcome.pdf}[/success]")
+        except OSError:
+            # Fall back to the plain writer for its user-facing error messages.
+            results_json = json.dumps(
+                result.to_json_dict(), indent=4, default=json_encoder
+            )
+            _write_results(results_json, output_file, config, console)
 
         print(result.pretty_print())
-
-        # Generate PDF report if enabled
-        if config.report.generate_pdf:
-            pdf_path = config.paths.results_path / "Sandroid_Forensic_Report.pdf"
-            PDFReport(str(pdf_path), str(output_file))
-            logger.info(f"PDF report generated: {pdf_path}")
 
         logger.info("Analysis completed successfully")
         get_task_service().stop_all()

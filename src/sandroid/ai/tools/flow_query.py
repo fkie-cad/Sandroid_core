@@ -202,7 +202,9 @@ def get_flow_detail(
         "clear."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
-    risk=RiskTier.REVERSIBLE,
+    # Deletes captured evidence irrecoverably: always ask, never remember.
+    risk=RiskTier.CONSEQUENTIAL,
+    can_remember_choice=False,
     category="flow_query",
 )
 def clear_captured_flows() -> dict[str, Any]:

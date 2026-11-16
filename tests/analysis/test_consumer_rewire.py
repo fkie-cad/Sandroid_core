@@ -142,6 +142,11 @@ def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
     output_file = tmp_path / "sandroid.json"
     assert output_file.exists()
     written = json.loads(output_file.read_text(encoding="utf-8"))
+    # Run metadata is added on top of the legacy keys (backward compatible).
+    run_metadata = written.pop("Run Metadata")
+    assert run_metadata["mode"] == "cli-trigdroid"
+    assert run_metadata["started_at"]
+    assert run_metadata["ended_at"]
     expected = json.loads(json.dumps(canned.to_json_dict(), default=json_encoder))
     assert written == expected
     assert written["Device Name"] == "emu-test"

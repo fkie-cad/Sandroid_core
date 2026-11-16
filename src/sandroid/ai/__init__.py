@@ -60,7 +60,11 @@ The caller must explicitly::
     sandroid.ai.get_mcp_client_manager().start()
     sandroid.ai.bridge_mcp_tools()
 
-before ``mcp:sandroid-dummy:*``-style tools appear in the registry.
+before ``mcp:<server>:*``-style tools appear in the registry. ``start()`` is a
+no-op unless the AI Chat is configured and permitted (see
+:mod:`sandroid.ai.safety`) and at least one MCP server is enabled -- none is
+by default. The ``mcp`` package is imported lazily, so ``import sandroid.ai``
+(and the TUI Chat panel) works without it.
 """
 
 from sandroid.ai import subtasks  # side-effect: registers the two spawn tools

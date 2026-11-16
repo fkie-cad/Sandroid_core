@@ -113,16 +113,29 @@ class OpenAIClient:
             # encoding below. Force it rather than trust the guess.
             response.encoding = "utf-8"
         except requests.exceptions.RequestException as exc:
-            yield {"type": "error", "message": f"AI backend request failed: {exc}"}
+            msg = self._safe_error("request failed", exc)
+            yield {"type": "error", "message": msg}
             return
 
         try:
             yield from self._iter_sse_events(response)
         except requests.exceptions.RequestException as exc:
-            yield {"type": "error", "message": f"AI backend stream interrupted: {exc}"}
+            msg = self._safe_error("stream interrupted", exc)
+            yield {"type": "error", "message": msg}
             return
 
         yield {"type": "done"}
+
+    def __repr__(self) -> str:
+        # Never expose the API key (e.g. in a traceback's locals or a log line).
+        return f"OpenAIClient(base_url={self._base_url!r}, model={self._model!r})"
+
+    def _safe_error(self, what: str, exc: Exception) -> str:
+        """User-facing error text with the API key and token shapes redacted."""
+        from sandroid.ai.safety import redact_secrets
+
+        secrets = [self._api_key] if self._api_key else []
+        return redact_secrets(f"AI backend {what}: {exc}", secrets)
 
     def _iter_sse_events(self, response: requests.Response) -> Iterator[dict]:
         """Parse ``data: {...}`` SSE lines from a streamed response."""
