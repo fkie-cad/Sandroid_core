@@ -168,7 +168,10 @@ def check_and_enable_root(adb: Any) -> SetupCheckResult:
             return check
 
         if "restarting" in stdout.lower():
+            # adbd restarts as root; wait until the device is reachable again
+            # so the follow-up commands (id, setenforce) don't race it.
             time.sleep(0.5)
+            adb.send_adb_command("wait-for-device")
 
         stdout, stderr = adb.send_adb_command("shell id")
         if "uid=0" in stdout:
@@ -197,17 +200,32 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
     check = _make_check(name="selinux", display_name="SELinux Permissive")
 
     try:
-        stdout, stderr = adb.send_adb_command("shell setenforce 0")
-
+        _stdout, stderr = adb.send_adb_command("shell setenforce 0")
         if stderr:
-            check.status = SetupCheckStatus.WARNING
-            check.message = f"Failed to set SELinux permissive: {stderr.strip()}"
-            return check
+            # adbd not running as root (e.g. Magisk-rooted device): retry
+            # through su before giving up.
+            logger.debug(f"setenforce 0 failed ({stderr.strip()}), retrying via su")
+            _stdout, su_stderr = adb.send_adb_command("shell su 0 setenforce 0")
+            if su_stderr:
+                stderr = f"{stderr.strip()}; su: {su_stderr.strip()}"
+            else:
+                stderr = ""
 
-        stdout, stderr = adb.send_adb_command("shell getenforce")
-        if "permissive" in stdout.lower():
+        stdout, _ = adb.send_adb_command("shell getenforce")
+        mode = (stdout or "").strip()
+        check.details["mode"] = mode
+        if "permissive" in mode.lower():
             check.status = SetupCheckStatus.PASSED
             check.message = "SELinux set to permissive mode"
+        elif stderr:
+            check.status = SetupCheckStatus.WARNING
+            check.message = f"Failed to set SELinux permissive: {stderr.strip()}"
+        elif mode:
+            check.status = SetupCheckStatus.WARNING
+            check.message = (
+                f"SELinux is still {mode} after setenforce 0 "
+                "(binder calls from root, e.g. APK install or Frida, may be denied)"
+            )
         else:
             check.status = SetupCheckStatus.PASSED
             check.message = "SELinux setenforce command accepted"

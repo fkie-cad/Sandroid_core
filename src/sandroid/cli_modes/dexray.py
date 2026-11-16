@@ -59,7 +59,7 @@ def run_dexray_headless(
     from sandroid.services import get_spotlight_service
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
 
     # Route dexray_intercept logger output to terminal
     dexray_logger = logging.getLogger("dexray_intercept")

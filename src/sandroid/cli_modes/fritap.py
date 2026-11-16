@@ -40,7 +40,7 @@ def run_fritap_headless(
     from sandroid.services import get_spotlight_service
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
 
     # Route friTap logger output to terminal (it only has file handlers by default)
     fritap_logger = logging.getLogger("friTap")

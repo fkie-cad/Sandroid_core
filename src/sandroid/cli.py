@@ -154,15 +154,12 @@ def __getattr__(name: str):
     help="Start as if running for the first time (reset welcome screen)",
 )
 @click.option(
-    "--view",
-    type=click.Choice(["forensic", "malware", "security"]),
-    default=None,
-    help="Set the initial view mode (forensic, malware, or security). Default: from config or forensic",
-)
-@click.option(
     "--headless",
     is_flag=True,
-    help="Run in headless mode without interactive UI. Requires --trigdroid or --batch.",
+    help=(
+        "Run in headless mode without interactive UI. Malware/security modes "
+        "need --trigdroid PACKAGE (or --batch); forensic mode needs no package."
+    ),
 )
 @click.option(
     "--batch",
@@ -285,7 +282,6 @@ def main(
     debug: bool,
     log: bool,
     fresh: bool,
-    view: str | None,
     headless: bool,
     batch: str | None,
     mode: str,
@@ -308,6 +304,7 @@ def main(
     Main entry point for the Sandroid CLI application. Handles configuration
     loading, logging setup, and dispatches to the appropriate execution mode:
 
+    \b
     1. Default mode: Textual TUI (when running just 'sandroid')
     2. Automated analysis: Command-line driven analysis with --trigdroid
     3. Headless mode (--headless): Programmatic API-based analysis
@@ -411,11 +408,10 @@ def main(
         SandroidConsole.initialize(sandroid_config.theme.preset)
         console = SandroidConsole.get()
 
-        # Set the initial view mode
-        initial_view = (
-            view if view is not None else sandroid_config.analysis.default_view
-        )
-        get_ui_service().set_current_view(initial_view)
+        # View modes were removed from the UI (the --view flag is gone); the
+        # remaining view-aware lookups (ActionQ key dispatch) use the config
+        # default.
+        get_ui_service().set_current_view(sandroid_config.analysis.default_view)
 
         # Setup logging (the Textual TUI is the only interactive UI)
         active_logger = setup_logging(
@@ -536,7 +532,7 @@ def _run_proxy_command(
     from .services import get_proxy_service
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
     proxy_service = get_proxy_service()
 
     if clear:
@@ -560,17 +556,24 @@ def _run_proxy_command(
 def _run_install_apk(sandroid_config, apk_path: str) -> None:
     """Install APK on device in headless mode."""
     from .core.adb import Adb
+    from .core.exceptions import APKInstallError
     from .core.initializer import initialize_core
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    # pm install from the adb-root context needs SELinux permissive, otherwise
+    # it fails with "Failed transaction (2147483646)".
+    initialize_core(sandroid_config, prepare=True)
 
     console.print(f"[accent]Installing APK: {apk_path}[/accent]")
-    _stdout, stderr = Adb.install_apk(apk_path)
-    if stderr and "success" not in stderr.lower():
-        console.print(f"[error]APK install failed: {stderr}[/error]")
+    try:
+        # Returns the package name (or None if aapt couldn't determine it);
+        # raises APKInstallError on failure.
+        package_name = Adb.install_apk(apk_path)
+    except APKInstallError as e:
+        console.print(f"[error]APK install failed: {e}[/error]")
         sys.exit(1)
-    console.print("[success]APK installed successfully[/success]")
+    suffix = f" ({package_name})" if package_name else ""
+    console.print(f"[success]APK installed successfully{suffix}[/success]")
 
 
 def _run_import_action(sandroid_config, action_path: str) -> None:
