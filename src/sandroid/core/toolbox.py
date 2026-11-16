@@ -233,7 +233,10 @@ class Toolbox(metaclass=_ToolboxMeta):
         """Delegates to InitializationService for session, logging, args, and FridaManager."""
         init_service = _service("get_initialization_service")
         result = init_service.initialize_application(
-            args=cls.args or init_service.parse_arguments(),
+            # Never fall back to argparse on sys.argv here: Toolbox is also
+            # used as a library (headless API, scripts with their own CLI),
+            # and initialize_application() builds default args when None.
+            args=cls.args,
             device_serial=cls._get_active_device_serial(),
         )
         cls.args = result.args
