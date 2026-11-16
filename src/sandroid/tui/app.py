@@ -13,6 +13,7 @@ Extracted modules:
 import atexit
 import concurrent.futures
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -54,6 +55,7 @@ from sandroid.tui.css_resolver import (
     load_css_content,
     resolve_css_path,
 )
+from sandroid.tui.key_display import format_key
 from sandroid.tui.launcher import run_tui, run_tui_guarded
 from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
@@ -94,6 +96,12 @@ class SandroidTUI(App):
 
     # fmt: off
     BINDINGS = [
+        # Main flow first, so Record/Play lead the footer on every panel.
+        # Global (non-priority): an Input still receives the letter, and a
+        # focused panel could still shadow them -- none does any more
+        # (Snapshots refresh moved to Ctrl+R, Watchlist pull to u/U).
+        Binding("r", "record", "Record", id="record"),
+        Binding("p", "play", "Play/Replay", id="play"),
         # Navigation
         Binding("D", "show_device_selector", "Devices", priority=True),
         Binding("q", "quit", "Quit"),
@@ -113,8 +121,7 @@ class SandroidTUI(App):
         Binding("home", "scroll_top", "Top", show=False),
         Binding("end", "scroll_bottom", "Bottom", show=False),
         Binding("G", "handle_shift_g", "Forensic APKs", show=False),
-        # Recording — r/p are panel-scoped to the Diffs view (see
-        # DiffsView.BINDINGS -> app.record/app.play); only x/i stay global.
+        # Recording -- r/p are bound at the top of this list.
         Binding("x", "export_action", "Export", show=False, id="export"),
         Binding("i", "action_key('i')", "Import", show=False, id="import"),
         # Spotlight
@@ -165,7 +172,9 @@ class SandroidTUI(App):
         ),
         # Other
         Binding("n", "install_apk", "Install APK", show=False, id="new_apk"),
-        # Snapshots — [0] opens the tab, [1-8] load slots, [Ctrl+1-8] save to slots.
+        # Snapshots -- [0] opens the tab, [1-8] load slots (press the digit
+        # twice: a lone digit only arms the load, see action_load_slot),
+        # [Ctrl+1-8] save to slots.
         Binding("0", "open_snapshots", "Snapshots", show=False, id="show_snapshots"),
         Binding("1", "load_slot('1')", "Load slot 1", show=False, id="load_slot_1"),
         Binding("2", "load_slot('2')", "Load slot 2", show=False, id="load_slot_2"),
@@ -951,6 +960,12 @@ class SandroidTUI(App):
         except Exception:
             pass
 
+    def get_key_display(self, binding: Binding) -> str:
+        """Footer key label: keep Shift visible (``R`` -> ``⇧R``, ``r`` -> ``r``)."""
+        if binding.key_display:
+            return binding.key_display
+        return format_key(binding.key, "compact")
+
     def _get_main_screen(self) -> MainScreen | None:
         return self.screen if isinstance(self.screen, MainScreen) else None
 
@@ -978,11 +993,49 @@ class SandroidTUI(App):
         except Exception:
             return None
 
+    #: Seconds within which the same digit must be pressed again to really
+    #: load a snapshot slot (see ``action_load_slot``).
+    SLOT_CONFIRM_WINDOW = 3.0
+
     def action_load_slot(self, slot: str) -> None:
-        """Load the snapshot assigned to ``slot`` (keys 1-8)."""
+        """Load the snapshot assigned to ``slot`` -- press the digit twice.
+
+        Loading a snapshot reverts the whole emulator, and the digits 1-5 are
+        also the Spotlight panel's bypass toggles: one digit pressed with the
+        wrong focus used to wipe the device state mid-demo. The first press
+        now only arms the load and says so (toast); the same digit again
+        within ``SLOT_CONFIRM_WINDOW`` seconds loads it. Empty slots / non
+        emulators are reported straight away by the panel (nothing to arm).
+        """
         panel = self._snapshots_panel()
-        if panel is not None:
+        if panel is None:
+            return
+        slot = str(slot)
+        now = time.monotonic()
+        pending = getattr(self, "_pending_slot_load", None)
+        if (
+            pending is not None
+            and pending[0] == slot
+            and now - pending[1] <= self.SLOT_CONFIRM_WINDOW
+        ):
+            self._pending_slot_load = None
             panel.load_slot(slot)
+            return
+        tag = panel.slot_tag(slot) if hasattr(panel, "slot_tag") else None
+        if not tag:
+            # Nothing to confirm -- let the panel explain (empty slot, no
+            # emulator, ...).
+            self._pending_slot_load = None
+            panel.load_slot(slot)
+            return
+        self._pending_slot_load = (slot, now)
+        self.notify(
+            f"Press [b]{slot}[/b] again to load slot {slot} ('{tag}'). "
+            "This reverts the emulator.",
+            title="Load snapshot?",
+            severity="warning",
+            timeout=self.SLOT_CONFIRM_WINDOW,
+        )
 
     def action_save_slot(self, slot: str) -> None:
         """Save the current state into ``slot`` (keys Ctrl+1-8)."""
@@ -1053,7 +1106,7 @@ class SandroidTUI(App):
                 spotlight = get_spotlight_service()
                 if not spotlight.get_app_tuple():
                     self.notify(
-                        "No spotlight app. Press C (attach) or Shift+C "
+                        "No spotlight app. Press c (attach) or Shift+C "
                         "(spawn) first.",
                         severity="warning",
                     )
@@ -1507,10 +1560,83 @@ class SandroidTUI(App):
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()
 
+    def _active_device(self):
+        """The active device, or ``None`` (never raises)."""
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            return Toolbox.get_device_manager().active_device
+        except Exception:
+            return None
+
+    def _flow_blocked(self, what: str) -> bool:
+        """Common Record/Play preconditions; toast + True when blocked."""
+        rc = self._recording_controller
+        if rc.is_replaying:
+            self.notify(
+                "A replay is still running -- wait for it to finish "
+                "(progress in Files > Diffs).",
+                title=f"Cannot {what}",
+                severity="warning",
+            )
+            return True
+        if self._active_device() is None:
+            self.notify(
+                "No device connected. Press [b]D[/b] (Shift+D) to pick or start one.",
+                title=f"Cannot {what}",
+                severity="error",
+            )
+            return True
+        return False
+
     def action_record(self) -> bool:
-        return self._recording_controller.start_recording()
+        """Global ``r``: open the Record settings form and start recording.
+
+        Stopping is done in the recording window itself (Esc/Enter = stop &
+        save, which then auto-replays).
+        """
+        rc = self._recording_controller
+        if rc.is_recording():
+            self.notify(
+                "Already recording -- press Esc or Enter in the recording "
+                "window to stop & save.",
+                severity="warning",
+            )
+            return False
+        if self._flow_blocked("record"):
+            return False
+        try:
+            has_app = bool(get_spotlight_service().get_app_tuple())
+        except Exception:
+            has_app = True  # don't nag if the check itself fails
+        if not has_app:
+            self.notify(
+                "No app selected -- recording device-wide. Select one first "
+                "with [b]c[/b] (attach) or [b]⇧C[/b] (spawn) to focus the analysis.",
+                title="Record",
+                severity="warning",
+            )
+        return rc.start_recording()
 
     def action_play(self) -> bool:
+        """Global ``p``: replay the current recording N times and diff."""
+        rc = self._recording_controller
+        if rc.is_recording():
+            self.notify(
+                "Stop the recording first (Esc or Enter in the recording window).",
+                title="Cannot replay",
+                severity="warning",
+            )
+            return False
+        if self._flow_blocked("replay"):
+            return False
+        if not rc.has_recording():
+            self.notify(
+                "Nothing recorded yet -- press [b]r[/b] to record first.",
+                title="Cannot replay",
+                severity="warning",
+            )
+            return False
         # Tab-switch on Play-*press* always happens, regardless of what run
         # history looks like (the other, gated half of the unified focus
         # rule — whether the completed run also steals the rail's current
@@ -1518,7 +1644,7 @@ class SandroidTUI(App):
         ms = self._get_main_screen()
         if ms is not None:
             ms.open_files_tab(sub_tab="files-diffs")
-        return self._recording_controller.start_playback()
+        return rc.start_playback()
 
     def _notify_diffs_new_run(self, run_id: str) -> None:
         """Tell DiffsView a new run was saved (RecordingController's on_run_saved).

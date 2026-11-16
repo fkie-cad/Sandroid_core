@@ -46,16 +46,17 @@ described above, not as a substitute for Tab.
 
 Key scoping note (same non-priority-binding-on-a-focused-ancestor mechanism
 ``SnapshotsPanel``/``DiffsView`` already use elsewhere in this app): ``d``
-(remove), ``p``/``P`` (pull one/all) shadow the GLOBAL ``d``=Dump Memory and
-``p``=Play bindings only while this view has focus — SnapshotsPanel already
-shadows ``d`` for its own delete action, so this isn't a new precedent.
+(remove) shadows the GLOBAL ``d``=Dump Memory binding only while this view has
+focus — SnapshotsPanel already shadows ``d`` for its own delete action, so
+this isn't a new precedent. Pull one/all is ``u``/``U`` (not ``p``/``P``) so
+the global ``p``=Play keeps working while Watchlist has focus.
 ``n`` (focus the add-input) shadows the global ``n``=Install APK binding,
 the same precedent DiffsView already uses for its own (differently-meaning)
 ``n``=rename. ``a`` (toggle auto-mode, see below) shadows the global
 ``a``=Analyze (``app.py``'s ``static_analysis`` binding,
 ``Binding("a", ..., id="static_analysis")``) the same way — Analyze is
 irrelevant while Watchlist has focus, so this is the same already-
-established, previously-verified-safe kind of shadow as ``d``/``p``/``n``
+established, previously-verified-safe kind of shadow as ``d``/``n``
 above, not a new one.
 
 **Auto mode** (``a`` key, off by default; header badge ``auto ○ off`` /
@@ -248,12 +249,30 @@ class _AddPathInput(Input):
     binding.
     """
 
-    BINDINGS = [Binding("escape", "cancel_input", "Cancel", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel_input", "Cancel", show=False),
+        # Input binds Shift+Left/Right to text selection, which used to trap
+        # the Shift+Arrow tab navigation inside the Files tab. With nothing
+        # typed there is nothing to select, so hand them to the tool panel.
+        Binding("shift+left", "nav_or_select(-1)", show=False),
+        Binding("shift+right", "nav_or_select(1)", show=False),
+    ]
 
     def check_consume_key(self, key: str, character: str | None) -> bool:
         if key == "escape":
             return True
         return super().check_consume_key(key, character)
+
+    def action_nav_or_select(self, delta: int) -> None:
+        if self.value:
+            if delta < 0:
+                self.action_cursor_left(select=True)
+            else:
+                self.action_cursor_right(select=True)
+            return
+        cycle = getattr(self.screen, "cycle_active_level", None)
+        if cycle is not None:
+            cycle(delta)
 
     def action_cancel_input(self) -> None:
         self.value = ""
@@ -269,9 +288,9 @@ class WatchlistView(FilesSubViewBase):
     Bindings (when the list has focus):
         d: remove the selected path (shadows global ``d``=Dump Memory --
            see module docstring; SnapshotsPanel already shadows this key).
-        p: pull the selected path and diff it against its stored baseline
-           (shadows global ``p``=Play while this view has focus).
-        P: pull every watched path (Shift+P).
+        u: pull the selected path and diff it against its stored baseline
+           (``u``, not ``p``: the global ``p``=Play must keep working here).
+        U: pull every watched path (Shift+U).
         n: focus the inline add-path input (shadows global ``n``=Install
            APK, the same precedent DiffsView already uses for ``n``=rename).
         a: toggle auto-mode (shadows global ``a``=Analyze while this view
@@ -284,8 +303,8 @@ class WatchlistView(FilesSubViewBase):
 
     BINDINGS = [
         ("d", "remove_selected", "Remove"),
-        ("p", "pull_selected", "Pull"),
-        ("P", "pull_all", "Pull all"),
+        ("u", "pull_selected", "Pull"),
+        ("U", "pull_all", "Pull all"),
         ("n", "focus_add", "Add path"),
         ("a", "toggle_auto", "Auto mode"),
     ]
@@ -397,16 +416,14 @@ class WatchlistView(FilesSubViewBase):
     # -- focus forwarding ----------------------------------------------------
 
     def focus(self, scroll_visible: bool = True):
-        """Delegate focus to the list, or the add-input when empty.
+        """Delegate focus to the list (``n`` jumps into the add-path input).
 
-        Mirrors the old ``SpotlightFilesModal``'s own on-mount focus choice
-        (list when there's something to select, the add field otherwise).
+        Always the list, even when empty: auto-focusing the Input made it
+        swallow every letter key (global r/p/...) and Shift+Left/Right the
+        moment Watchlist was cycled past, which stranded keyboard users.
         """
         try:
-            if self._rows:
-                self.query_one("#watchlist-list", OptionList).focus(scroll_visible)
-            else:
-                self.query_one("#watchlist-add-input", Input).focus(scroll_visible)
+            self.query_one("#watchlist-list", OptionList).focus(scroll_visible)
             return self
         except Exception:
             pass
@@ -611,7 +628,7 @@ class WatchlistView(FilesSubViewBase):
             pass
 
     def _render_header(self) -> str:
-        hint = "[dim]p=pull  P=pull all  d=remove  n=add path  a=auto[/dim]"
+        hint = "[dim]u=pull  ⇧U=pull all  d=remove  n=add path  a=auto[/dim]"
         badge = self._auto_badge()
         total = len(self._rows)
         if total == 0:
@@ -644,7 +661,7 @@ class WatchlistView(FilesSubViewBase):
         info = self._rows.get(path)
         if info is None or info.state == RowState.NEVER_PULLED:
             scroll.mount(
-                Static(f"[b]{path}[/b]\n[dim]Never pulled — press p to pull.[/dim]")
+                Static(f"[b]{path}[/b]\n[dim]Never pulled — press u to pull.[/dim]")
             )
             return
         if info.state == RowState.CHANGED and info.diff_text is not None:

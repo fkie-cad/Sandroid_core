@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 class SandroidFooter(Widget):
     """Footer bar showing active key bindings."""
 
+    #: Actions always shown first (see ``_rebuild_keys``).
+    PINNED_ACTIONS = frozenset({"record", "play", "app.record", "app.play"})
+
     DEFAULT_CSS = """
     SandroidFooter {
         dock: bottom;
@@ -61,6 +64,13 @@ class SandroidFooter(Widget):
             return
         keys_container.remove_children()
         active_bindings = self.screen.active_bindings
+        # The main flow (Record / Play) leads the footer on every panel so it
+        # survives truncation on narrow (projector) terminals; Textual would
+        # otherwise list the focused panel's own keys first.
+        entries = sorted(
+            active_bindings.values(),
+            key=lambda e: e[1].action not in self.PINNED_ACTIONS,
+        )
         footer_keys = [
             FooterKey(
                 binding.key,
@@ -70,7 +80,7 @@ class SandroidFooter(Widget):
                 disabled=not enabled,
                 tooltip=tooltip or binding.description,
             )
-            for _, binding, enabled, tooltip in active_bindings.values()
+            for _, binding, enabled, tooltip in entries
             if binding.show
         ]
         if footer_keys:

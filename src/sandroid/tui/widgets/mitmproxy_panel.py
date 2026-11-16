@@ -1137,7 +1137,7 @@ class MitmproxyPanel(Widget):
                 if not spotlight.get_app_tuple():
                     self._append_line(
                         "[ERROR] No spotlight app. "
-                        "Press C (attach) or Shift+C (spawn) first."
+                        "Press c (attach) or Shift+C (spawn) first."
                     )
                     self._refresh_header()
                     return

@@ -159,11 +159,13 @@ class SpotlightPanel(Widget):
         yield Static(self._render_body(), id="spotlight-body")
         with Horizontal(id="spotlight-actions"):
             yield Static(self._primary_label(), id="act-primary", classes="act-cell")
-            yield Static("R restart", id="act-restart", classes="act-cell")
-            yield Static("A attach", id="act-attach", classes="act-cell")
-            yield Static("P pause", id="act-paused", classes="act-cell")
-            yield Static("K kill", id="act-kill", classes="act-cell")
-            yield Static("X clear", id="act-clear", classes="act-cell")
+            # Shift-letters, shown as ⇧X so they never read like the global
+            # lower-case r/p/a/k/x keys.
+            yield Static("⇧R restart", id="act-restart", classes="act-cell")
+            yield Static("⇧A attach", id="act-attach", classes="act-cell")
+            yield Static("⇧P pause", id="act-paused", classes="act-cell")
+            yield Static("⇧K kill", id="act-kill", classes="act-cell")
+            yield Static("⇧X clear", id="act-clear", classes="act-cell")
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -290,7 +292,7 @@ class SpotlightPanel(Widget):
     def _render_header(self) -> str:
         package = self._current_package()
         if not package:
-            return "[#fb7185]○ no app[/] — press [b]C[/] (attach) / [b]Shift+C[/] (spawn)"
+            return "[#fb7185]○ no app[/] — press [b]c[/] (attach) / [b]⇧C[/] (spawn)"
 
         pid = self._safe_pid()
         paused = self._is_paused()
@@ -318,7 +320,7 @@ class SpotlightPanel(Widget):
         if not package:
             return (
                 "[#5b6479]No spotlight app selected.\n\n"
-                "Press [b]C[/] to attach to the focused app, or [b]Shift+C[/] to "
+                "Press [b]c[/] to attach to the focused app, or [b]Shift+C[/] to "
                 "pick an app to spawn with hooks from the start.[/]"
             )
 
@@ -567,7 +569,7 @@ class SpotlightPanel(Widget):
             self._run_action_bg(self._work_resume, "resume")
         elif self._safe_pid():
             self._notify(
-                "Already running — R restart · A re-attach · K kill",
+                "Already running — ⇧R restart · ⇧A re-attach · ⇧K kill",
                 "information",
             )
         else:
@@ -767,7 +769,7 @@ class SpotlightPanel(Widget):
     def _require_package(self) -> bool:
         if not self._current_package():
             self._notify(
-                "No spotlight app. Press C (attach) or Shift+C (spawn) first.",
+                "No spotlight app. Press c (attach) or Shift+C (spawn) first.",
                 "warning",
             )
             return False
