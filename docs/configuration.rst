@@ -36,12 +36,21 @@ Configuration File Locations
 
 Sandroid searches for configuration files in this order:
 
-1. **Current directory**: ``./sandroid.toml``, ``./config.toml``
+1. **Current directory**: ``./sandroid.toml``, ``./sandroid.yaml``/``.yml``
+   (``sandroid.json`` -- the default results file -- and generic ``config.*``
+   files are deliberately *not* picked up from the working directory)
 2. **User config**: ``~/.config/sandroid/sandroid.toml`` (written by ``sandroid-config init``)
 3. **Platform config directories** (e.g. ``~/Library/Application Support/sandroid/`` on macOS)
 
-For each directory ``.toml``, ``.yaml``, ``.yml`` and ``.json`` are tried in
-that order; TOML is the default and recommended format.
+In the user/platform/system directories ``sandroid.*`` and ``config.*`` with
+``.toml``, ``.yaml``, ``.yml`` and ``.json`` are tried in that order; TOML is
+the default and recommended format. ``sandroid --config FILE`` works on its
+own, without any discovered file.
+
+Changes made in the TUI Settings screen are validated first and written to the
+configuration file actually in use (the ``--config`` file if one was given,
+otherwise the highest-priority discovered file, otherwise
+``~/.config/sandroid/sandroid.toml``); only the changed keys are written.
 
 **Check Configuration Paths:**
 
@@ -881,7 +890,7 @@ Integration with Tools
    ENV SANDROID_LOG_LEVEL=INFO
 
    # Run with custom config
-   CMD ["sandroid", "--config", "/app/config.toml"]
+   CMD ["sandroid", "--headless", "--mode", "forensic", "--config", "/app/config.toml"]
 
 **CI/CD Configuration:**
 
@@ -891,13 +900,13 @@ Integration with Tools
    - name: Configure Sandroid
      run: |
        sandroid-config init
-       sandroid-config set -k analysis.number_of_runs -v 1
+       sandroid-config set -k analysis.number_of_runs -v 2
        sandroid-config set -k analysis.screenshot_interval -v 10
 
    - name: Run Analysis
      env:
        SANDROID_AI__API_KEY: ${{ secrets.AI_API_KEY }}
-     run: sandroid --network --report
+     run: sandroid --headless --mode forensic --network --report
 
 **Batch Processing Configuration:**
 
@@ -908,7 +917,7 @@ Integration with Tools
    # Different configs for different analysis types
    sandroid --config malware-analysis.toml --trigdroid com.malware.app
    sandroid --config performance-test.toml --degrade-network
-   sandroid --config development.toml --number 1
+   sandroid --config development.toml -n 2
 
 Best Practices
 --------------

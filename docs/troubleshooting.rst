@@ -362,7 +362,7 @@ High System Resource Usage
 
 1. **Reduce monitoring scope**::
 
-   sandroid --number 1 --no-processes
+   sandroid -n 2 --no-processes
 
 2. **Optimize system**:
    - Close unnecessary applications
@@ -634,8 +634,8 @@ Slow Analysis Performance
 
 1. **Optimize configuration**::
 
-   # Reduce number of runs for testing
-   sandroid --number 1
+   # Use the minimum number of runs (2) for testing
+   sandroid -n 2
 
    # Disable resource-intensive features
    sandroid --no-processes --screenshot 30

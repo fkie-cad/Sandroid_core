@@ -10,7 +10,6 @@ Extracted modules:
 - ``css_resolver`` -- CSS file resolution logic
 """
 
-import atexit
 import concurrent.futures
 import logging
 import time
@@ -20,10 +19,10 @@ from typing import TYPE_CHECKING, Optional
 from textual.app import App
 from textual.binding import Binding
 
-from sandroid.tui.terminal_reset import reset_terminal
-
-atexit.register(reset_terminal)
-
+# NOTE: no import-time atexit(reset_terminal) here -- merely importing this
+# module (headless runs, sandroid-config, tests) must not emit terminal
+# escape sequences / ``stty`` on exit. ``launcher.run_tui`` registers
+# ``reset_terminal_hard`` for real TUI sessions.
 from sandroid.core.adb_device_monitor import AdbDeviceMonitor
 from sandroid.core.enums import ViewMode
 from sandroid.core.menu_controller import MenuController
@@ -104,7 +103,7 @@ class SandroidTUI(App):
         Binding("p", "play", "Play/Replay", id="play"),
         # Navigation
         Binding("D", "show_device_selector", "Devices", priority=True),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "request_quit", "Quit"),
         Binding("escape", "maybe_quit", "Back", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
@@ -174,7 +173,9 @@ class SandroidTUI(App):
         Binding("n", "install_apk", "Install APK", show=False, id="new_apk"),
         # Snapshots -- [0] opens the tab, [1-8] load slots (press the digit
         # twice: a lone digit only arms the load, see action_load_slot),
-        # [Ctrl+1-8] save to slots.
+        # [Ctrl+1-8] save to slots. Ctrl+digit only reaches us in terminals
+        # with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty,
+        # recent iTerm2); [S] then a digit is the terminal-safe fallback.
         Binding("0", "open_snapshots", "Snapshots", show=False, id="show_snapshots"),
         Binding("1", "load_slot('1')", "Load slot 1", show=False, id="load_slot_1"),
         Binding("2", "load_slot('2')", "Load slot 2", show=False, id="load_slot_2"),
@@ -207,6 +208,9 @@ class SandroidTUI(App):
         ),
         Binding(
             "ctrl+8", "save_slot('8')", "Save slot 8", show=False, id="save_slot_8"
+        ),
+        Binding(
+            "S", "pick_save_slot", "Save to slot", show=False, id="pick_save_slot"
         ),
         # Clipboard / Settings
         Binding("Y", "copy_log", "Copy Log", show=False),
@@ -453,12 +457,18 @@ class SandroidTUI(App):
         )
 
     def _load_config(self):
-        """Load Sandroid config for TUI settings (returns None on failure)."""
-        try:
-            from sandroid.config.loader import ConfigLoader
+        """Return the live Sandroid config for the TUI (None on failure).
 
-            loader = ConfigLoader()
-            return loader.load()
+        Uses the process-wide ``get_config()`` singleton -- the config the CLI
+        loaded with ``--config`` / ``--environment`` / flag overrides and
+        installed via ``set_config()`` -- instead of re-reading the
+        auto-discovered files, so the Settings screen shows (and saves on top
+        of) the values actually in effect.
+        """
+        try:
+            from sandroid.config import get_config
+
+            return get_config()
         except Exception as e:
             logger.debug(f"Could not load config: {e}")
             return None
@@ -1100,6 +1110,27 @@ class SandroidTUI(App):
         panel = self._snapshots_panel()
         if panel is not None:
             panel.save_slot(slot)
+
+    def action_pick_save_slot(self) -> None:
+        """Ask for a slot digit, then save into it (key S).
+
+        Terminal-safe twin of Ctrl+1-8, which most terminals cannot send.
+        """
+        panel = self._snapshots_panel()
+        if panel is None:
+            return
+        from sandroid.tui.modals import SnapshotSlotPickerModal
+
+        try:
+            slots = panel._slot_map() if hasattr(panel, "_slot_map") else {}
+        except Exception:
+            slots = {}
+
+        def on_pick(slot: str | None) -> None:
+            if slot:
+                self.action_save_slot(slot)
+
+        self.push_screen(SnapshotSlotPickerModal(slots), on_pick)
 
     def action_open_snapshots(self) -> None:
         """Open the Snapshots tab in the bottom strip (key 0)."""
@@ -1935,7 +1966,8 @@ class SandroidTUI(App):
         dispatch = {
             "device_selector": self.action_show_device_selector,
             "help": self.action_show_help,
-            "quit": self.action_quit,
+            "quit": self.action_request_quit,
+            "pick_save_slot": self.action_pick_save_slot,
         }
         handler = dispatch.get(message.action_name)
         if handler:

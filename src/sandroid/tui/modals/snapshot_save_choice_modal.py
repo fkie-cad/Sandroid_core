@@ -181,3 +181,83 @@ class SnapshotSaveChoiceModal(ForensicModal[SnapshotSaveChoiceResult]):
                 remember=remember,
             )
         )
+
+
+class SnapshotSlotPickerModal(ForensicModal[str]):
+    """Pick a slot (1-8) to save the current state into -- key ``S``.
+
+    Terminal-safe fallback for the ``Ctrl+1``-``Ctrl+8`` save keys: most
+    terminals (Terminal.app, VTE/GNOME Terminal, tmux without extended keys)
+    cannot send Ctrl+digit at all, only terminals speaking the kitty keyboard
+    protocol can. Here a plain digit picks the slot; Esc cancels. Dismisses
+    with the slot string (``"1"``-``"8"``) or ``None``.
+    """
+
+    BINDINGS = [
+        Binding(str(i), f"pick('{i}')", f"Slot {i}", show=False, priority=True)
+        for i in range(1, 9)
+    ]
+
+    DEFAULT_CSS = """
+    SnapshotSlotPickerModal .modal-container {
+        width: 60;
+        max-width: 90%;
+        height: auto;
+    }
+
+    SnapshotSlotPickerModal #slot-picker-description {
+        color: $text-muted;
+        text-align: center;
+        width: 100%;
+        height: auto;
+        padding-bottom: 1;
+    }
+
+    SnapshotSlotPickerModal .button-row {
+        align: center middle;
+        width: 100%;
+        height: 3;
+    }
+
+    SnapshotSlotPickerModal .button-row > Button {
+        min-width: 5;
+        width: 5;
+        margin: 0;
+    }
+    """
+
+    def __init__(self, slots: dict[str, str] | None = None, **kwargs) -> None:
+        """Initialize the picker.
+
+        Args:
+            slots: Current ``{slot: tag}`` assignments, shown as a hint.
+            **kwargs: Passed to the modal base.
+        """
+        super().__init__(**kwargs)
+        self._slots = dict(slots or {})
+
+    def compose(self) -> ComposeResult:
+        """Create the modal layout."""
+        used = ", ".join(f"{s}={t}" for s, t in sorted(self._slots.items()))
+        with Vertical(classes="modal-container"):
+            yield Label("Save to slot", classes="modal-title")
+            yield Label(
+                "Press [b]1[/b]-[b]8[/b] to save the current state into that "
+                "slot, Esc to cancel."
+                + (f"\n[dim]In use: {used}[/dim]" if used else ""),
+                id="slot-picker-description",
+            )
+            with Horizontal(classes="button-row"):
+                for i in range(1, 9):
+                    yield Button(str(i), id=f"slot-pick-{i}")
+            yield KeyHintFooter()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """A slot button was clicked."""
+        button_id = event.button.id or ""
+        if button_id.startswith("slot-pick-"):
+            self.action_pick(button_id.rsplit("-", 1)[-1])
+
+    def action_pick(self, slot: str) -> None:
+        """Dismiss with the chosen slot."""
+        self.dismiss(str(slot))

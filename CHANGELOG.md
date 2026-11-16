@@ -145,6 +145,16 @@ persistent run history, and an experimental AI Chat assistant.
 - The header's App PID is re-checked while other tabs are shown, so an app restarted outside Sandroid no longer shows its dead PID as running.
 - A replayed recording's run gets a distinct label (`<label> · play 2`) instead of a duplicate in the Runs rail.
 - The dry run's start, window length and end are logged (headless output showed no sign of it).
+- **Settings keep the live configuration**: saving in the TUI Settings screen (or changing mitmproxy addons) no longer reloads the config from disk, which silently dropped `--config`/`--environment`/CLI flags (results path, `--network`/`--hash`). Changes are validated against the whole config first (e.g. Number of Runs < 2 is refused with an error in the screen instead of breaking every later start), applied in place and written to the config file actually in use (the `--config` file if given) — only the changed keys, including sections missing from a minimal file. The Settings screen shows the values actually in effect.
+- `sandroid --config FILE` (and `--environment`/`SANDROID_*`-only setups) no longer fail with "No configuration found!" when no config file is auto-discovered.
+- `sandroid-config init` without `-o` no longer overwrites an existing user config without `--force`; `sandroid-config set KEY VALUE` / `get KEY` accept positional arguments (as the built-in hints and docs show), besides `-k`/`-v`.
+- Config discovery no longer picks up `sandroid.json` (the default results file) or `config.*` from the working directory, and saves never write to such files.
+- `q` and the command palette's Quit go through the same path as `Ctrl+C` (stop running tasks / confirm) — `q` used to exit immediately and the palette entry did nothing; the `QuitCommand` no longer logs a misleading "Exiting application...".
+- Snapshot slots can be saved with `S` then `1`–`8` in every terminal; `Ctrl+1`–`8` only work in terminals with the kitty keyboard protocol (documented).
+- Switching views with Shift+Arrows never leaves focus in a text field (Watchlist's "Add path" swallowed the next `⇧P`), and Shift+Arrows also work when nothing is focused.
+- `--trigdroid-ccf` (never functional with the current TrigDroid API) is hidden and fails with a clear error; `--trigdroid … -f dir/out.json` also writes the results to `dir/out.json` (the directory was dropped) and prints the final path.
+- Importing the TUI module no longer registers a terminal reset at exit, which printed escape sequences / `stty` errors after headless and `sandroid-config` runs.
+- Docs: non-working commands fixed (`--output` → `-f`, `--number 1` → `-n 2`, CI/Docker/script examples use `--headless`), exit-code table matches the code (1 = analysis/config error, 2 = invalid command line, 3 = documentation failed).
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.

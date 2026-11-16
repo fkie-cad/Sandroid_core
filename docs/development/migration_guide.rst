@@ -425,7 +425,7 @@ Validation and Testing
    sandroid-config show  # Should display configuration
 
    # 4. Analysis capability
-   sandroid --number 1 --screenshot 10  # Should run without errors
+   sandroid -n 2 --screenshot 10  # Should run without errors
 
    # 5. Compatibility
    ./sandroid --help  # Legacy script should still work
@@ -437,10 +437,10 @@ Validation and Testing
    # Test with same APK using both methods
 
    # Legacy method
-   ./sandroid --number 2 --network --output legacy_results.json
+   ./sandroid --number 2 --network -f legacy_results.json
 
    # Modern method
-   sandroid --number 2 --network --output modern_results.json
+   sandroid --headless --mode forensic -n 2 --network -f modern_results.json
 
    # Compare results (should be identical)
    diff legacy_results.json modern_results.json

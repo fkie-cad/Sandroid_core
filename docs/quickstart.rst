@@ -171,7 +171,7 @@ Common Workflows
 
 1. **Configure for Development**::
 
-      sandroid-config set -k analysis.number_of_runs -v 1
+      sandroid-config set -k analysis.number_of_runs -v 2
       sandroid-config set -k paths.results_path -v ./test_results/
 
 2. **Test Your App**::

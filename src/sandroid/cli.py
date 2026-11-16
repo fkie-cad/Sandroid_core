@@ -127,7 +127,8 @@ def __getattr__(name: str):
 @click.option(
     "--trigdroid-ccf",
     type=click.Choice(["I", "D"]),
-    help="Use the TrigDroid CCF utility. I for interactive mode, D to create the default config file",
+    hidden=True,  # not functional with the current TrigDroid API -- see main()
+    help="(Unsupported) TrigDroid CCF utility",
 )
 @click.option(
     "--hash",
@@ -338,6 +339,17 @@ def main(
     SandroidConsole.initialize()
     console = SandroidConsole.get()
 
+    # --trigdroid-ccf is kept (hidden) only so old scripts get a clear error
+    # instead of "no such option": the TrigDroid CCF utility has no
+    # equivalent in the current TrigDroid API, so it never did anything.
+    if trigdroid_ccf:
+        raise click.UsageError(
+            "--trigdroid-ccf is not supported in Sandroid 2.x (the TrigDroid "
+            "CCF utility is not available with the current TrigDroid API). "
+            "Configure TrigDroid via the [trigdroid] section of the config "
+            "file instead (sandroid-config show / set)."
+        )
+
     # --- Offline report generation (no config/device needed) ---------------
     if report_from:
         from .cli_modes.report import run_report_from
@@ -358,7 +370,16 @@ def main(
 
     try:
         loader = ConfigLoader()
-        if not loader._config_files:
+        # An explicit --config file, an --environment config or SANDROID_*
+        # environment variables are all valid configuration sources on their
+        # own -- only refuse when there is none at all.
+        has_config_source = bool(
+            loader._config_files
+            or config
+            or environment
+            or loader.load_environment_vars()
+        )
+        if not has_config_source:
             console.print("[error]Error: No configuration found![/error]")
             console.print(
                 "[warning]Please run 'sandroid-config init' first to set up Sandroid.[/warning]"
@@ -444,7 +465,7 @@ def main(
         # config instead of re-loading defaults from disk.
         from .config import set_config
 
-        set_config(sandroid_config)
+        set_config(sandroid_config, source_file=config)
 
         # Re-initialize console with the configured theme preset
         SandroidConsole.initialize(sandroid_config.theme.preset)

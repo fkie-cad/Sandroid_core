@@ -96,7 +96,29 @@ class MainScreen(Screen):
     - Footer with key bindings
     """
 
-    BINDINGS = []  # Bindings are handled by the main app
+    # Bindings are handled by the main app. The only exception: Shift+Arrow
+    # tool navigation while NOTHING has focus (e.g. after Esc left an input
+    # or a modal closed) -- normally those keys are caught by ``_ToolPanel``
+    # because focus sits inside the tool area; with no focus they would be
+    # dead. ``check_action`` limits these to the unfocused case so they never
+    # take Shift+Arrows away from a focused widget (activity log, inputs).
+    BINDINGS = [
+        Binding("shift+up", "unfocused_nav('level', -1)", show=False),
+        Binding("shift+down", "unfocused_nav('level', 1)", show=False),
+        Binding("shift+left", "unfocused_nav('cycle', -1)", show=False),
+        Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
+    ]
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "unfocused_nav":
+            return self.focused is None
+        return True
+
+    def action_unfocused_nav(self, kind: str, delta: int) -> None:
+        if kind == "level":
+            self.shift_nav_level(delta)
+        else:
+            self.cycle_active_level(delta)
 
     # These values are also themed: each of the 8 .tcss files (styles.tcss +
     # themes/*.tcss) defines matching selectors for #tool-tabbar/.tool-tab/
@@ -341,6 +363,7 @@ class MainScreen(Screen):
                 panel_widget.refresh_glance()
         except Exception:
             pass
+        self.call_after_refresh(self._ensure_view_focus)
         # Whenever the OUTER tab changes -- by any means (keyboard via
         # cycle_bottom_tab, mouse via on_click's tab-bar routing, or a
         # programmatic jump like open_fritap_tab/open_files_tab) -- force the
@@ -431,8 +454,44 @@ class MainScreen(Screen):
                     panel.cycle_subtab(delta)
                 except Exception:
                     pass
+                self.call_after_refresh(self._ensure_view_focus)
             return
         self.cycle_bottom_tab(delta)
+
+    def _ensure_view_focus(self) -> None:
+        """After a view switch, never leave the caret in a text input.
+
+        Switching tabs/sub-tabs focuses the new view's list/log. If focus
+        nevertheless ends up in a text field (Watchlist's "Add path" input,
+        e.g. via Textual re-homing focus away from a widget the switch just
+        hid), the next shortcut -- ``P`` for the PDF report -- would be typed
+        into it. Move focus to the first non-input focusable widget of the
+        active panel instead (or to nothing, which keeps global keys live).
+        """
+        from textual.widgets import Input, TextArea
+
+        focused = self.focused
+        if focused is not None and not isinstance(focused, Input | TextArea):
+            return
+        panel = self._current_panel_widget()
+        if panel is None:
+            return
+        if focused is None:
+            panel.focus()  # panels forward to their list/log
+            return
+        if panel not in focused.ancestors:
+            return  # e.g. the AI chat input -- not part of the switched view
+        # Nearest enclosing view first: a non-input focusable sibling of the
+        # input (Watchlist's list), then progressively wider containers.
+        chain = [w for w in self.focus_chain if not isinstance(w, Input | TextArea)]
+        for ancestor in focused.ancestors:
+            for widget in chain:
+                if widget is not ancestor and ancestor in widget.ancestors:
+                    self.set_focus(widget)
+                    return
+            if ancestor is panel:
+                break
+        self.set_focus(panel if panel.focusable else None)
 
     def set_nav_level_inner(self) -> None:
         """Move the active nav level to "inner" (called by a panel's own click).

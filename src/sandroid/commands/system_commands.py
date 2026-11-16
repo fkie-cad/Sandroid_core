@@ -17,25 +17,37 @@ class QuitCommand(CommandHandler):
     views = []  # Available in all views
 
     async def execute(self, ctx: CommandContext) -> CommandResult:
-        """Signal the application to exit.
+        """Quit through the TUI's normal quit path (same as ``q`` / Ctrl+C).
 
-        The legacy ``do_next`` loop that read ``action_queue.finished`` is gone;
-        actual quitting is owned by the TUI (``app.action_quit`` / the ``q``
-        binding). This handler just reports the intent via ``data``.
+        On the TUI's live dispatch path (``ctx.app`` set) this asks the app to
+        run ``action_request_quit`` -- stop running tasks first, otherwise the
+        quit confirmation -- on its main thread. Without a reachable app
+        (headless/API/tests) nothing can be quit from here, so it says so
+        instead of claiming the application is exiting.
 
         Args:
             ctx: Command context
 
         Returns:
-            CommandResult indicating the quit was initiated
+            CommandResult describing what actually happened
         """
-        logger.info("Quit command executed - signaling application exit")
+        if ctx.app is not None:
+            try:
+                ctx.app.call_from_thread(ctx.app.action_request_quit)
+            except Exception:
+                logger.warning("Could not request quit from command", exc_info=True)
+            else:
+                return CommandResult(
+                    success=True,
+                    message="Quit requested",
+                    data={"action": "quit"},
+                    should_return_to_menu=False,
+                )
 
         return CommandResult(
-            success=True,
-            message="Exiting application...",
+            success=False,
+            message="Quit is handled by the TUI: press q or Ctrl+C.",
             data={"action": "quit"},
-            should_return_to_menu=False,
         )
 
 

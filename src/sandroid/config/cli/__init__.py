@@ -358,12 +358,24 @@ def init(
 
     loader = ConfigLoader()
 
-    # Determine output path
-    config_path = Path(output) if output else None
+    # Determine output path. Resolve the default (user config dir) up front
+    # so the exists/--force guard below also protects the user's existing
+    # config when no -o is given.
+    if output:
+        config_path = Path(output)
+        existing = [config_path] if config_path.exists() else []
+    else:
+        user_dir = loader._preferred_user_config_dir()
+        config_path = user_dir / f"sandroid.{format}"
+        existing = [
+            user_dir / f"sandroid.{ext}"
+            for ext in ("toml", "yaml", "yml", "json")
+            if (user_dir / f"sandroid.{ext}").exists()
+        ]
 
     # Check if file exists
-    if config_path and config_path.exists() and not force:
-        console.print(f"[red]Configuration file already exists: {config_path}")
+    if existing and not force:
+        console.print(f"[red]Configuration file already exists: {existing[0]}")
         console.print("Use --force to overwrite or choose a different path.")
         sys.exit(1)
 
@@ -559,14 +571,42 @@ def paths():
     console.print("\nUse 'sandroid-config init' to create a default configuration.")
 
 
+def _resolve_key_value(
+    key_opt: str | None,
+    key_arg: str | None,
+    value_opt: str | None = None,
+    value_arg: str | None = None,
+    need_value: bool = False,
+) -> tuple[str, str | None]:
+    """Combine ``-k/-v`` options with positional ``KEY [VALUE]`` arguments."""
+    if key_opt and key_arg and value_arg is None and need_value and not value_opt:
+        # ``set -k some.key VALUE``: the lone positional is the value.
+        key_arg, value_arg = None, key_arg
+    if key_opt and key_arg:
+        raise click.UsageError("Give the key either positionally or with -k, not both.")
+    if value_opt is not None and value_arg is not None:
+        raise click.UsageError(
+            "Give the value either positionally or with -v, not both."
+        )
+    key = key_opt or key_arg
+    if not key:
+        raise click.UsageError("Missing configuration KEY (e.g. emulator.device_name).")
+    value = value_opt if value_opt is not None else value_arg
+    if need_value and value is None:
+        raise click.UsageError(f"Missing VALUE for {key}.")
+    return key, value
+
+
 @main.command("set")
+@click.argument("key_arg", metavar="KEY", required=False)
+@click.argument("value_arg", metavar="VALUE", required=False)
 @click.option(
     "-k",
     "--key",
-    required=True,
+    "key_opt",
     help="Configuration key (e.g., emulator.device_name)",
 )
-@click.option("-v", "--value", required=True, help="Value to set")
+@click.option("-v", "--value", "value_opt", help="Value to set")
 @click.option("--config", "-c", type=click.Path(), help="Configuration file path")
 @click.option(
     "--format",
@@ -574,11 +614,21 @@ def paths():
     default="toml",
     help="Configuration file format (default: toml)",
 )
-def set_config(key: str, value: str, config: str | None, format: str):
-    """Set a configuration value.
+def set_config(
+    key_arg: str | None,
+    value_arg: str | None,
+    key_opt: str | None,
+    value_opt: str | None,
+    config: str | None,
+    format: str,
+):
+    """Set a configuration value: KEY VALUE (or -k KEY -v VALUE).
 
-    Example: sandroid-config set -k emulator.device_name -v Pixel_6
+    Example: sandroid-config set emulator.device_name Pixel_6
     """
+    key, value = _resolve_key_value(
+        key_opt, key_arg, value_opt, value_arg, need_value=True
+    )
     loader = ConfigLoader()
 
     try:
@@ -617,21 +667,28 @@ def set_config(key: str, value: str, config: str | None, format: str):
 
 
 @main.command("get")
+@click.argument("key_arg", metavar="KEY", required=False)
 @click.option(
     "-k",
     "--key",
-    required=True,
+    "key_opt",
     help="Configuration key (e.g., emulator.device_name)",
 )
 @click.option(
     "--config", "-c", type=click.Path(exists=True), help="Configuration file path"
 )
 @click.option("--environment", "-e", help="Environment name")
-def get_config(key: str, config: str | None, environment: str | None):
-    """Get a configuration value.
+def get_config(
+    key_arg: str | None,
+    key_opt: str | None,
+    config: str | None,
+    environment: str | None,
+):
+    """Get a configuration value: KEY (or -k KEY).
 
-    Example: sandroid-config get -k emulator.device_name
+    Example: sandroid-config get emulator.device_name
     """
+    key, _ = _resolve_key_value(key_opt, key_arg)
     loader = ConfigLoader()
 
     try:

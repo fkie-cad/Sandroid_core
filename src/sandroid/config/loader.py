@@ -76,20 +76,91 @@ class ConfigLoader:
 
         return dirs
 
+    # In the current working directory only ``sandroid.{toml,yaml,yml}`` are
+    # picked up: ``sandroid.json`` is the default analysis *result* file
+    # (``sandroid -f``) and ``config.*`` is far too generic a name -- loading
+    # (and, worse, saving settings into) either would clobber unrelated data.
+    _CWD_CONFIG_NAMES = ("sandroid.toml", "sandroid.yaml", "sandroid.yml")
+    _CONFIG_NAMES = ("sandroid", "config")
+    _CONFIG_EXTENSIONS = (".toml", ".yaml", ".yml", ".json")  # TOML is default
+
     def _discover_config_files(self) -> list[Path]:
         """Discover configuration files in order of preference."""
         config_files = []
-        config_names = ["sandroid", "config"]
-        extensions = [".toml", ".yaml", ".yml", ".json"]  # TOML is default format
 
-        for config_dir in self._config_dirs:
-            for name in config_names:
-                for ext in extensions:
-                    config_file = config_dir / f"{name}{ext}"
+        # _config_dirs[0] is the current working directory (see
+        # _get_config_directories); the rest are XDG/platform/system dirs.
+        for index, config_dir in enumerate(self._config_dirs):
+            for name in self._CONFIG_NAMES:
+                for ext in self._CONFIG_EXTENSIONS:
+                    filename = f"{name}{ext}"
+                    if index == 0 and filename not in self._CWD_CONFIG_NAMES:
+                        continue
+                    config_file = config_dir / filename
                     if config_file.exists() and config_file.is_file():
                         config_files.append(config_file)
 
         return config_files
+
+    def _is_recognised_config(self, path: Path) -> bool:
+        """True if ``path`` is a file name/location discovery treats as config."""
+        path = Path(path)
+        if path.parent == self._config_dirs[0] and path.name in self._CWD_CONFIG_NAMES:
+            return True
+        return (
+            path.stem in self._CONFIG_NAMES
+            and path.suffix in self._CONFIG_EXTENSIONS
+            and path.parent in self._config_dirs[1:]
+        )
+
+    def resolve_save_target(self, explicit: str | Path | None = None) -> Path:
+        """Return the config file that settings changes should be written to.
+
+        Order: the explicit (``--config``) file, else the highest-priority
+        discovered config file, else ``~/.config/sandroid/sandroid.toml``.
+        Never a file that discovery would not load as a config.
+        """
+        if explicit is not None:
+            return Path(explicit)
+        for candidate in self._config_files:
+            if self._is_recognised_config(candidate):
+                return candidate
+        return self._preferred_user_config_dir() / "sandroid.toml"
+
+    def update_file_keys(self, path: str | Path, updates: dict[str, Any]) -> Path:
+        """Write dotted-key ``updates`` into the config file at ``path``.
+
+        Only the given keys are touched: the file's existing content is kept
+        as-is (no defaults are added), sections missing from a minimal file
+        are created. A ``None`` value removes the key (TOML has no null).
+        Values must already be JSON-serialisable.
+        """
+        path = Path(path)
+        data: dict[str, Any] = self._load_file(path) if path.exists() else {}
+        for key, value in updates.items():
+            parts = key.split(".")
+            current = data
+            for part in parts[:-1]:
+                if not isinstance(current.get(part), dict):
+                    current[part] = {}
+                current = current[part]
+            if value is None:
+                current.pop(parts[-1], None)
+            else:
+                current[parts[-1]] = value
+
+        fmt = self._suffix_to_format(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if fmt == "toml":
+            with open(path, "wb") as f:
+                tomli_w.dump(data, f)
+        elif fmt == "yaml":
+            with open(path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+        return path
 
     def _load_toml(self, path: Path) -> dict[str, Any]:
         """Load TOML configuration file."""
@@ -383,12 +454,14 @@ class ConfigLoader:
     def detect_and_save(
         self, config: SandroidConfig, config_path: str | Path | None = None
     ) -> Path:
-        """Detect existing config format and save. Uses first discovered file if no path given."""
-        target_path = config_path
-        if target_path is None and self._config_files:
-            target_path = self._config_files[0]
+        """Detect existing config format and save.
 
-        target = Path(target_path) if target_path is not None else None
+        Without ``config_path`` this writes to the highest-priority discovered
+        *recognised* config file (see ``resolve_save_target``), falling back
+        to the user config dir -- never to an arbitrary file such as an
+        analysis result ``sandroid.json`` in the working directory.
+        """
+        target = self.resolve_save_target(config_path)
         return self.save_config(config, target, self._suffix_to_format(target))
 
     def load_and_update_section(

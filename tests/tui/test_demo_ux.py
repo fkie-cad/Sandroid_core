@@ -577,3 +577,174 @@ def test_config_init_runs_without_tty(tmp_path, args) -> None:
     assert out.exists()
     assert "Configuration created successfully" in result.output
     assert "sandroid -i" not in result.output
+
+
+# --------------------------------------------------------------------------
+# Phase-4 UX fixes: quit keys, save-slot fallback, view-switch focus
+# --------------------------------------------------------------------------
+
+
+async def test_q_goes_through_request_quit(monkeypatch) -> None:
+    """``q`` must behave like Ctrl+C (QuitController), not hard-exit."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        calls = []
+        monkeypatch.setattr(
+            app._quit_controller, "request_quit", lambda: calls.append("q")
+        )
+        await pilot.press("q")
+        await _settle(pilot)
+        assert calls == ["q"]
+        assert app.is_running
+        assert app.return_code is None
+
+
+async def test_palette_quit_goes_through_request_quit(monkeypatch) -> None:
+    import gc
+    import warnings
+
+    from sandroid.tui.screens.command_palette import CommandPalette
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        calls = []
+        monkeypatch.setattr(
+            app._quit_controller, "request_quit", lambda: calls.append("palette")
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            app.on_command_palette_action_selected(
+                CommandPalette.ActionSelected("quit")
+            )
+            gc.collect()
+            await _settle(pilot)
+        assert calls == ["palette"]
+        assert not [w for w in caught if "never awaited" in str(w.message)]
+
+
+async def test_quit_command_uses_tui_quit_path() -> None:
+    from sandroid.commands.base import CommandContext
+    from sandroid.commands.system_commands import QuitCommand
+
+    called = []
+
+    class _App:
+        def action_request_quit(self):
+            called.append(True)
+
+        def call_from_thread(self, fn):
+            return fn()
+
+    result = await QuitCommand().execute(CommandContext(app=_App()))
+    assert called == [True]
+    assert result.success
+    assert "Exiting" not in result.message
+
+    headless = await QuitCommand().execute(CommandContext())
+    assert not headless.success
+    assert "q" in headless.message
+
+
+def test_app_bindings_have_no_duplicate_keys() -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    keys = [b.key for b in SandroidTUI.BINDINGS]
+    dupes = {k for k in keys if keys.count(k) > 1}
+    assert not dupes, dupes
+    by_id = {b.id: b for b in SandroidTUI.BINDINGS if b.id}
+    assert by_id["pick_save_slot"].key == "S"
+
+
+async def test_shift_s_then_digit_saves_slot(monkeypatch) -> None:
+    """Terminal-safe fallback for Ctrl+1-8 (not sendable outside kitty)."""
+    from sandroid.tui.modals import SnapshotSlotPickerModal
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+    saves = []
+    monkeypatch.setattr(SnapshotsPanel, "save_slot", lambda self, s: saves.append(s))
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("S")
+        await _settle(pilot)
+        assert isinstance(app.screen, SnapshotSlotPickerModal)
+        await pilot.press("3")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert saves == ["3"]
+
+        # Esc cancels without saving.
+        await pilot.press("S")
+        await _settle(pilot)
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert saves == ["3"]
+
+
+async def test_view_switch_never_leaves_focus_in_text_input(monkeypatch) -> None:
+    """Shift+Right into Watchlist must not land in the "Add path" Input.
+
+    Simulates focus being re-homed into the Input during the switch (what
+    the phase-4 demo hit); a following ``P`` would be typed into the field.
+    """
+    from textual.widgets import Input
+
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    def _focus_input(self, scroll_visible=True):
+        self.query_one("#watchlist-add-input", Input).focus(scroll_visible)
+        return self
+
+    monkeypatch.setattr(WatchlistView, "focus", _focus_input)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        app.screen.open_files_tab()
+        await _settle(pilot)
+        await pilot.press("shift+down")
+        await pilot.press("shift+right")  # Monitor -> Watchlist
+        await _settle(pilot)
+        assert app.screen.query_one("#files-body").current == "files-watchlist"
+        assert not isinstance(app.focused, Input)
+        assert app.screen.query_one("#files-watchlist") in (
+            app.focused.ancestors_with_self
+        )
+        await pilot.press("P")
+        await _settle(pilot)
+        assert app.screen.query_one("#watchlist-add-input", Input).value == ""
+
+
+async def test_shift_arrows_work_with_nothing_focused() -> None:
+    """After Esc leaves an input, focus is None -- navigation must still work."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        app.screen.set_focus(None)
+        await _settle(pilot)
+        before = app.screen.query_one("#tool-body").current
+        await pilot.press("shift+right")
+        await _settle(pilot)
+        after = app.screen.query_one("#tool-body").current
+        assert after != before
+        assert app.focused is not None
+
+
+def test_importing_tui_app_emits_no_terminal_reset(tmp_path) -> None:
+    """Importing the TUI module (headless runs) must not reset the terminal."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import sandroid.tui.app"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=120,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "\x1b[?1049l" not in proc.stdout
+    assert "stty" not in proc.stderr
