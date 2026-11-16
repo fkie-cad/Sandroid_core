@@ -142,7 +142,15 @@ where = ["src"]
 include = ["sandroid*"]
 
 [tool.setuptools.package-data]
-sandroid = ["config/*.yaml", "config/*.toml", "templates/*.html"]
+sandroid = [
+    "config/*.yaml",
+    "config/*.toml",
+    "templates/*.html",
+    "assets/*.png",
+    "assets/*.jpg",
+    "tui/*.tcss",
+    "tui/themes/*.tcss",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "sandroid._version.__version__" }
