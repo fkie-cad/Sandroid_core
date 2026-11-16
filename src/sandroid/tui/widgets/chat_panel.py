@@ -83,7 +83,6 @@ from typing import TYPE_CHECKING
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.text import Text
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
@@ -107,6 +106,7 @@ from sandroid.tui.widgets.tool_permission_prompt import (
 
 if TYPE_CHECKING:
     from rich.console import RenderableType
+    from textual.app import ComposeResult
     from textual.timer import Timer
 
     from sandroid.ai.tools.registry import ToolSpec

@@ -22,12 +22,15 @@ import functools
 import logging
 import threading
 import time
+from typing import TYPE_CHECKING
 
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +360,7 @@ class SpotlightPanel(Widget):
             lines.append("  [#5b6479]none[/]")
         lines.append("")
 
-        # 3. Immediate bypass toggles (armed ∪ active)
+        # 3. Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
         lines.append(
             "[#7dd3fc bold]Bypass[/] "
@@ -816,7 +819,7 @@ class SpotlightPanel(Widget):
         return True
 
     #: Upper bound for any single spotlight action. The fixed teardown/spawn
-    #: paths complete in 1–3s; this only ever trips on a genuine regression
+    #: paths complete in 1-3s; this only ever trips on a genuine regression
     #: (e.g. a frida call wedging), and exists so _action_inflight can NEVER
     #: stay stuck and permanently disable the panel.
     _ACTION_TIMEOUT = 90.0

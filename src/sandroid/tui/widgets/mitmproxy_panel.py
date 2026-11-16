@@ -17,12 +17,15 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import RichLog, Static
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
 
