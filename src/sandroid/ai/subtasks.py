@@ -45,6 +45,7 @@ from sandroid.ai.client import OpenAIClient
 from sandroid.ai.context import build_ambient_block
 from sandroid.ai.loop import run_agent_turn
 from sandroid.ai.prompts import SUBTASK_SYSTEM_PROMPT
+from sandroid.ai.safety import build_client, redact_secrets
 from sandroid.ai.tools.registry import RiskTier, get_tool_registry, sandroid_tool
 
 logger = logging.getLogger(__name__)
@@ -168,19 +169,14 @@ def _default_client_factory() -> OpenAIClient:
     """Build an :class:`OpenAIClient` from ``Toolbox.config.ai`` (lazy import).
 
     The default so the manager is usable even before a ChatPanel configures it
-    with its own client factory. Mirrors ``chat_panel.py``'s config read.
-    """
-    from sandroid.core.toolbox import Toolbox
+    with its own client factory. Applies the same safety policy as the chat
+    panel (configured + localhost-only unless ``ai.allow_remote``), see
+    :func:`sandroid.ai.safety.build_client`.
 
-    ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
-    base_url = getattr(ai_cfg, "base_url", None)
-    api_key = getattr(ai_cfg, "api_key", None)
-    model = getattr(ai_cfg, "model", None)
-    if not (base_url and api_key and model):
-        raise RuntimeError(
-            "AI backend is not configured (set config.ai.base_url/api_key/model)"
-        )
-    return OpenAIClient(base_url, api_key, model)
+    Raises:
+        AIClientError: If the AI is unconfigured or its endpoint is refused.
+    """
+    return build_client()
 
 
 class SubtaskManager:
@@ -381,7 +377,7 @@ class SubtaskManager:
             )
         except Exception as exc:
             logger.debug("Subtask %s crashed: %s", subtask_id, exc, exc_info=True)
-            result = json.dumps({"error": str(exc)})
+            result = json.dumps({"error": redact_secrets(exc)})
         finally:
             get_arbiter().forget_subtask(subtask_id)
             try:
