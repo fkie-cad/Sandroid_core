@@ -35,6 +35,7 @@ import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
+from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import ContentSwitcher, OptionList, Static
 from textual.widgets.option_list import Option
@@ -79,7 +80,8 @@ class DiffsView(FilesSubViewBase):
         # so they work from every panel, not only here.
         ("n", "rename_run", "Rename run"),
         ("delete", "delete_run", "Delete run"),
-        ("backspace", "delete_run", "Delete run"),
+        # Same action as Del -- keep it out of the footer (listed once).
+        Binding("backspace", "delete_run", "Delete run", show=False),
         ("[", "toggle_rail", "Collapse rail"),
         ("P", "generate_pdf", "PDF report"),
     ]
@@ -196,7 +198,7 @@ class DiffsView(FilesSubViewBase):
                 yield OptionList(id="runs-list")
                 yield Static(
                     "r record · p replay · n rename · del delete · "
-                    "P pdf report · [ collapse",
+                    "⇧P pdf report · [ collapse",
                     id="diffs-actions",
                 )
 
