@@ -1,4 +1,10 @@
-# Sandroid quickstart guide
+# Sandroid quickstart guide (legacy Docker bundle)
+
+> **Legacy / best effort.** This bundle (Docker image + packaged emulator archive)
+> is not maintained or tested. For normal use install Sandroid with
+> `pip install sandroid` (Python 3.12+) and see [SETUP.md](../SETUP.md).
+> The current Docker image is described in `docs/advanced/docker_deployment.rst`.
+> `deploy/create_avd.py` (AVD creation helper) is still usable on its own.
 
 Run `./deploy`
 
