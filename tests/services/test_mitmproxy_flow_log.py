@@ -10,7 +10,7 @@ tests/services/test_mitmproxy_addon_flow_log.py for the writer side).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -31,7 +31,7 @@ def _reset_cursor_cache():
 
 
 def _iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
 
 def _record(seq: int, *, ts_end: float = 1000.0, app: str = "", **overrides) -> dict:

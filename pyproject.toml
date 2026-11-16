@@ -155,7 +155,7 @@ version = { attr = "sandroid._version.__version__" }
 
 [tool.black]
 line-length = 88
-target-version = ["py310"]
+target-version = ["py312"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -199,7 +199,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 ignore_errors = true
 ignore_missing_imports = true
 follow_imports = "skip"
@@ -243,7 +243,7 @@ exclude_lines = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 88
 
 [tool.ruff.lint]
@@ -279,6 +279,8 @@ ignore = [
     "RUF059","G201","DTZ001","PTH202","D417",
     "B017","S310","S608","S604","S306","S104",
     "RUF001","PLW1510","PLW1509","DTZ006","D414",
+    # PEP 695 generics (py312 target): keep typing.Generic/TypeVar style
+    "UP046","UP047",
 ]
 
 exclude = [
