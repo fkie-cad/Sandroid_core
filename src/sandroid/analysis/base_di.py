@@ -814,6 +814,25 @@ class DataGatherBase(DataGatherer, DataProvider):
         kept, self.filtered_noise = self.system_noise_filter.split(files)
         return kept
 
+    def _filter_system_noise(
+        self, files: list[str], dropped: dict[str, str]
+    ) -> list[str]:
+        """:meth:`_apply_system_noise`, also recording earlier drops.
+
+        Args:
+            files: Candidate file paths after dry-run noise subtraction.
+            dropped: ``{path: reason}`` removed earlier in ``process_data()``
+                (structural / dry-run noise); added to :attr:`filtered_noise`
+                so nothing disappears from the result unrecorded.
+
+        Returns:
+            The files not matched by :attr:`system_noise_filter`.
+        """
+        kept = self._apply_system_noise(files)
+        hidden = self.filtered_noise if isinstance(self.filtered_noise, dict) else {}
+        self.filtered_noise = {**dropped, **hidden}
+        return kept
+
     def _highlight_timestamps(self, text: str, color: str = "") -> str:
         """Highlight timestamps in text using Toolbox formatting.
 

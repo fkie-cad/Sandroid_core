@@ -2,6 +2,8 @@ import os
 from logging import getLogger
 from typing import Any
 
+from rich.markup import escape
+
 from sandroid.core import file_diff
 from sandroid.core.toolbox import Toolbox
 
@@ -9,6 +11,11 @@ from .base_di import AdbProtocol, DataGatherBase, ForensicServiceProtocol
 from .filters import filter_noise_files, intersect_file_lists
 
 logger = getLogger(__name__)
+
+
+def _analysis_error_note(exc: Exception) -> str:
+    """Diff-line placeholder for a changed file whose diff raised."""
+    return f"\tCould not analyse this file: {type(exc).__name__}: {exc}"
 
 
 class ChangedFiles(DataGatherBase):
@@ -141,6 +148,11 @@ class ChangedFiles(DataGatherBase):
                     result.append(file)
             except FileNotFoundError:
                 result.append(file)
+            except Exception as exc:
+                # One undiffable file must never cost the whole section: keep
+                # it, with a note saying why there is no diff.
+                logger.warning("Could not diff changed file %s: %s", file, exc)
+                result.append({file: [_analysis_error_note(exc)]})
         return {"Changed Files": result}
 
     def pretty_print(self) -> str:
@@ -224,6 +236,16 @@ class ChangedFiles(DataGatherBase):
                     + file
                     + "\n"
                 )
+            except Exception as exc:
+                logger.warning("Could not diff changed file %s: %s", file, exc)
+                result = (
+                    result
+                    + "[accent]"
+                    + file
+                    + "\n[info]"
+                    + escape(_analysis_error_note(exc))
+                    + "\n"
+                )
         result = result + (
             "[bold]"
             "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
@@ -240,10 +262,12 @@ class ChangedFiles(DataGatherBase):
         """
         # Use shared filter utilities to reduce code duplication
         files_from_all_pulls = intersect_file_lists(self.fileListList)
+        dropped: dict[str, str] = {}
         files_from_all_pulls = filter_noise_files(
             files_from_all_pulls,
             self._get_noise_files(),
             preserve_sqlite_xml=True,
+            dropped=dropped,
         )
         files_from_all_pulls = self._exclude_whitelist(files_from_all_pulls)
-        return self._apply_system_noise(files_from_all_pulls)
+        return self._filter_system_noise(files_from_all_pulls, dropped)

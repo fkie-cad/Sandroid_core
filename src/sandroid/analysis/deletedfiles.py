@@ -11,7 +11,7 @@ from logging import getLogger
 from typing import Any
 
 from .base_di import DataGatherBase
-from .filters import filter_noise_files, intersect_file_lists
+from .filters import NOISE_REASON_DRY_RUN, filter_noise_files, intersect_file_lists
 
 logger = getLogger(__name__)
 
@@ -131,13 +131,17 @@ class DeletedFiles(DataGatherBase):
         """
         # Use shared filter utilities to reduce code duplication
         files_from_all_pulls = intersect_file_lists(self.deletedFileListList)
-        files_from_all_pulls = [
-            f for f in files_from_all_pulls if f not in self.noise_deleted_files
-        ]
+        dropped: dict[str, str] = {
+            f: NOISE_REASON_DRY_RUN
+            for f in files_from_all_pulls
+            if f in self.noise_deleted_files
+        }
+        files_from_all_pulls = [f for f in files_from_all_pulls if f not in dropped]
         files_from_all_pulls = filter_noise_files(
             files_from_all_pulls,
             self._get_noise_files(),
             preserve_sqlite_xml=True,
+            dropped=dropped,
         )
         files_from_all_pulls = self._exclude_whitelist(files_from_all_pulls)
-        return self._apply_system_noise(files_from_all_pulls)
+        return self._filter_system_noise(files_from_all_pulls, dropped)

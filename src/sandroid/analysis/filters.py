@@ -23,7 +23,8 @@ def intersect_file_lists(file_lists: list[list[str]]) -> list[str]:
         file_lists: List of file path lists from multiple runs.
 
     Returns:
-        List of file paths that appear in ALL input lists.
+        List of file paths that appear in ALL input lists, in the order of
+        the first list (deterministic, unlike a plain set).
 
     Example:
         >>> lists = [
@@ -44,7 +45,14 @@ def intersect_file_lists(file_lists: list[list[str]]) -> list[str]:
     for file_list in file_lists[1:]:
         result &= set(file_list)
 
-    return list(result)
+    return [f for f in dict.fromkeys(file_lists[0]) if f in result]
+
+
+#: ``Filtered Noise`` reason for :func:`is_structural_noise` matches.
+NOISE_REASON_STRUCTURAL = "structural noise (ART profile / package-manager bookkeeping)"
+
+#: ``Filtered Noise`` reason for files subtracted by the dry run.
+NOISE_REASON_DRY_RUN = "dry-run noise (also changed without the app)"
 
 
 #: Directory prefixes whose contents are runtime bookkeeping, not app
@@ -197,6 +205,7 @@ def filter_noise_files(
     files: list[str],
     noise_files: dict[str, str],
     preserve_sqlite_xml: bool = True,
+    dropped: dict[str, str] | None = None,
 ) -> list[str]:
     """Filter out noise files while optionally preserving SQLite and XML files.
 
@@ -209,6 +218,8 @@ def filter_noise_files(
         noise_files: Dictionary of noise file paths (keys are paths).
         preserve_sqlite_xml: If True, SQLite and XML files are kept even if
             they appear in the noise files list. Default is True.
+        dropped: Optional dict that receives ``{removed_path: reason}`` for
+            every file removed here (reported as "Filtered Noise").
 
     Returns:
         Filtered list of file paths with noise files removed.
@@ -223,17 +234,20 @@ def filter_noise_files(
 
     for file_path in files:
         if is_structural_noise(file_path):
+            if dropped is not None:
+                dropped[file_path] = NOISE_REASON_STRUCTURAL
             continue
         if file_path not in noise_files:
             # File is not noise, keep it
             result.append(file_path)
-        elif preserve_sqlite_xml:
-            # File is noise, but check if it should be preserved
-            if file_diff.is_sqlite_from_device_path(file_path) or file_path.endswith(
-                ".xml"
-            ):
-                result.append(file_path)
-            # Otherwise, file is noise and not a special type - skip it
+        elif preserve_sqlite_xml and (
+            file_diff.is_sqlite_from_device_path(file_path)
+            or file_path.endswith(".xml")
+        ):
+            # Noise, but its content diff is still filtered line by line.
+            result.append(file_path)
+        elif dropped is not None:
+            dropped[file_path] = NOISE_REASON_DRY_RUN
 
     return result
 
