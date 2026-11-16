@@ -45,6 +45,11 @@ def _append_log(root: Path, records: list[logging.LogRecord]) -> None:
         handler.close()
 
 
+def _plain(console, text: str, style: str | None = None) -> None:
+    """Print verbatim (no markup, no wrapping) so paths stay parseable."""
+    console.print(text, style=style, soft_wrap=True, markup=False, highlight=False)
+
+
 def run_report_from(result_dir: str) -> int:
     """Regenerate the PDF report for ``result_dir``.
 
@@ -75,15 +80,15 @@ def run_report_from(result_dir: str) -> int:
         outcome = report_from_folder(root)
     except EvidenceVerificationError as exc:
         write_log = False  # never write into a folder that failed verification
-        console.print(f"[error]{exc}[/error]")
+        _plain(console, str(exc), "error")
         for rel in exc.check.mismatched[:20]:
-            console.print(f"  modified: {rel}")
+            _plain(console, f"  modified: {rel}")
         for rel in exc.check.missing[:20]:
-            console.print(f"  missing:  {rel}")
+            _plain(console, f"  missing:  {rel}")
         return 2
     except Exception as exc:
         sandroid_logger.error("Report regeneration failed: %s", exc, exc_info=True)
-        console.print(f"[error]Report generation failed: {exc}[/error]")
+        _plain(console, f"Report generation failed: {exc}", "error")
         return 1
     finally:
         sandroid_logger.removeHandler(buffer)
@@ -102,15 +107,17 @@ def run_report_from(result_dir: str) -> int:
         )
     else:
         console.print("[warning]No evidence manifest existed; a new one was written.[/warning]")
-    console.print(f"[success]PDF report written: {outcome.pdf}[/success]")
+    _plain(console, f"PDF report written: {outcome.pdf}", "success")
     if outcome.addendum is not None:
-        console.print(
+        _plain(
+            console,
             f"Recorded in addendum manifest: {outcome.addendum} "
-            f"(SHA-256 {outcome.addendum_sha256})"
+            f"(SHA-256 {outcome.addendum_sha256})",
         )
     if outcome.manifest is not None:
-        console.print(
+        _plain(
+            console,
             f"Manifest: {outcome.manifest.sha256sums_path} "
-            f"(SHA-256 {outcome.manifest.sha256sums_sha256})"
+            f"(SHA-256 {outcome.manifest.sha256sums_sha256})",
         )
     return 0
