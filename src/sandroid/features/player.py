@@ -6,6 +6,7 @@ Modified to fit the needs of this project.
 
 import math
 import re
+import threading
 import time
 from logging import getLogger
 
@@ -15,6 +16,25 @@ from sandroid.core.toolbox import Toolbox
 from .functionality import Functionality
 
 logger = getLogger(__name__)
+
+#: Process-wide "stop replaying" flag. Set by :meth:`Player.cancel_all` (TUI
+#: stop/quit) and checked before every event and during every inter-event
+#: wait, so a replay stops within one event instead of tapping on for minutes.
+_cancel_event = threading.Event()
+
+
+def _raise_cancelled() -> None:
+    """Abort the current replay so the analysis engine stops the whole run.
+
+    Raises the engine's ``FatalStepError`` (imported lazily: the engine
+    imports this module) so the remaining steps, including the next
+    iteration's snapshot load and replay, are skipped.
+    """
+    try:
+        from sandroid.analysis.engine import FatalStepError
+    except Exception:  # pragma: no cover - engine always importable
+        FatalStepError = RuntimeError
+    raise FatalStepError("Replay cancelled")
 
 
 class Player(Functionality):
@@ -29,6 +49,21 @@ class Player(Functionality):
     """
 
     STORE_LINE_RE = re.compile(r"(\S+) (\S+) (\S+) (\S+) (\S+)$")
+
+    @staticmethod
+    def cancel_all() -> None:
+        """Stop every running replay as soon as possible (thread-safe)."""
+        _cancel_event.set()
+
+    @staticmethod
+    def clear_cancel() -> None:
+        """Allow replays again; call before starting a new playback."""
+        _cancel_event.clear()
+
+    @staticmethod
+    def is_cancelled() -> bool:
+        """Whether :meth:`cancel_all` was called since the last clear."""
+        return _cancel_event.is_set()
 
     def __init__(self, recording_path: str | None = None) -> None:
         """Initialize the player.
@@ -78,7 +113,11 @@ class Player(Functionality):
         Raises:
             RuntimeError: If no recording path was supplied, or if the
                 recording file cannot be opened.
+            FatalStepError: If :meth:`cancel_all` was called before or
+                during the replay.
         """
+        if _cancel_event.is_set():
+            _raise_cancelled()
         Toolbox.set_action_time()
         start_time = int(round(time.time()))
         logger.info("Start playing")
@@ -102,9 +141,13 @@ class Player(Functionality):
 
                     if last_ts and (ts - last_ts) > 0:
                         delta_second = (ts - last_ts) / 1000
-                        time.sleep(delta_second)
+                        # Interruptible sleep: returns early on cancel.
+                        _cancel_event.wait(delta_second)
 
                     last_ts = ts
+                    if _cancel_event.is_set():
+                        logger.info("Replay cancelled")
+                        _raise_cancelled()
 
                     Adb.send_adb_command(
                         f"shell sendevent {dev} {etype} {ecode} {data}"

@@ -553,6 +553,11 @@ class RecordingController:
 
         self._log_info("Starting playback analysis...")
 
+        # A previous Stop/quit left the process-wide cancel flag set.
+        from sandroid.features.player import Player
+
+        Player.clear_cancel()
+
         # Run playback in worker thread (non-blocking)
         if self._run_worker:
             self._run_worker(
@@ -565,6 +570,26 @@ class RecordingController:
             # Fallback to synchronous execution
             self._run_playback_analysis()
 
+        return True
+
+    def stop_playback(self) -> bool:
+        """Stop the running replay (Play) as soon as possible.
+
+        Sets the process-wide :class:`~sandroid.features.player.Player`
+        cancel flag: the replay stops before its next input event, the
+        engine skips the remaining runs, and the partial run is still saved
+        (with a "Replay cancelled" error) by :meth:`_run_playback_analysis`.
+        Call from the UI thread; a no-op when nothing is replaying.
+
+        Returns:
+            True if a replay was running and has been asked to stop.
+        """
+        from sandroid.features.player import Player
+
+        if not self._is_replaying:
+            return False
+        Player.cancel_all()
+        self._guarded(self._log_warning, "Stopping replay...")
         return True
 
     def start_playback_chat(
@@ -897,7 +922,9 @@ class RecordingController:
             self._ui(self._log_error, f"Could not save run {run_id}: {e}")
             saved_run_id = None
 
-        if error is None and result is not None:
+        if error == "Replay cancelled":
+            self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
+        elif error is None and result is not None:
             self._ui(
                 self._log_success,
                 f"Analysis complete: {len(result.changed_files)} changed, "

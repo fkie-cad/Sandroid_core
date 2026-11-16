@@ -154,3 +154,122 @@ def test_disconnect_guard_failure_does_not_abort_the_replay(monkeypatch, tmp_pat
     index = run_history.load_index()
     assert len(index) == 1
     assert not index[0].get("error")
+
+
+# ---------------------------------------------------------------------------
+# P2-H1: the replay must be stoppable (Stop, quit, crash)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_player_cancel():
+    from sandroid.features.player import Player
+
+    Player.clear_cancel()
+    yield
+    Player.clear_cancel()
+
+
+def test_player_stops_between_events_when_cancelled(
+    tmp_path, monkeypatch, _clean_player_cancel
+):
+    from sandroid.analysis.engine import FatalStepError
+    from sandroid.core.adb import Adb
+    from sandroid.features.player import Player
+
+    rec = tmp_path / "recording.txt"
+    # 1 event every 200 ms for 10 s: an uncancelled replay would take ~10 s.
+    rec.write_text(
+        "".join(f"{i * 200}.0 /dev/input/event1 3 53 {i}\n" for i in range(50))
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, cmd, **kw: sent.append(cmd))
+    )
+    monkeypatch.setattr("sandroid.core.toolbox.Toolbox.set_action_time", lambda: None)
+
+    errors: list[BaseException] = []
+
+    def replay() -> None:
+        try:
+            Player(recording_path=str(rec)).perform()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=replay)
+    started = time.monotonic()
+    worker.start()
+    time.sleep(0.5)
+    Player.cancel_all()
+    worker.join(timeout=2.0)
+
+    assert not worker.is_alive()
+    assert time.monotonic() - started < 2.0
+    assert len(sent) < 10
+    assert errors
+    assert isinstance(errors[0], FatalStepError)
+
+
+def test_cancelled_player_refuses_to_start(tmp_path, _clean_player_cancel):
+    from sandroid.analysis.engine import FatalStepError
+    from sandroid.features.player import Player
+
+    rec = tmp_path / "recording.txt"
+    rec.write_text("0.0 /dev/input/event1 3 53 1\n")
+    Player.cancel_all()
+    with pytest.raises(FatalStepError):
+        Player(recording_path=str(rec)).perform()
+
+
+def test_stop_playback_aborts_remaining_runs_and_still_saves(
+    monkeypatch, tmp_path, _clean_player_cancel
+):
+    """Stop during run 1 of 3: no further snapshot loads/replays, partial run
+    saved with an error so it stays visible in Diffs.
+    """
+    from sandroid.features.player import Player
+
+    controller, toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    controller._current_number_of_runs = 3
+    performed: list[int] = []
+
+    def fake_perform(self, recording_path=None):
+        performed.append(1)
+        controller.stop_playback()
+        if Player.is_cancelled():
+            from sandroid.analysis.engine import FatalStepError
+
+            raise FatalStepError("Replay cancelled")
+
+    monkeypatch.setattr(Player, "perform", fake_perform)
+    controller._run_playback_analysis()
+
+    assert performed == [1]
+    loads_before_first_replay = 1
+    assert len(toolbox.load_snapshot_calls) <= loads_before_first_replay + 1
+    index = run_history.load_index()
+    assert len(index) == 1
+    assert "cancelled" in (index[0].get("error") or "").lower()
+
+
+def test_start_playback_clears_a_previous_cancel(
+    monkeypatch, tmp_path, _clean_player_cancel
+):
+    from sandroid.features.player import Player
+
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, run_worker=lambda fn, **kw: None
+    )
+    Player.cancel_all()
+    assert controller.start_playback() is True
+    assert not Player.is_cancelled()
+
+
+def test_shutdown_services_cancels_running_replays(_clean_player_cancel):
+    from sandroid.features.player import Player
+    from sandroid.tui import launcher
+
+    task_service = SimpleNamespace(stop_all=lambda: None)
+    capture = SimpleNamespace(is_capturing=lambda: False)
+    launcher._shutdown_services(lambda: task_service, lambda: capture)
+    assert Player.is_cancelled()

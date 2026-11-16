@@ -123,12 +123,25 @@ def run_tui(
 
 def _shutdown_services(get_task_service, get_network_capture_service) -> None:
     """Run all post-TUI cleanup steps."""
+    # First: stop any replay still tapping on the device. Its worker thread
+    # outlives the app (crash or quit) and used to keep replaying for minutes.
+    _cleanup_with_timeout(_cancel_replays, timeout=1.0)
     _cleanup_with_timeout(_shutdown_ui_bus, timeout=2.0)
     _cleanup_with_timeout(lambda: get_task_service().stop_all(), timeout=2.0)
     _cleanup_with_timeout(
         lambda: _stop_network_capture(get_network_capture_service), timeout=3.0
     )
     _reset_tui_mode()
+
+
+def _cancel_replays() -> None:
+    """Make every running Player replay stop at its next event."""
+    try:
+        from sandroid.features.player import Player
+
+        Player.cancel_all()
+    except Exception:
+        pass
 
 
 def _shutdown_ui_bus() -> None:
