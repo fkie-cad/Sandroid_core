@@ -23,6 +23,7 @@ Usage:
 """
 
 import fnmatch
+import inspect
 import logging
 import os
 from collections.abc import Callable
@@ -51,6 +52,32 @@ except ImportError:
     get_config = None
 
 logger = logging.getLogger(__name__)
+
+#: Default timeout of the recursive ``ls`` filesystem scan. A full scan of
+#: ``/data`` on a used device takes far longer than adb's 30 s default, and a
+#: timed-out scan used to look like "nothing changed". Override with the
+#: ``SANDROID_SCAN_TIMEOUT`` environment variable (seconds).
+DEFAULT_SCAN_TIMEOUT = 300.0
+
+
+class FilesystemScanError(RuntimeError):
+    """The device filesystem scan produced no listing (adb error/timeout)."""
+
+
+def _scan_timeout() -> float:
+    value = os.environ.get("SANDROID_SCAN_TIMEOUT", "")
+    try:
+        return float(value) if value else DEFAULT_SCAN_TIMEOUT
+    except ValueError:
+        logger.warning("Ignoring invalid SANDROID_SCAN_TIMEOUT=%r", value)
+        return DEFAULT_SCAN_TIMEOUT
+
+
+def _accepts_timeout(func: Any) -> bool:
+    try:
+        return "timeout" in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class ForensicService:
@@ -778,10 +805,20 @@ class ForensicService:
 
         adb = self._get_adb()
         command = self._build_scan_command()
-        filesystem, errors = adb.send_adb_command(command)
+        if _accepts_timeout(adb.send_adb_command):
+            filesystem, errors = adb.send_adb_command(command, timeout=_scan_timeout())
+        else:
+            filesystem, errors = adb.send_adb_command(command)
 
         if errors:
             self._logger.error("Errors from subprocess on phone: " + errors)
+        if not (filesystem or "").strip():
+            # ``ls`` always lists something under /data; an empty listing is
+            # a failed scan (timeout, adb gone), never "no changes".
+            raise FilesystemScanError(
+                "Device filesystem scan returned no listing"
+                + (f": {errors}" if errors else "")
+            )
 
         entries = self._parse_filesystem_listing(filesystem)
         changed_files = self._filter_by_action_window(entries, fetch_all)

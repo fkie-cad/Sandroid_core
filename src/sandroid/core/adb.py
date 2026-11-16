@@ -206,7 +206,7 @@ class Adb:
 
     @classmethod
     def send_adb_command(
-        cls, command: str, serial: str | None = None
+        cls, command: str, serial: str | None = None, timeout: float = 30
     ) -> tuple[str, str]:
         """Send an ADB command and return the output.
 
@@ -218,9 +218,13 @@ class Adb:
             serial: Device serial to target for this call only, without
                 mutating the shared ``_target_device`` global. Omit to use
                 the current global target (default behavior, unchanged).
+            timeout: Seconds before the command is abandoned (default 30).
 
         Returns:
             A tuple containing (stdout, stderr) from the command execution.
+            Bytes that are not valid UTF-8 (e.g. device file names) are
+            decoded with ``surrogateescape``: they survive the round trip
+            into a later adb command line or a host path unchanged.
 
         Raises:
             OSError: If the ADB process fails to start.
@@ -238,14 +242,15 @@ class Adb:
                 check=False,
                 capture_output=True,
                 text=True,
+                errors="surrogateescape",
                 shell=True,
-                timeout=30,  # 30 second timeout to prevent hangs
+                timeout=timeout,
             )
             log_adb_result(full_command, output.stdout, output.stderr)
             return output.stdout, output.stderr.strip()
         except subprocess.TimeoutExpired:
             logger.error(f"ADB command timed out: {full_command}")
-            return "", "Command timed out after 30 seconds"
+            return "", f"Command timed out after {timeout:g} seconds"
         except OSError as e:
             logger.error(f"Failed to start ADB process: {e}")
             return "", f"OSError: {e}"

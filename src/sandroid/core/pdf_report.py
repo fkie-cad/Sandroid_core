@@ -47,6 +47,7 @@ from . import timeline_generator
 from .run_report import (
     DEFAULT_PDF_NAME,
     DEFAULT_RESULTS_NAME,
+    RUN_ERRORS_KEY,
     RUN_METADATA_KEY,
     iso_now,
     plain_text,
@@ -95,7 +96,14 @@ _NON_ARTEFACT_KEYS = {
     "Action Duration",
     "Other Data",
     RUN_METADATA_KEY,
+    RUN_ERRORS_KEY,
 }
+
+#: Rows of the Filtered Noise appendix (the full list is in the JSON).
+MAX_FILTERED_NOISE_ROWS = 150
+
+#: Step errors listed in the first-page banner.
+MAX_BANNER_STEP_ERRORS = 12
 
 _SCREENSHOT_EXTS = (".png", ".jpg", ".jpeg")
 
@@ -440,6 +448,8 @@ class PDFReport:
                     self.changedFileHashesTableMaker,
                 )
             )
+        if self._filtered_noise() is not None:
+            plan.append(("Filtered Noise", self.filteredNoiseTableMaker))
         screenshot_dir = find_screenshot_dir(self.results_dir)
         if screenshot_dir is not None:
 
@@ -681,6 +691,7 @@ class PDFReport:
             )
         )
         self.elements.append(Spacer(10, 14))
+        self._run_errors_banner()
         self.elements.append(Paragraph("Run metadata", self.section_style))
 
         md = self.meta
@@ -764,6 +775,78 @@ class PDFReport:
             "it happens. The complete data is in the results file."
         )
         self.elements.append(PageBreak())
+
+    def _run_errors_banner(self):
+        """Prominent first-page warning when the run aborted or lost steps."""
+        errors = self.data.get(RUN_ERRORS_KEY)
+        if not isinstance(errors, dict) or not errors:
+            return
+        status = str(errors.get("status") or "completed with errors")
+        steps = errors.get("steps") or []
+        title_style = ParagraphStyle(
+            "banner_title",
+            parent=self.body,
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            leading=14,
+            textColor=colors.HexColor("#8B0000"),
+        )
+        lines = [
+            Paragraph(
+                f"RUN {_txt(status.upper())} - the results below may be "
+                "incomplete. Do not read missing entries as "
+                "&quot;nothing happened&quot;.",
+                title_style,
+            )
+        ]
+        if errors.get("fatal"):
+            lines.append(
+                Paragraph(
+                    f"<b>Fatal:</b> {_txt(_clip(str(errors['fatal']), 600))}",
+                    self.body_wrap,
+                )
+            )
+        for step in steps[:MAX_BANNER_STEP_ERRORS]:
+            if not isinstance(step, dict):
+                step = {"error": step}
+            where = " ".join(
+                str(x)
+                for x in (
+                    step.get("step"),
+                    f"(run {step['run']})" if step.get("run") else None,
+                )
+                if x
+            )
+            lines.append(
+                Paragraph(
+                    f"<b>{_txt(where or 'step')}:</b> "
+                    f"{_txt(_clip(str(step.get('error')), 400))}",
+                    self.body_wrap,
+                )
+            )
+        if len(steps) > MAX_BANNER_STEP_ERRORS:
+            lines.append(
+                Paragraph(
+                    f"… {len(steps) - MAX_BANNER_STEP_ERRORS} more step error(s) "
+                    f"in {_txt(self.results_name)} (&quot;{RUN_ERRORS_KEY}&quot;).",
+                    self.body_wrap,
+                )
+            )
+        banner = Table([[line] for line in lines], colWidths=[FRAME_WIDTH])
+        banner.setStyle(
+            TableStyle(
+                [
+                    ("BOX", (0, 0), (-1, -1), 1.5, colors.HexColor("#B00020")),
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FDECEA")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
+        self.elements.append(banner)
+        self.elements.append(Spacer(10, 12))
 
     # ---- summary / settings -----------------------------------------------
 
@@ -1060,6 +1143,50 @@ class PDFReport:
                 )
             )
             self.elements.append(table)
+
+    def _filtered_noise(self):
+        value = self.other.get("Filtered Noise")
+        if isinstance(value, list):
+            value = value[-1] if value else None
+        return value if isinstance(value, dict) else None
+
+    def filteredNoiseTableMaker(self):
+        """Compact appendix: what the noise filters hid, and why."""
+        report = self._filtered_noise() or {}
+        sections = {k: v for k, v in report.items() if isinstance(v, dict)}
+        self.sectionTitle("Filtered Noise")
+        total = sum(len(v) for v in sections.values())
+        counts = ", ".join(f"{_txt(k)}: {len(v)}" for k, v in sections.items())
+        enabled = "on" if report.get("enabled") else "off"
+        self.note(
+            f"{total} entr{'y' if total == 1 else 'ies'} hidden from the "
+            f"results above ({counts or 'none'}; system noise filter {enabled}). "
+            + _txt(report.get("note") or "")
+        )
+        if not total:
+            self.elements.append(Spacer(10, 12))
+            return
+        rows = [self.make_header(["Section", "Path / entry", "Reason"])]
+        shown = 0
+        for section, hidden in sections.items():
+            for path, reason in hidden.items():
+                if shown >= MAX_FILTERED_NOISE_ROWS:
+                    break
+                rows.append(
+                    [
+                        Paragraph(_txt(section), self.body_wrap),
+                        Paragraph(_txt(_clip(str(path), 300)), self.body_wrap),
+                        Paragraph(_txt(_clip(str(reason), 300)), self.body_wrap),
+                    ]
+                )
+                shown += 1
+        self.elements.append(self._table(rows, [90, FRAME_WIDTH - 260, 170]))
+        if total > shown:
+            self.note(
+                f"{total - shown} more entr{'y' if total - shown == 1 else 'ies'} "
+                f"in {_txt(self.results_name)} (Other Data → Filtered Noise)."
+            )
+        self.elements.append(Spacer(10, 14))
 
     # ---- small helpers ----------------------------------------------------
 

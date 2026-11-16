@@ -112,7 +112,9 @@ class _FakeToolboxBase:
         pass
 
     def fetch_changed_files(self, fetch_all: bool = False) -> dict:
-        return {}
+        # The engine refuses an empty baseline (a failed scan), so the
+        # full-filesystem listing is never empty.
+        return {"/data/baseline.db": 1} if fetch_all else {}
 
 
 def _playback_controller(monkeypatch, tmp_path, **overrides):

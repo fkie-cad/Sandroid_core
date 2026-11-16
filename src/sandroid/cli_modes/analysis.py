@@ -6,7 +6,9 @@ Handles the non-interactive, command-line driven analysis workflow
 
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from sandroid.config import SandroidConfig
 from sandroid.core.console import SandroidConsole
@@ -126,11 +128,17 @@ def run_analysis(
         # Write results JSON (+ run metadata), optional PDF and the evidence
         # manifest via the shared finalisation step.
         console = SandroidConsole.get()
-        output_file = config.paths.results_path / config.output_file.name
+        # The session folder (where the raw pulls, screenshots and logs of
+        # this run live), like the headless path -- not the base results
+        # directory shared by every session.
+        result_dir = Path(
+            os.environ.get("SESSION_PATH") or str(config.paths.results_path)
+        )
+        output_file = result_dir / config.output_file.name
         documentation_failed = False
         try:
             outcome = finalize_run(
-                config.paths.results_path,
+                result_dir,
                 result.to_json_dict(),
                 output_name=config.output_file.name,
                 adb=Adb,
@@ -155,7 +163,13 @@ def run_analysis(
 
         print(result.pretty_print())
 
-        logger.info("Analysis completed successfully")
+        run_errors = result.run_errors()
+        if run_errors:
+            # A failed/partial run must not look like a clean one (exit 3).
+            documentation_failed = True
+            _print_run_errors(console, run_errors)
+        else:
+            logger.info("Analysis completed successfully")
         get_task_service().stop_all()
         get_ui_service().print_exit_summary(Toolbox.get_tools_used())
         if documentation_failed:
@@ -166,6 +180,26 @@ def run_analysis(
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise
+
+
+def _print_run_errors(console, run_errors: dict) -> None:
+    """Print a run's fatal/per-step errors verbatim (no markup)."""
+    console.print(
+        f"Analysis {run_errors.get('status', 'completed with errors')}: the "
+        "results may be incomplete (see 'Run Errors' in the results JSON).",
+        style="error",
+        soft_wrap=True,
+        markup=False,
+    )
+    if run_errors.get("fatal"):
+        console.print(f"  fatal: {run_errors['fatal']}", style="error", markup=False)
+    for step in run_errors.get("steps") or []:
+        console.print(
+            f"  {step.get('step')} (run {step.get('run')}): {step.get('error')}",
+            style="error",
+            soft_wrap=True,
+            markup=False,
+        )
 
 
 def _write_results(results_json, output_file, config, console) -> None:
