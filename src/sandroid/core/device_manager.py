@@ -172,8 +172,17 @@ class DeviceManager:
                         state=state,
                         model=model,
                     )
-                    # Populate additional info for new devices
-                    self._populate_device_info(device)
+                    # Populate additional info for new devices -- but only
+                    # for ready ones. Stale/offline/unauthorized entries (e.g.
+                    # a dead "emulator-5556 offline" left in adbd) can't answer
+                    # getprop and would just spam warnings; they are probed by
+                    # the existing-device branch above once they turn ready.
+                    if state == "device":
+                        self._populate_device_info(device)
+                    else:
+                        logger.debug(
+                            "Ignoring not-ready device %s (state: %s)", serial, state
+                        )
 
                 new_devices[serial] = device
 

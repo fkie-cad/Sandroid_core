@@ -1,0 +1,495 @@
+"""Regression tests for the 2.1 CLI / headless / import-robustness fixes.
+
+All device access is faked: ``Adb.send_adb_command`` and the core init steps
+are monkeypatched, so nothing here talks to a real adb.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import sys
+import threading
+from types import SimpleNamespace
+
+import pytest
+
+from sandroid.core.adb import Adb
+
+
+class _FakeAdb:
+    """Scripted ``send_adb_command`` stand-in recording every call."""
+
+    def __init__(self, responses: dict[str, tuple[str, str]]):
+        self.responses = responses
+        self.calls: list[str] = []
+
+    def send_adb_command(self, command: str, serial=None):
+        self.calls.append(command)
+        return self.responses.get(command, ("", ""))
+
+
+# ---------------------------------------------------------------------------
+# --install-apk
+# ---------------------------------------------------------------------------
+
+
+def test_install_apk_success_does_not_unpack_return_value(monkeypatch, capsys):
+    from sandroid import cli
+    from sandroid.core import initializer
+
+    prepared = {}
+    monkeypatch.setattr(
+        initializer,
+        "initialize_core",
+        lambda cfg, prepare=False: prepared.setdefault("prepare", prepare),
+    )
+    monkeypatch.setattr(Adb, "install_apk", classmethod(lambda cls, p: "com.x"))
+
+    cli._run_install_apk(object(), "/tmp/x.apk")  # must not raise / exit
+
+    assert prepared["prepare"] is True  # root + SELinux permissive requested
+    assert "installed successfully (com.x)" in capsys.readouterr().out
+
+
+def test_install_apk_failure_exits_nonzero(monkeypatch):
+    from sandroid import cli
+    from sandroid.core import initializer
+    from sandroid.core.exceptions import APKInstallError
+
+    monkeypatch.setattr(initializer, "initialize_core", lambda cfg, prepare=False: None)
+
+    def _boom(cls, path):
+        raise APKInstallError("x.apk", "INSTALL_FAILED_X")
+
+    monkeypatch.setattr(Adb, "install_apk", classmethod(_boom))
+    with pytest.raises(SystemExit) as exc:
+        cli._run_install_apk(object(), "/tmp/x.apk")
+    assert exc.value.code == 1
+
+
+def test_install_apk_detects_failure_reported_on_stdout(monkeypatch):
+    from sandroid.core import adb_packages
+    from sandroid.core.exceptions import APKInstallError
+
+    monkeypatch.setattr(adb_packages, "find_aapt_paths", list)
+    fake = _FakeAdb({})
+    fake.send_adb_command = lambda cmd, serial=None: (
+        "Performing Streamed Install\n"
+        "adb: failed to install x.apk: Failed transaction (2147483646)",
+        "",
+    )
+    with pytest.raises(APKInstallError, match="SELinux"):
+        adb_packages.install_apk(fake.send_adb_command, "/tmp/x.apk")
+
+
+def test_install_apk_success_returns_package(monkeypatch):
+    from sandroid.core import adb_packages
+
+    monkeypatch.setattr(adb_packages, "find_aapt_paths", lambda: ["aapt"])
+    monkeypatch.setattr(
+        adb_packages, "extract_package_name_with_aapt", lambda a, p: "com.ok"
+    )
+    sent = []
+
+    def send(cmd):
+        sent.append(cmd)
+        return "Performing Streamed Install\nSuccess\n", ""
+
+    assert adb_packages.install_apk(send, "/tmp/my app.apk") == "com.ok"
+    assert "my app.apk" in sent[0]
+    assert sent[0] != "install -r /tmp/my app.apk"  # path is quoted
+
+
+# ---------------------------------------------------------------------------
+# Root + SELinux permissive for headless one-shot modes
+# ---------------------------------------------------------------------------
+
+
+def test_selinux_check_falls_back_to_su_and_verifies():
+    from sandroid.services.setup_checks import check_and_set_selinux
+
+    fake = _FakeAdb(
+        {
+            "shell setenforce 0": ("", "setenforce: Permission denied"),
+            "shell su 0 setenforce 0": ("", ""),
+            "shell getenforce": ("Permissive\n", ""),
+        }
+    )
+    check = check_and_set_selinux(fake)
+    assert check.passed
+    assert "shell su 0 setenforce 0" in fake.calls
+
+
+def test_selinux_check_warns_when_still_enforcing():
+    from sandroid.services.setup_checks import check_and_set_selinux
+
+    fake = _FakeAdb({"shell getenforce": ("Enforcing\n", "")})
+    check = check_and_set_selinux(fake)
+    assert not check.passed
+    assert "Enforcing" in check.message
+
+
+def test_root_check_waits_for_device_after_adbd_restart(monkeypatch):
+    from sandroid.services import setup_checks
+
+    monkeypatch.setattr(setup_checks.time, "sleep", lambda s: None)
+    fake = _FakeAdb(
+        {
+            "root": ("restarting adbd as root\n", ""),
+            "shell id": ("uid=0(root)\n", ""),
+        }
+    )
+    assert setup_checks.check_and_enable_root(fake).passed
+    assert fake.calls.index("wait-for-device") < fake.calls.index("shell id")
+
+
+def test_prepare_device_roots_and_sets_permissive(monkeypatch):
+    from sandroid.core import initializer
+
+    fake = _FakeAdb(
+        {
+            "root": ("adbd is already running as root\n", ""),
+            "shell id": ("uid=0(root)\n", ""),
+            "shell getenforce": ("Permissive\n", ""),
+        }
+    )
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, c, serial=None: fake.send_adb_command(c))
+    )
+    printed = []
+    console = SimpleNamespace(print=printed.append)
+    assert initializer.prepare_device(console) is True
+    assert "shell setenforce 0" in fake.calls
+    assert any("SELinux permissive" in p for p in printed)
+
+
+def test_prepare_device_reports_missing_root(monkeypatch):
+    from sandroid.core import initializer
+
+    fake = _FakeAdb({"root": ("", "adbd cannot run as root in production builds")})
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, c, serial=None: fake.send_adb_command(c))
+    )
+    assert initializer.prepare_device(None) is False
+    assert "shell setenforce 0" not in fake.calls
+
+
+def test_initialize_core_prepare_runs_before_toolbox_init(monkeypatch):
+    from sandroid.core import initializer
+    from sandroid.core.toolbox import Toolbox
+
+    order = []
+    monkeypatch.setattr(Adb, "init", classmethod(lambda cls: order.append("adb")))
+    monkeypatch.setattr(Toolbox, "init", classmethod(lambda cls: order.append("tb")))
+    monkeypatch.setattr(
+        initializer, "prepare_device", lambda console=None: order.append("prep")
+    )
+    monkeypatch.setattr(Toolbox, "config", None, raising=False)
+
+    initializer.initialize_core(SimpleNamespace(), prepare=True)
+    assert order == ["adb", "prep", "tb"]
+
+    order.clear()
+    initializer.initialize_core(SimpleNamespace())
+    assert order == ["adb", "tb"]
+
+
+# ---------------------------------------------------------------------------
+# Headless API: config passthrough, forensic mode, batch
+# ---------------------------------------------------------------------------
+
+
+def test_headless_initialize_keeps_supplied_config(monkeypatch):
+    from sandroid import services
+    from sandroid.api.headless import SandroidHeadlessAPI
+    from sandroid.config import ConfigLoader
+    from sandroid.core.toolbox import Toolbox
+
+    def _no_reload(*a, **k):
+        raise AssertionError("config must not be reloaded")
+
+    monkeypatch.setattr(ConfigLoader, "load", _no_reload)
+    monkeypatch.setattr(Adb, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(Toolbox, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(Toolbox, "init_files", classmethod(lambda cls: None))
+    monkeypatch.setattr(Toolbox, "config", None, raising=False)
+    setup = SimpleNamespace(
+        check_critical_setup=lambda: SimpleNamespace(success=True, errors=[])
+    )
+    monkeypatch.setattr(services, "get_setup_service", lambda: setup)
+    monkeypatch.setattr(
+        SandroidHeadlessAPI, "is_device_connected", lambda self: _async(True)
+    )
+
+    cfg = SimpleNamespace(emulator=SimpleNamespace(device_name="My_AVD"))
+    api = SandroidHeadlessAPI(config=cfg)
+    result = asyncio.run(api.initialize())
+    assert result.success, result.error
+    assert api.config is cfg
+    assert Toolbox.config is cfg
+
+
+async def _async(value):
+    return value
+
+
+def test_headless_forensic_forwards_capture_network(monkeypatch):
+    from sandroid.api import headless
+    from sandroid.api.interfaces import AnalysisMode
+
+    seen = {}
+
+    async def fake_forensic(**kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
+    api._initialized = True
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC, capture_network=True))
+    assert seen["capture_network"] is True
+
+
+def test_cli_headless_forensic_needs_no_package(monkeypatch):
+    import sandroid.api as api_pkg
+    from sandroid.cli_modes import headless as mode
+
+    calls = {}
+
+    class _FakeAPI:
+        def __init__(self, config=None, config_path=None):
+            calls["config"] = config
+
+        async def initialize(self):
+            return SimpleNamespace(success=True)
+
+        async def run_analysis(self, **kwargs):
+            calls["run"] = kwargs
+            return {}
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(api_pkg, "SandroidHeadlessAPI", _FakeAPI)
+    cfg = object()
+    mode.run_headless_analysis(
+        sandroid_config=cfg,
+        active_logger=None,
+        package=None,
+        batch_config=None,
+        mode="forensic",
+        runs=2,
+        network=True,
+        hash_files=False,
+        show_deleted=False,
+        output_file=None,
+    )
+    assert calls["config"] is cfg
+    assert calls["run"]["capture_network"] is True
+    assert calls["run"]["package"] is None
+
+    with pytest.raises(SystemExit):
+        mode.run_headless_analysis(
+            sandroid_config=cfg,
+            active_logger=None,
+            package=None,
+            batch_config=None,
+            mode="malware",
+            runs=2,
+            network=False,
+            hash_files=False,
+            show_deleted=False,
+            output_file=None,
+        )
+
+
+def test_batch_security_uses_apk_path_and_config(monkeypatch, tmp_path):
+    from sandroid.api import batch, headless
+    from sandroid.api.interfaces import AnalysisMode
+
+    seen = {}
+
+    class _FakeAPI:
+        def __init__(self, config_path=None, config=None):
+            seen["config"] = config
+
+        async def initialize(self):
+            return SimpleNamespace(success=True)
+
+        async def run_analysis(self, **kwargs):
+            seen["run"] = kwargs
+            return {}
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(headless, "SandroidHeadlessAPI", _FakeAPI)
+    cfg = object()
+    res = asyncio.run(
+        batch.batch_analyze(
+            ["/tmp/a.apk"],
+            mode=AnalysisMode.SECURITY,
+            output_dir=str(tmp_path),
+            config=cfg,
+        )
+    )
+    assert res["/tmp/a.apk"]["status"] == "success"
+    assert seen["config"] is cfg
+    assert seen["run"]["apk_path"] == "/tmp/a.apk"
+    assert "package" not in seen["run"]
+
+
+# ---------------------------------------------------------------------------
+# Import robustness / no sys.argv parsing
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def toolbox_args():
+    """Save/restore ``Toolbox.args`` (a metaclass property, so monkeypatch's
+    setattr/delattr round-trip can't be used on it)."""
+    from sandroid.core.toolbox import Toolbox
+
+    saved = Toolbox.args, Toolbox.scan_directories
+    yield Toolbox
+    Toolbox.args, Toolbox.scan_directories = saved
+
+
+def test_screenshot_module_imports_without_toolbox_args(toolbox_args):
+    Toolbox = toolbox_args
+    Toolbox.args = None
+    sys.modules.pop("sandroid.features.screenshot", None)
+    mod = importlib.import_module("sandroid.features.screenshot")
+    assert mod.Screenshot().interval == mod.Screenshot.DEFAULT_INTERVAL
+    assert mod.Screenshot(interval=7).interval == 7
+    Toolbox.args = SimpleNamespace(screenshot=3)
+    assert mod.Screenshot().interval == 3
+
+
+def test_toolbox_init_never_parses_sys_argv(monkeypatch, toolbox_args):
+    from sandroid import services
+
+    Toolbox = toolbox_args
+
+    seen = {}
+
+    class _InitService:
+        def parse_arguments(self, argv=None):
+            raise AssertionError("must not parse sys.argv")
+
+        def initialize_application(self, args=None, device_serial=None):
+            seen["args"] = args
+            return SimpleNamespace(
+                args=SimpleNamespace(),
+                logger=None,
+                frida_manager=None,
+                scan_directories=[],
+            )
+
+    monkeypatch.setattr(sys, "argv", ["my_script.py", "--my-own-flag"])
+    Toolbox.args = None
+    monkeypatch.setattr(services, "get_initialization_service", _InitService)
+    monkeypatch.setattr(Toolbox, "_get_active_device_serial", classmethod(lambda c: None))
+    Toolbox.init()
+    assert seen["args"] is None
+
+
+def test_previously_broken_lazy_imports_resolve():
+    from sandroid.core.console import SandroidConsole
+    from sandroid.core.ui_request_bus import show_message
+
+    assert SandroidConsole.get() is not None
+    assert callable(show_message)
+    for mod in (
+        "sandroid.commands.snapshot_commands",
+        "sandroid.commands.monitoring_commands",
+        "sandroid.services.app_selection_flows",
+        "sandroid.tui.launcher",
+    ):
+        src = importlib.util.find_spec(mod).loader.get_source(mod)
+        assert "sandroid.core.sandroid_console" not in src
+        assert "formatting import SandroidConsole" not in src
+        assert "config.loader import get_config" not in src
+
+
+def test_blocking_dialog_tui_route_never_blocks_ui_thread(monkeypatch):
+    from sandroid.core import ui_request_bus
+    from sandroid.core.notifications.blocking_dialog import BlockingDialogService
+
+    shown = []
+    done = threading.Event()
+
+    def fake_show(title, message, level="info"):
+        shown.append((title, level, threading.current_thread()))
+        done.set()
+
+    bus = SimpleNamespace(has_active_handler=lambda: True)
+    monkeypatch.setattr(ui_request_bus.UIRequestBus, "get", classmethod(lambda c: bus))
+    monkeypatch.setattr(ui_request_bus, "show_message", fake_show)
+
+    assert BlockingDialogService._try_tui_dialog("T", "M", None, "warning")
+    assert done.wait(2)
+    title, level, thread = shown[0]
+    assert (title, level) == ("T", "warning")
+    assert thread is not threading.main_thread()
+
+
+# ---------------------------------------------------------------------------
+# Device selection: stale offline entries are ignored quietly
+# ---------------------------------------------------------------------------
+
+
+def test_offline_device_is_not_probed(monkeypatch):
+    from sandroid.core.device_manager import DeviceManager
+
+    probed = []
+    monkeypatch.setattr(
+        DeviceManager, "_populate_device_info", lambda self, d: probed.append(d.serial)
+    )
+    monkeypatch.setattr(DeviceManager, "auto_select_device", lambda self: None)
+    out = (
+        "List of devices attached\n"
+        "emulator-5554 device product:sdk model:sdk transport_id:1\n"
+        "emulator-5556 offline transport_id:2\n"
+    )
+    monkeypatch.setattr(
+        Adb, "send_adb_command", classmethod(lambda cls, c, serial=None: (out, ""))
+    )
+    DeviceManager.reset()
+    try:
+        devices = DeviceManager.get().refresh_devices()
+    finally:
+        DeviceManager.reset()
+    assert {d.serial for d in devices} == {"emulator-5554", "emulator-5556"}
+    assert probed == ["emulator-5554"]
+
+
+# ---------------------------------------------------------------------------
+# TUI: chat panel is optional; CLI: --view is gone
+# ---------------------------------------------------------------------------
+
+
+def test_chat_panel_missing_dependency_yields_placeholder(monkeypatch):
+    from textual.widgets import Static
+
+    from sandroid.tui import widgets
+    from sandroid.tui.screens.main_screen import MainScreen
+
+    # A None entry in sys.modules makes the import raise ImportError.
+    monkeypatch.setitem(sys.modules, "sandroid.tui.widgets.chat_panel", None)
+    assert widgets.load_chat_panel_class() is None
+    assert widgets.CHAT_PANEL_IMPORT_ERROR
+    panel = MainScreen._make_chat_panel()
+    assert type(panel) is Static
+    assert panel.id == "chat-panel"
+
+
+def test_cli_has_no_view_option():
+    from click.testing import CliRunner
+
+    from sandroid.cli import main
+
+    result = CliRunner().invoke(main, ["--help"])
+    assert result.exit_code == 0
+    assert "--view" not in result.output
