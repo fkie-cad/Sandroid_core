@@ -116,6 +116,10 @@ _DIRTY_MARKERS = (
     # running?)"); route it to the server-restart remedy, not a bare re-spawn.
     "no pid",
     "is frida-server running",
+    # After a snapshot load the cached frida device object is dead
+    # ("device is gone"); a fresh device handle / server restart recovers.
+    "device is gone",
+    "device has been lost",
 )
 
 # Substrings that mark the *target process* dying (anti-Frida self-kill, hook

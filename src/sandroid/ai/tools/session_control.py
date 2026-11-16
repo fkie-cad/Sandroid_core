@@ -520,12 +520,11 @@ def set_device_proxy() -> dict[str, Any]:
     calling ``ProxyService.set_proxy`` bare. Never raises.
 
     This does **not** manage any ``adb reverse`` tunnel -- that is a separate
-    TUI-only convenience, out of scope for this tool. Also note:
-    ``proxy_port`` defaults to ``8080`` until :func:`start_mitmproxy` has
-    actually run once (config-file ports are not loaded until then) --
-    calling this before starting mitmproxy can point the device at a port
-    nothing is listening on. This mirrors the existing TUI panel's own
-    behavior, not a regression, but prefer starting mitmproxy first.
+    TUI-only convenience, out of scope for this tool. ``proxy_port`` is the
+    configured port while mitmproxy is stopped and the live port while it
+    runs; prefer starting mitmproxy first so something is listening. The
+    address is recorded on the mitmproxy service so Sandroid clears it again
+    on stop / exit (only if it still points at us).
 
     Returns:
         ``{"success": bool, "host_ip": str, "port": int,
@@ -556,6 +555,8 @@ def set_device_proxy() -> dict[str, Any]:
     # ProxyStatus.ERROR falls through to "none"/None, same as NOT_SET.
 
     success = get_proxy_service().set_proxy(host_ip, str(proxy_port))
+    if success:
+        get_mitmproxy_service().note_device_proxy(f"{host_ip}:{proxy_port}")
 
     return {
         "success": success,
@@ -591,8 +592,12 @@ def clear_device_proxy() -> dict[str, Any]:
         ``{"success": bool}``.
     """
     from sandroid.services import get_proxy_service
+    from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
-    return {"success": get_proxy_service().clear_proxy()}
+    success = get_proxy_service().clear_proxy()
+    if success:
+        get_mitmproxy_service().note_device_proxy(None)
+    return {"success": success}
 
 
 @sandroid_tool(

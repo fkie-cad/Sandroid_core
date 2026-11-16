@@ -138,6 +138,11 @@ class _FakeMitmproxyService:
     def stop(self):
         self.stop_called = True
 
+    noted_device_proxy = "unset"
+
+    def note_device_proxy(self, address):
+        self.noted_device_proxy = address
+
     def is_running(self):
         return self.state.running
 
@@ -575,6 +580,8 @@ def test_set_device_proxy_resolves_host_and_port_and_calls_set_proxy(monkeypatch
     result = session_control.set_device_proxy()
 
     assert captured == {"ip": "10.0.2.2", "port": "9999"}
+    # recorded so Sandroid clears it again on stop / exit
+    assert fake_mitm.noted_device_proxy == "10.0.2.2:9999"
     assert result == {
         "success": True,
         "host_ip": "10.0.2.2",
@@ -626,6 +633,7 @@ def test_set_device_proxy_never_raises_when_set_proxy_fails(monkeypatch):
     result = session_control.set_device_proxy()
 
     assert result["success"] is False
+    assert fake_mitm.noted_device_proxy == "unset"
 
 
 # =============================================================================
@@ -639,8 +647,11 @@ def test_clear_device_proxy_passes_through_true(monkeypatch):
         "get_proxy_service",
         lambda: SimpleNamespace(clear_proxy=lambda: True),
     )
+    fake_mitm = _FakeMitmproxyService()
+    monkeypatch.setattr(mitmproxy_service, "get_mitmproxy_service", lambda: fake_mitm)
 
     assert session_control.clear_device_proxy() == {"success": True}
+    assert fake_mitm.noted_device_proxy is None
 
 
 def test_clear_device_proxy_passes_through_false(monkeypatch):
