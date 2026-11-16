@@ -127,6 +127,18 @@ persistent run history, and an experimental AI Chat assistant.
 - mitmproxy: the device-reachability probe waits for the device to settle after the Zygote restart of CA injection and re-probes automatically; the CA status recognises an existing injection by fingerprint.
 - friTap no longer crashes the app on re-attach: attach mode refuses a process that already carried a friTap/Frida agent (restart the app or use spawn mode) and re-resolves a stale spotlight PID. When the target dies, friTap stops itself, finalizes its outputs and clears the PID. Each session writes its own `fritap_keylog_<timestamp>.log`, `fritap_output_<timestamp>.json` and `fritap_capture_<timestamp>_1.pcap` (the capture now stops with friTap). A previous session's detach no longer marks a new spawn as "target process gone", and the Spotlight shows the PID of a process re-spawned by friTap or dexray.
 - mitmproxy listens on `127.0.0.1` by default (`mitmproxy.listen_host`), the status shows the configured port while stopped, the device-reachability probe no longer reports false errors, and only a device proxy Sandroid set is cleared on stop/exit (`mitmproxy.auto_device_proxy` sets it on start).
+- **Evidence integrity**: SQLite diffs integrate `-wal`/`-journal` files and run `sqldiff` on temporary copies, so pulled databases under `raw/` are no longer rewritten (VACUUM, WAL checkpoint, `-shm`) before they are hashed.
+- Changed Files: one file whose diff fails (non-UTF-8 `.txt`, malformed ABX) is listed with a "could not analyse" note instead of emptying the whole section.
+- Diff failures (missing/failed `sqldiff`, unparsable XML/ABX, missing pull) are reported as such and never shown as "No changes" or dropped as "ITS ALL NOISE"; CLI/headless warn at startup when `sqldiff` is missing.
+- **Failed runs are no longer sealed as clean**: fatal and per-step errors (incl. failed result sections) are stored as `Run Errors` in the results JSON and `Run Metadata` (`run_status`), shown as a banner on the PDF's first page, and make `--trigdroid` / `--headless` / `--batch` exit with code 3.
+- Device file names that are not valid UTF-8 no longer abort the filesystem scan (they are kept byte-exact for pulls, JSON and `SHA256SUMS`); the scan timeout is 300 s (`SANDROID_SCAN_TIMEOUT`), and an empty or failed baseline scan aborts the run instead of producing empty results.
+- `--trigdroid` writes its results, PDF and manifest into the session folder instead of the base results directory.
+- `--batch`: every package gets its own result folder (raw pulls, JSON, PDF, manifest) instead of sharing one session folder; per-path diff caches are reset per run.
+- Renaming a run in Files → Diffs no longer rewrites the sealed `run.json` (the label is kept in `runs/labels.json` / `index.json`), so the bundle still verifies.
+- A result folder whose `SHA256SUMS` was deleted is verified against `manifest.json` and reported as failed instead of being treated as unsealed; the `--report-from` message reflects an addendum.
+- Artifact hashes include files that also changed in the dry run.
+- Files hidden as structural noise (ART profiles, package-manager bookkeeping) or dry-run noise are listed under `Other Data → Filtered Noise` with their reason, and the PDF has a compact Filtered Noise appendix.
+- Changed/New Files and SQLite update columns are reported in a deterministic order.
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.
