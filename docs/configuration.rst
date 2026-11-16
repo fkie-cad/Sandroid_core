@@ -237,6 +237,9 @@ Analysis (``[analysis]``)
    # Perform full filesystem checks for deleted files
    show_deleted_files = false
 
+   # Seconds to keep capturing after each replay (see below)
+   replay_settle_seconds = 8
+
    # List all APKs and their hashes
    list_apks = false
 
@@ -268,6 +271,19 @@ deleted:
   hidden, even if a pattern matches them (any path component equal to, or
   starting with, the package name counts);
 * set ``system_noise_filter = false`` to show everything.
+
+Replay settle time
+^^^^^^^^^^^^^^^^^^
+
+A replay ends with the last recorded input event, so its capture window is
+as long as the recording. On a slow link the app may still be loading when
+the replay ends: a 16 s recording that opened an article 8 s before the end
+produced an empty run. ``replay_settle_seconds`` (default 8) keeps every
+replay's window open that much longer -- network, process and socket
+captures keep running and files written in that time count as changed. The
+dry run waits the same extra time, so noise subtraction still compares
+windows of equal length. Each analysis gets ``(runs + 1) x`` that much
+longer; set it to 0 to end the window with the replay.
 
 Network noise (dry run)
 ^^^^^^^^^^^^^^^^^^^^^^^

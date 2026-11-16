@@ -616,3 +616,76 @@ def test_result_preserves_native_changed_files_shape():
     result = engine.run()
 
     assert result.changed_files == [{"/data/a.db": ["- old", "+ new"]}, "/data/plain"]
+
+
+# ===========================================================================
+# Phase-4 M3: post-replay settle time, applied to the dry run as well
+# ===========================================================================
+
+
+def _settle_run(monkeypatch, settle: int):
+    """N=2 + dry run with a 16 s replay; return (settle waits, dry-run sleeps)."""
+    import types
+
+    from sandroid.analysis import engine as engine_module
+    from sandroid.features import player as player_module
+
+    action_window_service = ActionWindowService(adb=MagicMock())
+
+    class _FakePlayer(player_module.Player):
+        def perform(self, recording_path=None):
+            action_window_service.set_duration(16)
+
+    waits: list[float] = []
+    monkeypatch.setattr(
+        player_module,
+        "_cancel_event",
+        types.SimpleNamespace(wait=lambda s: waits.append(s) or False),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(engine_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        "sandroid.config.get_config",
+        lambda: types.SimpleNamespace(
+            analysis=types.SimpleNamespace(replay_settle_seconds=settle)
+        ),
+    )
+    config = RunConfig(
+        number_of_runs=2, noise_filter=True, action=_FakePlayer(recording_path="x")
+    )
+    result = AnalysisEngine(
+        config,
+        forensic_service=MagicMock(),
+        action_window_service=action_window_service,
+        toolbox=FakeToolbox(),
+        gatherer_classes=_classes(),
+    ).run()
+    return waits, sleeps, result
+
+
+def test_replay_settle_extends_every_replay_and_the_dry_run(monkeypatch):
+    waits, sleeps, result = _settle_run(monkeypatch, settle=5)
+
+    assert waits == [5, 5]  # after each of the two replays
+    assert sleeps == [21]  # dry run: replay (16 s) + settle (5 s)
+    assert result.action_duration == 21
+
+
+def test_zero_settle_keeps_the_replay_window(monkeypatch):
+    waits, sleeps, result = _settle_run(monkeypatch, settle=0)
+
+    assert waits == []
+    assert sleeps == [16]
+    assert result.action_duration == 16
+
+
+def test_settle_seconds_default_is_in_schema_and_default_toml():
+    import tomllib
+    from pathlib import Path
+
+    from sandroid.config.schema import AnalysisConfig
+
+    assert AnalysisConfig().replay_settle_seconds == 8
+    default = Path(__file__).resolve().parents[2] / "src/sandroid/config/default.toml"
+    data = tomllib.loads(default.read_text())
+    assert data["analysis"]["replay_settle_seconds"] == 8

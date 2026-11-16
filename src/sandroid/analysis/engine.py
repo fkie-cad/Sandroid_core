@@ -206,7 +206,9 @@ class ActionStep(Step):
 
     def run(self, ctx: EngineContext) -> None:
         if self.action is not None:
+            first_window = not ctx.action_window_service.get_duration()
             self.action.perform()
+            self._settle(ctx, first_window)
             return
         # Action-less forensic run: open a fixed capture window so
         # processes/sockets and the changed-files scan have a duration to work
@@ -216,6 +218,49 @@ class ActionStep(Step):
         ctx.action_window_service.set_duration(window)
         if window > 0:
             time.sleep(window)
+
+    def _settle(self, ctx: EngineContext, first_window: bool) -> None:
+        """Keep the window open ``replay_settle_seconds`` after a replay.
+
+        A replay ends with its last input event; on a slow link the app was
+        still loading then and the run came out empty. The captures keep
+        running while we wait, and the first replay's window (which every
+        later run and the dry run reuse) grows by the settle time, so the dry
+        run waits exactly as long and noise subtraction stays fair.
+        """
+        from sandroid.features import player as player_module
+
+        if not isinstance(self.action, player_module.Player):
+            return
+        settle = _replay_settle_seconds(ctx.config)
+        if settle <= 0:
+            return
+        logger.info(
+            "Replay done, letting the app settle for %ds "
+            "(analysis.replay_settle_seconds)",
+            settle,
+        )
+        if player_module._cancel_event.wait(settle):
+            player_module._raise_cancelled()
+        if first_window:
+            duration = int(ctx.action_window_service.get_duration() or 0)
+            ctx.action_window_service.set_duration(duration + settle, force=True)
+
+
+def _replay_settle_seconds(config: Any) -> int:
+    """``replay_settle_seconds`` of the run config, else of ``[analysis]``."""
+    value = getattr(config, "replay_settle_seconds", None)
+    if value is None:
+        try:
+            from sandroid.config import get_config
+
+            value = get_config().analysis.replay_settle_seconds
+        except Exception:
+            value = 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 class StartCaptureStep(Step):

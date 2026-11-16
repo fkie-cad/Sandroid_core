@@ -242,6 +242,16 @@ class AnalysisConfig(BaseModel):
     show_deleted_files: bool = Field(
         default=False, description="Perform full filesystem checks for deleted files"
     )
+    replay_settle_seconds: int = Field(
+        default=8,
+        ge=0,
+        le=600,
+        description=(
+            "Seconds to keep capturing after each replay so late network "
+            "responses and writes land in the run (the dry run waits the "
+            "same extra time); 0 = window ends with the replay"
+        ),
+    )
     list_apks: bool = Field(default=False, description="List all APKs and their hashes")
     degrade_network: bool = Field(
         default=False, description="Simulate UMTS/3G connection speeds"
