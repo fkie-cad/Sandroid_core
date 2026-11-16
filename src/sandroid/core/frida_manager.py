@@ -343,6 +343,73 @@ def stop_frida_job_bounded(
     return finished
 
 
+def _crash_summary(crash) -> str:
+    """One line out of a frida ``Crash`` (its report is ~500 frames)."""
+    if not crash:
+        return ""
+    summary = getattr(crash, "summary", None)
+    if summary:
+        return str(summary).splitlines()[0][:200]
+    return str(crash).splitlines()[0][:200] if str(crash) else ""
+
+
+def install_stale_detach_guard(job_manager) -> bool:
+    """Make the JobManager ignore ``detached`` signals of its *previous* sessions.
+
+    AFM connects every session it attaches to one bound handler that clears
+    ``process_session`` and fails *all* running jobs. A session whose detach
+    was bounded away by :func:`stop_frida_job_bounded` (or whose process gets
+    killed by the next spawn) fires that handler late -- after the next job
+    has started on a new session -- so friTap showed "target process gone" on
+    a healthy app (spawn cycles 2-5, phase 3). With the guard, a detach only
+    touches the JobManager state if it is the current session, and only fails
+    jobs that ran on the detached session. The crash report is reduced to one
+    line (the full backtrace is logged at DEBUG).
+
+    Idempotent; returns False if the JobManager has no hook to wrap.
+    """
+    if getattr(job_manager, "_sandroid_detach_guard", False):
+        return True
+    original = getattr(type(job_manager), "_on_session_detached", None)
+    if original is None or not hasattr(job_manager, "device"):
+        return False
+
+    def _on_detached(session, reason, crash) -> None:
+        summary = _crash_summary(crash)
+        if crash:
+            logger.debug(f"Frida crash report ({reason}): {crash}")
+        jobs = getattr(job_manager, "jobs", None)
+        jobs = list(jobs.values()) if isinstance(jobs, dict) else []
+        if getattr(job_manager, "process_session", None) is session:
+            original(job_manager, reason, None)
+            if summary:
+                logger.warning(f"Target crashed: {summary}")
+            return
+        logger.debug(f"Ignoring detach ({reason}) of a previous Frida session")
+        for job in jobs:
+            if (
+                getattr(job, "process_session", None) is session
+                and getattr(job, "state", None) == "running"
+            ):
+                try:
+                    job._set_state("error", f"session detached: {reason}")
+                except Exception:
+                    job.state = "error"
+
+    def _attach_with_detach_handler(target):
+        session = job_manager.device.attach(target)
+        session.on(
+            "detached",
+            lambda reason, crash: _on_detached(session, reason, crash),
+        )
+        job_manager.process_session = session
+        return session
+
+    job_manager._attach_with_detach_handler = _attach_with_detach_handler
+    job_manager._sandroid_detach_guard = True
+    return True
+
+
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/
 
 
