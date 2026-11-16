@@ -391,6 +391,12 @@ class SpotlightPanel(Widget):
             self.query_one("#act-primary", Static).update(self._primary_label())
         except Exception:
             pass
+        # The header's App row reads the same (cached) PID: keep both in step
+        # (it said "not running" while this panel showed the live PID).
+        try:
+            self.screen._safe_refresh_status_bar()
+        except Exception:
+            pass
 
     # -- live running-state poll (slow fallback) --------------------------
 
