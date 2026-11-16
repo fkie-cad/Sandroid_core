@@ -207,6 +207,14 @@ class MitmproxyPanel(Widget):
                 get_focus_manager().disable_focus()
         except Exception:
             pass
+        # Best-effort: never leave the device pointed at a mitmproxy that dies
+        # with Sandroid. Only the exact address we set is cleared (a proxy
+        # changed since is left alone). The service's atexit hook is the
+        # backstop if the TUI exits without unmounting.
+        try:
+            self._service.release_device_proxy()
+        except Exception:
+            pass
         # Best-effort: drop our adb-reverse tunnel so it doesn't leak.
         self._remove_our_reverse()
 
@@ -230,6 +238,7 @@ class MitmproxyPanel(Widget):
             log = self.query_one("#mitm-log", RichLog)
             if line.startswith("[FLOW]|"):
                 log.write(self._format_flow(line))
+                self._note_direct_flow(line)
             elif line.startswith("[TLS_FAIL]|"):
                 log.write(self._format_tls_fail(line))
                 if (
@@ -249,6 +258,27 @@ class MitmproxyPanel(Widget):
                 # mitmweb's own chatter (only visible when verbose mode is on)
                 log.write(f"[#5b6479]{line}[/]")
             self._refresh_header()
+        except Exception:
+            pass
+
+    def _note_direct_flow(self, line: str) -> None:
+        """Retract an "unreachable" verdict once Device-Proxy flows arrive.
+
+        A flow on the regular listener (no app-proxy lane) can only have come
+        through the device proxy, so the device evidently reaches us.
+        """
+        if self._reach_state != "unreachable":
+            return
+        from sandroid.services.mitmproxy_service import _is_direct_flow_line
+
+        if not _is_direct_flow_line(line):
+            return
+        self._reach_state = "ok"
+        try:
+            self.query_one("#mitm-log", RichLog).write(
+                "[#7dd3fc][INFO] [OK] device traffic is arriving — "
+                "device→mitmproxy reachable after all[/]"
+            )
         except Exception:
             pass
 
@@ -397,9 +427,10 @@ class MitmproxyPanel(Widget):
         st = self._service.state
         running = self._service.is_running()
         head = (
-            f"[#4ade80]● running[/]   :{st.proxy_port} [#5b6479]→[/] :{st.web_port}"
+            f"[#4ade80]● running[/]   {st.listen_host}:{st.proxy_port} "
+            f"[#5b6479]→[/] :{st.web_port}"
             if running
-            else "[#fb7185]○ stopped[/]"
+            else f"[#fb7185]○ stopped[/] [#5b6479](port {st.proxy_port})[/]"
         )
 
         # Always-visible, ground-truth setup checklist. The proxy-state token
@@ -482,7 +513,9 @@ class MitmproxyPanel(Widget):
         left alone). Stopping first clears OUR device proxy so we never leave it
         pointing at a dead mitmweb; App Proxies are independent and left alone.
         Routing the device (Ctrl+D) and installing the CA (Ctrl+N) are separate,
-        deliberate keystrokes — start never triggers them as a side effect.
+        deliberate keystrokes — start never triggers them as a side effect,
+        unless the user opted in with ``mitmproxy.auto_device_proxy`` (then
+        start also arms the Device Proxy, exactly as Ctrl+D would).
         """
         if self._service.is_running():
             self._disarm()
@@ -492,9 +525,22 @@ class MitmproxyPanel(Widget):
             self._append_line("[INFO] running")
             # Let the upcoming ground-truth probe report CA status once.
             self._announce_ca_on_start = True
+            if self._auto_device_proxy_enabled() and self._service.is_running():
+                # Opt-in (mitmproxy.auto_device_proxy): route the device too.
+                self._arm_device()
         # Reconcile the checklist with real device state off the UI thread.
         self._kick_state_refresh()
         self._refresh_header()
+
+    @staticmethod
+    def _auto_device_proxy_enabled() -> bool:
+        """``mitmproxy.auto_device_proxy`` (default False). Never raises."""
+        try:
+            from sandroid.config import get_config
+
+            return bool(getattr(get_config().mitmproxy, "auto_device_proxy", False))
+        except Exception:
+            return False
 
     # ── Device Proxy ──────────────────────────────────────────────────
     #
@@ -740,9 +786,14 @@ class MitmproxyPanel(Widget):
         """
         if getattr(result, "reachable", False):
             self._reach_state = "ok"
-            self._append_line(
-                "[INFO] [OK] device→mitmproxy reachable (flow round-trip confirmed)"
-            )
+            detail = getattr(result, "detail", "") or "device→mitmproxy reachable"
+            self._append_line(f"[INFO] [OK] {detail}")
+        elif getattr(result, "inconclusive", False):
+            # Not a verdict on the device (mitmweb not bound yet / gone, or no
+            # toybox nc): never claim "CANNOT reach" here.
+            self._reach_state = "unknown"
+            detail = getattr(result, "detail", "") or "reachability unknown"
+            self._append_line(f"[INFO] [~] reachability not checked: {detail}")
         else:
             self._reach_state = "unreachable"
             self._append_line(
@@ -875,6 +926,7 @@ class MitmproxyPanel(Widget):
             status, cfg = ProxyManager().get_proxy_settings()
             if status == ProxyStatus.SET and cfg and cfg.address == addr:
                 self._proxy_set_by_us = True
+                self._service.note_device_proxy(addr)
                 self._proxy_state = "ours"
                 self._proxy_addr = addr
                 self._set_glance_device_proxy(addr)
@@ -883,6 +935,7 @@ class MitmproxyPanel(Widget):
 
             if svc.set_proxy(host_ip, port):
                 self._proxy_set_by_us = True
+                self._service.note_device_proxy(addr)
                 self._proxy_state = "ours"
                 self._proxy_addr = addr
                 self._set_glance_device_proxy(addr)
@@ -895,7 +948,7 @@ class MitmproxyPanel(Widget):
 
     def _clear_device_proxy(self) -> None:
         """Remove device proxy if we set it (and our adb-reverse tunnel)."""
-        if not self._proxy_set_by_us:
+        if not (self._proxy_set_by_us or self._service.owned_device_proxy):
             return
         try:
             from sandroid.services import get_proxy_service
@@ -904,6 +957,7 @@ class MitmproxyPanel(Widget):
             if svc.clear_proxy():
                 self._append_line("[INFO] Device proxy cleared")
             self._proxy_set_by_us = False
+            self._service.note_device_proxy(None)
             self._proxy_state = "none"
             self._proxy_addr = ""
             self._reach_state = "unknown"

@@ -690,6 +690,9 @@ class ReachabilityResult:
     flows_incremented: bool
     detail: str
     hint: str = ""
+    #: True when the probe could not reach a verdict (mitmweb not listening
+    #: yet, ``toybox nc`` missing on the device). Never reported as an error.
+    inconclusive: bool = False
 
 
 @dataclass
@@ -700,6 +703,8 @@ class MitmproxyState:
     proxy_port: int = 8080
     web_port: int = 8081
     web_host: str = "127.0.0.1"
+    #: Bind address of the proxy + SOCKS listeners (``mitmproxy.listen_host``).
+    listen_host: str = "127.0.0.1"
     pid: int | None = None
     flows_seen: int = 0
     tls_failures: int = 0
@@ -712,6 +717,51 @@ class MitmproxyState:
     focus_lanes: int = 5
     capture_scope: str = "none"
     focus_apps: list[str] = field(default_factory=list)
+    #: ``time.monotonic()`` of the last flow that arrived on the regular proxy
+    #: listener (no app-proxy lane), i.e. through the Device Proxy. 0 = none.
+    last_direct_flow_at: float = 0.0
+
+
+def _is_direct_flow_line(line: str) -> bool:
+    """Whether a ``[FLOW]|`` line came in on the regular proxy listener.
+
+    App-proxy (SOCKS lane) flows carry the app package in the last column;
+    regular-listener flows (the Device Proxy) leave it empty.
+    """
+    parts = line.split("|")
+    return len(parts) < 8 or not parts[7].strip()
+
+
+def _pid_listening(pid: int, port: int, host: str = "127.0.0.1") -> bool:
+    """Whether process ``pid`` (or a child) has a TCP listener on ``port``.
+
+    Checks the process itself rather than just connecting to the port, so a
+    *different* process holding that port (e.g. another mitmproxy) is never
+    mistaken for ours. Falls back to a plain connect when psutil cannot
+    inspect the process.
+    """
+    try:
+        import psutil
+
+        proc = psutil.Process(pid)
+        for p in [proc, *proc.children(recursive=True)]:
+            for conn in p.net_connections(kind="tcp"):
+                if (
+                    conn.status == psutil.CONN_LISTEN
+                    and conn.laddr
+                    and conn.laddr.port == port
+                ):
+                    return True
+        return False
+    except Exception:
+        import socket
+
+        target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+        try:
+            with socket.create_connection((target, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
 
 def _find_mitmweb() -> str | None:
@@ -764,11 +814,38 @@ class MitmproxyService:
         # toggles the same manager instance. These methods are thin forwards.
         # We only auto-tear-down SSL on mitmweb stop when *we* started it.
         self._ssl_via_mitm: bool = False
+        # The device http_proxy address ("ip:port") Sandroid pointed at this
+        # mitmproxy, so it can be cleared on stop and on exit -- also when the
+        # TUI did not get to unmount cleanly. None = we set nothing.
+        self._owned_device_proxy: str | None = None
         atexit.register(self._atexit_cleanup)
 
     @property
     def state(self) -> MitmproxyState:
+        # While stopped, the ports shown (glance band, panel, AI tools) are the
+        # configured ones, so a config edit shows up without a start. While
+        # running they are the ports the live process was started with.
+        if self._proc is None:
+            self._sync_ports_from_config()
         return self._state
+
+    def _sync_ports_from_config(self) -> None:
+        """Copy the configured ports / bind hosts into the (stopped) state.
+
+        Best-effort and cheap (``get_config`` is cached); never raises.
+        """
+        if get_config is None:
+            return
+        try:
+            cfg = get_config().mitmproxy
+            self._state.proxy_port = int(cfg.proxy_port)
+            self._state.web_port = int(cfg.web_port)
+            self._state.web_host = str(cfg.web_host)
+            self._state.listen_host = str(
+                getattr(cfg, "listen_host", "127.0.0.1") or "127.0.0.1"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("mitmproxy port sync failed: %s", exc)
 
     @property
     def user_addons_dir(self) -> Path:
@@ -803,6 +880,10 @@ class MitmproxyService:
         self._state.socks_base = cfg.socks_base
         self._state.focus_lanes = cfg.focus_lanes
         self._state.capture_scope = cfg.capture_scope
+        # Ports too: before this, state kept the dataclass default 8080 until
+        # the first start, so the glance showed ":8080 (stopped)" while the
+        # configured port was e.g. 8090.
+        self._sync_ports_from_config()
 
     @staticmethod
     def _focus_sidecar_path() -> str:
@@ -996,10 +1077,11 @@ class MitmproxyService:
             ProxyStatus,
             classify_device_proxy,
             get_focus_manager,
+            resolve_proxy_host_ip,
         )
 
         try:
-            host_ip = ProxyManager.get_host_ip()
+            host_ip = resolve_proxy_host_ip()
         except Exception:
             host_ip = ""
         proxy_port = self.state.proxy_port
@@ -1030,8 +1112,16 @@ class MitmproxyService:
             "apps": apps,
         }
 
+    #: A Device-Proxy flow seen this recently counts as proof of reachability.
+    _RECENT_DIRECT_FLOW_S = 30.0
+
     def probe_device_reachability(
-        self, host: str, port: int, *, timeout: int = 4
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: int = 4,
+        listen_timeout: float = 8.0,
     ) -> ReachabilityResult:
         r"""Prove the device can actually reach our mitmproxy at ``host:port``.
 
@@ -1041,15 +1131,28 @@ class MitmproxyService:
         header reads green. This fires a real device→proxy round-trip and
         cross-checks ``flows_seen`` for end-to-end proof.
 
-        Two independent signals (so an ``nc`` quirk alone can't flip the
-        verdict):
+        Our own end is checked first: Ctrl+D / Ctrl+R start mitmweb and probe
+        straight away, before it has bound its port, which used to produce a
+        false "device CANNOT reach mitmproxy" although flows arrived seconds
+        later. Not listening yet (or not running) is ``inconclusive``.
+
+        Independent signals, any one of which proves reachability (so an
+        ``nc`` quirk alone can't flip the verdict):
 
         1. Device bytes — a forced-HTTP request through the proxy to
            ``http://mitm.it/`` (mitmproxy's onboarding addon answers it itself,
            offline, even with no upstream). Reachable iff stdout is non-empty
            AND contains ``"HTTP/"`` (NOT the ``nc`` exit code — unreliable).
+           Retried once after a short pause.
         2. Host counter — ``flows_seen`` rising during the probe is independent
            proof the proxy received and counted the flow.
+        3. Recent Device-Proxy traffic — a flow on the regular listener within
+           the last ``_RECENT_DIRECT_FLOW_S`` seconds: if flows arrive, the
+           device evidently reaches us.
+
+        On an emulator ``10.0.2.2`` is the host's loopback, so this works with
+        the default ``listen_host = 127.0.0.1``; so does ``127.0.0.1`` on the
+        device via ``adb reverse``.
 
         QUOTING: ``Adb.send_adb_command`` runs the whole string through the host
         shell (``shell=True``), so the device-side pipe + ``printf`` ``\\r\\n``
@@ -1059,22 +1162,36 @@ class MitmproxyService:
         arrives, so we hold stdin open with ``{ ...; sleep N; }`` — do NOT
         simplify it back to a bare pipe or stdout comes back empty.
 
-        WARNING: blocking (one device round-trip + a short settle poll). Call
-        this OFF the UI thread.
+        WARNING: blocking (listen wait + device round-trips + a short settle
+        poll). Call this OFF the UI thread.
 
         Args:
             host: Proxy host the device is pointed at (the resolved host IP, or
                 ``127.0.0.1`` when routed via adb reverse).
             port: Proxy port.
             timeout: ``nc`` connect/read timeout in seconds.
+            listen_timeout: How long to wait for mitmweb to bind its port.
 
         Returns:
             A :class:`ReachabilityResult`.
         """
         from sandroid.core.adb import Adb
 
-        before = self._state.flows_seen
         addr = f"{host}:{port}"
+        if not self.wait_listening(timeout=listen_timeout):
+            detail = (
+                f"mitmproxy is not listening on :{port} yet"
+                if self.is_running()
+                else "mitmproxy is not running"
+            )
+            return ReachabilityResult(
+                reachable=False,
+                flows_incremented=False,
+                detail=detail,
+                inconclusive=True,
+            )
+
+        before = self._state.flows_seen
         request = (
             "GET http://mitm.it/ HTTP/1.1\\r\\n"
             "Host: mitm.it\\r\\n"
@@ -1088,39 +1205,104 @@ class MitmproxyService:
             f"{{ printf '{request}'; sleep 2; }} | "
             f"toybox nc -w {timeout} {host} {port}"
         )
-        try:
-            out, _ = Adb.send_adb_command(f'shell "{inner}"')
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("reachability probe failed: %s", exc)
-            out = ""
-        got_http = bool((out or "").strip()) and "HTTP/" in (out or "")
+        got_http = False
+        tool_missing = False
+        for attempt in range(2):
+            try:
+                out, err = Adb.send_adb_command(f'shell "{inner}"')
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("reachability probe failed: %s", exc)
+                out, err = "", ""
+            out = out or ""
+            if out.strip() and "HTTP/" in out:
+                got_http = True
+                break
+            blob = (err or "").lower()
+            # toybox's wording for a missing applet is "Unknown command nc";
+            # adb's for a vanished device is "device ... not found".
+            if not out.strip() and any(
+                k in blob for k in ("not found", "no such", "usage", "unknown command")
+            ):
+                tool_missing = True
+                break
+            if self._state.flows_seen > before or attempt:
+                break
+            time.sleep(1.5)
 
         # Short settle poll (~0.3s x5, mirroring _wait_listening cadence) so a
         # just-counted flow has a moment to land before we re-read.
         after = self._state.flows_seen
         for _ in range(5):
-            if self._state.flows_seen > before:
+            if after > before:
                 break
             time.sleep(0.3)
             after = self._state.flows_seen
         flows_incremented = after > before
 
-        reachable = got_http or flows_incremented
+        last_direct = self._state.last_direct_flow_at
+        recent_direct = bool(last_direct) and (
+            time.monotonic() - last_direct <= self._RECENT_DIRECT_FLOW_S
+        )
+
+        reachable = got_http or flows_incremented or recent_direct
+        hint = ""
+        inconclusive = False
         if reachable:
-            detail = f"device→mitmproxy reachable ({addr})"
-            hint = ""
+            how = (
+                "flow round-trip confirmed"
+                if (got_http or flows_incremented)
+                else "device traffic is arriving"
+            )
+            detail = f"device→mitmproxy reachable ({addr}, {how})"
+        elif tool_missing:
+            inconclusive = True
+            detail = f"could not probe {addr} from the device (no toybox nc?)"
         else:
             detail = f"device CANNOT reach mitmproxy at {addr}"
             hint = (
                 f"device can't reach the proxy at {addr} — check the host IP, "
                 "or route via adb reverse in Proxy Settings (y)"
             )
+            listen_host = self._state.listen_host
+            if listen_host.startswith("127.") and host not in (
+                "10.0.2.2",
+                "127.0.0.1",
+            ):
+                hint = (
+                    f"mitmproxy listens on {listen_host} only, which {host} "
+                    "does not reach — route via adb reverse in Proxy Settings "
+                    '(y), or set mitmproxy.listen_host = "0.0.0.0" for a '
+                    "device on Wi-Fi (exposes the proxy to the LAN)"
+                )
         return ReachabilityResult(
             reachable=reachable,
             flows_incremented=flows_incremented,
             detail=detail,
             hint=hint,
+            inconclusive=inconclusive,
         )
+
+    def wait_listening(self, timeout: float = 8.0) -> bool:
+        """Block until our mitmweb accepts connections on its proxy port.
+
+        ``start()`` returns as soon as the process is spawned; mitmweb needs
+        a moment (Python start-up, addons, one listener per lane) before it
+        binds. Returns False if the process is gone or the deadline passes.
+        Blocking: call it off the UI thread.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                proc = self._proc
+            if proc is None or proc.poll() is not None:
+                return False
+            if _pid_listening(
+                proc.pid, self._state.proxy_port, self._state.listen_host
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
 
     def add_listener(self, callback: Callable[[str], None]) -> None:
         self._listeners.append(callback)
@@ -1139,7 +1321,21 @@ class MitmproxyService:
         proxy_port: int = 8080,
         web_port: int = 8081,
         web_host: str = "127.0.0.1",
+        listen_host: str | None = None,
     ) -> bool:
+        """Spawn mitmweb.
+
+        Args:
+            proxy_port: Proxy listen port (the default means "use config").
+            web_port: Web UI port (the default means "use config").
+            web_host: Web UI bind host (the default means "use config").
+            listen_host: Bind address for the proxy and SOCKS listeners;
+                ``None`` reads ``mitmproxy.listen_host`` (default
+                ``127.0.0.1``, i.e. not reachable from the LAN).
+
+        Returns:
+            True when the process was spawned.
+        """
         with self._lock:
             if self.is_running():
                 self._state.last_error = "already running"
@@ -1162,6 +1358,15 @@ class MitmproxyService:
                     web_host = cfg.web_host
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning("Failed to read mitmproxy ports: %s", exc)
+            if not listen_host:
+                listen_host = "127.0.0.1"
+                if get_config is not None:
+                    try:
+                        listen_host = (
+                            get_config().mitmproxy.listen_host or "127.0.0.1"
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning("Failed to read listen_host: %s", exc)
 
             binary = _find_mitmweb()
             if binary is None:
@@ -1173,8 +1378,13 @@ class MitmproxyService:
 
             self._write_addon()
             verbosity = "info" if self._state.verbose else "warn"
+            # --listen-host applies to every --mode below (the regular proxy
+            # and each SOCKS5 lane). mitmproxy's own default is all
+            # interfaces, which would expose intercepted traffic to the LAN.
             cmd = [
                 binary,
+                "--listen-host",
+                listen_host,
                 "--listen-port",
                 str(proxy_port),
                 "--web-port",
@@ -1240,9 +1450,11 @@ class MitmproxyService:
             self._state.proxy_port = proxy_port
             self._state.web_port = web_port
             self._state.web_host = web_host
+            self._state.listen_host = listen_host
             self._state.pid = self._proc.pid
             self._state.last_error = None
             self._state.flows_seen = 0
+            self._state.last_direct_flow_at = 0.0
             self._state.tls_failures = 0
             self._state.flow_errors = 0
 
@@ -1255,11 +1467,26 @@ class MitmproxyService:
 
             self._emit(
                 f"[INFO] mitmweb started "
-                f"(proxy :{proxy_port}, web http://{web_host}:{web_port}/)"
+                f"(proxy {listen_host}:{proxy_port}, "
+                f"web http://{web_host}:{web_port}/)"
             )
             return True
 
-    def stop(self, timeout: float = 3.0) -> None:
+    def stop(
+        self, timeout: float = 3.0, *, release_device_proxy: bool = True
+    ) -> None:
+        """Stop mitmweb (idempotent).
+
+        Args:
+            timeout: Seconds to wait for a graceful exit before killing it.
+            release_device_proxy: Also clear the device proxy Sandroid pointed
+                at this mitmproxy (see :meth:`release_device_proxy`), so the
+                device is never left routed to a dead proxy. ``restart()``
+                passes False because the caller re-applies it.
+        """
+        if release_device_proxy and self._proc is not None:
+            # Outside the lock: this is ADB I/O.
+            self.release_device_proxy()
         with self._lock:
             proc = self._proc
             if proc is None:
@@ -1302,7 +1529,7 @@ class MitmproxyService:
             self._emit("[INFO] mitmweb stopped")
 
     def restart(self, **kwargs) -> bool:
-        self.stop()
+        self.stop(release_device_proxy=False)
         return self.start(**kwargs)
 
     def set_verbose(self, verbose: bool) -> None:
@@ -1421,6 +1648,8 @@ class MitmproxyService:
                 # Structured tags emitted by our embedded addon
                 if line.startswith("[FLOW]|"):
                     self._state.flows_seen += 1
+                    if _is_direct_flow_line(line):
+                        self._state.last_direct_flow_at = time.monotonic()
                 elif line.startswith("[TLS_FAIL]|"):
                     self._state.tls_failures += 1
                 elif line.startswith("[FLOW_ERR]|"):
@@ -1442,7 +1671,58 @@ class MitmproxyService:
             except Exception:
                 logger.exception("mitmweb listener failed")
 
+    # ── Device proxy ownership ────────────────────────────────────────
+
+    @property
+    def owned_device_proxy(self) -> str | None:
+        """The device proxy address Sandroid set to this mitmproxy, if any."""
+        return self._owned_device_proxy
+
+    def note_device_proxy(self, address: str | None) -> None:
+        """Record (``"ip:port"``) or forget (``None``) the device proxy we set."""
+        self._owned_device_proxy = address or None
+
+    def release_device_proxy(self) -> bool:
+        """Clear the device http_proxy if it still points where we set it.
+
+        A proxy someone else changed in the meantime is left alone. Also drops
+        the ``adb reverse`` tunnel when the proxy we set was a loopback route.
+        Blocking (ADB); best-effort, never raises.
+
+        Returns:
+            True when a proxy was cleared.
+        """
+        addr = self._owned_device_proxy
+        if not addr:
+            return False
+        self._owned_device_proxy = None
+        cleared = False
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.proxy_manager import (
+                ProxyManager,
+                ProxyStatus,
+                _reverse_registered,
+            )
+
+            pm = ProxyManager()
+            status, cfg = pm.get_proxy_settings()
+            if status == ProxyStatus.SET and cfg is not None and cfg.address == addr:
+                cleared, _ = pm.unset_proxy()
+            if addr.startswith("127.0.0.1:"):
+                port = int(addr.rsplit(":", 1)[1])
+                if _reverse_registered(port):
+                    Adb.reverse_remove(f"tcp:{port}")
+        except Exception as exc:
+            logger.debug("Releasing device proxy %s failed: %s", addr, exc)
+        return cleared
+
     def _atexit_cleanup(self) -> None:
+        # Never leave the device pointed at a mitmproxy that is about to die.
+        try:
+            self.release_device_proxy()
+        except Exception:
+            pass
         try:
             if self.is_running():
                 self.stop(timeout=1.0)

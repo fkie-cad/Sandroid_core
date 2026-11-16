@@ -85,7 +85,10 @@ Two sub-tabs:
 
 **Mitmproxy** -- embedded ``mitmweb`` (requires ``pip install mitmproxy``):
 
-- ``Enter`` start/stop mitmweb (proxy ``:8080``, web UI ``http://127.0.0.1:8081/``)
+- ``Enter`` start/stop mitmweb (proxy ``127.0.0.1:8080``, web UI
+  ``http://127.0.0.1:8081/``). Start does not touch the device unless
+  ``mitmproxy.auto_device_proxy = true``; stop (and quitting Sandroid) clears
+  the Device Proxy Sandroid set
 - ``Ctrl+D`` toggle the Device Proxy (global ``http_proxy``)
 - ``Ctrl+N`` install the mitmproxy CA into the system trust store (APEX
   bind-mount on Android 14+, Zygote namespace on Android 10-13)
