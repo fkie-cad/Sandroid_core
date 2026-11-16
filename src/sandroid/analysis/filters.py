@@ -49,6 +49,9 @@ def intersect_file_lists(file_lists: list[list[str]]) -> list[str]:
 STRUCTURAL_NOISE_PREFIXES: tuple[str, ...] = (
     "/data/misc/profiles/",
     "/data/misc/profman/",
+    # Battery-stats history chunks, rolled over on wall-clock changes (each
+    # snapshot revert + clock resync starts a new, differently named one).
+    "/data/system/battery-history/",
 )
 
 #: Exact files the package manager / ART rewrite on their own schedule.
@@ -56,6 +59,8 @@ STRUCTURAL_NOISE_FILES: frozenset[str] = frozenset(
     {
         "/data/system/package-dex-usage.pb",
         "/data/system/package-usage.list",
+        # Records wall-clock shifts -- rewritten by every guest clock resync.
+        "/data/system/monotonic_clock.xml",
     }
 )
 
