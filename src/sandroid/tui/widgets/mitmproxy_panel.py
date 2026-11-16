@@ -88,6 +88,10 @@ class MitmproxyPanel(Widget):
     #: 15s readiness wait + session-setup overhead).
     _SSL_UNPIN_TIMEOUT = 30.0
 
+    #: Seconds between re-probes while the verdict is "unreachable" (the last
+    #: value repeats), so a wrong or outdated verdict corrects itself.
+    _REPROBE_DELAYS = (15.0, 30.0, 60.0)
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._service = get_mitmproxy_service()
@@ -99,11 +103,24 @@ class MitmproxyPanel(Widget):
         self._proxy_addr = ""
         self._ca_ok = False
         self._ct_ok = False
+        # Where the CA was found / why it doesn't count (set off-thread).
+        self._ca_detail = ""
         self._unpin_hint_shown = False
         # Last device→mitmproxy reachability verdict, set off-thread by the
         # reachability probe and rendered in the header / log. Distinct from
         # _proxy_state: the proxy can be "ours" yet the device can't reach it.
-        self._reach_state = "unknown"  # "ok" | "unreachable" | "suspect" | "unknown"
+        # "checking" = a settle-wait + probe is in flight (after a Zygote
+        # restart or device reconnect), so no stale verdict is shown meanwhile.
+        self._reach_state = "unknown"  # ok | unreachable | checking | unknown
+        # Bumped on every probe kick / disarm / disconnect: a probe result
+        # carrying an older generation is stale and is dropped.
+        self._probe_gen = 0
+        # Follow-up re-probe while the verdict is "unreachable" (backoff
+        # index into _REPROBE_DELAYS), so a wrong verdict never stands.
+        self._reprobe_timer = None
+        self._reprobe_step = 0
+        self._device_cb_registered = False
+        self._unmounted = False
         # When the device proxy was last armed (for the steady-state 0-flows
         # soft signal) and a one-shot guard so that hint logs only once. Its
         # OWN flag — never reuse _unpin_hint_shown (taken by the TLS hint).
@@ -151,6 +168,56 @@ class MitmproxyPanel(Widget):
         self._kick_state_refresh()
         self._kick_focus_cleanup()
         self._kick_reverse_cleanup()
+        self._subscribe_device_changes()
+
+    def _subscribe_device_changes(self) -> None:
+        """Re-probe after a device reconnect (once per panel; best-effort).
+
+        DeviceManager has no unregister, so the callback checks
+        ``_unmounted`` and becomes a no-op once the panel is gone.
+        """
+        if self._device_cb_registered:
+            return
+        try:
+            from sandroid.services import get_device_service
+
+            get_device_service().register_device_change_callback(self._on_device_change)
+            self._device_cb_registered = True
+        except Exception as exc:
+            logger.debug("mitm panel device-change subscription failed: %s", exc)
+
+    def _on_device_change(self, device) -> None:
+        """Device-poll thread → UI thread (non-blocking, like _on_service_line)."""
+        if self._unmounted:
+            return
+        loop = self._main_loop
+        try:
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(self._handle_device_change, device)
+        except RuntimeError:
+            pass
+
+    def _handle_device_change(self, device) -> None:
+        """Drop the verdict on disconnect; re-check on (re)connect (UI thread).
+
+        A verdict from before a disconnect says nothing about the device that
+        comes back, so it is cleared. On reconnect, when mitmproxy runs and
+        the device proxy is ours, wait for the device to settle and re-probe.
+        """
+        if self._unmounted:
+            return
+        self._cancel_reprobe()
+        self._probe_gen += 1
+        if device is None:
+            if self._reach_state != "unknown":
+                self._reach_state = "unknown"
+                self._refresh_header()
+            return
+        self._kick_state_refresh()
+        if self._service.is_running() and (
+            self._proxy_state == "ours" or self._service.owned_device_proxy
+        ):
+            self._kick_reachability_probe(settle=True, reason="device reconnected")
 
     def _kick_focus_cleanup(self) -> None:
         """Self-heal leftover Focus rules/redirectors from a crashed prior run.
@@ -195,6 +262,8 @@ class MitmproxyPanel(Widget):
         threading.Thread(target=_run, name="mitm-reverse-cleanup", daemon=True).start()
 
     def on_unmount(self) -> None:
+        self._unmounted = True
+        self._cancel_reprobe()
         try:
             self._service.remove_listener(self._on_service_line)
         except Exception:
@@ -268,13 +337,17 @@ class MitmproxyPanel(Widget):
         A flow on the regular listener (no app-proxy lane) can only have come
         through the device proxy, so the device evidently reaches us.
         """
-        if self._reach_state != "unreachable":
+        if self._reach_state not in ("unreachable", "checking"):
             return
         from sandroid.services.mitmproxy_service import _is_direct_flow_line
 
         if not _is_direct_flow_line(line):
             return
+        was_unreachable = self._reach_state == "unreachable"
         self._reach_state = "ok"
+        self._cancel_reprobe()
+        if not was_unreachable:
+            return
         try:
             self.query_one("#mitm-log", RichLog).write(
                 "[#7dd3fc][INFO] [OK] device traffic is arriving — "
@@ -389,6 +462,10 @@ class MitmproxyPanel(Widget):
             # can't reach it — show red instead of a lying green.
             device = (
                 f"[#fb7185]✗ Device → mitmproxy {self._proxy_addr} (unreachable)[/]"
+            )
+        elif self._proxy_state == "ours" and self._reach_state == "checking":
+            device = (
+                f"[#facc15]◌ Device → our mitmproxy {self._proxy_addr} (re-checking)[/]"
             )
         elif self._proxy_state == "ours":
             device = f"[#4ade80]● Device → our mitmproxy {self._proxy_addr}[/]"
@@ -740,7 +817,9 @@ class MitmproxyPanel(Widget):
 
         threading.Thread(target=_run, name="mitm-setup-probe", daemon=True).start()
 
-    def _kick_reachability_probe(self) -> None:
+    def _kick_reachability_probe(
+        self, *, settle: bool = False, reason: str = "", quiet: bool = False
+    ) -> None:
         """Prove the device can reach our mitmproxy off the UI thread.
 
         Mirrors ``_kick_state_refresh``: the probe blocks on a device round-trip
@@ -748,7 +827,27 @@ class MitmproxyPanel(Widget):
         verdict back via ``call_from_thread``. The address probed is the one the
         device is actually pointed at — the live ``http_proxy`` IP when set
         (e.g. ``127.0.0.1`` for an adb-reverse route), else the resolved host IP.
+
+        Args:
+            settle: First wait for the device to settle (boot completed +
+                package manager up) and retry a negative probe a few times.
+                Used after a Zygote restart and a device reconnect, where an
+                immediate probe hits a device without network.
+            reason: Shown in the log while waiting (e.g. "Zygote restart").
+            quiet: A periodic re-probe: log only when the verdict changes.
         """
+        self._probe_gen += 1
+        gen = self._probe_gen
+        if settle:
+            # Never show a pre-restart verdict while the device comes back.
+            self._cancel_reprobe()
+            self._reach_state = "checking"
+            why = f" after {reason}" if reason else ""
+            self._append_line(
+                f"[INFO] [~] waiting for the device to settle{why}, "
+                "then re-checking device→mitmproxy…"
+            )
+            self._refresh_header()
 
         def _run() -> None:
             try:
@@ -757,45 +856,126 @@ class MitmproxyPanel(Widget):
                     ProxyStatus,
                     resolve_proxy_host_ip,
                 )
+                from sandroid.services.mitmproxy_service import (
+                    _not_settled_result,
+                )
 
                 port = self._service.state.proxy_port
-                status, cfg = ProxyManager().get_proxy_settings()
-                if status == ProxyStatus.SET and cfg is not None:
-                    host = cfg.ip
+                # Settle BEFORE reading http_proxy: settings is served by
+                # system_server, which is down during a Zygote restart.
+                if settle and not self._service.wait_device_settled():
+                    result, addr = _not_settled_result(), ""
                 else:
-                    host = resolve_proxy_host_ip()
-                result = self._service.probe_device_reachability(host, port)
-                addr = f"{host}:{port}"
+                    status, cfg = ProxyManager().get_proxy_settings()
+                    if status == ProxyStatus.SET and cfg is not None:
+                        host = cfg.ip
+                    else:
+                        host = resolve_proxy_host_ip()
+                    if settle:
+                        result = self._service.probe_after_device_restart(
+                            host, port, wait_settle=False
+                        )
+                    else:
+                        result = self._service.probe_device_reachability(host, port)
+                    addr = f"{host}:{port}"
             except Exception as exc:  # marshal a failure as a quiet unknown
                 logger.debug("reachability probe kick failed: %s", exc)
-                return
+                result, addr = None, ""
             try:
-                self.app.call_from_thread(self._apply_reachability_result, result, addr)
+                self.app.call_from_thread(
+                    self._apply_reachability_result, result, addr, gen, quiet
+                )
+                if settle:
+                    # A state refresh during the restart could not read the
+                    # device proxy (system_server down); re-read it now.
+                    self.app.call_from_thread(self._kick_state_refresh)
             except Exception:
                 pass
 
         threading.Thread(target=_run, name="mitm-reach-probe", daemon=True).start()
 
-    def _apply_reachability_result(self, result, addr: str) -> None:
+    def _cancel_reprobe(self) -> None:
+        """Stop a pending follow-up re-probe (idempotent)."""
+        timer, self._reprobe_timer = self._reprobe_timer, None
+        self._reprobe_step = 0
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+
+    def _schedule_reprobe(self) -> None:
+        """Re-probe later while the verdict is "unreachable" (backoff)."""
+        if self._unmounted or self._reprobe_timer is not None:
+            return
+        delays = self._REPROBE_DELAYS
+        delay = delays[min(self._reprobe_step, len(delays) - 1)]
+        self._reprobe_step += 1
+        try:
+            self._reprobe_timer = self.set_timer(delay, self._reprobe_due)
+        except Exception as exc:  # not mounted (tests) — nothing to schedule
+            logger.debug("re-probe scheduling skipped: %s", exc)
+            self._reprobe_timer = None
+
+    def _reprobe_due(self) -> None:
+        """Timer callback: re-check an "unreachable" verdict (UI thread)."""
+        self._reprobe_timer = None
+        if (
+            self._unmounted
+            or self._reach_state != "unreachable"
+            or self._proxy_state != "ours"
+            or not self._service.is_running()
+        ):
+            self._reprobe_step = 0
+            return
+        self._kick_reachability_probe(quiet=True)
+
+    def _apply_reachability_result(
+        self, result, addr: str, gen: int | None = None, quiet: bool = False
+    ) -> None:
         """Render the device→mitmproxy reachability verdict (UI thread).
 
         ``result`` is a ``ReachabilityResult``. Unreachable flips the header's
-        Device token red and logs an ``[ERROR]`` + a neutral remedy hint;
-        reachable logs one quiet confirmation. Uses ``[~]`` for hints, never
-        ``[i]`` (RichLog parses ``[i]`` as italic markup).
+        Device token red, logs an ``[ERROR]`` + a neutral remedy hint and
+        schedules a follow-up re-probe; reachable logs one quiet confirmation.
+        A result from a superseded probe (``gen`` older than the latest kick)
+        is dropped. Uses ``[~]`` for hints, never ``[i]`` (RichLog parses
+        ``[i]`` as italic markup).
         """
+        if gen is not None and gen != self._probe_gen:
+            return  # stale: a newer probe / disarm / disconnect superseded it
+        if result is None:
+            if self._reach_state == "checking":
+                self._reach_state = "unknown"
+                self._refresh_header()
+            return
+        previous = self._reach_state
         if getattr(result, "reachable", False):
             self._reach_state = "ok"
+            self._cancel_reprobe()
             detail = getattr(result, "detail", "") or "device→mitmproxy reachable"
-            self._append_line(f"[INFO] [OK] {detail}")
+            if previous == "unreachable":
+                self._append_line(
+                    f"[INFO] [OK] {detail} — the earlier 'CANNOT reach' no "
+                    "longer applies"
+                )
+            elif not quiet:
+                self._append_line(f"[INFO] [OK] {detail}")
         elif getattr(result, "inconclusive", False):
-            # Not a verdict on the device (mitmweb not bound yet / gone, or no
-            # toybox nc): never claim "CANNOT reach" here.
+            # Not a verdict on the device (mitmweb not bound yet / gone, the
+            # device still restarting, or no toybox nc): never claim "CANNOT
+            # reach" here, and never keep a stale "unreachable" either.
             self._reach_state = "unknown"
+            self._cancel_reprobe()
             detail = getattr(result, "detail", "") or "reachability unknown"
-            self._append_line(f"[INFO] [~] reachability not checked: {detail}")
+            if not quiet:
+                self._append_line(f"[INFO] [~] reachability not checked: {detail}")
+        elif quiet and previous == "unreachable":
+            # Still unreachable on a periodic re-probe: no repeated error.
+            self._schedule_reprobe()
         else:
             self._reach_state = "unreachable"
+            self._schedule_reprobe()
             self._append_line(
                 f"[ERROR] device CANNOT reach mitmproxy at {addr} — traffic "
                 "will silently time out (0 flows)"
@@ -817,8 +997,12 @@ class MitmproxyPanel(Widget):
         if self._announce_ca_on_start:
             self._announce_ca_on_start = False
             if self._service.is_running():
+                detail = self._ca_detail
                 if ca_ok:
-                    self._append_line("[INFO] [OK] CA already injected (Zygote)")
+                    where = f" ({detail})" if detail else ""
+                    self._append_line(f"[INFO] [OK] CA already in trust store{where}")
+                elif detail:
+                    self._append_line(f"[INFO] [~] {detail} — press Ctrl+N")
                 else:
                     self._append_line(
                         "[INFO] [~] no CA in trust store yet — press Ctrl+N to "
@@ -892,7 +1076,11 @@ class MitmproxyPanel(Widget):
 
         try:
             ca_mgr = CAManager()
-            ca_ok = ca_mgr.check_zygote_injection_status().injected
+            ca_status = ca_mgr.check_zygote_injection_status()
+            ca_ok = ca_status.injected
+            self._ca_detail = (
+                self._ca_where(ca_status) if ca_ok else ca_status.error_message or ""
+            )
             if ca_ok:
                 stdout, _ = Adb.send_adb_command(
                     "shell ls /data/local/tmp/chrome-command-line 2>/dev/null"
@@ -902,6 +1090,14 @@ class MitmproxyPanel(Widget):
             logger.debug("CA state probe failed: %s", exc)
 
         return proxy_state, proxy_addr, ca_ok, ct_ok
+
+    @staticmethod
+    def _ca_where(status) -> str:
+        """Short "where/how" note for an injected CA status."""
+        where = getattr(status, "location", None) or "Zygote"
+        if getattr(status, "fingerprint_verified", False):
+            return f"{where}, fingerprint verified"
+        return where
 
     def _set_device_proxy(self) -> None:
         """Ensure the device proxy routes through mitmweb (idempotent).
@@ -961,6 +1157,8 @@ class MitmproxyPanel(Widget):
             self._proxy_state = "none"
             self._proxy_addr = ""
             self._reach_state = "unknown"
+            self._probe_gen += 1  # drop an in-flight probe's verdict
+            self._cancel_reprobe()
             self._armed_at = None
             self._set_glance_device_proxy("")
         except Exception as exc:
@@ -999,7 +1197,9 @@ class MitmproxyPanel(Widget):
             status = ca_mgr.check_zygote_injection_status()
             if status.injected:
                 self._ca_ok = True
-                self._append_line("[INFO] [~] CA already injected (Zygote)")
+                self._append_line(
+                    f"[INFO] [~] CA already in trust store ({self._ca_where(status)})"
+                )
                 # Still ensure Chrome CT bypass is in place
                 certs = ca_mgr.detect_ca_certificates()
                 mitm_cert = next(
@@ -1121,12 +1321,16 @@ class MitmproxyPanel(Widget):
                 else:
                     self._append_line(f"[INFO] Chrome CT bypass skipped: {ct_msg}")
 
-                # CA injection restarts Zygote, which resets app net state — if
-                # the device proxy is ours, re-prove reachability. Gated on
+                # CA injection restarts Zygote (and with it system_server and
+                # netd) — if the device proxy is ours, re-prove reachability
+                # once the device has settled; an immediate probe hits a device
+                # without network and reports a false "CANNOT reach". Gated on
                 # success AND an armed device proxy so we never pollute
                 # flows_seen when no device proxy is even set.
-                if self._proxy_state == "ours":
-                    self._kick_reachability_probe()
+                if self._proxy_state == "ours" or self._service.owned_device_proxy:
+                    self._kick_reachability_probe(
+                        settle=True, reason="the Zygote restart"
+                    )
             elif result.needs_root:
                 from sandroid.tui.modals.confirm_modal import ConfirmModal
 
