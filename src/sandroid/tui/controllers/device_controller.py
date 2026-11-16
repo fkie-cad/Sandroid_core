@@ -502,12 +502,14 @@ class DeviceController:
             mode_str = "headless" if headless else "with UI"
             self._log_info(f"Starting AVD '{avd_name}' ({mode_str})...")
 
-            # Build command
+            # Build command. Guest Vulkan off in every mode (SwiftShader Vulkan
+            # leaks host memory on each snapshot load), same flags as the CLI.
+            from sandroid.core.emulator_guard import emulator_launch_args
+
             cmd = [str(emulator_path), "-avd", avd_name]
             if headless:
-                cmd.extend(
-                    ["-no-window", "-no-boot-anim", "-gpu", "swiftshader_indirect"]
-                )
+                cmd.extend(["-no-window", "-no-boot-anim"])
+            cmd.extend(emulator_launch_args(headless=headless))
 
             # Set up environment
             env = os.environ.copy()
