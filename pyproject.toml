@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "An Android sandbox for automated Forensic, Malware, and Security Analysis."
 readme = { file = "README.md", content-type = "text/markdown" }
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 
 authors = [
     { name = "Daniel Baier", email = "daniel.baier@fkie.fraunhofer.de" },
@@ -30,15 +30,14 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
     "Topic :: Software Development :: Testing",
     "Topic :: System :: Monitoring",
@@ -65,14 +64,13 @@ dependencies = [
     "tqdm>=4.64.0",
     "reportlab>=4.0.0",
     "geopy>=2.3.0",
-    "friTap>=2.0.0",
-    "mvt>=2.6.1",
+    "friTap>=2.6.7,<3",
+    "mvt>=2026.10.5,<2027",
     "colorlog>=6.7.0",
     "objection>=1.11.0,<2.0.0",
-    "AndroidFridaManager>=2.0.2",
+    "AndroidFridaManager>=2.0.7,<3",
     "trigdroid[full]>=2.0.6",
-    "dexray-intercept>=1.0.1.9",
-    "tomli>=2.0.1; python_version<'3.11'",
+    "dexray-intercept>=1.0.1.9,<2",
     "tomli-w>=1.0.0",
     "pyyaml>=6.0",
     "pydantic>=2.0.0",
@@ -81,27 +79,33 @@ dependencies = [
     "wcwidth>=0.2.13",
     "thefuzz>=0.22.1",
     "textual>=0.40.0",
+    # The default TUI imports the AI chat panel, which needs the MCP client.
+    # mcp 2.x renamed FastMCP and changed the client API -> stay on 1.x.
+    "mcp>=1.9.0,<2",
+    # The TUI's network panel and the AI session tools run `mitmweb`.
+    "mitmproxy>=12.0.0,<13",
+    # sandroid.ai.tools.app_query and sandroid.services.component_info_parser
+    # decode AndroidManifest.xml with androguard for exported-component
+    # enumeration (real dumpsys package output has no exported/permission
+    # data -- see component_info_parser's module docstring). The AI chat is
+    # part of the default TUI, so this is a core dependency.
+    "androguard>=4.1.0,<5",
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
-ai = [
-    "mcp>=1.9.0",
-]
+# Kept for backwards compatibility: mcp is a core dependency since 2.1 (the
+# default TUI imports the AI chat panel), so `.[ai]` no longer adds anything.
+ai = []
 static-analysis = [
     "dexray-insight>=1.0.0",
-    # Already a transitive dependency of dexray-insight; declared directly
-    # since sandroid.ai.tools.app_query and sandroid.services.component_info_parser
-    # import it directly to decode AndroidManifest.xml for exported-component
-    # enumeration (real dumpsys package output has no exported/permission
-    # data -- see component_info_parser's module docstring).
-    "androguard>=4.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
     "pytest-asyncio>=0.21.0",
-    "ruff>=0.1.0",
+    "ruff==0.12.7",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",
