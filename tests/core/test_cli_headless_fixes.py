@@ -941,3 +941,49 @@ def test_headless_api_keeps_run_documentation(monkeypatch):
     api._initialized = True
     asyncio.run(api.run_analysis(AnalysisMode.FORENSIC))
     assert api.last_run_documentation == "DOC"
+
+
+def test_batch_reports_documentation_errors_and_exits_nonzero(monkeypatch, tmp_path):
+    import json as _json
+
+    import sandroid.api as api_pkg
+    from sandroid.api import batch, headless
+    from sandroid.cli_modes import headless as cli_headless
+    from sandroid.core import run_report
+
+    class _FakeAPI:
+        def __init__(self, config_path=None, config=None):
+            self.last_run_documentation = None
+
+        async def initialize(self):
+            return SimpleNamespace(success=True)
+
+        async def run_analysis(self, **kwargs):
+            self.last_run_documentation = run_report.FinalizeOutcome(
+                results_json=tmp_path / "s.json", errors=["pdf: too large"]
+            )
+            return {}
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(headless, "SandroidHeadlessAPI", _FakeAPI)
+    monkeypatch.setattr(api_pkg, "batch_analyze", batch.batch_analyze)
+    cfg_file = tmp_path / "batch.json"
+    cfg_file.write_text(
+        _json.dumps({"packages": ["a.b"], "output_dir": str(tmp_path / "out")})
+    )
+    with pytest.raises(SystemExit) as info:
+        cli_headless.run_headless_analysis(
+            sandroid_config=object(),
+            active_logger=None,
+            package=None,
+            batch_config=str(cfg_file),
+            mode="malware",
+            runs=2,
+            network=False,
+            hash_files=False,
+            show_deleted=False,
+            output_file=None,
+        )
+    assert info.value.code == cli_headless.EXIT_DOCUMENTATION_FAILED

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_UNTRACKED = object()
+
 
 async def batch_analyze(
     packages: list[str],
@@ -88,6 +90,14 @@ async def batch_analyze(
                 **target_kw,
             )
             results[package] = {"status": "success", "data": result}
+            doc = getattr(api, "last_run_documentation", _UNTRACKED)
+            if mode != AnalysisMode.SECURITY and doc is not _UNTRACKED:
+                if doc is None:
+                    results[package]["documentation_errors"] = [
+                        "results JSON / evidence documentation not written"
+                    ]
+                elif doc.errors:
+                    results[package]["documentation_errors"] = list(doc.errors)
 
             # Save individual result
             pkg_file = output_path / f"{package.replace('.', '_')}.json"

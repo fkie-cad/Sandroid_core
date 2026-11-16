@@ -361,11 +361,19 @@ async def _run_batch_analysis(
     if error_count > 0:
         console.print(f"  [error]Errors: {error_count}[/error]")
 
+    doc_failures = 0
     for pkg, result in results.items():
         status = result.get("status")
-        if status == "success":
+        doc_errors = result.get("documentation_errors") or []
+        if status == "success" and not doc_errors:
             console.print(f"  [success]{pkg}: OK[/success]")
+        elif status == "success":
+            doc_failures += 1
+            _plain(console, f"  {pkg}: analysed, but {'; '.join(doc_errors)}", "error")
         else:
-            console.print(
-                f"  [error]{pkg}: {result.get('error', 'Unknown error')}[/error]"
-            )
+            _plain(console, f"  {pkg}: {result.get('error', 'Unknown error')}", "error")
+
+    if error_count:
+        sys.exit(1)
+    if doc_failures:
+        sys.exit(EXIT_DOCUMENTATION_FAILED)
