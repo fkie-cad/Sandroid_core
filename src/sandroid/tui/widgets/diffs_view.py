@@ -724,12 +724,17 @@ class DiffsView(FilesSubViewBase):
             bus = EventBus.get()
 
             def _cb(_event) -> None:
-                loop = self._main_loop
+                # Post through this widget's own message queue (thread-safe,
+                # non-blocking), NOT loop.call_soon_threadsafe: a bare loop
+                # callback runs in the publisher's empty contextvars context,
+                # and _reload_index re-mounts DiffView/Collapsible widgets,
+                # whose compose then raised NoActiveAppError and killed the
+                # TUI on the first state change once a run was listed
+                # (P2-H1). The message handler runs with the app context set.
                 try:
-                    if loop is not None and not loop.is_closed():
-                        loop.call_soon_threadsafe(self._refresh_if_visible)
-                except RuntimeError:
-                    pass
+                    self.call_later(self._refresh_if_visible)
+                except Exception:
+                    logger.debug("DiffsView: refresh scheduling failed", exc_info=True)
 
             bus.subscribe(EventType.STATE_CHANGED, _cb)
             self._event_handlers.append((EventType.STATE_CHANGED, _cb))
