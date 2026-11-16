@@ -14,18 +14,13 @@ see :mod:`sandroid.config.loader`), keyed by tool *name*, not by arguments.
 
 import logging
 import os
-import sys
+import tomllib
 from pathlib import Path
 from typing import Literal
 
-from sandroid.ai.tools.registry import RiskTier
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
 import tomli_w
+
+from sandroid.ai.tools.registry import RiskTier
 
 logger = logging.getLogger(__name__)
 

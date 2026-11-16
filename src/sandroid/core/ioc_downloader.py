@@ -74,6 +74,15 @@ class IOCDownloader:
 
     # Default MVT GitHub base URL (kept as fallback)
     _DEFAULT_MVT_GITHUB_BASE = "https://raw.githubusercontent.com/mvt-project/mvt/main/"
+    #: Index ``mvt-android download-iocs`` itself uses (mvt >= 2.x). The
+    #: per-file paths below under mvt/android/data/ no longer exist upstream
+    #: (404), so the index is the primary fallback source.
+    MVT_INDICATORS_INDEX = (
+        "https://raw.githubusercontent.com/mvt-project/mvt-indicators/main/"
+        "indicators.yaml"
+    )
+    _GITHUB_RAW = "https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+
     MVT_IOC_FILES = [
         "mvt/android/data/androidspy.stix2",
         "mvt/android/data/malware.stix2",
@@ -257,8 +266,51 @@ class IOCDownloader:
             logger.debug(f"mvt-android command failed: {e}")
             return None
 
+    def _index_ioc_urls(self, ssl_context) -> list[tuple[str, str]]:
+        """Resolve (url, filename) pairs from the mvt-indicators index.
+
+        Mirrors ``mvt.common.updates.IndicatorsUpdates.update``: entries of
+        type ``github`` point at a file in a GitHub repo, others carry a
+        ``download_url``. Returns an empty list if the index is unreachable.
+        """
+        import yaml
+
+        try:
+            with urlopen(  # nosec B310
+                self.MVT_INDICATORS_INDEX, timeout=30, context=ssl_context
+            ) as response:
+                index = yaml.safe_load(response.read()) or {}
+        except Exception as e:
+            logger.warning(f"Could not fetch the MVT indicators index: {e}")
+            return []
+
+        urls = []
+        for ioc in index.get("indicators") or []:
+            if ioc.get("type") == "github":
+                gh = ioc.get("github") or {}
+                if not (gh.get("owner") and gh.get("repo") and gh.get("path")):
+                    continue
+                url = self._GITHUB_RAW.format(
+                    owner=gh["owner"],
+                    repo=gh["repo"],
+                    branch=gh.get("branch", "main"),
+                    path=gh["path"],
+                )
+            else:
+                url = ioc.get("download_url") or ""
+            if not url.startswith("https://"):
+                continue
+            # Same naming scheme as mvt (unique per source repo/path)
+            filename = url.removeprefix("https://").replace("/", "_")
+            urls.append((url, filename))
+        return urls
+
     def _download_from_github(self) -> Path | None:
-        """Download IOC files directly from MVT's GitHub repository.
+        """Download the public MVT indicators without the mvt CLI.
+
+        Uses the mvt-indicators index (what ``mvt-android download-iocs``
+        reads); falls back to the legacy per-file list under the configured
+        ``external_urls.mvt_github_base`` (useful for mirrors).
 
         Returns:
             Path to IOC directory if successful, None otherwise
@@ -270,9 +322,12 @@ class IOCDownloader:
         ssl_context = _create_ssl_context()
         mvt_base = self._get_mvt_github_base()
 
-        for ioc_file in self.MVT_IOC_FILES:
-            url = f"{mvt_base}{ioc_file}"
-            filename = ioc_file.split("/")[-1]
+        sources = self._index_ioc_urls(ssl_context) or [
+            (f"{mvt_base}{ioc_file}", ioc_file.split("/")[-1])
+            for ioc_file in self.MVT_IOC_FILES
+        ]
+
+        for url, filename in sources:
             output_path = github_ioc_dir / filename
 
             try:

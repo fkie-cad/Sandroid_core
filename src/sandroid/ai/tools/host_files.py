@@ -17,7 +17,7 @@ Importing this module registers all three tools into the
 
 import base64
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
@@ -100,7 +100,7 @@ def list_host_dir(path: str) -> dict[str, Any]:
                     "is_symlink": entry.is_symlink(),
                     "size_bytes": None if is_dir else stat_result.st_size,
                     "modified_time": datetime.fromtimestamp(
-                        stat_result.st_mtime, tz=timezone.utc
+                        stat_result.st_mtime, tz=UTC
                     ).isoformat(),
                 }
             )

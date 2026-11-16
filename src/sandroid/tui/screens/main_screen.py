@@ -1105,8 +1105,20 @@ class MainScreen(Screen):
             action_name: Name of the action to execute after install
             feature_name: Display name of the feature that needs Frida
         """
+        from sandroid.core.frida_manager import frida_server_auto_start_enabled
         from sandroid.core.toolbox import Toolbox
         from sandroid.tui.modals import FridaInstallModal, FridaInstallResult
+
+        if frida_server_auto_start_enabled():  # frida.server_auto_start: no prompt
+            import functools
+
+            self.run_worker(
+                functools.partial(self._install_frida_and_execute, action_name),
+                name=f"frida_install_{action_name}",
+                exclusive=False,
+                thread=True,
+            )
+            return
 
         # Get device name
         device_name = "device"
@@ -1158,8 +1170,9 @@ class MainScreen(Screen):
             frida_service = get_frida_session_service()
             frida_manager = frida_service.get_frida_manager()
             if frida_manager:
-                frida_manager.install_frida_server()
-                started = frida_manager.run_frida_server()
+                from sandroid.core.frida_manager import ensure_frida_server_started
+
+                started = ensure_frida_server_started(frida_manager)
 
                 if started:
                     # Log success
@@ -1184,7 +1197,9 @@ class MainScreen(Screen):
             msg = f"Frida not available: {e}"
             self.app.call_from_thread(lambda: self._log_to_activity(msg, error=True))
         except Exception as e:
-            msg = f"Frida installation failed: {e}"
+            from sandroid.core.frida_manager import describe_frida_install_error
+
+            msg = f"Frida installation failed: {describe_frida_install_error(e)}"
             self.app.call_from_thread(lambda: self._log_to_activity(msg, error=True))
 
         # Refresh UI

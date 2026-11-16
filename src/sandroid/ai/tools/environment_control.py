@@ -316,7 +316,9 @@ def install_frida_server(version: str | None = None) -> dict[str, Any]:
     try:
         manager.install_frida_server(version=version)
     except Exception as exc:
-        return {"installed": False, "error": str(exc)}
+        from sandroid.core.frida_manager import describe_frida_install_error
+
+        return {"installed": False, "error": describe_frida_install_error(exc)}
     return {"installed": True, "version": manager.get_installed_server_version()}
 
 
