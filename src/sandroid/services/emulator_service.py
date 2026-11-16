@@ -582,6 +582,11 @@ class EmulatorService:
             # was sometimes too short (a race) and often too long (needless
             # latency on a device that recovers quickly).
             self._wait_for_device_ready(adb, serial)
+            # A snapshot restores the guest clock to the moment it was saved,
+            # so every revert rewinds device time (minutes after a few
+            # replays), skewing file timestamps / the timeline against the
+            # host. Re-sync it to the host clock.
+            self._resync_guest_clock(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -589,6 +594,38 @@ class EmulatorService:
         except Exception as e:
             self._logger.error(f"Failed to load snapshot: {e}")
             return False
+
+    def _resync_guest_clock(self, adb: AdbProtocol, serial: str | None) -> bool:
+        """Best-effort: set the guest's wall clock to the host's (UTC epoch).
+
+        Tries a plain root shell first (adbd as root), then Magisk/su
+        variants. Never raises; returns whether the device accepted a value
+        within 2 s of the host clock.
+        """
+        epoch = int(time.time())
+        commands = (
+            f"shell date -u @{epoch}",
+            f"shell su 0 date -u @{epoch}",
+            f"shell su -c 'date -u @{epoch}'",
+        )
+        for command in commands:
+            try:
+                adb.send_adb_command(command, serial=serial)
+                stdout, _stderr = adb.send_adb_command(
+                    "shell date +%s", serial=serial
+                )
+                guest = int(str(stdout).strip().splitlines()[-1])
+            except Exception as exc:
+                self._logger.debug(f"Guest clock resync via {command!r} failed: {exc}")
+                continue
+            if abs(guest - int(time.time())) <= 2:
+                self._logger.debug(f"Guest clock resynced to host ({command})")
+                return True
+        self._logger.warning(
+            "Could not resync the guest clock after snapshot load "
+            "(needs root); device timestamps may lag the host"
+        )
+        return False
 
     def _wait_for_device_ready(
         self,

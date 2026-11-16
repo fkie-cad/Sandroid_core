@@ -539,6 +539,42 @@ def test_playback_persists_full_results_json(tmp_path, monkeypatch) -> None:
         assert "Other Data" in data
 
 
+def test_art_profiles_are_structural_noise() -> None:
+    from sandroid.analysis.filters import filter_noise_files, is_structural_noise
+
+    prof = "/data/misc/profiles/cur/0/de.fkie.ground_truth/primary.prof"
+    assert is_structural_noise(prof)
+    assert is_structural_noise("/data/system/package-dex-usage.pb")
+    assert not is_structural_noise("/data/data/de.fkie.ground_truth/files/a.txt")
+    kept = filter_noise_files(
+        [prof, "/data/data/de.fkie.ground_truth/databases/GroundTruth.db"], {}
+    )
+    assert kept == ["/data/data/de.fkie.ground_truth/databases/GroundTruth.db"]
+
+
+def test_snapshot_load_resyncs_guest_clock(monkeypatch) -> None:
+    """After a revert the guest clock is set back to the host's epoch."""
+    from sandroid.services import emulator_service as es_module
+    from sandroid.services.emulator_service import EmulatorService
+
+    monkeypatch.setattr(es_module.time, "time", lambda: 1_800_000_000.0)
+    adb = MagicMock()
+    adb.send_telnet_command.return_value = ("OK\n", "")
+    calls: list[str] = []
+
+    def send(command: str, serial: str | None = None) -> tuple[str, str]:
+        calls.append(command)
+        if command == "get-state":
+            return "device\n", ""
+        if command == "shell date +%s":
+            return "1800000000\n", ""
+        return "", ""
+
+    adb.send_adb_command.side_effect = send
+    assert EmulatorService(adb=adb).load_snapshot("tmp") is True
+    assert "shell date -u @1800000000" in calls
+
+
 def test_xml_beautify_handles_three_arg_update_text() -> None:
     """The xmldiff formatter emits ``[update-text, path, new, old]``."""
     from sandroid.core import file_diff
