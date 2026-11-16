@@ -1,0 +1,274 @@
+"""Usability / keybinding regressions found in the 2.1 live demo rehearsal.
+
+Covers the global Record/Play keys, Shift-aware key labels, the double-press
+guard on snapshot-slot loading, Shift+Arrow focus handling, the Record
+settings modal and smaller fixes (recording duration, ...). The full
+``SandroidTUI`` is driven through Textual's pilot; the suite-wide conftest
+blocks every device access, so "no device connected" is the natural state.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from sandroid.tui.key_display import format_key
+from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+SIZE = (200, 50)
+
+
+async def _settle(pilot, n: int = 4) -> None:
+    for _ in range(n):
+        await pilot.pause(0.05)
+
+
+async def _boot(app, pilot) -> None:
+    """Wait for MainScreen and dismiss the first-run welcome modal."""
+    await _settle(pilot, 8)
+    if type(app.screen).__name__ != "MainScreen":
+        await pilot.press("enter")
+        await _settle(pilot, 4)
+    assert type(app.screen).__name__ == "MainScreen"
+
+
+def _app():
+    from sandroid.tui.app import SandroidTUI
+
+    return SandroidTUI()
+
+
+def _messages(app) -> list[str]:
+    return [n.message for n in app._notifications]
+
+
+# --------------------------------------------------------------------------
+# key labels
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "compact", "long"),
+    [
+        ("r", "r", "r"),
+        ("R", "⇧R", "Shift+R"),
+        ("c", "c", "c"),
+        ("C", "⇧C", "Shift+C"),
+        ("ctrl+b", "^b", "Ctrl+B"),
+        ("ctrl+shift+p", "^⇧P", "Ctrl+Shift+P"),
+        ("shift+right", "⇧→", "Shift+→"),
+        ("question_mark", "?", "?"),
+        ("enter", "⏎", "Enter"),
+        ("1", "1", "1"),
+    ],
+)
+def test_format_key_keeps_shift_visible(key, compact, long) -> None:
+    assert format_key(key, "compact") == compact
+    assert format_key(key, "long") == long
+
+
+def test_lower_and_upper_case_keys_never_render_alike() -> None:
+    for letter in "cefgrp":
+        assert format_key(letter) != format_key(letter.upper())
+        assert format_key(letter, "compact") != format_key(letter.upper(), "compact")
+
+
+# --------------------------------------------------------------------------
+# recording wrapper
+# --------------------------------------------------------------------------
+
+
+def test_recording_wrapper_stop_reports_real_duration(tmp_path) -> None:
+    wrapper = RecordingWrapper(output_file=str(tmp_path / "rec.txt"))
+    wrapper._start_time = time.time() - 42
+    assert wrapper.stop() == 42
+    assert wrapper.elapsed_seconds == 42
+    # idempotent
+    assert wrapper.stop() == 42
+
+
+# --------------------------------------------------------------------------
+# global Record / Play
+# --------------------------------------------------------------------------
+
+
+def test_record_play_are_global_rebindable_app_bindings() -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    by_id = {b.id: b for b in SandroidTUI.BINDINGS if b.id}
+    assert by_id["record"].key == "r"
+    assert by_id["play"].key == "p"
+    assert not by_id["record"].priority  # an Input must still receive "r"
+
+
+async def test_r_on_main_screen_without_device_explains_why() -> None:
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("r")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("No device connected" in m for m in _messages(app))
+
+
+async def test_r_on_main_screen_opens_record_settings(monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("r")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "RecordSettingsModal"
+        # No spotlight app: warned, but recording is still allowed.
+        assert any("No app selected" in m for m in _messages(app))
+
+
+async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        monkeypatch.setattr(app._recording_controller, "has_recording", lambda: False)
+        started = []
+        monkeypatch.setattr(
+            app._recording_controller, "start_playback", lambda: started.append(1)
+        )
+        await pilot.press("p")
+        await _settle(pilot)
+        assert started == []
+        assert any("Nothing recorded yet" in m for m in _messages(app))
+        assert app.screen.query_one("#tool-body").current == "spotlight-panel"
+
+
+async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        rc = app._recording_controller
+        monkeypatch.setattr(rc, "has_recording", lambda: True)
+        started = []
+        monkeypatch.setattr(rc, "start_playback", lambda: started.append(1) or True)
+        await pilot.press("p")
+        await _settle(pilot)
+        assert started == [1]
+        assert app.screen.query_one("#tool-body").current == "files-panel"
+
+
+# --------------------------------------------------------------------------
+# snapshot slots: a lone digit must not revert the emulator
+# --------------------------------------------------------------------------
+
+
+async def test_slot_digit_needs_second_press(monkeypatch) -> None:
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+    loads: list[str] = []
+    monkeypatch.setattr(SnapshotsPanel, "slot_tag", lambda self, s: "clean")
+    monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        # Focus off the Spotlight panel (where 1-5 are bypass toggles).
+        app.screen.open_snapshots_tab()
+        await _settle(pilot)
+        await pilot.press("7")
+        await _settle(pilot)
+        assert loads == []
+        assert any("again to load slot 7" in m for m in _messages(app))
+        await pilot.press("7")
+        await _settle(pilot)
+        assert loads == ["7"]
+
+
+async def test_slot_press_expires(monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+    loads: list[str] = []
+    monkeypatch.setattr(SnapshotsPanel, "slot_tag", lambda self, s: "clean")
+    monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
+    monkeypatch.setattr(SandroidTUI, "SLOT_CONFIRM_WINDOW", 0.0)
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        app.screen.open_snapshots_tab()
+        await _settle(pilot)
+        await pilot.press("6")
+        await _settle(pilot)
+        await pilot.press("6")
+        await _settle(pilot)
+        assert loads == []
+
+
+async def test_digit_on_spotlight_toggles_bypass_not_slot(monkeypatch) -> None:
+    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    toggles: list[str] = []
+    loads: list[str] = []
+    monkeypatch.setattr(
+        SpotlightPanel, "action_toggle_bypass", lambda self, c: toggles.append(c)
+    )
+    monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
+    app = _app()
+    async with app.run_test(size=SIZE, notifications=True) as pilot:
+        await _boot(app, pilot)
+        assert app.focused.id == "spotlight-panel"
+        await pilot.press("1", "1")
+        await _settle(pilot)
+        assert toggles == ["ssl", "ssl"]
+        assert loads == []
+
+
+# --------------------------------------------------------------------------
+# Shift+Arrow focus
+# --------------------------------------------------------------------------
+
+
+async def test_shift_arrow_moves_focus_into_each_panel() -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        seen = []
+        for _ in range(4):
+            await pilot.press("shift+right")
+            await _settle(pilot)
+            current = app.screen.query_one("#tool-body").current
+            panel = app.screen.query_one(f"#{current}")
+            assert app.focused is not None
+            assert panel in app.focused.ancestors_with_self, current
+            seen.append(current)
+        assert seen[-1] == "spotlight-panel"
+
+
+async def test_files_subtabs_cycle_past_watchlist() -> None:
+    """Shift+Right must not get stuck in the Watchlist add-path Input.
+
+    The Input used to grab focus and swallow Shift+Right (text selection),
+    trapping the user in the Files tab.
+    """
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        app.screen.open_files_tab()
+        await _settle(pilot)
+        await pilot.press("shift+down")
+        visited = []
+        for _ in range(3):
+            await pilot.press("shift+right")
+            await _settle(pilot)
+            visited.append(app.screen.query_one("#files-body").current)
+            assert type(app.focused).__name__ != "_AddPathInput"
+        assert len(set(visited)) == 3

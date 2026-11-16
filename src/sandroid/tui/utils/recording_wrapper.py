@@ -140,8 +140,11 @@ class RecordingWrapper:
         if self._stopped:
             return self._duration
 
-        self._stopped = True
+        # Measure first: once ``_stopped`` is set, ``elapsed_seconds`` returns
+        # the (still 0) ``_duration`` -- which made every recording report
+        # "N events, 0s".
         self._duration = self.elapsed_seconds
+        self._stopped = True
 
         try:
             # Write final dummy event
@@ -165,7 +168,8 @@ class RecordingWrapper:
             if self._reader_thread and self._reader_thread.is_alive():
                 self._reader_thread.join(timeout=1)
 
-            logger.info(
+            # debug: the caller reports "Recording saved: N events, Ns" itself.
+            logger.debug(
                 f"Recording stopped: {self._event_count} events, {self._duration}s"
             )
 
