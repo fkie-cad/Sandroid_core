@@ -155,7 +155,11 @@ class HookConfigurationUI:
         updated_hooks = current_hooks.copy()
         for group_key, group_info in self._hook_groups.items():
             key = f"{group_info['name']} ({group_info['description']})"
-            if key in result:
+            # Only a toggled group changes its hooks. Applying an unchanged
+            # group used to switch on *every* hook of a partly enabled group
+            # (e.g. the process/runtime hooks next to the default DEX
+            # unpacking ones), which crashed Wikipedia at EGL init on spawn.
+            if key in result and result[key] != hook_toggles.get(key):
                 for hook in group_info["hooks"]:
                     updated_hooks[hook] = result[key]
         return updated_hooks
