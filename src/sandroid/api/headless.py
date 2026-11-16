@@ -102,15 +102,22 @@ class SandroidHeadlessAPI(SandroidAPI):
         >>> await api.shutdown()
     """
 
-    def __init__(self, config_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: str | Path | None = None,
+        config: SandroidConfig | None = None,
+    ) -> None:
         """Initialize the headless API.
 
         Args:
             config_path: Optional path to configuration file. If not provided,
                 uses the standard config loading mechanism.
+            config: An already-loaded configuration (e.g. the one the CLI
+                built with its overrides). When given, :meth:`initialize`
+                uses it as-is instead of loading the configuration again.
         """
         self._config_path = config_path
-        self._config: SandroidConfig | None = None
+        self._config: SandroidConfig | None = config
         self._adb: Adb | None = None
         self._toolbox: type[Toolbox] | None = None
         self._state = AnalysisStateEnum.IDLE
@@ -189,14 +196,18 @@ class SandroidHeadlessAPI(SandroidAPI):
             CommandResult indicating success or failure with details
         """
         try:
-            # Load configuration
-            from sandroid.config import ConfigLoader
+            # Load configuration -- unless the caller already supplied one
+            # (the CLI passes its fully-resolved config incl. --config /
+            # --environment / CLI overrides; reloading here would silently
+            # drop them, e.g. reporting the default AVD name).
+            if self._config is None:
+                from sandroid.config import ConfigLoader
 
-            loader = ConfigLoader()
-            if self._config_path:
-                self._config = loader.load(config_file=str(self._config_path))
-            else:
-                self._config = loader.load()
+                loader = ConfigLoader()
+                if self._config_path:
+                    self._config = loader.load(config_file=str(self._config_path))
+                else:
+                    self._config = loader.load()
 
             # Import and initialize core components
             from sandroid.core.adb import Adb
@@ -352,6 +363,7 @@ class SandroidHeadlessAPI(SandroidAPI):
                     track_deleted=track_deleted,
                     compute_hashes=compute_hashes,
                     current_run_setter=_set_current_run,
+                    capture_network=capture_network,
                     **kwargs,
                 )
             elif mode == AnalysisMode.SECURITY:
