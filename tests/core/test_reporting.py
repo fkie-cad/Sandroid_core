@@ -490,6 +490,86 @@ class TestPdf:
         assert out == tmp_path / run_report.DEFAULT_PDF_NAME
         assert out.read_bytes()[:5] == b"%PDF-"
 
+    def test_huge_diffs_never_exceed_a_page(self, tmp_path, clean_env):
+        """P2-H3: the Wikipedia run's PDF failed with a 15718 pt table row.
+
+        Shape taken from the real bundle: app_icons.db has 5 diff lines of up
+        to 26,286 characters (icon BLOBs), wikipedia.db a 53-line diff.
+        """
+        data = _results()
+        blob_lines = [
+            f"[INSERT] Table [icons] row [{i},'pkg',x'{'89504e47' * 3300}']"
+            for i in range(5)
+        ]
+        wiki_lines = [
+            f"[INSERT] Table [Category] row [{i},2026,11,'Category:Example "
+            f"category number {i} with a long name','en',1] has been added"
+            for i in range(53)
+        ]
+        many_lines = [f"Updated attribute: /root/pkg[{i}] to 'x'" for i in range(260)]
+        data["Changed Files"] = [
+            {"/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db": blob_lines},
+            {"/data/data/org.wikipedia/databases/wikipedia.db": wiki_lines},
+            {"/data/system/users/0/package-restrictions.xml": many_lines},
+        ]
+        data["Network"] = ["x" * 50_000]
+        (tmp_path / "sandroid.json").write_text(json.dumps(data))
+
+        report = pdf_report.PDFReport(
+            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
+        )
+        assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
+        assert report.degraded_sections == []
+        texts = "\n".join(_paragraph_texts(report.elements))
+        # All 53 wikipedia.db lines are in the report (continuation rows).
+        assert "Category:Example category number 52" in texts
+        assert "continued, part 2/" in texts
+        # Long lines and over-long diffs are shortened, visibly.
+        assert "more characters]" in texts
+        assert "60 more line(s) not shown — see sandroid.json / raw/" in texts
+
+    def test_cell_paragraph_height_is_bounded(self):
+        style = pdf_report.ParagraphStyle("t", fontName="Helvetica", fontSize=7.5, leading=9.5)
+        para = pdf_report.bounded_lines_paragraph(["word " * 4000] * 30, style, 260)
+        assert para.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT
+        cells = pdf_report.split_lines_into_cells(["y " * 300] * 300, style, 260)
+        assert all(c.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT for c in cells)
+        assert "100 more line(s) not shown" in cells[-1].text
+
+    def test_unlayoutable_section_degrades_instead_of_failing(
+        self, tmp_path, clean_env, monkeypatch
+    ):
+        """A section that cannot be laid out is replaced by a note."""
+
+        def too_tall(self, key, title=None):
+            self.sectionTitle(title or key)
+            if key == "Processes":  # ReportLab drawing error (negative width)
+                self.elements.append(pdf_report.Table([[pdf_report.Spacer(10, 9)]]))
+            else:  # LayoutError: one row taller than a page
+                self.elements.append(
+                    pdf_report.Table([[pdf_report.Spacer(10, 5000)]], colWidths=[100])
+                )
+
+        def broken(self):
+            raise ValueError("bad data")
+
+        monkeypatch.setattr(pdf_report.PDFReport, "generalTableMaker", too_tall)
+        monkeypatch.setattr(pdf_report.PDFReport, "APKTableMaker", broken)
+        (tmp_path / "sandroid.json").write_text(json.dumps(_results()))
+        report = pdf_report.PDFReport(
+            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
+        )
+        assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
+        titles = {t for t, _ in report.degraded_sections}
+        assert "APKs & Hashes" in titles
+        assert "New Files" in titles
+        assert "Processes" in titles
+        assert any("layout error" in r for _, r in report.degraded_sections)
+        texts = "\n".join(_paragraph_texts(report.elements))
+        assert "could not be laid out in the PDF" in texts
+        # Unaffected sections are still there.
+        assert "GroundTruth.db" in texts
+
     def test_find_results_json(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             pdf_report.find_results_json(tmp_path)
