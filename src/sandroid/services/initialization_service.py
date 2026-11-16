@@ -138,25 +138,50 @@ class InitializationService:
 
     def __init__(
         self,
-        base_path: str | Path = "results",
+        base_path: str | Path | None = None,
         folder_structure: FolderStructure | None = None,
         event_bus: EventBusProtocol | None = None,
     ):
         """Initialize InitializationService.
 
         Args:
-            base_path: Base directory for results (default: "results").
+            base_path: Base directory for results. Default (None): the
+                configured ``paths.results_path`` (resolved when a session is
+                created), falling back to ``./results``. Session folders and
+                run bundles (``<results_path>/runs/``) thus share one root.
             folder_structure: Custom folder structure configuration.
             event_bus: Optional event bus for state change notifications.
         """
         self._event_bus = event_bus
         self._logger = logger
         self._lock = threading.RLock()
-        self._base_path = Path(base_path)
+        self._explicit_base_path = base_path is not None
+        self._base_path = Path(base_path) if base_path is not None else Path("results")
         self._folder_structure = folder_structure or FolderStructure()
         self._current_session: SessionPaths | None = None
         self._file_handler: logging.FileHandler | None = None
         self._error_handler: logging.FileHandler | None = None
+
+    @staticmethod
+    def _configured_results_root() -> Path:
+        """Return the absolute configured results root (``paths.results_path``).
+
+        Prefers the config the CLI loaded (``Toolbox.config``), then the
+        ``get_config()`` singleton, then ``./results``.
+        """
+        configured = None
+        try:
+            from sandroid.core.toolbox import Toolbox
+
+            cfg = getattr(Toolbox, "config", None)
+            if cfg is None:
+                from sandroid.config import get_config
+
+                cfg = get_config()
+            configured = cfg.paths.results_path
+        except Exception as e:  # config unavailable -> default below
+            logger.debug(f"Configured results_path unavailable: {e}")
+        return Path(configured or "results").expanduser().resolve()
 
     def create_session(
         self,
@@ -182,7 +207,9 @@ class InitializationService:
             if timestamp is None:
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-            # Create session path
+            # Create session path (under the configured results_path)
+            if not self._explicit_base_path:
+                self._base_path = self._configured_results_root()
             session_path = self._base_path / timestamp
             session_path.mkdir(parents=True, exist_ok=True)
 
@@ -825,7 +852,7 @@ class InitializationService:
         parser.add_argument(
             "--hash",
             action="store_true",
-            help="Create before/after md5 hashes of all changed and new files and save them to hashes.json",
+            help="Create before/after MD5 + SHA-256 hashes of all changed and new files and save them to hashes.json",
         )
         parser.add_argument(
             "--apk",
