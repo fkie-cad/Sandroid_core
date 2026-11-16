@@ -1582,7 +1582,7 @@ class SandroidTUI(App):
             return True
         if self._active_device() is None:
             self.notify(
-                "No device connected. Press [b]D[/b] (Shift+D) to pick or start one.",
+                "No device connected. Press [b]⇧D[/b] to pick or start one.",
                 title=f"Cannot {what}",
                 severity="error",
             )

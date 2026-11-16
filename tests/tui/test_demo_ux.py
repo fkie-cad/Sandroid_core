@@ -272,3 +272,62 @@ async def test_files_subtabs_cycle_past_watchlist() -> None:
             visited.append(app.screen.query_one("#files-body").current)
             assert type(app.focused).__name__ != "_AddPathInput"
         assert len(set(visited)) == 3
+
+
+# --------------------------------------------------------------------------
+# Record settings / recording modal
+# --------------------------------------------------------------------------
+
+
+async def _open_record_settings(app, pilot, monkeypatch) -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
+    await _boot(app, pilot)
+    await pilot.press("r")
+    await _settle(pilot)
+    assert type(app.screen).__name__ == "RecordSettingsModal"
+
+
+async def test_record_settings_buttons_have_visible_labels(monkeypatch) -> None:
+    from textual.widgets import Button
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _open_record_settings(app, pilot, monkeypatch)
+        for button in app.screen.query(Button):
+            # Textual's tall default borders used to eat the only row of the
+            # 1-line -secondary button, leaving a blank bar.
+            assert button.content_region.height >= 1, button.id
+
+
+async def test_record_settings_esc_aborts_recording(monkeypatch) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _open_record_settings(app, pilot, monkeypatch)
+        footer_text = str(app.screen.query_one("KeyHintFooter").render())
+        assert "Esc=Cancel (nothing recorded)" in footer_text
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert not app._recording_controller.is_recording()
+
+
+async def test_recording_modal_footer_says_esc_stops_and_saves() -> None:
+    from textual.app import App
+
+    from sandroid.tui.modals.recording_modal import RecordingModal
+
+    app = App()
+    async with app.run_test() as pilot:
+        modal = RecordingModal()
+        await app.push_screen(modal)
+        await pilot.pause()
+        footer = modal.query_one("KeyHintFooter")
+        assert "Esc=Cancel" in str(footer.render())
+        modal.is_recording = True
+        await pilot.pause()
+        assert "Esc/Enter=Stop & save" in str(footer.render())
+        assert str(modal.query_one("#btn-cancel").label) == "Discard"
+        modal.is_recording = False  # don't trigger a real stop on teardown
+        await pilot.pause()
