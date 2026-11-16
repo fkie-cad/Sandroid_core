@@ -24,6 +24,9 @@ PROBE_RETRY_COOLDOWN_SECONDS = 30.0
 #: name for emulators, model for physical devices), or ``None`` while no
 #: device has been activated -- then config ``emulator.device_name`` is used.
 _active_device_name: str | None = None
+#: Session device name before the first device was activated (the config
+#: value), restored by :meth:`DeviceManager.reset`.
+_configured_device_name: str | None = None
 
 
 def resolve_device_name(device: Device) -> str | None:
@@ -110,8 +113,22 @@ class DeviceManager:
 
     @classmethod
     def reset(cls) -> None:
-        """Reset the singleton instance (primarily for testing)."""
+        """Reset the singleton instance (primarily for testing).
+
+        Also forgets the recorded device name and restores the configured
+        one in the session state (see ``_sync_session_device_name``).
+        """
+        global _active_device_name, _configured_device_name
         cls._instance = None
+        if _active_device_name is not None and _configured_device_name is not None:
+            try:
+                from sandroid.services import get_session_state_service
+
+                get_session_state_service().device_name = _configured_device_name
+            except Exception:
+                pass
+        _active_device_name = None
+        _configured_device_name = None
 
     def refresh_devices(self, *, auto_select: bool = True) -> list[Device]:
         """Refresh the list of connected devices from ADB.
@@ -549,15 +566,18 @@ class DeviceManager:
         sandroid.json / reports named the wrong device and the snapshot-path
         check looked in the wrong AVD folder.
         """
-        global _active_device_name
+        global _active_device_name, _configured_device_name
         name = resolve_device_name(device)
         if not name:
             return
-        _active_device_name = name
         try:
             from sandroid.services import get_session_state_service
 
-            get_session_state_service().device_name = name
+            state = get_session_state_service()
+            if _active_device_name is None:
+                _configured_device_name = state.device_name
+            _active_device_name = name
+            state.device_name = name
         except Exception as e:
             logger.debug(f"Could not record device name {name!r}: {e}")
 

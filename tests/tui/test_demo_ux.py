@@ -544,6 +544,7 @@ def test_activating_device_records_its_avd_name(monkeypatch) -> None:
     )
     monkeypatch.setattr(Toolbox, "switch_device_folder", staticmethod(lambda n: None))
     monkeypatch.setattr(dm_mod, "_active_device_name", None)
+    monkeypatch.setattr(dm_mod, "_configured_device_name", None)
     state = get_session_state_service()
     monkeypatch.setattr(state, "_device_name", "Pixel_6_Pro_API_31")
 
