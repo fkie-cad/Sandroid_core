@@ -763,13 +763,27 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
     def _refresh_zygote_status(self) -> None:
         """Refresh and display Zygote injection status."""
-        self._zygote_status = self._ca_manager.check_zygote_injection_status()
+        try:
+            selected = self._get_selected_ca_path()
+        except Exception:
+            selected = None
+        self._zygote_status = self._ca_manager.check_zygote_injection_status(selected)
         status_widget = self.query_one("#zygote-status", Static)
 
         if self._zygote_status.injected:
+            where = self._zygote_status.location or "trust store"
+            how = (
+                "fingerprint match"
+                if self._zygote_status.fingerprint_verified
+                else "hash match"
+            )
             status_widget.update(
-                f"[green]●[/green] CA verified in Zygote namespace "
-                f"(hash: {self._zygote_status.cert_hash})"
+                f"[green]●[/green] CA in trust store {where} "
+                f"(hash: {self._zygote_status.cert_hash}, {how})"
+            )
+        elif self._zygote_status.error_message:
+            status_widget.update(
+                f"[yellow]●[/yellow] {self._zygote_status.error_message}"
             )
         else:
             pid_info = ""

@@ -215,12 +215,38 @@ class DeviceController:
 
             # No devices connected - offer to start an AVD
             logger.info("No devices connected on startup")
+            explicit = getattr(dm, "preferred_serial", lambda: None)()
+            if explicit:
+                self._report_requested_device_missing(dm, explicit)
             self.offer_avd_start()
             return False
         except Exception as e:
             logger.error(f"Error checking devices on startup: {e}")
             self._log_error(f"Error checking devices: {e}")
             return False
+
+    def _report_requested_device_missing(self, dm: Any, serial: str) -> None:
+        """Say clearly that the requested ``--serial`` device is unusable.
+
+        Nothing is selected instead (no silent fallback to another device);
+        the user can start the AVD or pick a device with the selector.
+        """
+        try:
+            from sandroid.core.initializer import describe_device_problem
+
+            problem = describe_device_problem(dm)
+        except Exception:
+            problem = None
+        problem = problem or f"Requested device {serial} is not connected"
+        msg = (
+            f"{problem}. No device selected -- nothing will run on another "
+            "device. Start it, or choose one with the device selector."
+        )
+        logger.error(msg)
+        try:
+            self._call_from_thread(self._log_error, msg)
+        except Exception:
+            logger.debug("Could not show the device error in the UI", exc_info=True)
 
     def _resolve_startup_device_selection(self, dm: Any, devices: list) -> None:
         """Resolve device selection at startup, prompting when 2+ are ready.
@@ -247,8 +273,11 @@ class DeviceController:
             ready_devices = [d for d in devices if d.state == "device"]
             explicit = getattr(dm, "preferred_serial", lambda: None)()
             if explicit or len(ready_devices) < 2 or not self._push_modal:
-                # auto_select_device() honours --serial / ANDROID_SERIAL.
+                # auto_select_device() honours --serial / ANDROID_SERIAL and
+                # never falls back to another device.
                 dm.auto_select_device()
+                if explicit and dm.active_device is None:
+                    self._report_requested_device_missing(dm, explicit)
                 return
 
             from sandroid.tui.modals import DeviceSelectionModal

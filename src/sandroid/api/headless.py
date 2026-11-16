@@ -33,6 +33,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from sandroid.core.exceptions import DeviceNotAvailableError
+
 from .analysis_runners import (
     run_forensic_analysis,
     run_malware_analysis,
@@ -219,7 +221,10 @@ class SandroidHeadlessAPI(SandroidAPI):
 
             # Toolbox.config, configured adb path, --serial/ANDROID_SERIAL
             # device pinning, Adb.init() and Toolbox.init() -- in that order.
-            initialize_core(self._config)
+            # require=True: fail fast (before any session folder, snapshot or
+            # FridaManager) when the requested serial is not connected and
+            # online, or no device is available at all.
+            initialize_core(self._config, require=True)
             self._adb = Adb
 
             # Initialize session files
@@ -254,6 +259,13 @@ class SandroidHeadlessAPI(SandroidAPI):
                 },
             )
 
+        except DeviceNotAvailableError as e:
+            logger.error(f"Headless API: {e}")
+            return CommandResult(
+                success=False,
+                message="No usable device",
+                error=str(e),
+            )
         except Exception as e:
             logger.exception("Failed to initialize headless API")
             return CommandResult(
@@ -298,15 +310,25 @@ class SandroidHeadlessAPI(SandroidAPI):
     # Extended Analysis Methods (headless-specific)
     # =========================================================================
 
+    @staticmethod
+    def _require_device() -> None:
+        """Raise ``DeviceNotAvailableError`` unless the selected device is usable.
+
+        A run without a device must not produce (empty) evidence files.
+        """
+        from sandroid.core.initializer import require_device
+
+        require_device()
+
     @require_initialized
     async def run_analysis(
         self,
         mode: AnalysisMode,
         package: str | None = None,
         runs: int = 2,
-        capture_network: bool = False,
-        compute_hashes: bool = False,
-        track_deleted: bool = False,
+        capture_network: bool | None = None,
+        compute_hashes: bool | None = None,
+        track_deleted: bool | None = None,
         apk_path: str | None = None,
         output_file: str | None = None,
         **kwargs: Any,
@@ -320,12 +342,16 @@ class SandroidHeadlessAPI(SandroidAPI):
             mode: Analysis mode (FORENSIC, MALWARE, or SECURITY)
             package: Target package name (required for MALWARE mode)
             runs: Number of analysis runs (minimum 2 for noise detection)
-            capture_network: Enable network traffic capture
-            compute_hashes: Compute MD5 hashes for changed files
-            track_deleted: Track deleted files during analysis
+            capture_network: Enable network traffic capture.
+            compute_hashes: Compute MD5 hashes for changed files.
+            track_deleted: Track deleted files during analysis.
             apk_path: Path to APK file (required for SECURITY mode)
             output_file: Optional output file path for results
             **kwargs: Additional mode-specific options
+
+        Toggles left at ``None`` (and ``monitor_processes``, ``dry_run``, ...
+        in ``kwargs``) follow the ``[analysis]`` configuration; see
+        :func:`~sandroid.api.analysis_runners.resolve_analysis_config`.
 
         Returns:
             JSON-serializable dictionary with analysis results
@@ -333,7 +359,11 @@ class SandroidHeadlessAPI(SandroidAPI):
         Raises:
             ValueError: If required parameters are missing for the mode
             RuntimeError: If API not initialized
+            DeviceNotAvailableError: Malware/forensic mode without a usable
+                device (checked before anything is captured or written).
         """
+        if mode in (AnalysisMode.MALWARE, AnalysisMode.FORENSIC):
+            self._require_device()
         self._state = AnalysisStateEnum.RUNNING
         self._analysis_start_time = datetime.now()
         self._current_run = 0

@@ -59,7 +59,11 @@ class Fridump:
     @classmethod
     def attach_to_app(cls, pid: int) -> bool:
         try:
-            cls.process = frida.get_usb_device().attach(pid)
+            from sandroid.services.frida_device_manager import (
+                get_selected_frida_device,
+            )
+
+            cls.process = get_selected_frida_device().attach(pid)
         except Exception:
             logger.error("Can't connect to App. Have you connected the device?")
             return False

@@ -255,9 +255,9 @@ async def _run_single_analysis(
                 mode=analysis_mode,
                 apk_path=package,
                 runs=runs,
-                capture_network=network,
-                compute_hashes=hash_files,
-                track_deleted=show_deleted,
+                capture_network=network or None,
+                compute_hashes=hash_files or None,
+                track_deleted=show_deleted or None,
                 output_file=output_file,
             )
         else:
@@ -265,9 +265,9 @@ async def _run_single_analysis(
                 mode=analysis_mode,
                 package=package,
                 runs=runs,
-                capture_network=network,
-                compute_hashes=hash_files,
-                track_deleted=show_deleted,
+                capture_network=network or None,
+                compute_hashes=hash_files or None,
+                track_deleted=show_deleted or None,
                 output_file=output_file,
                 **extra,
             )
@@ -333,7 +333,7 @@ async def _run_batch_analysis(
 
     batch_mode = AnalysisMode(batch_cfg.get("mode", analysis_mode.value))
     batch_runs = batch_cfg.get("runs", runs)
-    batch_network = batch_cfg.get("capture_network", network)
+    batch_network = batch_cfg.get("capture_network", network or None)
     output_dir = batch_cfg.get("output_dir", "batch_results")
 
     console.print(

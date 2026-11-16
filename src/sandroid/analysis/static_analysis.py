@@ -10,6 +10,7 @@ from sandroid.core.adb_utils import (
     format_adb_error,
     is_adb_error_actionable,
     log_adb_result,
+    quote_host_arg,
 )
 from sandroid.core.console import SandroidConsole
 from sandroid.core.events.events import AnalysisCompleted, TaskOutput
@@ -313,7 +314,7 @@ class StaticAnalysis(DataGatherBase):
 
         # Pull APK from device
         pull_stdout, pull_stderr = self._send_adb_command(
-            f"pull {device_apk_path} {local_apk_path}"
+            f"pull {quote_host_arg(device_apk_path)} {quote_host_arg(str(local_apk_path))}"
         )
         log_adb_result(f"pull {device_apk_path}", pull_stdout, pull_stderr)
         if pull_stderr and is_adb_error_actionable(pull_stderr):

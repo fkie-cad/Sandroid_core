@@ -38,7 +38,7 @@ from sandroid.services.forensic_service_types import (
 from sandroid.services.forensic_timeline import ForensicTimeline
 from sandroid.services.forensic_utils import (
     DIR_PATTERN,
-    TIME_PATTERN,
+    LS_FULL_TIME_ENTRY,
     get_parent_db_path,
     is_wal_or_journal,
 )
@@ -639,6 +639,8 @@ class ForensicService:
 
         Parses the output of `ls -ltRAp --full-time` and extracts file paths
         with their timestamps. Skips directories, symlinks, and unparseable lines.
+        Everything after the timestamp/time-zone columns is the file name, so
+        names containing spaces (``Web Data``) are kept whole.
 
         Args:
             filesystem: Raw output from the `ls` command.
@@ -650,7 +652,7 @@ class ForensicService:
         current_dir = ""
 
         for line in filesystem.splitlines():
-            match = TIME_PATTERN.search(line)
+            match = LS_FULL_TIME_ENTRY.search(line)
 
             if match is None:
                 dir_match = DIR_PATTERN.search(line)
@@ -658,16 +660,16 @@ class ForensicService:
                     current_dir = dir_match.string[0:-1] + "/"
                 continue
 
-            # Skip directories and symlinks
-            if line[-1] == "/" or " -> " in line:
+            # Skip directories (``-p`` appends "/") and symlinks ("l" type)
+            if line.endswith("/") or line.startswith("l"):
                 continue
 
-            words = list(filter(None, line.split(" ")))
-            if len(words) < 9:
+            # perms, links, owner, group, size precede the timestamp.
+            if len(line[: match.start()].split()) < 5:
                 continue
 
-            filename = words[8]
-            timestamp_str = f"{words[5]} {words[6]} {words[7]}"
+            filename = match.group("name")
+            timestamp_str = match.group("timestamp")
 
             try:
                 parsed_ts = dp.parse(timestamp_str)

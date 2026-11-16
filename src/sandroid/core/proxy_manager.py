@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 
 from sandroid.core.adb import Adb
+from sandroid.core.adb_utils import quote_host_arg
 
 # Import config with fallback for standalone usage
 try:
@@ -181,6 +182,52 @@ class ZygoteStatus:
     zygote64_pid: int | None
     zygote_pid: int | None
     error_message: str | None = None
+    #: Trust-store dir the CA was found in (APEX or system cacerts).
+    location: str | None = None
+    #: True when the device copy's SHA-256 fingerprint matched the host CA
+    #: (False = matched by subject-hash file name only).
+    fingerprint_verified: bool = False
+
+
+_PEM_CERT_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----\s*(.+?)\s*-----END CERTIFICATE-----", re.S
+)
+
+
+def _pem_der_certs(text: str) -> list[bytes]:
+    """DER bytes of every PEM ``CERTIFICATE`` block in ``text``.
+
+    Android's cacerts files are PEM, often preceded by ``openssl x509 -text``
+    output, so the blocks are searched rather than parsed from the start.
+    """
+    import base64
+    import binascii
+
+    out: list[bytes] = []
+    for body in _PEM_CERT_RE.findall(text or ""):
+        try:
+            out.append(base64.b64decode("".join(body.split()), validate=True))
+        except (binascii.Error, ValueError):
+            continue
+    return out
+
+
+def _subject_hash_old(der: bytes) -> str | None:
+    """OpenSSL ``-subject_hash_old`` (the cacerts file name) of a DER cert.
+
+    MD5 over the DER-encoded subject, first four bytes read little-endian.
+    Returns None when ``cryptography`` is unavailable.
+    """
+    try:
+        from cryptography import x509
+    except ImportError:  # pragma: no cover - cryptography ships with mitmproxy
+        return None
+    try:
+        subject = x509.load_der_x509_certificate(der).subject.public_bytes()
+    except Exception:
+        return None
+    digest = hashlib.md5(subject).digest()
+    return f"{int.from_bytes(digest[:4], 'little'):08x}"
 
 
 class InjectionStrategy(Enum):
@@ -523,7 +570,9 @@ class CAManager:
                 local_path = der_path
 
             # Push to device
-            Adb.send_adb_command(f"push {local_path} {self.DEVICE_CERT_PATH}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(local_path))} {self.DEVICE_CERT_PATH}"
+            )
 
             # Verify
             check_stdout, check_stderr = Adb.send_adb_command(
@@ -582,7 +631,9 @@ class CAManager:
                     return False, f"OpenSSL DER→PEM conversion error: {error}"
                 push_path = pem_path
 
-            Adb.send_adb_command(f"push {push_path} {self.DEVICE_CERT_PATH}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(push_path))} {self.DEVICE_CERT_PATH}"
+            )
 
             check_stdout, _ = Adb.send_adb_command(
                 f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
@@ -764,7 +815,9 @@ class CAManager:
         """Pull cert from device and compute its hash."""
         try:
             local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.pem"
-            Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
+            Adb.send_adb_command(
+                f"pull {self.DEVICE_CERT_PATH} {quote_host_arg(str(local_temp))}"
+            )
             if local_temp.exists():
                 cert_hash = self.get_cert_hash(local_temp)
                 local_temp.unlink()
@@ -1051,7 +1104,9 @@ class CAManager:
                 for base in ["/data/local", "/data/local/tmp"]:
                     target = f"{base}/{variant}"
                     try:
-                        Adb.send_adb_command(f"push {local_tmp} {target}")
+                        Adb.send_adb_command(
+                            f"push {quote_host_arg(str(local_tmp))} {quote_host_arg(str(target))}"
+                        )
                         Adb.send_adb_command(
                             f"shell {self._root_cmd(f'chmod 744 {target}')}"
                         )
@@ -1078,17 +1133,171 @@ class CAManager:
             logger.error(f"Chrome CT bypass failed: {e}")
             return False, f"Chrome CT bypass failed: {e}"
 
-    def check_zygote_injection_status(self) -> ZygoteStatus:
-        """Check whether the CA cert is present inside Zygote's mount namespace.
+    def cert_identity(self, cert_path: Path) -> tuple[str | None, str | None]:
+        """Return ``(subject_hash_old, sha256_fingerprint)`` of a host cert.
 
-        Verifies by actually looking inside the namespace, not just checking
-        the staging path.
+        Reads PEM or DER. The hash names the file in the Android trust store
+        (``<hash>.0``); the fingerprint tells two CAs with the same subject
+        apart (every mitmproxy CA is ``CN=mitmproxy`` → ``c8750f0d``).
+        Falls back to ``openssl`` for the hash. Never raises.
+        """
+        try:
+            raw = Path(cert_path).read_bytes()
+        except OSError:
+            return None, None
+        ders = _pem_der_certs(raw.decode("latin-1"))
+        der = ders[0] if ders else raw
+        fingerprint = hashlib.sha256(der).hexdigest()
+        cert_hash = _subject_hash_old(der) or self.get_cert_hash(Path(cert_path))
+        if not cert_hash:
+            return None, None
+        return cert_hash, fingerprint
+
+    def _sandroid_ca_path(self) -> Path | None:
+        """The host mitmproxy CA Sandroid injects (``~/.mitmproxy``), if any."""
+        for info in self.detect_ca_certificates():
+            if info.source == CASource.MITMPROXY:
+                return info.path
+        return None
+
+    def _trust_store_dirs(self) -> list[str]:
+        """Trust-store dirs apps read on this device, most relevant first.
+
+        API 34+ reads the APEX conscrypt cacerts; API 29-33 reads
+        ``/system/etc/security/cacerts``. Same decision as the injection
+        (``determine_injection_strategy``), so status and injection agree.
+        """
+        try:
+            strategy, _ = self.determine_injection_strategy()
+        except Exception:
+            return [self.APEX_CA_PATH, self.SYSTEM_CA_PATH]
+        if strategy == InjectionStrategy.BIND_MOUNT:
+            return [self.APEX_CA_PATH]
+        return [self.SYSTEM_CA_PATH]
+
+    def _read_device_cert(self, path: str, ns_pid: int | None = None) -> str | None:
+        """``cat`` a trust-store file; inside ``ns_pid``'s mount ns if given.
+
+        Without ``ns_pid`` this needs no root (cacerts are world-readable).
+        Returns None when the file is missing or unreadable.
+        """
+        if ns_pid is None:
+            cmd = f"shell cat {path}"
+        else:
+            inner = f"nsenter --mount=/proc/{ns_pid}/ns/mnt -- cat {path}"
+            cmd = f"shell {self._root_cmd(inner)}"
+        try:
+            stdout, _ = Adb.send_adb_command(cmd)
+        except Exception:
+            return None
+        stdout = stdout or ""
+        if not stdout.strip() or "No such file" in stdout:
+            return None
+        return stdout
+
+    @staticmethod
+    def _fingerprint_verdict(content: str, fingerprint: str | None) -> bool | None:
+        """True/False = device file is/isn't our CA; None = can't tell."""
+        ders = _pem_der_certs(content)
+        if not ders or not fingerprint:
+            return None
+        return any(hashlib.sha256(d).hexdigest() == fingerprint for d in ders)
+
+    def check_zygote_injection_status(
+        self, cert_path: Path | None = None
+    ) -> ZygoteStatus:
+        """Check whether our CA is in the trust store apps actually use.
+
+        Looks for ``<subject_hash>.0`` of Sandroid's mitmproxy CA (or
+        ``cert_path``) in the APEX conscrypt cacerts (API 34+) or the system
+        cacerts (API 29-33) and compares the SHA-256 fingerprint of the device
+        copy with the host CA. This recognises an injection (bind mount /
+        tmpfs overlay) that is still active from an earlier session, without
+        relying on the staging file or ``su``. When the device's own view
+        lacks it, Zygote's mount namespace is checked via ``nsenter`` (root).
+
+        Falls back to the hash of the on-device staging cert when no host CA
+        is known (legacy behaviour).
 
         Returns:
             ZygoteStatus with current state.
         """
         zygote_pid, zygote64_pid = self.get_zygote_pids()
         target_pid = zygote64_pid or zygote_pid
+
+        ref = cert_path if cert_path is not None else self._sandroid_ca_path()
+        cert_hash = fingerprint = None
+        if ref is not None and Path(ref).exists():
+            cert_hash, fingerprint = self.cert_identity(Path(ref))
+        if cert_hash:
+            return self._check_trust_store(
+                cert_hash, fingerprint, zygote_pid, zygote64_pid, target_pid
+            )
+        return self._check_staging_cert_status(zygote_pid, zygote64_pid, target_pid)
+
+    def _check_trust_store(
+        self,
+        cert_hash: str,
+        fingerprint: str | None,
+        zygote_pid: int | None,
+        zygote64_pid: int | None,
+        target_pid: int | None,
+    ) -> ZygoteStatus:
+        """Look up ``<cert_hash>.0`` in the trust store(s); see the caller."""
+        cert_name = f"{cert_hash}.0"
+        dirs = self._trust_store_dirs()
+        mismatch = False
+
+        def _scan(ns_pid: int | None) -> tuple[str, bool] | None:
+            nonlocal mismatch
+            for d in dirs:
+                content = self._read_device_cert(f"{d}/{cert_name}", ns_pid)
+                if content is None:
+                    continue
+                verdict = self._fingerprint_verdict(content, fingerprint)
+                if verdict is False:
+                    mismatch = True
+                    continue
+                return d, bool(verdict)
+            return None
+
+        found = _scan(None)
+        if found is None and target_pid and self._check_root_access():
+            found = _scan(target_pid)
+
+        if found is not None:
+            location, verified = found
+            return ZygoteStatus(
+                injected=True,
+                cert_hash=cert_hash,
+                zygote_pid=zygote_pid,
+                zygote64_pid=zygote64_pid,
+                location=location,
+                fingerprint_verified=verified,
+            )
+        error = None
+        if mismatch:
+            error = (
+                f"{cert_name} in the trust store is a different CA (same "
+                "subject, other key — another mitmproxy install?); re-inject"
+            )
+        return ZygoteStatus(
+            injected=False,
+            cert_hash=cert_hash,
+            zygote_pid=zygote_pid,
+            zygote64_pid=zygote64_pid,
+            error_message=error,
+        )
+
+    def _check_staging_cert_status(
+        self,
+        zygote_pid: int | None,
+        zygote64_pid: int | None,
+        target_pid: int | None,
+    ) -> ZygoteStatus:
+        """Legacy check keyed on the on-device staging cert (no host CA)."""
+        if target_pid:
+            self._check_root_access()
 
         # Check if cert exists on device
         try:
@@ -1839,7 +2048,9 @@ class FocusManager:
         dst = self._binary_dst
         try:
             Adb.send_adb_command(f"shell {self._ca._root_cmd(f'rm -f {dst}')}")
-            Adb.send_adb_command(f"push {cached} {dst}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(cached))} {quote_host_arg(str(dst))}"
+            )
             check_stdout, check_stderr = Adb.send_adb_command(f"shell ls {dst}")
             if dst not in (check_stdout or ""):
                 detail = check_stderr or check_stdout or "file not found after push"

@@ -25,11 +25,13 @@ Usage:
 import hashlib
 import logging
 import os
+import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from sandroid.core.adb_utils import quote_host_arg
 from sandroid.services.protocols import EventBusProtocol
 
 # Import config with fallback for standalone usage
@@ -39,6 +41,35 @@ except ImportError:
     get_config = None
 
 logger = logging.getLogger(__name__)
+
+
+def pull_command(remote_path: str, local_path: str | Path) -> str:
+    """``adb pull`` command line with both paths quoted for the host shell.
+
+    ``Adb.send_adb_command`` runs through the host shell (``shell=True``),
+    so unquoted paths with spaces (WebView's ``Session Storage``,
+    ``Shared Dictionary``, ``Web Data``) were split into several arguments.
+    ``adb pull`` hands the device path to adbd's sync service verbatim (no
+    device shell), so host quoting is all it needs.
+
+    Args:
+        remote_path: Path on the device, unquoted.
+        local_path: Host destination, unquoted.
+
+    Returns:
+        The ``pull ...`` command for ``send_adb_command``.
+    """
+    return f"pull {quote_host_arg(remote_path)} {quote_host_arg(str(local_path))}"
+
+
+def device_shell_arg(path: str) -> str:
+    """Quote ``path`` for an ``adb shell`` command run via the host shell.
+
+    ``adb shell`` joins its arguments and hands them to the *device* shell,
+    so the path is quoted for the device shell first and the result again
+    for the host shell.
+    """
+    return quote_host_arg(shlex.quote(path))
 
 
 @dataclass
@@ -201,7 +232,7 @@ class FileExtractionService:
         local_dir.mkdir(parents=True, exist_ok=True)
 
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {remote_path} {local_path}")
+        output, error = adb.send_adb_command(pull_command(remote_path, local_path))
 
         # Check for common errors in combined output
         combined = str(output) + str(error)
@@ -380,7 +411,7 @@ class FileExtractionService:
         local_dir.mkdir(parents=True, exist_ok=True)
 
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {remote_path} {local_path}")
+        output, error = adb.send_adb_command(pull_command(remote_path, local_path))
 
         # Check if file exists
         from sandroid.core.adb_utils import detect_adb_pull_error
@@ -458,7 +489,7 @@ class FileExtractionService:
 
             # List files in this directory
             output, error = adb.send_adb_command(
-                f"shell find {app_path} -type f 2>/dev/null"
+                f"shell find {device_shell_arg(app_path)} -type f 2>/dev/null"
             )
 
             if not output or "No such file" in str(output) or error:
@@ -592,7 +623,7 @@ class FileExtractionService:
         """
         adb = self._get_adb()
         output, _error = adb.send_adb_command(
-            f"shell test -f {remote_path} && echo EXISTS"
+            f"shell test -f {device_shell_arg(remote_path)} && echo EXISTS"
         )
 
         return "EXISTS" in str(output)
@@ -608,7 +639,7 @@ class FileExtractionService:
         """
         adb = self._get_adb()
         output, _error = adb.send_adb_command(
-            f"shell stat -c %s {remote_path} 2>/dev/null"
+            f"shell stat -c %s {device_shell_arg(remote_path)} 2>/dev/null"
         )
 
         try:
@@ -643,7 +674,7 @@ class FileExtractionService:
 
         # Pull the file
         adb = self._get_adb()
-        output, error = adb.send_adb_command(f"pull {file_to_pull} {target_path}")
+        output, error = adb.send_adb_command(pull_command(file_to_pull, target_path))
 
         # Handle common errors
         from sandroid.core.adb_utils import detect_adb_pull_error
@@ -793,7 +824,7 @@ class FileExtractionService:
                 )
                 apk_file = base_folder / f"{package}__{apk_name}"
 
-                adb.send_adb_command(f"pull {device_apk} {apk_file}")
+                adb.send_adb_command(pull_command(device_apk, apk_file))
 
                 if apk_file.exists():
                     self._logger.debug(f"Hashing apk {label}")

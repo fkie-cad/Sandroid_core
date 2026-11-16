@@ -281,7 +281,10 @@ class FridaSessionService:
                     self._frida_manager = FridaManager(
                         verbose=True,
                         frida_install_dst="/data/local/tmp/",
-                        device_serial=self._device_serial,
+                        device_serial=(
+                            self._device_serial
+                            or self._get_device_serial_from_manager()
+                        ),
                     )
                     self._logger.debug("FridaManager initialized")
                 except ImportError as e:
@@ -1035,7 +1038,14 @@ class FridaSessionService:
                 return dm.active_device.serial
         except Exception:
             pass  # DeviceManager not ready yet
-        return None
+        # No active device: still target the explicitly selected serial, so
+        # AndroidFridaManager fails on it instead of auto-selecting another.
+        try:
+            from sandroid.core.adb import Adb
+
+            return Adb.selected_serial()
+        except Exception:
+            return None
 
     def _publish_spawn_event(self, package: str, pid: int) -> None:
         """Publish spawn event."""

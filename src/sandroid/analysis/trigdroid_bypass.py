@@ -330,10 +330,12 @@ class TrigDroidBypass:
         if Toolbox.frida_manager:
             self.frida_device = Toolbox.frida_manager.get_frida_device()
         else:
-            # Fallback: get device directly via frida
-            import frida
+            # Fallback: the selected device (never "first USB device").
+            from sandroid.services.frida_device_manager import (
+                get_selected_frida_device,
+            )
 
-            self.frida_device = frida.get_usb_device()
+            self.frida_device = get_selected_frida_device()
 
         logger.info(
             f"TrigDroid Bypass initialized in {self.mode.upper()} mode for {self.app_package} (PID: {self.process_id})"

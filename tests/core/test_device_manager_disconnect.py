@@ -1,8 +1,9 @@
 """Unit tests for DeviceManager active-device disconnect handling.
 
 Covers the refresh_devices() disconnect path:
-- a vanished active serial nulls the active device, clears the ADB target,
-  and fires the change callback once with None;
+- a vanished active serial nulls the active device, keeps the ADB target
+  pinned to the lost serial (so no adb call goes out without ``-s``), and
+  fires the change callback once with None;
 - a normal refresh (device still listed and ready) does nothing;
 - a transient non-ready state (offline) does NOT disconnect (no flapping).
 
@@ -83,7 +84,9 @@ def test_disconnect_fires_change_callback_with_none(monkeypatch):
 
     assert dm.active_device is None
     assert calls == [None]
-    assert Adb.get_target_device() is None
+    # The target stays on the lost serial: adb calls in the gap (snapshot
+    # load) must never go out without -s and hit another device.
+    assert Adb.get_target_device() == "emulator-5554"
 
 
 def test_normal_refresh_does_not_fire_change_callback(monkeypatch):
