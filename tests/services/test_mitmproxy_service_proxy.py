@@ -375,3 +375,153 @@ def test_panel_start_sets_device_proxy_only_when_configured(panel, monkeypatch, 
     monkeypatch.setattr(p, "_arm_device", lambda: armed.append(1))
     p.action_toggle_running()
     assert armed == ([1] if auto else [])
+
+
+# ── phase 3: settle after Zygote restart / reconnect, never a stale verdict ──
+
+
+def _settle_device(adb_out, *answers):
+    """Queue (boot_completed, pm ok) answers for wait_device_settled."""
+    for boot, pm_ok in answers:
+        adb_out[0].append((boot, ""))
+        if boot == "1":
+            adb_out[0].append(
+                ("package:/system/framework-res.apk" if pm_ok else "", "")
+            )
+
+
+def test_wait_device_settled_needs_stable_package_manager(make_service, adb_out):
+    svc, _ = make_service()
+    # restarting: no boot, then pm down, then two good polls in a row.
+    _settle_device(adb_out, ("", False), ("1", False), ("1", True), ("1", True))
+    assert svc.wait_device_settled(timeout=30, poll=0)
+    assert adb_out[0] == []
+
+
+def test_wait_device_settled_times_out(make_service, adb_out, monkeypatch):
+    svc, _ = make_service()
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(ms.time, "monotonic", lambda: next(clock))
+    assert not svc.wait_device_settled(timeout=25, poll=0)
+
+
+def test_probe_after_restart_unsettled_is_inconclusive(make_service, monkeypatch):
+    svc, _ = make_service()
+    monkeypatch.setattr(svc, "wait_device_settled", lambda timeout=0: False)
+    probes = []
+    monkeypatch.setattr(svc, "probe_device_reachability", lambda h, p: probes.append(1))
+    res = svc.probe_after_device_restart("10.0.2.2", 8090)
+    assert res.inconclusive
+    assert not res.reachable
+    assert "CANNOT" not in res.detail
+    assert probes == []
+
+
+def test_probe_after_restart_retries_until_network_is_back(make_service, monkeypatch):
+    svc, _ = make_service()
+    monkeypatch.setattr(ms.time, "sleep", lambda s: None)
+    monkeypatch.setattr(svc, "wait_device_settled", lambda timeout=0: True)
+    seq = [_unreachable(), ms.ReachabilityResult(True, True, "reachable")]
+    monkeypatch.setattr(svc, "probe_device_reachability", lambda h, p: seq.pop(0))
+    assert svc.probe_after_device_restart("10.0.2.2", 8090).reachable
+    assert seq == []
+
+
+def _unreachable():
+    return ms.ReachabilityResult(False, False, "device CANNOT reach mitmproxy")
+
+
+def test_panel_unreachable_schedules_reprobe(panel, monkeypatch):
+    p, _, _, lines = panel
+    scheduled = []
+    monkeypatch.setattr(p, "_schedule_reprobe", lambda: scheduled.append(1))
+    p._apply_reachability_result(_unreachable(), "10.0.2.2:8090")
+    assert p._reach_state == "unreachable"
+    assert scheduled == [1]
+    assert sum(line.startswith("[ERROR]") for line in lines) == 1
+    # A quiet periodic re-probe that still fails neither re-logs nor stops.
+    p._apply_reachability_result(_unreachable(), "10.0.2.2:8090", None, True)
+    assert sum(line.startswith("[ERROR]") for line in lines) == 1
+    assert scheduled == [1, 1]
+    # ...and one that succeeds retracts the verdict explicitly.
+    ok = ms.ReachabilityResult(True, True, "device→mitmproxy reachable")
+    p._apply_reachability_result(ok, "10.0.2.2:8090", None, True)
+    assert p._reach_state == "ok"
+    assert "no longer applies" in lines[-1]
+
+
+def test_panel_drops_stale_probe_result(panel, monkeypatch):
+    p, _, _, lines = panel
+    monkeypatch.setattr(p, "_schedule_reprobe", lambda: None)
+    p._probe_gen = 5
+    p._apply_reachability_result(_unreachable(), "10.0.2.2:8090", 4)
+    assert p._reach_state == "unknown"
+    assert lines == []
+
+
+def test_panel_settle_probe_after_zygote_restart(panel, monkeypatch):
+    """Ctrl+N success → wait for the device to settle, then probe (no
+    immediate probe against a device without network).
+    """
+    p, _, _, _ = panel
+    kicks = []
+    monkeypatch.setattr(p, "_kick_reachability_probe", lambda **kw: kicks.append(kw))
+    monkeypatch.setattr(p, "_nudge_unpin", lambda: None)
+    monkeypatch.setattr(
+        proxy_manager.CAManager,
+        "bypass_chrome_ct",
+        lambda self, path: (False, "skipped"),
+    )
+    p._proxy_state = "ours"
+    result = proxy_manager.InjectionResult(
+        success=True,
+        message="ok",
+        strategy=proxy_manager.InjectionStrategy.BIND_MOUNT,
+        api_level=35,
+    )
+    p._apply_inject_result(result, None)
+    assert kicks == [{"settle": True, "reason": "the Zygote restart"}]
+
+
+def test_panel_settle_kick_shows_checking_not_stale(panel, monkeypatch):
+    p, _, _, lines = panel
+    import threading
+
+    monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+    p._reach_state = "unreachable"
+    p._kick_reachability_probe(settle=True, reason="the Zygote restart")
+    assert p._reach_state == "checking"
+    assert "settle" in lines[-1]
+    # Device-Proxy flows arriving meanwhile prove it reachable.
+    p._note_direct_flow("[FLOW]|t|HTTPS|200|GET|x/y|1KB|")
+    assert p._reach_state == "ok"
+
+
+def test_panel_device_reconnect_reprobes(panel, monkeypatch):
+    p, svc, _, _ = panel
+    kicks = []
+    monkeypatch.setattr(p, "_kick_reachability_probe", lambda **kw: kicks.append(kw))
+    monkeypatch.setattr(svc, "is_running", lambda: True)
+    p._proxy_state = "ours"
+    p._reach_state = "unreachable"
+    gen = p._probe_gen
+    p._handle_device_change(None)  # disconnect: the verdict no longer applies
+    assert p._reach_state == "unknown"
+    assert p._probe_gen > gen
+    assert kicks == []
+    p._handle_device_change(SimpleNamespace(serial="emulator-5556"))
+    assert kicks == [{"settle": True, "reason": "device reconnected"}]
+
+
+def test_panel_reprobe_due_only_while_unreachable(panel, monkeypatch):
+    p, svc, _, _ = panel
+    kicks = []
+    monkeypatch.setattr(p, "_kick_reachability_probe", lambda **kw: kicks.append(kw))
+    monkeypatch.setattr(svc, "is_running", lambda: True)
+    p._proxy_state = "ours"
+    p._reach_state = "ok"
+    p._reprobe_due()
+    assert kicks == []
+    p._reach_state = "unreachable"
+    p._reprobe_due()
+    assert kicks == [{"quiet": True}]

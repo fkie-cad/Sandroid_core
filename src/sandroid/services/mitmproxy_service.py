@@ -722,6 +722,16 @@ class MitmproxyState:
     last_direct_flow_at: float = 0.0
 
 
+def _not_settled_result() -> ReachabilityResult:
+    """Inconclusive verdict for a device that has not come back yet."""
+    return ReachabilityResult(
+        reachable=False,
+        flows_incremented=False,
+        detail="device has not settled yet (still restarting?)",
+        inconclusive=True,
+    )
+
+
 def _is_direct_flow_line(line: str) -> bool:
     """Whether a ``[FLOW]|`` line came in on the regular proxy listener.
 
@@ -1280,6 +1290,80 @@ class MitmproxyService:
             hint=hint,
             inconclusive=inconclusive,
         )
+
+    @staticmethod
+    def wait_device_settled(
+        timeout: float = 60.0, poll: float = 1.0, stable_polls: int = 2
+    ) -> bool:
+        """Block until the device has settled after a Zygote restart/reconnect.
+
+        Killing Zygote (CA injection) takes system_server down with it, and
+        init's ``onrestart`` for Zygote also restarts ``netd`` -- so for a
+        few seconds the device has no package manager and no routes. A
+        reachability probe fired in that window reports a false "device
+        CANNOT reach mitmproxy". The same goes for a device that just came
+        back after a disconnect.
+
+        Settled means ``sys.boot_completed == 1`` AND the package manager
+        answers (``pm path android``), seen on ``stable_polls`` consecutive
+        polls (one good poll can still come from the dying system_server).
+        Blocking: call it off the UI thread.
+
+        Returns:
+            True once settled, False when ``timeout`` passed first.
+        """
+        from sandroid.core.adb import Adb
+
+        deadline = time.monotonic() + timeout
+        good = 0
+        while True:
+            ready = False
+            try:
+                boot, _ = Adb.send_adb_command("shell getprop sys.boot_completed")
+                if (boot or "").strip() == "1":
+                    pm_out, _ = Adb.send_adb_command("shell pm path android")
+                    ready = "package:" in (pm_out or "")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("settle poll failed: %s", exc)
+            good = good + 1 if ready else 0
+            if good >= max(1, stable_polls):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll)
+
+    def probe_after_device_restart(
+        self,
+        host: str,
+        port: int,
+        *,
+        settle_timeout: float = 60.0,
+        attempts: int = 3,
+        retry_delay: float = 5.0,
+        wait_settle: bool = True,
+    ) -> ReachabilityResult:
+        """Wait for the device to settle, then probe reachability with retries.
+
+        Used after a Zygote restart (Ctrl+N) and after a device reconnect.
+        Even once the package manager answers, the default network may need a
+        few more seconds to come back, so a negative probe is retried
+        ``attempts`` times ``retry_delay`` seconds apart before it counts. A
+        device that never settles yields an ``inconclusive`` result, never a
+        "CANNOT reach" verdict. ``wait_settle=False`` skips the settle wait
+        (the caller already did it).
+
+        WARNING: blocking (up to ``settle_timeout`` + the probe retries).
+        Call this OFF the UI thread.
+        """
+        if wait_settle and not self.wait_device_settled(timeout=settle_timeout):
+            return _not_settled_result()
+        result = self.probe_device_reachability(host, port)
+        for _ in range(max(0, attempts - 1)):
+            if result.reachable or result.inconclusive:
+                break
+            time.sleep(retry_delay)
+            result = self.probe_device_reachability(host, port)
+        return result
 
     def wait_listening(self, timeout: float = 8.0) -> bool:
         """Block until our mitmweb accepts connections on its proxy port.
