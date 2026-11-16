@@ -139,6 +139,14 @@ def __getattr__(name: str):
 )
 @click.option("--report", is_flag=True, help="Generate PDF report")
 @click.option(
+    "--report-from",
+    type=click.Path(exists=True, file_okay=False),
+    metavar="DIR",
+    default=None,
+    help="(Re)generate the PDF report from an existing results folder and exit "
+    "(no device needed)",
+)
+@click.option(
     "--debug",
     is_flag=True,
     help="Enable debug/verbose mode",
@@ -302,6 +310,7 @@ def main(
     fridump: str | None,
     duration: int,
     with_fritap: str | None,
+    report_from: str | None = None,
 ) -> None:
     """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
 
@@ -315,6 +324,12 @@ def main(
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()
+
+    # --- Offline report generation (no config/device needed) ---------------
+    if report_from:
+        from .cli_modes.report import run_report_from
+
+        sys.exit(run_report_from(report_from))
 
     # --- Fresh start: remove welcome marker so first-run screen appears ---
     if fresh:
