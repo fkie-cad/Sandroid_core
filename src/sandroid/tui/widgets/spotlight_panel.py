@@ -57,6 +57,10 @@ _ACTION_CELLS = {
 
 # How often the slow fallback poll re-checks the app's PID (seconds).
 _POLL_INTERVAL = 4.0
+# While another tab is shown, poll only every Nth tick: the header's App row
+# reads the same PID and showed a dead attach PID as "running" for >= 49 s
+# after an external restart (phase 4) when the poll stopped with the tab.
+_HIDDEN_POLL_EVERY = 2
 
 
 class SpotlightPanel(Widget):
@@ -138,6 +142,7 @@ class SpotlightPanel(Widget):
         # Slow fallback poll bookkeeping.
         self._poll_timer = None
         self._poll_inflight = False
+        self._hidden_ticks = 0
         self._last_running_state: bool | None = None
         # Guard against overlapping blocking actions (spawn/kill/restart).
         self._action_inflight = False
@@ -411,12 +416,13 @@ class SpotlightPanel(Widget):
     def _poll_running_state(self) -> None:
         """Timer tick (main thread): re-check the app's PID off-thread.
 
-        No-op when nothing is selected, the Spotlight tab is not the shown
-        one, or a lifecycle action is in flight (Start/Restart/Kill own the
-        PID while they run — the poll must not clobber their set_pid with a
-        stale sample taken during the force-stop window). A single in-flight
-        guard also skips the tick if the previous worker is still running so a
-        slow ADB call can never stack up.
+        No-op when nothing is selected or a lifecycle action is in flight
+        (Start/Restart/Kill own the PID while they run — the poll must not
+        clobber their set_pid with a stale sample taken during the force-stop
+        window). While another tab is shown only every
+        ``_HIDDEN_POLL_EVERY``-th tick polls. A single in-flight guard also
+        skips the tick if the previous worker is still running so a slow ADB
+        call can never stack up.
         """
         if self._poll_inflight or self._action_inflight:
             return
@@ -424,7 +430,11 @@ class SpotlightPanel(Widget):
         if not package:
             return
         if not self._is_active_child():
-            return
+            # Hidden: still notice an app that died or was restarted outside
+            # Sandroid (the header shows this PID), at a lower rate.
+            self._hidden_ticks += 1
+            if self._hidden_ticks % _HIDDEN_POLL_EVERY:
+                return
         self._poll_inflight = True
         self.run_worker(
             functools.partial(self._poll_worker, package),

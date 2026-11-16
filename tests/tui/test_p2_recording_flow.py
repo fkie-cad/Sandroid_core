@@ -748,3 +748,31 @@ def test_drop_stale_frida_device(monkeypatch, is_lost, session, dropped):
     )
     assert drop_stale_frida_device() is dropped
     assert (jm.device is None) is dropped
+
+
+@pytest.mark.parametrize(("shown", "expected_polls"), [(True, 4), (False, 2)])
+def test_spotlight_pid_poll_keeps_running_while_tab_is_hidden(
+    monkeypatch, shown, expected_polls
+) -> None:
+    """Phase-4 5e: a dead attach PID stayed 'running' in the header while idle.
+
+    The poll stopped whenever another tab was shown; now it continues there
+    at half the rate.
+    """
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    panel = SpotlightPanel(id="spotlight-panel")
+    monkeypatch.setattr(panel, "_current_package", lambda: "org.wikipedia")
+    monkeypatch.setattr(panel, "_is_active_child", lambda: shown)
+    polls: list[str] = []
+
+    def run_worker(work, name=None, **kw):
+        polls.append(name)
+        panel._poll_inflight = False  # the worker finished
+
+    monkeypatch.setattr(panel, "run_worker", run_worker)
+
+    for _ in range(4):
+        panel._poll_running_state()
+
+    assert polls == ["spotlight_pid_poll"] * expected_polls
