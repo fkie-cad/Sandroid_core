@@ -665,6 +665,78 @@ class RecordingController:
             "noise_filter": self._current_noise_filter,
         }
 
+    @staticmethod
+    def _active_device_name() -> str | None:
+        """Name of the active device (AVD name for emulators), or None.
+
+        Also records it in the session state (``Toolbox.device_name``) when
+        that still holds another value, e.g. the hard-coded default.
+        """
+        try:
+            from sandroid.core.device_manager import (
+                DeviceManager,
+                resolve_device_name,
+            )
+
+            dm = DeviceManager.get()
+            device = dm.active_device
+            if device is None:
+                return None
+            if device.is_emulator:
+                dm.get_avd_name_for_device(device)  # cached after the first call
+            name = resolve_device_name(device)
+            if name:
+                DeviceManager._sync_session_device_name(device)
+            return name or None
+        except Exception:
+            logger.debug("Could not resolve the active device name", exc_info=True)
+            return None
+
+    def _current_device_name(self) -> str:
+        """Device name a run is recorded under.
+
+        Resolved from the active device at run time rather than trusting
+        ``Toolbox.device_name`` alone: that value starts as the hard-coded
+        session default (``Pixel_6_Pro_API_31``) and was not updated on
+        every activation path, so runs, sandroid.json and the PDF named the
+        wrong device (P2-H5). Falls back to ``Toolbox.device_name`` without
+        a device, and whenever the session does not agree with the resolved
+        name: the engine aborts a run whose ``Toolbox.device_name`` differs
+        from the configured one ("device changed mid-run").
+        """
+        toolbox = self._get_toolbox()
+        fallback = getattr(toolbox, "device_name", None) or "unknown"
+        name = self._active_device_name()
+        if name and getattr(toolbox, "device_name", None) == name:
+            return name
+        return fallback
+
+    @staticmethod
+    def _avd_dir(avd_name: str) -> str | None:
+        """Host directory of ``avd_name`` (honours ANDROID_AVD_HOME and the
+        ``path=`` redirect in ``<avd>.ini``), or None if not found.
+        """
+        from pathlib import Path
+
+        try:
+            from sandroid.config.android_env import find_existing_avd_home
+
+            home = find_existing_avd_home()
+        except Exception:
+            home = None
+        if home is None:
+            home = Path("~/.android/avd").expanduser()
+        ini = home / f"{avd_name}.ini"
+        try:
+            for line in ini.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip() == "path" and Path(value.strip()).is_dir():
+                    return value.strip()
+        except OSError:
+            pass
+        default = home / f"{avd_name}.avd"
+        return str(default) if default.is_dir() else None
+
     def _verify_snapshot(self) -> bool:
         """Verify that a snapshot exists for playback.
 
@@ -673,34 +745,17 @@ class RecordingController:
         """
         try:
             toolbox = self._get_toolbox()
-            device_name = toolbox.device_name
-            snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "tmp",
-            )
-
+            name = self._active_device_name() or getattr(toolbox, "device_name", "")
+            avd_dir = self._avd_dir(name) if name else None
+            if avd_dir is None:
+                return False
+            snapshot_path = os.path.join(avd_dir, "snapshots", "tmp")
             logger.debug(f"Looking for snapshot at: {snapshot_path}")
-
             if os.path.exists(snapshot_path):
                 return True
-
-            # Try alternative path patterns
-            alt_snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "default_boot",
-            )
-            if os.path.exists(alt_snapshot_path):
+            if os.path.exists(os.path.join(avd_dir, "snapshots", "default_boot")):
                 self._log_info("Using default_boot snapshot")
                 return True
-
         except Exception as e:
             logger.debug(f"Error checking snapshot path: {e}")
 
@@ -832,7 +887,7 @@ class RecordingController:
         from sandroid.core import run_bundle, run_history
 
         toolbox = self._get_toolbox()
-        device_name = getattr(toolbox, "device_name", None) or "unknown"
+        device_name = self._current_device_name()
         recorded_at = datetime.now().isoformat()
         run_id = run_history.new_run_id()
         result: Any = None

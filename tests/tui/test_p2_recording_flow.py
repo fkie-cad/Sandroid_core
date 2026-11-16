@@ -104,6 +104,17 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
 # ---------------------------------------------------------------------------
 
 
+class _FakeToolboxBase:
+    def load_snapshot(self, tag) -> None:
+        pass
+
+    def create_snapshot(self, tag) -> None:
+        pass
+
+    def fetch_changed_files(self, fetch_all: bool = False) -> dict:
+        return {}
+
+
 def _playback_controller(monkeypatch, tmp_path, **overrides):
     """A RecordingController wired to the lightweight fakes of the monitor
     safety-net tests (no device, engine pipeline neutered).
@@ -111,6 +122,8 @@ def _playback_controller(monkeypatch, tmp_path, **overrides):
     # tests/ is not a package; pytest puts this directory on sys.path.
     from test_recording_controller_monitor_safety import _make_controller
 
+    # Other tests leave SESSION_PATH behind; the legacy sandroid.json goes there.
+    monkeypatch.delenv("SESSION_PATH", raising=False)
     return _make_controller(monkeypatch, tmp_path, **overrides)
 
 
@@ -368,3 +381,97 @@ def test_controller_does_not_play_a_cancelled_recording(monkeypatch, tmp_path):
     pushed[0](RecordingResult(cancelled=True))
     assert played == []
     assert "Recording cancelled" in logs
+
+
+# ---------------------------------------------------------------------------
+# P2-H5: TUI runs carry the connected device's name, not the config default
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _fresh_device_manager():
+    from sandroid.core.device_manager import DeviceManager
+
+    DeviceManager.reset()
+    yield DeviceManager.get()
+    DeviceManager.reset()
+
+
+def _active_emulator(dm, avd_name: str = "SanDroid_-_API_35"):
+    from sandroid.core.device import Device
+
+    device = Device(serial="emulator-5554", name=avd_name, model="sdk_gphone64")
+    device._avd_name_fetched = True
+    dm._devices = {device.serial: device}
+    dm._active_device = device
+    return device
+
+
+def test_playback_run_records_the_active_device_name(
+    monkeypatch, tmp_path, _fresh_device_manager
+):
+    """Toolbox.device_name kept the hard-coded default when the device was
+    activated without passing through the name sync (old build / any path
+    that bypasses set_active_device); the run must still be labelled with
+    the device it ran on.
+    """
+    from sandroid.services import get_session_state_service
+
+    _active_emulator(_fresh_device_manager)
+    state = get_session_state_service()
+    monkeypatch.setattr(state, "_device_name", "Pixel_6_Pro_API_31")
+
+    class _SessionNamedToolbox(_FakeToolboxBase):
+        # Like the real Toolbox: device_name is the session state's value.
+        @property
+        def device_name(self):
+            return state.device_name
+
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, toolbox=_SessionNamedToolbox()
+    )
+
+    controller._run_playback_analysis()
+
+    index = run_history.load_index()
+    assert [e["device_name"] for e in index] == ["SanDroid_-_API_35"]
+    assert not index[0].get("error")
+    assert state.device_name == "SanDroid_-_API_35"
+    import json
+
+    summary = json.loads((tmp_path / "sandroid.json").read_text())
+    assert summary["Device Name"] == "SanDroid_-_API_35"
+
+
+def test_playback_falls_back_to_toolbox_name_without_device(
+    monkeypatch, tmp_path, _fresh_device_manager
+):
+    controller, toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    controller._run_playback_analysis()
+    assert [e["device_name"] for e in run_history.load_index()] == ["fake-device"]
+
+
+def test_verify_snapshot_uses_android_avd_home_and_active_avd(
+    monkeypatch, tmp_path, _fresh_device_manager
+):
+    _active_emulator(_fresh_device_manager)
+    avd_home = tmp_path / "avdhome"
+    (avd_home / "SanDroid_-_API_35.avd" / "snapshots" / "tmp").mkdir(parents=True)
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(avd_home))
+    controller, toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    toolbox.device_name = "Pixel_6_Pro_API_31"
+    assert controller._verify_snapshot() is True
+
+
+def test_verify_snapshot_follows_avd_ini_path_redirect(
+    monkeypatch, tmp_path, _fresh_device_manager
+):
+    _active_emulator(_fresh_device_manager)
+    avd_home = tmp_path / "avdhome"
+    avd_home.mkdir()
+    real_dir = tmp_path / "elsewhere" / "custom.avd"
+    (real_dir / "snapshots" / "tmp").mkdir(parents=True)
+    (avd_home / "SanDroid_-_API_35.ini").write_text(f"path={real_dir}\n")
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(avd_home))
+    controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    assert controller._verify_snapshot() is True
