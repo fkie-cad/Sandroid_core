@@ -222,7 +222,8 @@ def test_intent_filter_actions_and_categories_captured():
 def test_intent_filter_data_entries_captured_per_real_data_tag():
     """Each real <data> tag becomes its own dict; multi-attribute <data>
     tags (scheme+host together) keep both attributes on one entry, matching
-    how the real manifest actually groups them."""
+    how the real manifest actually groups them.
+    """
     result = parse_component_info(COMPONENT_MANIFEST_FIXTURE, _REAL_TARGET_SDK)
     home_activity = next(
         a
@@ -310,7 +311,8 @@ def test_non_exported_receiver_marked_correctly():
 
 def test_provider_with_no_explicit_exported_defaults_false_on_modern_target_sdk():
     """androidx.car.app.connection.provider declares no android:exported at
-    all; real targetSdkVersion 36 >= 17 so the implicit default is False."""
+    all; real targetSdkVersion 36 >= 17 so the implicit default is False.
+    """
     result = parse_component_info(COMPONENT_MANIFEST_FIXTURE, _REAL_TARGET_SDK)
     car_provider = next(
         p
@@ -328,7 +330,8 @@ def test_provider_with_no_explicit_exported_defaults_true_below_sdk_17():
     """Documents the legacy (pre-Android-4.2) provider default rule, which
     cannot be observed on any real modern device -- verified against the
     Android platform docs / AOSP PackageParser default-computation instead
-    of a live capture, unlike every other case in this file."""
+    of a live capture, unlike every other case in this file.
+    """
     result = parse_component_info(COMPONENT_MANIFEST_FIXTURE, target_sdk=16)
     car_provider = next(
         p

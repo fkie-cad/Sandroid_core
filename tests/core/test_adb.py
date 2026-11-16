@@ -137,7 +137,8 @@ def test_get_android_version_and_api_level_serial_does_not_mutate_global(
     info = Adb.get_android_version_and_api_level(serial="emulator-5556")
 
     assert info == {"android_version": "14", "api_level": "34"}
-    assert calls and all(serial == "emulator-5556" for _cmd, serial in calls)
+    assert calls
+    assert all(serial == "emulator-5556" for _cmd, serial in calls)
     assert Adb.get_target_device() == "emulator-5554"
 
 
@@ -153,7 +154,9 @@ def test_get_android_version_and_api_level_default_forwards_no_serial(monkeypatc
 
     Adb.get_android_version_and_api_level()
 
-    assert calls and all(serial is None for serial in calls)
+    assert calls
+
+    assert all(serial is None for serial in calls)
 
 
 # ---------------------------------------------------------------------------

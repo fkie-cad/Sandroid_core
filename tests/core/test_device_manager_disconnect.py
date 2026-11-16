@@ -316,7 +316,9 @@ def test_populate_device_info_does_not_touch_adb_target_device(monkeypatch):
 
     dm._populate_device_info(device)
 
-    assert calls and all(serial == "emulator-5556" for _cmd, serial in calls)
+    assert calls
+
+    assert all(serial == "emulator-5556" for _cmd, serial in calls)
     assert Adb.get_target_device() == "emulator-5554"  # untouched throughout
     assert device.android_version == "14"
 

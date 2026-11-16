@@ -534,7 +534,7 @@ class AnalysisPlan:
 
         cf = gatherers["changed_files"]
         nf = gatherers["new_files"]
-        df = gatherers.get("deleted_files")
+        df = gatherers.get("deleted_files")  # noqa: PD901 - gatherer, not a DataFrame
         want_deleted = config.show_deleted and df is not None
 
         # ---- Pre-analysis ----
@@ -1029,7 +1029,7 @@ class AnalysisEngine:
 
         cf = self.gatherers.get("changed_files")
         nf = self.gatherers.get("new_files")
-        df = self.gatherers.get("deleted_files")
+        df = self.gatherers.get("deleted_files")  # noqa: PD901 - gatherer, not a DataFrame
         pr = self.gatherers.get("processes")
         sk = self.gatherers.get("sockets")
         nw = self.gatherers.get("network")

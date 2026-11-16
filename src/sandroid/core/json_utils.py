@@ -34,7 +34,7 @@ def json_encoder(obj):
         if callable(dump):
             try:
                 dumped = dump()
-            except Exception:  # noqa: BLE001 - fall through to other strategies
+            except Exception:
                 continue
             if isinstance(dumped, dict):
                 return dumped
