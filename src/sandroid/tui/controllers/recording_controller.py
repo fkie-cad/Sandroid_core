@@ -974,18 +974,26 @@ class RecordingController:
             )
             saved_run_id = None
 
-        # Legacy summary file some external tooling may still read.
+        # Full legacy results JSON (what ActionQ._save_analysis_results wrote:
+        # network, processes, sockets, hashes, timeline -- none of which the
+        # RunRecord carries) into the session folder and the run bundle, so
+        # the PDF report / external tooling see the whole analysis.
         try:
             import json
 
+            from sandroid.core.json_utils import json_encoder
+
+            if result is not None:
+                data = result.to_json_dict()
+            else:
+                data = {"Device Name": device_name, "Action Duration": duration}
             results_path = os.getenv("RESULTS_PATH", "./")
-            output_file = os.path.join(results_path, "sandroid.json")
-            data = {
-                "Device Name": device_name,
-                "Action Duration": duration,
-            }
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
+            targets = [os.path.join(results_path, "sandroid.json")]
+            if bundle_dir:
+                targets.append(os.path.join(bundle_dir, "sandroid.json"))
+            for output_file in targets:
+                with open(output_file, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, default=json_encoder)
         except Exception as e:
             self._call_from_thread(
                 self._log_info,
