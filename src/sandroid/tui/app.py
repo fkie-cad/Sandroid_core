@@ -685,6 +685,13 @@ class SandroidTUI(App):
                 frida_service.invalidate_frida_device_cache()
                 if device:
                     logger.info(f"Device changed to: {device.serial}")
+                    # Same serial after an emulator restart: the job manager
+                    # would keep its dead frida handle ("device is gone").
+                    from sandroid.tui.controllers.recording_controller import (
+                        drop_stale_frida_device,
+                    )
+
+                    drop_stale_frida_device()
                     frida_service.update_device_serial(device.serial)
                     # Re-warm the per-serial kprobe availability cache for the
                     # new device (off-thread) and re-sync an open SettingsScreen.

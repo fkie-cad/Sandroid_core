@@ -32,6 +32,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _forget_device_handles() -> None:
+    """After a snapshot load: drop the dead frida handle and Spotlight PID."""
+    from sandroid.tui.controllers.recording_controller import (
+        reset_device_handles_after_snapshot_load,
+    )
+
+    reset_device_handles_after_snapshot_load()
+
 # Clickable action-cell id -> panel action method. Routed from
 # MainScreen.on_click (same dispatch as the bottom tab bar / arrow).
 _ACTION_CELLS = {
@@ -591,6 +600,7 @@ class SnapshotsPanel(Widget):
 
             def _work() -> tuple[bool, str]:
                 self._toolbox().load_snapshot(tag)
+                _forget_device_handles()
                 return True, f"Loaded '{tag}'"
 
             self._run_action_bg(_work, "load", refresh_after=True)
@@ -691,6 +701,7 @@ class SnapshotsPanel(Widget):
 
         def _work() -> tuple[bool, str]:
             self._toolbox().load_snapshot(tag)
+            _forget_device_handles()
             return True, f"Loaded slot {slot} ('{tag}')"
 
         self._run_action_bg(_work, f"load slot {slot}", refresh_after=True)

@@ -606,3 +606,145 @@ async def test_escape_in_a_main_screen_input_leaves_the_input_not_the_app() -> N
         await pilot.pause()
         assert app.pushed == []
         assert app.focused is None
+
+
+# ---------------------------------------------------------------------------
+# M: stale Spotlight PID / "device is gone" after Record/Play
+# ---------------------------------------------------------------------------
+
+
+class _FakeJobManager:
+    def __init__(self) -> None:
+        self.device = object()  # a frida Device the snapshot load invalidated
+        self.pid = 7875
+        self.reset_calls = 0
+
+    def reset_session(self, timeout_per_job: float = 2.0, detach_timeout=2.0):
+        self.reset_calls += 1
+        self.pid = -1
+
+
+def _fake_frida_and_spotlight(monkeypatch):
+    from sandroid import services
+
+    jm = _FakeJobManager()
+    frida_svc = SimpleNamespace(_job_manager=jm, invalidated=0)
+
+    def invalidate() -> None:
+        frida_svc.invalidated += 1
+
+    frida_svc.invalidate_frida_device_cache = invalidate
+    spot = SimpleNamespace(pid=7875, events=0)
+    spot.set_pid = lambda pid: setattr(spot, "pid", pid)
+
+    def publish(*_args, **_kwargs) -> None:
+        spot.events += 1
+
+    spot.get_effective_package = lambda: "org.wikipedia"
+    spot.publish_state_refresh = publish
+    monkeypatch.setattr(services, "get_frida_session_service", lambda: frida_svc)
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: spot)
+    return jm, frida_svc, spot
+
+
+def test_playback_drops_frida_handles_and_pid_invalidated_by_the_revert(
+    monkeypatch, tmp_path
+):
+    """Play's snapshot loads kill every app process and the frida device.
+
+    The cached JobManager.device made every later spawn fail with "device is
+    gone" until the TUI was restarted, and Spotlight kept the dead PID.
+    """
+    jm, frida_svc, spot = _fake_frida_and_spotlight(monkeypatch)
+    controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+
+    controller._run_playback_analysis()
+
+    assert jm.device is None
+    assert jm.reset_calls == 1
+    assert frida_svc.invalidated >= 1
+    assert spot.pid is None
+
+
+def test_snapshot_reset_helper_never_raises(monkeypatch):
+    from sandroid import services
+    from sandroid.tui.controllers.recording_controller import (
+        reset_device_handles_after_snapshot_load,
+    )
+
+    def boom():
+        raise RuntimeError("no service")
+
+    monkeypatch.setattr(services, "get_frida_session_service", boom)
+    monkeypatch.setattr(services, "get_spotlight_service", boom)
+    reset_device_handles_after_snapshot_load()
+
+
+@pytest.mark.asyncio
+async def test_enter_on_spotlight_with_a_stale_pid_rechecks_and_starts(
+    monkeypatch,
+) -> None:
+    """Enter said 'Already running' for a dead app until the slow poll ran."""
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    pids: dict[str, int | None] = {"org.wikipedia": None}
+    monkeypatch.setattr(
+        Adb,
+        "get_pid_for_package_name",
+        classmethod(lambda cls, pkg, **kw: pids.get(pkg)),
+    )
+    spot = SimpleNamespace(pid=7875)
+
+    class _Harness(App):
+        def compose(self) -> ComposeResult:
+            yield SpotlightPanel(id="spotlight-panel")
+
+    started: list[str] = []
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(SpotlightPanel)
+        monkeypatch.setattr(panel, "_current_package", lambda: "org.wikipedia")
+        monkeypatch.setattr(panel, "_safe_pid", lambda: spot.pid)
+        monkeypatch.setattr(panel, "_is_paused", lambda: False)
+        fake_spotlight = SimpleNamespace(set_pid=lambda pid: setattr(spot, "pid", pid))
+        monkeypatch.setattr(panel, "_spotlight", lambda: fake_spotlight)
+        monkeypatch.setattr(
+            panel,
+            "_run_frida_action",
+            lambda work, label, feature: started.append(label),
+        )
+        panel.action_primary()
+        await _wait_for(pilot, lambda: started == ["start"])
+        assert spot.pid is None
+
+        # A live app is still reported as running (no second spawn).
+        pids["org.wikipedia"] = 4242
+        spot.pid = 4242
+        started.clear()
+        panel.action_primary()
+        await pilot.pause(0.3)
+        assert started == []
+        assert spot.pid == 4242
+
+
+@pytest.mark.parametrize(
+    ("is_lost", "session", "dropped"),
+    [(True, object(), True), (False, None, True), (False, object(), False)],
+)
+def test_drop_stale_frida_device(monkeypatch, is_lost, session, dropped):
+    from sandroid import services
+    from sandroid.tui.controllers.recording_controller import (
+        drop_stale_frida_device,
+    )
+
+    jm = SimpleNamespace(
+        device=SimpleNamespace(is_lost=is_lost), process_session=session
+    )
+    monkeypatch.setattr(
+        services,
+        "get_frida_session_service",
+        lambda: SimpleNamespace(_job_manager=jm),
+    )
+    assert drop_stale_frida_device() is dropped
+    assert (jm.device is None) is dropped
