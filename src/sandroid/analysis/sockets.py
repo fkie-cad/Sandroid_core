@@ -1,16 +1,14 @@
-import threading
-import time
 from logging import getLogger
 from typing import Any
 
 from sandroid.core.events.events import NetworkEvent, TaskOutput
 
-from .base_di import DataGatherBase
+from .base_di import DataGatherBase, PollingCaptureMixin
 
 logger = getLogger(__name__)
 
 
-class Sockets(DataGatherBase):
+class Sockets(PollingCaptureMixin, DataGatherBase):
     """Handles the gathering and processing of listening sockets during an action."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -38,8 +36,7 @@ class Sockets(DataGatherBase):
         collected via ADB shell netstat commands.
         """
         logger.info("Collecting information on listening sockets during action")
-        t1 = threading.Thread(target=self.socket_capture_thread, args=())
-        t1.start()
+        self._start_polling(self.socket_capture_thread, "sandroid-sockets")
 
     def return_data(self) -> dict[str, list[str]]:
         """Return the processed list of listening sockets.
@@ -97,22 +94,23 @@ class Sockets(DataGatherBase):
         During dry runs, the captured sockets are stored as baseline noise.
         During normal runs, sockets are stored per run for later comparison.
         """
-        runtime = self._get_toolbox().get_action_duration()
-        socket_list = []
-        for i in range(runtime):
-            stdout, _stderr = self._send_adb_command("shell netstat -tulp")
-            stdout = stdout.splitlines()[1:]
-            detected_listening = []
-            for socket in stdout:
-                if "LISTEN" in socket:
-                    detected_listening.append(socket)
-            socket_list = list(
-                set(detected_listening + socket_list)
-            )  # Join new-found sockets with the socket list so far without duplicates
-            logger.debug("Found " + str(len(socket_list)) + " listening sockets so far")
-            time.sleep(1)
+        toolbox = self._get_toolbox()
+        runtime = toolbox.get_action_duration() or 0
+        dry_run = toolbox.is_dry_run()
+        seen: set[str] = set()
+        for _tick in self._poll_ticks(runtime):
+            try:
+                stdout, _stderr = self._send_adb_command("shell netstat -tulp")
+            except Exception as exc:
+                logger.debug(f"Socket poll failed: {exc}")
+                continue
+            seen.update(
+                line for line in (stdout or "").splitlines()[1:] if "LISTEN" in line
+            )
+            logger.debug("Found " + str(len(seen)) + " listening sockets so far")
+        socket_list = sorted(seen)
 
-        if self._get_toolbox().is_dry_run():
+        if dry_run:
             self.noise_sockets = socket_list
         else:
             self.run_sockets_lists[self.run_counter] = socket_list
@@ -174,9 +172,16 @@ class Sockets(DataGatherBase):
                 # Add the key and its value from the first dictionary to the result
                 result[key] = port_numbers_and_names_dict_list[0][key]
 
+        # Compare exact local ports (the old substring test against the whole
+        # noise list dropped e.g. port 80 whenever 8080 was noise).
+        noise_ports = set()
+        for line in noise:
+            parts = line.split()
+            if len(parts) > 3:
+                noise_ports.add(parts[3].split(":")[-1])
         noise_adjusted_result = {}
         for key in result.keys():
-            if str(key) not in str(noise):
+            if str(key) not in noise_ports:
                 noise_adjusted_result[key] = result[key]
 
         # Generate final socket list
