@@ -462,7 +462,8 @@ class MenuController:
 
         # ===== Snapshot Actions (Emulator-only) =====
         # Slot memory: keys [1-8] LOAD the snapshot assigned to a slot, and
-        # [Ctrl+1-8] SAVE the current state into a slot. Assignments live per-AVD
+        # [Ctrl+1-8] (or [S] then a digit, in terminals that can't send
+        # Ctrl+digit) SAVE the current state into a slot. Assignments live per-AVD
         # in config (tui.snapshot_slots) and are managed from the Snapshots tab.
         self._register(
             "show_snapshots",
@@ -472,7 +473,8 @@ class MenuController:
             ["forensic", "malware"],
             description="Open the Snapshots tab",
             inline_text=(
-                "key [0] opens snapshots, [1-8] twice loads a slot, [Ctrl+1-8] save"
+                "key [0] opens snapshots, [1-8] twice loads a slot, "
+                "[Ctrl+1-8] or [S]+digit saves"
             ),
             required_capabilities=[DeviceCapability.SNAPSHOTS],
             unavailable_reason="Snapshots only available on emulators",
@@ -504,6 +506,20 @@ class MenuController:
                 required_capabilities=[DeviceCapability.SNAPSHOTS],
                 unavailable_reason="Snapshots only available on emulators",
             )
+        self._register(
+            "pick_save_slot",
+            "Save to slot…",
+            "S",
+            ActionCategory.SNAPSHOTS,
+            ["forensic", "malware"],
+            description=(
+                "Pick a slot (1-8) to save the current state into; works in "
+                "every terminal (Ctrl+1-8 needs the kitty keyboard protocol)"
+            ),
+            inline_text="[S] then 1-8: save to slot",
+            required_capabilities=[DeviceCapability.SNAPSHOTS],
+            unavailable_reason="Snapshots only available on emulators",
+        )
 
     def _register(
         self,

@@ -61,6 +61,7 @@ from .selection_modal import SelectionModal
 from .snapshot_save_choice_modal import (
     SnapshotSaveChoiceModal,
     SnapshotSaveChoiceResult,
+    SnapshotSlotPickerModal,
 )
 from .spawn_mode_modal import SpawnModeModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
@@ -134,6 +135,7 @@ __all__ = [
     "SnapshotSaveChoiceResult",
     "SnapshotSelectionModal",
     "SnapshotSelectionResult",
+    "SnapshotSlotPickerModal",
     "SpawnMode",
     "SpawnModeModal",
     "ToggleConfigModal",
