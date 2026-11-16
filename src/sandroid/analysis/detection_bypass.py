@@ -24,6 +24,11 @@ Emulator detection has no native manager: incoherent field spoofing gives
 false confidence and can trip heuristics harder, so that one category stays on
 TrigDroid's RPC device-profile path.
 
+**EXPERIMENTAL.** All bypass categories (SSL unpinning incl. the native
+cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug
+detection) are experimental, off by default, and only applied after an
+explicit analyst toggle. Results must be verified; a bypass can silently miss.
+
 For authorized security testing, forensic analysis, and research only.
 """
 
@@ -392,7 +397,7 @@ class FridaDetectionBypassManager(BypassManagerBase):
     """Suppress common anti-Frida detection tricks (self-kill, proc scans)."""
 
     TOOL_NAME = "frida_detection_bypass"
-    DISPLAY_NAME = "Frida Detection Bypass"
+    DISPLAY_NAME = "Frida Detection Bypass (experimental)"
     HOOKS_REGISTRY = FRIDA_DETECTION_HOOKS
     FRIDA_SCRIPT = _FRIDA_DETECTION_SCRIPT
     PRIORITY = 5  # installs first in the merged script (anti-anti-Frida prelude)
@@ -924,7 +929,7 @@ class RootDetectionBypassManager(BypassManagerBase):
     """Hide root indicators (su paths, magisk, root apps, build tags)."""
 
     TOOL_NAME = "root_detection_bypass"
-    DISPLAY_NAME = "Root Detection Bypass"
+    DISPLAY_NAME = "Root Detection Bypass (experimental)"
     HOOKS_REGISTRY = ROOT_DETECTION_HOOKS
     FRIDA_SCRIPT = _ROOT_DETECTION_SCRIPT
     PRIORITY = 10
@@ -1032,7 +1037,7 @@ class DebugDetectionBypassManager(BypassManagerBase):
     """Defeat debugger-attached checks (isDebuggerConnected, TracerPid)."""
 
     TOOL_NAME = "debug_detection_bypass"
-    DISPLAY_NAME = "Debug Detection Bypass"
+    DISPLAY_NAME = "Debug Detection Bypass (experimental)"
     HOOKS_REGISTRY = DEBUG_DETECTION_HOOKS
     FRIDA_SCRIPT = _DEBUG_DETECTION_SCRIPT
     PRIORITY = 10
@@ -1209,7 +1214,7 @@ class IntegrityBypassManager(BypassManagerBase):
     """Bypass the Google Play / PairIP license check ("Something went wrong")."""
 
     TOOL_NAME = "integrity_bypass"
-    DISPLAY_NAME = "Integrity / Attestation Bypass"
+    DISPLAY_NAME = "Integrity / Attestation Bypass (experimental)"
     HOOKS_REGISTRY = INTEGRITY_HOOKS
     FRIDA_SCRIPT = _INTEGRITY_SCRIPT
     PRIORITY = 10
@@ -1222,6 +1227,12 @@ class IntegrityBypassManager(BypassManagerBase):
 # Category keys are the stable identifiers used by the panel, MitmproxyService,
 # and TrigDroid delegation. "ssl" maps to SSLUnpinManager (imported lazily to
 # avoid a circular import: ssl_unpin imports this module's base class).
+#: Every bypass category is EXPERIMENTAL: hooks target specific library
+#: versions/obfuscations and can silently miss (or crash) an app. All are OFF
+#: by default (nothing is armed until the analyst toggles it) and every
+#: user-facing name/message carries this tag.
+EXPERIMENTAL_SUFFIX = " (experimental)"
+
 _CATEGORY_DISPLAY = {
     "ssl": "SSL Pinning Bypass",
     "frida": "Frida Detection Bypass",
@@ -1299,8 +1310,12 @@ class BypassService:
         """All known category keys, in display order."""
         return ["ssl", "root", "frida", "debug", "integrity"]
 
-    def display_name(self, category: str) -> str:
+    def _plain_name(self, category: str) -> str:
         return _CATEGORY_DISPLAY.get(category, category)
+
+    def display_name(self, category: str) -> str:
+        """User-facing name, always tagged experimental (see module docstring)."""
+        return _CATEGORY_DISPLAY.get(category, category) + EXPERIMENTAL_SUFFIX
 
     def _categories_by_priority(self, categories) -> list[str]:
         """Order categories by PRIORITY (lower first) for the merged order.
@@ -1787,8 +1802,8 @@ class BypassService:
             active_now = set(self._active)
 
         if active_now:
-            display = "Bypass: " + ", ".join(
-                self.display_name(c)
+            display = "Bypass (experimental): " + ", ".join(
+                self._plain_name(c)
                 for c in self._categories_by_priority(active_now)
             )
             self._register_task(display)
@@ -1950,8 +1965,8 @@ class BypassService:
         ok, msg = self.set_active(armed, paused=False, on_message=on_message)
         if not ok:
             return False, msg
-        return True, "Applied: " + ", ".join(
-            self.display_name(c) for c in self._categories_by_priority(armed)
+        return True, "Applied (experimental): " + ", ".join(
+            self._plain_name(c) for c in self._categories_by_priority(armed)
         )
 
     def apply_to_fresh_spawn(
@@ -2060,8 +2075,8 @@ class BypassService:
             loaded = sorted(self._active)
         if loaded:
             return True, (
-                f"Spawned {package} with {len(loaded)} bypass(es): "
-                + ", ".join(self.display_name(c) for c in loaded)
+                f"Spawned {package} with {len(loaded)} experimental bypass(es): "
+                + ", ".join(self._plain_name(c) for c in loaded)
             )
         return True, f"Spawned {package} (no bypasses armed)"
 

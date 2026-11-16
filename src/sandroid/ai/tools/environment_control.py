@@ -397,8 +397,10 @@ def check_hook_conflicts(hooks: list[str]) -> dict[str, Any]:
 @sandroid_tool(
     name="start_ssl_unpin",
     description=(
-        "Start SSL pinning bypass (SSL unpin) for the current spotlight app "
-        "via a Frida script. Idempotent -- a no-op if already active."
+        "EXPERIMENTAL: start SSL pinning bypass (SSL unpin) for the current "
+        "spotlight app by injecting a Frida script into it. Results may be "
+        "incomplete; tell the analyst it is experimental. Idempotent -- a "
+        "no-op if already active."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.REVERSIBLE,

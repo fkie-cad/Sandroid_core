@@ -12,6 +12,10 @@ This script is **SSL-only** — anti-anti-Frida hooks live in the dedicated
 ``FridaDetectionBypassManager`` so the two concerns stay independent (enable
 the Frida bypass first to survive on anti-Frida apps, then SSL).
 
+**EXPERIMENTAL** and off by default: the native tiers (cronet/BoringSSL,
+mbedTLS/MNS, early-ctor install) target specific library builds and can
+silently miss or destabilise an app. Only applied after an explicit toggle.
+
 For authorized security testing, forensic analysis, and research only.
 """
 
@@ -1155,7 +1159,7 @@ class SSLUnpinManager(BypassManagerBase):
     """
 
     TOOL_NAME = "ssl_unpin"
-    DISPLAY_NAME = "SSL Pinning Bypass"
+    DISPLAY_NAME = "SSL Pinning Bypass (experimental)"
     HOOKS_REGISTRY = SSL_UNPIN_HOOKS
     FRIDA_SCRIPT = _FRIDA_SCRIPT
     PRIORITY = 15
