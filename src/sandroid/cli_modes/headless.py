@@ -15,6 +15,23 @@ from sandroid.core.console import SandroidConsole
 
 logger = logging.getLogger(__name__)
 
+#: Exit code when the analysis ran but its documentation (results JSON, a
+#: requested PDF report or the evidence manifest) could not be written.
+EXIT_DOCUMENTATION_FAILED = 3
+
+_MISSING = object()
+
+#: Result keys counted in the end-of-run summary.
+_SUMMARY_KEYS = (
+    "Changed Files",
+    "New Files",
+    "Deleted Files",
+    "Processes",
+    "Listening Sockets",
+    "Network",
+    "Network IP:Port (send/recv)",
+)
+
 
 def run_headless_analysis(
     sandroid_config: SandroidConfig,
@@ -27,11 +44,20 @@ def run_headless_analysis(
     hash_files: bool,
     show_deleted: bool,
     output_file: str | None,
+    recording_path: str | None = None,
 ) -> None:
     """Execute analysis using the headless API.
 
     Supports both single-package analysis and batch processing of multiple
     packages without requiring interactive UI.
+
+    The full results are written to the session folder (and to
+    ``output_file`` if given); the console only shows a short summary with
+    the result paths. Exit codes: 0 success, 1 analysis failed,
+    :data:`EXIT_DOCUMENTATION_FAILED` (3) if the analysis ran but the
+    results JSON, a requested PDF report or the evidence manifest could not
+    be written. Security mode without ``output_file`` prints its JSON to
+    stdout (it has no result folder).
 
     Args:
         sandroid_config: Loaded Sandroid configuration.
@@ -44,6 +70,8 @@ def run_headless_analysis(
         hash_files: Compute file hashes.
         show_deleted: Track deleted files.
         output_file: Output file path for results.
+        recording_path: ``recording.txt`` to replay in every run (forensic
+            mode, ``--import-action``) instead of a manual capture window.
 
     Raises:
         SystemExit: If required parameters are missing or analysis fails.
@@ -83,8 +111,76 @@ def run_headless_analysis(
                 hash_files=hash_files,
                 show_deleted=show_deleted,
                 output_file=output_file,
+                recording_path=recording_path,
             )
         )
+
+
+def _plain(console, text: str, style: str | None = None) -> None:
+    """Print verbatim (no markup, no wrapping) so paths stay parseable."""
+    console.print(text, style=style, soft_wrap=True, markup=False, highlight=False)
+
+
+def _count(value) -> int:
+    return len(value) if isinstance(value, (list, dict)) else 0
+
+
+def _print_summary(
+    console, sandroid_config, analysis_mode, results, doc, output_file
+) -> int:
+    """Print a short end-of-run summary and return the exit code."""
+    from sandroid.api import AnalysisMode
+
+    rc = 0
+    runs = results.get("runs") if isinstance(results, dict) else None
+    title = f"Headless {analysis_mode.value} analysis finished"
+    if runs:
+        title += f" ({runs} runs)"
+    console.print(f"[accent]{title}[/accent]")
+    if isinstance(results, dict) and any(k in results for k in _SUMMARY_KEYS):
+        counts = ", ".join(
+            f"{key}: {_count(results.get(key))}"
+            for key in _SUMMARY_KEYS
+            if key in results
+        )
+        _plain(console, f"  {counts}")
+        if results.get("Action Duration") is not None:
+            console.print(f"  Action duration: {results.get('Action Duration')} s")
+
+    report_requested = bool(
+        getattr(getattr(sandroid_config, "report", None), "generate_pdf", False)
+    )
+    if doc is not _MISSING and analysis_mode != AnalysisMode.SECURITY:
+        if doc is None:
+            _plain(
+                console,
+                "  Results JSON / evidence documentation could not be written "
+                "(see log)",
+                "error",
+            )
+            rc = EXIT_DOCUMENTATION_FAILED
+        else:
+            _plain(console, f"  Results: {doc.results_json}")
+            pdf_errors = [e for e in doc.errors if e.startswith("pdf:")]
+            if doc.pdf is not None:
+                _plain(console, f"  PDF report: {doc.pdf}")
+            elif report_requested:
+                reason = pdf_errors[0][4:].strip() if pdf_errors else "unknown"
+                _plain(console, f"  PDF report FAILED: {reason}", "error")
+                rc = EXIT_DOCUMENTATION_FAILED
+            if doc.manifest is not None:
+                _plain(
+                    console,
+                    f"  Evidence manifest: {doc.manifest.sha256sums_path} "
+                    f"(SHA-256 {doc.manifest.sha256sums_sha256})",
+                )
+            for err in doc.errors:
+                if not err.startswith("pdf:"):
+                    _plain(console, f"  {err}", "error")
+                    rc = EXIT_DOCUMENTATION_FAILED
+    if output_file:
+        _plain(console, f"  Results also saved to: {output_file}")
+    return rc
 
 
 async def _run_single_analysis(
@@ -97,6 +193,7 @@ async def _run_single_analysis(
     hash_files: bool,
     show_deleted: bool,
     output_file: str | None,
+    recording_path: str | None = None,
 ) -> None:
     """Run analysis on a single package.
 
@@ -110,6 +207,7 @@ async def _run_single_analysis(
         hash_files: Compute file hashes.
         show_deleted: Track deleted files.
         output_file: Output file path for results.
+        recording_path: Recording to replay (forensic mode only).
     """
     from sandroid.api import AnalysisMode, SandroidHeadlessAPI
 
@@ -137,6 +235,18 @@ async def _run_single_analysis(
         console.print(f"[error]Initialization failed: {result.error}[/error]")
         sys.exit(1)
 
+    def _window_prompt(message: str) -> None:
+        _plain(console, message, "warning")
+
+    extra = {}
+    if analysis_mode == AnalysisMode.FORENSIC:
+        if recording_path:
+            extra["recording_path"] = recording_path
+            console.print(f"[accent]Replaying recording: {recording_path}[/accent]")
+        else:
+            extra["window_notify"] = _window_prompt
+
+    rc = 0
     try:
         # For SECURITY mode, package is interpreted as apk_path
         # (can be a local file path or an installed package name)
@@ -159,14 +269,23 @@ async def _run_single_analysis(
                 compute_hashes=hash_files,
                 track_deleted=show_deleted,
                 output_file=output_file,
+                **extra,
             )
 
-        if output_file:
-            console.print(f"[success]Results saved to: {output_file}[/success]")
-        else:
+        if analysis_mode == AnalysisMode.SECURITY and not output_file:
+            # No result folder in security mode: stdout is the only output.
             print(json.dumps(results, indent=2, default=str))
-
-        console.print("[success]Headless analysis completed successfully[/success]")
+        doc = getattr(api, "last_run_documentation", _MISSING)
+        rc = _print_summary(
+            console, sandroid_config, analysis_mode, results, doc, output_file
+        )
+        if rc:
+            console.print(
+                "[error]Headless analysis finished, but its documentation is "
+                f"incomplete (exit code {rc})[/error]"
+            )
+        else:
+            console.print("[success]Headless analysis completed successfully[/success]")
 
     except Exception as e:
         console.print(f"[error]Analysis failed: {e}[/error]")
@@ -174,6 +293,8 @@ async def _run_single_analysis(
         sys.exit(1)
     finally:
         await api.shutdown()
+    if rc:
+        sys.exit(rc)
 
 
 async def _run_batch_analysis(

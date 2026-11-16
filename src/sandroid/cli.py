@@ -235,7 +235,11 @@ def __getattr__(name: str):
     type=click.Path(exists=True),
     metavar="PATH",
     default=None,
-    help="Import action recording file (headless mode)",
+    help=(
+        "Replay a TUI recording headless: PATH is a run bundle's recording.txt "
+        "(or the bundle folder). Runs a forensic analysis that replays it in "
+        "every run (-n, --report, --network, ... apply)."
+    ),
 )
 @click.option(
     "--device-settings",
@@ -497,7 +501,16 @@ def main(
         elif install_apk:
             _run_install_apk(sandroid_config, install_apk)
         elif import_action:
-            _run_import_action(sandroid_config, import_action)
+            _run_import_action(
+                sandroid_config,
+                import_action,
+                active_logger=active_logger,
+                runs=number or 2,
+                network=network,
+                hash_files=locals()["hash"],
+                show_deleted=show_deleted,
+                output_file=file,
+            )
         elif fridump:
             run_fridump_headless(
                 sandroid_config=sandroid_config,
@@ -614,25 +627,87 @@ def _run_install_apk(sandroid_config, apk_path: str) -> None:
     console.print(f"[success]APK installed successfully{suffix}[/success]")
 
 
-def _run_import_action(sandroid_config, action_path: str) -> None:
-    """Import an action file in headless mode."""
-    import json
+def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
+    """Validate an ``--import-action`` argument.
 
-    from .core.initializer import initialize_core
+    Accepts a ``recording.txt`` (``<timestamp> <device> <type> <code> <value>``
+    lines as written by the TUI recorder) or a run bundle folder containing
+    one.
+
+    Returns:
+        ``(absolute recording path, None)`` or ``(None, error message)``.
+    """
+    from pathlib import Path
+
+    from .features.player import Player
+
+    path = Path(action_path)
+    if path.is_dir():
+        path = path / "recording.txt"
+    if not path.is_file():
+        return None, f"No recording found: {path}"
+    try:
+        lines = [
+            ln.strip()
+            for ln in path.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"Cannot read {path}: {e}"
+    if not lines:
+        return None, f"Recording is empty: {path}"
+    if lines[0].startswith(("{", "[")):
+        return None, (
+            f"{path} is a JSON file. JSON action files cannot be replayed; pass "
+            "a recording.txt from a run bundle (or the bundle folder) instead."
+        )
+    bad = [ln for ln in lines if not Player.STORE_LINE_RE.match(ln)]
+    if bad:
+        return None, (
+            f"{path} is not a Sandroid recording ({len(bad)} of {len(lines)} "
+            f"lines are not '<timestamp> <device> <type> <code> <value>'; "
+            f"first: {bad[0][:80]!r})"
+        )
+    return str(path.resolve()), None
+
+
+def _run_import_action(
+    sandroid_config,
+    action_path: str,
+    *,
+    active_logger=None,
+    runs: int = 2,
+    network: bool = False,
+    hash_files: bool = False,
+    show_deleted: bool = False,
+    output_file: str | None = None,
+) -> None:
+    """Replay a recording headless as a forensic analysis (``--import-action``).
+
+    The recording is replayed via the Player in every run, starting from the
+    device's current state (a ``tmp`` snapshot is taken first), so start the
+    device in the state the recording expects (same app screen).
+    """
+    from .cli_modes import run_headless_analysis
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
-
-    try:
-        with open(action_path, encoding="utf-8") as f:
-            action_data = json.load(f)
-        console.print(f"[success]Action imported from: {action_path}[/success]")
-        console.print(
-            f"[dim]Actions loaded: {len(action_data) if isinstance(action_data, list) else 'N/A'}[/dim]"
-        )
-    except (json.JSONDecodeError, FileNotFoundError) as e:
-        console.print(f"[error]Failed to import action: {e}[/error]")
+    recording, error = resolve_recording(action_path)
+    if error:
+        console.print(f"[error]Cannot import action: {error}[/error]")
         sys.exit(1)
+    run_headless_analysis(
+        sandroid_config=sandroid_config,
+        active_logger=active_logger,
+        package=None,
+        batch_config=None,
+        mode="forensic",
+        runs=runs,
+        network=network,
+        hash_files=hash_files,
+        show_deleted=show_deleted,
+        output_file=output_file,
+        recording_path=recording,
+    )
 
 
 if __name__ == "__main__":

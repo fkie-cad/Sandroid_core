@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,68 @@ logger = logging.getLogger(__name__)
 
 # Type alias for the run-progress callback
 RunSetter = Callable[[int], None] | None
+
+#: Seconds between "N s remaining" prompts during a capture window.
+PROMPT_INTERVAL = 10
+
+
+class CaptureWindowAction:
+    """Action of a headless forensic run: a timed window for the user.
+
+    Mirrors the engine's action-less capture window (set the action time,
+    fix the duration, wait) but tells the user *when* to interact: each
+    :meth:`perform` (one per run) announces "Run k/N: perform the action on
+    the device now (W s remaining)" and counts down every
+    :data:`PROMPT_INTERVAL` seconds.
+
+    Args:
+        window: Window length in seconds.
+        runs: Number of runs (for the "k/N" label).
+        notify: Receives each prompt line (default: ``logger.info``).
+        sleep: Injectable sleep (tests).
+    """
+
+    def __init__(
+        self,
+        window: int,
+        runs: int,
+        notify: Callable[[str], None] | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.window = max(int(window or 0), 0)
+        self.runs = runs
+        self.notify = notify or logger.info
+        self.sleep = sleep
+        self.performed = 0
+
+    def perform(self) -> None:
+        from sandroid.core.toolbox import Toolbox
+        from sandroid.services import get_action_window_service
+
+        self.performed += 1
+        Toolbox.set_action_time()
+        get_action_window_service().set_duration(self.window)
+        run = f"Run {self.performed}/{self.runs}"
+        if self.window <= 0:
+            self.notify(f"{run}: capture window is 0 s, nothing to wait for.")
+            return
+        hint = (
+            " Perform the same action in every run."
+            if self.runs > 1 and self.performed == 1
+            else ""
+        )
+        self.notify(
+            f">>> {run}: PERFORM THE ACTION ON THE DEVICE NOW "
+            f"({self.window} s remaining).{hint}"
+        )
+        remaining = self.window
+        while remaining > 0:
+            step = min(PROMPT_INTERVAL, remaining)
+            self.sleep(step)
+            remaining -= step
+            if remaining > 0:
+                self.notify(f"    {run}: {remaining} s remaining")
+        self.notify(f"<<< {run}: capture window closed, collecting results...")
 
 
 def _apply_network_degradation(degrade: bool) -> None:
@@ -40,14 +103,24 @@ def _apply_network_degradation(degrade: bool) -> None:
 
 
 def _finalize_headless_run(
-    toolbox: Any, result: Any, mode: str, started_at: str
-) -> None:
+    toolbox: Any,
+    result: Any,
+    mode: str,
+    started_at: str,
+    on_finalized: Callable[[Any], None] | None = None,
+) -> Any:
     """Write results JSON + metadata, optional PDF and manifest for a run.
 
     Headless runs have no run bundle; they write into the session folder
     (``SESSION_PATH``, created by ``Toolbox.init_files()``), falling back to
     the configured ``paths.results_path``. Never raises: the analysis result
     is still returned to the API caller if documentation fails.
+
+    Returns:
+        The :class:`~sandroid.core.run_report.FinalizeOutcome`, or ``None``
+        if even the results JSON could not be written. The same value is
+        passed to ``on_finalized`` (the headless API keeps it as
+        ``last_run_documentation`` so the CLI can report failures).
     """
     import os
 
@@ -58,6 +131,7 @@ def _finalize_headless_run(
     result_dir = os.environ.get("SESSION_PATH") or str(
         getattr(getattr(cfg, "paths", None), "results_path", "results")
     )
+    outcome = None
     try:
         outcome = run_report.finalize_run(
             result_dir,
@@ -74,9 +148,12 @@ def _finalize_headless_run(
         if outcome.pdf is not None:
             logger.info(f"PDF report: {outcome.pdf}")
         for err in outcome.errors:
-            logger.warning(f"Run finalisation issue: {err}")
+            logger.error(f"Run finalisation issue: {err}")
     except Exception as e:
         logger.error(f"Could not write run documentation: {e}", exc_info=True)
+    if on_finalized is not None:
+        on_finalized(outcome)
+    return outcome
 
 
 def _make_progress_adapter(
@@ -193,7 +270,13 @@ async def run_malware_analysis(
     result = AnalysisEngine(
         run_config, progress=_make_progress_adapter(current_run_setter, runs)
     ).run()
-    _finalize_headless_run(toolbox, result, "headless-malware", started_at)
+    _finalize_headless_run(
+        toolbox,
+        result,
+        "headless-malware",
+        started_at,
+        on_finalized=kwargs.get("on_finalized"),
+    )
 
     # Normalize to a JSON-safe dict (sets -> lists, etc.), matching the legacy
     # ``json.loads(action_q.get_data())`` return type.
@@ -216,13 +299,21 @@ async def run_forensic_analysis(
     3. Tracks new, modified, and optionally deleted files
     4. Returns file system change data
 
+    Without a recording each run opens a capture window of
+    ``capture_window`` seconds (default 60) in which the user performs the
+    action; :class:`CaptureWindowAction` prompts for it (``window_notify``
+    receives the prompt lines). With ``recording_path`` (a ``recording.txt``
+    from a run bundle) every run replays that recording via the
+    :class:`~sandroid.features.player.Player` instead.
+
     Args:
         toolbox: The Toolbox class reference.
         runs: Number of analysis runs.
         track_deleted: Track deleted files.
         compute_hashes: Compute file hashes.
         current_run_setter: Optional callback to update current run number.
-        **kwargs: Additional mode-specific options.
+        **kwargs: Additional mode-specific options (``capture_window``,
+            ``window_notify``, ``recording_path``, ``on_finalized``, ...).
 
     Returns:
         Dictionary with forensic analysis results in the unified
@@ -253,9 +344,20 @@ async def run_forensic_analysis(
         whitelist=kwargs.get("whitelist"),
         capture_window=kwargs.get("capture_window", 60),
     )
-    # Pure forensic run: no action (``action=None``) — the engine opens a
-    # capture window instead of performing/replaying anything.
-    run_config = RunConfig.from_analysis_config(ac, action=None, whitelist=ac.whitelist)
+    recording_path = kwargs.get("recording_path")
+    if recording_path:
+        # Replay an imported recording (``--import-action``) in every run.
+        from sandroid.features.player import Player
+
+        action: Any = Player(recording_path=str(recording_path))
+    else:
+        # Pure forensic run: a prompted capture window per run.
+        action = CaptureWindowAction(
+            ac.capture_window, runs, notify=kwargs.get("window_notify")
+        )
+    run_config = RunConfig.from_analysis_config(
+        ac, action=action, whitelist=ac.whitelist
+    )
     # Identity pin (headless has no run bundle -> run against the session dir).
     run_config.results_path = ""
     run_config.raw_results_path = ""
@@ -266,7 +368,13 @@ async def run_forensic_analysis(
     result = AnalysisEngine(
         run_config, progress=_make_progress_adapter(current_run_setter, runs)
     ).run()
-    _finalize_headless_run(toolbox, result, "headless-forensic", started_at)
+    _finalize_headless_run(
+        toolbox,
+        result,
+        "headless-replay" if recording_path else "headless-forensic",
+        started_at,
+        on_finalized=kwargs.get("on_finalized"),
+    )
 
     data = json.loads(json.dumps(result.to_json_dict(), default=json_encoder))
     # Preserve the two metadata keys the legacy implementation returned so API

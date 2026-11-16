@@ -718,3 +718,226 @@ def test_exit_helper_hard_exits_only_with_lingering_threads(monkeypatch):
     finally:
         stop.set()
         t.join()
+
+
+# ---------------------------------------------------------------------------
+# Headless output, exit codes, capture-window prompts, --import-action
+# ---------------------------------------------------------------------------
+
+#: First lines of the tester's Wikipedia run bundle recording.txt.
+RECORDING = """1794847081351 /dev/input/event1 0 0 0
+1794847083059 /dev/input/event1 3 57 7
+1794847083061 /dev/input/event1 3 53 16322
+1794847083074 /dev/input/event1 3 54 30252
+"""
+
+
+def _run_cli_headless(monkeypatch, doc, *, report=False, mode="forensic", **kw):
+    """Run the headless CLI mode against a fake API returning ``doc``."""
+    import sandroid.api as api_pkg
+    from sandroid.cli_modes import headless as cli_headless
+
+    calls = {}
+
+    class _FakeAPI:
+        def __init__(self, config=None, config_path=None):
+            self.last_run_documentation = None
+
+        async def initialize(self):
+            return SimpleNamespace(success=True)
+
+        async def run_analysis(self, **kwargs):
+            calls["run"] = kwargs
+            self.last_run_documentation = doc
+            return {
+                "Changed Files": ["/data/a", {"/data/b.db": ["+ x"]}],
+                "New Files": ["/data/c"],
+                "Action Duration": 60,
+                "analysis_type": "forensic",
+                "runs": 2,
+            }
+
+        async def shutdown(self):
+            calls["shutdown"] = True
+
+    monkeypatch.setattr(api_pkg, "SandroidHeadlessAPI", _FakeAPI)
+    cfg = SimpleNamespace(report=SimpleNamespace(generate_pdf=report))
+    cli_headless.run_headless_analysis(
+        sandroid_config=cfg,
+        active_logger=None,
+        package=None,
+        batch_config=None,
+        mode=mode,
+        runs=2,
+        network=False,
+        hash_files=False,
+        show_deleted=False,
+        output_file=None,
+        **kw,
+    )
+    return calls
+
+
+def test_headless_prints_summary_not_json(monkeypatch, capsys, tmp_path):
+    from sandroid.core import run_report
+
+    doc = run_report.FinalizeOutcome(
+        results_json=tmp_path / "sandroid.json", pdf=tmp_path / "r.pdf"
+    )
+    calls = _run_cli_headless(monkeypatch, doc, report=True)
+    out = capsys.readouterr().out
+    assert '"Changed Files"' not in out  # no JSON dump
+    assert "Changed Files: 2" in out
+    assert str(tmp_path / "sandroid.json") in out
+    assert str(tmp_path / "r.pdf") in out
+    assert "completed successfully" in out
+    # Forensic runs get the window prompt callback.
+    assert callable(calls["run"]["window_notify"])
+
+
+def test_headless_failed_report_exits_nonzero(monkeypatch, capsys, tmp_path):
+    """P2: --report failed with only a WARNING and exit 0."""
+    from sandroid.cli_modes import headless as cli_headless
+    from sandroid.core import run_report
+
+    doc = run_report.FinalizeOutcome(
+        results_json=tmp_path / "sandroid.json",
+        errors=["pdf: Flowable too large on page 5"],
+    )
+    with pytest.raises(SystemExit) as info:
+        _run_cli_headless(monkeypatch, doc, report=True)
+    assert info.value.code == cli_headless.EXIT_DOCUMENTATION_FAILED
+    out = capsys.readouterr().out
+    assert "PDF report FAILED: Flowable too large on page 5" in out
+    assert "completed successfully" not in out
+
+
+def test_headless_missing_documentation_exits_nonzero(monkeypatch):
+    with pytest.raises(SystemExit) as info:
+        _run_cli_headless(monkeypatch, None)
+    assert info.value.code == 3
+
+
+def test_capture_window_action_prompts_each_run(monkeypatch):
+    from sandroid.api import analysis_runners
+    from sandroid.core.toolbox import Toolbox
+
+    durations = []
+    monkeypatch.setattr(Toolbox, "set_action_time", classmethod(lambda cls: None))
+    monkeypatch.setattr(
+        "sandroid.services.get_action_window_service",
+        lambda: SimpleNamespace(set_duration=durations.append),
+    )
+    lines, slept = [], []
+    action = analysis_runners.CaptureWindowAction(
+        25, runs=2, notify=lines.append, sleep=slept.append
+    )
+    action.perform()
+    action.perform()
+    assert durations == [25, 25]
+    assert slept == [10, 10, 5, 10, 10, 5]
+    assert "Run 1/2: PERFORM THE ACTION ON THE DEVICE NOW (25 s remaining)" in lines[0]
+    assert "Perform the same action in every run" in lines[0]
+    assert "Run 1/2: 15 s remaining" in lines[1]
+    assert any("Run 2/2: PERFORM THE ACTION" in ln for ln in lines)
+    assert lines[-1].startswith("<<< Run 2/2: capture window closed")
+
+
+def test_forensic_runner_replays_recording(monkeypatch):
+    from sandroid.analysis.engine import AnalysisEngine
+    from sandroid.api import analysis_runners
+    from sandroid.features.player import Player
+
+    captured = {}
+
+    def _init(self, config, **kwargs):
+        captured["config"] = config
+
+    canned = SimpleNamespace(to_json_dict=dict)
+    monkeypatch.setattr(AnalysisEngine, "__init__", _init)
+    monkeypatch.setattr(AnalysisEngine, "run", lambda self: canned)
+    monkeypatch.setattr(
+        analysis_runners, "_finalize_headless_run", lambda *a, **k: None
+    )
+    toolbox = SimpleNamespace(create_snapshot=lambda name: None)
+    asyncio.run(
+        analysis_runners.run_forensic_analysis(
+            toolbox=toolbox,
+            runs=2,
+            track_deleted=False,
+            compute_hashes=False,
+            recording_path="/abs/recording.txt",
+        )
+    )
+    action = captured["config"].action
+    assert isinstance(action, Player)
+    assert action._recording_path == "/abs/recording.txt"
+
+
+def test_resolve_recording(tmp_path):
+    from sandroid.cli import resolve_recording
+
+    bundle = tmp_path / "run"
+    bundle.mkdir()
+    (bundle / "recording.txt").write_text(RECORDING)
+    path, err = resolve_recording(str(bundle))
+    assert err is None
+    assert path == str((bundle / "recording.txt").resolve())
+
+    js = tmp_path / "a.json"
+    js.write_text('{"actions": []}')
+    path, err = resolve_recording(str(js))
+    assert path is None
+    assert "JSON action files cannot be replayed" in err
+
+    junk = tmp_path / "junk.txt"
+    junk.write_text("hello world\n")
+    assert "not a Sandroid recording" in resolve_recording(str(junk))[1]
+    assert "No recording found" in resolve_recording(str(tmp_path))[1]
+
+
+def test_import_action_runs_headless_replay(monkeypatch, tmp_path):
+    """P2: --import-action only json.loads'ed the file and replayed nothing."""
+    from sandroid import cli, cli_modes
+
+    rec = tmp_path / "recording.txt"
+    rec.write_text(RECORDING)
+    seen = {}
+    monkeypatch.setattr(
+        cli_modes, "run_headless_analysis", lambda **kw: seen.update(kw)
+    )
+    cli._run_import_action(object(), str(rec), runs=3, output_file="o.json")
+    assert seen["mode"] == "forensic"
+    assert seen["runs"] == 3
+    assert seen["recording_path"] == str(rec.resolve())
+    assert seen["output_file"] == "o.json"
+
+    js = tmp_path / "a.json"
+    js.write_text("[]")
+    with pytest.raises(SystemExit) as info:
+        cli._run_import_action(object(), str(js))
+    assert info.value.code == 1
+
+
+def test_headless_cli_forwards_recording(monkeypatch, tmp_path):
+    from sandroid.core import run_report
+
+    doc = run_report.FinalizeOutcome(results_json=tmp_path / "sandroid.json")
+    calls = _run_cli_headless(monkeypatch, doc, recording_path="/abs/rec.txt")
+    assert calls["run"]["recording_path"] == "/abs/rec.txt"
+    assert "window_notify" not in calls["run"]
+
+
+def test_headless_api_keeps_run_documentation(monkeypatch):
+    from sandroid.api import headless
+    from sandroid.api.interfaces import AnalysisMode
+
+    async def fake_forensic(**kwargs):
+        kwargs["on_finalized"]("DOC")
+        return {}
+
+    monkeypatch.setattr(headless, "run_forensic_analysis", fake_forensic)
+    api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
+    api._initialized = True
+    asyncio.run(api.run_analysis(AnalysisMode.FORENSIC))
+    assert api.last_run_documentation == "DOC"

@@ -128,6 +128,9 @@ class SandroidHeadlessAPI(SandroidAPI):
         self._analysis_start_time: datetime | None = None
         self._current_run = 0
         self._total_runs = 0
+        #: FinalizeOutcome of the last malware/forensic run (results JSON,
+        #: PDF, manifest and their errors); ``None`` if documentation failed.
+        self.last_run_documentation: Any = None
 
         # Lazily created on first use via property
         self._fritap_controller: HeadlessFriTapController | None = None
@@ -338,6 +341,13 @@ class SandroidHeadlessAPI(SandroidAPI):
 
         def _set_current_run(run: int) -> None:
             self._current_run = run
+
+        def _set_documentation(outcome: Any) -> None:
+            self.last_run_documentation = outcome
+
+        self.last_run_documentation = None
+        if mode in (AnalysisMode.MALWARE, AnalysisMode.FORENSIC):
+            kwargs.setdefault("on_finalized", _set_documentation)
 
         try:
             if mode == AnalysisMode.MALWARE:
