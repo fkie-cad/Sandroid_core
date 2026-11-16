@@ -506,9 +506,15 @@ def xml_diff_beautify(raw_diff_string):
                 formatted_line += (
                     f"Moved: {path} to position {position} under {target_parent}"
                 )
-            elif action == "update-text" and len(args) == 2:
-                path, new_text = args
+            elif action == "update-text" and len(args) in (2, 3):
+                # xmldiff >= 2.5 appends the old text ("null" for none).
+                path, new_text = args[0], args[1]
+                old_text = args[2] if len(args) == 3 else "null"
+                if new_text == "null":
+                    new_text = ""
                 formatted_line += f'Updated text: {path} to "{new_text}"'
+                if old_text != "null":
+                    formatted_line += f' (was "{old_text}")'
             elif action == "update-attribute" and len(args) == 3:
                 path, attr_name, new_value = args
                 formatted_line += f"Updated attribute: {path} attribute '{attr_name}' to \"{new_value}\""
@@ -542,8 +548,11 @@ def txt_diff(txt_file):
     :rtype: str
     """
     raw_results = os.getenv("RAW_RESULTS_PATH", "")
-    old_path = os.path.join(raw_results, "first_pull", txt_file)
-    new_path = os.path.join(raw_results, "second_pull", txt_file)
+    # Device paths are absolute ("/data/..."); os.path.join would discard the
+    # pull-folder prefix for them and open the *device* path on the host.
+    relative = txt_file.lstrip("/")
+    old_path = os.path.join(raw_results, "first_pull", relative)
+    new_path = os.path.join(raw_results, "second_pull", relative)
 
     try:
         with open(old_path, encoding="utf-8") as f:
