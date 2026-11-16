@@ -257,6 +257,12 @@ class DataGatherBase(DataGatherer, DataProvider):
         self.config = config
         self._logger = logger or logging.getLogger(self.__class__.__name__)
         self._data: dict[str, Any] = {}
+        # Curated system/GMS noise filter (a ``filters.SystemNoiseFilter``),
+        # injected by the analysis engine. ``None`` keeps every file.
+        self.system_noise_filter: Any = None
+        # {path: matching pattern} hidden by ``system_noise_filter`` during the
+        # last ``process_data()``; surfaced as "Filtered Noise" in the result.
+        self.filtered_noise: dict[str, str] = {}
 
     @property
     def logger(self) -> logging.Logger:
@@ -788,6 +794,25 @@ class DataGatherBase(DataGatherer, DataProvider):
             return fs.exclude_whitelist(files)
         # Fallback: return all files if no service available
         return files
+
+    def _apply_system_noise(self, files: list[str]) -> list[str]:
+        """Drop curated system/GMS noise, remembering what was hidden.
+
+        The hidden paths are kept in :attr:`filtered_noise` (overwritten on
+        every call so repeated ``process_data()`` calls stay idempotent) so
+        the engine can report them instead of dropping them silently.
+
+        Args:
+            files: Candidate file paths after dry-run noise subtraction.
+
+        Returns:
+            The files not matched by :attr:`system_noise_filter`.
+        """
+        if self.system_noise_filter is None:
+            self.filtered_noise = {}
+            return files
+        kept, self.filtered_noise = self.system_noise_filter.split(files)
+        return kept
 
     def _highlight_timestamps(self, text: str, color: str = "") -> str:
         """Highlight timestamps in text using Toolbox formatting.

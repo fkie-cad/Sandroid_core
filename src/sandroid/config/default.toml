@@ -37,6 +37,11 @@ cache_path = "~/.cache/sandroid/"
 [analysis]
 number_of_runs = 2
 avoid_strong_noise_filter = false
+# Hide well-known Android/GMS background files; they stay in the result
+# JSON under "Other Data" -> "Filtered Noise". false = show everything.
+system_noise_filter = true
+noise_patterns = []        # extra globs, e.g. "/data/*/com.example.sync/*"
+protected_packages = []    # never filtered (the spotlight app always is)
 capture_processes = true
 capture_sockets = false
 capture_network = false

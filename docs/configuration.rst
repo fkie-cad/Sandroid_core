@@ -210,6 +210,15 @@ Analysis (``[analysis]``)
    # Disable strong noise filtering (dry run)
    avoid_strong_noise_filter = false
 
+   # Hide well-known Android/GMS background files (see below)
+   system_noise_filter = true
+
+   # Extra fnmatch globs treated as system noise
+   noise_patterns = []
+
+   # Packages whose files are never filtered as noise
+   protected_packages = []
+
    # Screenshot interval in seconds
    # screenshot_interval = <not set>
 
@@ -236,6 +245,29 @@ Analysis (``[analysis]``)
 
    # Default view mode for interactive menu (forensic, malware, or security)
    default_view = "forensic"
+
+System noise filter
+^^^^^^^^^^^^^^^^^^^
+
+On a Google Play emulator image many files change in the background whether
+or not the analysed app does anything: Digital Wellbeing, Play services
+(``clearcut`` telemetry, SafetyNet), Gboard, the launcher, WebView, netstats,
+``package-restrictions.xml``, ``recent_tasks`` and the permission module's
+``access.abx``/``roles.xml``. The dry-run noise pass cannot catch all of them
+because some are only touched while an app is in the foreground.
+
+With ``system_noise_filter = true`` (the default) Sandroid hides paths that
+match the curated ``DEFAULT_SYSTEM_NOISE_PATTERNS`` list in
+``sandroid/analysis/filters.py`` plus your own ``noise_patterns``. Nothing is
+deleted:
+
+* hidden paths are listed with the pattern that matched them in the result
+  JSON under ``"Other Data" -> "Filtered Noise"`` (raw pulls stay in the run
+  bundle);
+* files of the spotlight (target) app and of ``protected_packages`` are never
+  hidden, even if a pattern matches them (any path component equal to, or
+  starting with, the package name counts);
+* set ``system_noise_filter = false`` to show everything.
 
 Report (``[report]``)
 ~~~~~~~~~~~~~~~~~~~~~

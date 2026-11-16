@@ -1,8 +1,6 @@
 import os
 from logging import getLogger
 
-from sandroid.core.events.events import FileChanged
-
 from .base_di import DataGatherBase
 from .filters import filter_noise_files, intersect_file_lists
 from .static_analysis import StaticAnalysis
@@ -68,10 +66,6 @@ class NewFiles(DataGatherBase):
         for file in changed_files:  # Get new files
             if file not in baseline:  # File is a new file
                 new_files.append(file)
-                # Publish event for newly detected file
-                FileChanged(
-                    file_path=file, change_type="created", source="newfiles"
-                ).publish()
         self._append_new_files(new_files)
         logger.debug(str(len(new_files)) + " New files discovered")
         logger.debug("New files found in this run: " + str(new_files))
@@ -201,7 +195,9 @@ class NewFiles(DataGatherBase):
                     os.remove(os.path.join(root, file_name))
 
         true_new_files_list = self._exclude_whitelist(true_new_files_list)
-        return true_new_files_list
+        # After the new_pull clean-up above, so the raw copies of filtered
+        # system noise stay in the bundle as evidence.
+        return self._apply_system_noise(true_new_files_list)
 
     """This is old, not quite OOP translated code that was supposed to detect if a new file was created but in a different directory each run.
     I am skipping this special case for now, but I'll leave the code here just in case

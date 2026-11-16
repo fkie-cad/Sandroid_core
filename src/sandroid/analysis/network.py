@@ -294,11 +294,17 @@ class Network(DataGatherBase):
         tcp_targets = self._targets_in(packets)
 
         # Calculate byte counts for each connection
+        dns_names = self._dns_answers_in(packets)
         ip_analysis = []
         for ip_and_port in sorted(tcp_targets):
             target_ip, target_port, proto = self._parse_endpoint(ip_and_port)
             bytes_sent, bytes_received = self._count_bytes_in(
                 packets, target_ip, target_port, proto
+            )
+            sni = (
+                self._sni_names_in(packets, target_ip, target_port)
+                if proto == "tcp"
+                else set()
             )
             ip_analysis.append(
                 {
@@ -307,6 +313,8 @@ class Network(DataGatherBase):
                     "protocol": proto,
                     "bytes_sent": bytes_sent,
                     "bytes_received": bytes_received,
+                    "dns_names": sorted(dns_names.get(target_ip, set())),
+                    "tls_sni": sorted(sni),
                 }
             )
 
@@ -677,9 +685,15 @@ class Network(DataGatherBase):
         return sent_bytes, received_bytes
 
     @classmethod
-    def _dns_answers_in(cls, packets: list[Any]) -> dict[str, str]:
-        """Map resolved IPs to the queried name (A/AAAA answers)."""
-        answers: dict[str, str] = {}
+    def _dns_answers_in(cls, packets: list[Any]) -> dict[str, set[str]]:
+        """Map each resolved IP to *every* queried name that resolved to it.
+
+        CDNs and load balancers share one IP between many hosts (Wikimedia
+        serves en.wikipedia.org and intake-analytics.wikimedia.org from the
+        same address), so keeping only the first answer mislabelled all
+        traffic to that IP.
+        """
+        answers: dict[str, set[str]] = {}
         for pkt in packets:
             if not pkt.haslayer(DNS):
                 continue
@@ -692,9 +706,93 @@ class Network(DataGatherBase):
             except Exception:
                 continue
             for rr in records:
-                if isinstance(rr, DNSRR) and rr.type in (1, 28):
-                    answers.setdefault(str(rr.rdata), qname or "")
+                if isinstance(rr, DNSRR) and rr.type in (1, 28) and qname:
+                    answers.setdefault(str(rr.rdata), set()).add(
+                        qname.rstrip(".")
+                    )
         return answers
+
+    @staticmethod
+    def _tls_sni(payload: bytes) -> str | None:
+        """Server name from a TLS ClientHello record, or ``None``.
+
+        A minimal parser (record -> handshake -> extensions -> server_name)
+        so no TLS dissector has to be loaded; any malformed or truncated
+        record simply yields ``None``.
+        """
+        try:
+            if len(payload) < 43 or payload[0] != 0x16 or payload[5] != 0x01:
+                return None
+            pos = 9 + 2 + 32  # record + handshake headers, version, random
+            pos += 1 + payload[pos]  # session id
+            pos += 2 + int.from_bytes(payload[pos : pos + 2], "big")  # ciphers
+            pos += 1 + payload[pos]  # compression methods
+            end = pos + 2 + int.from_bytes(payload[pos : pos + 2], "big")
+            pos += 2
+            while pos + 4 <= min(end, len(payload)):
+                ext_type = int.from_bytes(payload[pos : pos + 2], "big")
+                ext_len = int.from_bytes(payload[pos + 2 : pos + 4], "big")
+                pos += 4
+                if ext_type == 0:  # server_name: list len, type, name len
+                    if payload[pos + 2] != 0:
+                        return None
+                    name_len = int.from_bytes(payload[pos + 3 : pos + 5], "big")
+                    name = payload[pos + 5 : pos + 5 + name_len]
+                    if len(name) != name_len:
+                        return None
+                    return name.decode("ascii", errors="replace")
+                pos += ext_len
+        except IndexError:
+            return None
+        return None
+
+    @classmethod
+    def _sni_names_in(
+        cls, packets: list[Any], ip_address: str, port: int
+    ) -> set[str]:
+        """TLS SNI host names the guest sent to ``ip_address:port``."""
+        names: set[str] = set()
+        for pkt in packets:
+            ip = cls._ip_layer(pkt)
+            if ip is None or not pkt.haslayer(TCP):
+                continue
+            seg = pkt[TCP]
+            if ip.dst != ip_address or seg.dport != port:
+                continue
+            name = cls._tls_sni(bytes(seg.payload))
+            if name:
+                names.add(name)
+        return names
+
+    @classmethod
+    def _got_reply(
+        cls, packets: list[Any], ip_address: str, port: int, proto: str
+    ) -> bool:
+        """Whether any packet came back from ``ip_address:port``."""
+        layer = TCP if proto == "tcp" else UDP
+        for pkt in packets:
+            ip = cls._ip_layer(pkt)
+            if ip is None or not pkt.haslayer(layer):
+                continue
+            if ip.src == ip_address and pkt[layer].sport == port:
+                return True
+        return False
+
+    @staticmethod
+    def _host_label(dns_names: set[str], sni_names: set[str]) -> str:
+        """`` [a, b] (TLS SNI: c)`` -- every DNS name of the IP, plus SNI.
+
+        The SNI note is only added when it says something the DNS names do
+        not: HTTP/2 clients (OkHttp) coalesce requests for several hosts on
+        one connection to a shared IP, so the SNI alone is not attribution.
+        """
+        names = sorted(dns_names) or sorted(sni_names)
+        if not names:
+            return ""
+        label = f" [{', '.join(names)}]"
+        if dns_names and sni_names and sorted(sni_names) != names:
+            label += f" (TLS SNI: {', '.join(sorted(sni_names))})"
+        return label
 
     # ------------------------------------------------------------------
     # Public extraction API
@@ -763,6 +861,12 @@ class Network(DataGatherBase):
         capture contains the answer) and the bytes sent/received in the first
         run capture that contains it.
 
+        Every DNS name that resolved to the IP is listed (shared CDN /
+        load-balancer IPs serve several hosts), plus the TLS SNI when it
+        narrows that down. IPv4 and IPv6 flows are counted alike; a target
+        that never answered (e.g. an IPv6 SYN on an emulator without IPv6
+        routing) is marked as a connection attempt.
+
         Returns:
             Formatted strings, e.g.
             ``"192.102.162.236:443 [fkie.fraunhofer.de] (42B sent to / 0B
@@ -774,14 +878,14 @@ class Network(DataGatherBase):
 
         per_run: list[tuple[list[Any], set[str]]] = []
         all_targets: set[str] = set()
-        dns_names: dict[str, str] = {}
+        dns_names: dict[str, set[str]] = {}
         for path in self._run_pcap_paths():
             packets = self._read_pcap(path)
             targets = self._targets_in(packets)
             per_run.append((packets, targets))
             all_targets.update(targets)
-            for ip, name in self._dns_answers_in(packets).items():
-                dns_names.setdefault(ip, name)
+            for ip, names in self._dns_answers_in(packets).items():
+                dns_names.setdefault(ip, set()).update(names)
 
         noise_targets = self._targets_in(self._read_pcap(self._noise_pcap_path()))
         diff = sorted(all_targets - noise_targets)
@@ -793,10 +897,22 @@ class Network(DataGatherBase):
             sent_bytes, received_bytes = self._count_bytes_in(
                 packets, target_ip, target_port, proto
             )
-            name = dns_names.get(target_ip, "").rstrip(".")
-            label = f"{endpoint} [{name}]" if name else endpoint
+            sni = (
+                self._sni_names_in(packets, target_ip, target_port)
+                if proto == "tcp"
+                else set()
+            )
+            label = endpoint + self._host_label(dns_names.get(target_ip, set()), sni)
+            note = ""
+            if (
+                sent_bytes == 0
+                and received_bytes == 0
+                and not self._got_reply(packets, target_ip, target_port, proto)
+            ):
+                note = "; no reply, connection attempt only"
             result.append(
-                f"{label} ({sent_bytes}B sent to / {received_bytes}B received from)"
+                f"{label} ({sent_bytes}B sent to / {received_bytes}B received from"
+                f"{note})"
             )
 
             NetworkEvent(

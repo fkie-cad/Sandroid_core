@@ -37,6 +37,7 @@ import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from sandroid.analysis.filters import DEFAULT_SYSTEM_NOISE_PATTERNS, SystemNoiseFilter
 from sandroid.analysis.run_config import ProgressUpdate, RunResult, StepError
 from sandroid.core.events.events import AnalysisCompleted, AnalysisStarted
 
@@ -777,7 +778,31 @@ class AnalysisEngine:
             gatherers["processes"] = classes["processes"](**kwargs)
         if self.config.sockets:
             gatherers["sockets"] = classes["sockets"](**kwargs)
+        noise_filter = self._build_noise_filter()
+        for key in _FILE_GATHERER_KEYS:
+            if key in gatherers:
+                gatherers[key].system_noise_filter = noise_filter
         return gatherers
+
+    def _target_packages(self) -> list[str]:
+        """The spotlight (target) app's package, if one is selected."""
+        try:
+            app = self.toolbox.get_spotlight_application()
+        except Exception:
+            return []
+        if isinstance(app, (tuple, list)) and app:
+            app = app[0]
+        return [app] if isinstance(app, str) and app else []
+
+    def _build_noise_filter(self) -> SystemNoiseFilter:
+        """Build the curated system/GMS noise filter for this analysis."""
+        enabled, extra, protected = self.config.noise_settings()
+        protected = [*self._target_packages(), *protected]
+        return SystemNoiseFilter(
+            enabled=enabled,
+            patterns=(*DEFAULT_SYSTEM_NOISE_PATTERNS, *extra),
+            protected_packages=tuple(dict.fromkeys(protected)),
+        )
 
     def _reset_accumulators(self) -> None:
         """Reset cross-analysis accumulators once per ``run()`` (not per replay).
@@ -1063,6 +1088,51 @@ class AnalysisEngine:
                     exc,
                 )
         result.pretty_text = "".join(parts)
+        self._log_file_summary(result)
+
+    def _filtered_noise_report(self) -> dict[str, Any]:
+        """What the system noise filter hid, per section (for the JSON)."""
+        noise_filter = None
+        report: dict[str, Any] = {}
+        for key, section in _FILE_GATHERER_KEYS.items():
+            gatherer = self.gatherers.get(key)
+            if gatherer is None:
+                continue
+            noise_filter = noise_filter or getattr(gatherer, "system_noise_filter", None)
+            hidden = getattr(gatherer, "filtered_noise", None)
+            report[section] = dict(sorted(hidden.items())) if hidden else {}
+        enabled = bool(noise_filter is not None and noise_filter.enabled)
+        header: dict[str, Any] = {
+            "enabled": enabled,
+            "note": (
+                "Well-known Android/GMS background files hidden from the "
+                "results above (path -> matching pattern). Disable with "
+                "analysis.system_noise_filter = false."
+            ),
+        }
+        if noise_filter is not None:
+            header["protected_packages"] = list(noise_filter.protected_packages)
+        return {**header, **report}
+
+    def _log_file_summary(self, result: RunResult) -> None:
+        """One INFO line with the final file counts (per-file detail is DEBUG)."""
+        hidden = sum(
+            len(getattr(self.gatherers.get(key), "filtered_noise", None) or {})
+            for key in _FILE_GATHERER_KEYS
+        )
+        deleted = (
+            str(_safe_len(result.deleted_files))
+            if "deleted_files" in self.gatherers
+            else "not checked"
+        )
+        logger.info(
+            "File changes: %d changed, %d new, %s deleted "
+            "(%d system-noise file(s) hidden, see Other Data -> Filtered Noise)",
+            _safe_len(result.changed_files),
+            _safe_len(result.new_files),
+            deleted,
+            hidden,
+        )
 
     def _safe_return(
         self, gatherer: DataGatherBase | None, key: str, default: Any
@@ -1116,6 +1186,19 @@ class AnalysisEngine:
         except Exception as exc:
             logger.debug("Could not read Other Data collector: %s", exc)
             result.other_data = {}
+        try:
+            # List-wrapped like every other "Other Data" entry.
+            result.other_data["Filtered Noise"] = [self._filtered_noise_report()]
+        except Exception as exc:
+            logger.debug("Could not build Filtered Noise report: %s", exc)
+
+
+#: File gatherers the system noise filter applies to -> result section name.
+_FILE_GATHERER_KEYS: dict[str, str] = {
+    "changed_files": "Changed Files",
+    "new_files": "New Files",
+    "deleted_files": "Deleted Files",
+}
 
 
 def _safe_len(value: Any) -> int:

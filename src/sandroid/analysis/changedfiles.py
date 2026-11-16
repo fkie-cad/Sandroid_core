@@ -3,7 +3,6 @@ from logging import getLogger
 from typing import Any
 
 from sandroid.core import file_diff
-from sandroid.core.events.events import FileChanged
 from sandroid.core.toolbox import Toolbox
 
 from .base_di import AdbProtocol, DataGatherBase, ForensicServiceProtocol
@@ -91,10 +90,11 @@ class ChangedFiles(DataGatherBase):
             for file in changed_and_new:
                 if file in baseline:
                     changed_files.append(file)
-                    # Publish event for each changed file detected
-                    FileChanged(
-                        file_path=file, change_type="modified", source="changedfiles"
-                    ).publish()
+            # Candidates only (before intersection/noise filtering) -> DEBUG;
+            # the engine logs the final counts once.
+            logger.debug(
+                "%d changed-file candidate(s) in this run", len(changed_files)
+            )
             self.fileListList.append(changed_files)
 
     def return_data(self) -> dict[str, list[Any]]:
@@ -248,4 +248,4 @@ class ChangedFiles(DataGatherBase):
             preserve_sqlite_xml=True,
         )
         files_from_all_pulls = self._exclude_whitelist(files_from_all_pulls)
-        return files_from_all_pulls
+        return self._apply_system_noise(files_from_all_pulls)

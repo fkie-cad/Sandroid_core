@@ -5,6 +5,11 @@ analysis modules (changedfiles, newfiles, deletedfiles) to eliminate
 code duplication and ensure consistent filtering behavior.
 """
 
+from __future__ import annotations
+
+import fnmatch
+from dataclasses import dataclass, field
+
 from sandroid.core import file_diff
 
 
@@ -86,6 +91,107 @@ def is_structural_noise(file_path: str) -> bool:
         or file_path in STRUCTURAL_NOISE_FILES
         or file_path.endswith(STRUCTURAL_NOISE_SUFFIXES)
     )
+
+
+#: Curated list of well-known Android / Google Play services background paths
+#: (``fnmatch`` globs; ``*`` also matches ``/``). These files change on a Play
+#: image whether or not the analysed app does anything, so on a demo they
+#: drowned the app's own artefacts. Matches are *not* dropped: they are moved
+#: to ``Other Data -> Filtered Noise`` in the result JSON. Files of the target
+#: (spotlight) app and of ``analysis.protected_packages`` are never matched.
+#: Opt out with ``analysis.system_noise_filter = false``; add site-specific
+#: globs with ``analysis.noise_patterns``.
+DEFAULT_SYSTEM_NOISE_PATTERNS: tuple[str, ...] = (
+    # --- system_server state (rewritten by the framework, not the app) ---
+    "/data/system/users/*/package-restrictions.xml*",
+    "/data/system/users/*/appwidgets.xml*",
+    "/data/system_ce/*/recent_tasks/*",
+    "/data/system_ce/*/recent_images/*",
+    "/data/system/netstats/*",
+    "/data/system/usagestats/*",
+    "/data/system/procstats/*",
+    "/data/system/dropbox/*",
+    "/data/system/graphicsstats/*",
+    "/data/system/batterystats*",
+    # --- mainline modules: traffic counters, permission/role bookkeeping ---
+    "/data/misc/apexdata/com.android.tethering/netstats/*",
+    "/data/misc/apexdata/com.android.permission/*",
+    "/data/misc_de/*/apexdata/com.android.permission/*",
+    # --- Google Play services / Play Store and their telemetry ---
+    "/data/*/com.google.android.gms/*",
+    "/data/*/com.google.android.gsf/*",
+    "/data/*/com.android.vending/*",
+    # --- Google system apps that sync or log in the background ---
+    "/data/*/com.google.android.apps.wellbeing/*",
+    "/data/*/com.google.android.as/*",
+    "/data/*/com.google.android.as.oss/*",
+    "/data/*/com.google.android.inputmethod.latin/*",
+    "/data/*/com.google.android.webview/*",
+    "/data/*/com.google.android.apps.nexuslauncher/*",
+    "/data/*/com.google.android.googlequicksearchbox/*",
+    "/data/*/com.android.providers.calendar/shared_prefs/sanity.xml",
+    # PRIMES "flight records" (calendar, deskclock, ...)
+    "/data/*/files/flight_records/*",
+)
+
+#: Characters that may follow a package name inside a path component
+#: (``org.wikipedia.xml``, ``org.wikipedia_preferences.xml``,
+#: ``org.wikipedia-1==`` under ``/data/app``).
+_PACKAGE_COMPONENT_SEPARATORS = (".", "_", "-", ":")
+
+
+def path_belongs_to_package(file_path: str, package: str) -> bool:
+    """Whether ``file_path`` has a path component naming ``package``.
+
+    Errs on the side of *protecting* a file: any component equal to the
+    package name or starting with it plus a separator counts.
+    """
+    if not package:
+        return False
+    prefixes = tuple(package + sep for sep in _PACKAGE_COMPONENT_SEPARATORS)
+    return any(
+        part == package or part.startswith(prefixes)
+        for part in file_path.split("/")
+    )
+
+
+@dataclass
+class SystemNoiseFilter:
+    """Hide well-known system/GMS background files, transparently.
+
+    Attributes:
+        enabled: Apply the patterns at all (``analysis.system_noise_filter``).
+        patterns: ``fnmatch`` globs (defaults plus ``analysis.noise_patterns``).
+        protected_packages: Packages whose files are never filtered -- the
+            spotlight/target app plus ``analysis.protected_packages``.
+    """
+
+    enabled: bool = True
+    patterns: tuple[str, ...] = DEFAULT_SYSTEM_NOISE_PATTERNS
+    protected_packages: tuple[str, ...] = field(default_factory=tuple)
+
+    def match(self, file_path: str) -> str | None:
+        """Return the pattern ``file_path`` is filtered by, or ``None``."""
+        if not self.enabled:
+            return None
+        if any(path_belongs_to_package(file_path, p) for p in self.protected_packages):
+            return None
+        for pattern in self.patterns:
+            if fnmatch.fnmatchcase(file_path, pattern):
+                return pattern
+        return None
+
+    def split(self, files: list[str]) -> tuple[list[str], dict[str, str]]:
+        """Split ``files`` into ``(kept, {filtered_path: matching_pattern})``."""
+        kept: list[str] = []
+        filtered: dict[str, str] = {}
+        for file_path in files:
+            pattern = self.match(file_path)
+            if pattern is None:
+                kept.append(file_path)
+            else:
+                filtered[file_path] = pattern
+        return kept, filtered
 
 
 def filter_noise_files(

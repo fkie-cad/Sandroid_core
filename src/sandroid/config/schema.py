@@ -206,6 +206,25 @@ class AnalysisConfig(BaseModel):
     avoid_strong_noise_filter: bool = Field(
         default=False, description="Disable strong noise filtering (dry run)"
     )
+    system_noise_filter: bool = Field(
+        default=True,
+        description=(
+            "Hide well-known Android/GMS background files (curated list in "
+            "sandroid.analysis.filters). Hidden files stay in the result JSON "
+            "under Other Data -> Filtered Noise; set false to show everything"
+        ),
+    )
+    noise_patterns: list[str] = Field(
+        default_factory=list,
+        description="Extra fnmatch globs treated as system noise",
+    )
+    protected_packages: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Packages whose files are never filtered as noise (the spotlight "
+            "app always is)"
+        ),
+    )
     screenshot_interval: int | None = Field(
         default=None, ge=1, description="Screenshot interval in seconds"
     )
