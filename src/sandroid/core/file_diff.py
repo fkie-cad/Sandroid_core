@@ -8,7 +8,6 @@ from logging import getLogger
 from pathlib import Path
 
 from lxml import etree
-from xmldiff import formatting, main
 
 from sandroid.core.ccl_abx import AbxDecodeError, AbxReader
 
@@ -318,32 +317,34 @@ def db_journal_helper(db_path):
 def xml_diff(xml_path1, xml_path2, noise_path=None):
     """Calculates the differences between two XML files.
 
+    Elements are matched by a stable key (see :func:`keyed_xml_diff`), so an
+    added, updated or deleted SharedPreferences entry shows up as exactly
+    that instead of as a cascade of positional moves.
+
     :param xml_path1: The full path to the first XML file.
     :type xml_path1: str
     :param xml_path2: The full path to the second XML file.
     :type xml_path2: str
-    :param noise_path: The full path to the noise XML file (optional).
+    :param noise_path: The full path to the noise XML file (optional). Lines
+        that also appear in the first-vs-noise diff are dropped.
     :type noise_path: str
-    :returns: A formatted string naming entries that have been added, removed, and updated.
+    :returns: One tab-indented line per added, removed or updated entry, or
+        ``"ITS ALL NOISE"`` when every change also happened without the app.
     :rtype: str
     """
     if not os.path.isfile(xml_path1) or not os.path.isfile(xml_path2):
         return "\tNot enough data for intra file analysis. At least one version was not pulled. Refer to errors or warnings created during pulls."
 
     diff = xml_diff_helper(xml_path1, xml_path2)
-    if not os.path.isfile(noise_path):
-        return xml_diff_beautify(diff)
-    noise = xml_diff_helper(xml_path1, noise_path)
-    result = ""
-    if diff == noise:
+    if not noise_path or not os.path.isfile(noise_path):
+        return diff
+    noise_lines = set(xml_diff_helper(xml_path1, noise_path).splitlines())
+    if _NO_XML_CHANGE.strip() in {line.strip() for line in noise_lines}:
+        noise_lines = set()
+    kept = [line for line in diff.splitlines() if line not in noise_lines]
+    if not kept and diff.strip() and _NO_XML_CHANGE.strip() not in diff:
         return "ITS ALL NOISE"
-    for line in diff.splitlines():
-        if line not in noise:
-            result = result + line + "\n"
-        else:
-            # result = result + "[NOISE]" + line + "\n"
-            pass
-    return xml_diff_beautify(result)
+    return "".join(f"{line}\n" for line in kept) or _NO_XML_CHANGE
 
 
 def xml_diff_helper(xml_path1, xml_path2):
@@ -371,6 +372,269 @@ def xml_diff_helper(xml_path1, xml_path2):
     return txt_xml_diff(xml_path1, xml_path2)
 
 
+_NO_XML_CHANGE = "\tNo change detected\n"
+
+#: Attributes that identify an element among its siblings, in priority order.
+#: SharedPreferences use ``name``; package-restrictions/roles use ``name`` or
+#: ``package``; the ground-truth app uses ``ID``.
+XML_KEY_ATTRIBUTES: tuple[str, ...] = (
+    "name",
+    "key",
+    "id",
+    "ID",
+    "package",
+    "packageName",
+    "task_id",
+)
+
+
+def _local_name(tag):
+    """Strip an lxml ``{namespace}`` prefix from a tag or attribute name."""
+    return tag.split("}", 1)[1] if tag.startswith("{") else tag
+
+
+def _element_key_attr(element):
+    """Return ``(attr, value)`` of the element's identifying attribute, if any."""
+    attrs = {_local_name(k): v for k, v in element.attrib.items()}
+    for name in XML_KEY_ATTRIBUTES:
+        if name in attrs:
+            return name, attrs[name]
+    return None
+
+
+def _child_elements(element):
+    """Child elements, skipping comments and processing instructions."""
+    return [child for child in element if isinstance(child.tag, str)]
+
+
+def _split_children(element):
+    """Split children into keyed (by path segment) and un-keyed (by tag).
+
+    Keyed children (see :data:`XML_KEY_ATTRIBUTES`) get the segment
+    ``tag[@attr="value"]``; a repeated key gets an extra occurrence index so
+    no child is dropped. Un-keyed children are grouped per tag, in order.
+    """
+    keyed = {}
+    unkeyed: dict[str, list] = {}
+    for child in _child_elements(element):
+        tag = _local_name(child.tag)
+        key_attr = _element_key_attr(child)
+        if key_attr is None:
+            unkeyed.setdefault(tag, []).append(child)
+            continue
+        segment = f'{tag}[@{key_attr[0]}="{key_attr[1]}"]'
+        if segment in keyed:
+            n = 2
+            while f"{segment}[{n}]" in keyed:
+                n += 1
+            segment = f"{segment}[{n}]"
+        keyed[segment] = child
+    return keyed, unkeyed
+
+
+def _unkeyed_segment(tag, index, multiple):
+    """Path segment of an un-keyed child: ``tag`` or ``tag[n]`` (1-based)."""
+    return f"{tag}[{index + 1}]" if multiple else tag
+
+
+def _signature(element):
+    """Hashable deep fingerprint of an element (tag, attributes, text, children)."""
+    return (
+        _local_name(element.tag),
+        tuple(sorted((_local_name(k), v) for k, v in element.attrib.items())),
+        _element_text(element),
+        tuple(_signature(child) for child in _child_elements(element)),
+    )
+
+
+def _pair_unkeyed(old_list, new_list):
+    """Pair un-keyed same-tag siblings: identical ones first, then by position.
+
+    Pairing identical subtrees first makes an insert into an unordered
+    ``<set>`` (e.g. a SharedPreferences string set) come out as one
+    ``[ADDED]`` instead of a chain of positional updates.
+
+    Returns:
+        ``(pairs, deleted, added)`` -- index pairs that need a recursive diff,
+        and the old/new indexes without a partner.
+    """
+    by_signature: dict = {}
+    for j, child in enumerate(new_list):
+        by_signature.setdefault(_signature(child), []).append(j)
+    used_new: set[int] = set()
+    unmatched_old: list[int] = []
+    for i, child in enumerate(old_list):
+        candidates = by_signature.get(_signature(child))
+        if candidates:
+            used_new.add(candidates.pop(0))
+        else:
+            unmatched_old.append(i)
+    unmatched_new = [j for j in range(len(new_list)) if j not in used_new]
+    pairs = list(zip(unmatched_old, unmatched_new, strict=False))
+    deleted = unmatched_old[len(pairs) :]
+    added = unmatched_new[len(pairs) :]
+    return pairs, deleted, added
+
+
+def _element_text(element):
+    return (element.text or "").strip()
+
+
+def _one_line(value):
+    """Escape line breaks so every diff entry stays on a single line."""
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
+#: Values longer than this are shown trimmed to the changed region.
+_XML_VALUE_CONTEXT = 60
+
+
+def _format_value_change(old, new):
+    """Render ``"old" → "new"``, trimming long values to the changed region.
+
+    Cookie maps and JSON blobs in SharedPreferences are several KB long and
+    typically change in one timestamp; the shared prefix/suffix is elided
+    with ``…`` so the change itself stays visible.
+    """
+    old, new = _one_line(old), _one_line(new)
+    limit = 2 * _XML_VALUE_CONTEXT
+    if len(old) <= limit and len(new) <= limit:
+        return f'"{old}" → "{new}"'
+    prefix = 0
+    while prefix < min(len(old), len(new)) and old[prefix] == new[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < min(len(old), len(new)) - prefix
+        and old[-1 - suffix] == new[-1 - suffix]
+    ):
+        suffix += 1
+    start = max(0, prefix - _XML_VALUE_CONTEXT)
+
+    def clip(value):
+        end = min(len(value), len(value) - suffix + _XML_VALUE_CONTEXT)
+        head = "…" if start > 0 else ""
+        tail = "…" if end < len(value) else ""
+        return f"{head}{value[start:end]}{tail}"
+
+    return f'"{clip(old)}" → "{clip(new)}"'
+
+
+def _describe_element(element):
+    """Render an element's attributes (minus its key) and text on one line."""
+    key_attr = _element_key_attr(element)
+    parts = [
+        f'{_local_name(k)}="{_one_line(v)}"'
+        for k, v in element.attrib.items()
+        if key_attr is None or _local_name(k) != key_attr[0]
+    ]
+    text = _element_text(element)
+    if text:
+        parts.append(f'text="{_one_line(text)}"')
+    return " ".join(parts)
+
+
+def _emit_subtree(lines, label, path, element):
+    """Emit ``[ADDED]``/``[DELETED]`` lines for an element and its descendants."""
+    desc = _describe_element(element)
+    lines.append(f"\t[{label}] {path}" + (f" {desc}" if desc else ""))
+    keyed, unkeyed = _split_children(element)
+    for segment, child in keyed.items():
+        _emit_subtree(lines, label, f"{path}/{segment}", child)
+    for tag, children in unkeyed.items():
+        for i, child in enumerate(children):
+            segment = _unkeyed_segment(tag, i, len(children) > 1)
+            _emit_subtree(lines, label, f"{path}/{segment}", child)
+
+
+def _diff_elements(lines, path, old, new):
+    old_attrs = {_local_name(k): v for k, v in old.attrib.items()}
+    new_attrs = {_local_name(k): v for k, v in new.attrib.items()}
+    for name, value in new_attrs.items():
+        if name not in old_attrs:
+            lines.append(
+                f"\t[UPDATED] {path} attribute '{name}' added: \"{_one_line(value)}\""
+            )
+        elif old_attrs[name] != value:
+            change = _format_value_change(old_attrs[name], value)
+            lines.append(f"\t[UPDATED] {path} {name}: {change}")
+    for name, value in old_attrs.items():
+        if name not in new_attrs:
+            lines.append(
+                f"\t[UPDATED] {path} attribute '{name}' removed"
+                f' (was "{_one_line(value)}")'
+            )
+    old_text, new_text = _element_text(old), _element_text(new)
+    if old_text != new_text:
+        change = _format_value_change(old_text, new_text)
+        lines.append(f"\t[UPDATED] {path} text: {change}")
+
+    old_keyed, old_unkeyed = _split_children(old)
+    new_keyed, new_unkeyed = _split_children(new)
+    for segment, child in old_keyed.items():
+        if segment not in new_keyed:
+            _emit_subtree(lines, "DELETED", f"{path}/{segment}", child)
+    for segment, child in new_keyed.items():
+        child_path = f"{path}/{segment}"
+        if segment in old_keyed:
+            _diff_elements(lines, child_path, old_keyed[segment], child)
+        else:
+            _emit_subtree(lines, "ADDED", child_path, child)
+
+    for tag in dict.fromkeys([*old_unkeyed, *new_unkeyed]):
+        old_list = old_unkeyed.get(tag, [])
+        new_list = new_unkeyed.get(tag, [])
+        multiple = len(old_list) > 1 or len(new_list) > 1
+        pairs, deleted, added = _pair_unkeyed(old_list, new_list)
+        for i in deleted:
+            segment = _unkeyed_segment(tag, i, multiple)
+            _emit_subtree(lines, "DELETED", f"{path}/{segment}", old_list[i])
+        for i, j in pairs:
+            segment = _unkeyed_segment(tag, j, multiple)
+            _diff_elements(lines, f"{path}/{segment}", old_list[i], new_list[j])
+        for j in added:
+            segment = _unkeyed_segment(tag, j, multiple)
+            _emit_subtree(lines, "ADDED", f"{path}/{segment}", new_list[j])
+
+
+def keyed_xml_diff(old_root, new_root):
+    """Diff two parsed XML trees, matching elements by a stable key.
+
+    Children are paired by tag plus their identifying attribute (``name``,
+    ``key``, ``id``/``ID``, ``package`` ...; see :data:`XML_KEY_ATTRIBUTES`),
+    or by position among same-tag siblings when they have none. Sibling order
+    is ignored (SharedPreferences are an unordered map), so an insert or
+    delete no longer shifts every following element. Output lines:
+
+    * ``[ADDED] <path> <attributes/text>``
+    * ``[DELETED] <path> <attributes/text>``
+    * ``[UPDATED] <path> <attr>: "old" → "new"`` / ``text: "old" → "new"``
+
+    :param old_root: Root element of the earlier version (lxml or ElementTree).
+    :param new_root: Root element of the later version.
+    :returns: Tab-indented, newline-terminated diff lines, or
+        a "No change detected" line.
+    :rtype: str
+    """
+    lines: list[str] = []
+    old_tag, new_tag = _local_name(old_root.tag), _local_name(new_root.tag)
+    if old_tag != new_tag:
+        _emit_subtree(lines, "DELETED", f"/{old_tag}", old_root)
+        _emit_subtree(lines, "ADDED", f"/{new_tag}", new_root)
+    else:
+        _diff_elements(lines, f"/{new_tag}", old_root, new_root)
+    if not lines:
+        return _NO_XML_CHANGE
+    return "".join(f"{line}\n" for line in lines)
+
+
+_XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=True)
+
+
+def _parse_xml_bytes(data):
+    return etree.fromstring(data, parser=_XML_PARSER)
+
+
 def txt_xml_diff(file_path1, file_path2):
     """Calculates the differences between two text (aka normal) XML files.
 
@@ -381,35 +645,28 @@ def txt_xml_diff(file_path1, file_path2):
     :returns: A formatted string naming entries that have been added and removed.
     :rtype: str
     """
-    formatter = formatting.DiffFormatter(pretty_print=True)
-
     try:
-        changes = main.diff_files(file_path1, file_path2, formatter=formatter)
+        old_root = _parse_xml_bytes(Path(file_path1).read_bytes())
+        new_root = _parse_xml_bytes(Path(file_path2).read_bytes())
     except etree.XMLSyntaxError as e:
         logger.error(f"XML Syntax Error encountered: {e}")
-        return "\tNo change detected\n"
-
-    if changes == "":
-        return "\tNo change detected\n"
-    return _format_xml_diff_output(changes)
+        return _NO_XML_CHANGE
+    except OSError as e:
+        logger.error(f"Failed to read XML file for diff: {e}")
+        return f"\tError: Could not open file {e.filename}\n"
+    return keyed_xml_diff(old_root, new_root)
 
 
 def _format_xml_diff_output(changes):
-    """Format raw xmldiff output consistently for CLI/report consumption.
+    """Tab-indent a multi-line diff string (``"No change detected"`` if empty).
 
-    Shared by :func:`txt_xml_diff` and :func:`abx_xml_diff` so both XML-diff
-    code paths (plain-text XML vs. ABX-decoded XML) produce identically
-    tab-indented output, since :func:`xml_diff_helper` treats their return
-    values interchangeably.
-
-    :param changes: The raw formatted diff string from xmldiff's ``DiffFormatter``.
+    :param changes: The diff text to indent.
     :type changes: str
-    :returns: A tab-indented, newline-terminated diff string, or a
-        "No change detected" message when *changes* is empty.
+    :returns: A tab-indented, newline-terminated diff string.
     :rtype: str
     """
     if not changes:
-        return "\tNo change detected\n"
+        return _NO_XML_CHANGE
     return "".join(f"\t{line}\n" for line in changes.splitlines())
 
 
@@ -434,8 +691,8 @@ def abx_xml_diff(file_path1, file_path2):
     """Calculates the differences between two ABX XML files.
 
     Decodes both files in-process using the repo's own ``AbxReader``
-    decoder (:mod:`sandroid.core.ccl_abx`) and diffs the resulting XML
-    strings directly -- no subprocess, no temporary files.
+    decoder (:mod:`sandroid.core.ccl_abx`) and diffs the resulting trees
+    with :func:`keyed_xml_diff` -- no subprocess, no temporary files.
 
     :param file_path1: The full path to the first ABX file.
     :type file_path1: str
@@ -445,7 +702,6 @@ def abx_xml_diff(file_path1, file_path2):
     :rtype: str
     """
     logger.debug("Calculating ABX XML Diff between both versions of " + file_path1)
-    logger.debug({"file_path1": file_path1, "file_path2": file_path2})
 
     try:
         first_xml = _convert_abx_to_xml_string(file_path1)
@@ -454,24 +710,13 @@ def abx_xml_diff(file_path1, file_path2):
         logger.error(f"Failed to convert ABX files for diff: {exc}")
         return "\tFailed to convert ABX files for diff\n"
 
-    logger.debug("Converted ABX files to XML via AbxReader")
-    logger.debug(
-        {
-            "file_path1": file_path1,
-            "file_path2": file_path2,
-            "first_xml_length": len(first_xml),
-            "second_xml_length": len(second_xml),
-        }
-    )
-
-    formatter = formatting.DiffFormatter(pretty_print=True)
     try:
-        changes = main.diff_texts(first_xml, second_xml, formatter=formatter)
+        old_root = _parse_xml_bytes(first_xml.encode("utf-8"))
+        new_root = _parse_xml_bytes(second_xml.encode("utf-8"))
     except etree.XMLSyntaxError as e:
         logger.error(f"XML Syntax Error encountered while diffing ABX XML: {e}")
-        return "\tNo change detected\n"
-
-    return _format_xml_diff_output(changes)
+        return _NO_XML_CHANGE
+    return keyed_xml_diff(old_root, new_root)
 
 
 def xml_diff_beautify(raw_diff_string):
