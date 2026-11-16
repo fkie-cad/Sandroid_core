@@ -28,8 +28,8 @@ def _ensure_scapy():
     global _scapy_imported
     if not _scapy_imported:
         logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-        global DNS, DNSQR, IP, TCP, rdpcap
-        from scapy.all import DNS, DNSQR, IP, TCP, rdpcap
+        global DNS, DNSQR, DNSRR, IP, IPv6, TCP, UDP, rdpcap
+        from scapy.all import DNS, DNSQR, DNSRR, IP, TCP, UDP, IPv6, rdpcap
 
         _scapy_imported = True
 
@@ -285,24 +285,26 @@ class Network(DataGatherBase):
         """
         _ensure_scapy()
 
-        # Extract DNS requests
-        dns_queries = self.extract_dns_requests_from_pcap(pcap_path)
+        packets = self._read_pcap(pcap_path)
 
-        # Extract TCP connection targets
-        tcp_targets = self.extract_target_ips_and_ports(pcap_path)
+        # Extract DNS requests
+        dns_queries = self._dns_queries_in(packets)
+
+        # Extract connection targets (TCP SYNs + non-DNS UDP)
+        tcp_targets = self._targets_in(packets)
 
         # Calculate byte counts for each connection
         ip_analysis = []
         for ip_and_port in sorted(tcp_targets):
-            target_ip = ip_and_port.split(":")[0]
-            target_port = int(ip_and_port.split(":")[1])
-            bytes_sent, bytes_received = self.count_bytes(
-                target_ip, target_port, pcap_path
+            target_ip, target_port, proto = self._parse_endpoint(ip_and_port)
+            bytes_sent, bytes_received = self._count_bytes_in(
+                packets, target_ip, target_port, proto
             )
             ip_analysis.append(
                 {
                     "ip": target_ip,
                     "port": target_port,
+                    "protocol": proto,
                     "bytes_sent": bytes_sent,
                     "bytes_received": bytes_received,
                 }
@@ -528,39 +530,198 @@ class Network(DataGatherBase):
         """
         return cls._trace_file_name
 
+    # ------------------------------------------------------------------
+    # PCAP discovery / reading
+    # ------------------------------------------------------------------
+
+    def _run_pcap_paths(self) -> list[str]:
+        """Return the existing per-run capture files, in run order.
+
+        Discovered from disk instead of derived from ``internal_run_counter``:
+        the old ``range(1, counter - 1)`` arithmetic assumed a dry-run capture
+        had also bumped the counter, so with the noise filter off (or a single
+        run) the last real capture was silently never analysed.
+        """
+        base_path = self._get_path()
+        found: list[tuple[int, str]] = []
+        try:
+            names = os.listdir(base_path)
+        except OSError:
+            return []
+        prefix = self._trace_file_name
+        for name in names:
+            if not (name.startswith(prefix) and name.endswith(".pcap")):
+                continue
+            index = name[len(prefix) : -len(".pcap")]
+            if index.isdigit():
+                found.append((int(index), os.path.join(base_path, name)))
+        return [path for _, path in sorted(found)]
+
+    def _noise_pcap_path(self) -> str:
+        """Path of the dry-run (noise) capture."""
+        return f"{self._get_path()}{self._trace_file_name}noise.pcap"
+
+    @staticmethod
+    def _read_pcap(pcap_path: str) -> list[Any]:
+        """Read a capture, returning ``[]`` if it is missing or unreadable.
+
+        A missing noise capture (noise filter off) or a capture that never
+        started must not abort the whole network result.
+        """
+        _ensure_scapy()
+        if not pcap_path or not os.path.isfile(pcap_path):
+            logger.debug(f"No capture file at {pcap_path}")
+            return []
+        try:
+            return list(rdpcap(pcap_path))
+        except Exception as exc:
+            logger.warning(f"Could not read capture {pcap_path}: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Packet parsing helpers (operate on already-read packet lists)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ip_layer(pkt: Any) -> Any:
+        """Return the IPv4 or IPv6 layer of ``pkt`` (or ``None``)."""
+        if pkt.haslayer(IP):
+            return pkt[IP]
+        if pkt.haslayer(IPv6):
+            return pkt[IPv6]
+        return None
+
+    @staticmethod
+    def _format_endpoint(ip: str, port: int, proto: str) -> str:
+        """``ip:port`` for TCP, ``ip:port/udp`` for UDP; IPv6 in brackets."""
+        host = f"[{ip}]" if ":" in ip else ip
+        suffix = "/udp" if proto == "udp" else ""
+        return f"{host}:{port}{suffix}"
+
+    @staticmethod
+    def _parse_endpoint(endpoint: str) -> tuple[str, int, str]:
+        """Inverse of :meth:`_format_endpoint`."""
+        proto = "tcp"
+        if endpoint.endswith("/udp"):
+            proto = "udp"
+            endpoint = endpoint[: -len("/udp")]
+        host, _, port = endpoint.rpartition(":")
+        return host.strip("[]"), int(port), proto
+
+    @staticmethod
+    def _is_local_or_multicast(ip: str) -> bool:
+        """Whether ``ip`` is the emulator's virtual LAN, multicast or broadcast."""
+        if ip.startswith(("10.0.2.", "224.", "239.", "255.", "ff0", "fe80:")):
+            return True
+        return ip in ("0.0.0.0", "::")  # nosec B104 - comparison only
+
+    @classmethod
+    def _dns_queries_in(cls, packets: list[Any]) -> set[str]:
+        domain_names: set[str] = set()
+        for pkt in packets:
+            if not pkt.haslayer(DNS):
+                continue
+            dns = pkt.getlayer(DNS)
+            if dns.qr != 0 or not dns.qd:
+                continue
+            try:
+                dns_query = dns.qd[0]
+            except (IndexError, TypeError):
+                continue
+            if dns_query is not None and isinstance(dns_query, DNSQR):
+                # mDNS (5353) is LAN service discovery, not a lookup.
+                if pkt.haslayer(UDP) and pkt[UDP].dport == 5353:
+                    continue
+                domain_names.add(dns_query.qname.decode(errors="replace"))
+        return domain_names
+
+    @classmethod
+    def _targets_in(cls, packets: list[Any]) -> set[str]:
+        """Outbound connection targets: TCP SYNs + non-DNS unicast UDP."""
+        targets: set[str] = set()
+        for pkt in packets:
+            ip = cls._ip_layer(pkt)
+            if ip is None:
+                continue
+            if pkt.haslayer(TCP):
+                flags = pkt[TCP].flags
+                # SYN without ACK == connection initiation by the guest.
+                if "S" in str(flags) and "A" not in str(flags):
+                    targets.add(cls._format_endpoint(ip.dst, pkt[TCP].dport, "tcp"))
+            elif pkt.haslayer(UDP):
+                udp = pkt[UDP]
+                if udp.dport in (53, 5353, 67, 68) or udp.sport in (53, 5353):
+                    continue
+                if cls._is_local_or_multicast(ip.dst):
+                    continue
+                targets.add(cls._format_endpoint(ip.dst, udp.dport, "udp"))
+        return targets
+
+    @classmethod
+    def _count_bytes_in(
+        cls, packets: list[Any], ip_address: str, port: int, proto: str = "tcp"
+    ) -> tuple[int, int]:
+        """Payload bytes (sent to, received from) ``ip_address:port``."""
+        layer = TCP if proto == "tcp" else UDP
+        sent_bytes = 0
+        received_bytes = 0
+        for pkt in packets:
+            ip = cls._ip_layer(pkt)
+            if ip is None or not pkt.haslayer(layer):
+                continue
+            seg = pkt[layer]
+            if ip.dst == ip_address and seg.dport == port:
+                sent_bytes += len(seg.payload)
+            elif ip.src == ip_address and seg.sport == port:
+                received_bytes += len(seg.payload)
+        return sent_bytes, received_bytes
+
+    @classmethod
+    def _dns_answers_in(cls, packets: list[Any]) -> dict[str, str]:
+        """Map resolved IPs to the queried name (A/AAAA answers)."""
+        answers: dict[str, str] = {}
+        for pkt in packets:
+            if not pkt.haslayer(DNS):
+                continue
+            dns = pkt.getlayer(DNS)
+            if dns.qr != 1 or not dns.an:
+                continue
+            try:
+                qname = dns.qd[0].qname.decode(errors="replace") if dns.qd else ""
+                records = list(dns.an)
+            except Exception:
+                continue
+            for rr in records:
+                if isinstance(rr, DNSRR) and rr.type in (1, 28):
+                    answers.setdefault(str(rr.rdata), qname or "")
+        return answers
+
+    # ------------------------------------------------------------------
+    # Public extraction API
+    # ------------------------------------------------------------------
+
     def extract_dns_requests_for_all_pcaps(self) -> list[str]:
         """Extract DNS requests from all PCAP files, filtering out baseline noise.
 
-        Analyzes all numbered PCAP files from capture runs, extracts DNS queries,
-        and removes any domains that also appeared in the baseline 'noise' capture.
+        Analyzes every per-run capture, extracts DNS queries, and removes any
+        domains that also appeared in the dry-run 'noise' capture (if any).
         Publishes NetworkEvent for each unique DNS request found.
 
         Returns:
             A list of unique DNS domain names that were queried during the
             capture runs but not present in the baseline noise capture.
         """
-        # Set to store DNS requests from all pcaps except the noise pcap
-        all_dns_requests = set()
-
         logger.info("Analyzing pcaps for DNS requests, this could take a minute...")
 
-        # Iterate over PCAP files
-        base_path = self._get_path()
-        for i in range(1, self.internal_run_counter - 1):
-            path = f"{base_path}{self._trace_file_name}{i}.pcap"
+        all_dns_requests: set[str] = set()
+        for path in self._run_pcap_paths():
+            all_dns_requests.update(self.extract_dns_requests_from_pcap(path))
 
-            # Extract DNS requests and add them to the set
-            dns_requests = self.extract_dns_requests_from_pcap(path)
-            all_dns_requests.update(dns_requests)
+        noise_dns_requests = self.extract_dns_requests_from_pcap(
+            self._noise_pcap_path()
+        )
+        diff = sorted(all_dns_requests - noise_dns_requests)
 
-        # Extract DNS requests from the noise pcap
-        noise_path = f"{base_path}{self._trace_file_name}noise.pcap"
-        noise_dns_requests = self.extract_dns_requests_from_pcap(noise_path)
-
-        # Return only the DNS names that were in all_dns_requests but not in noise_dns_requests as a list
-        diff = list(all_dns_requests - noise_dns_requests)
-
-        # Publish NetworkEvent for each unique DNS request
         for dns_request in diff:
             NetworkEvent(
                 event_type_name="dns_request",
@@ -572,7 +733,6 @@ class Network(DataGatherBase):
                 source="network",
             ).publish()
 
-        # Publish summary
         TaskOutput(
             task_name="network",
             message=f"Found {len(diff)} unique DNS requests",
@@ -586,95 +746,69 @@ class Network(DataGatherBase):
     def extract_dns_requests_from_pcap(cls, pcap_path: str) -> set[str]:
         """Extract all DNS query domain names from a PCAP file.
 
-        Parses the PCAP file and extracts domain names from DNS query packets
-        (qr=0 indicates a query, not a response).
-
         Args:
-            pcap_path: Path to the PCAP file to analyze.
+            pcap_path: Path to the PCAP file to analyze (missing -> empty set).
 
         Returns:
             A set of domain names that were queried in the capture.
         """
-        _ensure_scapy()  # Lazy import scapy
-        domain_names = set()
-
-        # Read the pcap file
-        packets = rdpcap(pcap_path)
-
-        # Iterate over each packet
-        for pkt in packets:
-            # Check if the packet is a DNS request
-            if (
-                pkt.haslayer(DNS) and pkt.getlayer(DNS).qr == 0
-            ):  # qr == 0 indicates a query
-                # Extract the queried domain names
-                dns_query = pkt.getlayer(DNS).qd[0]  # DNS question section
-                if dns_query is not None and isinstance(dns_query, DNSQR):
-                    domain_names.add(dns_query.qname.decode())
-
-        # TODO: also store IPs of answer so they can be correlated later on
-        return domain_names
+        return cls._dns_queries_in(cls._read_pcap(pcap_path))
 
     def extract_target_ips_and_ports_for_all_pcaps(self) -> list[str]:
-        """Extract target IP:port connections from all PCAPs, filtering baseline noise.
+        """Extract connection targets from all PCAPs, filtering baseline noise.
 
-        Analyzes all numbered PCAP files, extracts TCP SYN packets to identify
-        connection targets, and removes any that also appeared in the baseline
-        'noise' capture. Calculates bytes sent/received for each connection.
-        Publishes NetworkEvent for each unique connection found.
+        TCP targets come from guest SYN packets, UDP targets from non-DNS
+        unicast datagrams. Targets also present in the dry-run capture are
+        removed. Each entry is annotated with the resolved DNS name (if the
+        capture contains the answer) and the bytes sent/received in the first
+        run capture that contains it.
 
         Returns:
-            A list of formatted strings with IP:port and byte counts, e.g.,
-            "192.168.1.1:443 (100B sent to / 500B received from)".
+            Formatted strings, e.g.
+            ``"192.102.162.236:443 [fkie.fraunhofer.de] (42B sent to / 0B
+            received from)"``; UDP targets carry a ``/udp`` port suffix.
         """
-        # Set to store target IPs and ports from all pcaps except the noise pcap
-        all_target_ips_and_ports = set()
-
         logger.info(
             "Analyzing pcaps for target IPs and ports, this could take a minute..."
         )
 
-        # Iterate over PCAP files
-        base_path = self._get_path()
-        for i in range(1, self.internal_run_counter - 1):
-            path = f"{base_path}{self._trace_file_name}{i}.pcap"
+        per_run: list[tuple[list[Any], set[str]]] = []
+        all_targets: set[str] = set()
+        dns_names: dict[str, str] = {}
+        for path in self._run_pcap_paths():
+            packets = self._read_pcap(path)
+            targets = self._targets_in(packets)
+            per_run.append((packets, targets))
+            all_targets.update(targets)
+            for ip, name in self._dns_answers_in(packets).items():
+                dns_names.setdefault(ip, name)
 
-            # Extract target IPs and ports and add them to the set
-            target_ips_and_ports = self.extract_target_ips_and_ports(path)
-            all_target_ips_and_ports.update(target_ips_and_ports)
+        noise_targets = self._targets_in(self._read_pcap(self._noise_pcap_path()))
+        diff = sorted(all_targets - noise_targets)
 
-        # Extract target IPs and ports from the noise pcap
-        noise_path = f"{base_path}{self._trace_file_name}noise.pcap"
-        noise_target_ips_and_ports = self.extract_target_ips_and_ports(noise_path)
-
-        # Return only the target IPs and ports that were in all_target_ips_and_ports but not in noise_target_ips_and_ports
-        diff = list(all_target_ips_and_ports - noise_target_ips_and_ports)
-
-        # Calculate the number of bytes sent and received over each connection
         result = []
-        for ip_and_port in diff:
-            target_IP = ip_and_port.split(":")[0]
-            target_port = int(ip_and_port.split(":")[1])
-            pcap_path = f"{base_path}network_trace_run_1.pcap"
-            sent_bytes, received_bytes = self.count_bytes(
-                target_IP, target_port, pcap_path
+        for endpoint in diff:
+            target_ip, target_port, proto = self._parse_endpoint(endpoint)
+            packets = next((p for p, t in per_run if endpoint in t), [])
+            sent_bytes, received_bytes = self._count_bytes_in(
+                packets, target_ip, target_port, proto
             )
+            name = dns_names.get(target_ip, "").rstrip(".")
+            label = f"{endpoint} [{name}]" if name else endpoint
             result.append(
-                f"{target_IP}:{target_port} ({sent_bytes}B sent to / {received_bytes}B received from)"
+                f"{label} ({sent_bytes}B sent to / {received_bytes}B received from)"
             )
 
-            # Publish NetworkEvent for each unique connection
             NetworkEvent(
                 event_type_name="connection",
-                protocol="tcp",
+                protocol=proto,
                 source_ip="",
-                dest_ip=target_IP,
+                dest_ip=target_ip,
                 dest_port=target_port,
                 data_size=sent_bytes + received_bytes,
                 source="network",
             ).publish()
 
-        # Publish summary
         TaskOutput(
             task_name="network",
             message=f"Found {len(result)} unique IP:port connections",
@@ -686,47 +820,20 @@ class Network(DataGatherBase):
 
     @classmethod
     def extract_target_ips_and_ports(cls, pcap_path: str) -> set[str]:
-        """Extract all TCP connection targets from a PCAP file.
-
-        Parses the PCAP file and extracts destination IP:port pairs from
-        TCP SYN packets (connection initiation).
+        """Extract all connection targets from a PCAP file.
 
         Args:
-            pcap_path: Path to the PCAP file to analyze.
+            pcap_path: Path to the PCAP file to analyze (missing -> empty set).
 
         Returns:
-            A set of target addresses in "IP:Port" format.
+            A set of targets in ``"IP:Port"`` (TCP) / ``"IP:Port/udp"`` format.
         """
-        _ensure_scapy()  # Lazy import scapy
-        target_ips_and_ports = set()
-
-        # Read the pcap file
-        packets = rdpcap(pcap_path)
-
-        # Iterate over each packet
-        packet_number = 0
-        for pkt in packets:
-            if packet_number % 500 == 0:
-                logger.debug(f"Progress: {packet_number}/{len(packets)}")
-            # Check if the packet is an IP packet
-            if pkt.haslayer(IP):
-                # Check if the packet is a TCP packet and if it is a SYN packet
-                if pkt.haslayer(TCP) and pkt[TCP].flags == "S":
-                    # Extract the target IP and port
-                    target_ip = pkt[IP].dst
-                    target_port = pkt[TCP].dport
-                    target_ips_and_ports.add(f"{target_ip}:{target_port}")
-            packet_number += 1
-
-        return target_ips_and_ports
+        return cls._targets_in(cls._read_pcap(pcap_path))
 
     def count_bytes(
         self, ip_address: str, port: int, pcap_file: str
     ) -> tuple[int, int]:
-        """Count bytes sent to and received from a specific IP:port.
-
-        Analyzes all TCP/UDP packets in the PCAP file that match the specified
-        IP address and port, summing payload sizes for each direction.
+        """Count TCP+UDP payload bytes sent to / received from ``ip:port``.
 
         Args:
             ip_address: The target IP address to analyze.
@@ -734,22 +841,9 @@ class Network(DataGatherBase):
             pcap_file: Path to the PCAP file to analyze.
 
         Returns:
-            A tuple of (sent_bytes, received_bytes) where:
-                - sent_bytes: Total payload bytes sent to the IP:port.
-                - received_bytes: Total payload bytes received from the IP:port.
+            A tuple of (sent_bytes, received_bytes).
         """
-        _ensure_scapy()  # Lazy import scapy
-        packets = rdpcap(pcap_file)
-        sent_bytes = 0
-        received_bytes = 0
-        for packet in packets:
-            if packet.haslayer("IP"):
-                ip = packet["IP"]
-                if ip.haslayer("TCP") or ip.haslayer("UDP"):
-                    tcp_udp = ip["TCP"] if ip.haslayer("TCP") else ip["UDP"]
-                    if tcp_udp.dport == port or tcp_udp.sport == port:
-                        if ip.src == ip_address:
-                            received_bytes += len(tcp_udp.payload)
-                        if ip.dst == ip_address:
-                            sent_bytes += len(tcp_udp.payload)
-        return sent_bytes, received_bytes
+        packets = self._read_pcap(pcap_file)
+        sent_tcp, recv_tcp = self._count_bytes_in(packets, ip_address, port, "tcp")
+        sent_udp, recv_udp = self._count_bytes_in(packets, ip_address, port, "udp")
+        return sent_tcp + sent_udp, recv_tcp + recv_udp
