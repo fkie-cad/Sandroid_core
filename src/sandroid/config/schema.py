@@ -1,7 +1,6 @@
 """Configuration schema for Sandroid using Pydantic."""
 
 import shutil
-import sys
 import tempfile
 from enum import Enum
 from pathlib import Path
@@ -29,6 +28,13 @@ class EmulatorConfig(BaseModel):
 
     device_name: str = Field(
         default="Pixel_6_Pro_API_31", description="Android Virtual Device name"
+    )
+    serial: str | None = Field(
+        default=None,
+        description=(
+            "ADB serial of the device to use (e.g. emulator-5556). Overrides "
+            "automatic selection; --serial and ANDROID_SERIAL also work."
+        ),
     )
     android_emulator_path: Path | None = Field(
         default=None,
@@ -254,18 +260,45 @@ class TrigDroidConfig(BaseModel):
 
 
 class AIConfig(BaseModel):
-    """Chat/agent LLM connection config.
+    """Chat/agent LLM connection config (EXPERIMENTAL feature, off by default).
 
     The connection fields (``base_url``/``api_key``/``model``) have no
-    defaults — must be explicitly set. The behavior toggles below do have
+    defaults — the AI Chat stays disabled until all three are explicitly set.
+    Only a local (loopback) endpoint is accepted unless ``allow_remote`` is
+    turned on, because tool results carry device and app data to the model
+    (see :mod:`sandroid.ai.safety`). The behavior toggles below do have
     defaults since they're just chat-UI presentation preferences.
     """
 
     base_url: str | None = Field(
-        default=None, description="OpenAI-compatible chat-completions base URL"
+        default=None,
+        description=(
+            "EXPERIMENTAL. OpenAI-compatible chat-completions base URL. Device "
+            "and app data is sent here. A local server is recommended, e.g. "
+            "http://localhost:11434/v1 (Ollama) or http://localhost:8000/v1 "
+            "(vLLM). No default: AI Chat is off until this is set."
+        ),
     )
-    api_key: str | None = Field(default=None, description="API key for the endpoint")
+    api_key: str | None = Field(
+        default=None,
+        # Never include the key in repr()/str() of the config (logs, tracebacks).
+        repr=False,
+        description=(
+            "API key for the endpoint. Prefer the SANDROID_AI__API_KEY "
+            "environment variable: a key in a config file is stored in "
+            "plaintext. Local servers that ignore keys accept any value."
+        ),
+    )
     model: str | None = Field(default=None, description="Model name to request")
+    allow_remote: bool = Field(
+        default=False,
+        description=(
+            "Allow a non-local ai.base_url. Off (default) = only loopback "
+            "endpoints (localhost/127.0.0.1/::1) are used, so device and app "
+            "data never leaves this machine. Set to true only if you accept "
+            "sending case data to that remote service."
+        ),
+    )
     show_verbose_thinking: bool = Field(
         default=False,
         description=(
@@ -326,14 +359,15 @@ class MCPServerConfig(BaseModel):
 class MCPConfig(BaseModel):
     """MCP (Model Context Protocol) client configuration."""
 
+    # Empty by default: no MCP server (and no subprocess) unless explicitly
+    # configured. The bundled ``sandroid.ai.mcp_demo_server`` is a test
+    # fixture that returns FAKE data and must be opted into explicitly.
     servers: list[MCPServerConfig] = Field(
-        default_factory=lambda: [
-            MCPServerConfig(
-                name="sandroid-dummy",
-                command=sys.executable,
-                args=["-m", "sandroid.ai.mcp_dummy_server"],
-            )
-        ]
+        default_factory=list,
+        description=(
+            "External MCP tool servers for the (experimental) AI Chat. "
+            "Empty by default; only used when AI Chat is configured."
+        ),
     )
 
 

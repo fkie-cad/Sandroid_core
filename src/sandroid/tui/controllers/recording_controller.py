@@ -974,15 +974,36 @@ class RecordingController:
             )
             saved_run_id = None
 
-        # Legacy summary file some external tooling may still read.
+        # Full results JSON (+ run metadata), optional PDF and the evidence
+        # hash manifest, written into the run bundle -- the same finalisation
+        # the CLI and headless API use.
+        if result is not None:
+            self._finalize_run_bundle(
+                run_id=run_id,
+                result=result,
+                bundle_dir=bundle_dir,
+                recorded_at=recorded_at,
+            )
+
+        try:
+            from sandroid.core import run_bundle as _rb
+
+            _rb.record_session_bundle(bundle_dir)
+        except Exception:
+            logger.debug("Could not register run bundle for exit summary")
+
+        # Legacy session-level summary: a pointer to where the data really is.
         try:
             import json
 
-            results_path = os.getenv("RESULTS_PATH", "./")
+            results_path = os.getenv("SESSION_PATH") or os.getenv("RESULTS_PATH", "./")
             output_file = os.path.join(results_path, "sandroid.json")
             data = {
                 "Device Name": device_name,
                 "Action Duration": duration,
+                "Run ID": run_id,
+                "Run Bundle": bundle_dir,
+                "Results": os.path.join(bundle_dir, "sandroid.json"),
             }
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
@@ -993,6 +1014,44 @@ class RecordingController:
             )
 
         return saved_run_id
+
+    def _finalize_run_bundle(
+        self, *, run_id: str, result: Any, bundle_dir: str, recorded_at: str
+    ) -> None:
+        """Write results JSON, optional PDF and manifest into the run bundle.
+
+        Never raises (runs on the playback worker thread); problems are
+        logged to the activity log.
+        """
+        try:
+            from sandroid.core import run_report
+            from sandroid.core.adb import Adb
+
+            cfg = getattr(self._get_toolbox(), "config", None)
+            generate_pdf = bool(
+                getattr(getattr(cfg, "report", None), "generate_pdf", False)
+            )
+            outcome = run_report.finalize_run(
+                bundle_dir,
+                result.to_json_dict(),
+                adb=Adb,
+                config=cfg,
+                started_at=recorded_at,
+                run_id=run_id,
+                mode="tui-play",
+                generate_pdf=generate_pdf,
+            )
+            if outcome.pdf is not None:
+                self._call_from_thread(self._log_success, f"PDF report: {outcome.pdf}")
+            for err in outcome.errors:
+                self._call_from_thread(
+                    self._log_warning, f"Report finalisation issue: {err}"
+                )
+        except Exception as e:
+            logger.exception("finalize_run failed")
+            self._call_from_thread(
+                self._log_warning, f"Could not write run report files: {e}"
+            )
 
     # =========================================================================
     # Export Operations

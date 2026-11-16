@@ -68,6 +68,17 @@ def __getattr__(name: str):
     "--environment", "-e", help="Environment name (development, testing, production)"
 )
 @click.option(
+    "--serial",
+    "-s",
+    metavar="SERIAL",
+    default=None,
+    help=(
+        "ADB serial of the device to use (e.g. emulator-5556). Default: "
+        "$ANDROID_SERIAL, then config emulator.serial, then auto-select "
+        "(prefers emulators)."
+    ),
+)
+@click.option(
     "--file", "-f", type=click.Path(), help="Save output to the specified file"
 )
 @click.option(
@@ -121,7 +132,7 @@ def __getattr__(name: str):
 @click.option(
     "--hash",
     is_flag=True,
-    help="Create before/after md5 hashes of all changed and new files",
+    help="Create before/after MD5 + SHA-256 hashes of all changed and new files",
 )
 @click.option(
     "--apk", is_flag=True, help="List all APKs from the emulator and their hashes"
@@ -139,6 +150,14 @@ def __getattr__(name: str):
 )
 @click.option("--report", is_flag=True, help="Generate PDF report")
 @click.option(
+    "--report-from",
+    type=click.Path(exists=True, file_okay=False),
+    metavar="DIR",
+    default=None,
+    help="(Re)generate the PDF report from an existing results folder and exit "
+    "(no device needed)",
+)
+@click.option(
     "--debug",
     is_flag=True,
     help="Enable debug/verbose mode",
@@ -154,15 +173,12 @@ def __getattr__(name: str):
     help="Start as if running for the first time (reset welcome screen)",
 )
 @click.option(
-    "--view",
-    type=click.Choice(["forensic", "malware", "security"]),
-    default=None,
-    help="Set the initial view mode (forensic, malware, or security). Default: from config or forensic",
-)
-@click.option(
     "--headless",
     is_flag=True,
-    help="Run in headless mode without interactive UI. Requires --trigdroid or --batch.",
+    help=(
+        "Run in headless mode without interactive UI. Malware/security modes "
+        "need --trigdroid PACKAGE (or --batch); forensic mode needs no package."
+    ),
 )
 @click.option(
     "--batch",
@@ -266,6 +282,7 @@ def __getattr__(name: str):
 def main(
     config: str | None,
     environment: str | None,
+    serial: str | None,
     file: str | None,
     loglevel: str | None,
     number: int | None,
@@ -285,7 +302,6 @@ def main(
     debug: bool,
     log: bool,
     fresh: bool,
-    view: str | None,
     headless: bool,
     batch: str | None,
     mode: str,
@@ -302,12 +318,14 @@ def main(
     fridump: str | None,
     duration: int,
     with_fritap: str | None,
+    report_from: str | None = None,
 ) -> None:
-    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
+    r"""Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
 
     Main entry point for the Sandroid CLI application. Handles configuration
     loading, logging setup, and dispatches to the appropriate execution mode:
 
+    \b
     1. Default mode: Textual TUI (when running just 'sandroid')
     2. Automated analysis: Command-line driven analysis with --trigdroid
     3. Headless mode (--headless): Programmatic API-based analysis
@@ -315,6 +333,12 @@ def main(
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()
+
+    # --- Offline report generation (no config/device needed) ---------------
+    if report_from:
+        from .cli_modes.report import run_report_from
+
+        sys.exit(run_report_from(report_from))
 
     # --- Fresh start: remove welcome marker so first-run screen appears ---
     if fresh:
@@ -401,21 +425,31 @@ def main(
             trigdroid=trigdroid,
             trigdroid_ccf=trigdroid_ccf,
             report=report,
+            serial=serial,
         )
 
         sandroid_config = loader.load(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
 
+        # Device selection precedence: --serial > $ANDROID_SERIAL > config.
+        if not serial and os.environ.get("ANDROID_SERIAL"):
+            sandroid_config.emulator.serial = os.environ["ANDROID_SERIAL"]
+
+        # Make get_config() (run history/bundles, services) return this exact
+        # config instead of re-loading defaults from disk.
+        from .config import set_config
+
+        set_config(sandroid_config)
+
         # Re-initialize console with the configured theme preset
         SandroidConsole.initialize(sandroid_config.theme.preset)
         console = SandroidConsole.get()
 
-        # Set the initial view mode
-        initial_view = (
-            view if view is not None else sandroid_config.analysis.default_view
-        )
-        get_ui_service().set_current_view(initial_view)
+        # View modes were removed from the UI (the --view flag is gone); the
+        # remaining view-aware lookups (ActionQ key dispatch) use the config
+        # default.
+        get_ui_service().set_current_view(sandroid_config.analysis.default_view)
 
         # Setup logging (the Textual TUI is the only interactive UI)
         active_logger = setup_logging(
@@ -536,7 +570,7 @@ def _run_proxy_command(
     from .services import get_proxy_service
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
     proxy_service = get_proxy_service()
 
     if clear:
@@ -560,17 +594,24 @@ def _run_proxy_command(
 def _run_install_apk(sandroid_config, apk_path: str) -> None:
     """Install APK on device in headless mode."""
     from .core.adb import Adb
+    from .core.exceptions import APKInstallError
     from .core.initializer import initialize_core
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    # pm install from the adb-root context needs SELinux permissive, otherwise
+    # it fails with "Failed transaction (2147483646)".
+    initialize_core(sandroid_config, prepare=True)
 
     console.print(f"[accent]Installing APK: {apk_path}[/accent]")
-    _stdout, stderr = Adb.install_apk(apk_path)
-    if stderr and "success" not in stderr.lower():
-        console.print(f"[error]APK install failed: {stderr}[/error]")
+    try:
+        # Returns the package name (or None if aapt couldn't determine it);
+        # raises APKInstallError on failure.
+        package_name = Adb.install_apk(apk_path)
+    except APKInstallError as e:
+        console.print(f"[error]APK install failed: {e}[/error]")
         sys.exit(1)
-    console.print("[success]APK installed successfully[/success]")
+    suffix = f" ({package_name})" if package_name else ""
+    console.print(f"[success]APK installed successfully{suffix}[/success]")
 
 
 def _run_import_action(sandroid_config, action_path: str) -> None:

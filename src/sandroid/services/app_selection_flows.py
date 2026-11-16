@@ -205,7 +205,7 @@ class CLISelectionFlow:
         try:
             import click
 
-            from sandroid.core.formatting import SandroidConsole
+            from sandroid.core.console import SandroidConsole
 
             console = SandroidConsole.get()
             has_fuzzy = self._fuzzy.is_available()

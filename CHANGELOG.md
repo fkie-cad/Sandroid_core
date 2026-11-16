@@ -5,6 +5,83 @@ All notable changes to the Sandroid project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-11-XX
+
+Sandroid 2.1 redesigns the TUI around always-on tool tabs, adds an mitmproxy-based
+network interception stack with per-app proxies and CA injection, a tiered Frida
+bypass suite, a kprobe filesystem monitor, a rewritten analysis engine with
+persistent run history, and an experimental AI Chat assistant.
+
+### ⚠️ Breaking Changes
+- **Python 3.12 or newer is required** (3.12 and 3.13 are tested in CI); Python 3.10/3.11 support was dropped.
+- **Legacy Rich interactive mode removed**: `sandroid -i` / `--interactive` no longer exist — use the Textual TUI (`sandroid`) or `--headless`.
+- **`--ai` removed**: the Gemini-based video summarisation feature and its API-key setting are gone, superseded by the new (experimental) AI Chat.
+- **TUI views removed**: the Forensic / Malware / Security views (`TAB`) were replaced by a single flat action catalog; `--view` and `analysis.default_view` no longer have any effect in the TUI (`--mode` for `--headless` is unchanged).
+- **TUI layout changed**: the `Ctrl+B` bottom panel was replaced by always-on tool tabs (Spotlight / Network / Snapshots / Files) with `Shift+Arrow` navigation; Record/Play moved into **Files → Diffs**.
+- The internal `ActionQ`/`DataGather` analysis pipeline was replaced by `AnalysisEngine`; third-party code importing those internals must be updated.
+- The on-device proxy redirector changed from `ipt2socks` to `gost`.
+
+### Added
+
+#### TUI
+- **Glance band**: permanent, boxed status strip (device, frida-server, mitmproxy engine, device/app proxies, spotlight) derived from live device state.
+- **Always-on tool tabs**: **Spotlight**, **Network** (Mitmproxy + friTap sub-tabs), **Snapshots** and **Files** (Monitor / Watchlist / Diffs sub-tabs), unified under `Shift+Arrow` navigation.
+- **Help & keybinding editor** (`?`): browse every action by category and rebind any key (incl. `Ctrl` combos) with live conflict detection; persisted to `tui.keybindings`.
+- **Snapshots tab** with an 8-slot snapshot memory per AVD (`1`–`8` load, `Ctrl+1`–`Ctrl+8` save, `a` assign).
+- **friTap panel** with status header and live log tail.
+- **Startup device picker** and real-time device shutdown/reconnect detection (`adb host:track-devices`).
+- **Monitor settings tab** (kprobe/fsmon source, multiple paths, per-category event visibility).
+- Theming of the chat/tool panels and the chat transcript; compact form widgets.
+
+#### Analysis engine & run history
+- **`AnalysisEngine`** replaces the ActionQ/DataGather pipeline (same `sandroid.json` keys).
+- **Run history / run bundles**: every Play is stored as a self-contained bundle (`<results_path>/runs/<run_id>/` with `run.json`, `recording.txt`, raw pull tree), listed in **Files → Diffs**, scoped per device; Record/Play UX fixes and a redesigned Diffs layout.
+- **Unified Files tab**: fsmon/kprobe monitor stream, Spotlight-Files watchlist and Play diffing in one place, with grouped, de-duplicated event display.
+- **kprobe filesystem monitor** (`tui.monitor_backend = "kprobe"`, default): kernel tracefs kprobes with per-process/child-tree attribution and path-scoped capture, no binary pushed to the device; automatic fallback to `fsmon`.
+
+#### Network interception
+- **mitmproxy integration** (Network → Mitmproxy): start/stop `mitmweb`, live flow and TLS-failure tail, flow log.
+- **Device Proxy and per-app App Proxies** in one Proxy Settings modal (`y`); App Proxies route individual apps (by UID) through Sandroid's mitmproxy or an external proxy (Burp/ZAP) via an on-device `gost` redirector; optional QUIC (UDP/443) blocking; emulator-aware host IP detection, device-reachability probe and `adb reverse` fallback.
+- **CA certificate injection** into the system trust store (APEX bind-mount on Android 14+, Zygote mount namespace on Android 10–13, with confirmation before restarting Zygote); CA status reported on start.
+- **Custom mitmproxy addons** from `~/.config/sandroid/mitm_addons/` and `./mitm_addons/`, managed with `Ctrl+A`, hot-reloaded on edit.
+
+#### Bypass suite (EXPERIMENTAL)
+- Flag-gated, single resident Frida script with **SSL**, **Root**, **Frida**, **Debug** and new **Integrity** (PairIP / licensing / attestation) categories; instant toggles without un-hooked gaps; auto-reload and package validation.
+- SSL unpinning tiers: Java/Conscrypt/OkHttp/WebView/TrustKit/CT, native BoringSSL, **Chromium/cronet BoringSSL** (incl. stripped, symbol-less libraries), **mbedTLS / Meta Network Stack**; pre-init constructor interposition and a spawn-reliability ladder for hardened apps.
+
+#### AI Chat (EXPERIMENTAL)
+- `sandroid.ai`: streaming OpenAI-compatible client, tool-calling loop, MCP client bridge, concurrent subtasks with a device-resource arbiter.
+- Chat dock (`Ctrl+Y`) with markdown rendering, ambient device/session context on every turn and ~76 tools (app/process lifecycle, device/network/flow queries, certificate/environment control, file transfer with host-path confinement, file monitor, record/replay).
+- Per-tool permission gate (allow once / always / never, persisted).
+- New `[ai]` and `[mcp]` config sections with secret redaction in `sandroid-config show`. **Note:** prompts, device context and tool output are sent to the configured endpoint — prefer a local endpoint (e.g. Ollama) and set the key via `SANDROID_AI__API_KEY`.
+
+#### Tooling
+- Hermetic test suite (~1100 tests); `tests/conftest.py` blocks all real adb/emulator/frida access.
+- CI runs ruff and pytest on Python 3.12 and 3.13 for `main` and `dev`, and checks the built distribution.
+- Releases are tagged `v<version>` with notes taken from this changelog.
+
+### Changed
+- **friTap 2.0** compatibility.
+- Simplified app picker (system apps toggle on `Ctrl+S`).
+- Spotlight header self-heals a stale "paused" state against the live process.
+- Configuration is saved to `~/.config/sandroid/` again instead of the platformdirs location.
+- ABX (binary XML) files are decoded in-process instead of shelling out.
+- Documentation brought up to date (requirements, rooted-AVD setup, TOML configuration, new features).
+- Docker image installs Sandroid from `pyproject.toml` (best effort, not tested in CI).
+
+### Fixed
+- frida-server start failures are reported honestly instead of always "started"; clean frida install prompt and Java bridge restored on frida 17.
+- CA injection on Android 10–13; mitmproxy start/stop no longer deadlocks the TUI when triggered from AI Chat; `start_mitmproxy` can retry on another port.
+- Glance band never updating from panels; tab-bar visibility; startup logo wobble.
+- Shared-global ADB serial race between devices; zombie retries capped; `DeviceManagerProtocol` drift.
+- kprobe backend: off-thread setup, path-mode scoping, preflight self-check hang, noisy teardown warnings.
+- `ADB_PATH` is quoted when building shell commands (paths with spaces, Windows).
+- ChangedFiles `.xml` branch reuses the joined pull paths.
+<!-- Integration: add the 2.1 stabilisation fixes from the release branches here. -->
+
+### Removed
+- Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.
+
 ## [2.0.0] - 2026-03-17
 
 ### Complete Rewrite: Textual TUI, Click CLI, and Three Analysis Views

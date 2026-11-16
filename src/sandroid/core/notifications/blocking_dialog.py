@@ -16,6 +16,7 @@ Usage::
 
 import logging
 import sys
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -279,20 +280,27 @@ class BlockingDialogService:
         Returns True if handled by TUI, False otherwise.
         """
         try:
-            from sandroid.core.notifications import show_error, show_info, show_warning
-            from sandroid.core.ui_request_bus import UIRequestBus
+            from sandroid.core.ui_request_bus import UIRequestBus, show_message
 
             bus = UIRequestBus.get()
             if bus.has_active_handler():
                 full_message = message
                 if action_hint:
                     full_message += f"\n\n{action_hint}"
-                if dialog_type == "warning":
-                    show_warning(title, full_message)
-                elif dialog_type == "error":
-                    show_error(title, full_message)
+                level = (
+                    dialog_type if dialog_type in ("warning", "error") else "info"
+                )
+                if threading.current_thread() is threading.main_thread():
+                    # On the UI thread a synchronous bus request would block
+                    # the event loop waiting for its own modal -- show it
+                    # fire-and-forget from a helper thread instead.
+                    threading.Thread(
+                        target=show_message,
+                        args=(title, full_message, level),
+                        daemon=True,
+                    ).start()
                 else:
-                    show_info(title, full_message)
+                    show_message(title, full_message, level=level)
                 return True
         except ImportError:
             pass

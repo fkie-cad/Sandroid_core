@@ -287,6 +287,22 @@ class ConfigLoader:
                 )
         return config_dict
 
+    @staticmethod
+    def _drop_env_only_secrets(config_dict: dict) -> dict:
+        """Never persist a secret that was supplied via an environment variable.
+
+        ``load()`` merges ``SANDROID_*`` env vars into the config, so any
+        load-modify-save flow (``sandroid-config theme set``, the TUI help
+        screen, ...) would otherwise copy ``SANDROID_AI__API_KEY`` into the
+        config file in plaintext.
+        """
+        env_key = (os.environ.get("SANDROID_AI__API_KEY") or "").strip()
+        ai_section = config_dict.get("ai")
+        if env_key and isinstance(ai_section, dict):
+            if str(ai_section.get("api_key") or "").strip() == env_key:
+                ai_section.pop("api_key", None)
+        return config_dict
+
     def save_config(
         self,
         config: SandroidConfig,
@@ -333,6 +349,8 @@ class ConfigLoader:
 
         if redact_secrets:
             config_dict = self._redact_secrets(config_dict)
+        else:
+            config_dict = self._drop_env_only_secrets(config_dict)
 
         # Save based on format
         if format == "toml":

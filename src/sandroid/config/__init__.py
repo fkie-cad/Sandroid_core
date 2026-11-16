@@ -27,6 +27,18 @@ def get_config() -> SandroidConfig:
     return _config_instance
 
 
+def set_config(config: SandroidConfig | None) -> None:
+    """Install ``config`` as the process-wide singleton returned by get_config().
+
+    The CLI calls this after loading the config with ``--config`` /
+    ``--environment`` / CLI overrides, so code that uses ``get_config()``
+    (run history, run bundles, ...) sees the same settings, e.g. the same
+    ``paths.results_path``.
+    """
+    global _config_instance
+    _config_instance = config
+
+
 def reset_config_cache() -> None:
     """Reset the cached config instance.
 
@@ -37,4 +49,10 @@ def reset_config_cache() -> None:
     _config_instance = None
 
 
-__all__ = ["ConfigLoader", "SandroidConfig", "get_config", "reset_config_cache"]
+__all__ = [
+    "ConfigLoader",
+    "SandroidConfig",
+    "get_config",
+    "reset_config_cache",
+    "set_config",
+]

@@ -1,14 +1,19 @@
 name: Publish to PyPI
 
+# Release procedure: see "Release Process" in CODING_GUIDELINES.md.
+# A push to main that changes src/sandroid/_version.py builds the package,
+# publishes it to PyPI and creates the GitHub Release + tag `v<version>`
+# with the matching CHANGELOG.md section as release notes.
+
 on:
   push:
     branches: [main]
     # Only run when the version file changes
     paths: [ "src/sandroid/_version.py" ]
-  workflow_dispatch: {} # for manual runs
+  workflow_dispatch: {} # for manual runs (must be started on main)
 
 permissions:
-  contents: write    # needed to create a GitHub Release
+  contents: write    # needed to create the tag + GitHub Release
   id-token: write    # needed for PyPI Trusted Publishing (OIDC)
 
 concurrency:
@@ -21,6 +26,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Refuse to release from anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are only published from main (got ${GITHUB_REF})."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -28,10 +39,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
 
-      - name: Install build backend
-        run: python -m pip install --upgrade build
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine
 
       - name: Extract version from src/sandroid/_version.py
         id: getver
@@ -42,13 +52,70 @@ jobs:
                         pathlib.Path('src/sandroid/_version.py').read_text())
           if not m:
             raise SystemExit("Could not find __version__ in src/sandroid/_version.py")
-          print(f"version={m.group(1)}")
-          open(os.environ["GITHUB_OUTPUT"], "a").write(f"version={m.group(1)}\n")
+          version = m.group(1)
+          prerelease = bool(re.search(r'(a|b|rc|dev)\d*$', version))
+          print(f"version={version} prerelease={prerelease}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+            fh.write(f"version={version}\n")
+            fh.write(f"tag=v{version}\n")
+            fh.write(f"prerelease={'true' if prerelease else 'false'}\n")
           PY
 
+      - name: Fail early if tag v<version> already exists
+        env:
+          TAG: ${{ steps.getver.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Tag ${TAG} already exists on origin. Bump src/sandroid/_version.py (and CHANGELOG.md) before releasing."
+            exit 1
+          fi
+          echo "Tag ${TAG} is free."
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.getver.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os, re, pathlib, sys
+          version = os.environ["VERSION"]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          # Section starts at "## [<version>]" and ends at the next "## " heading.
+          m = re.search(
+              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)",
+              text, flags=re.M | re.S,
+          )
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+          if not m or not m.group(1).strip():
+              fail(f"CHANGELOG.md has no (non-empty) '## [{version}]' section.")
+          heading = m.group(0).splitlines()[0]
+          if "XX" in heading:
+              fail(f"CHANGELOG.md heading still has a placeholder date: {heading}")
+          notes = m.group(1).strip()
+          notes += (
+              "\n\n---\n\nInstall: `pip install sandroid=="
+              + version
+              + "`\n\nFull changelog: [CHANGELOG.md](https://github.com/"
+              + os.environ.get("GITHUB_REPOSITORY", "fkie-cad/Sandroid_core")
+              + "/blob/main/CHANGELOG.md)\n"
+          )
+          pathlib.Path("release-notes.md").write_text(notes, encoding="utf-8")
+          print(notes)
+          PY
 
       - name: Build sdist & wheel
-        run: python -m build
+        run: |
+          python -m build
+          twine check --strict dist/*
+
+      - name: Verify built version matches _version.py
+        env:
+          VERSION: ${{ steps.getver.outputs.version }}
+        run: |
+          ls dist/
+          ls dist/ | grep -q -- "-${VERSION}-py3-none-any.whl" || {
+            echo "::error::Wheel version does not match ${VERSION}"; exit 1; }
 
       - name: Publish to PyPI (Trusted Publishing)
         # No username/password needed when using Trusted Publishing
@@ -56,15 +123,18 @@ jobs:
         with:
           packages-dir: dist/
           verbose: true
-          # skip-existing prevents a hard fail if the same files were uploaded already
+          # Lets a re-run succeed if the upload worked but a later step failed.
           skip-existing: true
 
-      - name: Create GitHub Release and upload assets
+      - name: Create GitHub Release v<version> and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
+          tag_name: ${{ steps.getver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Sandroid ${{ steps.getver.outputs.tag }}
+          body_path: release-notes.md
+          prerelease: ${{ steps.getver.outputs.prerelease }}
+          make_latest: ${{ steps.getver.outputs.prerelease == 'true' && 'false' || 'true' }}
           files: |
             dist/*.whl
             dist/*.tar.gz

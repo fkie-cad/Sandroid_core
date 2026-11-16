@@ -284,11 +284,11 @@ class StatusBar(Static):
         bypass_cells = [
             f"[{run}]●[/] {label}"
             for category, label in (
-                ("ssl", "SSL"),
-                ("root", "Root"),
-                ("frida", "Frida"),
-                ("debug", "Debug"),
-                ("integrity", "Integ"),
+                ("ssl", "SSL (exp.)"),
+                ("root", "Root (exp.)"),
+                ("frida", "Frida (exp.)"),
+                ("debug", "Debug (exp.)"),
+                ("integrity", "Integ (exp.)"),
             )
             if category in on
         ]

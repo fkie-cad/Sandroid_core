@@ -46,7 +46,7 @@ def run_network_headless(
     from sandroid.services import get_device_service
 
     console = SandroidConsole.get()
-    initialize_core(sandroid_config)
+    initialize_core(sandroid_config, prepare=True)
 
     # Pre-check: emulator-only mode
     try:
@@ -75,8 +75,7 @@ def run_network_headless(
         if with_fritap:
             console.print(f"[dim]FriTap SSL keylog enabled for: {with_fritap}[/dim]")
 
-        api = SandroidHeadlessAPI(config_path=None)
-        api._config = sandroid_config
+        api = SandroidHeadlessAPI(config=sandroid_config)
         api._initialized = True
         api._toolbox = Toolbox
         api._adb = Adb

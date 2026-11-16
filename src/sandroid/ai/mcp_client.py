@@ -45,9 +45,6 @@ import logging
 import threading
 from typing import Any
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
 from sandroid.ai.errors import AIClientError, ToolExecutionError
 
 logger = logging.getLogger(__name__)
@@ -64,6 +61,45 @@ _SHUTDOWN_TIMEOUT = 5.0
 #: How long stop() waits for the background thread to actually exit.
 _THREAD_JOIN_TIMEOUT = 5.0
 
+#: Shown when the optional ``mcp`` package is missing. The ``mcp`` import is
+#: deliberately lazy (see :func:`_import_mcp`) so that ``import sandroid.ai``
+#: -- and with it the TUI Chat panel -- keeps working without it; only actually
+#: connecting to a configured MCP server needs the package.
+MCP_UNAVAILABLE_MESSAGE = (
+    "MCP support is unavailable: the 'mcp' Python package is not installed. "
+    "Install it with `pip install mcp` (or `pip install 'sandroid[ai]'`) to "
+    "use tools from external MCP servers; the AI Chat itself works without it."
+)
+
+
+def mcp_available() -> bool:
+    """Return whether the optional ``mcp`` package can be imported."""
+    try:
+        _import_mcp()
+    except AIClientError:
+        return False
+    return True
+
+
+def _import_mcp():
+    """Import and return ``(ClientSession, StdioServerParameters, stdio_client)``.
+
+    Raises:
+        AIClientError: With :data:`MCP_UNAVAILABLE_MESSAGE` if ``mcp`` is missing.
+    """
+    try:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+    except ImportError as exc:
+        raise AIClientError(MCP_UNAVAILABLE_MESSAGE) from exc
+    return ClientSession, StdioServerParameters, stdio_client
+
+
+def _enabled_servers() -> list:
+    from sandroid.config import get_config
+
+    return [s for s in get_config().mcp.servers if s.enabled]
+
 
 class MCPClientManager:
     """Connects to configured MCP servers and bridges sync calls into them.
@@ -78,7 +114,7 @@ class MCPClientManager:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._loop_ready = threading.Event()
-        self._sessions: dict[str, ClientSession] = {}
+        self._sessions: dict[str, Any] = {}  # name -> mcp.ClientSession
         self._tools_cache: dict[str, list] = {}
         self._serve_tasks: dict[str, asyncio.Task] = {}
         self._shutdown_events: dict[str, asyncio.Event] = {}
@@ -88,9 +124,28 @@ class MCPClientManager:
 
         Idempotent against a double-start (a second call is a no-op if the
         thread is already alive).
+
+        A no-op (no thread, no subprocess) when the AI feature is not usable
+        (unconfigured, or its endpoint refused by the localhost-only policy --
+        see :mod:`sandroid.ai.safety`) or when no MCP server is enabled: MCP
+        tools only ever serve the AI Chat, so there is nothing to start.
+
+        Raises:
+            AIClientError: If servers are enabled but the ``mcp`` package is
+                not installed (message: :data:`MCP_UNAVAILABLE_MESSAGE`), or
+                the background loop fails to start.
         """
         if self._thread is not None and self._thread.is_alive():
             return
+        from sandroid.ai.safety import get_ai_settings
+
+        if not get_ai_settings().is_ready:
+            logger.debug("AI Chat not configured/permitted; not starting MCP servers")
+            return
+        if not _enabled_servers():
+            logger.debug("No MCP servers enabled; not starting the MCP client")
+            return
+        _import_mcp()  # fail fast with a clear message if mcp is missing
         self._loop_ready.clear()
         self._thread = threading.Thread(
             target=self._run_loop, name="mcp-client-loop", daemon=True
@@ -112,13 +167,8 @@ class MCPClientManager:
 
     async def _connect_all(self) -> None:
         """Spawn one long-lived serve task per enabled server and wait for readiness."""
-        from sandroid.config import get_config
-
-        servers = get_config().mcp.servers
         ready_futures: list[asyncio.Future] = []
-        for server in servers:
-            if not server.enabled:
-                continue
+        for server in _enabled_servers():
             ready = asyncio.get_running_loop().create_future()
             shutdown_event = asyncio.Event()
             task = asyncio.create_task(
@@ -158,6 +208,7 @@ class MCPClientManager:
                     f"MCP server {server.name!r} requests transport "
                     f"{server.transport!r}, but only 'stdio' is implemented"
                 )
+            ClientSession, StdioServerParameters, stdio_client = _import_mcp()
             params = StdioServerParameters(command=server.command, args=server.args)
             async with (
                 stdio_client(params) as (read, write),

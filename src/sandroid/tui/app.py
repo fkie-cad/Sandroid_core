@@ -567,8 +567,9 @@ class SandroidTUI(App):
         # Pre-initialize command registry and package cache in background
         self.run_worker(self._pre_init_commands, exclusive=False)
         self.run_worker(self._pre_fetch_packages, exclusive=False)
-        # Connect every enabled config.mcp.servers entry (e.g. the bundled
-        # dummy server) and bridge their tools into the shared ToolRegistry,
+        # Connect every enabled config.mcp.servers entry (the bundled
+        # ``mcp_demo_server`` fixture is off by default) and bridge their
+        # tools into the shared ToolRegistry,
         # so the Chat tab's tool-calling loop can see them immediately. A
         # broken/unreachable MCP server must never break app startup.
         self.run_worker(self._start_mcp_tools, exclusive=False, thread=True)
@@ -638,10 +639,13 @@ class SandroidTUI(App):
             MessageModal(
                 title="Welcome to Sandroid TUI",
                 message=(
-                    "This is the new default mode for Sandroid.\n"
+                    "Sandroid runs as this terminal UI by default.\n"
                     "\n"
-                    "For the legacy Rich interactive mode, use:\n"
-                    "  sandroid -i\n"
+                    "  ?             help & all keybindings\n"
+                    "  Ctrl+Shift+P  command palette\n"
+                    "  D             select device\n"
+                    "\n"
+                    "For scripted runs see: sandroid --help (--headless).\n"
                     "\n"
                     "Press OK to continue."
                 ),

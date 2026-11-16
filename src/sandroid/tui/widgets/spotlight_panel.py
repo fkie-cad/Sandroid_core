@@ -30,13 +30,14 @@ from textual.widgets import ContentSwitcher, Static
 
 logger = logging.getLogger(__name__)
 
-# (binding key, category, label) for the four immediate bypass toggles.
+# (binding key, category, label) for the immediate bypass toggles. All
+# bypass tiers are experimental, hence the "(exp.)" tag.
 _BYPASS_TOGGLES = [
-    ("1", "ssl", "SSL"),
-    ("2", "root", "Root"),
-    ("3", "frida", "Frida"),
-    ("4", "debug", "Debug"),
-    ("5", "integrity", "Integ"),
+    ("1", "ssl", "SSL (exp.)"),
+    ("2", "root", "Root (exp.)"),
+    ("3", "frida", "Frida (exp.)"),
+    ("4", "debug", "Debug (exp.)"),
+    ("5", "integrity", "Integ (exp.)"),
 ]
 
 # Clickable action-cell id -> panel action method. Routed from
@@ -106,11 +107,11 @@ class SpotlightPanel(Widget):
     """
 
     BINDINGS = [
-        ("1", "toggle_bypass('ssl')", "SSL"),
-        ("2", "toggle_bypass('root')", "Root"),
-        ("3", "toggle_bypass('frida')", "Frida"),
-        ("4", "toggle_bypass('debug')", "Debug"),
-        ("5", "toggle_bypass('integrity')", "Integ"),
+        ("1", "toggle_bypass('ssl')", "SSL (exp.)"),
+        ("2", "toggle_bypass('root')", "Root (exp.)"),
+        ("3", "toggle_bypass('frida')", "Frida (exp.)"),
+        ("4", "toggle_bypass('debug')", "Debug (exp.)"),
+        ("5", "toggle_bypass('integrity')", "Integ (exp.)"),
         ("enter", "primary", "Start/Resume"),
         ("R", "restart_app", "Restart"),
         ("A", "attach_app", "Attach"),

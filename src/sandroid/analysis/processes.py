@@ -1,16 +1,39 @@
-import threading
-import time
 from logging import getLogger
 from typing import Any
 
 from sandroid.core.events.events import TaskOutput
 
-from .base_di import DataGatherBase
+from .base_di import DataGatherBase, PollingCaptureMixin
 
 logger = getLogger(__name__)
 
+#: Short-lived helper commands Sandroid itself runs on the device while an
+#: action is captured (filesystem scan, action clock, this poller, the
+#: socket poller, the playback injector). They show up in ``ps`` during the
+#: action runs but not during the dry run, so the dry-run noise filter alone
+#: never removes them.
+SANDROID_HELPER_PROCESSES = frozenset(
+    {"ls", "date", "ps", "netstat", "sendevent", "getevent", "toybox"}
+)
 
-class Processes(DataGatherBase):
+
+def is_noise_process(name: str) -> bool:
+    """Whether ``name`` is structural noise rather than app activity.
+
+    Kernel threads (``[kworker/u8:10-ext4-rsv-conversion]`` -- ``ps`` shows
+    them, and exiting processes, in brackets) churn constantly with changing
+    work-queue suffixes, so they never match the dry-run list; Sandroid's own
+    helper commands are listed in :data:`SANDROID_HELPER_PROCESSES`.
+    """
+    name = name.strip()
+    if not name:
+        return True
+    if name.startswith("[") and name.endswith("]"):
+        return True
+    return name in SANDROID_HELPER_PROCESSES
+
+
+class Processes(PollingCaptureMixin, DataGatherBase):
     """Handles the gathering and processing of active processes during an action."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -37,8 +60,7 @@ class Processes(DataGatherBase):
         data is collected via ADB shell commands.
         """
         logger.info("Collecting information on active processes during action")
-        t1 = threading.Thread(target=self.process_capture_thread, args=())
-        t1.start()
+        self._start_polling(self.process_capture_thread, "sandroid-processes")
 
     def return_data(self) -> dict[str, list[str]]:
         """Return the processed list of active processes.
@@ -50,7 +72,7 @@ class Processes(DataGatherBase):
             A dictionary with key "Processes" containing a list of process
             names that were active during the capture but not in the baseline.
         """
-        if len(self.final_processes_list) == 0:
+        if not self.performed_diff:
             self.process_processes()
         return {"Processes": self.final_processes_list}
 
@@ -96,17 +118,22 @@ class Processes(DataGatherBase):
         Publishes TaskOutput events to report capture progress.
         """
         toolbox = self._get_toolbox()
-        runtime = toolbox.get_action_duration()
-        process_list = []
-        for i in range(runtime):
-            stdout, _stderr = self._send_adb_command("shell ps -Ao NAME")
-            process_list = list(
-                set(stdout.splitlines()[1:] + process_list)
-            )  # Join new-found processes with the process list so far without duplicates
-            logger.debug("Found " + str(len(process_list)) + " processes so far")
-            time.sleep(1)
+        runtime = toolbox.get_action_duration() or 0
+        # Decide the slot up front: the dry-run flag may already be cleared
+        # by the time a long poll finishes.
+        dry_run = toolbox.is_dry_run()
+        seen: set[str] = set()
+        for _tick in self._poll_ticks(runtime):
+            try:
+                stdout, _stderr = self._send_adb_command("shell ps -Ao NAME")
+            except Exception as exc:
+                logger.debug(f"Process poll failed: {exc}")
+                continue
+            seen.update(line.strip() for line in (stdout or "").splitlines()[1:])
+            logger.debug("Found " + str(len(seen)) + " processes so far")
+        process_list = sorted(p for p in seen if p)
 
-        if toolbox.is_dry_run():
+        if dry_run:
             toolbox.noise_processes = process_list
             TaskOutput(
                 task_name="processes",
@@ -144,9 +171,12 @@ class Processes(DataGatherBase):
                 if process not in result:
                     result.append(process)
 
-        for process in result:
-            if process not in noise:
-                self.final_processes_list.append(process)
+        noise_set = set(noise or [])
+        self.final_processes_list = [
+            process
+            for process in result
+            if process not in noise_set and not is_noise_process(process)
+        ]
 
         logger.debug(self.final_processes_list)
         self.performed_diff = True

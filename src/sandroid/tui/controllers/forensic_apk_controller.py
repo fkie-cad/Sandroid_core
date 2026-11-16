@@ -447,23 +447,19 @@ class ForensicAPKController:
         Args:
             apk: ForensicAPK to install
         """
-        from sandroid.tui.modals import WarningModal
+        from sandroid.tui.modals import InstallWarningModal
 
         if not self._install_warning_shown:
             # Show warning first
             def on_warning_result(result) -> None:
-                if result.proceed:
+                if result is not None and result.proceed:
                     if result.dont_show_again:
                         self._install_warning_shown = True
                     self._install_forensic_apk(apk)
 
             if self._push_modal:
                 self._push_modal(
-                    WarningModal(
-                        title="Security Warning",
-                        message="Installing this APK may compromise device security. "
-                        "Only proceed if you understand the risks.",
-                    ),
+                    InstallWarningModal(package_name=apk.package_name),
                     on_warning_result,
                 )
         else:
@@ -500,8 +496,12 @@ class ForensicAPKController:
                 f"Installing {apk.package_name}... (this may take up to 2 minutes)"
             )
 
+            from sandroid.core.adb import Adb
+
+            # argv list (no host shell) honoring ADB_PATH and the active
+            # device, instead of a bare "adb" that may not be on PATH.
             result = subprocess.run(
-                ["adb", "install", "-r", apk.local_path],
+                [*Adb.base_argv(), "install", "-r", apk.local_path],
                 check=False,
                 capture_output=True,
                 text=True,

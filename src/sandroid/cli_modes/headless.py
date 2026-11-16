@@ -113,18 +113,24 @@ async def _run_single_analysis(
     """
     from sandroid.api import AnalysisMode, SandroidHeadlessAPI
 
-    if not package:
+    # Forensic mode observes the whole device during a capture window and
+    # needs no target package; malware (TrigDroid) and security (APK/package
+    # static analysis) do.
+    if not package and analysis_mode != AnalysisMode.FORENSIC:
         console.print(
-            "[error]--headless requires --trigdroid <package> or --batch <config>[/error]"
+            f"[error]--headless --mode {analysis_mode.value} requires "
+            "--trigdroid <package> (or --batch <config>)[/error]"
         )
         sys.exit(1)
 
+    target = f" for: {package}" if package else ""
     console.print(
-        f"[accent]Starting headless {analysis_mode.value} analysis for: {package}[/accent]"
+        f"[accent]Starting headless {analysis_mode.value} analysis{target}[/accent]"
     )
 
-    api = SandroidHeadlessAPI(config_path=None)
-    api._config = sandroid_config
+    # Hand the CLI-resolved config (incl. --config/--environment/overrides)
+    # to the API so initialize() does not reload a different one.
+    api = SandroidHeadlessAPI(config=sandroid_config)
 
     result = await api.initialize()
     if not result.success:
@@ -222,6 +228,7 @@ async def _run_batch_analysis(
         runs=batch_runs,
         capture_network=batch_network,
         output_dir=output_dir,
+        config=sandroid_config,
     )
 
     # Summary

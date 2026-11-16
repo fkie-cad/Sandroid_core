@@ -155,8 +155,21 @@ def test_from_analysis_config_screenshot_gated_by_take_screenshots():
 # ---------------------------------------------------------------------------
 # RunConfig.for_playback
 # ---------------------------------------------------------------------------
-def test_for_playback_defaults_and_no_action():
-    """for_playback sets recording_path and leaves action None (engine builds it)."""
+def test_for_playback_defaults_and_no_action(monkeypatch):
+    """for_playback sets recording_path and leaves action None (engine builds it).
+
+    Capture toggles follow the ``[analysis]`` config; with every toggle off
+    there, the result matches the historic hard-coded playback defaults.
+    """
+    from sandroid.analysis import run_config as run_config_module
+
+    monkeypatch.setattr(
+        run_config_module,
+        "_analysis_toggle_defaults",
+        lambda: dict.fromkeys(
+            ("network", "processes", "sockets", "hash_files", "pull_apk"), False
+        ),
+    )
     rc = RunConfig.for_playback(recording_path="/abs/bundle/recording.txt")
     assert rc.recording_path == "/abs/bundle/recording.txt"
     assert rc.action is None

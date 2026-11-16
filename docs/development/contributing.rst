@@ -12,14 +12,17 @@ Development Setup
    git clone https://github.com/fkie-cad/Sandroid_core.git
    cd Sandroid_core
 
-   # Install in development mode
-   pip install -e .[dev]
+   # Work happens on the dev branch
+   git switch dev
 
-   # Initialize configuration
-   sandroid-config init
+   # Install in development mode (Python 3.12+)
+   pip install -e ".[dev,full]"
+   pre-commit install
 
-   # Run tests
+   # Run tests and linters (same as CI)
    pytest
+   ruff check .
+   ruff format --check .
 
 Code Guidelines
 ---------------
@@ -40,10 +43,11 @@ Submitting Changes
 ------------------
 
 1. Fork the repository
-2. Create a feature branch
+2. Create a feature branch off ``dev``
 3. Make your changes
-4. Add tests
-5. Update documentation
-6. Submit a pull request
+4. Add tests (they must not touch a real device -- see :doc:`testing`)
+5. Update documentation and ``CHANGELOG.md``
+6. Submit a pull request against ``dev``
 
-For more details, see the AUTHORS.md file.
+Releases are cut from ``dev`` to ``main``; the procedure is described in the
+*Release Process* section of ``CODING_GUIDELINES.md``.

@@ -36,6 +36,28 @@ class DeviceManager:
 
     _instance: "DeviceManager | None" = None
 
+    #: Serial requested via ``--serial`` / config ``emulator.serial`` (set by
+    #: ``initialize_core``). ``ANDROID_SERIAL`` is the fallback; see
+    #: :meth:`preferred_serial`.
+    _preferred_serial: str | None = None
+
+    @classmethod
+    def set_preferred_serial(cls, serial: str | None) -> None:
+        """Pin device selection to ``serial`` (None = automatic selection)."""
+        cls._preferred_serial = serial or None
+
+    @classmethod
+    def preferred_serial(cls) -> str | None:
+        """Explicitly requested device serial, if any.
+
+        Precedence: ``--serial`` / config ``emulator.serial`` (via
+        :meth:`set_preferred_serial`), then the ``ANDROID_SERIAL`` environment
+        variable adb itself honours.
+        """
+        import os
+
+        return cls._preferred_serial or os.environ.get("ANDROID_SERIAL") or None
+
     def __init__(self):
         """Initialize the device manager."""
         self._devices: dict[str, Device] = {}
@@ -107,6 +129,9 @@ class DeviceManager:
                 return list(self._devices.values())
 
             new_devices: dict[str, Device] = {}
+            # With an explicitly pinned serial (--serial / ANDROID_SERIAL) in a
+            # shared multi-emulator lab, never probe other people's devices.
+            pinned = self.preferred_serial()
 
             # Parse "adb devices -l" output
             # Format: serial state [key:value ...]
@@ -158,7 +183,11 @@ class DeviceManager:
                     # on a healthy device. Gated by a cooldown so a flickering
                     # zombie serial (present but never actually answers) isn't
                     # re-probed on every single refresh cycle indefinitely.
-                    if state == "device" and not device.android_version:
+                    if (
+                        state == "device"
+                        and not device.android_version
+                        and (not pinned or serial == pinned)
+                    ):
                         since_last_attempt = (
                             time.monotonic() - device.last_probe_attempt
                         )
@@ -173,8 +202,17 @@ class DeviceManager:
                         state=state,
                         model=model,
                     )
-                    # Populate additional info for new devices
-                    self._populate_device_info(device)
+                    # Populate additional info for new devices -- but only
+                    # for ready ones. Stale/offline/unauthorized entries (e.g.
+                    # a dead "emulator-5556 offline" left in adbd) can't answer
+                    # getprop and would just spam warnings; they are probed by
+                    # the existing-device branch above once they turn ready.
+                    if state == "device" and (not pinned or serial == pinned):
+                        self._populate_device_info(device)
+                    else:
+                        logger.debug(
+                            "Ignoring not-ready device %s (state: %s)", serial, state
+                        )
 
                 new_devices[serial] = device
 
@@ -584,6 +622,21 @@ class DeviceManager:
 
         # Filter to only devices in ready state
         ready_devices = [d for d in devices if d.state == "device"]
+
+        # An explicitly requested serial (--serial / config / ANDROID_SERIAL)
+        # wins; never silently fall back to a different device.
+        wanted = self.preferred_serial()
+        if wanted:
+            match = next((d for d in ready_devices if d.serial == wanted), None)
+            if match is None:
+                state = self._devices[wanted].state if wanted in self._devices else None
+                logger.warning(
+                    f"Requested device {wanted} is not ready"
+                    + (f" (state: {state})" if state else " (not connected)")
+                )
+                return None
+            self.set_active_device(match.serial)
+            return match
 
         if len(ready_devices) == 0:
             logger.warning("No devices in ready state")

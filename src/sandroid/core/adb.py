@@ -17,7 +17,6 @@ do not need any changes.
 
 import functools
 import re
-import shlex
 import shutil
 import subprocess
 from logging import getLogger
@@ -30,7 +29,11 @@ from sandroid.core import adb_network as _net
 from sandroid.core import adb_packages as _pkg
 from sandroid.core import adb_process as _proc
 from sandroid.core import adb_queries as _qry
-from sandroid.core.adb_utils import is_adb_error_actionable, log_adb_result
+from sandroid.core.adb_utils import (
+    is_adb_error_actionable,
+    log_adb_result,
+    quote_host_arg,
+)
 
 PIPE = subprocess.PIPE
 
@@ -100,18 +103,47 @@ class Adb:
 
     @classmethod
     def _build_shell_command(cls, command: str) -> str:
-        """Return a shell-safe command string with a quoted ADB path.
+        """Return the full command line (quoted ADB path + command) as a string.
 
-        ADB_PATH is concatenated directly into a shell=True subprocess
-        invocation at the call sites below; on Windows (or any POSIX install
-        under a space-containing path) an unquoted path would be split into
-        multiple shell tokens. Wraps the path in double quotes only when it
-        contains a space, so the common no-space case is unaffected.
+        The result is passed *as a string* to ``subprocess`` with
+        ``shell=True``. (Passing a one-element list, as earlier versions did,
+        is equivalent on POSIX but breaks on Windows: ``list2cmdline`` then
+        wraps the whole line in quotes and escapes the inner ones, so
+        ``cmd.exe`` can no longer find the executable.) The ADB path is quoted
+        for the host shell via :func:`quote_host_arg` -- unchanged for the
+        common no-special-characters case.
+
+        Known limitation: ``command`` itself is passed through the host shell
+        verbatim (callers rely on that, e.g. host-side pipes), so on Windows
+        POSIX-style single quoting inside ``command`` is not interpreted by
+        ``cmd.exe`` -- it is forwarded to adb, whose device shell re-parses it.
         """
         adb_path = cls.ADB_PATH or "adb"
-        if " " in adb_path:
-            adb_path = f'"{adb_path}"'
-        return f"{adb_path} {command}"
+        return f"{quote_host_arg(adb_path)} {command}"
+
+    @classmethod
+    def get_executable(cls) -> str:
+        """Return the configured adb executable (initializing it if needed)."""
+        if not cls.ADB_PATH:
+            cls.init()
+        return cls.ADB_PATH or "adb"
+
+    @classmethod
+    def base_argv(cls, serial: str | None = None) -> list[str]:
+        """Return ``[adb, (-s, serial)]`` for argv-style (``shell=False``) use.
+
+        For callers that need ``subprocess.Popen``/``run`` with an argument
+        list (no host-shell quoting issues), honoring ``ADB_PATH`` and the
+        current target device instead of a bare ``"adb"``.
+
+        Args:
+            serial: Device serial override; defaults to the global target.
+        """
+        argv = [cls.get_executable()]
+        target = serial if serial is not None else cls._target_device
+        if target:
+            argv += ["-s", target]
+        return argv
 
     # ------------------------------------------------------------------
     # Initialization
@@ -132,7 +164,20 @@ class Adb:
                 logger.critical("Could not find ADB path")
                 exit(1)
             if cls.ADB_PATH is None:
-                logger.critical('"which adb" returned none')
+                # Not on PATH: fall back to the Android SDK (ANDROID_HOME /
+                # ANDROID_SDK_ROOT / default SDK locations).
+                try:
+                    from sandroid.config.android_env import find_adb_path
+
+                    sdk_adb = find_adb_path()
+                    cls.ADB_PATH = str(sdk_adb) if sdk_adb else None
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(f"SDK adb lookup failed: {e}")
+            if cls.ADB_PATH is None:
+                logger.critical(
+                    "adb not found on PATH or in the Android SDK "
+                    "(set ANDROID_HOME or add platform-tools to PATH)"
+                )
                 exit(1)
             logger.debug("Android debug bridge path found: " + cls.ADB_PATH)
 
@@ -170,7 +215,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             output = subprocess.run(
-                [cls._build_shell_command(full_command)],
+                cls._build_shell_command(full_command),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -217,7 +262,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             process = subprocess.Popen(
-                [cls._build_shell_command(full_command)],
+                cls._build_shell_command(full_command),
                 stdout=PIPE,
                 stdin=subprocess.DEVNULL,  # Changed from PIPE - ADB doesn't need stdin
                 stderr=PIPE,
@@ -256,7 +301,7 @@ class Adb:
         logger.debug("Running ADB command " + full_command)
         try:
             output = subprocess.run(
-                [cls._build_shell_command(full_command)],
+                cls._build_shell_command(full_command),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -648,7 +693,7 @@ class Adb:
             Tuple of (success, message).
         """
         stdout, stderr = cls.send_adb_command(
-            f"push {shlex.quote(local_path)} {shlex.quote(remote_path)}"
+            f"push {quote_host_arg(local_path)} {quote_host_arg(remote_path)}"
         )
         combined = f"{stdout or ''}\n{stderr or ''}".strip()
         lc = combined.lower()

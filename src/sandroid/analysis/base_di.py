@@ -54,7 +54,10 @@ Example in tests:
 
 import logging
 import os
+import threading
+import time
 from abc import abstractmethod
+from collections.abc import Callable, Iterator
 from typing import Any, Protocol
 
 try:
@@ -943,10 +946,76 @@ class DataGatherBase(DataGatherer, DataProvider):
 DataGatherDI = DataGatherBase
 
 
+class PollingCaptureMixin:
+    """Bounded, stoppable background polling for capture gatherers.
+
+    ``Processes``/``Sockets`` poll the device once per second while an action
+    runs. Their legacy threads were fire-and-forget loops of
+    ``action_duration`` *iterations* (each iteration = one adb round trip +
+    1s sleep), so they outlived the action, kept polling across the snapshot
+    revert (and every 30s adb timeout while the device was reconnecting), and
+    -- worst -- the dry-run thread could still be running when the engine
+    materialized results, so the noise list was empty and nothing was
+    filtered. This mixin bounds the loop by wall-clock time and gives the
+    gatherer a real ``stop()`` that the engine's ``StopCaptureStep`` calls,
+    which joins the thread so the run's data is complete before the next step.
+    """
+
+    #: Upper bound for a capture whose duration is not known yet (0).
+    _POLL_MAX_SECONDS: float = 600.0
+    #: Seconds to wait for the poll thread to finish in ``stop()``.
+    _POLL_JOIN_TIMEOUT: float = 45.0
+    #: Poll interval in seconds.
+    _POLL_INTERVAL: float = 1.0
+
+    def _start_polling(self, target: Callable[[], None], name: str) -> None:
+        """Start ``target`` in a daemon thread with a fresh stop event."""
+        self._poll_stop = threading.Event()
+        self._poll_thread = threading.Thread(target=target, name=name, daemon=True)
+        self._poll_thread.start()
+
+    def _poll_ticks(self, runtime: float) -> Iterator[int]:
+        """Yield once per poll interval until stopped or ``runtime`` elapsed.
+
+        Always yields at least once so even a zero-length window is sampled.
+
+        Args:
+            runtime: Capture duration in seconds; ``<= 0`` means "until
+                ``stop()``" (bounded by ``_POLL_MAX_SECONDS``).
+        """
+        stop = getattr(self, "_poll_stop", None) or threading.Event()
+        limit = runtime if runtime and runtime > 0 else self._POLL_MAX_SECONDS
+        deadline = time.monotonic() + limit
+        tick = 0
+        while True:
+            yield tick
+            tick += 1
+            if stop.is_set() or time.monotonic() >= deadline:
+                return
+            if stop.wait(self._POLL_INTERVAL):
+                return
+
+    def stop(self) -> None:
+        """Stop polling and wait for the capture thread to store its data."""
+        stop = getattr(self, "_poll_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_poll_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=self._POLL_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logging.getLogger(__name__).warning(
+                    "%s capture thread did not stop within %.0fs",
+                    type(self).__name__,
+                    self._POLL_JOIN_TIMEOUT,
+                )
+
+
 __all__ = [
     "AdbProtocol",
     "ConfigProtocol",
     "DataGatherBase",
     "DataGatherDI",  # Alias
     "ForensicServiceProtocol",
+    "PollingCaptureMixin",
 ]

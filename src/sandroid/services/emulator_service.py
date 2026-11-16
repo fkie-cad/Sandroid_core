@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from sandroid.core.adb_utils import quote_host_arg
 from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
@@ -310,7 +311,9 @@ class EmulatorService:
         # Pull the recording from device
         try:
             adb = self._get_adb()
-            _stdout, stderr = adb.send_adb_command(f"pull {device_path} {local_path}")
+            _stdout, stderr = adb.send_adb_command(
+                f"pull {device_path} {quote_host_arg(str(local_path))}"
+            )
 
             if stderr and "error" in stderr.lower():
                 self._logger.error(f"Failed to pull recording: {stderr}")
@@ -418,9 +421,13 @@ class EmulatorService:
         Raises:
             RuntimeError: If the subprocess cannot be started.
         """
+        from sandroid.core.adb import Adb
+
         try:
+            # Honor ADB_PATH (adb may not be on PATH) and the active device
+            # (-s serial) instead of a bare "adb".
             return subprocess.Popen(
-                ["adb", "shell", "screenrecord", device_path],
+                [*Adb.base_argv(), "shell", "screenrecord", device_path],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -532,10 +539,11 @@ class EmulatorService:
             else:
                 command = b"avd snapshot save " + name
 
-            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
+            stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
-            if stderr:
-                self._logger.error(f"Failed to create snapshot: {stderr}")
+            # The console reports failures as "KO: ..." on stdout (adb exit 0).
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to create snapshot: {stderr or stdout}")
                 return False
 
             self._logger.info(f"Snapshot '{name}' created successfully")
@@ -567,10 +575,12 @@ class EmulatorService:
             else:
                 command = b"avd snapshot load " + name
 
-            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
+            stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
-            if stderr:
-                self._logger.error(f"Failed to load snapshot: {stderr}")
+            # The console reports failures (e.g. unknown snapshot) as
+            # "KO: ..." on stdout while adb itself exits 0.
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to load snapshot: {stderr or stdout}")
                 return False
 
             # Reverting VM state disrupts the ADB transport for a variable
@@ -579,6 +589,11 @@ class EmulatorService:
             # was sometimes too short (a race) and often too long (needless
             # latency on a device that recovers quickly).
             self._wait_for_device_ready(adb, serial)
+            # A snapshot restores the guest clock to the moment it was saved,
+            # so every revert rewinds device time (minutes after a few
+            # replays), skewing file timestamps / the timeline against the
+            # host. Re-sync it to the host clock.
+            self._resync_guest_clock(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -586,6 +601,38 @@ class EmulatorService:
         except Exception as e:
             self._logger.error(f"Failed to load snapshot: {e}")
             return False
+
+    def _resync_guest_clock(self, adb: AdbProtocol, serial: str | None) -> bool:
+        """Best-effort: set the guest's wall clock to the host's (UTC epoch).
+
+        Tries a plain root shell first (adbd as root), then Magisk/su
+        variants. Never raises; returns whether the device accepted a value
+        within 2 s of the host clock.
+        """
+        epoch = int(time.time())
+        commands = (
+            f"shell date -u @{epoch}",
+            f"shell su 0 date -u @{epoch}",
+            f"shell su -c 'date -u @{epoch}'",
+        )
+        for command in commands:
+            try:
+                adb.send_adb_command(command, serial=serial)
+                stdout, _stderr = adb.send_adb_command(
+                    "shell date +%s", serial=serial
+                )
+                guest = int(str(stdout).strip().splitlines()[-1])
+            except Exception as exc:
+                self._logger.debug(f"Guest clock resync via {command!r} failed: {exc}")
+                continue
+            if abs(guest - int(time.time())) <= 2:
+                self._logger.debug(f"Guest clock resynced to host ({command})")
+                return True
+        self._logger.warning(
+            "Could not resync the guest clock after snapshot load "
+            "(needs root); device timestamps may lag the host"
+        )
+        return False
 
     def _wait_for_device_ready(
         self,

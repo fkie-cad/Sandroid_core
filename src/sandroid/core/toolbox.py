@@ -233,7 +233,10 @@ class Toolbox(metaclass=_ToolboxMeta):
         """Delegates to InitializationService for session, logging, args, and FridaManager."""
         init_service = _service("get_initialization_service")
         result = init_service.initialize_application(
-            args=cls.args or init_service.parse_arguments(),
+            # Never fall back to argparse on sys.argv here: Toolbox is also
+            # used as a library (headless API, scripts with their own CLI),
+            # and initialize_application() builds default args when None.
+            args=cls.args,
             device_serial=cls._get_active_device_serial(),
         )
         cls.args = result.args
@@ -481,8 +484,8 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def load_snapshot(cls, name):
-        """Delegates to EmulatorService.load_snapshot()."""
-        _service("get_emulator_service").load_snapshot(
+        """Delegates to EmulatorService.load_snapshot(); returns its success bool."""
+        return _service("get_emulator_service").load_snapshot(
             name if isinstance(name, str) else name.decode("utf-8")
         )
 
@@ -1060,7 +1063,7 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def calculate_hashes(cls):
-        """Calculates MD5 hashes for new and changed files.
+        """Calculates MD5 and SHA-256 hashes for new and changed files.
 
         Delegates to FileExtractionService for the implementation.
         """
@@ -1075,6 +1078,8 @@ class Toolbox(metaclass=_ToolboxMeta):
         """
         result = _service("get_file_extraction_service").pull_and_hash_apks()
         cls.submit_other_data("APK Hashes", result.get("apk_hashes", []))
+        if "apk_hashes_sha256" in result:
+            cls.submit_other_data("APK Hashes SHA-256", result["apk_hashes_sha256"])
 
     @classmethod
     def exclude_whitelist(cls, file_paths):

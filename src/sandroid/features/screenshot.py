@@ -22,15 +22,25 @@ class Screenshot(Functionality):
     Attributes:
         actions: Queue of action labels used in screenshot filenames.
         finished: Flag to signal the screenshot thread to stop.
-        interval: Seconds between screenshots, from Toolbox.args.screenshot.
+        interval: Seconds between screenshots (``--screenshot INTERVAL``).
     """
 
-    actions: Queue = Queue()
-    finished: bool = False
-    interval: int = Toolbox.args.screenshot
+    #: Fallback interval when neither the caller nor the CLI args provide one.
+    DEFAULT_INTERVAL = 5
 
-    def __init__(self) -> None:
-        """Initialize with a daemon thread (not yet started)."""
+    def __init__(self, interval: int | None = None) -> None:
+        """Initialize with a daemon thread (not yet started).
+
+        Args:
+            interval: Seconds between screenshots. Defaults to the CLI's
+                ``--screenshot`` value (read at runtime, never at import time,
+                so importing this module works before ``Toolbox.args`` is set).
+        """
+        self.actions: Queue = Queue()
+        self.finished: bool = False
+        if interval is None:
+            interval = getattr(Toolbox.args, "screenshot", None)
+        self.interval: int = max(1, int(interval or self.DEFAULT_INTERVAL))
         self.thread = threading.Thread(target=self.screenshot_thread)
         self.thread.daemon = True
 

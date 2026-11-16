@@ -39,6 +39,46 @@ def _apply_network_degradation(degrade: bool) -> None:
         Adb.send_telnet_command("network speed full")
 
 
+def _finalize_headless_run(
+    toolbox: Any, result: Any, mode: str, started_at: str
+) -> None:
+    """Write results JSON + metadata, optional PDF and manifest for a run.
+
+    Headless runs have no run bundle; they write into the session folder
+    (``SESSION_PATH``, created by ``Toolbox.init_files()``), falling back to
+    the configured ``paths.results_path``. Never raises: the analysis result
+    is still returned to the API caller if documentation fails.
+    """
+    import os
+
+    from sandroid.core import run_report
+    from sandroid.core.adb import Adb
+
+    cfg = getattr(toolbox, "config", None)
+    result_dir = os.environ.get("SESSION_PATH") or str(
+        getattr(getattr(cfg, "paths", None), "results_path", "results")
+    )
+    try:
+        outcome = run_report.finalize_run(
+            result_dir,
+            result.to_json_dict(),
+            adb=Adb,
+            config=cfg,
+            started_at=started_at,
+            mode=mode,
+            generate_pdf=bool(
+                getattr(getattr(cfg, "report", None), "generate_pdf", False)
+            ),
+        )
+        logger.info(f"Run documentation written: {outcome.results_json}")
+        if outcome.pdf is not None:
+            logger.info(f"PDF report: {outcome.pdf}")
+        for err in outcome.errors:
+            logger.warning(f"Run finalisation issue: {err}")
+    except Exception as e:
+        logger.error(f"Could not write run documentation: {e}", exc_info=True)
+
+
 def _make_progress_adapter(
     current_run_setter: RunSetter, runs: int
 ) -> Callable[[Any], None]:
@@ -147,9 +187,13 @@ async def run_malware_analysis(
     run_config.results_path = ""
     run_config.raw_results_path = ""
 
+    from sandroid.core.run_report import iso_now
+
+    started_at = iso_now()
     result = AnalysisEngine(
         run_config, progress=_make_progress_adapter(current_run_setter, runs)
     ).run()
+    _finalize_headless_run(toolbox, result, "headless-malware", started_at)
 
     # Normalize to a JSON-safe dict (sets -> lists, etc.), matching the legacy
     # ``json.loads(action_q.get_data())`` return type.
@@ -216,9 +260,13 @@ async def run_forensic_analysis(
     run_config.results_path = ""
     run_config.raw_results_path = ""
 
+    from sandroid.core.run_report import iso_now
+
+    started_at = iso_now()
     result = AnalysisEngine(
         run_config, progress=_make_progress_adapter(current_run_setter, runs)
     ).run()
+    _finalize_headless_run(toolbox, result, "headless-forensic", started_at)
 
     data = json.loads(json.dumps(result.to_json_dict(), default=json_encoder))
     # Preserve the two metadata keys the legacy implementation returned so API

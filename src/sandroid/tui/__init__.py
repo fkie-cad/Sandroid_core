@@ -8,7 +8,7 @@ Features:
 - Three view modes: Forensic, Malware, Security
 - Vim-style navigation (j/k/g/G)
 - Help overlay (?) showing all shortcuts
-- Command palette (Ctrl+P) for fuzzy search
+- Command palette (Ctrl+Shift+P) for fuzzy search
 - Theme switching (Ctrl+T) with 8 themes
 - Native modal dialogs (no Rich mode switching)
 - Real-time background task monitoring

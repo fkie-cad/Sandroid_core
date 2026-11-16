@@ -245,7 +245,9 @@ class DeviceController:
                 return
 
             ready_devices = [d for d in devices if d.state == "device"]
-            if len(ready_devices) < 2 or not self._push_modal:
+            explicit = getattr(dm, "preferred_serial", lambda: None)()
+            if explicit or len(ready_devices) < 2 or not self._push_modal:
+                # auto_select_device() honours --serial / ANDROID_SERIAL.
                 dm.auto_select_device()
                 return
 
