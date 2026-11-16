@@ -475,3 +475,134 @@ def test_verify_snapshot_follows_avd_ini_path_redirect(
     monkeypatch.setenv("ANDROID_AVD_HOME", str(avd_home))
     controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
     assert controller._verify_snapshot() is True
+
+
+# ---------------------------------------------------------------------------
+# M: key collisions (Diffs rename, Esc)
+# ---------------------------------------------------------------------------
+
+
+class _DiffsWithGlobalN(App):
+    """DiffsView under an app that binds n globally (Install APK), like
+    SandroidTUI.
+    """
+
+    BINDINGS = [("n", "install_apk", "Install APK")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.install_calls = 0
+
+    def compose(self) -> ComposeResult:
+        yield DiffsView(id="files-diffs")
+
+    def action_install_apk(self) -> None:
+        self.install_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_n_without_a_focused_run_reaches_the_global_binding(
+    results_root,
+) -> None:
+    _save_run("20261116_100000_aaaaaa", label="Run A")
+    app = _DiffsWithGlobalN()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffsView)
+        await _wait_for(pilot, lambda: len(view.query(DiffView)) == 1)
+        view.query_one(DiffView).focus()  # a diff entry, not the Runs rail
+        await pilot.pause()
+        await pilot.press("n")
+        await pilot.pause(0.1)
+        assert app.install_calls == 1
+        assert type(app.screen).__name__ != "InputModal"
+
+
+@pytest.mark.asyncio
+async def test_rename_needs_explicit_confirm(results_root) -> None:
+    """The tester's APK path typed after `n` became the run label at once."""
+    from textual.widgets import Input
+
+    run_id = "20261116_100000_aaaaaa"
+    _save_run(run_id, label="Run A")
+    app = _DiffsWithGlobalN()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffsView)
+        await _wait_for(pilot, lambda: view._detail_record is not None)
+        view.focus()  # the Runs rail with the run highlighted
+        await pilot.pause()
+        await pilot.press("n")
+        await _wait_for(pilot, lambda: type(app.screen).__name__ == "InputModal")
+        app.screen.query_one(Input).value = "/tmp/wikipedia.apk"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        assert run_history.load_run(run_id).label == "Run A"
+        assert "apk" in str(app.screen.query("Label").last().render()).lower()
+        await pilot.press("n")  # No
+        await pilot.pause(0.2)
+        assert run_history.load_run(run_id).label == "Run A"
+
+        view.focus()
+        await pilot.pause()
+        await pilot.press("n")
+        await _wait_for(pilot, lambda: type(app.screen).__name__ == "InputModal")
+        app.screen.query_one(Input).value = "Bookmark article"
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await pilot.press("y")
+        await _wait_for(
+            pilot, lambda: run_history.load_run(run_id).label == "Bookmark article"
+        )
+        assert app.install_calls == 0
+
+
+def test_escape_on_main_screen_never_opens_quit() -> None:
+    from sandroid.tui.controllers.quit_controller import QuitController
+
+    pushed: list = []
+    notes: list[str] = []
+    screen = SimpleNamespace(
+        focused=None, app=SimpleNamespace(notify=lambda msg, **kw: notes.append(msg))
+    )
+    qc = QuitController(
+        push_modal=lambda modal, cb: pushed.append(modal),
+        is_main_screen=lambda: True,
+        get_current_screen=lambda: screen,
+        get_screen_stack=lambda: [object(), screen],
+    )
+    qc.maybe_quit()
+    assert pushed == []
+    assert any("q" in n for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_escape_in_a_main_screen_input_leaves_the_input_not_the_app() -> None:
+    from textual.widgets import Input
+
+    from sandroid.tui.controllers.quit_controller import QuitController
+
+    class _Harness(App):
+        BINDINGS = [("escape", "maybe_quit", "Back")]
+
+        def compose(self) -> ComposeResult:
+            yield Input(id="field")
+
+        def on_mount(self) -> None:
+            self.pushed: list = []
+            self.qc = QuitController(
+                push_modal=lambda modal, cb: self.pushed.append(modal),
+                is_main_screen=lambda: True,
+                get_current_screen=lambda: self.screen,
+                get_screen_stack=lambda: self.screen_stack,
+            )
+
+        def action_maybe_quit(self) -> None:
+            self.qc.maybe_quit()
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        app.query_one("#field", Input).focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.pushed == []
+        assert app.focused is None

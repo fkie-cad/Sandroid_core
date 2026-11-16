@@ -201,10 +201,15 @@ class QuitController:
         self._show_quit_confirmation()
 
     def maybe_quit(self) -> None:
-        """Handle ESC key - dismiss modal if open, otherwise show quit confirmation.
+        """Handle ESC: close the top modal/overlay, or leave a focused input.
 
         Since the ESC binding has priority=True, we capture ESC before modals can.
         So we need to manually dismiss modals when they're open.
+
+        On the main screen Esc never opens the Quit dialog (q / Ctrl+C do):
+        pressed in a panel it used to pop "Quit?" when the user only meant to
+        close something (P2 key collision). A focused text input is left
+        instead; otherwise a short hint names the quit key.
         """
         from textual.screen import ModalScreen
 
@@ -227,8 +232,8 @@ class QuitController:
             # We never want to pop MainScreen as that would leave a blank screen
             if self._is_main_screen():
                 if is_debug:
-                    logger.debug("    On MainScreen, showing quit confirmation")
-                self._show_quit_confirmation()
+                    logger.debug("    On MainScreen: Esc never opens Quit")
+                self._escape_on_main_screen(current_screen)
                 return
 
             # If there's a modal/overlay screen on top of MainScreen, dismiss it
@@ -266,6 +271,25 @@ class QuitController:
 
         except Exception as e:
             logger.error(f"!!! Exception in maybe_quit: {e}", exc_info=True)
+
+    @staticmethod
+    def _escape_on_main_screen(screen: Any) -> None:
+        """Esc on the main screen: leave a focused input, else hint at ``q``."""
+        focused = getattr(screen, "focused", None)
+        try:
+            from textual.widgets import Input, TextArea
+
+            if isinstance(focused, Input | TextArea):
+                screen.set_focus(None)
+                return
+        except Exception:
+            logger.debug("Esc: could not leave the focused input", exc_info=True)
+        try:
+            screen.app.notify(
+                "Esc closes dialogs and inputs. Press q to quit.", timeout=3
+            )
+        except Exception:
+            pass
 
     def _show_quit_confirmation(self) -> None:
         """Show the quit confirmation modal."""

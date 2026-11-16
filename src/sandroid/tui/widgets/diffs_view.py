@@ -19,11 +19,9 @@ Key scoping note: ``n`` (rename) and ``delete``/``backspace`` (delete) are
 bound here on this Widget, not the App — they only fire while this view has
 focus, exactly the same non-priority-binding-on-a-focused-ancestor mechanism
 ``SnapshotsPanel`` uses for its own ``c``/``l``/``d``/``a``/``r``. ``n``
-deliberately **shadows the GLOBAL ``n``=Install APK binding** (``app.py``'s
-``action_install_apk``, id ``"new_apk"``) while Diffs has focus — Install APK
-is irrelevant while reviewing Play results, the same precedent already
-established by Watchlist's ``a``/Analyze shadow over the global Analyze
-action. ``delete``/``backspace`` are unbound anywhere else in the app
+renames only while the Runs rail has focus with a run highlighted, and only
+after a confirm; anywhere else it falls through to the GLOBAL ``n`` = Install
+APK (``app.py``'s ``action_install_apk``, id ``"new_apk"``). ``delete``/``backspace`` are unbound anywhere else in the app
 (``help_screen.py`` uses backspace on a separate screen), so no shadowing
 concern there. ``[`` (collapse the Runs bar) is likewise confirmed unbound.
 """
@@ -62,8 +60,9 @@ class DiffsView(FilesSubViewBase):
     Bindings (when focused):
         r / p: Record / replay -- global app keys, they work here too.
         P: generate the PDF report for the selected run (Shift+P).
-        n: rename the selected run (shadows global "n"=Install APK — see
-           module docstring).
+        n: rename the highlighted run, with a confirm (Runs rail focused
+           only; elsewhere the global "n"=Install APK runs — see module
+           docstring).
         delete / backspace: delete the selected run, through a ConfirmModal
            first (never on a bare keypress).
         [: collapse/expand the bottom Runs bar (reclaims height for a taller
@@ -581,32 +580,52 @@ class DiffsView(FilesSubViewBase):
         self._set_breadcrumb()
 
     def action_rename_run(self) -> None:
-        """``n`` — rename the selected run.
+        """``n`` — rename the focused run, after an explicit confirm.
 
-        Deliberately shadows the GLOBAL ``n``=Install APK binding while this
-        view has focus (see module docstring) — a deliberate, previously-
-        verified-safe shadow, the same precedent as Watchlist's ``a``/Analyze
-        shadow elsewhere in this plan.
+        Only acts while the Runs rail has focus with a run highlighted;
+        otherwise the key falls through (``SkipAction``) to the global
+        ``n`` = Install APK. The new label is applied only after a Yes in a
+        confirm dialog: the tester pressed ``n`` meaning Install APK, typed
+        an APK path, and it silently became the run label (P2 key
+        collision).
         """
+        from textual.actions import SkipAction
+
         run_id = self._selected_run_id
-        if not run_id:
-            self._notify("No run selected to rename.", "warning")
-            return
-        from sandroid.tui.modals import InputModal
+        try:
+            rail_focused = self.query_one("#runs-list", OptionList).has_focus
+        except Exception:
+            rail_focused = False
+        if not run_id or not rail_focused:
+            raise SkipAction
+        from sandroid.tui.modals import ConfirmModal, InputModal
 
         current = self._current_label(run_id)
+
+        def on_confirm(yes: bool | None, label: str) -> None:
+            if yes:
+                self._rename_run_bg(run_id, label)
 
         def on_result(value: str | None) -> None:
             if value is None:
                 return
             label = value.strip()
-            if not label:
+            if not label or label == current:
                 return
-            self._rename_run_bg(run_id, label)
+            message = f"Rename run '{current}' to '{label}'?"
+            if label.lower().endswith(".apk") or "/" in label:
+                message += (
+                    "\nThis looks like a file path. To install an APK, "
+                    "choose No and press n outside the Diffs tab."
+                )
+            self.app.push_screen(
+                ConfirmModal(title="Rename run", message=message),
+                lambda yes: on_confirm(yes, label),
+            )
 
         self.app.push_screen(
             InputModal(
-                title="Rename run",
+                title=f"Rename run '{current}'",
                 default=current,
                 placeholder="run label",
             ),

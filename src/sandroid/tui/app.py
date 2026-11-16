@@ -105,7 +105,7 @@ class SandroidTUI(App):
         # Navigation
         Binding("D", "show_device_selector", "Devices", priority=True),
         Binding("q", "quit", "Quit"),
-        Binding("escape", "maybe_quit", "Back/Quit", priority=True),
+        Binding("escape", "maybe_quit", "Back", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
@@ -908,7 +908,10 @@ class SandroidTUI(App):
         self._quit_controller.request_quit()
 
     def action_maybe_quit(self) -> None:
-        """Handle ESC -- dismiss modal or show quit confirmation."""
+        """Handle ESC -- dismiss the top modal or leave a focused input.
+
+        Never opens the Quit dialog from the main screen (q / Ctrl+C do).
+        """
         self._quit_controller.maybe_quit()
 
     def exit(self, result=None, return_code: int = 0) -> None:
