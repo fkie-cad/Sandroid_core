@@ -402,7 +402,7 @@ class AbxReader:
                 self._handle_attribute(token, offset, element_stack, is_multi_root)
 
             else:
-                raise NotImplementedError(f"unexpected XML type: {xml_type}")
+                raise AbxDecodeError(f"unexpected XML type: {xml_type}")
 
         if not (
             root_closed
