@@ -137,6 +137,12 @@ def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
 
         prepare_device(SandroidConsole.get())
     Toolbox.init()
+    try:
+        from sandroid.core.emulator_guard import start_memory_guard
+
+        start_memory_guard(config)
+    except Exception:  # the guard is a safety net, never block startup
+        logging.getLogger(__name__).debug("memory guard not started", exc_info=True)
 
 
 class EscalatingSignalHandler:

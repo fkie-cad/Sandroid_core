@@ -768,17 +768,11 @@ class EmulatorService:
             )
 
         # Start new emulator instance
+        from sandroid.core.emulator_guard import emulator_launch_args
+
         try:
             subprocess.Popen(
-                [
-                    emulator_path,
-                    "@",
-                    device_name,
-                    "-feature",
-                    "-Vulkan",
-                    "-gpu",
-                    "host",
-                ],
+                [emulator_path, "@", device_name, *emulator_launch_args()],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,

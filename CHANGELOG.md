@@ -63,6 +63,7 @@ persistent run history, and an experimental AI Chat assistant.
 - PDF title page with run metadata, readable wrapping tables, deterministic timeline.
 
 #### Device selection & safety defaults
+- **Emulator memory guard**: the qemu process of the active emulator is watched; above `emulator.max_host_memory_gb` (default 10 GB) it is shut down (`memory_guard_action = "warn"` only logs). Sandroid warns when an emulator was started without `-feature -Vulkan`.
 - **`--serial/-s`**, `$ANDROID_SERIAL` and `emulator.serial` select the device; every adb call is pinned to it.
 - **AI Chat is off unless configured**, accepts only local endpoints unless `ai.allow_remote = true`, shows a data-egress notice naming endpoint and model, and no MCP server is enabled by default (the bundled demo server returns clearly marked fake data only).
 - All bypass categories are labelled *experimental* and off by default.
@@ -107,6 +108,7 @@ persistent run history, and an experimental AI Chat assistant.
 - objection command lines fixed for objection 1.12; `frida.server_auto_start` is honoured; frida-server download errors (offline, rate limit, digest mismatch) are explained; MVT IOC download fallback fixed; `mitmweb` is found next to the Python interpreter.
 - AI Chat: tools from external MCP servers and evidence deletion always require confirmation; the API key is never written to logs, results or the config file from the environment.
 - `json_encoder` no longer recurses on duck-typed objects.
+- Every Sandroid-launched emulator (incl. `sandroid-config avd start`, headless) disables guest Vulkan: SwiftShader Vulkan leaked host memory on each snapshot load, growing qemu to tens of GB over a session.
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.

@@ -339,6 +339,15 @@ def _block_device_access(request, monkeypatch):
                 monkeypatch.setattr(
                     frida_mod, name, _make_frida_blocker(frida_mod, name)
                 )
+    # The emulator memory guard watches real qemu processes on the host;
+    # never start it from tests (tests/core/test_emulator_guard.py drives
+    # EmulatorMemoryGuard.check_once directly).
+    try:
+        from sandroid.core import emulator_guard
+    except Exception:
+        emulator_guard = None
+    if emulator_guard is not None:
+        monkeypatch.setattr(emulator_guard, "start_memory_guard", lambda config: None)
 
     start = len(_blocked)
     yield

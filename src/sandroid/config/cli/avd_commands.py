@@ -711,8 +711,14 @@ def _start_avd(
             cmd.extend(["-snapshot", snapshot_name])
 
         # Only allow specific safe emulator arguments
+        from sandroid.core.emulator_guard import emulator_launch_args
+
+        # Guest Vulkan off in every mode: SwiftShader Vulkan leaks host memory
+        # on each snapshot load.
         if headless:
-            cmd.extend(["-no-window", "-no-boot-anim", "-gpu", "swiftshader_indirect"])
+            cmd.extend(["-no-window", "-no-boot-anim", *emulator_launch_args(headless=True)])
+        else:
+            cmd.extend(emulator_launch_args())
 
         # Set up environment
         env = os.environ.copy()

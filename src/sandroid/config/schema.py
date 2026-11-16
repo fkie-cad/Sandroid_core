@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from enum import Enum
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator, validator
 
@@ -62,6 +63,19 @@ class EmulatorConfig(BaseModel):
     avd_auto_start: bool = Field(
         default=False,
         description="Automatically start AVD when needed",
+    )
+    max_host_memory_gb: float = Field(
+        default=10.0,
+        ge=0,
+        description=(
+            "Host memory limit (resident GB) for the active emulator's qemu "
+            "process. Above it the emulator is stopped to protect the host "
+            "(see memory_guard_action). 0 disables the guard."
+        ),
+    )
+    memory_guard_action: Literal["kill", "warn"] = Field(
+        default="kill",
+        description="What to do when max_host_memory_gb is exceeded: kill or warn",
     )
 
     @validator("android_emulator_path", "sdk_path", "adb_path", "avd_home", pre=True)

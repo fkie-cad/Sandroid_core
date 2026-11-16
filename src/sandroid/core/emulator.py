@@ -178,9 +178,12 @@ class Emulator:
             print("Error: Emulator path could not be detected.")
             return False
 
+        from sandroid.core.emulator_guard import emulator_launch_args
+
         command = [emulator_path, "-avd", avd_name]
-        # Add common performance flags (adjust as needed)
-        command.extend(["-feature", "-Vulkan", "-gpu", "host"])
+        # Guest Vulkan off: SwiftShader Vulkan leaks host memory on every
+        # snapshot load (see core/emulator_guard.py).
+        command.extend(emulator_launch_args())
 
         # Add boot mode flags
         if boot_mode == "cold":
