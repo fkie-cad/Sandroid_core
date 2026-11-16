@@ -127,7 +127,8 @@ def __getattr__(name: str):
 @click.option(
     "--trigdroid-ccf",
     type=click.Choice(["I", "D"]),
-    help="Use the TrigDroid CCF utility. I for interactive mode, D to create the default config file",
+    hidden=True,  # not functional with the current TrigDroid API -- see main()
+    help="(Unsupported) TrigDroid CCF utility",
 )
 @click.option(
     "--hash",
@@ -337,6 +338,17 @@ def main(
     # Initialize console with default theme (re-initialized with config theme later)
     SandroidConsole.initialize()
     console = SandroidConsole.get()
+
+    # --trigdroid-ccf is kept (hidden) only so old scripts get a clear error
+    # instead of "no such option": the TrigDroid CCF utility has no
+    # equivalent in the current TrigDroid API, so it never did anything.
+    if trigdroid_ccf:
+        raise click.UsageError(
+            "--trigdroid-ccf is not supported in Sandroid 2.x (the TrigDroid "
+            "CCF utility is not available with the current TrigDroid API). "
+            "Configure TrigDroid via the [trigdroid] section of the config "
+            "file instead (sandroid-config show / set)."
+        )
 
     # --- Offline report generation (no config/device needed) ---------------
     if report_from:

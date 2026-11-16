@@ -6,7 +6,9 @@ Handles the non-interactive, command-line driven analysis workflow
 
 import json
 import logging
+import shutil
 import sys
+from pathlib import Path
 
 from sandroid.config import SandroidConfig
 from sandroid.core.console import SandroidConsole
@@ -141,6 +143,10 @@ def run_analysis(
                 generate_pdf=config.report.generate_pdf,
                 run_settings=describe_run_settings(run_config),
             )
+            final_json = _deliver_to_requested_path(
+                outcome.results_json, config.output_file
+            )
+            console.print(f"[success]Results: {final_json}[/success]")
             if outcome.pdf is not None:
                 console.print(f"[success]PDF report: {outcome.pdf}[/success]")
             for err in outcome.errors:
@@ -166,6 +172,26 @@ def run_analysis(
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise
+
+
+def _deliver_to_requested_path(written: Path, requested: Path | str) -> Path:
+    """Also place the results JSON at the full ``-f`` path, if it has a folder.
+
+    The run's results (and evidence manifest) live in the session folder,
+    which only uses the ``-f`` *file name*; a ``-f some/dir/out.json`` used to
+    silently drop ``some/dir``. A bare file name keeps the old behaviour.
+
+    Returns:
+        The path the user should look at.
+    """
+    requested = Path(requested).expanduser()
+    if requested.parent == Path() or not Path(written).exists():
+        return Path(written)
+    target = requested if requested.is_absolute() else Path.cwd() / requested
+    if target.resolve() != Path(written).resolve():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(written, target)
+    return target
 
 
 def _write_results(results_json, output_file, config, console) -> None:

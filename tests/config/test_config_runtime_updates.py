@@ -8,6 +8,7 @@
 - ``sandroid --config FILE`` works without an auto-discovered config.
 - ``sandroid-config init`` without ``-o`` refuses to clobber the user config.
 - ``sandroid-config set/get`` accept positional ``KEY [VALUE]``.
+- ``--trigdroid-ccf`` is rejected; ``--trigdroid -f DIR/FILE`` keeps DIR.
 """
 
 from __future__ import annotations
@@ -319,3 +320,42 @@ def test_config_set_get_accept_positional_key_value(xdg):
     res = runner.invoke(config_main, ["set", "mvt.enabled"])
     assert res.exit_code == 2
     assert "Missing VALUE" in res.output
+
+
+# -- B9: --trigdroid-ccf is hidden and errors clearly --------------------------
+
+
+def test_trigdroid_ccf_hidden_and_rejected(xdg):
+    import sandroid.cli as cli_mod
+
+    runner = CliRunner()
+    assert "--trigdroid-ccf" not in runner.invoke(cli_mod.main, ["--help"]).output
+    result = runner.invoke(cli_mod.main, ["--trigdroid-ccf", "D"])
+    assert result.exit_code == 2
+    assert "not supported" in result.output
+
+
+# -- B10: --trigdroid -f DIR/FILE keeps the directory --------------------------
+
+
+def test_cli_results_copied_to_full_f_path(xdg, tmp_path):
+    from sandroid.cli_modes.analysis import _deliver_to_requested_path
+
+    _, work = xdg
+    session = tmp_path / "session"
+    session.mkdir()
+    written = session / "out.json"
+    written.write_text('{"ok": true}')
+
+    final = _deliver_to_requested_path(written, Path("reports/case1/out.json"))
+    assert final == work / "reports" / "case1" / "out.json"
+    assert final.read_text() == '{"ok": true}'
+    assert written.exists()  # session copy (covered by the manifest) stays
+
+    absolute = tmp_path / "abs" / "out.json"
+    assert _deliver_to_requested_path(written, absolute) == absolute
+    assert absolute.exists()
+
+    # A bare file name keeps the old behaviour: only the session copy.
+    assert _deliver_to_requested_path(written, Path("out.json")) == written
+    assert not (work / "out.json").exists()
