@@ -556,3 +556,23 @@ def test_activating_device_records_its_avd_name(monkeypatch) -> None:
     assert state.device_name == "Pixel_6_Pro"
     assert dm_mod.active_device_name() == "Pixel_6_Pro"
     assert _connected_device_name() == "Pixel_6_Pro"
+
+
+# --------------------------------------------------------------------------
+# sandroid-config init without a TTY
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("args", [[], ["--yes"]])
+def test_config_init_runs_without_tty(tmp_path, args) -> None:
+    from click.testing import CliRunner
+
+    from sandroid.config.cli import main
+
+    out = tmp_path / "sandroid.toml"
+    # CliRunner's stdin is not a TTY and is empty: any prompt would hit EOF.
+    result = CliRunner().invoke(main, ["init", "-o", str(out), *args], input="")
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert "Configuration created successfully" in result.output
+    assert "sandroid -i" not in result.output
