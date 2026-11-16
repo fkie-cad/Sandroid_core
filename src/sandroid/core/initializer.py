@@ -98,6 +98,40 @@ def prepare_device(console: Any | None = None) -> bool:
     return True
 
 
+def ensure_frida_server(console: Any | None = None) -> bool:
+    """Headless Frida modes: honour ``frida.server_auto_start`` and say why.
+
+    Starts frida-server when it is not running and auto-start is enabled.
+    Reports the result (including the failure reason) on *console*. Never
+    raises.
+
+    Returns:
+        True if frida-server is running afterwards.
+    """
+    from sandroid.core.frida_manager import (
+        auto_start_frida_server,
+        frida_server_auto_start_enabled,
+    )
+
+    ok, reason = auto_start_frida_server()
+    if ok:
+        logger.info(f"Frida: {reason}")
+        if console is not None and reason != "frida-server already running":
+            console.print(f"[dim]{reason}[/dim]")
+        return True
+    if not frida_server_auto_start_enabled():
+        msg = (
+            "frida-server is not running and frida.server_auto_start is "
+            "disabled; start it first (TUI: f)"
+        )
+    else:
+        msg = f"frida-server could not be started: {reason}"
+    logger.error(msg)
+    if console is not None:
+        console.print(f"[error]{msg}[/error]")
+    return False
+
+
 def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
     """Initialize the Sandroid core subsystems in the required order.
 

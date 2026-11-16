@@ -696,6 +696,11 @@ class SandroidTUI(App):
                     # Re-warm the per-serial kprobe availability cache for the
                     # new device (off-thread) and re-sync an open SettingsScreen.
                     self._warm_kprobe_cache_on_device_change()
+                    import threading
+
+                    threading.Thread(
+                        target=self._auto_start_frida_server, daemon=True
+                    ).start()
                 else:
                     logger.info("Device changed to: None")
 
@@ -809,10 +814,47 @@ class SandroidTUI(App):
         def _background_check():
             self._device_controller.check_devices_on_startup()
             self._run_deferred_setup_checks()
+            self._auto_start_frida_server()
             self._warm_kprobe_cache_on_startup()
 
         thread = threading.Thread(target=_background_check, daemon=True)
         thread.start()
+
+    def _auto_start_frida_server(self) -> None:
+        """Honour ``frida.server_auto_start`` (startup / device change).
+
+        Blocking adb work: call it off the UI thread. A failure is shown
+        with its reason; nothing happens when auto-start is disabled.
+        """
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.frida_manager import (
+                auto_start_frida_server,
+                frida_server_auto_start_enabled,
+            )
+
+            if not frida_server_auto_start_enabled() or not Adb.get_target_device():
+                return
+            ok, reason = auto_start_frida_server()
+        except Exception as exc:
+            ok, reason = False, str(exc)
+        if ok:
+            logger.info(f"Frida: {reason}")
+        else:
+            logger.warning(f"frida-server auto-start failed: {reason}")
+            try:
+                self.call_from_thread(
+                    self.notify,
+                    f"frida-server auto-start failed: {reason}",
+                    severity="warning",
+                    timeout=10,
+                )
+            except Exception:
+                pass
+        try:
+            self.call_from_thread(self._update_status_bar)
+        except Exception:
+            pass
 
     def _warm_kprobe_cache_on_startup(self) -> None:
         """Warm the per-serial kprobe availability cache at startup.

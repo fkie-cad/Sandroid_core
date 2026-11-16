@@ -36,11 +36,17 @@ def run_fritap_headless(
     """
     from sandroid.analysis.fritap import FriTap
     from sandroid.core.adb import Adb
-    from sandroid.core.initializer import EscalatingSignalHandler, initialize_core
+    from sandroid.core.initializer import (
+        EscalatingSignalHandler,
+        ensure_frida_server,
+        initialize_core,
+    )
     from sandroid.services import get_spotlight_service
 
     console = SandroidConsole.get()
     initialize_core(sandroid_config, prepare=True)
+    if not ensure_frida_server(console):
+        sys.exit(1)
 
     # Route friTap logger output to terminal (it only has file handlers by default)
     fritap_logger = logging.getLogger("friTap")

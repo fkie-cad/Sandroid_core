@@ -168,3 +168,106 @@ def test_unrelated_errors_pass_through():
     exc = RuntimeError("Cannot install frida-server: device not rooted")
     assert describe_frida_install_error(exc) == str(exc)
     assert describe_frida_install_error(KeyError()) == "KeyError"
+
+
+# --- frida.server_auto_start honoured at startup / headless; helper cleanup ---
+
+
+class _Adb:
+    def __init__(self, removed="3"):
+        self.cmds = []
+        self.removed = removed
+
+    def root_shell(self, cmd, timeout=5):
+        import types
+
+        self.cmds.append(cmd)
+        return types.SimpleNamespace(stdout=f"{self.removed}\n", stderr="")
+
+
+class _ServerFM:
+    def __init__(self, running=False, rooted=True, starts=True, version=None):
+        import frida
+
+        self.running = running
+        self.is_device_rooted = rooted
+        self.starts = starts
+        self.version = version or frida.__version__
+        self.adb = _Adb()
+        self.frida_install_dst = "/data/local/tmp/"
+        self.calls = []
+
+    def is_frida_server_running(self):
+        return self.running
+
+    def get_installed_server_version(self):
+        return self.version
+
+    def install_frida_server(self):
+        self.calls.append("install")
+
+    def run_frida_server(self):
+        self.calls.append("run")
+        self.running = self.starts
+        return self.starts
+
+
+def _auto(monkeypatch, enabled=True):
+    from sandroid.core import frida_manager
+
+    monkeypatch.setattr(frida_manager, "frida_server_auto_start_enabled", lambda: enabled)
+    return frida_manager
+
+
+def test_auto_start_starts_server_and_cleans_helpers(monkeypatch):
+    fm_mod = _auto(monkeypatch)
+    fm = _ServerFM()
+    assert fm_mod.auto_start_frida_server(fm) == (True, "frida-server started")
+    assert fm.calls == ["run"]  # versions match: no download
+    assert any("frida-helper-*.dex" in c and "rm -f" in c for c in fm.adb.cmds)
+
+
+def test_auto_start_reports_reasons(monkeypatch):
+    fm_mod = _auto(monkeypatch)
+    ok, reason = fm_mod.auto_start_frida_server(_ServerFM(rooted=False))
+    assert not ok
+    assert "not rooted" in reason
+    ok, reason = fm_mod.auto_start_frida_server(_ServerFM(starts=False))
+    assert not ok
+    assert "did not become ready" in reason
+
+    fm_mod = _auto(monkeypatch, enabled=False)
+    fm = _ServerFM()
+    ok, reason = fm_mod.auto_start_frida_server(fm)
+    assert not ok
+    assert "disabled" in reason
+    assert fm.calls == []
+    # A running server is reported as running even with auto-start off.
+    assert fm_mod.auto_start_frida_server(_ServerFM(running=True))[0] is True
+
+
+def test_helper_cleanup_skipped_while_server_runs():
+    from sandroid.core.frida_manager import cleanup_stale_frida_helpers
+
+    fm = _ServerFM(running=True)
+    assert cleanup_stale_frida_helpers(fm) == 0
+    assert fm.adb.cmds == []
+    fm = _ServerFM()
+    assert cleanup_stale_frida_helpers(fm) == 3
+
+
+def test_headless_ensure_frida_server_prints_reason(monkeypatch):
+    from sandroid.core import frida_manager, initializer
+
+    printed = []
+    console = type("C", (), {"print": lambda self, m: printed.append(m)})()
+    monkeypatch.setattr(
+        frida_manager, "auto_start_frida_server", lambda: (False, "device is not rooted")
+    )
+    monkeypatch.setattr(frida_manager, "frida_server_auto_start_enabled", lambda: True)
+    assert initializer.ensure_frida_server(console) is False
+    assert "device is not rooted" in printed[-1]
+    monkeypatch.setattr(
+        frida_manager, "auto_start_frida_server", lambda: (True, "frida-server started")
+    )
+    assert initializer.ensure_frida_server(console) is True

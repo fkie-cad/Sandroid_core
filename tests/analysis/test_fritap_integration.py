@@ -53,22 +53,94 @@ def test_json_output_is_assembled_on_finalize(tmp_path):
     assert not (tmp_path / "fritap_output.json.events.jsonl").exists()
 
 
-def test_stop_finalizes_after_detaching():
-    calls = []
+class _Script:
+    def __init__(self, calls, block=None):
+        self.calls = calls
+        self.block = block
+
+    def unload(self):
+        if self.block is not None:
+            self.block.wait(10)  # a hooked SSL_read that never returns
+        self.calls.append("unload")
+
+
+def _job(calls, block=None):
+    import threading
+
+    return types.SimpleNamespace(
+        state="running", stop_event=threading.Event(), script=_Script(calls, block)
+    )
+
+
+def _fritap_with_job(calls, block=None):
     ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
     ft.show_in_activity_log = False
-    ft.job_id = None
+    ft.job_id = ALIVE
     ft.app_package = "com.example"
+    ft._get_toolbox = lambda: types.SimpleNamespace(unregister_frida_hooks=lambda j: 0)
+    job = _job(calls, block)
     ft.job_manager = types.SimpleNamespace(
-        stop_jobs=lambda timeout_per_job: calls.append("stop_jobs") or {},
-        detach_from_app=lambda timeout: calls.append("detach"),
+        jobs={ALIVE: job},
+        process_session=types.SimpleNamespace(detach=lambda: calls.append("detach")),
+        get_job_by_id=lambda j: job,
+        unregister_hooks=lambda j: calls.append("unregister"),
     )
     ft.ssl_log = types.SimpleNamespace(
         close_output_handlers=lambda: calls.append("close_handlers"),
         _finalize_json_output=lambda: calls.append("finalize_json"),
     )
+    return ft, job
+
+
+def test_stop_finalizes_after_detaching():
+    calls = []
+    ft, job = _fritap_with_job(calls)
     ft.stop()
-    assert calls == ["stop_jobs", "detach", "close_handlers", "finalize_json"]
+    assert calls == [
+        "unload",
+        "detach",
+        "unregister",
+        "close_handlers",
+        "finalize_json",
+    ]
+    assert job.stop_event.is_set()
+    assert job.state == "stopped"
+    assert ft.job_manager.jobs == {}
+    assert ft.job_manager.process_session is None
+
+
+def test_stop_is_bounded_when_unload_hangs(monkeypatch):
+    """P2 friTap stop: unload blocked by a hooked call -> still one quick stop."""
+    import threading
+    import time
+
+    monkeypatch.setattr(fritap_mod, "_STOP_TIMEOUT", 0.3)
+    calls = []
+    block = threading.Event()
+    ft, _job_ = _fritap_with_job(calls, block)
+    t0 = time.monotonic()
+    ft.stop()
+    assert time.monotonic() - t0 < 3
+    assert "close_handlers" in calls
+    assert "finalize_json" in calls
+    assert ft.job_manager.jobs == {}
+    # Late agent messages are dropped once the outputs are closed.
+    seen = []
+    ft.print_to_console = False
+    handler = ft._create_activity_log_wrapper(lambda *a: seen.append(a))
+    handler(None, {"type": "send", "payload": {}}, None)
+    assert seen == []
+    block.set()
+
+
+def test_stop_keeps_session_for_other_tools():
+    calls = []
+    ft, _job_ = _fritap_with_job(calls)
+    ft.job_manager.jobs["other"] = types.SimpleNamespace(state="running")
+    ft.stop()
+    assert "detach" not in calls
+    assert ft.job_manager.process_session is not None
+    assert list(ft.job_manager.jobs) == ["other"]
 
 
 @pytest.mark.parametrize(
@@ -194,8 +266,8 @@ def test_stop_unregisters_its_hooks():
     ft.ssl_log = None
     ft.job_manager = types.SimpleNamespace(
         get_job_by_id=lambda j: types.SimpleNamespace(get_state=lambda: "running"),
-        stop_jobs=lambda timeout_per_job: {},
-        detach_from_app=lambda timeout: None,
+        jobs={},
+        process_session=None,
     )
     unregistered = []
     ft._get_toolbox = lambda: types.SimpleNamespace(
