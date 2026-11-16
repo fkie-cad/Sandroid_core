@@ -1166,9 +1166,9 @@ class MitmproxyService:
 
         QUOTING: ``Adb.send_adb_command`` runs the whole string through the host
         shell (``shell=True``), so the device-side pipe + ``printf`` ``\\r\\n``
-        escapes are wrapped in a single double-quoted ``shell "..."`` argument so
-        the *device* shell interprets them; a bare pipe would be split by the
-        host shell. ``toybox nc`` closes the socket on stdin EOF before the reply
+        escapes are passed as ONE host-quoted word (``device_shell_command``) so
+        only the *device* shell interprets them; a bare pipe would be split by
+        the host shell. ``toybox nc`` closes the socket on stdin EOF before the reply
         arrives, so we hold stdin open with ``{ ...; sleep N; }`` — do NOT
         simplify it back to a bare pipe or stdout comes back empty.
 
@@ -1186,6 +1186,7 @@ class MitmproxyService:
             A :class:`ReachabilityResult`.
         """
         from sandroid.core.adb import Adb
+        from sandroid.core.adb_utils import device_shell_command
 
         addr = f"{host}:{port}"
         if not self.wait_listening(timeout=listen_timeout):
@@ -1218,7 +1219,7 @@ class MitmproxyService:
         tool_missing = False
         for attempt in range(2):
             try:
-                out, err = Adb.send_adb_command(f'shell "{inner}"')
+                out, err = Adb.send_adb_command(device_shell_command(inner))
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("reachability probe failed: %s", exc)
                 out, err = "", ""

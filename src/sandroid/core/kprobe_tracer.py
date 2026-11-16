@@ -41,10 +41,12 @@ instead of being expanded or stripped by either shell.
 from __future__ import annotations
 
 import logging
+import shlex
 import subprocess
 import threading
 
 from .adb import Adb
+from .adb_utils import device_shell_command
 
 logger = logging.getLogger(__name__)
 
@@ -221,25 +223,25 @@ class KprobeTracer:
     def _shell(cls, device_cmd: str) -> str:
         """Run a single device shell command as root, returning combined output.
 
-        Single-quotes the device command for the host shell (so host
-        metacharacters aren't interpreted host-side) -- the established
-        ``proxy_manager._root_cmd`` idiom for an ``adb root`` shell.
+        The device command is passed as ONE host-quoted word
+        (:func:`~sandroid.core.adb_utils.device_shell_command`), so host
+        metacharacters are never interpreted host-side -- even when the
+        command contains single quotes (e.g. from :meth:`_dq` or a
+        user-supplied path).
         """
-        stdout, stderr = Adb.send_adb_command(f"shell '{device_cmd}'")
+        stdout, stderr = Adb.send_adb_command(device_shell_command(device_cmd))
         return (stdout or "") + ("\n" + stderr if stderr else "")
 
     @staticmethod
     def _dq(payload: str) -> str:
-        r"""Device-side double-quote a payload that must survive the device shell.
+        """Quote a payload as one literal word for the device shell.
 
-        Escapes ``$`` -> ``\\$`` (so ``$argN`` isn't expanded by the device
-        shell) and ``"`` -> ``\\"`` (so inner double quotes survive), then wraps
-        in device double quotes. Parentheses are literal inside double quotes.
-        The whole device command is later single-quoted for the host shell by
-        :meth:`_shell`, so this ``\\$`` / ``\\"`` reaches the device intact.
+        ``shlex.quote`` single-quotes it, so ``$argN``, inner double quotes,
+        backticks and parentheses all reach ``echo`` verbatim (nothing is
+        expanded on the device). :meth:`_shell` then quotes the whole device
+        command for the host shell.
         """
-        escaped = payload.replace("$", "\\$").replace('"', '\\"')
-        return f'"{escaped}"'
+        return shlex.quote(payload)
 
     # =========================================================================
     # Root

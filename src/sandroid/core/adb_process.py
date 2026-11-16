@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from sandroid.core.adb_utils import is_adb_error_actionable
+from sandroid.core.adb_utils import (
+    device_shell_arg,
+    is_adb_error_actionable,
+    validate_pid,
+)
 
 logger = getLogger(__name__)
 
@@ -54,7 +58,7 @@ def _try_pidof(
     Returns:
         The PID if found, *None* otherwise.
     """
-    output, stderr = send_command(f"shell pidof {package_name}")
+    output, stderr = send_command(f"shell pidof {device_shell_arg(package_name)}")
     if stderr and is_adb_error_actionable(stderr):
         logger.warning(f"pidof command warning for {package_name}: {stderr}")
     logger.debug(f"pidof output: '{output}', stderr: '{stderr}'")
@@ -303,6 +307,13 @@ def get_process_detail(
         ``'effective'``, ``'saved'``, ``'fs'`` (each ``None`` if the line was
         missing or unparseable).
     """
+    try:
+        # *pid* can come straight from an AI tool argument; it is embedded in
+        # shell command lines below, so only a real positive int may pass.
+        pid = validate_pid(pid)
+    except ValueError as exc:
+        logger.warning(f"get_process_detail: {exc}")
+        return None
     status_out, status_err = send_command(f"shell cat /proc/{pid}/status")
     if not status_out or not status_out.strip():
         logger.debug(

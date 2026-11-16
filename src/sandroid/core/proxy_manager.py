@@ -12,6 +12,7 @@ import io
 import logging
 import os
 import re
+import shlex
 import socket
 import subprocess
 import tarfile
@@ -25,7 +26,12 @@ from pathlib import Path
 import requests
 
 from sandroid.core.adb import Adb
-from sandroid.core.adb_utils import quote_host_arg
+from sandroid.core.adb_utils import (
+    device_shell_arg,
+    device_shell_command,
+    is_valid_package_name,
+    quote_host_arg,
+)
 
 # Import config with fallback for standalone usage
 try:
@@ -767,14 +773,15 @@ class CAManager:
     def _root_cmd(self, cmd: str) -> str:
         """Wrap a command for root execution on the device.
 
-        Always single-quotes the command so shell metacharacters (&&, *, etc.)
-        are interpreted by the device shell, not the host shell.
-        Uses `su -c '...'` when root is via su binary, or plain quoting
-        when the shell is already root (adb root).
+        The result is ONE host-shell-quoted word, so shell metacharacters
+        (&&, *, etc.) are interpreted by the device shell, never the host
+        shell -- even when *cmd* itself contains quotes. Uses
+        ``su -c '<cmd>'`` (device-quoted) when root is via the su binary, or
+        the plain command when the shell is already root (adb root).
         """
         if self._use_su:
-            return f"su -c '{cmd}'"
-        return f"'{cmd}'"
+            return quote_host_arg("su -c " + shlex.quote(cmd))
+        return quote_host_arg(cmd)
 
     def enable_adb_root(self) -> tuple[bool, str]:
         """Enable ADB root access on the device.
@@ -1605,6 +1612,8 @@ class FocusManager:
                 package = self._spotlight_package()
             if not package:
                 return False, "No spotlight app set — pick one first."
+            if not is_valid_package_name(package):
+                return False, f"Invalid package name {package!r}."
 
             # 2. Already proxied / pool exhausted.
             if package in self._lanes.values():
@@ -1887,10 +1896,16 @@ class FocusManager:
         ``userId=`` entirely — so match either. The previous code matched only
         ``userId=`` and so returned None (and "Could not resolve UID") on 15.
         """
+        if not is_valid_package_name(package):
+            logger.warning("Refusing to resolve UID for invalid package %r", package)
+            return None
         # 1. Data-dir owner — the exact Linux UID, no version dependence.
         try:
             out, _ = Adb.send_adb_command(
-                "shell " + self._ca._root_cmd(f"stat -c %u /data/data/{package}")
+                "shell "
+                + self._ca._root_cmd(
+                    f"stat -c %u {shlex.quote('/data/data/' + package)}"
+                )
             )
             val = (out or "").strip()
             if val.isdigit():
@@ -1900,7 +1915,9 @@ class FocusManager:
 
         # 2. dumpsys fallback (userId= pre-15, appId= on API 35+).
         try:
-            out, _ = Adb.send_adb_command(f"shell dumpsys package {package}")
+            out, _ = Adb.send_adb_command(
+                f"shell dumpsys package {device_shell_arg(package)}"
+            )
         except Exception:
             return None
         m = re.search(r"\b(?:userId|appId)=(\d+)", out or "")
@@ -2283,9 +2300,10 @@ class FocusManager:
 
         QUOTING: ``Adb.send_adb_command`` runs the whole string through the host
         shell (``shell=True``), so the device-side pipe and ``printf`` byte
-        escapes are wrapped in a single double-quoted ``shell "..."`` argument so
-        the *device* shell interprets them — a bare pipe would be split by the
-        *host* shell. ``toybox nc`` closes the socket on stdin EOF before the
+        escapes are passed as ONE host-quoted word (``device_shell_command``)
+        so only the *device* shell interprets them — a bare pipe would be split
+        by the *host* shell, and a double-quoted wrapper would still expand
+        ``$``/backticks host-side. ``toybox nc`` closes the socket on stdin EOF before the
         reply arrives, so we hold stdin open with ``{ ...; sleep N; }`` — do NOT
         simplify it back to a bare pipe or stdout comes back empty.
 
@@ -2300,7 +2318,7 @@ class FocusManager:
             "toybox xxd -p"
         )
         try:
-            out, err = Adb.send_adb_command(f'shell "{inner}"')
+            out, err = Adb.send_adb_command(device_shell_command(inner))
         except Exception:
             return "unknown"
         text = (out or "").strip().lower()

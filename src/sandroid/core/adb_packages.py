@@ -17,7 +17,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from sandroid.core.adb_utils import is_adb_error_actionable, quote_host_arg
+from sandroid.core.adb_utils import (
+    device_shell_arg,
+    is_adb_error_actionable,
+    quote_host_arg,
+)
 
 logger = getLogger(__name__)
 
@@ -180,7 +184,9 @@ def uninstall_apk(
         return True
 
     logger.info(f"Uninstalling package {package_name}")
-    stdout, stderr = send_command(f"shell pm uninstall {package_name}")
+    stdout, stderr = send_command(
+        f"shell pm uninstall {device_shell_arg(package_name)}"
+    )
 
     if "Success" in stdout:
         logger.info(f"Successfully uninstalled {package_name}")
@@ -221,7 +227,7 @@ def is_package_installed(
     Returns:
         True if package is installed, False otherwise.
     """
-    output, stderr = send_command(f"shell pm path {package_name}")
+    output, stderr = send_command(f"shell pm path {device_shell_arg(package_name)}")
     if stderr and is_adb_error_actionable(stderr):
         logger.warning(f"ADB pm path error for '{package_name}': {stderr}")
 
@@ -267,7 +273,8 @@ def get_installed_packages(
             package_name = match.group(1)
 
             detail_output, detail_error = send_command(
-                f"shell dumpsys package {package_name} | grep firstInstallTime"
+                f"shell dumpsys package {device_shell_arg(package_name)}"
+                " | grep firstInstallTime"
             )
             install_date = None
 

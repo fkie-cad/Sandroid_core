@@ -30,6 +30,7 @@ from sandroid.core import adb_packages as _pkg
 from sandroid.core import adb_process as _proc
 from sandroid.core import adb_queries as _qry
 from sandroid.core.adb_utils import (
+    device_shell_arg,
     is_adb_error_actionable,
     log_adb_result,
     quote_host_arg,
@@ -652,12 +653,15 @@ class Adb:
         Returns:
             Tuple of (success, message).
         """
+        # Both values are quoted for the device AND host shell: they can come
+        # from AI tool arguments or a restored spotlight selection.
         if activity_name:
-            component = f"{package_name}/{activity_name}"
+            component = device_shell_arg(f"{package_name}/{activity_name}")
             stdout, stderr = cls.send_adb_command(f"shell am start -n {component}")
         else:
             stdout, stderr = cls.send_adb_command(
-                f"shell monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
+                f"shell monkey -p {device_shell_arg(package_name)}"
+                " -c android.intent.category.LAUNCHER 1"
             )
 
         combined = f"{stdout or ''}\n{stderr or ''}".strip()
@@ -686,7 +690,9 @@ class Adb:
         Returns:
             Tuple of (success, message).
         """
-        stdout, stderr = cls.send_adb_command(f"shell am force-stop {package_name}")
+        stdout, stderr = cls.send_adb_command(
+            f"shell am force-stop {device_shell_arg(package_name)}"
+        )
         combined = f"{stdout or ''}\n{stderr or ''}".strip()
         lc = combined.lower()
         if "error" in lc or "exception" in lc:
