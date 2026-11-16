@@ -115,6 +115,12 @@ def _get_device_results_path() -> str:
     return os.getenv("SESSION_PATH", "")
 
 
+def _is_console_message(message: dict) -> bool:
+    """True for agent ``console`` payloads (also emitted via the friTap logger)."""
+    payload = message.get("payload") if isinstance(message, dict) else None
+    return isinstance(payload, dict) and payload.get("contentType") == "console"
+
+
 def _publish_fritap_event(event_bus, message: str):
     """Publish a FriTap TASK_OUTPUT event to the EventBus.
 
@@ -192,6 +198,10 @@ class FriTap(DataGatherBase):
         self.print_to_console = (
             False  # Print key captures to console (for CLI/headless mode)
         )
+        # Agent console lines are also logged by the "friTap" logger; callers
+        # that route that logger to the terminal set this to False so each
+        # line is printed once.
+        self.print_console_messages = True
         self.message_handler = None  # Will be set up in _setup_session
 
     def _create_activity_log_wrapper(self, original_handler):
@@ -216,7 +226,10 @@ class FriTap(DataGatherBase):
                     if msg is not None:
                         if self.show_in_activity_log:
                             _publish_fritap_event(event_bus, msg)
-                        if self.print_to_console:
+                        if self.print_to_console and (
+                            self.print_console_messages
+                            or not _is_console_message(message)
+                        ):
                             print(f"[friTap] {msg}")
                 except Exception as e:
                     # Log at warning level for visibility during debugging
@@ -574,15 +587,6 @@ class FriTap(DataGatherBase):
             except Exception as e:
                 logger.debug(f"Error checking job state: {e}")
 
-        # Finalize JSON output before stopping
-        if self.ssl_log:
-            if hasattr(self.ssl_log, "_finalize_json_output"):
-                try:
-                    self.ssl_log._finalize_json_output()
-                    logger.info("FriTap JSON output finalized")
-                except Exception as e:
-                    logger.warning(f"Error finalizing JSON output: {e}")
-
         # Stop Frida jobs and detach WITH TIMEOUT to prevent hanging
         # Use stop_jobs + detach instead of stop_app_with_closing_frida
         # which would call `adb shell am force-stop` and kill the app
@@ -596,6 +600,32 @@ class FriTap(DataGatherBase):
             logger.info(f"FriTap detached from {self.app_package} (app still running)")
         except Exception as e:
             logger.warning(f"Error stopping FriTap jobs: {e}")
+
+        # Finalize outputs only after the agent is gone, so no late message
+        # races the file close.
+        self._finalize_outputs()
+
+    def _finalize_outputs(self) -> None:
+        """Flush and close friTap's keylog/JSON writers. Idempotent.
+
+        friTap >= 2.6 writes keylog and JSON through output handlers created in
+        ``SSL_Logger.__init__``; the JSON document is only assembled from its
+        ``.events.jsonl`` sidecar when those handlers are closed
+        (``close_output_handlers``). ``_finalize_json_output`` alone leaves the
+        start-time skeleton (empty arrays) behind. It is still called for the
+        legacy inline-writer path; both calls are idempotent.
+        """
+        if not self.ssl_log:
+            return
+        for name in ("close_output_handlers", "_finalize_json_output"):
+            method = getattr(self.ssl_log, name, None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception as e:
+                logger.warning(f"Error finalizing friTap output ({name}): {e}")
+        logger.info("FriTap output finalized")
 
     def gather(self):
         """Gather data from the monitored application.

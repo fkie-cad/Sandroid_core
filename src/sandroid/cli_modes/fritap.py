@@ -62,6 +62,9 @@ def run_fritap_headless(
 
     fritap = FriTap()
     fritap.print_to_console = True
+    # The friTap logger is routed to stdout above; don't print agent console
+    # lines a second time through the message formatter.
+    fritap.print_console_messages = False
     if output_file:
         fritap.keylog_path = output_file
 
