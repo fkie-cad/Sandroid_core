@@ -309,7 +309,7 @@ Automated Testing
    adb install ground_truth.apk
 
    # Run Sandroid analysis
-   sandroid --number 2 --screenshot 10 --output ground_truth_results.json
+   sandroid --headless --mode forensic -n 2 --screenshot 10 -f ground_truth_results.json
 
    # Launch Ground Truth during analysis
    adb shell am start -n de.fkie.ground_truth/.MainActivity
@@ -343,7 +343,7 @@ Automated Testing
 
        # Install and test Ground Truth
        adb install ground_truth.apk
-       sandroid --number 2 --output validation_results.json &
+       sandroid --headless --mode forensic -n 2 -f validation_results.json &
 
        # Launch app and interact
        adb shell am start -n de.fkie.ground_truth/.MainActivity

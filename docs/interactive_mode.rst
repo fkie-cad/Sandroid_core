@@ -111,6 +111,14 @@ reverts the emulator and ``1``-``5`` are also Spotlight's bypass toggles -- and
 ``Ctrl+1``-``Ctrl+8`` save the current state into a slot (8 slots per AVD).
 Snapshots require an emulator.
 
+.. note::
+
+   ``Ctrl`` + digit can only be sent by terminals that speak the kitty
+   keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
+   Terminal.app, GNOME Terminal/VTE and tmux never deliver it. In any
+   terminal, press ``S`` (Shift+S) and then the slot digit ``1``-``8``
+   instead (``Esc`` cancels).
+
 Files
 ~~~~~
 
@@ -192,7 +200,7 @@ Tips
 ----
 
 1. **Start with Frida**: install/start frida-server (``f``) before dynamic analysis.
-2. **Use snapshots**: save a clean state into a slot (``Ctrl+1``) before
+2. **Use snapshots**: save a clean state into a slot (``Ctrl+1``, or ``S`` ``1``) before
    each experiment and reload it (``1``) afterwards.
 3. **Focus on one app**: set a spotlight app; App Proxies and the kprobe
    monitor can be scoped to it.

@@ -61,7 +61,7 @@ Sandroid's default interface is an interactive terminal UI (Textual). It consist
 |---|---|
 | **Spotlight** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`), and toggle the Frida bypass categories `1`–`5` (SSL, Root, Frida, Debug, Integrity). |
 | **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
-| **Snapshots** | AVD snapshot list: create (`c`), load (`l`), delete (`d`), assign to a slot (`a`). Globally, `0` opens the tab, `1`–`8` load a slot and `Ctrl+1`–`Ctrl+8` save into a slot (8 slots per AVD). |
+| **Snapshots** | AVD snapshot list: create (`c`), load (`l`), delete (`d`), assign to a slot (`a`). Globally, `0` opens the tab, `1`–`8` (pressed twice) load a slot and `Ctrl+1`–`Ctrl+8` save into a slot (8 slots per AVD). `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2); in Terminal.app, GNOME Terminal/VTE or tmux press `S` and then the slot digit instead. |
 | **Files** | Three sub-tabs: **Monitor** (live filesystem events), **Watchlist** (Spotlight Files: pull/diff selected files) and **Diffs** (Record → Play run history, see below). |
 
 Navigation: `Ctrl+B` focuses the tool tabs, `Shift+←/→` cycles tabs/sub-tabs, `Shift+↑/↓` moves between tab levels. `?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `Ctrl+Y` toggles the **AI Chat** dock, `D` switches devices and `q` quits. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
@@ -105,7 +105,6 @@ Analysis Options:
   --sockets                       Monitor listening sockets
   --screenshot INTERVAL           Take a screenshot each INTERVAL seconds
   --trigdroid PACKAGE_NAME        Execute malware triggers for PACKAGE_NAME
-  --trigdroid-ccf [I|D]           TrigDroid CCF utility (I=interactive, D=default)
   --hash                          Create MD5 hashes of changed and new files
   --apk                           List all APKs and their hashes
   --degrade-network               Simulate UMTS/3G network conditions

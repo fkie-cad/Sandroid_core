@@ -167,15 +167,13 @@ Execute malware triggers for the specified package:
 - Comprehensive trigger pattern execution
 - Behavioral analysis automation
 
-**TrigDroid Configuration**::
+**TrigDroid Configuration**
 
-   sandroid --trigdroid-ccf I    # Interactive mode
-   sandroid --trigdroid-ccf D    # Create default config
-
-Configure TrigDroid Component Coverage Framework:
-
-- ``I`` - Interactive configuration mode
-- ``D`` - Generate default configuration file
+TrigDroid is configured in the ``[trigdroid]`` section of the configuration
+file (``sandroid-config show`` / ``sandroid-config set trigdroid.<key> VALUE``).
+The former ``--trigdroid-ccf I|D`` option is not supported in Sandroid 2.x
+(it never had an effect with the current TrigDroid API) and now exits with an
+error.
 
 Headless Mode
 -------------
@@ -364,7 +362,7 @@ Common Usage Patterns
 **App Development Testing**::
 
    # Performance testing
-   sandroid --number 1 --screenshot 5 --degrade-network
+   sandroid -n 2 --screenshot 5 --degrade-network
 
    # Feature testing
    sandroid --network --sockets --apk
@@ -437,7 +435,7 @@ Batch Processing
    for apk in *.apk; do
        echo "Analyzing $apk..."
        adb install "$apk"
-       sandroid --number 2 --network --report \
+       sandroid --headless --mode forensic -n 2 --network --report \
                 -f "results_$(basename "$apk" .apk).json"
        adb uninstall "$(aapt dump badging "$apk" | grep package | cut -d"'" -f2)"
    done
@@ -452,8 +450,8 @@ Batch Processing
        adb wait-for-device
 
        # Run analysis
-       sandroid --network --report \
-                --output-file ci_analysis_results.json
+       sandroid --headless --mode forensic --network --report \
+                -f ci_analysis_results.json
 
        # Archive results
        tar -czf analysis_results.tar.gz results/ *.json *.pdf
@@ -461,9 +459,9 @@ Batch Processing
 **Parallel Analysis**::
 
    # Multiple simultaneous analyses
-   sandroid --config config1.toml -f results1.json &
-   sandroid --config config2.toml -f results2.json &
-   sandroid --config config3.toml -f results3.json &
+   sandroid --headless --mode forensic --config config1.toml -f results1.json &
+   sandroid --headless --mode forensic --config config2.toml -f results2.json &
+   sandroid --headless --mode forensic --config config3.toml -f results3.json &
    wait
 
 Error Handling
@@ -472,20 +470,23 @@ Error Handling
 **Exit Codes**
 
 - ``0`` - Analysis completed successfully
-- ``1`` - Analysis failed with errors
-- ``2`` - Configuration or setup error
+- ``1`` - Analysis failed, or a configuration/setup error (no or invalid
+  configuration, device not available, invalid ``--mode``, ...)
+- ``2`` - Invalid command line (unknown option or bad value, e.g. ``-n 1``)
+- ``3`` - The analysis ran, but the results JSON, a requested PDF report or
+  the evidence manifest could not be written
 
 **Common Error Scenarios**::
 
    # Handle device not found
-   sandroid --network || echo "Analysis failed - check device connection"
+   sandroid --headless --mode forensic --network || echo "Analysis failed - check device connection"
 
    # Timeout protection
-   timeout 1800 sandroid --network --screenshot 5
+   timeout 1800 sandroid --headless --mode forensic --network --screenshot 5
 
    # Resource cleanup
    trap 'kill $(jobs -p)' EXIT
-   sandroid --network &
+   sandroid --headless --mode forensic --network &
 
 Performance Optimization
 ------------------------
@@ -493,10 +494,10 @@ Performance Optimization
 **Resource Management**::
 
    # Lightweight analysis
-   sandroid --number 1 --no-processes
+   sandroid -n 2 --no-processes
 
    # High-performance analysis
-   sandroid --avoid-strong-noise-filter --number 1
+   sandroid --avoid-strong-noise-filter -n 2
 
 **Storage Optimization**::
 
@@ -504,7 +505,7 @@ Performance Optimization
    sandroid --number 2  # No screenshots, no network capture
 
    # Custom output location
-   sandroid --config <(echo 'paths.results_path="/tmp/analysis"')
+   SANDROID_PATHS__RESULTS_PATH=/tmp/analysis sandroid
 
 Debugging and Troubleshooting
 ------------------------------
@@ -559,8 +560,8 @@ Integration Examples
            stage('Android Analysis') {
                steps {
                    sh '''
-                       sandroid --network --report \
-                                --file analysis_${BUILD_NUMBER}.json
+                       sandroid --headless --mode forensic --network --report \
+                                -f analysis_${BUILD_NUMBER}.json
                    '''
                    archiveArtifacts artifacts: '*.json,*.pdf,results/**'
                }
@@ -573,7 +574,7 @@ Integration Examples
    # Dockerfile
    FROM sandroid:latest
    COPY config.toml /app/
-   CMD ["sandroid", "--config", "/app/config.toml", "--network", "--report"]
+   CMD ["sandroid", "--headless", "--mode", "forensic", "--config", "/app/config.toml", "--network", "--report"]
 
 **GitHub Actions**::
 
@@ -582,7 +583,7 @@ Integration Examples
      with:
        python-version: '3.12'
    - run: |
-       sandroid --network --report
+       sandroid --headless --mode forensic --network --report
    - uses: actions/upload-artifact@v4
      with:
        name: analysis-results

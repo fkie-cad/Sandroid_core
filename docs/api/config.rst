@@ -310,8 +310,7 @@ Configuration values are loaded in the following priority order (highest to lowe
 2. **Environment variables** (``SANDROID_*``)
 3. **Configuration file** (specified with ``--config``)
 4. **Default configuration files** (in search order):
-   - ``./sandroid.toml`` (current directory)
-   - ``./config.toml`` (current directory)
+   - ``./sandroid.toml`` / ``./sandroid.yaml`` (current directory only)
    - ``~/.config/sandroid/sandroid.toml`` (user config)
    - ``/etc/sandroid/sandroid.toml`` (system config)
 5. **Default values** (hardcoded in schema)
