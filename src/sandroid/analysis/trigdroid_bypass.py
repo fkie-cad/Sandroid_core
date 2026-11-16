@@ -114,7 +114,7 @@ class TrigDroidBypass:
         bypass.stop()
 
     For use with objection, the compiled script can be loaded via:
-        objection -g com.example.app explore -s trigdroid_bypass_bundle.js
+        objection -n com.example.app start -S trigdroid_bypass_bundle.js
 
     Build the script with:
         cd Sandroid_TrigDroid/frida_hooks && npm run build:bypass
@@ -667,7 +667,7 @@ class TrigDroidBypass:
 
         This method finds the compiled trigdroid_bypass_bundle.js file that can
         be loaded into objection using the -s flag:
-            objection -g com.example.app explore -s <path>
+            objection -n com.example.app start -S <path>
 
         Prefers using TrigDroid's Python API for installed packages.
 
