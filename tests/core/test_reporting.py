@@ -424,9 +424,15 @@ class TestServiceHashing:
         h = _service().calculate_hashes(str(raw))
         md5 = lambda b: hashlib.md5(b).hexdigest()  # noqa: E731
         sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
-        assert h["new_file_hashes"] == {"/data/data/p/files/new.txt": md5(b"new")}
+        # Files also seen in the dry run (noise_pull) are hashed too: their
+        # copies are part of the evidence (A10).
+        assert h["new_file_hashes"] == {
+            "/data/data/p/files/new.txt": md5(b"new"),
+            "/data/data/p/files/noisy.txt": md5(b"noise"),
+        }
         assert h["new_file_hashes_sha256"] == {
-            "/data/data/p/files/new.txt": sha(b"new")
+            "/data/data/p/files/new.txt": sha(b"new"),
+            "/data/data/p/files/noisy.txt": sha(b"noise"),
         }
         assert h["changed_file_hashes(old,new)"] == {
             "/data/data/p/db/a.db": [md5(b"old"), md5(b"cur")],

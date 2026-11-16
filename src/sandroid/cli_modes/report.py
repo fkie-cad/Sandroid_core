@@ -107,6 +107,11 @@ def run_report_from(result_dir: str) -> int:
             f"[success]Existing evidence manifest verified OK "
             f"({SHA256SUMS_NAME}, nothing was modified).[/success]"
         )
+    elif outcome.addendum is not None:
+        console.print(
+            f"[warning]{SHA256SUMS_NAME} could not be verified (none present); "
+            "the new report is recorded in an addendum manifest.[/warning]"
+        )
     else:
         console.print(
             "[warning]No evidence manifest existed; a new one was written.[/warning]"

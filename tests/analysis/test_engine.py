@@ -95,6 +95,10 @@ class FakeToolbox:
             and self._shadow_entry not in self._timestamps_shadow_dict_list
         ):
             self._timestamps_shadow_dict_list.append(self._shadow_entry)
+        if fetch_all:
+            # Baseline scan: a real device always lists files; the engine
+            # aborts on an empty (failed) baseline.
+            return {"/data/baseline.db": 1, **self._changed}
         return dict(self._changed)
 
     def pull_file(self, slot: str, file_to_pull: str) -> None:

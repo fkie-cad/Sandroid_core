@@ -171,11 +171,14 @@ class NewFiles(DataGatherBase):
                 if directory in consistent_dirs:
                     true_new_files.add(file_path)
 
-        # Apply noise filtering using shared utilities
+        # Apply noise filtering using shared utilities (sorted: a set has no
+        # stable order, and the result order ends up in the evidence JSON).
+        dropped: dict[str, str] = {}
         true_new_files_list = filter_noise_files(
-            list(true_new_files),
+            sorted(true_new_files),
             noise,
             preserve_sqlite_xml=True,
+            dropped=dropped,
         )
 
         logger.debug(
@@ -197,7 +200,7 @@ class NewFiles(DataGatherBase):
         true_new_files_list = self._exclude_whitelist(true_new_files_list)
         # After the new_pull clean-up above, so the raw copies of filtered
         # system noise stay in the bundle as evidence.
-        return self._apply_system_noise(true_new_files_list)
+        return self._filter_system_noise(true_new_files_list, dropped)
 
     """This is old, not quite OOP translated code that was supposed to detect if a new file was created but in a different directory each run.
     I am skipping this special case for now, but I'll leave the code here just in case

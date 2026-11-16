@@ -395,9 +395,25 @@ class SetupService:
                 result.sqldiff_available = False
                 result.objection_available = False
                 result.frida_available = False
+                # sqldiff is cheap to check and without it every changed
+                # database is listed without its row diff: say so up front
+                # (CLI / headless never run the deferred checks).
+                self._warn_if_sqldiff_missing(result)
 
             self._last_result = result
             return result
+
+    def _warn_if_sqldiff_missing(self, result: SetupResult) -> None:
+        try:
+            check = self._check_sqldiff()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("sqldiff check failed: %s", exc)
+            return
+        if check.status == SetupCheckStatus.PASSED:
+            result.sqldiff_available = True
+            return
+        result.add_warning(check.message)
+        logger.warning(check.message)
 
     # ==================== Critical Checks (Stage Methods) ====================
 

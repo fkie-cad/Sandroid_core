@@ -192,6 +192,43 @@ def _index_file() -> Path:
     return _runs_dir() / "index.json"
 
 
+def _labels_file() -> Path:
+    """User-assigned run labels (``runs/labels.json``, outside every bundle).
+
+    Renaming a run must not rewrite its sealed ``run.json`` (that would break
+    the bundle's ``SHA256SUMS``), so the new label lives here and in
+    ``index.json``; readers prefer it over the label stored in ``run.json``.
+    """
+    return _runs_dir() / "labels.json"
+
+
+def _read_labels() -> dict[str, str]:
+    path = _labels_file()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        labels = data.get("labels") if isinstance(data, dict) else None
+        if not isinstance(labels, dict):
+            return {}
+        return {str(k): str(v) for k, v in labels.items()}
+    except Exception as exc:
+        logger.warning("run_history: labels.json unreadable (%s); ignoring", exc)
+        return {}
+
+
+def _write_labels(labels: dict[str, str]) -> None:
+    _atomic_write_json(_labels_file(), {"labels": labels})
+
+
+def _apply_label(record: RunRecord, labels: dict[str, str] | None = None) -> RunRecord:
+    labels = _read_labels() if labels is None else labels
+    if record.run_id in labels:
+        record.label = labels[record.run_id]
+    return record
+
+
 def _atomic_write_json(path: Path, data: Any) -> None:
     """Write ``data`` as JSON to ``path`` atomically.
 
@@ -270,13 +307,14 @@ def _rebuild_index() -> list[dict[str, Any]]:
     """
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    labels = _read_labels()
 
     def _collect(path: Path) -> None:
         record = _safe_load_record(path)
         if record is None or record.run_id in seen_ids:
             return
         seen_ids.add(record.run_id)
-        entries.append(_summary_from_record(record))
+        entries.append(_summary_from_record(_apply_label(record, labels)))
 
     for path in sorted(_runs_dir().glob("*/run.json")):
         _collect(path)
@@ -345,23 +383,48 @@ def load_run(run_id: str) -> RunRecord:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return RunRecord.from_dict(data)
+        record = RunRecord.from_dict(data)
     except Exception as exc:
         raise RunHistoryError(f"Run '{run_id}' is corrupt: {exc}") from exc
+    return _apply_label(record)
 
 
 def update_label(run_id: str, label: str) -> RunRecord:
     """Rename one specific run's label.
 
     Independent of the recording-time "seed" label
-    (``RecordingController._current_recording_label``) — this only rewrites
-    the one on-disk ``RunRecord``, never anything that seeds future Plays of
-    the same recording.
+    (``RecordingController._current_recording_label``). The run's
+    ``run.json`` is part of its sealed evidence bundle and is left
+    untouched: the label is stored in ``runs/labels.json`` and
+    ``index.json`` (both outside the bundle), and :func:`load_run` /
+    :func:`load_index` return it.
     """
     record = load_run(run_id)
+    labels = _read_labels()
+    labels[run_id] = label
+    _write_labels(labels)
     record.label = label
-    save_run(record)
+
+    entries = _load_all_index_entries()
+    for entry in entries:
+        if entry.get("run_id") == run_id:
+            entry["label"] = label
+            break
+    else:
+        entries.append(_summary_from_record(record))
+    entries.sort(key=lambda e: e.get("run_id", ""), reverse=True)
+    _atomic_write_json(
+        _index_file(), {"schema_version": SCHEMA_VERSION, "runs": entries}
+    )
     return record
+
+
+def _forget_labels(run_ids: list[str]) -> None:
+    labels = _read_labels()
+    if any(run_id in labels for run_id in run_ids):
+        for run_id in run_ids:
+            labels.pop(run_id, None)
+        _write_labels(labels)
 
 
 def _remove_run_storage(run_id: str) -> None:
@@ -394,6 +457,7 @@ def delete_run(run_id: str) -> None:
     _atomic_write_json(
         _index_file(), {"schema_version": SCHEMA_VERSION, "runs": entries}
     )
+    _forget_labels([run_id])
 
 
 def clear_all(device_name: str | None = None) -> None:
@@ -403,6 +467,7 @@ def clear_all(device_name: str | None = None) -> None:
     """
     entries = _load_all_index_entries()
     keep: list[dict[str, Any]] = []
+    removed: list[str] = []
     for entry in entries:
         if device_name is not None and entry.get("device_name") != device_name:
             keep.append(entry)
@@ -410,7 +475,9 @@ def clear_all(device_name: str | None = None) -> None:
         run_id = entry.get("run_id")
         if run_id:
             _remove_run_storage(run_id)
+            removed.append(run_id)
     _atomic_write_json(_index_file(), {"schema_version": SCHEMA_VERSION, "runs": keep})
+    _forget_labels(removed)
 
 
 def run_count(device_name: str | None = None) -> int:

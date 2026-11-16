@@ -175,9 +175,19 @@ class BaselineStep(Step):
     path_sensitive = True
 
     def run(self, ctx: EngineContext) -> None:
-        ctx.forensic_service.set_baseline(
-            ctx.toolbox.fetch_changed_files(fetch_all=True)
-        )
+        # Without a baseline every changed file looks "new" and nothing is
+        # diffed, so a failed or empty scan must abort the run instead of
+        # producing plausible-looking but wrong results.
+        try:
+            baseline = ctx.toolbox.fetch_changed_files(fetch_all=True)
+        except Exception as exc:
+            raise FatalStepError(f"Baseline filesystem scan failed: {exc}") from exc
+        if not baseline:
+            raise FatalStepError(
+                "Baseline filesystem scan returned no files (adb error or "
+                "scan timeout); refusing to analyse against an empty baseline"
+            )
+        ctx.forensic_service.set_baseline(baseline)
 
 
 class ActionStep(Step):
@@ -845,6 +855,12 @@ class AnalysisEngine:
 
         NewFiles.newFileListList = []
         DeletedFiles.deletedFileListList = []
+        try:
+            from sandroid.core import file_diff
+
+            file_diff.clear_caches()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not clear file_diff caches: %s", exc)
         Network.internal_run_counter = 1
         Network.dns_requests = set()
         Network.performed_diff = False
@@ -1059,19 +1075,20 @@ class AnalysisEngine:
         sk = self.gatherers.get("sockets")
         nw = self.gatherers.get("network")
 
-        result.changed_files = self._safe_return(cf, "Changed Files", [])
-        result.new_files = self._safe_return(nf, "New Files", [])
+        def safe(gatherer: Any, key: str) -> Any:
+            return self._safe_return(gatherer, key, [], errors=result.per_step_errors)
+
+        result.changed_files = safe(cf, "Changed Files")
+        result.new_files = safe(nf, "New Files")
         if df is not None:
-            result.deleted_files = self._safe_return(df, "Deleted Files", [])
+            result.deleted_files = safe(df, "Deleted Files")
         if pr is not None:
-            result.processes = self._safe_return(pr, "Processes", [])
+            result.processes = safe(pr, "Processes")
         if sk is not None:
-            result.sockets = self._safe_return(sk, "Listening Sockets", [])
+            result.sockets = safe(sk, "Listening Sockets")
         if nw is not None:
-            result.network_dns = self._safe_return(nw, "Network", [])
-            result.network_targets = self._safe_return(
-                nw, "Network IP:Port (send/recv)", []
-            )
+            result.network_dns = safe(nw, "Network")
+            result.network_targets = safe(nw, "Network IP:Port (send/recv)")
 
         # Pretty text follows the legacy first-seen order.
         ordered = [cf, nf, df, nw, pr, sk]
@@ -1107,9 +1124,11 @@ class AnalysisEngine:
         header: dict[str, Any] = {
             "enabled": enabled,
             "note": (
-                "Well-known Android/GMS background files hidden from the "
-                "results above (path -> matching pattern). Disable with "
-                "analysis.system_noise_filter = false."
+                "Files hidden from the results above (path -> reason): "
+                "well-known Android/GMS background files (the matching "
+                "pattern; disable with analysis.system_noise_filter = false), "
+                "structural noise (ART profiles, package-manager bookkeeping) "
+                "and dry-run noise (also changed without the app)."
             ),
         }
         if noise_filter is not None:
@@ -1148,9 +1167,17 @@ class AnalysisEngine:
         )
 
     def _safe_return(
-        self, gatherer: DataGatherBase | None, key: str, default: Any
+        self,
+        gatherer: DataGatherBase | None,
+        key: str,
+        default: Any,
+        errors: list[StepError] | None = None,
     ) -> Any:
-        """Read one key from a gatherer's ``return_data``, isolating failures."""
+        """Read one key from a gatherer's ``return_data``, isolating failures.
+
+        A failure is appended to ``errors`` (the run's ``per_step_errors``)
+        so an empty section is never mistaken for "nothing found".
+        """
         if gatherer is None:
             return default
         try:
@@ -1159,6 +1186,14 @@ class AnalysisEngine:
             logger.warning(
                 "return_data failed for %s: %s", type(gatherer).__name__, exc
             )
+            if errors is not None:
+                errors.append(
+                    StepError(
+                        label=f"results:{key}",
+                        run_number=0,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                )
             return default
         if isinstance(data, dict):
             return data.get(key, default)

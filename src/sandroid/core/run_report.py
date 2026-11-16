@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 #: are left untouched for backward compatibility.
 RUN_METADATA_KEY = "Run Metadata"
 
+#: Results-JSON key of a run's fatal/per-step errors (absent on a clean run);
+#: same value as ``sandroid.analysis.run_config.RUN_ERRORS_KEY``.
+RUN_ERRORS_KEY = "Run Errors"
+
 #: Default file names inside a result folder.
 DEFAULT_RESULTS_NAME = "sandroid.json"
 DEFAULT_PDF_NAME = "Sandroid_Forensic_Report.pdf"
@@ -527,7 +531,10 @@ def write_results_json(
     doc = prepare_results_document(results, metadata)
     # Round-trip through the encoder first so the file is never half-written.
     text = json.dumps(doc, indent=4, default=json_encoder, ensure_ascii=False)
-    out.write_text(text, encoding="utf-8")
+    # Device file names that are not valid UTF-8 arrive as lone surrogates
+    # (``surrogateescape``); "backslashreplace" writes them as the JSON escape
+    # ``\udcXX`` instead of failing the whole results file.
+    out.write_text(text, encoding="utf-8", errors="backslashreplace")
     return out
 
 
@@ -622,7 +629,11 @@ def write_hash_manifest(
     lines = [f"{f['sha256']}  {f['path']}" for f in files]
     lines.append(f"{sha256_file(manifest_path)}  {MANIFEST_NAME}")
     sums_path = root / SHA256SUMS_NAME
-    sums_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # surrogateescape: non-UTF-8 file names are written as their original
+    # bytes, so ``sha256sum -c SHA256SUMS`` finds them.
+    sums_path.write_text(
+        "\n".join(lines) + "\n", encoding="utf-8", errors="surrogateescape"
+    )
     sums_hash = sha256_file(sums_path)
     logger.info(
         "Evidence manifest written: %s (%d files). SHA-256 of %s: %s",
@@ -661,12 +672,28 @@ def _addendum_files(root: Path) -> list[Path]:
 
 def _read_sums(path: Path) -> list[tuple[str, str]]:
     entries: list[tuple[str, str]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+    for line in text.splitlines():
         if not line.strip():
             continue
         digest, _, rel = line.partition("  ")
         entries.append((rel, digest.strip().lower()))
     return entries
+
+
+def _manifest_entries(path: Path, check: ManifestCheck) -> list[tuple[str, str]]:
+    """``(path, sha256)`` pairs from ``manifest.json`` (unreadable -> mismatch)."""
+    try:
+        files = json.loads(path.read_text(encoding="utf-8")).get("files") or []
+        return [
+            (str(f["path"]), str(f["sha256"]).lower())
+            for f in files
+            if isinstance(f, dict) and "path" in f and "sha256" in f
+        ]
+    except (OSError, ValueError, AttributeError) as exc:
+        logger.error("Cannot read %s: %s", path, exc)
+        check.mismatched.append(MANIFEST_NAME)
+        return []
 
 
 def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
@@ -676,21 +703,36 @@ def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
     regenerated later) is verified as well, so regenerated reports are
     covered by the same check.
 
+    A sealed folder whose ``SHA256SUMS`` was deleted is not treated as
+    unsealed: the files are verified against the per-file SHA-256 in
+    ``manifest.json`` and ``SHA256SUMS`` itself is reported as missing.
+
     Returns:
         A :class:`ManifestCheck`; ``present`` is False when neither
-        ``SHA256SUMS`` nor an addendum exists. ``unlisted`` lists files added
-        after the manifest (excluding live log files), which is
-        informational only.
+        ``SHA256SUMS``, ``manifest.json`` nor an addendum exists.
+        ``unlisted`` lists files added after the manifest (excluding live
+        log files), which is informational only.
     """
     root = Path(result_dir).resolve()
     sums_path = root / SHA256SUMS_NAME
     sum_files = ([sums_path] if sums_path.is_file() else []) + _addendum_files(root)
-    if not sum_files:
+    manifest_path = root / MANIFEST_NAME
+    sums_lost = not sums_path.is_file() and manifest_path.is_file()
+    if not sum_files and not sums_lost:
         return ManifestCheck(present=False)
     expected: list[tuple[str, str]] = []
     for path in sum_files:
         expected.extend(_read_sums(path))
     check = ManifestCheck(present=True)
+    if sums_lost:
+        check.missing.append(SHA256SUMS_NAME)
+        logger.error(
+            "%s is missing from sealed folder %s; verifying against %s",
+            SHA256SUMS_NAME,
+            root,
+            MANIFEST_NAME,
+        )
+        expected.extend(_manifest_entries(manifest_path, check))
     hashes: dict[str, str] = {}
     for rel, digest in expected:
         path = root / rel
@@ -702,9 +744,11 @@ def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
             hashes[rel] = sha256_file(path)
         if hashes[rel] != digest and rel not in check.mismatched:
             check.mismatched.append(rel)
-    listed = {rel for rel, _ in expected} | {
-        p.relative_to(root).as_posix() for p in sum_files
-    }
+    listed = (
+        {rel for rel, _ in expected}
+        | {p.relative_to(root).as_posix() for p in sum_files}
+        | ({MANIFEST_NAME} if sums_lost else set())
+    )
     for _full, rel in _iter_result_files(root):
         if rel in listed or _is_live_file(rel):
             continue
@@ -782,6 +826,18 @@ def finalize_run(
         mode=mode,
         run_settings=run_settings,
     )
+    run_errors = results.get(RUN_ERRORS_KEY)
+    if isinstance(run_errors, dict) and run_errors:
+        metadata["run_status"] = run_errors.get("status") or "completed with errors"
+        metadata["run_errors"] = run_errors
+        logger.error(
+            "Run %s: %s",
+            metadata["run_status"],
+            run_errors.get("fatal")
+            or f"{len(run_errors.get('steps') or [])} step error(s)",
+        )
+    else:
+        metadata["run_status"] = "completed"
     if adb is not None:
         # The results' "Device Name" is a session label (it can still be the
         # config default); keep it in line with what the device confirmed.
@@ -890,7 +946,7 @@ def write_manifest_addendum(
     if sums.is_file():
         lines.append(f"{sha256_file(sums)}  {SHA256SUMS_NAME}")
     path = _free_path(root / f"{ADDENDUM_PREFIX}{stamp}")
-    with open(path, "x", encoding="utf-8") as fh:  # never overwrite
+    with open(path, "x", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write("\n".join(lines) + "\n")
     return path, sha256_file(path)
 
@@ -989,6 +1045,7 @@ __all__ = [
     "HASH_ALGORITHMS",
     "MANIFEST_NAME",
     "REGENERATED_PDF_TEMPLATE",
+    "RUN_ERRORS_KEY",
     "RUN_METADATA_KEY",
     "SHA256SUMS_NAME",
     "EvidenceVerificationError",

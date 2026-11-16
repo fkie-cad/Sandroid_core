@@ -90,6 +90,8 @@ def test_analysis_config_whitelist_defaults_none():
 def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
     """The CLI path reaches the engine and writes to_json_dict() to the file."""
     canned = _canned_result()
+    # No session folder: the CLI falls back to paths.results_path.
+    monkeypatch.delenv("SESSION_PATH", raising=False)
 
     # Engine.run -> canned result (no device work).
     monkeypatch.setattr(AnalysisEngine, "run", lambda self: canned)

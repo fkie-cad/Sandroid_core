@@ -215,8 +215,13 @@ def _finalize_headless_run(
     from sandroid.core.adb import Adb
 
     cfg = getattr(toolbox, "config", None)
-    result_dir = os.environ.get("SESSION_PATH") or str(
-        getattr(getattr(cfg, "paths", None), "results_path", "results")
+    result_dir = (
+        str(run_config.results_path)
+        if run_config is not None and getattr(run_config, "results_path", "")
+        else None
+    ) or (
+        os.environ.get("SESSION_PATH")
+        or str(getattr(getattr(cfg, "paths", None), "results_path", "results"))
     )
     outcome = None
     try:
@@ -246,6 +251,24 @@ def _finalize_headless_run(
     if on_finalized is not None:
         on_finalized(outcome)
     return outcome
+
+
+def _pin_result_dir(run_config: Any, result_dir: str | None) -> None:
+    """Point the run at its result folder.
+
+    Without ``result_dir`` (a single headless run) the paths stay empty: an
+    identity pin, so the run uses the existing session dir. ``--batch``
+    passes a per-package folder so every package gets its own raw pulls,
+    results JSON and evidence manifest.
+    """
+    import os
+
+    if result_dir:
+        run_config.results_path = str(result_dir)
+        run_config.raw_results_path = os.path.join(str(result_dir), "raw")
+    else:
+        run_config.results_path = ""
+        run_config.raw_results_path = ""
 
 
 def _make_progress_adapter(
@@ -348,10 +371,7 @@ async def run_malware_analysis(
     run_config = RunConfig.from_analysis_config(
         ac, action=Trigdroid(), whitelist=ac.whitelist
     )
-    # Identity pin: headless has no run bundle, so run against the existing
-    # session dir (empty paths leave RESULTS_PATH / RAW_RESULTS_PATH untouched).
-    run_config.results_path = ""
-    run_config.raw_results_path = ""
+    _pin_result_dir(run_config, kwargs.get("result_dir"))
 
     from sandroid.core.run_report import iso_now
 
@@ -442,9 +462,7 @@ async def run_forensic_analysis(
     run_config = RunConfig.from_analysis_config(
         ac, action=action, whitelist=ac.whitelist
     )
-    # Identity pin (headless has no run bundle -> run against the session dir).
-    run_config.results_path = ""
-    run_config.raw_results_path = ""
+    _pin_result_dir(run_config, kwargs.get("result_dir"))
 
     from sandroid.core.run_report import iso_now
 

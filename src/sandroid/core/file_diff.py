@@ -1,7 +1,9 @@
 import os
 import os.path
+import shutil
 import sqlite3
 import subprocess
+import tempfile
 import xml.etree.ElementTree as xmltree
 from collections.abc import Callable
 from logging import getLogger
@@ -81,9 +83,56 @@ def is_sqlite_from_device_path(device_path, base_folder=""):
 # To see content that was deleted in run 2, we need to reverse the order of the diff
 
 
+#: Prefixes of diff strings that mean "this file could not be analysed" (as
+#: opposed to "analysed, no change"). They are never compared against the
+#: noise diff -- an identical failure on both sides is not noise.
+_DIFF_FAILURE_PREFIXES: tuple[str, ...] = (
+    "\tError:",
+    "\tCould not analyse",
+    "\tNot enough data",
+    "\tToo many rows",
+    "\tFailed to convert",
+)
+
+_NOT_ENOUGH_DATA = (
+    "\tNot enough data for intra file analysis. At least one version was not "
+    "pulled. Refer to errors or warnings created during pulls."
+)
+
+#: Logged once per process when ``sqldiff`` is missing.
+_sqldiff_missing_warned = False
+
+
+def is_diff_failure(diff):
+    """Whether ``diff`` reports that a file could not be analysed."""
+    return isinstance(diff, str) and diff.startswith(_DIFF_FAILURE_PREFIXES)
+
+
+def is_no_change(diff):
+    """Whether ``diff`` is one of the "analysed, nothing changed" messages."""
+    return isinstance(diff, str) and diff.strip().lower() in (
+        "no changes detected",
+        "no change detected",
+        "",
+    )
+
+
+def clear_caches():
+    """Forget cached per-path facts (call once per analysis run).
+
+    :func:`is_sqlite_file` caches by path string; the pull folders of a new
+    run (or a re-pull into the same folder) can hold different files under
+    the same paths.
+    """
+    _sqlite_file_cache.clear()
+
+
 # returns a nicely formatted string, naming entries that have been added and removed from filename_database_of_interest
 def db_diff(db_path1, db_path2, noise_path=None):
     """Calculates the differences between two database versions.
+
+    The pulled databases (and their ``-wal``/``-journal`` companions) are
+    never modified: pending writes are integrated into temporary copies.
 
     :param db_path1: The full path to the first database file.
     :type db_path1: str
@@ -91,27 +140,85 @@ def db_diff(db_path1, db_path2, noise_path=None):
     :type db_path2: str
     :param noise_path: The full path to the noise database file (optional).
     :type noise_path: str
-    :returns: A formatted string naming entries that have been added, removed, and updated.
+    :returns: A formatted string naming entries that have been added, removed,
+        and updated; ``"ITS ALL NOISE"`` only when there are real changes and
+        every one of them also happened in the noise run.
     :rtype: str
     """
+    if not os.path.isfile(db_path1) or not os.path.isfile(db_path2):
+        return _NOT_ENOUGH_DATA
     diff = db_diff_helper(db_path1, db_path2)
     if not noise_path or not os.path.isfile(noise_path):
         return diff
+    if is_diff_failure(diff) or is_no_change(diff):
+        return diff
     noise = db_diff_helper(db_path1, noise_path)
-    result = ""
-    if diff == noise:
+    if is_diff_failure(noise) or is_no_change(noise):
+        return diff
+    noise_lines = set(noise.splitlines())
+    kept = [line for line in diff.splitlines() if line not in noise_lines]
+    if not kept:
         return "ITS ALL NOISE"
-    for line in diff.splitlines():
-        if line not in noise:
-            result = result + line + "\n"
-        else:
-            # result = result + "[NOISE]" + line + "\n"
-            pass
-    return result
+    return "".join(f"{line}\n" for line in kept)
+
+
+def _copy_for_diff(db_path, dest_dir, name):
+    """Copy a pulled database (+ ``-wal``/``-journal``) into ``dest_dir``.
+
+    Pending WAL/journal content is integrated into the *copy* only, so the
+    pulled evidence (hashed later into the manifest) stays byte-identical.
+    ``-shm`` is not copied; SQLite rebuilds it for the copy.
+
+    :returns: Path of the (integrated) copy.
+    """
+    copy = os.path.join(dest_dir, name)
+    shutil.copyfile(db_path, copy)
+    for suffix in ("-wal", "-journal"):
+        if os.path.isfile(db_path + suffix):
+            shutil.copyfile(db_path + suffix, copy + suffix)
+    if os.path.isfile(copy + "-wal"):
+        db_wal_helper(copy)
+    if os.path.isfile(copy + "-journal"):
+        db_journal_helper(copy)
+    return copy
+
+
+def _run_sqldiff(source, target):
+    """Run ``sqldiff source target``; return ``(stdout, failure_message)``."""
+    global _sqldiff_missing_warned
+    try:
+        proc = subprocess.run(
+            ["sqldiff", source, target],
+            check=False,
+            capture_output=True,
+            text=False,
+        )
+    except OSError as e:
+        if not _sqldiff_missing_warned:
+            _sqldiff_missing_warned = True
+            logger.warning(
+                "sqldiff could not be started (%s): SQLite databases are listed "
+                "without row diffs. Install sqlite3-tools / sqldiff.",
+                e,
+            )
+        return "", "\tCould not analyse: sqldiff command not found or failed to start"
+    except subprocess.SubprocessError as e:
+        logger.error(f"Subprocess error running sqldiff: {e}")
+        return "", "\tCould not analyse: sqldiff subprocess failed"
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+        reason = (stderr.splitlines() or [f"exit code {proc.returncode}"])[0]
+        logger.warning(f"sqldiff failed for {target}: {reason}")
+        return stdout, f"\tCould not analyse: sqldiff failed ({reason})"
+    return stdout, None
 
 
 def db_diff_helper(db_path1, db_path2):
     """Helper function to calculate the differences between two database versions.
+
+    Works on temporary copies (see :func:`_copy_for_diff`); neither VACUUM
+    nor ``sqldiff`` ever touches the files at ``db_path1``/``db_path2``.
 
     :param db_path1: The full path to the first database file.
     :type db_path1: str
@@ -120,56 +227,26 @@ def db_diff_helper(db_path1, db_path2):
     :returns: A formatted string naming entries that have been added, removed, and updated.
     :rtype: str
     """
-    # Check for WAL files
-    if os.path.isfile(db_path1 + "-wal"):
-        db_wal_helper(db_path1)
-    if os.path.isfile(db_path2 + "-wal"):
-        db_wal_helper(db_path2)
+    try:
+        with tempfile.TemporaryDirectory(prefix="sandroid_dbdiff_") as tmp:
+            first = _copy_for_diff(db_path1, tmp, "first.db")
+            second = _copy_for_diff(db_path2, tmp, "second.db")
+            return _db_diff_copies(first, second, db_path1)
+    except OSError as e:
+        logger.error(f"Could not prepare database copies for diff: {e}")
+        return f"\tCould not analyse: {e}"
 
-    # Check for journal files
-    if os.path.isfile(db_path1 + "-journal"):
-        db_journal_helper(db_path1)
-    if os.path.isfile(db_path2 + "-journal"):
-        db_journal_helper(db_path2)
 
+def _db_diff_copies(db_path1, db_path2, display_path):
+    """Diff two (already integrated, temporary) database copies."""
     result = ""
-    logger.debug(f"Calculating Database Diff between {db_path1} and {db_path2}")
-    try:
-        deleted_rows = subprocess.run(
-            ["sqldiff", db_path2, db_path1],
-            check=False,
-            capture_output=True,
-            text=False,
-        )
-    except OSError as e:
-        logger.error(f"Failed to start sqldiff process: {e}")
-        return "\tError: sqldiff command not found or failed to start"
-    except subprocess.SubprocessError as e:
-        logger.error(f"Subprocess error running sqldiff: {e}")
-        return "\tError: sqldiff subprocess failed"
-    try:
-        deleted_stdout = deleted_rows.stdout.decode("utf-8", errors="replace")
-    except UnicodeDecodeError:
-        deleted_stdout = deleted_rows.stdout.decode("latin-1")
-
-    logger.debug(f"Calculating reverse Database Diff between {db_path1} and {db_path2}")
-    try:
-        new_rows = subprocess.run(
-            ["sqldiff", db_path1, db_path2],
-            check=False,
-            capture_output=True,
-            text=False,
-        )
-    except OSError as e:
-        logger.error(f"Failed to start sqldiff process: {e}")
-        return "\tError: sqldiff command not found or failed to start"
-    except subprocess.SubprocessError as e:
-        logger.error(f"Subprocess error running sqldiff: {e}")
-        return "\tError: sqldiff subprocess failed"
-    try:
-        new_stdout = new_rows.stdout.decode("utf-8", errors="replace")
-    except UnicodeDecodeError:
-        new_stdout = new_rows.stdout.decode("latin-1")
+    logger.debug(f"Calculating Database Diff for {display_path}")
+    deleted_stdout, failure = _run_sqldiff(db_path2, db_path1)
+    if failure:
+        return failure
+    new_stdout, failure = _run_sqldiff(db_path1, db_path2)
+    if failure:
+        return failure
 
     complexity = new_stdout.count("\n") * 2 + deleted_stdout.count("\n")
     logger.debug(
@@ -177,7 +254,7 @@ def db_diff_helper(db_path1, db_path2):
     )
     if complexity > 30000:
         logger.warning(
-            f"Skipping intra file analysis of {db_path1} because the file is too big"
+            f"Skipping intra file analysis of {display_path} because the file is too big"
         )
         return "\tToo many rows for intra file analysis ( more than 10000 )"
 
@@ -236,7 +313,7 @@ def db_diff_helper(db_path1, db_path2):
 
             # Build a formatted diff string that highlights only changed values
             diff_details = []
-            for key in set(old_pairs) | set(new_pairs):
+            for key in dict.fromkeys([*old_pairs, *new_pairs]):
                 old_val = old_pairs.get(key, "N/A")
                 new_val = new_pairs.get(key, "N/A")
 
@@ -333,14 +410,18 @@ def xml_diff(xml_path1, xml_path2, noise_path=None):
     :rtype: str
     """
     if not os.path.isfile(xml_path1) or not os.path.isfile(xml_path2):
-        return "\tNot enough data for intra file analysis. At least one version was not pulled. Refer to errors or warnings created during pulls."
+        return _NOT_ENOUGH_DATA
 
     diff = xml_diff_helper(xml_path1, xml_path2)
     if not noise_path or not os.path.isfile(noise_path):
         return diff
-    noise_lines = set(xml_diff_helper(xml_path1, noise_path).splitlines())
-    if _NO_XML_CHANGE.strip() in {line.strip() for line in noise_lines}:
-        noise_lines = set()
+    if is_diff_failure(diff) or is_no_change(diff):
+        # A failure (or "no change") is reported as-is, never as noise.
+        return diff
+    noise = xml_diff_helper(xml_path1, noise_path)
+    if is_diff_failure(noise) or is_no_change(noise):
+        return diff
+    noise_lines = set(noise.splitlines())
     kept = [line for line in diff.splitlines() if line not in noise_lines]
     if not kept and diff.strip() and _NO_XML_CHANGE.strip() not in diff:
         return "ITS ALL NOISE"
@@ -650,7 +731,7 @@ def txt_xml_diff(file_path1, file_path2):
         new_root = _parse_xml_bytes(Path(file_path2).read_bytes())
     except etree.XMLSyntaxError as e:
         logger.error(f"XML Syntax Error encountered: {e}")
-        return _NO_XML_CHANGE
+        return f"\tCould not analyse: XML parse error ({e})\n"
     except OSError as e:
         logger.error(f"Failed to read XML file for diff: {e}")
         return f"\tError: Could not open file {e.filename}\n"
@@ -706,16 +787,17 @@ def abx_xml_diff(file_path1, file_path2):
     try:
         first_xml = _convert_abx_to_xml_string(file_path1)
         second_xml = _convert_abx_to_xml_string(file_path2)
-    except (OSError, ValueError, AbxDecodeError) as exc:
+    except (OSError, ValueError, AbxDecodeError, NotImplementedError) as exc:
+        # NotImplementedError: ccl_abx refuses mixed text/element content.
         logger.error(f"Failed to convert ABX files for diff: {exc}")
-        return "\tFailed to convert ABX files for diff\n"
+        return f"\tCould not analyse: Failed to convert ABX files for diff ({exc})\n"
 
     try:
         old_root = _parse_xml_bytes(first_xml.encode("utf-8"))
         new_root = _parse_xml_bytes(second_xml.encode("utf-8"))
     except etree.XMLSyntaxError as e:
         logger.error(f"XML Syntax Error encountered while diffing ABX XML: {e}")
-        return _NO_XML_CHANGE
+        return f"\tCould not analyse: decoded ABX is not well-formed XML ({e})\n"
     return keyed_xml_diff(old_root, new_root)
 
 
@@ -798,35 +880,8 @@ def txt_diff(txt_file):
     relative = txt_file.lstrip("/")
     old_path = os.path.join(raw_results, "first_pull", relative)
     new_path = os.path.join(raw_results, "second_pull", relative)
-
-    try:
-        with open(old_path, encoding="utf-8") as f:
-            old_text = f.readlines()
-    except OSError as e:
-        logger.error(f"Failed to open old text file '{old_path}': {e}")
-        return f"\tError: Could not open file {old_path}"
-
-    try:
-        with open(new_path, encoding="utf-8") as f:
-            new_text = f.readlines()
-    except OSError as e:
-        logger.error(f"Failed to open new text file '{new_path}': {e}")
-        return f"\tError: Could not open file {new_path}"
-
-    # Use sets for efficient membership testing
-    old_set = set(old_text)
-    new_set = set(new_text)
-
-    parts = []
-    for line in old_text:
-        if line not in new_set:
-            parts.append(f"\t[LINE DELETED] {line}")
-
-    for line in new_text:
-        if line not in old_set:
-            parts.append(f"\t[LINE ADDED] {line}")
-
-    return "".join(parts)
+    # Same algorithm; txt_diff_paths also survives non-UTF-8 content.
+    return txt_diff_paths(old_path, new_path)
 
 
 def txt_diff_paths(old_path, new_path):

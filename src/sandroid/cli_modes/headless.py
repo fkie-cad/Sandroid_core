@@ -146,6 +146,24 @@ def _print_summary(
         _plain(console, f"  {counts}")
         if results.get("Action Duration") is not None:
             console.print(f"  Action duration: {results.get('Action Duration')} s")
+    run_errors = results.get("Run Errors") if isinstance(results, dict) else None
+    if isinstance(run_errors, dict) and run_errors:
+        # An aborted run or a lost step must not look like a clean run.
+        _plain(
+            console,
+            f"  Run {run_errors.get('status', 'completed with errors')}: results "
+            "may be incomplete (see 'Run Errors' in the results JSON)",
+            "error",
+        )
+        if run_errors.get("fatal"):
+            _plain(console, f"    fatal: {run_errors['fatal']}", "error")
+        for step in run_errors.get("steps") or []:
+            _plain(
+                console,
+                f"    {step.get('step')} (run {step.get('run')}): {step.get('error')}",
+                "error",
+            )
+        rc = EXIT_DOCUMENTATION_FAILED
 
     report_requested = bool(
         getattr(getattr(sandroid_config, "report", None), "generate_pdf", False)
@@ -281,8 +299,8 @@ async def _run_single_analysis(
         )
         if rc:
             console.print(
-                "[error]Headless analysis finished, but its documentation is "
-                f"incomplete (exit code {rc})[/error]"
+                "[error]Headless analysis finished, but the run had errors or "
+                f"its documentation is incomplete (exit code {rc})[/error]"
             )
         else:
             console.print("[success]Headless analysis completed successfully[/success]")

@@ -22,11 +22,16 @@ if TYPE_CHECKING:
     from sandroid.features.functionality import Functionality
 
 __all__ = [
+    "RUN_ERRORS_KEY",
     "ProgressUpdate",
     "RunConfig",
     "RunResult",
     "StepError",
 ]
+
+
+#: Results-JSON key holding a run's fatal/per-step errors (absent when clean).
+RUN_ERRORS_KEY = "Run Errors"
 
 
 @dataclass
@@ -426,6 +431,27 @@ class RunResult:
             "Network": self.network_dns,
             "Network IP:Port (send/recv)": self.network_targets,
             "Other Data": self.other_data,
+            # Only present when something went wrong, so a clean run keeps
+            # the legacy key set.
+            **({RUN_ERRORS_KEY: errors} if (errors := self.run_errors()) else {}),
+        }
+
+    def run_errors(self) -> dict[str, Any] | None:
+        """The fatal and per-step errors of this run, or ``None`` if clean.
+
+        Stored as ``"Run Errors"`` in the results JSON (and the run metadata)
+        and shown as a banner on the PDF's first page: a run that aborted or
+        lost a step must never look like a clean "nothing found" run.
+        """
+        if not self.error and not self.per_step_errors:
+            return None
+        return {
+            "status": "aborted" if self.error else "completed with errors",
+            "fatal": self.error,
+            "steps": [
+                {"step": e.label, "run": e.run_number, "error": e.error}
+                for e in self.per_step_errors
+            ],
         }
 
     def pretty_print(self) -> str:

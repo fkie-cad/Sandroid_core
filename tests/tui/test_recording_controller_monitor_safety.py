@@ -90,7 +90,8 @@ class _FakeToolbox:
             raise self._create_snapshot_error
 
     def fetch_changed_files(self, fetch_all: bool = False) -> dict:
-        return {}
+        # The engine refuses an empty (failed) baseline scan.
+        return {"/data/baseline.db": 1} if fetch_all else {}
 
 
 class _FakeForensicService:

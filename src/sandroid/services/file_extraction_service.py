@@ -711,8 +711,9 @@ class FileExtractionService:
         - second_pull: Files after changes
 
         Pull directories are walked recursively and files are keyed by their
-        device path (e.g. ``/data/data/<pkg>/databases/x.db``). Files that are
-        also in ``noise_pull`` are excluded.
+        device path (e.g. ``/data/data/<pkg>/databases/x.db``). Every pulled
+        file is hashed -- also files that changed in the dry run (``noise_pull``),
+        whose diffs are still reported.
 
         Args:
             raw_results_path: The run's ``raw`` folder. Defaults to the
@@ -739,15 +740,12 @@ class FileExtractionService:
             if raw_results_path is not None
             else os.getenv("RAW_RESULTS_PATH", "")
         )
-        noise_files = set(self._pull_tree_files(base_folder / "noise_pull"))
 
         def _hashes(folder_name: str) -> dict[str, dict[str, str]]:
             result: dict[str, dict[str, str]] = {}
             for device_path, local in self._pull_tree_files(
                 base_folder / folder_name
             ).items():
-                if device_path in noise_files:
-                    continue
                 self._logger.debug(f"Hashing {folder_name}:{device_path}")
                 try:
                     result[device_path] = hash_file(local)
