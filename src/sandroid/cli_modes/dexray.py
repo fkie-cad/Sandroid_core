@@ -55,11 +55,17 @@ def run_dexray_headless(
     """
     from sandroid.analysis.malwaremonitor import MalwareMonitor
     from sandroid.core.adb import Adb
-    from sandroid.core.initializer import EscalatingSignalHandler, initialize_core
+    from sandroid.core.initializer import (
+        EscalatingSignalHandler,
+        ensure_frida_server,
+        initialize_core,
+    )
     from sandroid.services import get_spotlight_service
 
     console = SandroidConsole.get()
     initialize_core(sandroid_config, prepare=True)
+    if not ensure_frida_server(console):
+        sys.exit(1)
 
     # Route dexray_intercept logger output to terminal
     dexray_logger = logging.getLogger("dexray_intercept")
@@ -112,7 +118,8 @@ def run_dexray_headless(
         success = monitor.start_monitoring()
 
         if not success:
-            console.print("[error]dexray-intercept startup cancelled or failed[/error]")
+            reason = getattr(monitor, "last_error", None) or "unknown error"
+            console.print(f"[error]dexray-intercept failed to start: {reason}[/error]")
             sys.exit(1)
 
         # Now that monitor is running, wire up the cleanup callback

@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 
 import frida
 import requests
@@ -18,6 +19,8 @@ try:
     from sandroid.config import get_config
 except ImportError:
     get_config = None
+
+logger = logging.getLogger(__name__)
 
 #: Env var honoured by AndroidFridaManager >= 2.0.6 to install a frida-server
 #: whose SHA-256 cannot be verified against the GitHub release metadata.
@@ -129,14 +132,215 @@ def ensure_frida_server_started(fm) -> bool:
         Whatever ``install_frida_server`` raises; format it with
         :func:`describe_frida_install_error`.
     """
+    if _server_running(fm):
+        return bool(fm.run_frida_server())  # no-op when ready
     installed = None
     try:
         installed = fm.get_installed_server_version()
     except Exception:
         installed = None
     if installed != frida.__version__:
+        logger.info(
+            f"frida-server on the device is {installed or 'missing'}, host frida "
+            f"is {frida.__version__}: installing"
+        )
         fm.install_frida_server()
+    cleanup_stale_frida_helpers(fm)
     return bool(fm.run_frida_server())
+
+
+#: Files frida-server leaves in its install dir: every launch writes a new
+#: ``frida-helper-<uuid>.dex`` (57 of them had piled up on the test AVD).
+_FRIDA_HELPER_GLOB = "frida-helper-*.dex"
+
+
+def _server_running(fm) -> bool:
+    try:
+        return bool(fm.is_frida_server_running())
+    except Exception:
+        return False
+
+
+def cleanup_stale_frida_helpers(fm) -> int:
+    """Delete leftover ``frida-helper-*.dex`` files from the frida install dir.
+
+    Only runs while no frida-server process exists (the running server may
+    still use its own helper), i.e. right before a (re)start. Never raises.
+
+    Args:
+        fm: An ``AndroidFridaManager.FridaManager``.
+
+    Returns:
+        The number of files removed (0 when skipped or on error).
+    """
+    if _server_running(fm):
+        return 0
+    install_dir = getattr(fm, "frida_install_dst", None) or "/data/local/tmp/"
+    if not install_dir.endswith("/"):
+        install_dir += "/"
+    pattern = install_dir + _FRIDA_HELPER_GLOB
+    adb = getattr(fm, "adb", None)
+    root_shell = getattr(adb, "root_shell", None)
+    if not callable(root_shell):
+        return 0
+    try:
+        result = root_shell(
+            f'n=0; for f in {pattern}; do [ -f "$f" ] && rm -f "$f" && '
+            "n=$((n+1)); done; echo $n",
+            timeout=15,
+        )
+        removed = int((result.stdout or "0").strip().splitlines()[-1])
+    except Exception as e:
+        logger.debug(f"frida-helper cleanup skipped: {e}")
+        return 0
+    if removed:
+        logger.info(f"Removed {removed} stale {_FRIDA_HELPER_GLOB} file(s)")
+    return removed
+
+
+def auto_start_frida_server(fm=None, force: bool = False) -> tuple[bool, str]:
+    """Start frida-server when ``frida.server_auto_start`` is set (or *force*).
+
+    Used at TUI startup, on device changes and by the headless Frida modes, so
+    the configured auto-start is honoured everywhere. Never raises.
+
+    Args:
+        fm: An ``AndroidFridaManager.FridaManager``; defaults to the
+            FridaSessionService's manager for the active device.
+        force: Start even if auto-start is disabled in the config.
+
+    Returns:
+        ``(running, reason)``: ``running`` is True when frida-server is up;
+        ``reason`` is a short human-readable status or failure cause.
+    """
+    if fm is None:
+        try:
+            from sandroid.services import get_frida_session_service
+
+            fm = get_frida_session_service().get_frida_manager()
+        except Exception as e:
+            return False, f"Frida manager unavailable: {e}"
+    if fm is None:
+        return False, "Frida manager unavailable (no device connected?)"
+    # Startup and device-change callbacks may race: one start at a time, the
+    # second caller then finds the server running.
+    with _AUTO_START_LOCK:
+        return _auto_start_locked(fm, force)
+
+
+_AUTO_START_LOCK = threading.Lock()
+
+
+def _auto_start_locked(fm, force: bool) -> tuple[bool, str]:
+    if _server_running(fm):
+        return True, "frida-server already running"
+    if not (force or frida_server_auto_start_enabled()):
+        return False, "frida.server_auto_start is disabled"
+    try:
+        if not fm.is_device_rooted:
+            return False, "device is not rooted (frida-server needs root)"
+    except Exception as e:
+        return False, f"root check failed: {e}"
+    try:
+        started = ensure_frida_server_started(fm)
+    except Exception as e:
+        return False, describe_frida_install_error(e)
+    if started:
+        return True, "frida-server started"
+    return False, (
+        "frida-server did not become ready (see the log, "
+        "/data/local/tmp/frida-server.log or `adb logcat`)"
+    )
+
+
+def stop_frida_job_bounded(
+    job_manager, job_id: str | None, timeout: float = 5.0
+) -> bool:
+    """Unload one JobManager job (and detach if it was the last) without hanging.
+
+    ``script.unload()`` / ``session.detach()`` block until every app thread
+    has left the agent's hooks. A thread parked in a hooked ``SSL_read`` on an
+    idle keep-alive connection keeps them blocked for tens of seconds or more
+    (live: friTap on Wikipedia, 15 s to >60 s). AFM bounds the wait but runs
+    the calls on non-daemon executor threads (``detach_from_app`` even waits
+    for its own executor), so the caller -- and interpreter exit -- still
+    blocked. Here the frida calls run on one daemon thread; after *timeout*
+    the bookkeeping is done anyway and the unload finishes in the background.
+
+    Args:
+        job_manager: The AFM ``JobManager``.
+        job_id: The job to stop (None: only detach if no jobs are left).
+        timeout: Seconds to wait for the agent to unload.
+
+    Returns:
+        True if the unload/detach finished within *timeout*.
+    """
+    jobs = getattr(job_manager, "jobs", None)
+    if not isinstance(jobs, dict):
+        jobs = {}
+    job = jobs.get(job_id) if job_id else None
+    others = [
+        j
+        for jid, j in jobs.items()
+        if jid != job_id and getattr(j, "state", None) == "running"
+    ]
+    session = getattr(job_manager, "process_session", None)
+    detach = session is not None and not others
+
+    if job is not None:
+        try:
+            job.state = "stopping"
+            job.stop_event.set()  # ends the job's keep-alive thread loop
+        except Exception:
+            pass
+
+    def _work() -> None:
+        script = getattr(job, "script", None) if job is not None else None
+        if script is not None:
+            try:
+                script.unload()
+            except Exception as e:  # already gone / connection closed
+                logger.debug(f"script.unload: {e}")
+        if detach:
+            try:
+                session.detach()
+            except Exception as e:
+                logger.debug(f"session.detach: {e}")
+
+    worker = threading.Thread(target=_work, name="frida-job-teardown", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    finished = not worker.is_alive()
+    if not finished:
+        logger.warning(
+            f"Frida agent still unloading after {timeout:.0f}s (an app thread is "
+            "blocked inside a hooked call); continuing, it finishes in the "
+            "background"
+        )
+
+    if job is not None:
+        try:
+            set_state = getattr(job, "_set_state", None)
+            if callable(set_state):
+                set_state("stopped")
+            else:
+                job.state = "stopped"
+        except Exception:
+            pass
+        jobs.pop(job_id, None)
+        unregister = getattr(job_manager, "unregister_hooks", None)
+        if callable(unregister):
+            try:
+                unregister(job_id)
+            except Exception:
+                pass
+    if detach:
+        # Don't let JobManager reuse (or re-detach at exit) this session.
+        try:
+            job_manager.process_session = None
+        except Exception:
+            pass
+    return finished
 
 
 # some parts are taken from ttps://github.com/Mind0xP/Frida-Python-Binding/

@@ -71,12 +71,11 @@ class FridaServerCommand(CommandHandler):
                     data={"frida_status": "already_running"},
                 )
 
-            # Frida not running - install and start it
-            logger.info("Installing Frida server on device")
-            ctx.toolbox.frida_manager.install_frida_server()
+            # Frida not running - install (only if missing/outdated) and start
+            from sandroid.core.frida_manager import ensure_frida_server_started
 
             logger.info("Starting Frida server on device")
-            started = ctx.toolbox.frida_manager.run_frida_server()
+            started = ensure_frida_server_started(ctx.toolbox.frida_manager)
 
             if not started:
                 logger.error("Frida server failed to start")
@@ -92,7 +91,7 @@ class FridaServerCommand(CommandHandler):
             logger.info("Frida server started successfully")
             return CommandResult(
                 success=True,
-                message="Frida server installed and started successfully",
+                message="Frida server started successfully",
                 data={"frida_status": "started"},
             )
 
