@@ -17,8 +17,13 @@ logger = logging.getLogger(__name__)
 class MonitoringHandler:
     """Handles Monitor, malware monitor, and network capture operations."""
 
+    #: Device-side pcap written by :meth:`start_network_capture`.
+    _DEVICE_PCAP = "/sdcard/sandroid_capture.pcap"
+
     def __init__(self, api: SandroidHeadlessAPI) -> None:
         self._api = api
+        # {"pid", "device_path", "output_file"} of the capture we started.
+        self._capture: dict[str, Any] | None = None
 
     # -- Malware Monitor (Dexray-Intercept) ----------------------------------
 
@@ -233,47 +238,120 @@ class MonitoringHandler:
                 message="Network capture is already running",
             )
 
+        if self._capture is not None:
+            return CommandResult(
+                success=False,
+                message="Network capture is already running",
+                data={"pid": self._capture["pid"]},
+            )
+
+        import asyncio
         import os
+        import shlex
         from datetime import datetime
+
+        from sandroid.core.adb_utils import device_shell_command
 
         if not output_file:
             raw_path = os.getenv("RAW_RESULTS_PATH", ".")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_file = os.path.join(raw_path, f"capture_{timestamp}.pcap")
 
-        _stdout, stderr = self._api._adb.send_adb_command(
-            "shell tcpdump -i any -w /sdcard/capture.pcap &"
+        adb = self._api._adb
+        # Detach tcpdump ON THE DEVICE and print its PID. (A host-side
+        # trailing ``&`` backgrounded nothing: the host shell kept adb
+        # attached, so the call blocked until the 30 s timeout.)
+        device_pcap = self._DEVICE_PCAP
+        stdout, stderr = adb.send_adb_command(
+            device_shell_command(
+                f"nohup tcpdump -i any -w {shlex.quote(device_pcap)} "
+                "</dev/null >/dev/null 2>&1 & echo $!"
+            )
         )
-
-        if stderr and "error" in stderr.lower():
+        lines = (stdout or "").strip().splitlines()
+        pid = int(lines[-1]) if lines and lines[-1].strip().isdigit() else None
+        if pid is None:
             return CommandResult(
                 success=False,
                 message="Failed to start network capture",
-                error=stderr,
+                error=stderr or stdout or "no tcpdump PID returned",
             )
 
+        # tcpdump exits at once when it is missing or lacks permissions.
+        await asyncio.sleep(0.5)
+        alive, _ = adb.send_adb_command(
+            device_shell_command(f"kill -0 {pid} 2>/dev/null && echo RUNNING")
+        )
+        if "RUNNING" not in (alive or ""):
+            return CommandResult(
+                success=False,
+                message="Failed to start network capture",
+                error=f"tcpdump (pid {pid}) exited immediately: {stderr}".strip(),
+            )
+
+        self._capture = {
+            "pid": pid,
+            "device_path": device_pcap,
+            "output_file": output_file,
+        }
         return CommandResult(
             success=True,
             message="Network capture started",
-            data={"output_file": output_file},
+            data={"output_file": output_file, "pid": pid},
         )
 
     @safe_command("Failed to stop network capture")
     async def stop_network_capture(self) -> CommandResult:
-        """Stop network traffic capture and pull the PCAP file."""
+        """Stop the capture started by :meth:`start_network_capture`.
+
+        Signals exactly that tcpdump PID (never a blanket ``pkill``, which
+        also killed other tcpdump instances, e.g. the analysis capture) and
+        pulls the PCAP to the ``output_file`` chosen at start.
+        """
+        import asyncio
         import os
 
-        self._api._adb.send_adb_command("shell pkill tcpdump")
-
-        raw_path = os.getenv("RAW_RESULTS_PATH", ".")
-        local_path = os.path.join(raw_path, "capture.pcap")
-
-        from sandroid.core.adb_utils import quote_host_arg
-
-        self._api._adb.send_adb_command(
-            f"pull /sdcard/capture.pcap {quote_host_arg(local_path)}"
+        from sandroid.core.adb_utils import (
+            device_shell_arg,
+            device_shell_command,
+            quote_host_arg,
         )
-        self._api._adb.send_adb_command("shell rm /sdcard/capture.pcap")
+
+        capture = self._capture
+        if capture is None:
+            return CommandResult(
+                success=False, message="No network capture started by this API"
+            )
+        self._capture = None
+        adb = self._api._adb
+        pid = int(capture["pid"])
+
+        # SIGTERM (tcpdump flushes and closes the pcap on it; SIGINT may be
+        # ignored by a background job), then wait for that PID to exit.
+        adb.send_adb_command(f"shell kill {pid}")
+        for _ in range(10):
+            await asyncio.sleep(0.3)
+            alive, _ = adb.send_adb_command(
+                device_shell_command(f"kill -0 {pid} 2>/dev/null && echo RUNNING")
+            )
+            if "RUNNING" not in (alive or ""):
+                break
+
+        local_path = capture["output_file"]
+        parent = os.path.dirname(os.path.abspath(local_path))
+        os.makedirs(parent, exist_ok=True)
+        device_path = capture["device_path"]
+        _out, err = adb.send_adb_command(
+            f"pull {quote_host_arg(device_path)} {quote_host_arg(local_path)}"
+        )
+        adb.send_adb_command(f"shell rm -f {device_shell_arg(device_path)}")
+        if err and "error" in err.lower():
+            return CommandResult(
+                success=False,
+                message="Failed to pull network capture",
+                error=err,
+                data={"pcap_path": local_path},
+            )
 
         return CommandResult(
             success=True,
