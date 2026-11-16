@@ -4,6 +4,7 @@ Extracts the message parsing and formatting logic from the activity log wrapper,
 keeping the FriTap class focused on Frida session management.
 """
 
+import ipaddress
 import logging
 
 logger = logging.getLogger(__name__)
@@ -64,10 +65,26 @@ class FriTapMessageFormatter:
         return console_msg if console_msg else None
 
     @staticmethod
+    def _format_addr(addr, ss_family) -> str:
+        """Render an agent address; friTap sends IPv4 as a 32-bit integer."""
+        if isinstance(addr, int) or (isinstance(addr, str) and addr.isdigit()):
+            if ss_family in (None, "AF_INET"):
+                try:
+                    return str(ipaddress.IPv4Address(int(addr)))
+                except ValueError:
+                    pass
+        return str(addr)
+
+    @staticmethod
     def _format_datalog(payload: dict, data) -> str | None:
         """Format an SSL/TLS connection data message."""
-        src_addr = payload.get("src_addr", "?")
-        dst_addr = payload.get("dst_addr", "?")
+        family = payload.get("ss_family")
+        src_addr = FriTapMessageFormatter._format_addr(
+            payload.get("src_addr", "?"), family
+        )
+        dst_addr = FriTapMessageFormatter._format_addr(
+            payload.get("dst_addr", "?"), family
+        )
         src_port = payload.get("src_port", 0)
         dst_port = payload.get("dst_port", 0)
         func = payload.get("function", "unknown")

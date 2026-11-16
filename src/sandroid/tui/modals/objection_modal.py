@@ -19,13 +19,13 @@ if TYPE_CHECKING:
 class ObjectionConfig:
     """Configuration for objection launch."""
 
-    spawn_mode: bool = True  # True for spawn (-S), False for attach
+    spawn_mode: bool = True  # True for spawn (-s), False for attach
     ssl_unpinning: bool = True
     root_detection: bool = True
     emulator_detection: bool = False
     frida_detection: bool = False
     debug_detection: bool = False
-    use_bypass_script: bool = True  # Load trigdroid_bypass_rpc.js via -s
+    use_bypass_script: bool = True  # Load trigdroid_bypass_rpc.js (start -S)
 
 
 class ObjectionModal(FridaModal[ObjectionConfig | None]):
@@ -33,7 +33,7 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
 
     Objection creates its own Frida session, so it cannot use JobManager.
     Instead, the TrigDroid bypass script can be loaded via the -s flag:
-        objection -g com.example.app explore -s trigdroid_bypass_rpc.js
+        objection -n com.example.app start -S trigdroid_bypass_rpc.js
 
     Returns:
         ObjectionConfig with selected options, or None if cancelled.
@@ -285,30 +285,73 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         self._dismiss_with_refresh(self.config)
 
 
+def _objection_executable() -> str:
+    """``objection`` from PATH, else the one next to this interpreter.
+
+    pipx/uv-tool installs put objection in the tool venv's bin, which is not on
+    PATH unless the venv is activated.
+    """
+    import shutil
+    import sys
+    from pathlib import Path
+
+    found = shutil.which("objection")
+    if found:
+        return found
+    sibling = Path(sys.executable).parent / "objection"
+    return str(sibling) if sibling.exists() else "objection"
+
+
 def build_objection_command(
     package_name: str,
     config: ObjectionConfig,
     bypass_script_path: str | None = None,
+    serial: str | None = None,
 ) -> list:
-    """Build the objection command line arguments.
+    """Build the objection (>= 1.12) command line.
+
+    objection 1.12: ``-n/--name`` replaces the hidden ``-g``, ``explore`` is
+    deprecated for ``start``, ``-S`` is ``--serial`` (spawn is ``-s``) and the
+    startup script is ``start -S``. The old
+    ``objection -g pkg -S explore -s script`` failed: ``-S`` swallowed
+    "explore" as a serial ("Missing command"), and ``explore -s`` treats its
+    value as a REPL startup *command*, not a script path.
+
+    Spawn mode passes ``-p/--no-pause``: objection 1.12 otherwise leaves the
+    spawned app suspended until ``resume`` is typed, and Android kills an app
+    that has not attached within 10 s ("start timeout") -- verified on
+    API 36, the session died before the REPL was usable.
 
     Args:
         package_name: Target package name
         config: Objection configuration
         bypass_script_path: Path to the trigdroid_bypass_rpc.js script
+        serial: adb serial of the target device; defaults to the active
+            Sandroid device (objection would otherwise pick the first USB
+            device)
 
     Returns:
         List of command line arguments
     """
-    cmd = ["objection", "-g", package_name]
+    if serial is None:
+        try:
+            from sandroid.core.adb import Adb
 
+            serial = Adb.get_target_device()
+        except Exception:
+            serial = None
+
+    cmd = [_objection_executable()]
+    if serial:
+        cmd.extend(["-S", serial])
+    cmd.extend(["-n", package_name])
     if config.spawn_mode:
-        cmd.append("-S")
+        cmd.extend(["-s", "-p"])
 
-    cmd.append("explore")
+    cmd.append("start")
 
-    # -s flag must come AFTER 'explore' subcommand
+    # start's -S/--startup-script must come AFTER the subcommand
     if config.use_bypass_script and bypass_script_path:
-        cmd.extend(["-s", bypass_script_path])
+        cmd.extend(["-S", bypass_script_path])
 
     return cmd

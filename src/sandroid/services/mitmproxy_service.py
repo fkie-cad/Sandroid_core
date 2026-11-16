@@ -712,6 +712,24 @@ class MitmproxyState:
     focus_apps: list[str] = field(default_factory=list)
 
 
+def _find_mitmweb() -> str | None:
+    """Locate ``mitmweb``: PATH first, then next to this interpreter.
+
+    mitmproxy is a Sandroid dependency, so its console scripts live in the
+    same bin/ as ``sandroid`` -- which is not on PATH for pipx/uv-tool
+    installs or an unactivated venv (``/path/to/venv/bin/sandroid``).
+    """
+    found = shutil.which("mitmweb")
+    if found:
+        return found
+    import sys
+
+    sibling = Path(sys.executable).parent / (
+        "mitmweb.exe" if os.name == "nt" else "mitmweb"
+    )
+    return str(sibling) if sibling.exists() else None
+
+
 class MitmproxyService:
     """Manages a single mitmweb subprocess.
 
@@ -1143,7 +1161,7 @@ class MitmproxyService:
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning("Failed to read mitmproxy ports: %s", exc)
 
-            binary = shutil.which("mitmweb")
+            binary = _find_mitmweb()
             if binary is None:
                 self._state.last_error = (
                     "mitmweb not found on PATH (pip install mitmproxy)"

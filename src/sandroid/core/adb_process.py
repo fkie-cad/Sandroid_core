@@ -30,6 +30,17 @@ _ALLOWED_SIGNALS = {"TERM", "KILL", "HUP", "INT"}
 # ---------------------------------------------------------------------------
 
 
+def _is_main_process_line(parts: list[str], package_name: str) -> bool:
+    """True if a ``ps`` row's NAME column (last field) is exactly *package_name*.
+
+    A substring match also hit ``<pkg>_zygote``, ``<pkg>:privileged_process0``
+    and sandboxed renderer processes -- e.g. right after ``am force-stop``
+    the surviving ``com.android.chrome_zygote`` was taken for Chrome and
+    friTap attached to the app zygote (0 keys).
+    """
+    return bool(parts) and parts[-1] == package_name
+
+
 def _try_pidof(
     send_command: Callable[[str], tuple[str, str]],
     package_name: str,
@@ -77,9 +88,9 @@ def _try_ps_a(
 
     if output:
         for line in output.strip().split("\n"):
-            if package_name in line:
+            parts = line.split()
+            if _is_main_process_line(parts, package_name):
                 logger.debug(f"Found matching line: '{line}'")
-                parts = line.split()
                 logger.debug(f"Line parts: {parts}")
                 if len(parts) >= 2:
                     try:
@@ -110,9 +121,9 @@ def _try_ps_o(
 
     if output:
         for line in output.strip().split("\n"):
-            if package_name in line:
+            parts = line.split()
+            if _is_main_process_line(parts, package_name):
                 logger.debug(f"Found matching line in ps -o: '{line}'")
-                parts = line.split()
                 if len(parts) >= 1:
                     try:
                         pid = int(parts[0])
@@ -139,10 +150,13 @@ def _try_frida(package_name: str) -> int | None:
     try:
         import frida
 
-        device = frida.get_usb_device()
+        from sandroid.core.adb import Adb
+
+        serial = Adb.get_target_device()
+        device = frida.get_device(serial) if serial else frida.get_usb_device()
         processes = device.enumerate_processes()
         for proc in processes:
-            if proc.name == package_name or package_name in proc.name:
+            if proc.name == package_name:
                 logger.info(
                     f"Found PID {proc.pid} for {package_name} via Frida (last resort)"
                 )

@@ -2,23 +2,16 @@
 
 import json
 import os
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
+import tomli_w
 import yaml
 from platformdirs import site_config_dir, user_config_dir
 from pydantic import ValidationError
 
 from .schema import SandroidConfig
-
-# Handle tomli import for Python < 3.11
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
-import tomli_w
 
 
 class ConfigLoader:
