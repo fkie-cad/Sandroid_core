@@ -5,6 +5,7 @@ selection, and switching with proper state management.
 """
 
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -591,6 +592,20 @@ class DeviceManager:
         if len(ready_devices) == 1:
             self.set_active_device(ready_devices[0].serial)
             return ready_devices[0]
+
+        # Honour adb's own ANDROID_SERIAL convention so headless runs
+        # (`sandroid --fritap/--dexray ...`) can target one of several devices.
+        wanted = os.environ.get("ANDROID_SERIAL", "").strip()
+        if wanted:
+            for device in ready_devices:
+                if device.serial == wanted:
+                    logger.info(f"Selecting {wanted} (ANDROID_SERIAL)")
+                    self.set_active_device(wanted)
+                    return device
+            logger.warning(
+                f"ANDROID_SERIAL={wanted} is not a ready device; "
+                "falling back to automatic selection"
+            )
 
         # Multiple devices connected - prefer emulators
         emulators = [d for d in ready_devices if d.is_emulator]
