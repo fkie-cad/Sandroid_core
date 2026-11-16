@@ -60,6 +60,8 @@ persistent run history, and an experimental AI Chat assistant.
 - **`Run Metadata`** in every results JSON: Sandroid/frida/friTap/dexray versions, host, device serial, AVD, Android version/API level, build fingerprint, ISO-8601 start/end timestamps with timezone, and the (secret-free) analysis settings.
 - **Evidence manifest**: `manifest.json` + `SHA256SUMS` over the whole result folder (verifiable with `sha256sum -c` / `shasum -a 256 -c`); its own hash is logged.
 - **`sandroid --report-from <dir>`** verifies the manifest and (re)generates the PDF for an existing result folder; `P` in **Files → Diffs** does the same for a run; `report.generate_pdf` creates it after every Play.
+  Verification runs first: on a mismatch nothing is written (exit code 2). Existing files are never overwritten: the PDF is written as `Sandroid_Forensic_Report_regenerated_<UTC>.pdf` and recorded in `SHA256SUMS.addendum-<UTC>` (checked together with `SHA256SUMS`) plus a line in `sandroid_report.log`; the original `SHA256SUMS` stays unchanged.
+- PDF reports never fail on long diffs: diffs continue over several table rows, lines over 400 characters and diffs over 200 lines are shortened with a visible note, and a section that still cannot be laid out is replaced by a note instead of aborting the report.
 - PDF title page with run metadata, readable wrapping tables, deterministic timeline.
 
 #### Device selection & safety defaults

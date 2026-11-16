@@ -620,22 +620,83 @@ class TestFinalize:
         assert outcome.errors == ["pdf: render failed"]
         assert outcome.manifest is not None
 
-    def test_report_from_folder_keeps_manifest_on_tamper(self, tmp_path, clean_env):
+    @staticmethod
+    def _snapshot(folder: Path) -> dict[str, bytes]:
+        return {
+            p.relative_to(folder).as_posix(): p.read_bytes()
+            for p in sorted(folder.rglob("*"))
+            if p.is_file()
+        }
+
+    def _sealed_run(self, tmp_path) -> Path:
+        outcome = run_report.finalize_run(tmp_path, _results(), generate_pdf=True)
+        assert outcome.errors == []
+        assert outcome.pdf is not None
+        return tmp_path
+
+    def test_report_from_unsealed_folder_writes_default_pdf_and_manifest(
+        self, tmp_path, clean_env
+    ):
         (tmp_path / "sandroid.json").write_text(json.dumps(_results()))
         first = run_report.report_from_folder(tmp_path)
         assert first.check.present is False
+        assert first.pdf == tmp_path / run_report.DEFAULT_PDF_NAME
         assert first.manifest is not None
+        assert not (tmp_path / "timeline.png").exists()  # nothing extra added
+        assert run_report.verify_hash_manifest(tmp_path).ok
 
-        second = run_report.report_from_folder(tmp_path)
-        assert second.check.ok
-        assert second.manifest is not None
+    def test_report_from_sealed_folder_never_overwrites(self, tmp_path, clean_env):
+        """P2-H4: intact bundle -> new PDF name + addendum, originals untouched."""
+        root = self._sealed_run(tmp_path)
+        before = self._snapshot(root)
 
-        sums_before = (tmp_path / "SHA256SUMS").read_bytes()
-        (tmp_path / "sandroid.json").write_text(json.dumps(_results()) + " ")
-        third = run_report.report_from_folder(tmp_path)
-        assert third.check.mismatched == ["sandroid.json"]
-        assert third.manifest is None
-        assert (tmp_path / "SHA256SUMS").read_bytes() == sums_before
+        outcome = run_report.report_from_folder(root)
+        assert outcome.check.ok
+        assert outcome.manifest is None
+        assert outcome.pdf.name.startswith("Sandroid_Forensic_Report_regenerated_")
+        assert outcome.pdf.name.endswith("Z.pdf")
+        after = self._snapshot(root)
+        # Every original file is byte-identical, incl. PDF, timeline, SHA256SUMS.
+        assert {k: after[k] for k in before} == before
+        added = set(after) - set(before)
+        assert added == {outcome.pdf.name, outcome.addendum.name}
+        assert outcome.addendum.name.startswith("SHA256SUMS.addendum-")
+        lines = outcome.addendum.read_text().splitlines()
+        assert lines == [
+            f"{run_report.sha256_file(outcome.pdf)}  {outcome.pdf.name}",
+            f"{run_report.sha256_file(root / 'SHA256SUMS')}  SHA256SUMS",
+        ]
+        check = run_report.verify_hash_manifest(root)
+        assert check.ok
+        assert check.unlisted == []
+
+        # A second regeneration in the same second gets yet another name.
+        again = run_report.report_from_folder(root)
+        assert again.pdf != outcome.pdf
+        assert again.addendum != outcome.addendum
+        assert run_report.verify_hash_manifest(root).ok
+
+        # Tampering with a regenerated PDF is detected through the addendum.
+        outcome.pdf.write_bytes(b"%PDF-forged")
+        assert run_report.verify_hash_manifest(root).mismatched == [outcome.pdf.name]
+
+    def test_report_from_tampered_folder_writes_nothing(self, tmp_path, clean_env):
+        """P2-H4: verification runs first; a mismatch aborts before writing."""
+        root = self._sealed_run(tmp_path)
+        (root / "sandroid.json").write_text(json.dumps(_results()) + " ")
+        before = self._snapshot(root)
+        with pytest.raises(run_report.EvidenceVerificationError) as info:
+            run_report.report_from_folder(root)
+        assert info.value.check.mismatched == ["sandroid.json"]
+        assert "Nothing was written" in str(info.value)
+        assert self._snapshot(root) == before
+
+    def test_report_from_refuses_existing_output(self, tmp_path, clean_env):
+        root = self._sealed_run(tmp_path)
+        with pytest.raises(FileExistsError):
+            run_report.report_from_folder(
+                root, output_pdf=root / run_report.DEFAULT_PDF_NAME
+            )
 
     def test_cli_report_from(self, tmp_path, clean_env):
         from click.testing import CliRunner
@@ -648,3 +709,24 @@ class TestFinalize:
         assert (tmp_path / run_report.DEFAULT_PDF_NAME).exists()
         assert (tmp_path / "SHA256SUMS").exists()
         assert "Report regeneration requested" in (tmp_path / "sandroid_report.log").read_text()
+
+        res = CliRunner().invoke(main, ["--report-from", str(tmp_path)])
+        assert res.exit_code == 0, res.output
+        log = (tmp_path / "sandroid_report.log").read_text()
+        assert "Recorded in SHA256SUMS.addendum-" in log
+
+    def test_cli_report_from_tampered_exits_2_and_writes_nothing(
+        self, tmp_path, clean_env
+    ):
+        from click.testing import CliRunner
+
+        from sandroid.cli import main
+
+        root = self._sealed_run(tmp_path)
+        (root / "sandroid.json").write_text("{}")
+        before = self._snapshot(root)
+        res = CliRunner().invoke(main, ["--report-from", str(root)])
+        assert res.exit_code == 2, res.output
+        assert "verification FAILED" in res.output
+        assert "PDF report written" not in res.output
+        assert self._snapshot(root) == before
