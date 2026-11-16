@@ -591,6 +591,9 @@ class AnalysisPlan:
             steps.append(DryRunSleepStep(run_number=rn))
             steps += AnalysisPlan._capture_steps(gatherers, config, rn, start=False)
             steps.append(GatherStep(cf, run_number=rn))
+            if want_deleted:
+                # Background deletions (cache cleanup) seen without the app.
+                steps.append(GatherStep(df, run_number=rn))
             steps.append(PullStep("noise", cf, run_number=rn))
             steps.append(DryRunEndStep(run_number=rn))
 

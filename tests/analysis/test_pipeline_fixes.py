@@ -539,6 +539,38 @@ def test_playback_persists_full_results_json(tmp_path, monkeypatch) -> None:
         assert "Other Data" in data
 
 
+def test_dry_run_deletions_are_subtracted(monkeypatch) -> None:
+    from sandroid.analysis.deletedfiles import DeletedFiles
+
+    dry = {"on": False}
+    toolbox = MagicMock()
+    toolbox.is_dry_run.side_effect = lambda: dry["on"]
+    listings = iter(
+        [
+            {"/data/keep": 1},  # run 1: app.db + cache.log deleted
+            {"/data/keep": 1},  # run 2: same
+            {"/data/keep": 1, "/data/app.db": 1},  # dry run: only cache.log
+        ]
+    )
+    toolbox.fetch_changed_files.side_effect = lambda fetch_all=False: next(listings)
+    forensic = MagicMock()
+    forensic.get_baseline.return_value = {
+        "/data/keep": 1,
+        "/data/app.db": 1,
+        "/data/cache.log": 1,
+    }
+    forensic.get_noise_files.return_value = {}
+    monkeypatch.setattr(DeletedFiles, "deletedFileListList", [])
+    gatherer = DeletedFiles(forensic_service=forensic)
+    gatherer._get_toolbox = lambda: toolbox  # type: ignore[method-assign]
+    gatherer._exclude_whitelist = lambda files: files  # type: ignore[method-assign]
+    gatherer.gather()
+    gatherer.gather()
+    dry["on"] = True
+    gatherer.gather()
+    assert gatherer.return_data() == {"Deleted Files": ["/data/app.db"]}
+
+
 def test_art_profiles_are_structural_noise() -> None:
     from sandroid.analysis.filters import filter_noise_files, is_structural_noise
 

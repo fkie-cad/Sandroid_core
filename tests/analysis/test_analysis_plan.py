@@ -91,6 +91,7 @@ def test_n2_all_options_on():
         "stop_capture",
         "stop_capture",
         "gather",
+        "gather",  # deleted files: background deletions become noise
         "pull",
         "dry_run_end",
     ]

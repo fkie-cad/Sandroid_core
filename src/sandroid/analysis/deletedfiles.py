@@ -50,6 +50,9 @@ class DeletedFiles(DataGatherBase):
             When not provided, uses the default Toolbox-based services via base class.
         """
         super().__init__(**kwargs)
+        # Files deleted during the dry run (no app action): background cleanup
+        # such as Play Store cache logs, subtracted from the results.
+        self.noise_deleted_files: set[str] = set()
 
     def _fetch_all_files(self) -> dict[str, Any]:
         """Fetch all current files from the device.
@@ -83,7 +86,10 @@ class DeletedFiles(DataGatherBase):
                 FileChanged(
                     file_path=file, change_type="deleted", source="deletedfiles"
                 ).publish()
-        self.deletedFileListList.append(deletedFiles)
+        if self._get_toolbox().is_dry_run():
+            self.noise_deleted_files.update(deletedFiles)
+        else:
+            self.deletedFileListList.append(deletedFiles)
         logger.debug(str(len(deletedFiles)) + " Files were detected as deleted")
 
     def return_data(self) -> dict[str, list[str]]:
@@ -123,6 +129,9 @@ class DeletedFiles(DataGatherBase):
         """
         # Use shared filter utilities to reduce code duplication
         files_from_all_pulls = intersect_file_lists(self.deletedFileListList)
+        files_from_all_pulls = [
+            f for f in files_from_all_pulls if f not in self.noise_deleted_files
+        ]
         files_from_all_pulls = filter_noise_files(
             files_from_all_pulls,
             self._get_noise_files(),
