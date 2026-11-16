@@ -40,6 +40,83 @@ def apply_serial_selection(serial: str | None = None) -> str | None:
     return wanted
 
 
+def describe_device_problem(dm: Any = None) -> str | None:
+    """Why no usable device is selected, or None if one is.
+
+    With an explicitly requested serial (``--serial`` / config
+    ``emulator.serial`` / ``ANDROID_SERIAL``) that serial must be listed by
+    ``adb devices`` in state ``device``; there is no fallback to another
+    device. Without one, a device must have been (auto-)selected.
+
+    Uses the DeviceManager's last enumeration; call ``refresh_devices()``
+    first for a fresh answer.
+    """
+    from sandroid.core.device_manager import DeviceManager
+
+    dm = dm or DeviceManager.get()
+    wanted = DeviceManager.preferred_serial()
+    devices = dm.get_devices()
+    listing = ", ".join(f"{d.serial} ({d.state})" for d in devices) or "none"
+    if wanted:
+        device = dm.get_device(wanted)
+        if device is None:
+            return (
+                f"Requested device {wanted} is not connected (adb devices: {listing})"
+            )
+        if device.state != "device":
+            return (
+                f"Requested device {wanted} is not online (state: "
+                f"{device.state}; adb devices: {listing})"
+            )
+        active = dm.active_device
+        if active is not None and active.serial != wanted:
+            return (
+                f"Requested device {wanted} is not the active device ({active.serial})"
+            )
+        return None
+    if dm.active_device is None:
+        return (
+            "No Android device selected (adb devices: "
+            f"{listing}). Start an emulator or pass --serial."
+        )
+    return None
+
+
+def require_device() -> Any:
+    """Enumerate devices and make sure the selected one is usable.
+
+    Activates the requested serial if needed, so ``Adb``/Frida/the run
+    metadata all refer to it.
+
+    Returns:
+        The active :class:`~sandroid.core.device.Device`.
+
+    Raises:
+        DeviceNotAvailableError: The requested serial is not connected or not
+            online, or no device is available at all.
+    """
+    from sandroid.core.device_manager import DeviceManager
+    from sandroid.core.exceptions import DeviceNotAvailableError
+
+    dm = DeviceManager.get()
+    dm.refresh_devices()
+    wanted = DeviceManager.preferred_serial()
+    if wanted:
+        device = dm.get_device(wanted)
+        active = dm.active_device
+        if (
+            device is not None
+            and device.state == "device"
+            and (active is None or active.serial != wanted)
+        ):
+            dm.set_active_device(wanted)
+    problem = describe_device_problem(dm)
+    if problem:
+        logger.error(problem)
+        raise DeviceNotAvailableError(problem)
+    return dm.active_device
+
+
 def prepare_device(console: Any | None = None) -> bool:
     """Ensure ``adb root`` and SELinux permissive mode on the active device.
 
@@ -132,7 +209,9 @@ def ensure_frida_server(console: Any | None = None) -> bool:
     return False
 
 
-def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
+def initialize_core(
+    config: SandroidConfig, prepare: bool = False, require: bool | None = None
+) -> None:
     """Initialize the Sandroid core subsystems in the required order.
 
     Performs the 3-step initialization sequence that must happen before
@@ -146,6 +225,17 @@ def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
         prepare: Also run :func:`prepare_device` (adb root + SELinux
             permissive) between the Adb and Toolbox init steps. Headless
             one-shot modes that install packages or use Frida need this.
+        require: Fail fast with :class:`DeviceNotAvailableError` unless a
+            device is usable (see :func:`require_device`): an explicitly
+            requested serial must be connected and online, otherwise some
+            device must be selected. Defaults to ``prepare`` (every headless
+            one-shot mode); the TUI passes nothing and reports the problem
+            itself, since it can start an emulator.
+
+    Raises:
+        DeviceNotAvailableError: With ``require`` and no usable device. Raised
+            before ``Toolbox.init()``, so no FridaManager is created for (and
+            no device work reaches) another device.
 
     Example:
         >>> from sandroid.config import ConfigLoader
@@ -164,6 +254,8 @@ def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
     apply_serial_selection(getattr(emulator_cfg, "serial", None))
+    if prepare if require is None else require:
+        require_device()
     if prepare:
         # Before Toolbox.init(): that step creates the FridaManager, which
         # should already see a rooted, permissive device.
