@@ -264,3 +264,58 @@ def test_cli_without_any_config_still_errors(xdg):
     result = CliRunner().invoke(cli_mod.main, [])
     assert result.exit_code == 1
     assert "No configuration found" in result.output
+
+
+# -- B3: sandroid-config init without -o must not clobber ----------------------
+
+
+def test_config_init_without_output_refuses_to_overwrite(xdg):
+    from sandroid.config.cli import main as config_main
+
+    user_dir, _ = xdg
+    user_dir.mkdir(parents=True)
+    user_file = user_dir / "sandroid.toml"
+    user_file.write_text('log_level = "DEBUG"\n')
+
+    result = CliRunner().invoke(config_main, ["init", "--yes", "--skip-avd-setup"])
+
+    assert result.exit_code == 1
+    assert "already exists" in result.output
+    assert user_file.read_text() == 'log_level = "DEBUG"\n'
+
+    forced = CliRunner().invoke(
+        config_main, ["init", "--yes", "--skip-avd-setup", "--force"]
+    )
+    assert forced.exit_code == 0, forced.output
+    assert user_file.read_text() != 'log_level = "DEBUG"\n'
+
+
+# -- B11: positional KEY [VALUE] for set/get -----------------------------------
+
+
+def test_config_set_get_accept_positional_key_value(xdg):
+    from sandroid.config.cli import main as config_main
+
+    user_dir, _ = xdg
+    runner = CliRunner()
+
+    res = runner.invoke(config_main, ["set", "mvt.enabled", "true"])
+    assert res.exit_code == 0, res.output
+    assert _read_toml(user_dir / "sandroid.toml")["mvt"]["enabled"] is True
+
+    res = runner.invoke(
+        config_main, ["set", "-k", "analysis.number_of_runs", "-v", "3"]
+    )
+    assert res.exit_code == 0, res.output
+    res = runner.invoke(config_main, ["set", "-k", "analysis.number_of_runs", "4"])
+    assert res.exit_code == 0, res.output
+
+    res = runner.invoke(config_main, ["get", "analysis.number_of_runs"])
+    assert res.exit_code == 0, res.output
+    assert "analysis.number_of_runs = 4" in res.output
+    res = runner.invoke(config_main, ["get", "-k", "mvt.enabled"])
+    assert "mvt.enabled = True" in res.output
+
+    res = runner.invoke(config_main, ["set", "mvt.enabled"])
+    assert res.exit_code == 2
+    assert "Missing VALUE" in res.output
