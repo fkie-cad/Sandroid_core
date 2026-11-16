@@ -269,6 +269,31 @@ deleted:
   starting with, the package name counts);
 * set ``system_noise_filter = false`` to show everything.
 
+Network noise (dry run)
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The network results are compared with the dry-run capture per destination
+(IP:port) and per DNS name, by volume rather than by mere presence. Shared CDN
+and load-balancer IPs are often contacted once in the background and then
+carry most of the app's traffic. A destination also seen in the dry run is
+therefore only treated as noise when its busiest action run is comparable to
+the background:
+
+* it stays in the results when its payload bytes exceed
+  ``3 x background + 2048``, its packets exceed ``3 x background + 20`` or its
+  connections exceed ``3 x background + 2``. It is then annotated with
+  ``also seen in background: <bytes> in <packets> / <connections>``;
+* a DNS name also queried in the dry run stays (annotated
+  ``also seen in background: N queries``) when a destination reported above
+  background resolved to it, or when it was queried more than
+  ``3 x background + 2`` times;
+* everything subtracted is listed with both volumes in the result JSON under
+  ``"Other Data" -> "Filtered Noise"`` (sections ``Network`` and
+  ``Network IP:Port (send/recv)``).
+
+The thresholds are the ``NOISE_*`` constants in
+``sandroid/analysis/network.py``. Without a dry run nothing is subtracted.
+
 Report (``[report]``)
 ~~~~~~~~~~~~~~~~~~~~~
 

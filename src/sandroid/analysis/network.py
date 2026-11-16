@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from logging import getLogger
 from typing import Any
 
@@ -17,6 +18,82 @@ from sandroid.services import get_network_capture_service
 from .base_di import DataGatherBase
 
 logger = getLogger(__name__)
+
+# ----------------------------------------------------------------------
+# Dry-run (background) comparison thresholds
+# ----------------------------------------------------------------------
+# A destination (IP:port) or DNS name that also shows up in the dry-run
+# "noise" capture is *not* dropped just for having been seen: shared CDN /
+# load-balancer IPs (Wikimedia serves en.wikipedia.org, meta and
+# intake-analytics from one address) are often touched once in the
+# background and then carry megabytes when the app is actually used.
+# Instead the busiest action run is compared with the dry run, per
+# destination, and the destination stays in the result when *any* of
+#
+#     action payload bytes  > FACTOR * background bytes       + BYTES_FLOOR
+#     action packets        > FACTOR * background packets     + PACKETS_FLOOR
+#     action connections    > FACTOR * background connections + CONN_FLOOR
+#
+# holds. It is then annotated with "also seen in background: ...". Only
+# destinations whose volume is comparable to the background count as noise;
+# they are listed (with both volumes) under Other Data -> Filtered Noise.
+# The factor absorbs normal run-to-run jitter of periodic background traffic
+# (a dry run and an action run last about as long); the floors keep a
+# handful of extra packets (one retransmit, a keep-alive, a second TLS
+# session) from turning a background destination into a finding.
+#: Multiple of the dry-run volume an action run must exceed.
+NOISE_VOLUME_FACTOR = 3.0
+#: Payload bytes an action run may exceed ``FACTOR x`` background by.
+NOISE_BYTES_FLOOR = 2048
+#: Packets an action run may exceed ``FACTOR x`` background by.
+NOISE_PACKETS_FLOOR = 20
+#: Connections (distinct local ports) an action run may exceed it by.
+NOISE_CONNECTIONS_FLOOR = 2
+#: DNS queries for a name an action run may exceed ``FACTOR x`` it by. A
+#: DNS name is also kept whenever a destination reported above background
+#: resolved to it -- the query count alone says little because resolvers
+#: cache answers.
+NOISE_DNS_QUERIES_FLOOR = 2
+
+
+@dataclass
+class _Volume:
+    """Traffic to/from one destination within one capture."""
+
+    sent: int = 0
+    received: int = 0
+    packets: int = 0
+    local_ports: set[int] = field(default_factory=set)
+
+    @property
+    def total(self) -> int:
+        """Payload bytes in both directions."""
+        return self.sent + self.received
+
+    @property
+    def connections(self) -> int:
+        """Distinct guest-side ports, i.e. TCP connections / UDP flows."""
+        return len(self.local_ports)
+
+    def describe(self) -> str:
+        """``12345B in 7 packets / 2 connections``."""
+        return (
+            f"{self.total}B in {self.packets} packets / {self.connections} connections"
+        )
+
+
+def _above_background(action: _Volume, noise: _Volume) -> bool:
+    """Whether ``action`` is substantially more than the dry-run ``noise``.
+
+    See the threshold constants above for the rule and its rationale.
+    """
+    factor = NOISE_VOLUME_FACTOR
+    return (
+        action.total > factor * noise.total + NOISE_BYTES_FLOOR
+        or action.packets > factor * noise.packets + NOISE_PACKETS_FLOOR
+        or action.connections > factor * noise.connections + NOISE_CONNECTIONS_FLOOR
+    )
+
 
 # Lazy import for scapy to avoid slow module-level import that blocks TUI
 # Scapy's import can take several seconds and holds the GIL
@@ -75,6 +152,10 @@ class Network(DataGatherBase):
         self._thread = None
         self._capture_start_time = None
         self._stop_lock = threading.Lock()
+        # Dry-run destinations / DNS names subtracted from the result
+        # (``{section: {entry: reason}}``), surfaced by the analysis engine
+        # under Other Data -> Filtered Noise instead of dropping them.
+        self.filtered_network_noise: dict[str, dict[str, str]] = {}
 
     def get_expected_capture_path(self) -> str:
         """Get the expected capture file path without starting capture.
@@ -239,21 +320,21 @@ class Network(DataGatherBase):
         """Return the gathered DNS requests and target IP:port connections.
 
         Processes captured PCAP files to extract DNS queries and TCP connection
-        targets. Results are filtered against a 'noise' baseline capture to
-        identify application-specific network activity.
+        targets. Results are compared with the dry-run 'noise' capture: only
+        destinations whose volume is comparable to the background are
+        subtracted (and kept in :attr:`filtered_network_noise`); busier ones
+        stay, annotated with their background volume.
 
         Returns:
             A dictionary with two keys:
-                - "Network": List of unique DNS domain names queried.
+                - "Network": List of unique DNS domain names queried (a name
+                  also queried in the dry run carries an "(also seen in
+                  background: N queries)" suffix).
                 - "Network IP:Port (send/recv)": List of unique IP:port targets
                   with byte counts sent and received.
         """
         if not self.performed_diff:
-            self.dns_requests = self.extract_dns_requests_for_all_pcaps()
-            self.target_ips_and_ports = (
-                self.extract_target_ips_and_ports_for_all_pcaps()
-            )
-            self.performed_diff = True
+            self._analyse_all_pcaps()
         return {
             "Network": self.dns_requests,
             "Network IP:Port (send/recv)": self.target_ips_and_ports,
@@ -338,11 +419,7 @@ class Network(DataGatherBase):
             connections with send/receive byte counts.
         """
         if not self.performed_diff:
-            self.dns_requests = self.extract_dns_requests_for_all_pcaps()
-            self.target_ips_and_ports = (
-                self.extract_target_ips_and_ports_for_all_pcaps()
-            )
-            self.performed_diff = True
+            self._analyse_all_pcaps()
 
         result = (
             "[warning bold]"
@@ -364,6 +441,13 @@ class Network(DataGatherBase):
         )
         for entry in self.target_ips_and_ports:
             result += f"[accent]{entry}[/accent]\n"
+        hidden = sum(len(v) for v in self.filtered_network_noise.values())
+        if hidden:
+            result += (
+                f"[accent]({hidden} DNS name(s) / target(s) comparable to the "
+                "dry-run background hidden, see Other Data -> Filtered Noise)"
+                "[/accent]\n"
+            )
         result += (
             "[accent bold]"
             "———————————————————————————————————————————————————————————————————————————————————————————————————————\n"
@@ -679,10 +763,71 @@ class Network(DataGatherBase):
                 continue
             seg = pkt[layer]
             if ip.dst == ip_address and seg.dport == port:
-                sent_bytes += len(seg.payload)
+                sent_bytes += cls._payload_len(ip, seg, proto)
             elif ip.src == ip_address and seg.sport == port:
-                received_bytes += len(seg.payload)
+                received_bytes += cls._payload_len(ip, seg, proto)
         return sent_bytes, received_bytes
+
+    @staticmethod
+    def _payload_len(ip: Any, seg: Any, proto: str) -> int:
+        """Transport payload length taken from the IP/UDP length fields.
+
+        The header fields give the size on the wire, so Ethernet padding of
+        short frames is not counted as payload and captures cut by a snap
+        length still count every byte. Falls back to the captured payload
+        when a length field is missing.
+        """
+        try:
+            if proto == "udp" and seg.len is not None:
+                return max(0, seg.len - 8)
+            header = (seg.dataofs or 5) * 4
+            if pkt_len := getattr(ip, "len", None):  # IPv4 total length
+                return max(0, pkt_len - ip.ihl * 4 - header)
+            if (plen := getattr(ip, "plen", None)) is not None:  # IPv6
+                # Extension headers sit between the IPv6 header and TCP.
+                extension = len(ip.payload) - len(seg) if ip.nh != 6 else 0
+                return max(0, plen - extension - header)
+        except (AttributeError, TypeError):
+            pass
+        return len(seg.payload)
+
+    @classmethod
+    def _volumes_in(cls, packets: list[Any], targets: set[str]) -> dict[str, _Volume]:
+        """Per-destination traffic volume for ``targets`` in one pass."""
+        volumes: dict[str, _Volume] = {}
+        for pkt in packets:
+            ip = cls._ip_layer(pkt)
+            if ip is None:
+                continue
+            if pkt.haslayer(TCP):
+                seg, proto = pkt[TCP], "tcp"
+            elif pkt.haslayer(UDP):
+                seg, proto = pkt[UDP], "udp"
+            else:
+                continue
+            outbound = cls._format_endpoint(ip.dst, seg.dport, proto)
+            if outbound in targets:
+                volume = volumes.setdefault(outbound, _Volume())
+                volume.sent += cls._payload_len(ip, seg, proto)
+                volume.local_ports.add(seg.sport)
+            else:
+                inbound = cls._format_endpoint(ip.src, seg.sport, proto)
+                if inbound not in targets:
+                    continue
+                volume = volumes.setdefault(inbound, _Volume())
+                volume.received += cls._payload_len(ip, seg, proto)
+                volume.local_ports.add(seg.dport)
+            volume.packets += 1
+        return volumes
+
+    @classmethod
+    def _dns_query_counts(cls, packets: list[Any]) -> dict[str, int]:
+        """How often each name was queried (same filtering as queries)."""
+        counts: dict[str, int] = {}
+        for pkt in packets:
+            for name in cls._dns_queries_in([pkt]):
+                counts[name] = counts.get(name, 0) + 1
+        return counts
 
     @classmethod
     def _dns_answers_in(cls, packets: list[Any]) -> dict[str, set[str]]:
@@ -795,46 +940,19 @@ class Network(DataGatherBase):
     # ------------------------------------------------------------------
 
     def extract_dns_requests_for_all_pcaps(self) -> list[str]:
-        """Extract DNS requests from all PCAP files, filtering out baseline noise.
+        """DNS names queried in the action runs, compared with the dry run.
 
-        Analyzes every per-run capture, extracts DNS queries, and removes any
-        domains that also appeared in the dry-run 'noise' capture (if any).
-        Publishes NetworkEvent for each unique DNS request found.
+        See :meth:`_analyse_all_pcaps`. Names also queried in the dry run
+        stay in the list (annotated ``"(also seen in background: N
+        queries)"``) when a destination reported above background resolved
+        to them or they were queried substantially more often; the rest are
+        moved to :attr:`filtered_network_noise`.
 
         Returns:
-            A list of unique DNS domain names that were queried during the
-            capture runs but not present in the baseline noise capture.
+            The DNS names (with trailing dot, as queried), sorted.
         """
-        logger.info("Analyzing pcaps for DNS requests, this could take a minute...")
-
-        all_dns_requests: set[str] = set()
-        for path in self._run_pcap_paths():
-            all_dns_requests.update(self.extract_dns_requests_from_pcap(path))
-
-        noise_dns_requests = self.extract_dns_requests_from_pcap(
-            self._noise_pcap_path()
-        )
-        diff = sorted(all_dns_requests - noise_dns_requests)
-
-        for dns_request in diff:
-            NetworkEvent(
-                event_type_name="dns_request",
-                protocol="dns",
-                source_ip="",
-                dest_ip=dns_request,
-                dest_port=53,
-                data_size=0,
-                source="network",
-            ).publish()
-
-        TaskOutput(
-            task_name="network",
-            message=f"Found {len(diff)} unique DNS requests",
-            level="info",
-            source="network",
-        ).publish()
-
-        return diff
+        self._analyse_all_pcaps()
+        return self.dns_requests
 
     @classmethod
     def extract_dns_requests_from_pcap(cls, pcap_path: str) -> set[str]:
@@ -849,86 +967,161 @@ class Network(DataGatherBase):
         return cls._dns_queries_in(cls._read_pcap(pcap_path))
 
     def extract_target_ips_and_ports_for_all_pcaps(self) -> list[str]:
-        """Extract connection targets from all PCAPs, filtering baseline noise.
+        """Connection targets of the action runs, compared with the dry run.
 
-        TCP targets come from guest SYN packets, UDP targets from non-DNS
-        unicast datagrams. Targets also present in the dry-run capture are
-        removed. Each entry is annotated with the resolved DNS name (if the
-        capture contains the answer) and the bytes sent/received in the first
-        run capture that contains it.
-
-        Every DNS name that resolved to the IP is listed (shared CDN /
-        load-balancer IPs serve several hosts), plus the TLS SNI when it
-        narrows that down. IPv4 and IPv6 flows are counted alike; a target
-        that never answered (e.g. an IPv6 SYN on an emulator without IPv6
-        routing) is marked as a connection attempt.
+        See :meth:`_analyse_all_pcaps`.
 
         Returns:
             Formatted strings, e.g.
             ``"192.102.162.236:443 [fkie.fraunhofer.de] (42B sent to / 0B
             received from)"``; UDP targets carry a ``/udp`` port suffix.
         """
-        logger.info(
-            "Analyzing pcaps for target IPs and ports, this could take a minute..."
-        )
+        self._analyse_all_pcaps()
+        return self.target_ips_and_ports
 
-        per_run: list[tuple[list[Any], set[str]]] = []
+    def _analyse_all_pcaps(self) -> None:
+        """Analyse every run capture against the dry-run capture (once).
+
+        TCP targets come from guest SYN packets, UDP targets from non-DNS
+        unicast datagrams. Each entry is annotated with every DNS name that
+        resolved to the IP (shared CDN / load-balancer IPs serve several
+        hosts), the TLS SNI when it narrows that down, and the bytes
+        sent/received in the first run capture that contains it. A target
+        that never answered (e.g. an IPv6 SYN on an emulator without IPv6
+        routing) is marked as a connection attempt.
+
+        A target or DNS name also present in the dry-run capture is only
+        subtracted when its volume in the busiest action run is comparable
+        to the background (see ``NOISE_VOLUME_FACTOR`` and the floors at
+        the top of this module); otherwise it is kept and annotated with
+        ``"also seen in background: ..."``. Everything subtracted is kept,
+        with both volumes, in :attr:`filtered_network_noise`.
+
+        Sets :attr:`dns_requests`, :attr:`target_ips_and_ports`,
+        :attr:`filtered_network_noise` and :attr:`performed_diff`, and
+        publishes one ``NetworkEvent`` per reported DNS name / target.
+        """
+        if self.performed_diff:
+            return
+        logger.info("Analyzing pcaps for network targets, this could take a minute...")
+
+        runs: list[tuple[list[Any], set[str]]] = []
         all_targets: set[str] = set()
         dns_names: dict[str, set[str]] = {}
+        run_queries: dict[str, int] = {}  # name -> most queries in one run
         for path in self._run_pcap_paths():
             packets = self._read_pcap(path)
             targets = self._targets_in(packets)
-            per_run.append((packets, targets))
+            runs.append((packets, targets))
             all_targets.update(targets)
             for ip, names in self._dns_answers_in(packets).items():
                 dns_names.setdefault(ip, set()).update(names)
+            for name, count in self._dns_query_counts(packets).items():
+                run_queries[name] = max(run_queries.get(name, 0), count)
+        run_volumes = [self._volumes_in(p, t) for p, t in runs]
 
-        noise_targets = self._targets_in(self._read_pcap(self._noise_pcap_path()))
-        diff = sorted(all_targets - noise_targets)
+        noise_packets = self._read_pcap(self._noise_pcap_path())
+        noise_targets = self._targets_in(noise_packets)
+        noise_volumes = self._volumes_in(noise_packets, noise_targets & all_targets)
+        noise_queries = self._dns_query_counts(noise_packets)
 
-        result = []
-        for endpoint in diff:
+        targets_out: list[str] = []
+        filtered_targets: dict[str, str] = {}
+        reported_names: set[str] = set()
+        for endpoint in sorted(all_targets):
             target_ip, target_port, proto = self._parse_endpoint(endpoint)
-            packets = next((p for p, t in per_run if endpoint in t), [])
-            sent_bytes, received_bytes = self._count_bytes_in(
-                packets, target_ip, target_port, proto
+            first = next(i for i, (_, t) in enumerate(runs) if endpoint in t)
+            packets = runs[first][0]
+            shown = run_volumes[first].get(endpoint, _Volume())
+            busiest = max(
+                (v.get(endpoint, _Volume()) for v in run_volumes),
+                key=lambda v: (v.total, v.packets),
             )
             sni = (
                 self._sni_names_in(packets, target_ip, target_port)
                 if proto == "tcp"
                 else set()
             )
-            label = endpoint + self._host_label(dns_names.get(target_ip, set()), sni)
+            names = dns_names.get(target_ip, set())
+            label = endpoint + self._host_label(names, sni)
             note = ""
-            if (
-                sent_bytes == 0
-                and received_bytes == 0
-                and not self._got_reply(packets, target_ip, target_port, proto)
+            if endpoint in noise_targets:
+                noise = noise_volumes.get(endpoint, _Volume())
+                if not _above_background(busiest, noise):
+                    filtered_targets[label] = (
+                        f"comparable to background: dry run {noise.describe()}, "
+                        f"busiest action run {busiest.describe()}"
+                    )
+                    continue
+                note = f"; also seen in background: {noise.describe()}"
+            reported_names.update(names)
+            if shown.total == 0 and not self._got_reply(
+                packets, target_ip, target_port, proto
             ):
-                note = "; no reply, connection attempt only"
-            result.append(
-                f"{label} ({sent_bytes}B sent to / {received_bytes}B received from"
+                note = "; no reply, connection attempt only" + note
+            targets_out.append(
+                f"{label} ({shown.sent}B sent to / {shown.received}B received from"
                 f"{note})"
             )
-
             NetworkEvent(
                 event_type_name="connection",
                 protocol=proto,
                 source_ip="",
                 dest_ip=target_ip,
                 dest_port=target_port,
-                data_size=sent_bytes + received_bytes,
+                data_size=shown.total,
                 source="network",
             ).publish()
 
+        dns_out: list[str] = []
+        filtered_dns: dict[str, str] = {}
+        factor = NOISE_VOLUME_FACTOR
+        for name in sorted(run_queries):
+            entry = name
+            if name in noise_queries:
+                background = noise_queries[name]
+                busiest_queries = run_queries[name]
+                if (
+                    name.rstrip(".") not in reported_names
+                    and busiest_queries <= factor * background + NOISE_DNS_QUERIES_FLOOR
+                ):
+                    filtered_dns[name] = (
+                        f"comparable to background: dry run {background} "
+                        f"queries, busiest action run {busiest_queries} queries, "
+                        "no destination above background resolved to it"
+                    )
+                    continue
+                entry = f"{name} (also seen in background: {background} queries)"
+            dns_out.append(entry)
+            NetworkEvent(
+                event_type_name="dns_request",
+                protocol="dns",
+                source_ip="",
+                dest_ip=name,
+                dest_port=53,
+                data_size=0,
+                source="network",
+            ).publish()
+
+        self.dns_requests = dns_out
+        self.target_ips_and_ports = targets_out
+        self.filtered_network_noise = {
+            "Network": filtered_dns,
+            "Network IP:Port (send/recv)": filtered_targets,
+        }
+        self.performed_diff = True
+
+        hidden = len(filtered_dns) + len(filtered_targets)
         TaskOutput(
             task_name="network",
-            message=f"Found {len(result)} unique IP:port connections",
+            message=(
+                f"Found {len(dns_out)} DNS names and {len(targets_out)} IP:port "
+                f"targets ({hidden} comparable to the dry-run background hidden, "
+                "see Other Data -> Filtered Noise)"
+            ),
             level="info",
             source="network",
         ).publish()
-
-        return result
 
     @classmethod
     def extract_target_ips_and_ports(cls, pcap_path: str) -> set[str]:

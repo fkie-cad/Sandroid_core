@@ -83,7 +83,8 @@ def test_pull_path_success_uses_remote_path_basename(monkeypatch, tmp_path):
     result = file_transfer.pull_path("/data/local/tmp/config.xml")
 
     expected_destination = tmp_path / "ai_pulls" / "2026-01-01_00-00-00_config.xml"
-    assert captured["remote_path"] == shlex.quote("/data/local/tmp/config.xml")
+    # Unquoted: FileExtractionService.pull_file quotes for the host shell.
+    assert captured["remote_path"] == "/data/local/tmp/config.xml"
     assert captured["local_path"] == str(expected_destination)
     assert captured["compute_hash"] is True
     assert result == {
@@ -124,7 +125,7 @@ def test_pull_path_sanitizes_shell_metacharacters_in_local_filename(
 ):
     """Regression (review-caught, PoC-confirmed HIGH bug): a local_filename
     whose basename contains shell metacharacters used to reach
-    FileExtractionService.pull_file's unquoted
+    FileExtractionService.pull_file's (then unquoted)
     f"pull {remote_path} {local_path}" completely unsanitized beyond
     stripping '/', letting a crafted filename execute on the HOST machine.
     The destination actually used must be built from the *sanitized*

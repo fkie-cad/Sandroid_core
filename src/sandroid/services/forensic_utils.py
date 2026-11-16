@@ -11,6 +11,14 @@ import re
 
 # Pre-compiled patterns for filesystem parsing
 TIME_PATTERN = re.compile(r"\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d")
+#: One ``ls -l --full-time`` entry: the timestamp column (date, time with
+#: optional fraction, optional ``+0100`` zone) and *everything* after it as
+#: the name, so names with spaces (WebView's ``Web Data``, ``Session
+#: Storage``) are kept whole.
+LS_FULL_TIME_ENTRY = re.compile(
+    r"(?P<timestamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?(?: [+-]\d{4})?)"
+    r" (?P<name>.+)$"
+)
 DIR_PATTERN = re.compile(r"/.*:$")
 
 # WAL/journal file suffixes
@@ -56,6 +64,7 @@ def get_parent_db_path(file_path: str) -> str | None:
 
 __all__ = [
     "DIR_PATTERN",
+    "LS_FULL_TIME_ENTRY",
     "TIME_PATTERN",
     "get_parent_db_path",
     "is_wal_or_journal",
