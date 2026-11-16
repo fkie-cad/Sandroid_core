@@ -105,7 +105,7 @@ class SandroidTUI(App):
         # Navigation
         Binding("D", "show_device_selector", "Devices", priority=True),
         Binding("q", "quit", "Quit"),
-        Binding("escape", "maybe_quit", "Back/Quit", priority=True),
+        Binding("escape", "maybe_quit", "Back", priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
@@ -685,6 +685,13 @@ class SandroidTUI(App):
                 frida_service.invalidate_frida_device_cache()
                 if device:
                     logger.info(f"Device changed to: {device.serial}")
+                    # Same serial after an emulator restart: the job manager
+                    # would keep its dead frida handle ("device is gone").
+                    from sandroid.tui.controllers.recording_controller import (
+                        drop_stale_frida_device,
+                    )
+
+                    drop_stale_frida_device()
                     frida_service.update_device_serial(device.serial)
                     # Re-warm the per-serial kprobe availability cache for the
                     # new device (off-thread) and re-sync an open SettingsScreen.
@@ -908,7 +915,10 @@ class SandroidTUI(App):
         self._quit_controller.request_quit()
 
     def action_maybe_quit(self) -> None:
-        """Handle ESC -- dismiss modal or show quit confirmation."""
+        """Handle ESC -- dismiss the top modal or leave a focused input.
+
+        Never opens the Quit dialog from the main screen (q / Ctrl+C do).
+        """
         self._quit_controller.maybe_quit()
 
     def exit(self, result=None, return_code: int = 0) -> None:
@@ -916,6 +926,12 @@ class SandroidTUI(App):
         global _current_tui_app
         _current_tui_app = None
         self._quit_controller.force_exit()
+        # Stop a running replay: its thread worker cannot be cancelled by
+        # Textual and would otherwise keep tapping on the device (P2-H1).
+        try:
+            self._recording_controller.stop_playback()
+        except Exception:
+            pass
         # Stop the real-time device monitor before cancelling workers. Guard
         # getattr (the monitor may never have been created if the app exits
         # during StartupScreen) and the call (stop() is idempotent).
@@ -1619,8 +1635,14 @@ class SandroidTUI(App):
         return rc.start_recording()
 
     def action_play(self) -> bool:
-        """Global ``p``: replay the current recording N times and diff."""
+        """Global ``p``: replay the current recording N times and diff.
+
+        While a replay is running, ``p`` offers to stop it instead.
+        """
         rc = self._recording_controller
+        if rc.is_replaying:
+            self._confirm_stop_replay()
+            return False
         if rc.is_recording():
             self.notify(
                 "Stop the recording first (Esc or Enter in the recording window).",
@@ -1645,6 +1667,23 @@ class SandroidTUI(App):
         if ms is not None:
             ms.open_files_tab(sub_tab="files-diffs")
         return rc.start_playback()
+
+    def _confirm_stop_replay(self) -> None:
+        """Ask before stopping the running replay (``p`` while replaying)."""
+        from sandroid.tui.modals import ConfirmModal
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                self._recording_controller.stop_playback()
+
+        self.push_screen(
+            ConfirmModal(
+                title="Stop replay",
+                message="A replay is running. Stop it now? The partial run "
+                "is still saved in Files > Diffs.",
+            ),
+            on_result,
+        )
 
     def _notify_diffs_new_run(self, run_id: str) -> None:
         """Tell DiffsView a new run was saved (RecordingController's on_run_saved).

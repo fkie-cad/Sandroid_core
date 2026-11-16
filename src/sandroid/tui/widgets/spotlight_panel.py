@@ -575,6 +575,39 @@ class SpotlightPanel(Widget):
             # Resuming a paused spawn — frida is already attached, no gate.
             self._run_action_bg(self._work_resume, "resume")
         elif self._safe_pid():
+            # The cached PID may be stale (app died, snapshot load): the poll
+            # only refreshes it every few seconds while this tab is shown.
+            # Re-check the device before refusing to start.
+            self._recheck_pid_then_start()
+        else:
+            self._run_frida_action(self._work_start, "start", "Spawning an app")
+
+    def _recheck_pid_then_start(self) -> None:
+        """Re-read the app's PID off-thread; start it if it is really gone."""
+        package = self._current_package()
+
+        def _check() -> None:
+            pid = None
+            try:
+                from sandroid.core.adb import Adb
+
+                pid = Adb.get_pid_for_package_name(
+                    package, use_frida_fallback=False, quiet=True
+                )
+            except Exception as exc:
+                logger.debug(f"PID re-check failed for {package}: {exc}")
+            try:
+                self._spotlight().set_pid(pid)
+            except Exception:
+                pass
+            self._last_running_state = pid is not None
+            self._post(self._after_pid_recheck, pid)
+
+        self.run_worker(_check, name="spotlight_pid_recheck", thread=True)
+
+    def _after_pid_recheck(self, pid: int | None) -> None:
+        self.refresh_panel()
+        if pid:
             self._notify(
                 "Already running — ⇧R restart · ⇧A re-attach · ⇧K kill",
                 "information",

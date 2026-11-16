@@ -38,6 +38,78 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def reset_device_handles_after_snapshot_load() -> None:
+    """Forget device state that an emulator snapshot load has invalidated.
+
+    Loading a snapshot kills every app process and the emulator's frida
+    device object. Afterwards the cached ``JobManager.device`` raised
+    "device is gone" on every spawn until the TUI was restarted, and
+    Spotlight kept showing the dead PID. Drops the job manager's session
+    and device handle (it re-creates the handle lazily on the next spawn),
+    the frida device cache and the Spotlight PID, then publishes
+    ``STATE_CHANGED`` so the panels refresh. Never raises; call it from a
+    worker thread (the session reset may wait on frida for a few seconds).
+    """
+    from sandroid import services
+
+    try:
+        frida_svc = services.get_frida_session_service()
+        jm = getattr(frida_svc, "_job_manager", None)
+        if jm is not None:
+            try:
+                jm.reset_session(timeout_per_job=1.0, detach_timeout=1.0)
+            except Exception:
+                logger.debug("JobManager reset after snapshot load failed", exc_info=True)
+            jm.device = None
+        frida_svc.invalidate_frida_device_cache()
+    except Exception:
+        logger.debug("Could not reset frida state after snapshot load", exc_info=True)
+    try:
+        services.get_spotlight_service().set_pid(None)
+    except Exception:
+        logger.debug("Could not clear the Spotlight PID", exc_info=True)
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={"change_type": "snapshot_loaded"},
+                source="recording_controller",
+            )
+        )
+    except Exception:
+        logger.debug("Could not publish the snapshot-load refresh", exc_info=True)
+
+
+def drop_stale_frida_device() -> bool:
+    """Drop the job manager's frida device handle if it can no longer work.
+
+    For device (re)connects: after an emulator restart the serial is the
+    same, so nothing else refreshes ``JobManager.device`` and every spawn
+    fails with "device is gone". The handle is dropped when frida reports
+    it lost, or when no process session uses it; the job manager re-creates
+    it on the next spawn. Never raises.
+
+    Returns:
+        True if a handle was dropped.
+    """
+    try:
+        from sandroid import services
+
+        jm = getattr(services.get_frida_session_service(), "_job_manager", None)
+        device = getattr(jm, "device", None)
+        if device is None:
+            return False
+        lost = bool(getattr(device, "is_lost", False))
+        if lost or getattr(jm, "process_session", None) is None:
+            jm.device = None
+            return True
+    except Exception:
+        logger.debug("Could not check the frida device handle", exc_info=True)
+    return False
+
+
 @dataclass
 class PlaybackResult:
     """Result of playback analysis."""
@@ -205,6 +277,28 @@ class RecordingController:
     def _default_log(self, message: str) -> None:
         """Default logging when no callback provided."""
         logger.info(message)
+
+    def _ui(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Run a UI callback on the main thread; never raise.
+
+        ``App.call_from_thread`` re-raises whatever the callback raised and
+        raises itself once the app has stopped (crash or quit). On the
+        playback worker that used to abort the thread before the run was
+        persisted, so a UI problem lost the analysis results (P2-H1). UI
+        updates are best-effort; persistence must never depend on them.
+        """
+        try:
+            self._call_from_thread(fn, *args)
+        except Exception:
+            logger.debug("UI update %r failed (ignored)", fn, exc_info=True)
+
+    @staticmethod
+    def _guarded(fn: Callable[..., Any], *args: Any) -> None:
+        """Call ``fn(*args)`` directly, logging instead of raising."""
+        try:
+            fn(*args)
+        except Exception:
+            logger.debug("Callback %r failed (ignored)", fn, exc_info=True)
 
     def _get_toolbox(self) -> Any:
         """Get Toolbox reference."""
@@ -409,15 +503,15 @@ class RecordingController:
         self._current_noise_filter = noise_filter
 
         if self._suppress_disconnect_guard:
-            self._call_from_thread(self._suppress_disconnect_guard, True)
+            self._ui(self._suppress_disconnect_guard, True)
         try:
             self._get_toolbox().create_snapshot(b"tmp")
         except Exception as e:
             if self._suppress_disconnect_guard:
-                self._call_from_thread(self._suppress_disconnect_guard, False)
+                self._ui(self._suppress_disconnect_guard, False)
             return {"success": False, "message": f"Failed to create snapshot: {e}"}
         if self._suppress_disconnect_guard:
-            self._call_from_thread(self._suppress_disconnect_guard, False)
+            self._ui(self._suppress_disconnect_guard, False)
 
         from sandroid.tui.utils.recording_wrapper import RecordingWrapper
 
@@ -432,8 +526,8 @@ class RecordingController:
             stop_callback=wrapper.stop,
         )
         if self._set_recording_indicator:
-            self._call_from_thread(self._set_recording_indicator, True)
-        self._call_from_thread(
+            self._ui(self._set_recording_indicator, True)
+        self._ui(
             self._log_info,
             f"[AI] Recording '{self._current_recording_label}' started",
         )
@@ -462,8 +556,8 @@ class RecordingController:
         duration = wrapper.elapsed_seconds if wrapper else 0
 
         if self._set_recording_indicator:
-            self._call_from_thread(self._set_recording_indicator, False)
-        self._call_from_thread(
+            self._ui(self._set_recording_indicator, False)
+        self._ui(
             self._log_success,
             f"[AI] Recording stopped: {event_count} events, {duration}s",
         )
@@ -531,6 +625,11 @@ class RecordingController:
 
         self._log_info("Starting playback analysis...")
 
+        # A previous Stop/quit left the process-wide cancel flag set.
+        from sandroid.features.player import Player
+
+        Player.clear_cancel()
+
         # Run playback in worker thread (non-blocking)
         if self._run_worker:
             self._run_worker(
@@ -543,6 +642,26 @@ class RecordingController:
             # Fallback to synchronous execution
             self._run_playback_analysis()
 
+        return True
+
+    def stop_playback(self) -> bool:
+        """Stop the running replay (Play) as soon as possible.
+
+        Sets the process-wide :class:`~sandroid.features.player.Player`
+        cancel flag: the replay stops before its next input event, the
+        engine skips the remaining runs, and the partial run is still saved
+        (with a "Replay cancelled" error) by :meth:`_run_playback_analysis`.
+        Call from the UI thread; a no-op when nothing is replaying.
+
+        Returns:
+            True if a replay was running and has been asked to stop.
+        """
+        from sandroid.features.player import Player
+
+        if not self._is_replaying:
+            return False
+        Player.cancel_all()
+        self._guarded(self._log_warning, "Stopping replay...")
         return True
 
     def start_playback_chat(
@@ -618,6 +737,78 @@ class RecordingController:
             "noise_filter": self._current_noise_filter,
         }
 
+    @staticmethod
+    def _active_device_name() -> str | None:
+        """Name of the active device (AVD name for emulators), or None.
+
+        Also records it in the session state (``Toolbox.device_name``) when
+        that still holds another value, e.g. the hard-coded default.
+        """
+        try:
+            from sandroid.core.device_manager import (
+                DeviceManager,
+                resolve_device_name,
+            )
+
+            dm = DeviceManager.get()
+            device = dm.active_device
+            if device is None:
+                return None
+            if device.is_emulator:
+                dm.get_avd_name_for_device(device)  # cached after the first call
+            name = resolve_device_name(device)
+            if name:
+                DeviceManager._sync_session_device_name(device)
+            return name or None
+        except Exception:
+            logger.debug("Could not resolve the active device name", exc_info=True)
+            return None
+
+    def _current_device_name(self) -> str:
+        """Device name a run is recorded under.
+
+        Resolved from the active device at run time rather than trusting
+        ``Toolbox.device_name`` alone: that value starts as the hard-coded
+        session default (``Pixel_6_Pro_API_31``) and was not updated on
+        every activation path, so runs, sandroid.json and the PDF named the
+        wrong device (P2-H5). Falls back to ``Toolbox.device_name`` without
+        a device, and whenever the session does not agree with the resolved
+        name: the engine aborts a run whose ``Toolbox.device_name`` differs
+        from the configured one ("device changed mid-run").
+        """
+        toolbox = self._get_toolbox()
+        fallback = getattr(toolbox, "device_name", None) or "unknown"
+        name = self._active_device_name()
+        if name and getattr(toolbox, "device_name", None) == name:
+            return name
+        return fallback
+
+    @staticmethod
+    def _avd_dir(avd_name: str) -> str | None:
+        """Host directory of ``avd_name`` (honours ANDROID_AVD_HOME and the
+        ``path=`` redirect in ``<avd>.ini``), or None if not found.
+        """
+        from pathlib import Path
+
+        try:
+            from sandroid.config.android_env import find_existing_avd_home
+
+            home = find_existing_avd_home()
+        except Exception:
+            home = None
+        if home is None:
+            home = Path("~/.android/avd").expanduser()
+        ini = home / f"{avd_name}.ini"
+        try:
+            for line in ini.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip() == "path" and Path(value.strip()).is_dir():
+                    return value.strip()
+        except OSError:
+            pass
+        default = home / f"{avd_name}.avd"
+        return str(default) if default.is_dir() else None
+
     def _verify_snapshot(self) -> bool:
         """Verify that a snapshot exists for playback.
 
@@ -626,34 +817,17 @@ class RecordingController:
         """
         try:
             toolbox = self._get_toolbox()
-            device_name = toolbox.device_name
-            snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "tmp",
-            )
-
+            name = self._active_device_name() or getattr(toolbox, "device_name", "")
+            avd_dir = self._avd_dir(name) if name else None
+            if avd_dir is None:
+                return False
+            snapshot_path = os.path.join(avd_dir, "snapshots", "tmp")
             logger.debug(f"Looking for snapshot at: {snapshot_path}")
-
             if os.path.exists(snapshot_path):
                 return True
-
-            # Try alternative path patterns
-            alt_snapshot_path = os.path.join(
-                os.path.expanduser("~"),
-                ".android",
-                "avd",
-                f"{device_name}.avd",
-                "snapshots",
-                "default_boot",
-            )
-            if os.path.exists(alt_snapshot_path):
+            if os.path.exists(os.path.join(avd_dir, "snapshots", "default_boot")):
                 self._log_info("Using default_boot snapshot")
                 return True
-
         except Exception as e:
             logger.debug(f"Error checking snapshot path: {e}")
 
@@ -699,12 +873,12 @@ class RecordingController:
 
             task_service.stop("monitor")
 
-            self._call_from_thread(
+            self._ui(
                 self._log_warning,
                 "monitor stopped — won't survive Play's snapshot revert.",
             )
             if self._on_monitor_stopped_for_playback:
-                self._call_from_thread(self._on_monitor_stopped_for_playback)
+                self._ui(self._on_monitor_stopped_for_playback)
 
             return config
         except Exception as e:
@@ -785,7 +959,7 @@ class RecordingController:
         from sandroid.core import run_bundle, run_history
 
         toolbox = self._get_toolbox()
-        device_name = getattr(toolbox, "device_name", None) or "unknown"
+        device_name = self._current_device_name()
         recorded_at = datetime.now().isoformat()
         run_id = run_history.new_run_id()
         result: Any = None
@@ -828,9 +1002,9 @@ class RecordingController:
                 # idempotent when the matching arm never ran.
                 try:
                     if self._set_replay_indicator:
-                        self._call_from_thread(self._set_replay_indicator, True)
+                        self._ui(self._set_replay_indicator, True)
                     if self._suppress_disconnect_guard:
-                        self._suppress_disconnect_guard(True)
+                        self._guarded(self._suppress_disconnect_guard, True)
                     result = AnalysisEngine(
                         config,
                         progress=self._emit_progress,
@@ -843,13 +1017,17 @@ class RecordingController:
                     # run's error.
                     error = result.error
                 finally:
+                    # The engine's snapshot loads killed every app process
+                    # and the frida device handle; drop both so the next
+                    # spawn and the Spotlight PID start fresh.
+                    reset_device_handles_after_snapshot_load()
                     if self._suppress_disconnect_guard:
-                        self._suppress_disconnect_guard(False)
+                        self._guarded(self._suppress_disconnect_guard, False)
                     if self._set_replay_indicator:
-                        self._call_from_thread(self._set_replay_indicator, False)
+                        self._ui(self._set_replay_indicator, False)
             except Exception as e:
                 error = f"Playback failed: {e}"
-                self._call_from_thread(self._log_error, error)
+                self._ui(self._log_error, error)
         finally:
             self._is_replaying = False
             self._release_replay_world_lease()
@@ -857,19 +1035,28 @@ class RecordingController:
         # Persist regardless of a mid-pipeline error, so a failed/partial run
         # is still visible in Diffs (with its error message) instead of
         # silently vanishing — this is exactly why RunRecord.error exists.
-        self._call_from_thread(self._log_info, "Saving results...")
-        saved_run_id = self._persist_run(
-            run_id=run_id,
-            result=result,
-            recording_path=abs_rec,
-            bundle_dir=str(run_bundle.bundle_dir(run_id)),
-            device_name=device_name,
-            recorded_at=recorded_at,
-            error=error,
-        )
+        # Every UI touch goes through _ui(), which never raises, so a dead or
+        # broken UI can no longer skip this step (P2-H1).
+        self._ui(self._log_info, "Saving results...")
+        try:
+            saved_run_id = self._persist_run(
+                run_id=run_id,
+                result=result,
+                recording_path=abs_rec,
+                bundle_dir=str(run_bundle.bundle_dir(run_id)),
+                device_name=device_name,
+                recorded_at=recorded_at,
+                error=error,
+            )
+        except Exception as e:
+            logger.exception("Persisting run %s failed", run_id)
+            self._ui(self._log_error, f"Could not save run {run_id}: {e}")
+            saved_run_id = None
 
-        if error is None and result is not None:
-            self._call_from_thread(
+        if error == "Replay cancelled":
+            self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
+        elif error is None and result is not None:
+            self._ui(
                 self._log_success,
                 f"Analysis complete: {len(result.changed_files)} changed, "
                 f"{len(result.new_files)} new, "
@@ -877,7 +1064,7 @@ class RecordingController:
             )
 
         if saved_run_id and self._on_run_saved:
-            self._call_from_thread(self._on_run_saved, saved_run_id)
+            self._ui(self._on_run_saved, saved_run_id)
 
         # Offer to resume monitoring once Play is fully done — regardless of
         # success/error above, since resuming monitor is orthogonal to whether
@@ -886,7 +1073,7 @@ class RecordingController:
         # when monitor wasn't running to begin with, and in the true-no-op
         # case covered by _stop_monitor_before_revert).
         if monitor_config_for_resume is not None and self._on_monitor_resume_available:
-            self._call_from_thread(
+            self._ui(
                 self._on_monitor_resume_available, monitor_config_for_resume
             )
 
@@ -903,7 +1090,7 @@ class RecordingController:
         line = f"{label}: {message}" if message else label
         if not line:
             return
-        self._call_from_thread(self._log_info, line)
+        self._ui(self._log_info, line)
 
     def _persist_run(
         self,
@@ -972,7 +1159,7 @@ class RecordingController:
         try:
             run_bundle.write_manifest(record)
         except Exception as e:
-            self._call_from_thread(
+            self._ui(
                 self._log_warning,
                 f"Could not save run history: {e}",
             )
@@ -1012,7 +1199,7 @@ class RecordingController:
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
-            self._call_from_thread(
+            self._ui(
                 self._log_info,
                 f"[warning]Could not save legacy results summary: {e}[/warning]",
             )
@@ -1046,14 +1233,14 @@ class RecordingController:
                 generate_pdf=generate_pdf,
             )
             if outcome.pdf is not None:
-                self._call_from_thread(self._log_success, f"PDF report: {outcome.pdf}")
+                self._ui(self._log_success, f"PDF report: {outcome.pdf}")
             for err in outcome.errors:
-                self._call_from_thread(
+                self._ui(
                     self._log_warning, f"Report finalisation issue: {err}"
                 )
         except Exception as e:
             logger.exception("finalize_run failed")
-            self._call_from_thread(
+            self._ui(
                 self._log_warning, f"Could not write run report files: {e}"
             )
 

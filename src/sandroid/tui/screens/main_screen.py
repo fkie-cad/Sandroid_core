@@ -636,9 +636,14 @@ class MainScreen(Screen):
                 App.call_from_thread (blocks until processed). This prevents
                 deadlocks when EventBus subscribers are called from any thread.
                 """
+                # call_later posts to this screen's message queue (thread-safe
+                # and non-blocking like call_soon_threadsafe), but the handler
+                # then runs with Textual's app context set. A bare loop
+                # callback runs without it, so any handler that mounts or
+                # pushes a widget raised NoActiveAppError (P2-H1).
                 try:
                     if main_loop is not None and not main_loop.is_closed():
-                        main_loop.call_soon_threadsafe(handler, event)
+                        self.call_later(handler, event)
                 except RuntimeError:
                     pass  # Event loop closed during shutdown
                 except Exception as e:
