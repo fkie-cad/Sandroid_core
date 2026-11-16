@@ -500,6 +500,10 @@ def describe_run_settings(run_config: Any) -> dict[str, Any]:
         settings["capture_window"] = window
     whitelist = getattr(run_config, "whitelist", None)
     settings["whitelist_file"] = str(whitelist) if whitelist else None
+    if type(action).__name__ == "Player":
+        from sandroid.analysis.engine import _replay_settle_seconds
+
+        settings["replay_settle_seconds"] = _replay_settle_seconds(run_config)
     return settings
 
 

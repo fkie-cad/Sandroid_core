@@ -281,6 +281,16 @@ class TestMetadata:
         assert analysis["avoid_strong_noise_filter"] is True
         assert meta["run_settings"]["capture_network"] is False
 
+    def test_run_settings_record_replay_settle(self):
+        """A replayed run records the post-replay settle time it used."""
+        from types import SimpleNamespace
+
+        Player = type("Player", (), {})
+        used = SimpleNamespace(action=Player(), replay_settle_seconds=12)
+        assert run_report.describe_run_settings(used)["replay_settle_seconds"] == 12
+        plain = SimpleNamespace(action=None, replay_settle_seconds=12)
+        assert "replay_settle_seconds" not in run_report.describe_run_settings(plain)
+
     def test_host_metadata(self):
         from sandroid._version import __version__
 
