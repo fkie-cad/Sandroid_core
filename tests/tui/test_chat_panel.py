@@ -8,10 +8,10 @@ drive a Textual app/widget in a test, and the only way to confirm
 ``ChatPanel.compose()``/``on_mount()`` actually run end-to-end without
 raising (as opposed to just importing the module).
 
-Does not touch ``Toolbox``/config/ADB at all: ChatPanel's constructor,
-``compose()``, and ``on_mount()`` never read config or talk to a device --
-that only happens once a message is actually submitted -- so this mounts
-cleanly with zero fixtures.
+Does not touch ADB at all. ChatPanel's ``compose()``/``on_mount()`` only
+*read* ``Toolbox.config.ai`` (best-effort, for the header and the data-egress
+notice -- a missing config just renders the "not configured" state), so this
+mounts cleanly with zero fixtures.
 """
 
 import asyncio
@@ -627,7 +627,7 @@ async def test_on_input_submitted_pushes_a_text_renderable_for_the_user_line(
         Toolbox,
         "config",
         SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
         ),
         raising=False,
     )
@@ -1028,7 +1028,7 @@ async def test_completion_while_idle_pushes_line_and_launches_hidden_turn(
         Toolbox,
         "config",
         SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
         ),
         raising=False,
     )
@@ -1094,7 +1094,7 @@ async def test_completion_during_turn_defers_then_surfaces_and_launches(
         Toolbox,
         "config",
         SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
         ),
         raising=False,
     )
@@ -1149,7 +1149,7 @@ async def test_two_completions_push_two_lines_and_one_batched_hidden_turn(
         Toolbox,
         "config",
         SimpleNamespace(
-            ai=SimpleNamespace(base_url="http://x", api_key="k", model="m")
+            ai=SimpleNamespace(base_url="http://127.0.0.1:1/v1", api_key="k", model="m")
         ),
         raising=False,
     )
@@ -1409,3 +1409,121 @@ async def test_subtask_bar_hides_shows_count_and_lists_rows(stub_manager):
         await pilot.pause()
         assert bar.display is False
         assert mascot.display is True
+
+
+# -- safety defaults: not-configured state, egress notice, redaction ---------
+
+
+def _log_text(app) -> str:
+    log = app.query_one("#chat-log", RichLog)
+    return "\n".join(strip.text for strip in log.lines)
+
+
+def _set_ai(monkeypatch, **ai) -> None:
+    from sandroid.core.toolbox import Toolbox
+
+    monkeypatch.setattr(
+        Toolbox, "config", SimpleNamespace(ai=SimpleNamespace(**ai)), raising=False
+    )
+
+
+async def test_unconfigured_chat_shows_clear_state_and_sends_nothing(monkeypatch):
+    """AI is off unless configured: a clear notice instead of an error, and
+    submitting never reaches the model.
+    """
+    _set_ai(monkeypatch)  # no base_url/api_key/model
+    called = []
+    monkeypatch.setattr(
+        chat_panel_module, "run_agent_turn", lambda *a, **kw: called.append(a)
+    )
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        await pilot.pause()
+        header = str(app.query_one("#chat-header", Static).content)
+        assert "not configured" in header
+        log_text = _log_text(app)
+        assert "EXPERIMENTAL" in log_text
+        assert "not configured" in log_text
+
+        panel._launch_turn("hello")
+        await pilot.pause()
+        assert panel._turn_in_progress is False
+        assert called == []
+        assert any(
+            isinstance(line, str) and "not configured" in line
+            for line in panel._history_lines
+        )
+
+
+async def test_remote_endpoint_refused_without_allow_remote(monkeypatch):
+    _set_ai(
+        monkeypatch, base_url="https://api.example.com/v1", api_key="k", model="m"
+    )
+    called = []
+    monkeypatch.setattr(
+        chat_panel_module, "run_agent_turn", lambda *a, **kw: called.append(a)
+    )
+
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(120, 40)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        panel._launch_turn("hello")
+        await pilot.pause()
+        assert called == []
+        assert panel._turn_in_progress is False
+        assert any(
+            isinstance(line, str) and "allow_remote" in line
+            for line in panel._history_lines
+        )
+        assert "blocked" in str(app.query_one("#chat-header", Static).content)
+
+
+async def test_egress_notice_names_endpoint_and_model_before_first_message(
+    monkeypatch,
+):
+    _set_ai(
+        monkeypatch,
+        base_url="http://localhost:11434/v1",
+        api_key="k-secret-value",
+        model="qwen2.5",
+    )
+    app = _ChatPanelHarness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        panel = app.query_one("#chat-panel", ChatPanel)
+        await pilot.pause()
+        log_text = _log_text(app)
+        assert "EXPERIMENTAL" in log_text
+        assert "http://localhost:11434/v1" in log_text
+        assert "qwen2.5" in log_text
+        assert "k-secret-value" not in log_text
+        header = str(app.query_one("#chat-header", Static).content)
+        assert "EXPERIMENTAL" in header
+        assert "qwen2.5" in header
+
+        # The notice is UI-only: never part of the conversation history.
+        assert panel._history_lines == []
+        assert all("EXPERIMENTAL" not in m["content"] for m in panel._messages)
+
+        # It survives Ctrl+L.
+        panel.action_clear_log()
+        await pilot.pause()
+        assert "http://localhost:11434/v1" in _log_text(app)
+
+
+def test_turn_errors_are_redacted(monkeypatch):
+    _set_ai(
+        monkeypatch,
+        base_url="http://localhost:11434/v1",
+        api_key="k-secret-value",
+        model="m",
+    )
+    panel = ChatPanel()
+    panel._report_turn_error("AI backend error: bad key k-secret-value")
+    panel._append_ui_event(
+        {"type": "error", "message": "Authorization: Bearer k-secret-value"}
+    )
+    text = "\n".join(str(line) for line in panel._history_lines)
+    assert "k-secret-value" not in text
+    assert "***" in text

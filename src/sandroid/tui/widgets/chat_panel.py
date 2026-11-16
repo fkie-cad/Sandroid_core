@@ -93,6 +93,7 @@ from sandroid.ai import AIClientError, OpenAIClient, get_tool_registry, run_agen
 from sandroid.ai.arbiter import get_arbiter
 from sandroid.ai.context import build_ambient_block
 from sandroid.ai.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+from sandroid.ai.safety import egress_notice_lines, get_ai_settings, redact_secrets
 from sandroid.ai.subtasks import get_subtask_manager, should_reenter
 from sandroid.core.console import SANDROID_LOGO
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
@@ -638,7 +639,43 @@ class ChatPanel(Widget):
         return getattr(app, "sandroid_theme", None) or DEFAULT_THEME
 
     def _header_idle_markup(self) -> str:
-        return f"[{self._theme().muted_status_color}]○ idle[/]"
+        theme = self._theme()
+        settings = get_ai_settings()
+        if not settings.is_configured:
+            return (
+                f"[{theme.muted_status_color}]○ AI Chat not configured "
+                "(experimental, off by default)[/]"
+            )
+        if not settings.is_ready:
+            return f"[{theme.error}]○ AI endpoint blocked (remote not allowed)[/]"
+        where = "local" if settings.is_local else "REMOTE"
+        endpoint = escape(f"{settings.model} @ {settings.endpoint_display}")
+        return (
+            f"[{theme.muted_status_color}]○ idle · [/][{theme.warning}]"
+            f"EXPERIMENTAL[/][{theme.muted_status_color}] · {endpoint} "
+            f"({where})[/]"
+        )
+
+    def _egress_banner_lines(self) -> list[str]:
+        """The data-egress notice, always rendered at the top of the transcript.
+
+        Shown before the first message (it is drawn on mount, before any turn
+        can run) and kept above the conversation, so the analyst always sees
+        which endpoint/model receives device and app data -- see
+        :func:`sandroid.ai.safety.egress_notice_lines`. Recomputed from the
+        live config on every redraw; never stored in ``_history_lines`` and
+        never sent to the model.
+        """
+        theme = self._theme()
+        settings = get_ai_settings()
+        lines = egress_notice_lines(settings)
+        color = theme.warning if settings.is_ready else theme.error
+        if not settings.is_configured:
+            color = theme.muted_status_color
+        out = [f"[bold {theme.warning}]⚠ {escape(lines[0])}[/]"]
+        out.extend(f"[{color}]  {escape(line)}[/]" for line in lines[1:] if line)
+        out.append("")
+        return out
 
     def _header_error_markup(self) -> str:
         return f"[{self._theme().error}]○ error[/]"
@@ -674,6 +711,9 @@ class ChatPanel(Widget):
         yield Static("\n".join(_MASCOT_IDLE_FRAME), id="chat-mascot")
 
     def on_mount(self) -> None:
+        # Data-egress / not-configured notice first, before any message can
+        # be sent (see _egress_banner_lines), then the key hint.
+        self._redraw()
         try:
             self.query_one("#chat-log", RichLog).write(
                 f"[{self._theme().muted_status_color}]"
@@ -681,7 +721,7 @@ class ChatPanel(Widget):
             )
         except Exception:
             pass
-        self._update_mascot()
+        self.refresh_header()
         # Wire the subtask manager to this panel: it probes our live epoch at
         # spawn time and calls back (on a subtask thread) when a subtask
         # finishes. Leave client_factory at its default (it reads
@@ -858,18 +898,16 @@ class ChatPanel(Widget):
         if self._turn_in_progress:
             return
 
-        from sandroid.core.toolbox import Toolbox
-
-        ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
-        base_url = getattr(ai_cfg, "base_url", None)
-        api_key = getattr(ai_cfg, "api_key", None)
-        model = getattr(ai_cfg, "model", None)
-        if not (base_url and api_key and model):
-            self._push_history(
-                f"[{self._theme().error}]Set config.ai.base_url/api_key/model "
-                "to use Chat — see `sandroid-config` docs[/]"
-            )
+        # Safety gate (see sandroid.ai.safety): AI is off unless explicitly
+        # configured, and only a local endpoint is used unless
+        # ai.allow_remote is set. Refuse BEFORE anything is sent.
+        settings = get_ai_settings()
+        problem = settings.problem
+        if problem is not None:
+            self._push_history(f"[{self._theme().error}]{escape(problem)}[/]")
+            self.refresh_header()
             return
+        base_url, api_key, model = settings.base_url, settings.api_key, settings.model
 
         try:
             input_widget = self.query_one("#chat-input", Input)
@@ -1080,7 +1118,10 @@ class ChatPanel(Widget):
                 self._report_turn_error, f"AI backend error: {exc}"
             )
         except Exception as exc:  # must never crash the worker thread
-            logger.exception("Chat turn failed")
+            # Message redacted; the traceback only at debug level, since an
+            # exception's text could carry request details.
+            logger.error("Chat turn failed: %s", redact_secrets(exc))
+            logger.debug("Chat turn traceback", exc_info=True)
             self.app.call_from_thread(
                 self._report_turn_error, f"Chat turn failed: {exc}"
             )
@@ -1146,13 +1187,14 @@ class ChatPanel(Widget):
             self.refresh_header()
         elif etype == "error":
             self._finalize_live()
-            message = event.get("message", "unknown error")
+            message = redact_secrets(event.get("message", "unknown error"))
             self._push_history(f"[{self._theme().error}]error: {escape(message)}[/]")
             self._header_state = "error"
             self.refresh_header()
 
     def _report_turn_error(self, message: str) -> None:
         self._finalize_live()
+        message = redact_secrets(message)
         self._push_history(f"[{self._theme().error}]{escape(message)}[/]")
         self._header_state = "error"
         self.refresh_header()
@@ -1293,6 +1335,8 @@ class ChatPanel(Widget):
         except Exception:
             return
         log.clear()
+        for line in self._egress_banner_lines():
+            log.write(line)
         for line in self._history_lines:
             log.write(line)
         theme = self._theme()
@@ -1482,10 +1526,8 @@ class ChatPanel(Widget):
         self._subtasks_expanded = False
         self._selected_subtask_id = None
         self._subtask_bar_sig = None
-        try:
-            self.query_one("#chat-log", RichLog).clear()
-        except Exception:
-            pass
+        # Clears the log and re-draws just the egress notice on top.
+        self._redraw()
         self._refresh_subtask_bar()
 
     # -- subtask status bar -----------------------------------------------
