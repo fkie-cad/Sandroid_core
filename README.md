@@ -4,7 +4,9 @@
 </div>
 
 # Sandroid Framework
-![version](https://img.shields.io/badge/version-2.0.0-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
+![version](https://img.shields.io/badge/version-2.1.0-blue) [![PyPI version](https://badge.fury.io/py/Sandroid.svg)](https://badge.fury.io/py/Sandroid)
+![python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+[![Tests](https://github.com/fkie-cad/Sandroid_core/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/tests.yml)
 [![Ruff](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/lint.yml)
 [![Publish status](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml/badge.svg?branch=main)](https://github.com/fkie-cad/Sandroid_core/actions/workflows/publish.yml)
 
@@ -22,23 +24,16 @@ By using this framework, you can:
 The framework is designed to simplify the process of **forensic investigations**, **mobile threat detection**, and **security testing** by providing a streamlined, automated environment for analysis.
 Whether you're investigating malicious apps, assessing security flaws, or collecting digital evidence, this solution helps you quickly identify and understand what happens inside Android applications.
 
-## Interactive TUI
+## Requirements
 
-Sandroid's default interface is an interactive terminal UI. Instead of separate analysis "views", it presents a **flat catalog of single-key actions** alongside three companion surfaces:
-
-- **`?` — Keybinding editor / action catalog.** Browse every action grouped by category and rebind any key (including `Ctrl` combinations) with live conflict detection. Bindings are persisted and applied immediately.
-- **`Ctrl+Shift+P` — Command palette.** Fuzzy-search and run any action by name.
-- **`Ctrl+B` — Bottom panel.** A collapsible strip with three tabs — **Spotlight**, **Mitmproxy**, and **Snapshots** — switched with `←`/`→`.
-
-Common operations are a single keypress (run an analysis, set the proxy, attach to or spawn a target app, toggle SSL unpinning with `Ctrl+P`, …). Press `?` at any time to see and customise the full list.
-
-The **Snapshots** tab keeps an 8-slot snapshot memory per AVD: `1`–`8` load a slot, `Ctrl+1`–`Ctrl+8` save into a slot, and `a` assigns the highlighted snapshot to a slot.
-
-> Fully non-interactive runs are also available via `--headless`.
-
-<p align="center">
-  <img src="assets/screenshots/sandroid_tui.png" alt="Sandroid TUI" width="700"/>
-</p>
+- **Python 3.12 or 3.13** (Python 3.10/3.11 are no longer supported as of 2.1).
+- **Android SDK** platform-tools (`adb`) and the Android Emulator (e.g. via Android Studio). `sandroid-config init` auto-detects both.
+- **A rooted Android emulator (AVD).** Sandroid needs root on the device (it runs `adb root`, pushes and starts `frida-server`, and sets SELinux to *permissive* with `setenforce 0` itself). Two setups are known to work:
+  - a **Google APIs** system image (`google_apis`, *not* `google_apis_playstore`) — `adb root` works out of the box; or
+  - a **Google Play** system image rooted with [rootAVD](https://gitlab.com/newbit/rootAVD) (Magisk) **plus the Magisk `adb_root` module**, so that `adbd` itself runs as root. This is how the Sandroid team's own AVDs are set up.
+- **AVD snapshots** must be enabled — the record/play workflow and the Snapshots tab rely on them. Do **not** start the emulator with `-no-snapshot`; if you do not want the emulator to overwrite its quick-boot snapshot on exit use `-no-snapshot-save` (or simply start it via `sandroid-config avd start`).
+- **Physical devices** are only partially supported: they must be rooted, and everything that relies on the emulator (snapshots, emulator-console network capture/degradation, `-no-snapshot-*` boot modes) is unavailable.
+- Linux and macOS are the primary platforms; Windows works best via WSL2.
 
 ## Quick Start
 
@@ -46,14 +41,44 @@ The **Snapshots** tab keeps an 8-slot snapshot memory per AVD: `1`–`8` load a 
 # Install from PyPI
 pip install sandroid
 
-# Initialize configuration
+# Initialize configuration (detects the Android SDK and lets you pick/create an AVD)
 sandroid-config init
 
-# Run analysis in interactive mode
+# Start your AVD (keeps snapshots enabled)
+sandroid-config avd start
+
+# Launch the interactive TUI
 sandroid
 ```
 
 See [SETUP.md](SETUP.md) for all installation possibilities.
+
+## Interactive TUI
+
+Sandroid's default interface is an interactive terminal UI (Textual). It consists of a **glance band** at the top (device, frida-server, proxy and spotlight state at a glance), an **activity log**, a row of **always-on tool tabs**, and an optional **AI Chat dock**:
+
+| Tool tab | What it does |
+|---|---|
+| **Spotlight** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`), and toggle the Frida bypass categories `1`–`5` (SSL, Root, Frida, Debug, Integrity). |
+| **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
+| **Snapshots** | AVD snapshot list: create (`c`), load (`l`), delete (`d`), assign to a slot (`a`). Globally, `0` opens the tab, `1`–`8` load a slot and `Ctrl+1`–`Ctrl+8` save into a slot (8 slots per AVD). |
+| **Files** | Three sub-tabs: **Monitor** (live filesystem events), **Watchlist** (Spotlight Files: pull/diff selected files) and **Diffs** (Record → Play run history, see below). |
+
+Navigation: `Ctrl+B` focuses the tool tabs, `Shift+←/→` cycles tabs/sub-tabs, `Shift+↑/↓` moves between tab levels. `?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `Ctrl+Y` toggles the **AI Chat** dock, `D` switches devices and `q` quits. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
+
+> The 2.0 "views" (Forensic / Malware / Security, switched with `TAB`) are gone — all actions live in one flat catalog. Fully non-interactive runs are available via `--headless`.
+
+<p align="center">
+  <img src="assets/screenshots/sandroid_tui.png" alt="Sandroid TUI" width="700"/>
+</p>
+
+### Record → Play and run history
+
+In **Files → Diffs**, `r` records your interactions with the device and `p` plays them back: Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Diffs tab's run history, scoped to the active device. Runs are never deleted automatically.
+
+### File monitor (kprobe)
+
+The **Monitor** sub-tab (`o`) streams filesystem events from the device. The default backend (`tui.monitor_backend = "kprobe"`) uses kernel tracefs kprobes: kernel-verified per-PID attribution, following the whole child-process tree, path-scoped capture, and no binary pushed to the device. On kernels without the required support it falls back to the `fsmon` binary automatically (or set `monitor_backend = "fsmon"`).
 
 ## Usage
 
@@ -64,12 +89,10 @@ Usage: sandroid [OPTIONS]
 
 Core Options:
   -c, --config PATH               Configuration file path
-  -e, --environment TEXT           Environment name (development, testing, production)
+  -e, --environment TEXT          Environment name (development, testing, production)
   -f, --file PATH                 Save output to the specified file
   -ll, --loglevel [DEBUG|INFO|WARNING|ERROR|CRITICAL]
                                   Set the log level
-  --view [forensic|malware|security]
-                                  Set the initial view mode
   --fresh                         Start as if running for the first time
   --version                       Show the version and exit
 
@@ -117,18 +140,29 @@ Output & Debugging:
   --log                           Show log messages in terminal
 ```
 
-> **Note:** `--mode` only affects headless runs. The default TUI uses a flat, customisable action catalog (press `?`) rather than switchable views.
+> **Note:** `--mode` only affects headless runs. Removed since 2.0: `-i`/`--interactive` (legacy Rich menu), `--ai` (Gemini video summary) and the TUI view switch (`--view`). Results of a session are written to `./results/<timestamp>/` (`sandroid.json`, `sandroid.log`, per-device raw data and screenshots).
 
 
 ## Network Interception & Bypass
 
-Sandroid can route a target app's traffic through an embedded **mitmproxy** instance and defeat the common defences that get in the way of inspection.
+Sandroid can route a target app's traffic through an embedded **mitmproxy** instance and defeat the common defences that get in the way of inspection. Everything lives in **Network → Mitmproxy**; each step is its own keystroke, so none has a surprising side effect on the others:
 
-**mitmproxy capture.** Open the **Mitmproxy** tab (`Ctrl+B`) and press `Enter` to start `mitmweb`; this automatically points the device's HTTP proxy at the host. The proxy listens on `:8080` and the web UI is served at `http://127.0.0.1:8081/` (`Ctrl+O` opens it). The panel tails every flow and TLS failure live. Requires `mitmweb` on `PATH` (`pip install mitmproxy`).
+| Key | Action |
+|---|---|
+| `Enter` | start / stop `mitmweb` (proxy on `:8080`, web UI on `http://127.0.0.1:8081/`) |
+| `Ctrl+D` | toggle the **Device Proxy** (global `http_proxy` setting → our mitmproxy) |
+| `Ctrl+N` | install the mitmproxy CA into the device's **system** trust store |
+| `y` | **Proxy Settings** modal: Device Proxy, **App Proxies** and CA in one place |
+| `Ctrl+R` | restart `mitmweb` and re-apply device + app proxies |
+| `Ctrl+O` / `Ctrl+A` | open the web UI / manage addons |
 
-**CA certificate injection.** Press `y` to open the proxy dialog. Sandroid auto-detects the host CA certificate from mitmproxy (`~/.mitmproxy/mitmproxy-ca-cert.pem`), HTTP Toolkit, or Burp Suite (a custom path is also accepted) and injects it into the device's system trust store. On Android 14+ (API ≥ 34) it bind-mounts the certificate into the Conscrypt APEX trust store; on older releases it copies into the Zygote mount namespace. It also writes the Chrome command-line flags needed to bypass Certificate Transparency enforcement.
+Requires `mitmweb` on `PATH` (`pip install mitmproxy`).
 
-**Certificate-pinning & detection bypass.** Sandroid ships a Frida-based bypass suite with four categories — **SSL** unpinning, **Root**, **Frida**, and **Debug** detection — toggled from the **Spotlight** tab (`Ctrl+P` is a global shortcut for SSL unpinning). SSL unpinning covers `SSLContext`, OkHttp `CertificatePinner`, Conscrypt, WebView, TrustKit, Certificate Transparency, and native BoringSSL. All four categories live in a single resident Frida script that is flag-gated at runtime, so toggling one is instant and never leaves the app momentarily un-hooked.
+**App Proxies.** Besides the global device proxy, individual apps can be routed through a proxy *per UID*: Sandroid pushes a small [gost](https://github.com/go-gost/gost) redirector to the device and adds iptables `REDIRECT` rules for that app only — either to Sandroid's mitmproxy or to an external proxy such as Burp or ZAP. QUIC (UDP/443) is blocked for proxied apps by default (`focus.block_quic`) so they fall back to interceptable TCP/TLS. On emulators the host IP is detected automatically; an `adb reverse` fallback is offered when the device cannot reach the host.
+
+**CA certificate injection.** Sandroid auto-detects the host CA certificate from mitmproxy (`~/.mitmproxy/mitmproxy-ca-cert.pem`), HTTP Toolkit, or Burp Suite (a custom path is also accepted) and injects it into the device's system trust store. On Android 14+ (API ≥ 34) it bind-mounts the certificate into the Conscrypt APEX trust store; on Android 10–13 it injects into the Zygote mount namespace (after confirmation, since this restarts Zygote). It also writes the Chrome command-line flags needed to bypass Certificate Transparency enforcement.
+
+**Certificate-pinning & detection bypass — EXPERIMENTAL.** Sandroid ships a Frida-based bypass suite with five categories — **SSL** unpinning, **Root**, **Frida**, **Debug** and **Integrity** (PairIP / licensing / attestation gates) detection — toggled with `1`–`5` in the **Spotlight** tab (`Ctrl+P` is a global shortcut for SSL unpinning). SSL unpinning is tiered: Java (`SSLContext`, OkHttp `CertificatePinner`, Conscrypt, WebView, TrustKit, Certificate Transparency), native BoringSSL, Chromium/cronet BoringSSL (including stripped, symbol-less builds), and mbedTLS / Meta Network Stack, with early-init hooks and a spawn-reliability ladder for hardened apps. All categories live in a single resident, flag-gated Frida script, so toggling one is instant and never leaves the app momentarily un-hooked. These bypasses are under active development: expect individual apps to defeat them, and verify results independently.
 
 > These bypasses require a rooted AVD with `frida-server` running and a target app attached or spawned first.
 
@@ -137,7 +171,7 @@ Sandroid can route a target app's traffic through an embedded **mitmproxy** inst
 - `~/.config/sandroid/mitm_addons/` — per-user; created on first run with a `README.md` and an `examples/example_logger.py` template.
 - `./mitm_addons/` in the current working directory — handy for shipping addons together with a project.
 
-To enable addons, open the **Mitmproxy** tab (`Ctrl+B`) and press `Ctrl+A` for the addon manager — a checklist of every discovered addon. Tick the ones to load (or type a custom path directly); the selection is saved to your config under `mitmproxy.enabled_addons` and restored on the next run. A minimal addon looks like this:
+To enable addons, press `Ctrl+A` in the Mitmproxy sub-tab for the addon manager — a checklist of every discovered addon. Tick the ones to load (or type a custom path directly); the selection is saved to your config under `mitmproxy.enabled_addons` and restored on the next run. A minimal addon looks like this:
 
 ```python
 # ~/.config/sandroid/mitm_addons/log_urls.py
@@ -164,36 +198,36 @@ These tools are developed under the same sandbox ecosystem and are designed to w
 | [**friTap**](https://github.com/fkie-cad/friTap) | TLS key extraction and decrypted traffic interception for Android, enabling advanced network analysis in sandboxed environments. | ✅ Integrated |
 
 
-## AI Chat
+## AI Chat (EXPERIMENTAL)
 
-Sandroid includes an LLM-backed chat assistant that can drive the same device and analysis actions as the TUI, talking to any OpenAI-compatible chat-completions endpoint you configure.
+Sandroid includes an LLM-backed chat assistant that can drive the same device and analysis actions as the TUI, talking to any **OpenAI-compatible** chat-completions endpoint you configure. The feature is **experimental**: tool behaviour, prompts and configuration may change between minor releases.
 
-**Configuration.** Chat is inert until you set three connection fields — `base_url`, `api_key`, and `model`. There's no `sandroid-config` step for this yet; set them directly in your config file, or via environment variables:
+> **Data egress.** Everything the assistant sees — your prompts, the live device/session context Sandroid attaches to every turn, and the output of the tools it calls (file listings, file contents, captured flows, package data, …) — is sent to the configured endpoint. When analysing sensitive evidence or customer data, **use a local endpoint** (e.g. [Ollama](https://ollama.com), LM Studio, llama.cpp server or vLLM) instead of a cloud provider.
 
-```toml
-# ~/.config/sandroid/sandroid.toml
-[ai]
-base_url = "https://api.your-provider.com/v1"
-api_key = "sk-..."
-model = "your-model-name"
-```
+**Configuration.** Chat is inert until you set three connection fields — `base_url`, `api_key`, and `model`. Set the API key via an **environment variable** rather than the config file:
 
 ```bash
-# equivalent env vars (preferred for api_key -- see the caveat below)
-export SANDROID_AI__BASE_URL="https://api.your-provider.com/v1"
+# recommended: secrets via environment variables
 export SANDROID_AI__API_KEY="sk-..."
-export SANDROID_AI__MODEL="your-model-name"
 ```
 
-**Opening it.** Press `Ctrl+Y` to open the Chat dock (a non-modal panel; the binding is rebindable like every other action -- see `?`).
+```toml
+# ~/.config/sandroid/sandroid.toml -- example for a local Ollama instance
+[ai]
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:14b"      # any tool-calling capable model you have pulled
+# api_key: Ollama ignores it, but Sandroid requires a non-empty value -> export SANDROID_AI__API_KEY=ollama
+```
 
-**What it can do.** Around 76 native tools spanning app/process lifecycle control, device/network/flow queries, certificate and environment control, host-device file transfer, and recording/session control -- plus two subagent tools that spawn read-only or (with approval) fully privileged background investigations, and anything exposed by MCP servers you configure.
+`SANDROID_AI__BASE_URL` and `SANDROID_AI__MODEL` work as environment variables as well. A key written into the config file is stored in plaintext (`sandroid-config show` only redacts it for display).
 
-**Safety.** Every tool call passes a permission gate -- read-only calls run automatically, state-changing calls prompt for approval (optionally remembered) -- and a resource arbiter keeps the assistant and any concurrent subtasks from colliding on shared device resources such as the proxy, mitmproxy, frida-server, and snapshots.
+**Opening it.** Press `Ctrl+Y` to open the Chat dock (a non-modal panel; the binding is rebindable like every other action — see `?`).
+
+**What it can do.** Around 76 native tools spanning app/process lifecycle control, device/network/flow queries, certificate and environment control, host↔device file transfer, file monitoring and record/replay — plus two subagent tools that spawn read-only or (with approval) fully privileged background investigations, and anything exposed by MCP servers you configure under `[mcp]`. Host file access is confined to `ai.data_share_path` (default `~/Sandroid/ai_share/`), the current session's results directories and any `ai.extra_host_paths`.
+
+**Safety.** Every tool call passes a permission gate — read-only calls run automatically, state-changing calls prompt for approval (allow once / always / never, persisted) — and a resource arbiter keeps the assistant and any concurrent subtasks from colliding on shared device resources such as the proxy, mitmproxy, frida-server, and snapshots. Still: review what you approve; the model can be wrong or manipulated by content it reads (e.g. strings inside an analysed app).
 
 > The bundled `sandroid-dummy` MCP server is a demo only: everything it returns (e.g. its sample threat-intel lookup) is fabricated data, not a real result.
-
-> `api_key` is stored in plaintext in your config file unless set via `SANDROID_AI__API_KEY` (`sandroid-config show` only redacts it for display, not on disk) -- prefer the environment variable.
 
 
 # Ground Truth APK
@@ -221,21 +255,26 @@ Simply press the corresponding button to generate the Artefact
 
 ## Documentation
 
-- **[SETUP.md](SETUP.md)** - Complete setup guide for new installation method
+- **[SETUP.md](SETUP.md)** - Complete setup guide (requirements, AVD rooting, configuration)
+- **[MIGRATION.md](MIGRATION.md)** - Upgrading from older versions
 - **[CHANGELOG.md](CHANGELOG.md)** - Detailed release notes and version history
+- **[Online documentation](https://fkie-cad.github.io/Sandroid_core/)** - Sphinx docs (built from `docs/`)
 
 ## Installation
 
 ```bash
-pip install sandroid
+pip install sandroid                 # core
+pip install "sandroid[full]"         # + optional static-analysis extras (dexray-insight, androguard)
 sandroid-config init
 sandroid --help
-sandroid # starting sandroid in interactive mode (default)
+sandroid                             # start the interactive TUI (default)
 ```
+
+> **Docker** images (`docker/dockerfile`) are provided on a best-effort basis and are not tested in CI; the emulator always runs on the host. See [docs/advanced/docker_deployment.rst](docs/advanced/docker_deployment.rst).
 
 ## Configuration Management
 
-The modern installation includes a powerful configuration system:
+The installation includes a configuration system (TOML by default):
 
 ```bash
 # Initialize configuration
@@ -245,26 +284,25 @@ sandroid-config init
 sandroid-config show
 
 # Modify settings
-sandroid-config set analysis.capture_network true
-sandroid-config set emulator.device_name "Pixel_8_Pro_API_34"
+sandroid-config set -k analysis.capture_network -v true
+sandroid-config set -k emulator.device_name -v "Pixel_8_Pro_API_34"
 
 # Validate configuration
 sandroid-config validate
 ```
 
-Configuration files are automatically discovered in standard locations:
+Configuration files (`sandroid.toml`, also `.yaml`/`.yml`/`.json`) are discovered in this order — `sandroid-config paths` prints the exact list for your system:
+- `./sandroid.toml` (current directory, highest priority)
 - `~/.config/sandroid/sandroid.toml` (user config)
-- `./sandroid.toml` (project-specific config)
-- Environment variables with `SANDROID_` prefix
-
-Supported formats: TOML, YAML, JSON (TOML preferred)
+- the platform config directory (e.g. `~/Library/Application Support/sandroid/` on macOS)
+- Environment variables with the `SANDROID_` prefix override file values; nested keys use a double underscore, e.g. `SANDROID_AI__MODEL`.
 
 ### sandroid-config Subcommands
 
 ```bash
 # AVD Management
 sandroid-config avd list          # List available AVDs
-sandroid-config avd start         # Start an AVD (interactive or direct)
+sandroid-config avd start         # Start an AVD (interactive or --avd-name, --boot-mode)
 sandroid-config avd stop          # Stop running AVDs
 sandroid-config avd rename        # Rename an AVD
 sandroid-config avd create        # Create a new AVD
@@ -312,16 +350,18 @@ We welcome contributions to Sandroid! Before contributing:
    - Testing requirements and best practices
    - Security considerations for forensic tools
    - Documentation standards
+   - The release process
 
 2. **Development Setup**:
    ```bash
    git clone git@github.com:fkie-cad/Sandroid_core.git
    cd Sandroid_core
-   pip install -e .[dev]
-   #pytest  # Run tests - right now we don't have any tests
+   git checkout dev
+   pip install -e ".[dev,full]"
+   pytest            # ~1100 tests; never touch a real device (see tests/conftest.py)
    ```
 
-3. **Submit Changes**: Fork the repository, create a feature branch, ensure tests pass, and submit a pull request.
+3. **Submit Changes**: Fork the repository, create a feature branch off `dev`, ensure tests and `ruff check .` pass, and submit a pull request against `dev`.
 
 For detailed contribution instructions, see [docs/development/contributing.rst](docs/development/contributing.rst).
 

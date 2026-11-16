@@ -1,58 +1,65 @@
 Docker Deployment
 =================
 
-Deploy Sandroid using Docker containers for consistent, isolated analysis environments.
+.. warning::
 
-Quick Deployment
-----------------
+   Docker support is **best effort**: the image is not built or tested in CI.
+   The Android emulator always runs on the **host**; the container only runs
+   Sandroid and talks to the host's adb server.
 
-Use the provided Docker scripts:
+Building the Image
+------------------
+
+``docker/dockerfile`` installs Sandroid (with the ``full`` extras) from the
+repository's ``pyproject.toml`` on ``python:3.12-slim``:
 
 .. code-block:: bash
 
-   # Build and export Docker image
+   # from the repository root
+   docker build -t sandroid -f docker/dockerfile .
+
+   # or build + export a compressed image to deploy/sandroid_image.tar.gz
    ./build_and_export_docker.sh
 
-   # Deploy with custom output path
-   cd deploy
-   ./deploy /path/to/output
+Running
+-------
 
-Custom Docker Setup
--------------------
+**Linux** -- share the host network so the container reaches the host adb
+server on ``localhost:5037``:
 
-Create your own Dockerfile:
+.. code-block:: bash
+
+   docker run --rm -it --network host \
+       -v "$PWD/results:/sandroid/results" \
+       -v "$HOME/.config/sandroid:/root/.config/sandroid" \
+       sandroid
+
+**Docker Desktop (macOS/Windows)** -- start the host adb server so it accepts
+remote connections and point the container's adb client at it:
+
+.. code-block:: bash
+
+   adb kill-server && adb -a nodaemon server &      # on the host
+   docker run --rm -it \
+       -e ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 \
+       -v "$PWD/results:/sandroid/results" sandroid
+
+Inside the container run ``sandroid`` (TUI) or ``sandroid --headless ...``
+as usual. Features that talk to the emulator console or forward ports from
+the device to the host (mitmproxy proxies, frida-server port forwarding) may
+need additional port mappings when not using host networking.
+
+Custom Images
+-------------
 
 .. code-block:: dockerfile
 
-   FROM python:3.10-slim
-
-   # Install system dependencies
-   RUN apt-get update && apt-get install -y \
-       adb android-tools-adb \
-       sqlite3 \
+   FROM python:3.12-slim
+   RUN apt-get update && apt-get install -y --no-install-recommends adb \
        && rm -rf /var/lib/apt/lists/*
-
-   # Install Sandroid
-   RUN pip install sandroid[ai]
-
-   # Initialize configuration
-   RUN sandroid-config init
-
-   # Set working directory
-   WORKDIR /app
-
-   # Default command
+   RUN pip install "sandroid[full]"
+   WORKDIR /sandroid
    CMD ["sandroid", "--help"]
 
-Container Configuration
------------------------
-
-Mount configuration and results:
-
-.. code-block:: bash
-
-   docker run -v $(pwd)/config:/root/.config/sandroid \
-              -v $(pwd)/results:/app/results \
-              sandroid:latest sandroid --network --report
-
-For production deployments, see the deployment documentation.
+The legacy ``deploy/deploy`` bundle (image + packaged emulator archive) is
+kept for reference only and is not maintained.

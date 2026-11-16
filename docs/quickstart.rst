@@ -8,9 +8,11 @@ Prerequisites
 
 Before starting, ensure you have:
 
-1. **Sandroid installed** (see :doc:`installation`)
-2. **Android emulator running** or physical device connected
-3. **ADB working** - test with ``adb devices``
+1. **Sandroid installed** with Python 3.12+ (see :doc:`installation`)
+2. **A rooted Android emulator** -- a ``google_apis`` image, or a Google Play
+   image rooted with rootAVD/Magisk plus the ``adb_root`` module (see
+   :ref:`device-requirements`)
+3. **ADB working** -- test with ``adb devices``
 
 Basic Usage
 -----------
@@ -21,74 +23,95 @@ Basic Usage
 
 **2. Start Your Android Emulator**::
 
-   # List available AVDs
-   emulator -list-avds
+   # Easiest: start the configured AVD (snapshots stay enabled)
+   sandroid-config avd start
 
-   # Start an emulator
-   emulator -avd Pixel_6_Pro_API_31 -no-snapshot
+   # ...or start it manually
+   emulator -list-avds
+   emulator -avd Pixel_6_Pro_API_34 -no-snapshot-save
 
    # Verify connection
    adb devices
+
+.. important::
+
+   Do **not** use ``-no-snapshot``: Sandroid's Record/Play workflow and the
+   Snapshots tab need AVD snapshots. ``-no-snapshot-save`` (do not overwrite
+   the quick-boot snapshot on exit) is fine.
 
 **3. Run Sandroid**::
 
    sandroid
 
-Sandroid launches in the Textual TUI by default, providing a modern terminal user interface with three analysis views:
+Sandroid launches the Textual TUI. The top **glance band** shows device,
+frida-server, proxy and spotlight state; below the activity log are four
+always-on tool tabs:
 
-- **Forensic View**: File system analysis, artifact extraction, action recording
-- **Malware View**: Behavioral analysis, Dexray-Intercept monitoring, memory dumping
-- **Security View**: Vulnerability scanning and security testing (early stage)
+- **Spotlight** -- the app under investigation (start, attach, restart, kill)
+  and the Frida bypass toggles ``1``-``5`` (SSL, Root, Frida, Debug, Integrity;
+  experimental)
+- **Network** -- *Mitmproxy* (proxying, CA injection) and *friTap* sub-tabs
+- **Snapshots** -- create/load/delete AVD snapshots, 8 quick slots
+- **Files** -- *Monitor* (live file events), *Watchlist* (Spotlight files) and
+  *Diffs* (Record/Play run history)
 
-Use ``TAB`` to switch between views and single-key shortcuts to execute commands.
+Press ``?`` for every action and its key (all keys are rebindable),
+``Ctrl+Shift+P`` for the command palette, ``Ctrl+B`` to focus the tool tabs
+and ``Shift+Arrows`` to move between tabs.
 
 First Analysis - Recording User Actions
 ---------------------------------------
 
 **1. Install Frida Server** (if needed for dynamic analysis)
 
-   Sandroid will automatically prompt you to install Frida when a command requires it. You can also manually install it by pressing ``f`` in the TUI.
+   Sandroid prompts you to install ``frida-server`` when a command requires it.
+   You can also install/start it manually with ``f``.
 
-**2. Record User Interactions**::
+**2. Record User Interactions**
 
-   # In interactive mode, press 'r'
-   r
-
-   # This will:
-   # - Take a baseline snapshot of the system
-   # - Start monitoring file changes, processes, and network
-   # - Wait for you to interact with the device
+   Open **Files -> Diffs** and press ``r``. Sandroid saves a snapshot of the
+   current device state, then records your touch input until you stop the
+   recording.
 
 **3. Perform Actions on Device**
 
    - Install an APK
    - Open apps, interact with them
    - Browse, use features
-   - When done, press Enter in the Sandroid terminal
+   - Stop the recording when done
 
-**4. View Results**
+**4. Play and View Results**
 
-   Sandroid will analyze the changes and show:
+   Press ``p`` in **Files -> Diffs**. Sandroid reverts to the snapshot, replays
+   your recording, measures background noise with a dry run of the same
+   duration and pulls/diffs everything that changed. The result shows:
 
    - **New files** created during your actions
-   - **Changed files** and their differences
-   - **Network connections** made
-   - **Processes** that ran
-   - **Screenshots** taken during analysis
+   - **Changed files** and their (inline) differences
+   - **Deleted files** (with ``--show-deleted``)
+   - **Processes**, **listening sockets** and **network** activity (with ``--network``)
 
-Command-Line Analysis
----------------------
+   Each Play is stored as a run bundle and stays available in the Diffs run
+   history.
 
-For automated analysis without interaction::
+Command-Line Options
+--------------------
 
-   # Basic analysis with 2 runs
+Analysis options given on the command line pre-configure the session::
+
+   # Repeat the action twice to filter noise more aggressively
    sandroid --number 2
 
    # Network monitoring with screenshots every 5 seconds
    sandroid --network --screenshot 5
 
-   # Complete analysis with all features
+   # Everything, plus a PDF report
    sandroid --network --sockets --screenshot 3 --hash --apk --report
+
+For fully non-interactive runs use ``--headless`` (see :doc:`command_line_usage`)::
+
+   sandroid --headless --trigdroid com.suspicious.app
+   sandroid --headless --batch batch.json
 
 Configuration Examples
 ----------------------
@@ -98,10 +121,9 @@ Configuration Examples
 Create ``~/.config/sandroid/sandroid.toml``::
 
    log_level = "INFO"
-   output_file = "analysis_results.json"
 
    [emulator]
-   device_name = "Pixel_6_Pro_API_31"
+   device_name = "Pixel_6_Pro_API_34"
 
    [analysis]
    number_of_runs = 2
@@ -115,11 +137,10 @@ Create ``~/.config/sandroid/sandroid.toml``::
    number_of_runs = 3
    capture_network = true
    capture_processes = true
+   capture_sockets = true
    show_deleted_files = true
-
-   [features]
    screenshot_interval = 5
-   enable_hash_calculation = true
+   hash_files = true
    list_apks = true
 
 Common Workflows
@@ -130,18 +151,16 @@ Common Workflows
 1. **Setup**::
 
       sandroid-config init
-      # Edit config for malware analysis
-      sandroid-config set analysis.capture_network true
-      sandroid-config set log_level DEBUG
+      sandroid-config set -k analysis.capture_network -v true
+      sandroid-config set -k log_level -v DEBUG
 
 2. **Start Analysis**::
 
       sandroid --trigdroid com.suspicious.app --network --screenshot 3
 
-3. **Install and Run Malware**::
-
-      # Use TrigDroid for automated trigger execution
-      # Or manually install and interact with suspicious APK
+3. **Inspect the app** in the TUI: set it as Spotlight app, enable the Frida
+   bypasses it needs, route it through mitmproxy (**Network -> Mitmproxy**,
+   ``y`` for App Proxies) and watch file activity in **Files -> Monitor**.
 
 4. **Generate Report**::
 
@@ -151,52 +170,63 @@ Common Workflows
 
 1. **Configure for Development**::
 
-      sandroid-config set analysis.number_of_runs 1
-      sandroid-config set paths.results_path ./test_results/
+      sandroid-config set -k analysis.number_of_runs -v 1
+      sandroid-config set -k paths.results_path -v ./test_results/
 
 2. **Test Your App**::
 
-      sandroid --number 1 --screenshot 2
+      sandroid --screenshot 2
 
-3. **Monitor Specific App**::
-
-      # Set spotlight app in interactive mode
-      # Press 'c' to set current foreground app as spotlight
+3. **Monitor Specific App**: press ``c`` (attach) or ``C`` (spawn) to make the
+   foreground/selected app the Spotlight app.
 
 Understanding Results
 ---------------------
 
 **Output Files**
 
-- ``sandroid.json`` - Complete analysis results
-- ``results/`` - Raw data and screenshots
-- ``sandroid.pdf`` - Generated report (with --report)
-- ``sandroid.log`` - Detailed execution logs
+Every session writes to ``./results/<YYYYmmdd_HHMMSS>/`` (``paths.results_path``):
+
+- ``sandroid.json`` -- analysis results (see below)
+- ``sandroid.log`` / ``sandroid_error.log`` -- execution logs
+- ``<device name>/`` -- per-device raw data: ``raw/`` (pulled files,
+  ``recording.txt``, screenshots, network traces), ``spotlight_files/``,
+  ``fritap/``, ``dexray_insight/``, ``timeline.png``
+- ``sandroid.pdf`` -- generated report (with ``--report``)
+
+Record/Play run bundles are kept under ``<results_path>/runs/<run_id>/``.
 
 **Key Result Sections**
 
-- **Changed Files**: Files modified during analysis
-- **New Files**: Files created during analysis
-- **Network**: Connections and traffic captured
-- **Processes**: Applications and services that ran
-- **Static Analysis**: APK information and metadata
+- **Changed Files**: files modified during the action, with diffs
+- **New Files** / **Deleted Files**: files created / removed during the action
+- **Processes**, **Listening Sockets**: captured during the action
+- **Network** (DNS names) and **Network IP:Port (send/recv)**: with ``--network``
+- **Other Data**: hashes, APK list, timeline data
 
-**Example Results**::
+**Example** ``sandroid.json``::
 
    {
-     "Changed Files": [
-       {"/data/data/com.app/shared_prefs/settings.xml": [
+     "Device Name": "Pixel_6_Pro_API_34",
+     "Emulator relative action timestamp": 1731760000,
+     "Action Duration": 42,
+     "Changed Files": {
+       "/data/data/com.example.app/shared_prefs/settings.xml": [
          "- <string name=\"user_id\">old_value</string>",
          "+ <string name=\"user_id\">new_value</string>"
-       ]}
-     ],
+       ]
+     },
      "New Files": [
-       "/sdcard/Download/malware_payload.bin",
-       "/data/data/com.app/files/config.json"
+       "/data/data/com.example.app/files/config.json",
+       "/sdcard/Download/payload.bin"
      ],
-     "Network": {
-       "connections": ["192.168.1.100:8080", "malicious-c2.com:443"],
-       "dns_queries": ["api.legitimate-service.com", "tracking.ads.com"]
+     "Deleted Files": [],
+     "Processes": ["u0_a190  4711  com.example.app"],
+     "Listening Sockets": [],
+     "Network": ["api.example.com", "tracking.ads.example"],
+     "Network IP:Port (send/recv)": ["93.184.216.34:443"],
+     "Other Data": {
+       "Timeline Data": [[]]
      }
    }
 
@@ -214,26 +244,23 @@ Now that you've completed your first analysis:
 Tips for Better Analysis
 -------------------------
 
-**Performance Tips**
-
-- Use SSDs for faster file system monitoring
-- Close unnecessary applications during analysis
-- Use ``--avoid-strong-noise-filter`` for comprehensive analysis
-
 **Accuracy Tips**
 
 - Run multiple analysis iterations (``--number 3``)
-- Use clean snapshots as baselines
+- Start from a clean snapshot as baseline
 - Allow sufficient time between actions for monitoring
+- Use ``--avoid-strong-noise-filter`` only if you want *more* (noisier) output
 
 **Security Tips**
 
 - Use isolated emulators for malware analysis
 - Enable network monitoring for suspicious apps
-- Use AI analysis for automated threat detection
+- The AI Chat (``Ctrl+Y``) is **experimental** and sends device data to the
+  configured LLM endpoint -- prefer a local endpoint (e.g. Ollama) for
+  sensitive cases
 
 **Troubleshooting Tips**
 
 - Check ADB connection: ``adb devices``
-- Verify emulator is rooted for advanced features
-- Monitor logs: ``tail -f ~/.cache/sandroid/logs/sandroid.log``
+- Verify root: ``adb root && adb shell id``
+- Run with ``--log`` / ``-ll DEBUG`` and check ``results/<timestamp>/sandroid.log``

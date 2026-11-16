@@ -6,9 +6,11 @@ This comprehensive guide walks you through setting up Sandroid for forensic anal
 
 ### Prerequisites
 
-- **Python 3.10 or newer**
+- **Python 3.12 or 3.13**
 - **Internet connection** (for automated Android SDK detection)
 - **Linux, macOS, or Windows** (WSL2 recommended for Windows)
+- **Android SDK** platform-tools (`adb`) + Android Emulator (Android Studio or command-line tools)
+- **A rooted Android emulator with snapshots enabled** -- see [Device Requirements](#-device-requirements) below
 
 ### One-Command Setup
 
@@ -65,7 +67,7 @@ Start AVD 'Pixel_6_Pro_API_31' with UI by default? [Y/n]: Y
 Automatically start AVD when Sandroid needs it? [y/N]: n
 
 ✅ Configuration created successfully!
-📍 Location: ~/.config/sandroid/sandroid.yaml
+📍 Location: ~/.config/sandroid/sandroid.toml
 📱 Configured AVD: Pixel_6_Pro_API_31
 
 🚀 Start AVD 'Pixel_6_Pro_API_31' now? [y/N]: y
@@ -137,13 +139,64 @@ If automatic detection fails, install Android Studio manually:
 3. **Install SDK components**:
    - Android SDK Platform-Tools (includes ADB)
    - Android Emulator
-   - At least one Android system image (API 31+ recommended)
+   - At least one Android system image (API 31+ recommended; the team mainly uses API 34-36)
 4. **Create an AVD**:
    - Open Virtual Device Manager in Android Studio
    - Click "Create Device"
    - Choose a device profile (Pixel devices work well)
-   - Select a system image (x86_64 for Intel/AMD, arm64 for Apple Silicon)
+   - Select a system image (x86_64 for Intel/AMD, arm64 for Apple Silicon) -- see
+     [Device Requirements](#-device-requirements) for which image *type* to pick
    - Configure settings and create the AVD
+
+## 📱 Device Requirements
+
+Sandroid needs **root on the device**: it runs `adb root`, pushes and starts
+`frida-server`, injects CA certificates into the system trust store, and sets
+SELinux to *permissive* (`setenforce 0`) on its own -- you do not need to do
+that manually.
+
+### Option 1: Google APIs image (simplest)
+
+Use a **Google APIs** system image (`system-images;android-<api>;google_apis;<abi>`,
+*not* `google_apis_playstore`). These are `userdebug`-style builds on which
+`adb root` works out of the box:
+
+```bash
+sdkmanager "system-images;android-35;google_apis;arm64-v8a"   # or x86_64
+avdmanager create avd -n sandroid_api35 -k "system-images;android-35;google_apis;arm64-v8a" -d pixel_6
+adb root   # after boot: should print "restarting adbd as root"
+```
+
+### Option 2: Google Play image rooted with rootAVD + Magisk (team setup)
+
+If you need the Play Store, use a **Google Play** image and root it with
+[rootAVD](https://gitlab.com/newbit/rootAVD), which patches the AVD ramdisk
+with Magisk. Production (Play) builds refuse `adb root` ("adbd cannot run as
+root in production builds"), so additionally install the **`adb_root` Magisk
+module** from the Magisk app and reboot -- afterwards `adbd` runs as root and
+Sandroid works exactly as on a Google APIs image. This is how the Sandroid
+team's own AVDs are set up.
+
+Verify with:
+
+```bash
+adb root && adb shell id    # must report uid=0(root)
+```
+
+### Snapshots
+
+The record/play workflow and the Snapshots tab rely on **AVD snapshots**.
+Keep snapshots enabled: do **not** start the emulator with `-no-snapshot`. If
+you do not want the emulator to overwrite its quick-boot snapshot on exit, use
+`-no-snapshot-save`, or start it via `sandroid-config avd start`
+(`--boot-mode default|cold|snapshot|wipe`).
+
+### Physical devices
+
+Rooted physical devices work for many features (Frida, spotlight, file
+monitoring, proxies), but everything that relies on the emulator is
+unavailable: snapshots (and therefore record/play baselines), emulator-console
+network capture and `--degrade-network`.
 
 ## 📱 AVD Management
 
@@ -189,8 +242,8 @@ python deploy/create_avd.py
 # Show complete configuration with rich formatting
 sandroid-config show
 
-# Show configuration in YAML format
-sandroid-config show --format yaml
+# Show configuration in TOML/YAML/JSON format
+sandroid-config show --format toml
 
 # Validate your configuration
 sandroid-config validate
@@ -199,27 +252,30 @@ sandroid-config validate
 ### Manual Configuration Updates
 ```bash
 # Set Android paths manually if needed
-sandroid-config set emulator.sdk_path "/path/to/Android/Sdk"
-sandroid-config set emulator.adb_path "/path/to/adb"
-sandroid-config set emulator.android_emulator_path "/path/to/emulator"
+sandroid-config set -k emulator.sdk_path -v "/path/to/Android/Sdk"
+sandroid-config set -k emulator.adb_path -v "/path/to/adb"
+sandroid-config set -k emulator.android_emulator_path -v "/path/to/emulator"
 
 # Configure AVD settings
-sandroid-config set emulator.selected_avd "Pixel_6_Pro_API_31"
-sandroid-config set emulator.avd_headless true
-sandroid-config set emulator.avd_auto_start false
+sandroid-config set -k emulator.selected_avd -v "Pixel_6_Pro_API_31"
+sandroid-config set -k emulator.avd_headless -v true
+sandroid-config set -k emulator.avd_auto_start -v false
 
 # Set other analysis options
-sandroid-config set analysis.number_of_runs 3
-sandroid-config set analysis.monitor_network true
+sandroid-config set -k analysis.number_of_runs -v 3
+sandroid-config set -k analysis.capture_network -v true
 ```
 
 ### Configuration File Locations
-Configuration files are searched in this order:
-1. `./sandroid.yaml` (current directory)
-2. `~/.config/sandroid/sandroid.yaml` (user config)
-3. `/etc/sandroid/sandroid.yaml` (system config)
+Configuration files named `sandroid.toml` (or `config.toml`; `.yaml`, `.yml` and
+`.json` are accepted too) are searched in this order -- run `sandroid-config paths`
+to see the exact directories on your system:
+1. `./sandroid.toml` (current directory)
+2. `~/.config/sandroid/sandroid.toml` (user config, written by `sandroid-config init`)
+3. the platform user/site config directory (e.g. `~/Library/Application Support/sandroid/` on macOS)
 
-Supported formats: YAML (recommended), TOML, JSON
+Supported formats: **TOML (default and recommended)**, YAML, JSON.
+`sandroid-config init --format yaml|json` writes the other formats.
 
 ### Environment Variables
 All configuration can be set via environment variables:
@@ -240,7 +296,7 @@ export SANDROID_EMULATOR__AVD_HEADLESS=true
 sandroid-config init --force
 
 # Solution 2: Set paths manually
-sandroid-config set emulator.sdk_path "/path/to/Android/Sdk"
+sandroid-config set -k emulator.sdk_path -v "/path/to/Android/Sdk"
 ```
 
 **Problem: ADB not found**
@@ -250,7 +306,7 @@ which adb  # Linux/macOS
 where adb  # Windows
 
 # If not found, install Android SDK or set path manually
-sandroid-config set emulator.adb_path "/path/to/adb"
+sandroid-config set -k emulator.adb_path -v "/path/to/adb"
 ```
 
 **Problem: No AVDs found**
@@ -259,7 +315,7 @@ sandroid-config set emulator.adb_path "/path/to/adb"
 python deploy/create_avd.py
 
 # Or point to existing AVD directory
-sandroid-config set emulator.avd_home "/path/to/avd"
+sandroid-config set -k emulator.avd_home -v "/path/to/avd"
 ```
 
 **Problem: AVD won't start**
@@ -296,17 +352,16 @@ sandroid-config init --skip-avd-setup
 
 ## 🔧 Advanced Setup
 
-### Docker Deployment
+### Docker Deployment (best effort)
 
-For containerized environments:
+`docker/dockerfile` builds an image that installs Sandroid from `pyproject.toml`;
+the emulator keeps running on the host and the container talks to the host's
+adb server. Docker is **not tested in CI** -- see the comments at the top of
+the Dockerfile and `docs/advanced/docker_deployment.rst`.
 
 ```bash
-# Build Docker image
-./build_and_export_docker.sh
-
-# Deploy with Docker
-cd deploy
-./deploy [output_path]
+docker build -t sandroid -f docker/dockerfile .
+docker run --rm -it --network host -v "$PWD/results:/sandroid/results" sandroid
 ```
 
 ### Custom Android SDK Installation
@@ -329,13 +384,14 @@ python deploy/create_avd.py
 For contributors and developers:
 
 ```bash
-# Install in development mode
-pip install -e .[dev]
+# Install in development mode (dev tools + optional extras)
+pip install -e ".[dev,full]"
 
 # Install pre-commit hooks
 pre-commit install
 
-# Run tests
+# Run tests (hermetic: tests/conftest.py blocks every adb/emulator/frida call,
+# so this is safe with an emulator attached)
 pytest
 
 # Build documentation
@@ -377,10 +433,10 @@ sandroid -f malware-analysis.json \
 
 ```bash
 # Create environment-specific config
-sandroid-config init --output production.yaml
+sandroid-config init --output production.toml
 
 # Use specific configuration
-sandroid --config production.yaml --network --ai
+sandroid --config production.toml --network
 ```
 
 ## ✅ Verification
@@ -407,7 +463,7 @@ sandroid --help
 ## 📚 Next Steps
 
 - **Read the Documentation**: Check out the full documentation at `docs/`
-- **Interactive Mode**: Try `sandroid` to explore the interactive menu
+- **Interactive Mode**: Try `sandroid` and press `?` to see every action and keybinding
 - **Ground Truth APK**: Install and test with the included `ground_truth.apk`
 - **Configuration**: Use `sandroid-config show` to understand all available options
 - **Troubleshooting**: Refer to the troubleshooting section above for common issues

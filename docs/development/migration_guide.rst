@@ -3,6 +3,13 @@ Migration Guide
 
 This guide helps you migrate from the legacy Sandroid installation to the modern PyPI package, and understand the changes introduced in v1.1.0.
 
+.. note::
+
+   Upgrading from **2.0 to 2.1**? See ``MIGRATION.md`` in the repository root
+   (section *Upgrading from 2.0.x to 2.1*): Python 3.12+ is required, and the
+   legacy Rich menu (``-i``), ``--ai`` (Gemini) and the TUI views (``--view``)
+   were removed.
+
 Migration Overview
 ------------------
 
@@ -228,10 +235,12 @@ Development Workflow Migration
 
 .. code-block:: dockerfile
 
-   FROM python:3.10
-   RUN pip install sandroid[ai]
-   RUN sandroid-config init
+   FROM python:3.12-slim
+   RUN apt-get update && apt-get install -y --no-install-recommends adb
+   RUN pip install "sandroid[full]"
    CMD ["sandroid"]
+
+(See ``docker/dockerfile`` for the maintained, best-effort image.)
 
 Configuration System Migration
 ------------------------------
