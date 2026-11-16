@@ -312,7 +312,7 @@ class EmulatorService:
         try:
             adb = self._get_adb()
             _stdout, stderr = adb.send_adb_command(
-                f"pull {device_path} {quote_host_arg(str(local_path))}"
+                f"pull {quote_host_arg(device_path)} {quote_host_arg(str(local_path))}"
             )
 
             if stderr and "error" in stderr.lower():

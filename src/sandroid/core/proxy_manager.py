@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 
 from sandroid.core.adb import Adb
+from sandroid.core.adb_utils import quote_host_arg
 
 # Import config with fallback for standalone usage
 try:
@@ -569,7 +570,9 @@ class CAManager:
                 local_path = der_path
 
             # Push to device
-            Adb.send_adb_command(f"push {local_path} {self.DEVICE_CERT_PATH}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(local_path))} {self.DEVICE_CERT_PATH}"
+            )
 
             # Verify
             check_stdout, check_stderr = Adb.send_adb_command(
@@ -628,7 +631,9 @@ class CAManager:
                     return False, f"OpenSSL DER→PEM conversion error: {error}"
                 push_path = pem_path
 
-            Adb.send_adb_command(f"push {push_path} {self.DEVICE_CERT_PATH}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(push_path))} {self.DEVICE_CERT_PATH}"
+            )
 
             check_stdout, _ = Adb.send_adb_command(
                 f"shell ls {self.DEVICE_CERT_PATH} 2>/dev/null"
@@ -810,7 +815,9 @@ class CAManager:
         """Pull cert from device and compute its hash."""
         try:
             local_temp = Path(tempfile.gettempdir()) / "sandroid-device-cert.pem"
-            Adb.send_adb_command(f"pull {self.DEVICE_CERT_PATH} {local_temp}")
+            Adb.send_adb_command(
+                f"pull {self.DEVICE_CERT_PATH} {quote_host_arg(str(local_temp))}"
+            )
             if local_temp.exists():
                 cert_hash = self.get_cert_hash(local_temp)
                 local_temp.unlink()
@@ -1097,7 +1104,9 @@ class CAManager:
                 for base in ["/data/local", "/data/local/tmp"]:
                     target = f"{base}/{variant}"
                     try:
-                        Adb.send_adb_command(f"push {local_tmp} {target}")
+                        Adb.send_adb_command(
+                            f"push {quote_host_arg(str(local_tmp))} {quote_host_arg(str(target))}"
+                        )
                         Adb.send_adb_command(
                             f"shell {self._root_cmd(f'chmod 744 {target}')}"
                         )
@@ -2039,7 +2048,9 @@ class FocusManager:
         dst = self._binary_dst
         try:
             Adb.send_adb_command(f"shell {self._ca._root_cmd(f'rm -f {dst}')}")
-            Adb.send_adb_command(f"push {cached} {dst}")
+            Adb.send_adb_command(
+                f"push {quote_host_arg(str(cached))} {quote_host_arg(str(dst))}"
+            )
             check_stdout, check_stderr = Adb.send_adb_command(f"shell ls {dst}")
             if dst not in (check_stdout or ""):
                 detail = check_stderr or check_stdout or "file not found after push"
