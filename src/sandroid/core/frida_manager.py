@@ -312,11 +312,17 @@ def stop_frida_job_bounded(
     worker.join(timeout)
     finished = not worker.is_alive()
     if not finished:
-        logger.warning(
+        logger.info(
             f"Frida agent still unloading after {timeout:.0f}s (an app thread is "
             "blocked inside a hooked call); continuing, it finishes in the "
             "background"
         )
+        # Callers that can judge the target (friTap: spawned or attached?)
+        # watch the teardown and react if it never finishes.
+        try:
+            job_manager._sandroid_pending_teardown = worker
+        except Exception:
+            pass
 
     if job is not None:
         try:

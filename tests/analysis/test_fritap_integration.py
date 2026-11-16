@@ -566,3 +566,74 @@ def test_spotlight_announce_pid_publishes():
     assert not svc.announce_pid(5927, "org.wikipedia")  # unchanged: no event
     assert not svc.announce_pid(1, "com.other")  # other package: ignored
     assert svc.get_pid() == 5927
+
+
+# ---------------------------------------------------------------------------
+# Phase-4 M2: an agent unload that never finishes leaves the app frozen
+# ---------------------------------------------------------------------------
+
+
+def _hung_stop(monkeypatch, *, mode, pidof="4242", release_after=None):
+    """Stop friTap with an unload that hangs; return (adb calls, warnings)."""
+    import threading
+
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(fritap_mod, "_STOP_TIMEOUT", 0.1)
+    monkeypatch.setattr(fritap_mod, "_HUNG_UNLOAD_GRACE", 0.3)
+    adb_calls = []
+
+    def fake_adb(cmd, *a, **k):
+        adb_calls.append(cmd)
+        return (pidof + "\n", "") if "pidof" in cmd else ("", "")
+
+    monkeypatch.setattr(Adb, "send_adb_command", fake_adb)
+    published = []
+    monkeypatch.setattr(
+        fritap_mod, "_publish_fritap_event", lambda bus, msg: published.append(msg)
+    )
+    block = threading.Event()
+    ft, _job_ = _fritap_with_job([], block)
+    ft.mode = mode
+    ft.process_id = 4242
+    ft.app_package = "org.wikipedia"
+    ft.stop()
+    if release_after is not None:
+        threading.Timer(release_after, block.set).start()
+    for thread in threading.enumerate():
+        if thread.name == "fritap-unload-watchdog":
+            thread.join(5)
+    block.set()
+    return adb_calls, published
+
+
+def test_hung_unload_force_stops_a_spawned_app(monkeypatch):
+    adb_calls, published = _hung_stop(monkeypatch, mode="spawn")
+
+    assert adb_calls == [
+        "shell pidof org.wikipedia",
+        "shell am force-stop org.wikipedia",
+    ]
+    assert "was force-stopped" in published[0]
+
+
+def test_hung_unload_of_attached_app_only_tells_how_to_recover(monkeypatch):
+    adb_calls, published = _hung_stop(monkeypatch, mode="attach")
+
+    assert adb_calls == []
+    assert "adb shell am force-stop org.wikipedia" in published[0]
+    assert "isn't responding" in published[0]
+
+
+def test_late_but_finished_unload_leaves_the_app_alone(monkeypatch):
+    adb_calls, published = _hung_stop(monkeypatch, mode="spawn", release_after=0.05)
+
+    assert adb_calls == []
+    assert published == []
+
+
+def test_restarted_app_is_not_force_stopped(monkeypatch):
+    adb_calls, published = _hung_stop(monkeypatch, mode="spawn", pidof="5555")
+
+    assert adb_calls == ["shell pidof org.wikipedia"]
+    assert "Shift+R" in published[0]

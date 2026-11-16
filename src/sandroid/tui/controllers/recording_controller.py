@@ -1121,7 +1121,10 @@ class RecordingController:
         from sandroid.core import run_bundle, run_history
 
         completed_at = datetime.now().isoformat()
-        label = self._current_recording_label or f"Run · {time.strftime('%H:%M')}"
+        label = _unique_run_label(
+            self._current_recording_label or f"Run · {time.strftime('%H:%M')}",
+            device_name,
+        )
 
         if result is not None:
             duration = int(getattr(result, "action_duration", 0) or 0)
@@ -1286,3 +1289,23 @@ __all__ = [
     "RecordingController",
     "RecordingResult",
 ]
+
+
+def _unique_run_label(label: str, device_name: str | None) -> str:
+    """``label``, or ``"<label> · play N"`` if a run of it is already saved.
+
+    The recording's label seeds every Play of it, so a ``p`` replay showed
+    up as a second, indistinguishable "Run 1 · 22:58" in the Runs rail.
+    """
+    from sandroid.core import run_history
+
+    try:
+        taken = {e.get("label") for e in run_history.load_index(device_name)}
+    except Exception:
+        return label
+    if label not in taken:
+        return label
+    n = 2
+    while f"{label} · play {n}" in taken:
+        n += 1
+    return f"{label} · play {n}"

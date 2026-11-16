@@ -46,6 +46,9 @@ capture_processes = true
 capture_sockets = false
 capture_network = false
 show_deleted_files = false
+# Keep capturing N seconds after each replay (and the dry run) so slow
+# network responses still land in the run. 0 = stop with the replay.
+replay_settle_seconds = 8
 hash_files = false
 list_apks = false
 degrade_network = false

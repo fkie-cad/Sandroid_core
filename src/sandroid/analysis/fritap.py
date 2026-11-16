@@ -46,6 +46,14 @@ logger = logging.getLogger(__name__)
 #: Max seconds stop() waits for friTap's agent to unload before finalizing.
 _STOP_TIMEOUT = 4.0
 
+#: Extra seconds a watchdog gives an agent unload that outlived
+#: ``_STOP_TIMEOUT``. An unload still blocked after that left the app frozen
+#: ("isn't responding") for good in the phase-4 live test: a spawned target
+#: is then force-stopped, for an attached one the user is told how to recover.
+_HUNG_UNLOAD_GRACE = 15.0
+
+_PACKAGE_NAME = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)+$")
+
 #: Max seconds the target-death handler waits for the command layer to
 #: register the task (the target can die while start() is still returning).
 _REGISTER_WAIT = 5.0
@@ -125,6 +133,27 @@ def frida_agent_mapped(pid: int) -> bool | None:
         ):
             break
     return None
+
+
+def _force_stop_if_running(package: str | None, pid: int | None) -> bool:
+    """Force-stop *package* if *pid* is still its process. True if stopped.
+
+    The PID check keeps a process the user restarted in the meantime alive.
+    """
+    if not package or not _PACKAGE_NAME.match(str(package)) or not pid:
+        return False
+    try:
+        from sandroid.core.adb import Adb
+
+        out, _err = Adb.send_adb_command(f"shell pidof {package}")
+        if str(int(pid)) not in (out or "").split():
+            logger.debug(f"{package} PID {pid} is gone, nothing to force-stop")
+            return False
+        Adb.send_adb_command(f"shell am force-stop {package}")
+        return True
+    except Exception as e:
+        logger.debug(f"Force-stop of {package} failed: {e}")
+        return False
 
 
 def _job_state(job) -> str | None:
@@ -1068,6 +1097,9 @@ class FriTap(DataGatherBase):
                     f"FriTap stopped for {self.app_package} (agent unload "
                     "continues in the background)"
                 )
+                self._watch_hung_unload(
+                    getattr(self.job_manager, "_sandroid_pending_teardown", None)
+                )
         except Exception as e:
             logger.warning(f"Error stopping FriTap jobs: {e}")
         self._outputs_closed = True
@@ -1087,6 +1119,69 @@ class FriTap(DataGatherBase):
         # A capture friTap started ends with friTap (it used to run on until
         # the TUI quit).
         self._stop_network_capture()
+
+    def _is_spawned_target(self) -> bool:
+        mode = getattr(self, "mode", None)
+        return mode in (SpawnMode.SPAWN, SpawnMode.SPAWN.value)
+
+    def _watch_hung_unload(self, worker) -> None:
+        """Watch an agent unload that outlived ``_STOP_TIMEOUT`` (never blocks).
+
+        The unload waits for every app thread to leave friTap's hooks; a
+        thread parked in a hooked ``SSL_read`` on an idle connection can keep
+        it waiting forever while the app's main thread blocks on the agent
+        (ANR). After ``_HUNG_UNLOAD_GRACE`` more seconds the target counts as
+        hung, see :meth:`_handle_hung_target`.
+        """
+        if worker is None or not hasattr(worker, "join"):
+            return
+        package = getattr(self, "app_package", None)
+        pid = getattr(self, "process_id", None)
+        spawned = self._is_spawned_target()
+
+        def _watch() -> None:
+            worker.join(_HUNG_UNLOAD_GRACE)
+            if not worker.is_alive():
+                logger.info(f"friTap agent finished unloading from {package}")
+                return
+            self._handle_hung_target(package, pid, spawned)
+
+        threading.Thread(
+            target=_watch, name="fritap-unload-watchdog", daemon=True
+        ).start()
+
+    def _handle_hung_target(self, package, pid, spawned: bool) -> None:
+        """The agent never unloaded: recover a spawned app, warn otherwise."""
+        waited = _STOP_TIMEOUT + _HUNG_UNLOAD_GRACE
+        cause = (
+            f"friTap's agent could not unload from {package} (PID {pid}) within "
+            f"{waited:.0f}s: an app thread is stuck in a hooked SSL call, which "
+            "leaves the app frozen ('isn't responding')."
+        )
+        if spawned and _force_stop_if_running(package, pid):
+            msg = (
+                f"{cause} Sandroid spawned it, so it was force-stopped. Spawn "
+                "it again (Shift+C) or start it from the launcher."
+            )
+            forget_injected_pid(pid)
+            try:
+                from sandroid.services import get_spotlight_service
+
+                spotlight = get_spotlight_service()
+                if spotlight.get_pid() == pid:
+                    spotlight.announce_pid(None, package)
+            except Exception as e:
+                logger.debug(f"Could not clear the spotlight PID: {e}")
+        else:
+            msg = (
+                f"{cause} If it does not respond, restart it (Spotlight "
+                f"Shift+R) or run: adb shell am force-stop {package}"
+            )
+        logger.warning(msg)
+        try:
+            _publish_fritap_event(EventBus.get(), f"[warning]{msg}[/warning]")
+        except Exception:
+            pass
 
     def _stop_network_capture(self) -> None:
         """Stop the network capture this friTap session started. Idempotent.

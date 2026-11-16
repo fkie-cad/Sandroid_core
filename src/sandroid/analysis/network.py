@@ -1,6 +1,8 @@
 # ensure that we only see errors from scapy
 import logging
 import os
+import socket
+import struct
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,6 +57,18 @@ NOISE_CONNECTIONS_FLOOR = 2
 #: cache answers.
 NOISE_DNS_QUERIES_FLOOR = 2
 
+# ----------------------------------------------------------------------
+# Capture analysis bounds
+# ----------------------------------------------------------------------
+#: Packets analysed per capture. A dup-ACK / FIN storm on a half-open
+#: connection restored from the snapshot produced 1.3 M packets (94 MB) in a
+#: 41 s run; the streaming parser handles that in seconds, this cap only
+#: bounds pathological captures. A cut capture is reported in the results
+#: ("analysis truncated after N packets").
+MAX_ANALYSED_PACKETS = 5_000_000
+#: Minimum seconds between two "Analysing <pcap>: N packets" progress lines.
+PROGRESS_LOG_SECONDS = 5.0
+
 
 @dataclass
 class _Volume:
@@ -105,8 +119,8 @@ def _ensure_scapy():
     global _scapy_imported
     if not _scapy_imported:
         logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-        global DNS, DNSQR, DNSRR, IP, IPv6, TCP, UDP, rdpcap
-        from scapy.all import DNS, DNSQR, DNSRR, IP, TCP, UDP, IPv6, rdpcap
+        global DNS, DNSQR, DNSRR, IP, IPv6
+        from scapy.all import DNS, DNSQR, DNSRR, IP, IPv6
 
         _scapy_imported = True
 
@@ -364,29 +378,16 @@ class Network(DataGatherBase):
                 - total_dns_queries: Count of unique DNS queries
                 - total_tcp_connections: Count of unique TCP connections
         """
-        _ensure_scapy()
-
-        packets = self._read_pcap(pcap_path)
-
-        # Extract DNS requests
-        dns_queries = self._dns_queries_in(packets)
-
-        # Extract connection targets (TCP SYNs + non-DNS UDP)
-        tcp_targets = self._targets_in(packets)
-
-        # Calculate byte counts for each connection
-        dns_names = self._dns_answers_in(packets)
+        summary = self._summarise_pcap(pcap_path)
+        tcp_targets = summary.targets
+        dns_names = summary.dns_answers
         ip_analysis = []
         for ip_and_port in sorted(tcp_targets):
             target_ip, target_port, proto = self._parse_endpoint(ip_and_port)
-            bytes_sent, bytes_received = self._count_bytes_in(
-                packets, target_ip, target_port, proto
+            bytes_sent, bytes_received = summary.bytes_to_from(
+                target_ip, target_port, proto
             )
-            sni = (
-                self._sni_names_in(packets, target_ip, target_port)
-                if proto == "tcp"
-                else set()
-            )
+            sni = summary.sni_names(target_ip, target_port) if proto == "tcp" else set()
             ip_analysis.append(
                 {
                     "ip": target_ip,
@@ -398,6 +399,10 @@ class Network(DataGatherBase):
                     "tls_sni": sorted(sni),
                 }
             )
+        dns_queries = set(summary.dns_queries)
+        extra = (
+            {"analysis_note": summary.truncation_note()} if summary.truncated else {}
+        )
 
         return {
             "pcap_file": pcap_path,
@@ -406,6 +411,8 @@ class Network(DataGatherBase):
             "ip_analysis": ip_analysis,
             "total_dns_queries": len(dns_queries),
             "total_tcp_connections": len(tcp_targets),
+            "packets_analysed": summary.packets,
+            **extra,
         }
 
     def pretty_print(self) -> str:
@@ -653,35 +660,243 @@ class Network(DataGatherBase):
         """Path of the dry-run (noise) capture."""
         return f"{self._get_path()}{self._trace_file_name}noise.pcap"
 
-    @staticmethod
-    def _read_pcap(pcap_path: str) -> list[Any]:
-        """Read a capture, returning ``[]`` if it is missing or unreadable.
+    @classmethod
+    def _summarise_pcap(
+        cls, pcap_path: str, max_packets: int | None = None
+    ) -> "_PcapSummary":
+        """Stream a capture once and aggregate everything the analysis needs.
 
-        A missing noise capture (noise filter off) or a capture that never
-        started must not abort the whole network result.
+        Packets are read one at a time (never the whole file) and parsed with
+        a small header parser; only DNS packets are handed to scapy. The
+        result is per-flow aggregates, so memory does not grow with the
+        number of packets. Zero-payload TCP segments that repeat the previous
+        segment of their flow (dup-ACK / FIN retransmission storms on a
+        half-open connection restored from a snapshot) are only counted, not
+        treated as traffic. After ``max_packets`` (default
+        :data:`MAX_ANALYSED_PACKETS`) the summary is marked truncated.
+
+        A missing or unreadable capture (noise filter off, a capture that
+        never started) yields an empty summary instead of aborting the whole
+        network result.
         """
-        _ensure_scapy()
+        summary = _PcapSummary(path=pcap_path or "")
         if not pcap_path or not os.path.isfile(pcap_path):
             logger.debug(f"No capture file at {pcap_path}")
-            return []
+            return summary
+        _ensure_scapy()
+        from scapy.utils import RawPcapReader
+
+        limit = MAX_ANALYSED_PACKETS if max_packets is None else max_packets
+        name = os.path.basename(pcap_path)
+        summary.file_bytes = os.path.getsize(pcap_path)
+        started = last_log = time.monotonic()
         try:
-            return list(rdpcap(pcap_path))
+            reader = RawPcapReader(pcap_path)
         except Exception as exc:
             logger.warning(f"Could not read capture {pcap_path}: {exc}")
-            return []
-
-    # ------------------------------------------------------------------
-    # Packet parsing helpers (operate on already-read packet lists)
-    # ------------------------------------------------------------------
+            return summary
+        try:
+            default_link = getattr(reader, "linktype", 1)
+            for data, meta in reader:
+                if summary.packets >= limit:
+                    summary.truncated = True
+                    break
+                summary.packets += 1
+                summary.bytes_read += len(data) + 16
+                cls._account_packet(
+                    summary, data, getattr(meta, "linktype", default_link)
+                )
+                if summary.packets % 100_000 == 0:
+                    now = time.monotonic()
+                    if now - last_log >= PROGRESS_LOG_SECONDS:
+                        last_log = now
+                        logger.info(
+                            f"Analysing {name}: {summary.packets:,} packets "
+                            f"(~{summary.bytes_read / 1e6:.0f} of "
+                            f"{summary.file_bytes / 1e6:.0f} MB) after "
+                            f"{now - started:.0f}s"
+                        )
+        except Exception as exc:
+            logger.warning(
+                f"Could not read the rest of capture {pcap_path} after "
+                f"{summary.packets} packets: {exc}"
+            )
+        finally:
+            reader.close()
+        elapsed = time.monotonic() - started
+        if summary.duplicates:
+            logger.info(
+                f"{name}: {summary.duplicates:,} of {summary.packets:,} packets "
+                "were repeated zero-payload TCP segments (dup-ACK / FIN "
+                "retransmissions) and were not counted as traffic"
+            )
+        if summary.truncated:
+            logger.warning(f"{name}: {summary.truncation_note()}")
+        logger.debug(f"Analysed {name}: {summary.packets} packets in {elapsed:.1f}s")
+        return summary
 
     @staticmethod
-    def _ip_layer(pkt: Any) -> Any:
-        """Return the IPv4 or IPv6 layer of ``pkt`` (or ``None``)."""
-        if pkt.haslayer(IP):
-            return pkt[IP]
-        if pkt.haslayer(IPv6):
-            return pkt[IPv6]
+    def _ip_offset(linktype: int, data: bytes) -> int | None:
+        """Offset of the IPv4/IPv6 header in a frame of ``linktype``."""
+        if linktype == 1:  # Ethernet (the emulator's capture format)
+            offset, ethertype = 14, data[12:14]
+            while ethertype in (b"\x81\x00", b"\x88\xa8"):  # VLAN tags
+                ethertype = data[offset + 2 : offset + 4]
+                offset += 4
+            return offset if ethertype in (b"\x08\x00", b"\x86\xdd") else None
+        if linktype in (12, 14, 101, 228, 229):  # raw IP
+            return 0
+        if linktype in (0, 108):  # BSD loopback
+            return 4
+        if linktype == 113:  # Linux cooked v1
+            return 16 if data[14:16] in (b"\x08\x00", b"\x86\xdd") else None
+        if linktype == 276:  # Linux cooked v2
+            return 20 if data[0:2] in (b"\x08\x00", b"\x86\xdd") else None
         return None
+
+    @classmethod
+    def _account_packet(
+        cls, summary: "_PcapSummary", data: bytes, linktype: int
+    ) -> None:
+        """Add one raw frame to ``summary`` (malformed frames are skipped)."""
+        try:
+            offset = cls._ip_offset(linktype, data)
+            if offset is None:
+                data, offset = cls._ip_bytes_via_scapy(linktype, data), 0
+                if not data:
+                    return
+            cls._account_ip(summary, data, offset)
+        except (IndexError, struct.error, ValueError, OSError):
+            return
+
+    @staticmethod
+    def _ip_bytes_via_scapy(linktype: int, data: bytes) -> bytes:
+        """IP bytes of a frame of an unusual link type (slow path)."""
+        from scapy.config import conf
+
+        layer = conf.l2types.get(linktype)
+        if layer is None:
+            return b""
+        pkt = layer(data)
+        for ip_layer in (IP, IPv6):
+            if pkt.haslayer(ip_layer):
+                return bytes(pkt[ip_layer])
+        return b""
+
+    @classmethod
+    def _account_ip(cls, summary: "_PcapSummary", data: bytes, off: int) -> None:
+        """Parse the IP packet at ``data[off:]`` and aggregate it."""
+        version = data[off] >> 4
+        if version == 4:
+            ihl = (data[off] & 0x0F) * 4
+            total, frag, proto = (
+                _U16.unpack_from(data, off + 2)[0],
+                _U16.unpack_from(data, off + 6)[0] & 0x1FFF,
+                data[off + 9],
+            )
+            if frag:  # a later fragment carries no transport header
+                return
+            src = socket.inet_ntoa(data[off + 12 : off + 16])
+            dst = socket.inet_ntoa(data[off + 16 : off + 20])
+            l4 = off + ihl
+            end = off + total if total else len(data)  # drop Ethernet padding
+            # Payload bytes per the IP length field (on the wire, so frames
+            # cut by a snap length still count fully); None -> captured size.
+            ip_payload = total - ihl if total else None
+        elif version == 6:
+            plen, proto = _U16.unpack_from(data, off + 4)[0], data[off + 6]
+            src = socket.inet_ntop(socket.AF_INET6, data[off + 8 : off + 24])
+            dst = socket.inet_ntop(socket.AF_INET6, data[off + 24 : off + 40])
+            l4, extension = off + 40, 0
+            while proto in (0, 43, 44, 60):  # extension headers
+                if proto == 44:  # fragment header
+                    if _U16.unpack_from(data, l4 + 2)[0] >> 3:
+                        return
+                    length = 8
+                else:
+                    length = (data[l4 + 1] + 1) * 8
+                proto = data[l4]
+                l4 += length
+                extension += length
+            end = off + 40 + plen if plen else len(data)
+            ip_payload = plen - extension
+        else:
+            return
+
+        if proto == 6:
+            if len(data) < l4 + 20:
+                return
+            sport, dport, seq, ack, offset_flags = _TCP.unpack_from(data, l4)
+            header = ((offset_flags >> 12) or 5) * 4
+            flags = offset_flags & 0x1FF
+            if ip_payload is None:
+                size = max(0, end - l4 - header)
+            else:
+                size = max(0, ip_payload - header)
+            if flags & 0x02 and not flags & 0x10:  # SYN without ACK
+                summary.targets.add(cls._format_endpoint(dst, dport, "tcp"))
+            flow = summary.flow((src, sport, dst, dport, "tcp"))
+            if size == 0:
+                state = (seq, ack, flags)
+                if flow.last == state:
+                    flow.duplicates += 1
+                    summary.duplicates += 1
+                    return
+                flow.last = state
+            else:
+                flow.last = None
+                if data[l4 + header : l4 + header + 1] == b"\x16":
+                    name = cls._tls_sni(data[l4 + header : end])
+                    if name:
+                        summary.sni.setdefault((dst, dport), set()).add(name)
+            flow.packets += 1
+            flow.payload += size
+        elif proto == 17:
+            if len(data) < l4 + 8:
+                return
+            sport, dport, length = _UDP.unpack_from(data, l4)
+            size = max(0, length - 8)
+            if sport in _DNS_PORTS or dport in _DNS_PORTS:
+                cls._account_dns(summary, data[off:end], version, dport)
+            elif dport not in (67, 68) and not cls._is_local_or_multicast(dst):
+                summary.targets.add(cls._format_endpoint(dst, dport, "udp"))
+            flow = summary.flow((src, sport, dst, dport, "udp"))
+            flow.packets += 1
+            flow.payload += size
+
+    @staticmethod
+    def _account_dns(
+        summary: "_PcapSummary", ip_bytes: bytes, version: int, dport: int
+    ) -> None:
+        """Record the query / answers of one DNS packet (scapy-decoded)."""
+        try:
+            pkt = (IP if version == 4 else IPv6)(ip_bytes)
+            if not pkt.haslayer(DNS):
+                return
+            dns = pkt.getlayer(DNS)
+            if dns.qr == 0:
+                # mDNS (5353) is LAN service discovery, not a lookup.
+                if not dns.qd or dport == 5353:
+                    return
+                query = dns.qd[0]
+                if query is not None and isinstance(query, DNSQR):
+                    name = query.qname.decode(errors="replace")
+                    summary.dns_queries[name] = summary.dns_queries.get(name, 0) + 1
+                return
+            if dns.qr != 1 or not dns.an:
+                return
+            qname = dns.qd[0].qname.decode(errors="replace") if dns.qd else ""
+            for rr in list(dns.an):
+                if isinstance(rr, DNSRR) and rr.type in (1, 28) and qname:
+                    summary.dns_answers.setdefault(str(rr.rdata), set()).add(
+                        qname.rstrip(".")
+                    )
+        except Exception:  # malformed DNS must not stop the analysis
+            return
+
+    # ------------------------------------------------------------------
+    # Formatting helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _format_endpoint(ip: str, port: int, proto: str) -> str:
@@ -706,154 +921,6 @@ class Network(DataGatherBase):
         if ip.startswith(("10.0.2.", "224.", "239.", "255.", "ff0", "fe80:")):
             return True
         return ip in ("0.0.0.0", "::")  # nosec B104 - comparison only
-
-    @classmethod
-    def _dns_queries_in(cls, packets: list[Any]) -> set[str]:
-        domain_names: set[str] = set()
-        for pkt in packets:
-            if not pkt.haslayer(DNS):
-                continue
-            dns = pkt.getlayer(DNS)
-            if dns.qr != 0 or not dns.qd:
-                continue
-            try:
-                dns_query = dns.qd[0]
-            except (IndexError, TypeError):
-                continue
-            if dns_query is not None and isinstance(dns_query, DNSQR):
-                # mDNS (5353) is LAN service discovery, not a lookup.
-                if pkt.haslayer(UDP) and pkt[UDP].dport == 5353:
-                    continue
-                domain_names.add(dns_query.qname.decode(errors="replace"))
-        return domain_names
-
-    @classmethod
-    def _targets_in(cls, packets: list[Any]) -> set[str]:
-        """Outbound connection targets: TCP SYNs + non-DNS unicast UDP."""
-        targets: set[str] = set()
-        for pkt in packets:
-            ip = cls._ip_layer(pkt)
-            if ip is None:
-                continue
-            if pkt.haslayer(TCP):
-                flags = pkt[TCP].flags
-                # SYN without ACK == connection initiation by the guest.
-                if "S" in str(flags) and "A" not in str(flags):
-                    targets.add(cls._format_endpoint(ip.dst, pkt[TCP].dport, "tcp"))
-            elif pkt.haslayer(UDP):
-                udp = pkt[UDP]
-                if udp.dport in (53, 5353, 67, 68) or udp.sport in (53, 5353):
-                    continue
-                if cls._is_local_or_multicast(ip.dst):
-                    continue
-                targets.add(cls._format_endpoint(ip.dst, udp.dport, "udp"))
-        return targets
-
-    @classmethod
-    def _count_bytes_in(
-        cls, packets: list[Any], ip_address: str, port: int, proto: str = "tcp"
-    ) -> tuple[int, int]:
-        """Payload bytes (sent to, received from) ``ip_address:port``."""
-        layer = TCP if proto == "tcp" else UDP
-        sent_bytes = 0
-        received_bytes = 0
-        for pkt in packets:
-            ip = cls._ip_layer(pkt)
-            if ip is None or not pkt.haslayer(layer):
-                continue
-            seg = pkt[layer]
-            if ip.dst == ip_address and seg.dport == port:
-                sent_bytes += cls._payload_len(ip, seg, proto)
-            elif ip.src == ip_address and seg.sport == port:
-                received_bytes += cls._payload_len(ip, seg, proto)
-        return sent_bytes, received_bytes
-
-    @staticmethod
-    def _payload_len(ip: Any, seg: Any, proto: str) -> int:
-        """Transport payload length taken from the IP/UDP length fields.
-
-        The header fields give the size on the wire, so Ethernet padding of
-        short frames is not counted as payload and captures cut by a snap
-        length still count every byte. Falls back to the captured payload
-        when a length field is missing.
-        """
-        try:
-            if proto == "udp" and seg.len is not None:
-                return max(0, seg.len - 8)
-            header = (seg.dataofs or 5) * 4
-            if pkt_len := getattr(ip, "len", None):  # IPv4 total length
-                return max(0, pkt_len - ip.ihl * 4 - header)
-            if (plen := getattr(ip, "plen", None)) is not None:  # IPv6
-                # Extension headers sit between the IPv6 header and TCP.
-                extension = len(ip.payload) - len(seg) if ip.nh != 6 else 0
-                return max(0, plen - extension - header)
-        except (AttributeError, TypeError):
-            pass
-        return len(seg.payload)
-
-    @classmethod
-    def _volumes_in(cls, packets: list[Any], targets: set[str]) -> dict[str, _Volume]:
-        """Per-destination traffic volume for ``targets`` in one pass."""
-        volumes: dict[str, _Volume] = {}
-        for pkt in packets:
-            ip = cls._ip_layer(pkt)
-            if ip is None:
-                continue
-            if pkt.haslayer(TCP):
-                seg, proto = pkt[TCP], "tcp"
-            elif pkt.haslayer(UDP):
-                seg, proto = pkt[UDP], "udp"
-            else:
-                continue
-            outbound = cls._format_endpoint(ip.dst, seg.dport, proto)
-            if outbound in targets:
-                volume = volumes.setdefault(outbound, _Volume())
-                volume.sent += cls._payload_len(ip, seg, proto)
-                volume.local_ports.add(seg.sport)
-            else:
-                inbound = cls._format_endpoint(ip.src, seg.sport, proto)
-                if inbound not in targets:
-                    continue
-                volume = volumes.setdefault(inbound, _Volume())
-                volume.received += cls._payload_len(ip, seg, proto)
-                volume.local_ports.add(seg.dport)
-            volume.packets += 1
-        return volumes
-
-    @classmethod
-    def _dns_query_counts(cls, packets: list[Any]) -> dict[str, int]:
-        """How often each name was queried (same filtering as queries)."""
-        counts: dict[str, int] = {}
-        for pkt in packets:
-            for name in cls._dns_queries_in([pkt]):
-                counts[name] = counts.get(name, 0) + 1
-        return counts
-
-    @classmethod
-    def _dns_answers_in(cls, packets: list[Any]) -> dict[str, set[str]]:
-        """Map each resolved IP to *every* queried name that resolved to it.
-
-        CDNs and load balancers share one IP between many hosts (Wikimedia
-        serves en.wikipedia.org and intake-analytics.wikimedia.org from the
-        same address), so keeping only the first answer mislabelled all
-        traffic to that IP.
-        """
-        answers: dict[str, set[str]] = {}
-        for pkt in packets:
-            if not pkt.haslayer(DNS):
-                continue
-            dns = pkt.getlayer(DNS)
-            if dns.qr != 1 or not dns.an:
-                continue
-            try:
-                qname = dns.qd[0].qname.decode(errors="replace") if dns.qd else ""
-                records = list(dns.an)
-            except Exception:
-                continue
-            for rr in records:
-                if isinstance(rr, DNSRR) and rr.type in (1, 28) and qname:
-                    answers.setdefault(str(rr.rdata), set()).add(qname.rstrip("."))
-        return answers
 
     @staticmethod
     def _tls_sni(payload: bytes) -> str | None:
@@ -888,36 +955,6 @@ class Network(DataGatherBase):
         except IndexError:
             return None
         return None
-
-    @classmethod
-    def _sni_names_in(cls, packets: list[Any], ip_address: str, port: int) -> set[str]:
-        """TLS SNI host names the guest sent to ``ip_address:port``."""
-        names: set[str] = set()
-        for pkt in packets:
-            ip = cls._ip_layer(pkt)
-            if ip is None or not pkt.haslayer(TCP):
-                continue
-            seg = pkt[TCP]
-            if ip.dst != ip_address or seg.dport != port:
-                continue
-            name = cls._tls_sni(bytes(seg.payload))
-            if name:
-                names.add(name)
-        return names
-
-    @classmethod
-    def _got_reply(
-        cls, packets: list[Any], ip_address: str, port: int, proto: str
-    ) -> bool:
-        """Whether any packet came back from ``ip_address:port``."""
-        layer = TCP if proto == "tcp" else UDP
-        for pkt in packets:
-            ip = cls._ip_layer(pkt)
-            if ip is None or not pkt.haslayer(layer):
-                continue
-            if ip.src == ip_address and pkt[layer].sport == port:
-                return True
-        return False
 
     @staticmethod
     def _host_label(dns_names: set[str], sni_names: set[str]) -> str:
@@ -964,7 +1001,7 @@ class Network(DataGatherBase):
         Returns:
             A set of domain names that were queried in the capture.
         """
-        return cls._dns_queries_in(cls._read_pcap(pcap_path))
+        return set(cls._summarise_pcap(pcap_path).dns_queries)
 
     def extract_target_ips_and_ports_for_all_pcaps(self) -> list[str]:
         """Connection targets of the action runs, compared with the dry run.
@@ -997,67 +1034,63 @@ class Network(DataGatherBase):
         ``"also seen in background: ..."``. Everything subtracted is kept,
         with both volumes, in :attr:`filtered_network_noise`.
 
+        Each capture is streamed once (see :meth:`_summarise_pcap`); a
+        capture cut at :data:`MAX_ANALYSED_PACKETS` adds an "analysis
+        truncated" note as the last IP:port entry.
+
         Sets :attr:`dns_requests`, :attr:`target_ips_and_ports`,
         :attr:`filtered_network_noise` and :attr:`performed_diff`, and
         publishes one ``NetworkEvent`` per reported DNS name / target.
         """
         if self.performed_diff:
             return
-        logger.info("Analyzing pcaps for network targets, this could take a minute...")
+        started = time.monotonic()
+        logger.info("Analyzing pcaps for network targets...")
 
-        runs: list[tuple[list[Any], set[str]]] = []
+        runs = [self._summarise_pcap(path) for path in self._run_pcap_paths()]
         all_targets: set[str] = set()
         dns_names: dict[str, set[str]] = {}
         run_queries: dict[str, int] = {}  # name -> most queries in one run
-        for path in self._run_pcap_paths():
-            packets = self._read_pcap(path)
-            targets = self._targets_in(packets)
-            runs.append((packets, targets))
-            all_targets.update(targets)
-            for ip, names in self._dns_answers_in(packets).items():
+        for run in runs:
+            all_targets.update(run.targets)
+            for ip, names in run.dns_answers.items():
                 dns_names.setdefault(ip, set()).update(names)
-            for name, count in self._dns_query_counts(packets).items():
+            for name, count in run.dns_queries.items():
                 run_queries[name] = max(run_queries.get(name, 0), count)
-        run_volumes = [self._volumes_in(p, t) for p, t in runs]
+        run_volumes = [run.volumes(run.targets) for run in runs]
 
-        noise_packets = self._read_pcap(self._noise_pcap_path())
-        noise_targets = self._targets_in(noise_packets)
-        noise_volumes = self._volumes_in(noise_packets, noise_targets & all_targets)
-        noise_queries = self._dns_query_counts(noise_packets)
+        noise = self._summarise_pcap(self._noise_pcap_path())
+        noise_volumes = noise.volumes(noise.targets & all_targets)
+        noise_queries = noise.dns_queries
 
         targets_out: list[str] = []
         filtered_targets: dict[str, str] = {}
         reported_names: set[str] = set()
         for endpoint in sorted(all_targets):
             target_ip, target_port, proto = self._parse_endpoint(endpoint)
-            first = next(i for i, (_, t) in enumerate(runs) if endpoint in t)
-            packets = runs[first][0]
+            first = next(i for i, run in enumerate(runs) if endpoint in run.targets)
+            run = runs[first]
             shown = run_volumes[first].get(endpoint, _Volume())
             busiest = max(
                 (v.get(endpoint, _Volume()) for v in run_volumes),
                 key=lambda v: (v.total, v.packets),
             )
-            sni = (
-                self._sni_names_in(packets, target_ip, target_port)
-                if proto == "tcp"
-                else set()
-            )
+            sni = run.sni_names(target_ip, target_port) if proto == "tcp" else set()
             names = dns_names.get(target_ip, set())
             label = endpoint + self._host_label(names, sni)
             note = ""
-            if endpoint in noise_targets:
-                noise = noise_volumes.get(endpoint, _Volume())
-                if not _above_background(busiest, noise):
+            if endpoint in noise.targets:
+                background = noise_volumes.get(endpoint, _Volume())
+                if not _above_background(busiest, background):
                     filtered_targets[label] = (
-                        f"comparable to background: dry run {noise.describe()}, "
+                        f"comparable to background: dry run "
+                        f"{background.describe()}, "
                         f"busiest action run {busiest.describe()}"
                     )
                     continue
-                note = f"; also seen in background: {noise.describe()}"
+                note = f"; also seen in background: {background.describe()}"
             reported_names.update(names)
-            if shown.total == 0 and not self._got_reply(
-                packets, target_ip, target_port, proto
-            ):
+            if shown.total == 0 and not run.got_reply(target_ip, target_port, proto):
                 note = "; no reply, connection attempt only" + note
             targets_out.append(
                 f"{label} ({shown.sent}B sent to / {shown.received}B received from"
@@ -1079,19 +1112,22 @@ class Network(DataGatherBase):
         for name in sorted(run_queries):
             entry = name
             if name in noise_queries:
-                background = noise_queries[name]
+                background_queries = noise_queries[name]
                 busiest_queries = run_queries[name]
                 if (
                     name.rstrip(".") not in reported_names
-                    and busiest_queries <= factor * background + NOISE_DNS_QUERIES_FLOOR
+                    and busiest_queries
+                    <= factor * background_queries + NOISE_DNS_QUERIES_FLOOR
                 ):
                     filtered_dns[name] = (
-                        f"comparable to background: dry run {background} "
+                        f"comparable to background: dry run {background_queries} "
                         f"queries, busiest action run {busiest_queries} queries, "
                         "no destination above background resolved to it"
                     )
                     continue
-                entry = f"{name} (also seen in background: {background} queries)"
+                entry = (
+                    f"{name} (also seen in background: {background_queries} queries)"
+                )
             dns_out.append(entry)
             NetworkEvent(
                 event_type_name="dns_request",
@@ -1103,6 +1139,21 @@ class Network(DataGatherBase):
                 source="network",
             ).publish()
 
+        # A cut capture must be visible in the result itself, not only in
+        # the log: the note travels into run.json, the TUI and the PDF.
+        for summary in [*runs, noise]:
+            if summary.truncated:
+                note = (
+                    f"({os.path.basename(summary.path)}: {summary.truncation_note()})"
+                )
+                targets_out.append(note)
+                TaskOutput(
+                    task_name="network",
+                    message=note,
+                    level="warning",
+                    source="network",
+                ).publish()
+
         self.dns_requests = dns_out
         self.target_ips_and_ports = targets_out
         self.filtered_network_noise = {
@@ -1112,12 +1163,18 @@ class Network(DataGatherBase):
         self.performed_diff = True
 
         hidden = len(filtered_dns) + len(filtered_targets)
+        packets = sum(s.packets for s in [*runs, noise])
+        logger.info(
+            f"Analyzed {len(runs) + bool(noise.packets)} capture(s), "
+            f"{packets:,} packets, in {time.monotonic() - started:.1f}s"
+        )
         TaskOutput(
             task_name="network",
             message=(
-                f"Found {len(dns_out)} DNS names and {len(targets_out)} IP:port "
-                f"targets ({hidden} comparable to the dry-run background hidden, "
-                "see Other Data -> Filtered Noise)"
+                f"Found {len(dns_out)} DNS names and "
+                f"{len(targets_out) - sum(s.truncated for s in [*runs, noise])} "
+                f"IP:port targets ({hidden} comparable to the dry-run background "
+                "hidden, see Other Data -> Filtered Noise)"
             ),
             level="info",
             source="network",
@@ -1133,7 +1190,7 @@ class Network(DataGatherBase):
         Returns:
             A set of targets in ``"IP:Port"`` (TCP) / ``"IP:Port/udp"`` format.
         """
-        return cls._targets_in(cls._read_pcap(pcap_path))
+        return cls._summarise_pcap(pcap_path).targets
 
     def count_bytes(
         self, ip_address: str, port: int, pcap_file: str
@@ -1148,7 +1205,106 @@ class Network(DataGatherBase):
         Returns:
             A tuple of (sent_bytes, received_bytes).
         """
-        packets = self._read_pcap(pcap_file)
-        sent_tcp, recv_tcp = self._count_bytes_in(packets, ip_address, port, "tcp")
-        sent_udp, recv_udp = self._count_bytes_in(packets, ip_address, port, "udp")
+        summary = self._summarise_pcap(pcap_file)
+        sent_tcp, recv_tcp = summary.bytes_to_from(ip_address, port, "tcp")
+        sent_udp, recv_udp = summary.bytes_to_from(ip_address, port, "udp")
         return sent_tcp + sent_udp, recv_tcp + recv_udp
+
+
+# ----------------------------------------------------------------------
+# Streaming capture summary
+# ----------------------------------------------------------------------
+
+_U16 = struct.Struct("!H")
+_TCP = struct.Struct("!HHIIH")
+_UDP = struct.Struct("!HHH")
+_DNS_PORTS = (53, 5353)
+
+#: (src ip, src port, dst ip, dst port, "tcp"/"udp") -- one flow direction.
+_FlowKey = tuple[str, int, str, int, str]
+
+
+@dataclass
+class _Flow:
+    """Aggregate of one direction of one TCP connection / UDP flow."""
+
+    payload: int = 0
+    packets: int = 0
+    duplicates: int = 0
+    #: (seq, ack, flags) of the last zero-payload TCP segment.
+    last: tuple[int, int, int] | None = None
+
+
+@dataclass
+class _PcapSummary:
+    """Everything the network analysis needs from one capture."""
+
+    path: str = ""
+    flows: dict[_FlowKey, _Flow] = field(default_factory=dict)
+    targets: set[str] = field(default_factory=set)
+    dns_queries: dict[str, int] = field(default_factory=dict)
+    dns_answers: dict[str, set[str]] = field(default_factory=dict)
+    sni: dict[tuple[str, int], set[str]] = field(default_factory=dict)
+    packets: int = 0
+    duplicates: int = 0
+    bytes_read: int = 0
+    file_bytes: int = 0
+    truncated: bool = False
+
+    def flow(self, key: _FlowKey) -> _Flow:
+        flow = self.flows.get(key)
+        if flow is None:
+            flow = self.flows[key] = _Flow()
+        return flow
+
+    def truncation_note(self) -> str:
+        """Human-readable "analysis truncated" note."""
+        return (
+            f"analysis truncated after {self.packets:,} packets "
+            f"(~{self.bytes_read / 1e6:.0f} of {self.file_bytes / 1e6:.0f} MB); "
+            "traffic after that point is not in these results, open the "
+            "capture in Wireshark for the rest"
+        )
+
+    def volumes(self, targets: set[str]) -> dict[str, _Volume]:
+        """Per-destination traffic volume for ``targets``."""
+        volumes: dict[str, _Volume] = {}
+        fmt = Network._format_endpoint
+        for (src, sport, dst, dport, proto), flow in self.flows.items():
+            outbound = fmt(dst, dport, proto)
+            if outbound in targets:
+                volume = volumes.setdefault(outbound, _Volume())
+                volume.sent += flow.payload
+                volume.local_ports.add(sport)
+            else:
+                inbound = fmt(src, sport, proto)
+                if inbound not in targets:
+                    continue
+                volume = volumes.setdefault(inbound, _Volume())
+                volume.received += flow.payload
+                volume.local_ports.add(dport)
+            volume.packets += flow.packets
+        return volumes
+
+    def bytes_to_from(self, ip: str, port: int, proto: str) -> tuple[int, int]:
+        """Payload bytes (sent to, received from) ``ip:port``."""
+        sent = received = 0
+        for (src, sport, dst, dport, flow_proto), flow in self.flows.items():
+            if flow_proto != proto:
+                continue
+            if dst == ip and dport == port:
+                sent += flow.payload
+            elif src == ip and sport == port:
+                received += flow.payload
+        return sent, received
+
+    def got_reply(self, ip: str, port: int, proto: str) -> bool:
+        """Whether any packet came back from ``ip:port``."""
+        return any(
+            src == ip and sport == port and flow_proto == proto
+            for (src, sport, _, _, flow_proto) in self.flows
+        )
+
+    def sni_names(self, ip: str, port: int) -> set[str]:
+        """TLS SNI host names the guest sent to ``ip:port``."""
+        return set(self.sni.get((ip, port), set()))

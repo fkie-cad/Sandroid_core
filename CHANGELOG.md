@@ -38,6 +38,7 @@ persistent run history, and an experimental AI Chat assistant.
 - **Run history / run bundles**: every Play is stored as a self-contained bundle (`<results_path>/runs/<run_id>/` with `run.json`, `recording.txt`, raw pull tree), listed in **Files → Diffs**, scoped per device; Record/Play UX fixes and a redesigned Diffs layout.
 - **Unified Files tab**: fsmon/kprobe monitor stream, Spotlight-Files watchlist and Play diffing in one place, with grouped, de-duplicated event display.
 - **kprobe filesystem monitor** (`tui.monitor_backend = "kprobe"`, default): kernel tracefs kprobes with per-process/child-tree attribution and path-scoped capture, no binary pushed to the device; automatic fallback to `fsmon`.
+- **Replay settle time** (`analysis.replay_settle_seconds`, default 8 s, also in Settings → Analysis): every replay's capture window stays open that much longer so slow network responses and late writes land in the run; the dry run waits the same extra time, so noise subtraction still compares equal windows.
 
 #### Network interception
 - **mitmproxy integration** (Network → Mitmproxy): start/stop `mitmweb`, live flow and TLS-failure tail, flow log.
@@ -139,6 +140,11 @@ persistent run history, and an experimental AI Chat assistant.
 - Artifact hashes include files that also changed in the dry run.
 - Files hidden as structural noise (ART profiles, package-manager bookkeeping) or dry-run noise are listed under `Other Data → Filtered Noise` with their reason, and the PDF has a compact Filtered Noise appendix.
 - Changed/New Files and SQLite update columns are reported in a deterministic order.
+- **pcap analysis is streamed and bounded**: a dup-ACK/FIN storm on a half-open connection restored from the snapshot (1.3 M packets, 94 MB per capture) made the network analysis take ~4 min and >11 GB RAM. Captures are now read packet by packet into per-flow totals (same results, ~7 s for two such captures), repeated zero-payload TCP segments are not counted as traffic, progress is logged, and a capture over 5 M packets is cut with an "analysis truncated after N packets" note in the results.
+- friTap: when the agent cannot unload (an app thread stuck in a hooked SSL call, which left the app permanently "isn't responding"), a spawned app is force-stopped after 19 s; for an attached app the log says it is likely frozen and how to recover. The routine "agent still unloading" note is no longer a warning.
+- The header's App PID is re-checked while other tabs are shown, so an app restarted outside Sandroid no longer shows its dead PID as running.
+- A replayed recording's run gets a distinct label (`<label> · play 2`) instead of a duplicate in the Runs rail.
+- The dry run's start, window length and end are logged (headless output showed no sign of it).
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.

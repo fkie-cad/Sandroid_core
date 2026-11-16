@@ -452,6 +452,16 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
+        # Replay settle time
+        with Horizontal(classes="setting-row"):
+            yield Label("Replay Settle (s):", classes="setting-label")
+            yield Input(
+                value=str(config.analysis.replay_settle_seconds),
+                id="setting-analysis--replay_settle_seconds",
+                type="integer",
+                classes="setting-input",
+            )
+
         # Capture Processes
         with Horizontal(classes="setting-row"):
             yield Label("Capture Processes:", classes="setting-label")
@@ -1296,6 +1306,17 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 self._pending.pop("tui.monitor_max_lines", None)
                 return
             self._pending["tui.monitor_max_lines"] = value
+            return
+
+        if widget_id == "setting-analysis--replay_settle_seconds":
+            try:
+                value = int(event.value)
+            except ValueError:
+                value = None
+            if value is None or not (0 <= value <= 600):
+                self._pending.pop("analysis.replay_settle_seconds", None)
+                return
+            self._pending["analysis.replay_settle_seconds"] = value
             return
 
         key = self._id_to_key(widget_id)
