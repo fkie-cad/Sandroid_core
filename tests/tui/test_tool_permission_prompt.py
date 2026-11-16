@@ -9,7 +9,7 @@ is the standard, documented way to drive a widget in a test.
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Button
+from textual.widgets import Button, Label, Static
 
 from sandroid.ai.tools.registry import RiskTier, ToolSpec
 from sandroid.tui.widgets.tool_permission_prompt import (
@@ -160,3 +160,56 @@ def test_args_preview_truncates_long_arguments_with_ellipsis():
 
     assert len(preview) == 301  # 300 chars + the trailing ellipsis char
     assert preview.endswith("…")
+
+
+# -- full arguments / markup safety ---------------------------------------
+
+
+@pytest.mark.smoke
+async def test_long_arguments_are_flagged_and_shown_in_full():
+    """A payload past the 300-char preview must not be hidden from the user."""
+    tail = "; touch /tmp/PWNED #"
+    arguments = {"path": "/data/" + "a" * 400 + tail}
+    app = _PromptHarness(_make_spec(), arguments, lambda choice: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        message = str(app.query_one(".tool-permission-message", Label).render())
+        assert "TRUNCATED" in message
+        full = str(app.query_one("#tool-permission-args", Static).render())
+        assert tail in full
+
+
+@pytest.mark.smoke
+async def test_short_arguments_have_no_full_args_panel_and_markup_is_escaped():
+    arguments = {"name": "[/][#000000 on #000000]hidden[/]"}
+    app = _PromptHarness(_make_spec(), arguments, lambda choice: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        message = str(app.query_one(".tool-permission-message", Label).render())
+        assert "[#000000 on #000000]hidden" in message
+        assert not app.query("#tool-permission-args")
+
+
+@pytest.mark.smoke
+async def test_omitted_package_shows_resolved_spotlight_app(monkeypatch):
+    from sandroid import services
+
+    class _Spot:
+        @staticmethod
+        def get_effective_package():
+            return "com.example.target"
+
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: _Spot())
+    spec = _make_spec(
+        name="enable_app_proxy",
+        parameters={
+            "type": "object",
+            "properties": {"package": {"type": "string"}},
+            "required": [],
+        },
+    )
+    app = _PromptHarness(spec, {}, lambda choice: None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        message = str(app.query_one(".tool-permission-message", Label).render())
+        assert "com.example.target" in message
