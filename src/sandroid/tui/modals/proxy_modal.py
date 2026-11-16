@@ -450,10 +450,19 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     # ------------------------------------------------------------------ #
 
     def _mitmweb_addr(self) -> str:
-        """The ``host_ip:port`` Sandroid's own mitmproxy listens on."""
+        """The ``host_ip:port`` the device reaches Sandroid's mitmproxy at.
+
+        Emulator-aware (``10.0.2.2`` on an emulator, the host loopback), like
+        the Mitmproxy panel and the glance band. The raw LAN IP would not
+        reach mitmproxy, which listens on 127.0.0.1 by default.
+        """
+        from sandroid.core.proxy_manager import resolve_proxy_host_ip
         from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
-        host_ip = ProxyManager.get_host_ip()
+        try:
+            host_ip = resolve_proxy_host_ip()
+        except Exception:
+            host_ip = ProxyManager.get_host_ip()
         port = get_mitmproxy_service().state.proxy_port
         return f"{host_ip}:{port}"
 
@@ -1021,6 +1030,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             _teardown_reverse()
             ok, message = self._proxy_manager.unset_proxy()
             if ok:
+                get_mitmproxy_service().note_device_proxy(None)
                 self._set_glance_device_proxy("")
             else:
                 self.notify(message, severity="error")
@@ -1040,6 +1050,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 _teardown_reverse()
             ok, message = self._proxy_manager.set_proxy(desired_config)
             if ok:
+                # Remember a route to OUR mitmproxy so stop/exit clears it;
+                # an external proxy (Burp/ZAP) is the user's to keep.
+                ours = via_reverse or desired_config.address == self._mitmweb_addr()
+                get_mitmproxy_service().note_device_proxy(
+                    desired_config.address if ours else None
+                )
                 self._set_glance_device_proxy(desired_config.address)
             else:
                 self.notify(message, severity="error")

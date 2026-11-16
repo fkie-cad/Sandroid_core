@@ -785,6 +785,25 @@ class MitmproxyConfig(BaseModel):
     proxy_port: int = Field(
         default=8080, description="Listen port for the mitmproxy HTTP proxy"
     )
+    listen_host: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Bind address for the proxy and app-proxy SOCKS listeners. "
+            "127.0.0.1 keeps intercepted traffic off the LAN and is enough "
+            "for emulators (10.0.2.2 is the host loopback) and for USB "
+            "devices routed via adb reverse. Set 0.0.0.0 (all interfaces) "
+            "only for a physical device that reaches the host over Wi-Fi."
+        ),
+    )
+    auto_device_proxy: bool = Field(
+        default=False,
+        description=(
+            "Also point the device's global http_proxy at mitmproxy when it "
+            "is started with Enter in the Mitmproxy tab (off: start touches "
+            "nothing on the device; use Ctrl+D). Sandroid clears the device "
+            "proxy it set when mitmproxy stops and when Sandroid exits."
+        ),
+    )
     web_port: int = Field(default=8081, description="Port for the mitmweb web UI")
     web_host: str = Field(
         default="127.0.0.1", description="Bind host for the mitmweb web UI"
