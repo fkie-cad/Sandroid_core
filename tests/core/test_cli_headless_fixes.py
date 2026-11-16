@@ -74,11 +74,11 @@ def test_install_apk_detects_failure_reported_on_stdout(monkeypatch):
 
     monkeypatch.setattr(adb_packages, "find_aapt_paths", list)
     fake = _FakeAdb({})
-    fake.send_adb_command = lambda cmd, serial=None: (
+    out = (
         "Performing Streamed Install\n"
-        "adb: failed to install x.apk: Failed transaction (2147483646)",
-        "",
+        "adb: failed to install x.apk: Failed transaction (2147483646)"
     )
+    fake.send_adb_command = lambda cmd, serial=None: (out, "")
     with pytest.raises(APKInstallError, match="SELinux"):
         adb_packages.install_apk(fake.send_adb_command, "/tmp/x.apk")
 
@@ -348,7 +348,8 @@ def test_batch_security_uses_apk_path_and_config(monkeypatch, tmp_path):
 @pytest.fixture
 def toolbox_args():
     """Save/restore ``Toolbox.args`` (a metaclass property, so monkeypatch's
-    setattr/delattr round-trip can't be used on it)."""
+    setattr/delattr round-trip can't be used on it).
+    """
     from sandroid.core.toolbox import Toolbox
 
     saved = Toolbox.args, Toolbox.scan_directories
@@ -493,3 +494,212 @@ def test_cli_has_no_view_option():
     result = CliRunner().invoke(main, ["--help"])
     assert result.exit_code == 0
     assert "--view" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Device serial selection (--serial / config / ANDROID_SERIAL)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_serial(monkeypatch):
+    from sandroid.core.device_manager import DeviceManager
+
+    monkeypatch.delenv("ANDROID_SERIAL", raising=False)
+    DeviceManager.set_preferred_serial(None)
+    DeviceManager.reset()
+    Adb.set_target_device(None)
+    yield DeviceManager
+    DeviceManager.set_preferred_serial(None)
+    DeviceManager.reset()
+    Adb.set_target_device(None)
+
+
+_TWO_EMUS = (
+    "List of devices attached\n"
+    "emulator-5554 device product:sdk model:sdk transport_id:1\n"
+    "emulator-5558 device product:sdk model:sdk transport_id:2\n"
+)
+
+
+def test_apply_serial_selection_pins_adb_target(clean_serial, monkeypatch):
+    from sandroid.core.initializer import apply_serial_selection
+
+    assert apply_serial_selection(None) is None
+    assert Adb.get_target_device() is None
+
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5556")
+    assert apply_serial_selection(None) == "emulator-5556"
+    assert Adb.get_target_device() == "emulator-5556"
+
+    assert apply_serial_selection("emulator-5558") == "emulator-5558"
+    assert Adb.get_target_device() == "emulator-5558"
+    assert clean_serial.preferred_serial() == "emulator-5558"
+
+
+def test_auto_select_honours_preferred_serial_and_skips_foreign_probes(
+    clean_serial, monkeypatch
+):
+    device_manager_cls = clean_serial
+    probed = []
+    monkeypatch.setattr(
+        device_manager_cls,
+        "_populate_device_info",
+        lambda self, d: probed.append(d.serial),
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        classmethod(lambda c, cmd, serial=None: (_TWO_EMUS, "")),
+    )
+    selected = []
+    monkeypatch.setattr(
+        device_manager_cls,
+        "set_active_device",
+        lambda self, s: selected.append(s) or True,
+    )
+    device_manager_cls.set_preferred_serial("emulator-5558")
+    device_manager_cls.get().refresh_devices()
+    assert selected == ["emulator-5558"]  # not the first emulator
+    assert probed == ["emulator-5558"]  # 5554 belongs to someone else
+
+
+def test_auto_select_never_falls_back_when_preferred_missing(clean_serial, monkeypatch):
+    device_manager_cls = clean_serial
+    monkeypatch.setattr(
+        device_manager_cls, "_populate_device_info", lambda self, d: None
+    )
+    monkeypatch.setattr(
+        Adb,
+        "send_adb_command",
+        classmethod(lambda c, cmd, serial=None: (_TWO_EMUS, "")),
+    )
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-9999")
+    dm = device_manager_cls.get()
+    dm.refresh_devices(auto_select=False)
+    assert dm.auto_select_device() is None
+
+
+def test_cli_serial_option_and_override():
+    from click.testing import CliRunner
+
+    from sandroid.cli import main
+    from sandroid.cli_modes.helpers import build_cli_overrides
+
+    assert "--serial" in CliRunner().invoke(main, ["--help"]).output
+    values = dict.fromkeys(
+        ["file", "loglevel", "number", "whitelist", "screenshot", "trigdroid", "trigdroid_ccf"]
+    )
+    flags = dict.fromkeys(
+        ["debug", "avoid_strong_noise_filter", "network", "show_deleted", "no_processes", "sockets", "hash_files", "apk", "degrade_network", "report"],
+        False,
+    )
+    overrides = build_cli_overrides(**values, **flags, serial="emulator-5558")
+    assert overrides["emulator"] == {"serial": "emulator-5558"}
+
+
+# ---------------------------------------------------------------------------
+# One results root + run finalisation
+# ---------------------------------------------------------------------------
+
+
+def test_session_folder_uses_configured_results_path(tmp_path, monkeypatch):
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.services.initialization_service import InitializationService
+
+    cfg = SimpleNamespace(paths=SimpleNamespace(results_path=tmp_path / "res"))
+    monkeypatch.setattr(Toolbox, "config", cfg, raising=False)
+    for var in ("SESSION_PATH", "RESULTS_PATH", "RAW_RESULTS_PATH"):
+        monkeypatch.setenv(var, "")
+    paths = InitializationService().create_session(
+        timestamp="20260101_000000", setup_logging=False
+    )
+    assert paths.session_path == (tmp_path / "res" / "20260101_000000").resolve()
+
+
+def test_set_config_makes_get_config_return_cli_config():
+    import sandroid.config as config_mod
+
+    saved = config_mod._config_instance
+    try:
+        sentinel = SimpleNamespace(paths=SimpleNamespace(results_path="/x"))
+        config_mod.set_config(sentinel)
+        assert config_mod.get_config() is sentinel
+    finally:
+        config_mod._config_instance = saved
+
+
+def test_tui_play_finalizes_run_bundle(tmp_path, monkeypatch):
+    from sandroid.core import run_bundle, run_report
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    seen = {}
+
+    def fake_finalize(result_dir, results, **kwargs):
+        seen.update(kwargs, result_dir=result_dir, results=results)
+        return run_report.FinalizeOutcome(results_json=tmp_path / "sandroid.json")
+
+    monkeypatch.setattr(run_report, "finalize_run", fake_finalize)
+    cfg = SimpleNamespace(report=SimpleNamespace(generate_pdf=True))
+    ctl = RecordingController(
+        toolbox=SimpleNamespace(config=cfg), call_from_thread=lambda fn, *a: fn(*a)
+    )
+    result = SimpleNamespace(to_json_dict=lambda: {"Device Name": "x"})
+    ctl._finalize_run_bundle(
+        run_id="r1", result=result, bundle_dir=str(tmp_path), recorded_at="t0"
+    )
+    assert seen["result_dir"] == str(tmp_path)
+    assert seen["mode"] == "tui-play"
+    assert seen["run_id"] == "r1"
+    assert seen["generate_pdf"] is True
+    assert seen["config"] is cfg
+
+    run_bundle.record_session_bundle(str(tmp_path))
+    assert str(tmp_path) in run_bundle.session_bundles()
+
+
+def test_headless_runner_finalizes_into_session_dir(tmp_path, monkeypatch):
+    from sandroid.api import analysis_runners
+    from sandroid.core import run_report
+
+    seen = {}
+
+    def fake_finalize(result_dir, results, **kwargs):
+        seen.update(kwargs, result_dir=result_dir)
+        return run_report.FinalizeOutcome(results_json=tmp_path / "x.json")
+
+    monkeypatch.setattr(run_report, "finalize_run", fake_finalize)
+    monkeypatch.setenv("SESSION_PATH", str(tmp_path))
+    analysis_runners._finalize_headless_run(
+        SimpleNamespace(config=None),
+        SimpleNamespace(to_json_dict=dict),
+        "headless-forensic",
+        "t0",
+    )
+    assert seen["result_dir"] == str(tmp_path)
+    assert seen["mode"] == "headless-forensic"
+    assert seen["generate_pdf"] is False
+
+
+def test_exit_helper_hard_exits_only_with_lingering_threads(monkeypatch):
+    from sandroid.cli_modes import interactive
+
+    exited = []
+    monkeypatch.setattr(interactive, "_stop_capture_children", lambda: None)
+    monkeypatch.setattr("os._exit", exited.append)
+    monkeypatch.setattr(
+        "sandroid.tui.terminal_reset.reset_terminal_hard", lambda: None
+    )
+    monkeypatch.setattr("logging.shutdown", lambda: None)
+    interactive._exit_without_lingering_threads(grace=0.1)
+    assert exited == []
+
+    stop = threading.Event()
+    t = threading.Thread(target=stop.wait, name="stuck-reader", daemon=False)
+    t.start()
+    try:
+        interactive._exit_without_lingering_threads(grace=0.1)
+        assert exited == [0]
+    finally:
+        stop.set()
+        t.join()
