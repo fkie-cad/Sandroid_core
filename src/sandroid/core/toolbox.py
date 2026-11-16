@@ -1060,7 +1060,7 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def calculate_hashes(cls):
-        """Calculates MD5 hashes for new and changed files.
+        """Calculates MD5 and SHA-256 hashes for new and changed files.
 
         Delegates to FileExtractionService for the implementation.
         """
@@ -1075,6 +1075,8 @@ class Toolbox(metaclass=_ToolboxMeta):
         """
         result = _service("get_file_extraction_service").pull_and_hash_apks()
         cls.submit_other_data("APK Hashes", result.get("apk_hashes", []))
+        if "apk_hashes_sha256" in result:
+            cls.submit_other_data("APK Hashes SHA-256", result["apk_hashes_sha256"])
 
     @classmethod
     def exclude_whitelist(cls, file_paths):
