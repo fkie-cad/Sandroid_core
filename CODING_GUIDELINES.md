@@ -12,6 +12,7 @@ This document outlines the coding standards, best practices, and development gui
 - [Security Considerations](#security-considerations)
 - [Documentation Standards](#documentation-standards)
 - [Development Workflow](#development-workflow)
+- [Release Process](#release-process)
 - [Code Modification Protocol](#code-modification-protocol)
 - [Performance Guidelines](#performance-guidelines)
 - [Error Handling](#error-handling)
@@ -314,7 +315,27 @@ with frida_session("emulator-5554") as session:
 
 ## Testing Requirements
 
-Right now we don't have tests for the current version but when introducing new features we should follow these testing requirements.
+The suite lives in `tests/` (mirroring `src/sandroid/`) and runs on every push and
+pull request against `main` and `dev` (Python 3.12 and 3.13, `.github/workflows/tests.yml`).
+
+```bash
+pip install -e ".[dev,full]"
+pytest                 # whole suite, ~1 minute
+pytest tests/core -q   # one package
+```
+
+**Tests must never touch a real device.** `tests/conftest.py` enforces this for
+every test: it intercepts `subprocess` calls to `adb`, `emulator`, `frida*`,
+`objection`, `mitmdump`/`mitmweb`, `pkill`, ... (they are replaced by a process
+that exits 1), refuses socket connections to the adb server (5037), emulator
+ports and frida-server, and makes `frida.get_usb_device()` & co. raise. It also
+runs the session with a temporary `HOME`/XDG dirs and working directory and
+without `SANDROID_*`/API-key environment variables. Blocked calls are listed
+in the terminal summary as "sandroid device guard"; mock the device layer
+(`Adb.send_adb_command`, the service getters, ...) in your test instead. Use
+`SANDROID_TESTS_STRICT_DEVICE=1 pytest` to turn every blocked call into a test
+error. Tests that genuinely need hardware get `@pytest.mark.requires_device`
+and only run with `pytest --allow-device`.
 
 ### Test Coverage
 
@@ -563,30 +584,59 @@ Closes #123"
 Before submitting code:
 
 - [ ] All tests pass: `pytest`
-- [ ] Code is formatted: `black src/`
-- [ ] Imports are sorted: `isort src/`
-- [ ] Linting passes: `ruff check src/`
-- [ ] Type checking passes: `mypy src/`
+- [ ] Code is formatted: `ruff format .` (CI pins ruff 0.12.7)
+- [ ] Linting and import order pass: `ruff check .`
+- [ ] Type checking runs: `mypy src/sandroid` (informational in CI)
 - [ ] Documentation updated
 - [ ] Configuration changes documented
 - [ ] Backward compatibility maintained
 
 ### Continuous Integration
 
-```python
-# Test all Python versions
-def test_python_version_compatibility():
-    """Ensure code works on Python 3.10+"""
-    import sys
-    assert sys.version_info >= (3, 10)
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `lint.yml` | push / PR on `main`, `dev` | `ruff check`, `ruff format --check`, mypy (informational), bandit, pre-commit hooks — Python 3.12 + 3.13 |
+| `tests.yml` | push / PR on `main`, `dev` | `pytest` with `.[dev,full]` on Python 3.12 + 3.13; builds sdist/wheel, `twine check`, smoke-tests the installed entry points |
+| `docs.yml` | push on `main` (docs/src changes), PRs | builds the Sphinx docs; deploys GitHub Pages from `main` |
+| `publish.yml` | push on `main` that changes `src/sandroid/_version.py` | publishes to PyPI and creates the GitHub release `v<version>` (see below) |
 
-# Test on different platforms
-def test_cross_platform_paths():
-    """Test path handling across platforms"""
-    from pathlib import Path
-    path = Path("results") / "analysis.json"
-    assert path.exists() or not path.exists()  # Path should be valid
-```
+Supported Python versions: **3.12 and 3.13** (`requires-python = ">=3.12"`).
+
+## Release Process
+
+Branches: day-to-day work lands on `dev`; `main` only receives releases. A
+release is cut from a `release/<major>.<minor>` branch (or directly from `dev`)
+and published by merging/pushing it to `main`.
+
+1. **Prepare on the release branch**
+   - Bump `src/sandroid/_version.py` (`__version__ = "X.Y.Z"`) and the version
+     badge in `README.md`. The package version is read from `_version.py`
+     only (`pyproject.toml` declares it dynamic).
+   - Finalise the `## [X.Y.Z] - YYYY-MM-DD` section in `CHANGELOG.md`
+     (Keep a Changelog format, real date — a placeholder such as `2026-11-XX`
+     makes the publish job fail on purpose). This section becomes the GitHub
+     release notes verbatim.
+   - Make sure CI is green (lint, tests on 3.12/3.13, package build, docs) and
+     smoke-test against a real rooted AVD (`sandroid`, a Record/Play cycle,
+     mitmproxy start/stop).
+   - Optionally check the artefacts locally: `python -m build && twine check --strict dist/*`.
+2. **Publish**: push/merge the release branch to `main`. Because
+   `_version.py` changed, `publish.yml` runs and
+   - refuses to run if tag `vX.Y.Z` already exists (bump the version instead
+     of re-releasing),
+   - extracts the CHANGELOG section (fails if missing),
+   - builds sdist + wheel, runs `twine check`, verifies the wheel version,
+   - uploads to PyPI via Trusted Publishing (no token needed),
+   - creates tag **`vX.Y.Z`** on the released commit and a GitHub release
+     "Sandroid vX.Y.Z" with the wheel/sdist attached. Versions ending in
+     `aN`/`bN`/`rcN`/`.devN` are marked as pre-releases.
+3. **After the release**: merge `main` back into `dev` and open the next
+   `## [Unreleased]` section in `CHANGELOG.md`.
+
+If the PyPI upload succeeded but the GitHub release step failed, re-run the
+failed job from the Actions tab (`skip-existing` makes the upload idempotent);
+the tag is only created by the final step. Never reuse a version number: PyPI
+rejects re-uploads of an existing version even after deletion.
 
 ## Code Modification Protocol
 
@@ -741,18 +791,16 @@ def robust_analysis_function():
 ### Development Tools Setup
 
 ```bash
-# Install development dependencies
-pip install -e .[dev]
+# Install development dependencies (+ optional extras used by the tests)
+pip install -e ".[dev,full]"
 
 # Setup pre-commit hooks
 pre-commit install
 
-# Run all quality checks
-./scripts/quality-check.sh  # If available, or:
-black src/
-isort src/
-ruff check src/
-mypy src/
+# Run all quality checks (same as CI)
+ruff check .
+ruff format --check .
+mypy src/sandroid --ignore-missing-imports
 pytest
 ```
 
