@@ -273,3 +273,98 @@ def test_shutdown_services_cancels_running_replays(_clean_player_cancel):
     capture = SimpleNamespace(is_capturing=lambda: False)
     launcher._shutdown_services(lambda: task_service, lambda: capture)
     assert Player.is_cancelled()
+
+
+# ---------------------------------------------------------------------------
+# P2-H2: Record -> Cancel/Discard must not play
+# ---------------------------------------------------------------------------
+
+
+class _FakeWrapper:
+    is_running = True
+    event_count = 63
+    elapsed_seconds = 4
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> int:
+        self.stopped = True
+        self.is_running = False
+        return 4
+
+
+async def _recording_modal_in_progress(app, pilot, results: list):
+    from sandroid.tui.modals.recording_modal import RecordingModal
+
+    modal = RecordingModal()
+    await app.push_screen(modal, results.append)
+    await pilot.pause()
+    wrapper = _FakeWrapper()
+    modal._wrapper = wrapper
+    modal.is_recording = True
+    await pilot.pause()
+    return modal, wrapper
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["enter_on_focused_discard", "click_discard"])
+async def test_discard_while_recording_cancels_instead_of_saving(how) -> None:
+    """With Discard focused, Enter used to hit the modal's priority
+    Enter=Stop & save binding, so the recording was saved and auto-replayed.
+    """
+    from textual.widgets import Button
+
+    app = App()
+    results: list = []
+    async with app.run_test() as pilot:
+        modal, wrapper = await _recording_modal_in_progress(app, pilot, results)
+        if how == "enter_on_focused_discard":
+            modal.query_one("#btn-cancel", Button).focus()
+            await pilot.pause()
+            await pilot.press("enter")
+        else:
+            await pilot.click("#btn-cancel")
+        await pilot.pause()
+
+    assert wrapper.stopped
+    assert len(results) == 1
+    assert results[0].cancelled is True
+    assert results[0].completed is False
+
+
+@pytest.mark.asyncio
+async def test_enter_on_focused_stop_still_saves() -> None:
+    from textual.widgets import Button
+
+    app = App()
+    results: list = []
+    async with app.run_test() as pilot:
+        modal, _wrapper = await _recording_modal_in_progress(app, pilot, results)
+        modal.query_one("#btn-stop", Button).focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert results
+    assert results[0].completed is True
+    assert results[0].cancelled is False
+
+
+def test_controller_does_not_play_a_cancelled_recording(monkeypatch, tmp_path):
+    from sandroid.tui.modals.recording_modal import RecordingResult
+
+    logs: list[str] = []
+    pushed: list = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch,
+        tmp_path,
+        log_info=logs.append,
+        push_modal=lambda modal, cb: pushed.append(cb),
+    )
+    played: list = []
+    monkeypatch.setattr(controller, "start_playback", lambda: played.append(1))
+    assert controller.start_recording() is True
+    pushed[0](RecordingResult(cancelled=True))
+    assert played == []
+    assert "Recording cancelled" in logs

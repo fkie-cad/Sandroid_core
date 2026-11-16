@@ -560,7 +560,21 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         self.action_stop_or_cancel()
 
     def action_start_or_stop(self) -> None:
-        """Handle Enter key."""
+        """Handle Enter key.
+
+        Enter is a *priority* binding, so it fires before a focused button
+        sees the key. A focused button therefore has to be honoured here:
+        Tab to Discard/Cancel + Enter used to run Stop & save and the
+        auto-chained replay (P2-H2).
+        """
+        focused = self.focused
+        if isinstance(focused, Button) and focused.id in (
+            "btn-cancel",
+            "btn-stop",
+            "btn-start",
+        ):
+            focused.press()
+            return
         if self.is_recording:
             self._stop_recording()
         else:
