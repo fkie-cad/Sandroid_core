@@ -180,7 +180,10 @@ def log_adb_result(
         log_level: Base log level for success (default DEBUG)
     """
     if stderr:
-        if is_adb_error_actionable(stderr):
+        # ``get-state`` is a reachability probe: "device not found" is its
+        # expected answer while a snapshot loads or the emulator boots, and
+        # every caller handles it -- not something to warn the user about.
+        if is_adb_error_actionable(stderr) and "get-state" not in command:
             logger.warning(f"ADB command warning ({command}): {stderr.strip()}")
         else:
             logger.debug(f"ADB command info ({command}): {stderr.strip()}")

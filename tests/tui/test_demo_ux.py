@@ -363,3 +363,95 @@ async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
         assert "Spotlight panel (when focused)" in text
         assert "PDF report" in text
         await pilot.press("escape")
+
+
+# --------------------------------------------------------------------------
+# log hygiene
+# --------------------------------------------------------------------------
+
+
+def test_activity_log_drops_cross_channel_duplicates(monkeypatch) -> None:
+    from sandroid.tui.widgets.activity_log import ActivityLog
+
+    log = ActivityLog()
+    written: list[str] = []
+    monkeypatch.setattr(log, "write", lambda content, **_: written.append(content))
+    monkeypatch.setattr(
+        log,
+        "_get_theme_colors",
+        lambda: dict.fromkeys(
+            ("text_muted", "primary", "info", "warning", "error", "success"), "white"
+        ),
+    )
+    log.log_message("[*] libssl.so found & will be hooked", "FriTap")
+    log.log_message("libssl.so found & will be hooked", "FriTap")
+    log.log_info("libssl.so found & will be hooked")
+    log.log_info("Reading filesystem timestamps")
+    assert len(written) == 2
+
+    log._recent.clear()  # outside the window it is shown again
+    log.log_info("Reading filesystem timestamps")
+    assert len(written) == 3
+
+
+@pytest.mark.parametrize(
+    ("message", "level", "shown"),
+    [
+        ("Using specified device: emulator-5558", 20, False),
+        ("adbd is running as root", 20, False),
+        ("Spawned de.fkie.ground_truth with PID 2407", 20, False),
+        (
+            "Spawned de.fkie.ground_truth with PID 2407 (PAUSED - will resume "
+            "after hooks load)",
+            20,
+            False,
+        ),
+        ("Session detached: reason=device-lost", 30, False),
+        ("Session detached: reason=process-terminated", 30, True),
+        ("Spawned de.fkie.ground_truth (PID 2407) in paused state", 20, True),
+        ("Recording saved: 3 events, 4s", 20, True),
+        ("Using specified device: emulator-5558", 40, True),
+    ],
+)
+def test_tui_log_handler_quiets_routine_noise(message, level, shown) -> None:
+    import logging
+
+    from sandroid.core.events import EventBus, EventType, TUILoggingHandler
+
+    seen: list[str] = []
+    handler = TUILoggingHandler()
+    bus = EventBus.get()
+
+    def _on(event) -> None:
+        seen.append(event.data["message"])
+
+    bus.subscribe(EventType.LOG_MESSAGE, _on)
+    try:
+        record = logging.LogRecord("x", level, __file__, 1, message, None, None)
+        handler.emit(record)
+    finally:
+        bus.unsubscribe(EventType.LOG_MESSAGE, _on)
+    assert (message in seen) is shown
+
+
+def test_get_state_probe_failure_is_not_a_warning(caplog) -> None:
+    import logging
+
+    from sandroid.core.adb_utils import log_adb_result
+
+    with caplog.at_level(logging.DEBUG, logger="sandroid.core.adb_utils"):
+        log_adb_result(
+            "-s emulator-5558 get-state", "", "error: device 'emulator-5558' not found"
+        )
+        log_adb_result("-s emulator-5558 shell ls", "", "error: device offline")
+    levels = [r.levelno for r in caplog.records]
+    assert levels == [logging.DEBUG, logging.WARNING]
+
+
+def test_tool_usage_lists_each_output_file_once() -> None:
+    from sandroid.services.tool_usage_service import ToolUsageService
+
+    svc = ToolUsageService()
+    svc.mark_used("fritap", files=["a/fritap.log", "a/fritap_output.json"])
+    svc.mark_used("fritap", files=["a/fritap.log", "a/fritap_output.json"])
+    assert svc.get_files("fritap") == ["a/fritap.log", "a/fritap_output.json"]

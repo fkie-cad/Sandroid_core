@@ -342,7 +342,7 @@ class CommandRegistry:
             logger.debug("Command registry already initialized")
             return
 
-        logger.info("Initializing default command handlers")
+        logger.debug("Initializing default command handlers")
 
         import importlib
 
@@ -354,7 +354,7 @@ class CommandRegistry:
                 logger.warning(f"Could not load {module_name}: {e}")
 
         self._initialized = True
-        logger.info(f"Registered {len(self._handlers)} command handlers")
+        logger.debug(f"Registered {len(self._handlers)} command handlers")
 
 
 __all__ = ["CommandRegistry"]

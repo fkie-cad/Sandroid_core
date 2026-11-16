@@ -1,6 +1,8 @@
 """Activity log widget for background task output."""
 
 import re
+import time
+from collections import deque
 from datetime import datetime
 
 from textual.widgets import RichLog
@@ -29,6 +31,39 @@ class ActivityLog(RichLog):
         )
         # Store plain text copies of all log lines for clipboard export
         self._plain_lines: list[str] = []
+        # (normalized text, monotonic time) of the last few log lines, for
+        # dropping the same message arriving again via a second channel.
+        self._recent: deque[tuple[str, float]] = deque(maxlen=24)
+
+    #: Seconds within which an identical (normalized) line is a duplicate.
+    DEDUP_WINDOW = 3.0
+    _TOOL_PREFIX_RE = re.compile(r"^(?:\[[*+!-]\]\s*)+")
+    _MARKUP_RE = re.compile(r"\[/?[^\]]*\]")
+
+    @classmethod
+    def _normalize(cls, message: str) -> str:
+        text = cls._TOOL_PREFIX_RE.sub("", str(message).strip())
+        text = cls._MARKUP_RE.sub("", text)
+        return " ".join(text.split())
+
+    def _is_repeat(self, message: str) -> bool:
+        """True if ``message`` was already shown within ``DEDUP_WINDOW``.
+
+        Many tools reach the log twice or three times -- e.g. every friTap
+        line arrives as task output ("FriTap: x"), as its own Python log
+        record ("INFO: x") and with its "[*] " prefix ("FriTap: [*] x").
+        Level, source label and "[*]"/"[+]" prefixes are ignored when
+        comparing, so only the first copy is shown.
+        """
+        key = self._normalize(message)
+        if not key:
+            return False
+        now = time.monotonic()
+        for seen, at in self._recent:
+            if seen == key and now - at <= self.DEDUP_WINDOW:
+                return True
+        self._recent.append((key, now))
+        return False
 
     def write(
         self,
@@ -165,6 +200,8 @@ class ActivityLog(RichLog):
             message: The message to log
             task_name: Optional task name for prefix
         """
+        if self._is_repeat(message):
+            return
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
         if task_name:
@@ -217,6 +254,8 @@ class ActivityLog(RichLog):
             message: The message to log
             bold: Whether to bold the label
         """
+        if self._is_repeat(message):
+            return
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
         style = f"{colors[level_key]} bold" if bold else colors[level_key]

@@ -410,7 +410,7 @@ class ForensicService:
         """
         self._whitelist_path = path
         self._whitelist_patterns = None  # Force reload
-        self._logger.info(f"Set whitelist path: {path}")
+        self._logger.debug(f"Set whitelist path: {path!r}")
 
     def load_whitelist(self) -> list[str]:
         """Load whitelist patterns from file.

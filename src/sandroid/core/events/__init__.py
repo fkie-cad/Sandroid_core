@@ -40,6 +40,7 @@ Architecture:
 """
 
 import logging
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -308,6 +309,20 @@ class TUILoggingHandler(logging.Handler):
         logger.addHandler(handler)
     """
 
+    #: Routine third-party chatter that reads like an error (or just repeats
+    #: what Sandroid already says) in the Activity log; still in the log file.
+    #: Only applied below ERROR.
+    QUIET_PATTERNS: tuple[re.Pattern[str], ...] = (
+        # AndroidFridaManager, on every (re)connect / snapshot load.
+        re.compile(r"^Using specified device: "),
+        re.compile(r"^adbd is running as root$"),
+        # AndroidFridaManager's two copies of SpotlightService's own
+        # "Spawned <pkg> (PID n) in paused state ..." line.
+        re.compile(r"^Spawned \S+ with PID \d+( \(PAUSED\b.*\))?$"),
+        # Expected while a snapshot loads (the emulator drops adb briefly).
+        re.compile(r"^Session detached: reason=device-lost"),
+    )
+
     def emit(self, record: logging.LogRecord) -> None:
         """Emit a log record as an event to the EventBus.
 
@@ -317,6 +332,10 @@ class TUILoggingHandler(logging.Handler):
         try:
             # Format the message
             msg = self.format(record)
+            if record.levelno < logging.ERROR and any(
+                p.search(msg) for p in self.QUIET_PATTERNS
+            ):
+                return
 
             # Publish to EventBus
             EventBus.get().publish(

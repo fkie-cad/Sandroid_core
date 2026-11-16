@@ -124,7 +124,10 @@ class ToolUsageService:
                 self._tools[tool_name].use_count += 1
 
             if files:
-                self._tools[tool_name].files.extend(files)
+                # A tool started twice reports the same output files again;
+                # list each once (the exit summary showed fritap.log twice).
+                known = self._tools[tool_name].files
+                known.extend(f for f in dict.fromkeys(files) if f not in known)
 
         self._logger.debug(f"Tool used: {tool_name}, files: {files}")
 

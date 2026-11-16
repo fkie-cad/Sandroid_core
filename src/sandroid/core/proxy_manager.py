@@ -2160,7 +2160,7 @@ class FocusManager:
             except Exception:
                 self._ip6_ok = False
             if not self._ip6_ok:
-                logger.info(
+                logger.debug(
                     "ip6tables nat unavailable — IPv6 redirect rules skipped "
                     "(IPv4-only device)."
                 )

@@ -521,8 +521,12 @@ class RecordingController:
         # Check if snapshot exists - but don't block if we can't verify
         snapshot_verified = self._verify_snapshot()
         if not snapshot_verified:
-            self._log_warning(
-                "Could not verify snapshot path - proceeding anyway (recording created it)"
+            # Expected whenever the host-side AVD dir isn't where we guess
+            # (custom ANDROID_AVD_HOME, AVD name != device name, ...); the
+            # engine loads the snapshot via the emulator console anyway.
+            logger.debug(
+                "Could not verify snapshot path - proceeding anyway "
+                "(recording created it)"
             )
 
         self._log_info("Starting playback analysis...")
