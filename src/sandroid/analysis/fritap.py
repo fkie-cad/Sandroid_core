@@ -10,6 +10,7 @@ from sandroid.core.analysis_logging import setup_analysis_logging
 from sandroid.core.console import SandroidConsole
 from sandroid.core.enums import SpawnMode
 from sandroid.core.events import Event, EventBus, EventType
+from sandroid.core.frida_manager import stop_frida_job_bounded
 from sandroid.services import (
     get_network_capture_service,
     get_task_service,
@@ -36,6 +37,9 @@ def _get_display_value(field: str, default):
 
 
 logger = logging.getLogger(__name__)
+
+#: Max seconds stop() waits for friTap's agent to unload before finalizing.
+_STOP_TIMEOUT = 4.0
 
 
 def _job_state(job) -> str | None:
@@ -217,6 +221,9 @@ class FriTap(DataGatherBase):
         # line is printed once.
         self.print_console_messages = True
         self.message_handler = None  # Will be set up in _setup_session
+        # Set once stop() gave up waiting for the agent: late messages from a
+        # still-unloading agent must not race the finalized output files.
+        self._outputs_closed = False
 
     def _create_activity_log_wrapper(self, original_handler):
         """Create a wrapper that forwards messages to the activity log and/or console.
@@ -231,6 +238,8 @@ class FriTap(DataGatherBase):
         formatter = FriTapMessageFormatter()
 
         def wrapper(job, message, data):
+            if getattr(self, "_outputs_closed", False):
+                return None
             # Forward to activity log (TUI) and/or console (CLI/headless)
             should_forward = self.show_in_activity_log or self.print_to_console
 
@@ -320,6 +329,16 @@ class FriTap(DataGatherBase):
             debug_output=debug_output,
             json_output=self.json_output_path,
         )
+        # SSL_Logger only drives the agent here (Sandroid owns spawn/attach),
+        # so record the real target mode in fritap_output.json's session_info.
+        try:
+            info = self.ssl_log.session_data["session_info"]
+            info["spawn"] = self.mode in (SpawnMode.SPAWN, SpawnMode.SPAWN.value)
+            info["mobile"] = True
+            info["target_app"] = self.app_package
+            info["pid"] = self.process_id
+        except Exception:
+            pass
 
         # Log the configuration
         if verbose or debug_output:
@@ -709,19 +728,24 @@ class FriTap(DataGatherBase):
             except Exception as e:
                 logger.debug(f"Error checking job state: {e}")
 
-        # Stop Frida jobs and detach WITH TIMEOUT to prevent hanging
-        # Use stop_jobs + detach instead of stop_app_with_closing_frida
-        # which would call `adb shell am force-stop` and kill the app
+        # Unload the agent (and detach when no other tool uses the session)
+        # with a hard bound: an app thread parked in a hooked SSL_read keeps
+        # unload/detach blocked for a long time, which left the panel
+        # "running" and fritap_output.json unfinalized (no force-stop: the
+        # app keeps running).
         try:
-            results = self.job_manager.stop_jobs(timeout_per_job=3.0)
-            timed_out = [jid for jid, ok in results.items() if not ok]
-            if timed_out:
-                logger.warning(f"Jobs timed out: {timed_out}")
-
-            self.job_manager.detach_from_app(timeout=2.0)
-            logger.info(f"FriTap detached from {self.app_package}")
+            if stop_frida_job_bounded(
+                self.job_manager, getattr(self, "job_id", None), timeout=_STOP_TIMEOUT
+            ):
+                logger.info(f"FriTap detached from {self.app_package}")
+            else:
+                logger.info(
+                    f"FriTap stopped for {self.app_package} (agent unload "
+                    "continues in the background)"
+                )
         except Exception as e:
             logger.warning(f"Error stopping FriTap jobs: {e}")
+        self._outputs_closed = True
 
         # Release this job's hook registrations so the next start does not
         # report conflicts with a job that no longer exists.
