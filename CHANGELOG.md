@@ -111,6 +111,16 @@ persistent run history, and an experimental AI Chat assistant.
 - AI Chat: tools from external MCP servers and evidence deletion always require confirmation; the API key is never written to logs, results or the config file from the environment.
 - `json_encoder` no longer recurses on duck-typed objects.
 - Every Sandroid-launched emulator (incl. `sandroid-config avd start`, headless) disables guest Vulkan: SwiftShader Vulkan leaked host memory on each snapshot load, growing qemu to tens of GB over a session.
+- **System noise filter**: well-known Android/GMS/Play background files (package-restrictions, netstats, usagestats, Wellbeing, Gboard, clearcut, …) are hidden from Changed/New/Deleted Files after the dry-run subtraction; the analysed app's files are never filtered and every hidden path is listed under `Other Data → Filtered Noise` (`analysis.system_noise_filter`, `noise_patterns`, `protected_packages`).
+- XML/ABX diffs match elements by key (`name`/`key`/`id`/…) instead of position, so additions, updates and deletions are reported as such (`[ADDED]`/`[UPDATED]`/`[DELETED]`).
+- Network results list every DNS name seen for an IP plus the TLS SNI; IPv6 attempts without a reply are labelled as such.
+- PDF: long diffs (e.g. BLOB rows) are split across rows and capped instead of raising a ReportLab `LayoutError`; a failing section degrades on its own.
+- Headless prints a short summary instead of the full JSON, exits non-zero (3) when a requested report/manifest could not be written, announces each action window with a countdown; `--import-action` replays a run bundle's `recording.txt`.
+- TUI: no more `NoActiveAppError` crash (and lost results) on the second recording of a session; results are persisted even if the UI fails; replays can be cancelled and are stopped on quit; Enter on a focused Cancel/Discard button no longer starts playback; `Esc` never opens Quit; stale frida device handles are reset after snapshot loads.
+- dexray-intercept from the TUI no longer stalls for minutes, resumes its spawned app and removes its temporary snapshot; the hook modal only changes groups the user toggled; failure reasons are shown.
+- frida-server auto-start (`frida.server_auto_start`) works at TUI startup, on device change and in headless `--dexray`/`--fritap`; stale `frida-helper-*.dex` files are removed before a server (re)start.
+- friTap stop completes with one keypress and finalizes the keylog and `fritap_output.json` even when the agent unload blocks.
+- mitmproxy listens on `127.0.0.1` by default (`mitmproxy.listen_host`), the status shows the configured port while stopped, the device-reachability probe no longer reports false errors, and only a device proxy Sandroid set is cleared on stop/exit (`mitmproxy.auto_device_proxy` sets it on start).
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.
