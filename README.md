@@ -130,7 +130,7 @@ Device Management:
   --proxy IP:PORT                 Set HTTP proxy on device
   --proxy-clear                   Clear HTTP proxy settings
   --install-apk PATH              Install APK on device
-  --import-action PATH            Import action recording file
+  --import-action PATH            Replay a run bundle's recording.txt headless
   --device-settings FILE          Apply device settings from JSON file
   --preset CODE                   Apply country preset (e.g., de, us, ru, cn)
 

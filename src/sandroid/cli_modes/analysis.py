@@ -123,6 +123,7 @@ def run_analysis(
         # manifest via the shared finalisation step.
         console = SandroidConsole.get()
         output_file = config.paths.results_path / config.output_file.name
+        documentation_failed = False
         try:
             outcome = finalize_run(
                 config.paths.results_path,
@@ -137,6 +138,11 @@ def run_analysis(
             )
             if outcome.pdf is not None:
                 console.print(f"[success]PDF report: {outcome.pdf}[/success]")
+            for err in outcome.errors:
+                documentation_failed = True
+                console.print(
+                    f"{err}", style="error", soft_wrap=True, markup=False
+                )
         except OSError:
             # Fall back to the plain writer for its user-facing error messages.
             results_json = json.dumps(
@@ -149,6 +155,10 @@ def run_analysis(
         logger.info("Analysis completed successfully")
         get_task_service().stop_all()
         get_ui_service().print_exit_summary(Toolbox.get_tools_used())
+        if documentation_failed:
+            # A requested PDF report or the evidence manifest is missing:
+            # scripts must be able to tell (same code as --headless).
+            sys.exit(3)
 
     except Exception as e:
         logger.error(f"Analysis failed: {e}")

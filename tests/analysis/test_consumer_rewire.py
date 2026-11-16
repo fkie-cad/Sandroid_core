@@ -222,8 +222,8 @@ def test_headless_forensic_returns_engine_dict_with_metadata(monkeypatch):
     assert result["Deleted Files"] == ["/data/gone.txt"]
 
 
-def test_headless_forensic_action_is_none(monkeypatch):
-    """The forensic run builds an action-less RunConfig (pure forensic)."""
+def test_headless_forensic_action_is_capture_window(monkeypatch):
+    """The forensic run builds a capture-window action (pure forensic)."""
     captured: dict[str, Any] = {}
 
     def _capture_init(self, config, **kwargs):
@@ -244,7 +244,10 @@ def test_headless_forensic_action_is_none(monkeypatch):
     )
 
     run_config = captured["config"]
-    assert run_config.action is None
+    # A prompted capture window (no recording, nothing replayed).
+    assert isinstance(run_config.action, analysis_runners.CaptureWindowAction)
+    assert run_config.action.window == 60
+    assert run_config.action.runs == 2
     assert run_config.recording_path is None
     # Identity pin for the headless (bundle-less) path.
     assert run_config.results_path == ""

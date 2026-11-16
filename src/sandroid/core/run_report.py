@@ -32,7 +32,7 @@ import os
 import platform
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Protocol
@@ -48,6 +48,13 @@ DEFAULT_RESULTS_NAME = "sandroid.json"
 DEFAULT_PDF_NAME = "Sandroid_Forensic_Report.pdf"
 MANIFEST_NAME = "manifest.json"
 SHA256SUMS_NAME = "SHA256SUMS"
+
+#: Regenerated reports never replace an existing file; they are written as
+#: ``Sandroid_Forensic_Report_regenerated_<UTC timestamp>.pdf`` and recorded in
+#: an addendum manifest ``SHA256SUMS.addendum-<UTC timestamp>`` (sha256sum
+#: format) instead of rewriting the original ``SHA256SUMS``.
+REGENERATED_PDF_TEMPLATE = "Sandroid_Forensic_Report_regenerated_{stamp}.pdf"
+ADDENDUM_PREFIX = f"{SHA256SUMS_NAME}.addendum-"
 
 #: Hash algorithms recorded for every evidence file (MD5 kept for
 #: compatibility with older reports and tooling, SHA-256 is authoritative).
@@ -579,33 +586,60 @@ class ManifestCheck:
         return self.present and not self.mismatched and not self.missing
 
 
-def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
-    """Re-hash ``result_dir`` against its ``SHA256SUMS``.
+def _addendum_files(root: Path) -> list[Path]:
+    return sorted(
+        p for p in root.glob(f"{ADDENDUM_PREFIX}*") if p.is_file()
+    )
 
-    Returns:
-        A :class:`ManifestCheck`; ``present`` is False when no ``SHA256SUMS``
-        exists. ``unlisted`` lists files added after the manifest (excluding
-        live log files), which is informational only.
-    """
-    root = Path(result_dir).resolve()
-    sums_path = root / SHA256SUMS_NAME
-    if not sums_path.is_file():
-        return ManifestCheck(present=False)
-    expected: dict[str, str] = {}
-    for line in sums_path.read_text(encoding="utf-8").splitlines():
+
+def _read_sums(path: Path) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         digest, _, rel = line.partition("  ")
-        expected[rel] = digest.strip().lower()
+        entries.append((rel, digest.strip().lower()))
+    return entries
+
+
+def verify_hash_manifest(result_dir: str | os.PathLike[str]) -> ManifestCheck:
+    """Re-hash ``result_dir`` against its ``SHA256SUMS`` (and its addenda).
+
+    Every ``SHA256SUMS.addendum-*`` file (written when a report was
+    regenerated later) is verified as well, so regenerated reports are
+    covered by the same check.
+
+    Returns:
+        A :class:`ManifestCheck`; ``present`` is False when neither
+        ``SHA256SUMS`` nor an addendum exists. ``unlisted`` lists files added
+        after the manifest (excluding live log files), which is
+        informational only.
+    """
+    root = Path(result_dir).resolve()
+    sums_path = root / SHA256SUMS_NAME
+    sum_files = ([sums_path] if sums_path.is_file() else []) + _addendum_files(root)
+    if not sum_files:
+        return ManifestCheck(present=False)
+    expected: list[tuple[str, str]] = []
+    for path in sum_files:
+        expected.extend(_read_sums(path))
     check = ManifestCheck(present=True)
-    for rel, digest in expected.items():
+    hashes: dict[str, str] = {}
+    for rel, digest in expected:
         path = root / rel
         if not path.is_file():
-            check.missing.append(rel)
-        elif sha256_file(path) != digest:
+            if rel not in check.missing:
+                check.missing.append(rel)
+            continue
+        if rel not in hashes:
+            hashes[rel] = sha256_file(path)
+        if hashes[rel] != digest and rel not in check.mismatched:
             check.mismatched.append(rel)
+    listed = {rel for rel, _ in expected} | {
+        p.relative_to(root).as_posix() for p in sum_files
+    }
     for _full, rel in _iter_result_files(root):
-        if rel == SHA256SUMS_NAME or rel in expected or _is_live_file(rel):
+        if rel in listed or _is_live_file(rel):
             continue
         check.unlisted.append(rel)
     return check
@@ -710,6 +744,71 @@ class ReportFromFolderOutcome:
     pdf: Path
     check: ManifestCheck
     manifest: ManifestInfo | None = None
+    #: Addendum manifest recording the regenerated PDF (sealed folders).
+    addendum: Path | None = None
+    addendum_sha256: str | None = None
+
+
+class EvidenceVerificationError(RuntimeError):
+    """The result folder no longer matches its ``SHA256SUMS``.
+
+    Raised by :func:`report_from_folder` *before* anything is written.
+    """
+
+    def __init__(self, result_dir: str | os.PathLike[str], check: ManifestCheck):
+        self.result_dir = Path(result_dir)
+        self.check = check
+        names = (check.mismatched + check.missing)[:3]
+        more = len(check.mismatched) + len(check.missing) - len(names)
+        listed = ", ".join(names) + (f" (+{more} more)" if more > 0 else "")
+        super().__init__(
+            f"Evidence manifest verification FAILED for {self.result_dir}: "
+            f"{len(check.mismatched)} modified, {len(check.missing)} missing "
+            f"file(s): {listed}. Nothing was written."
+        )
+
+
+def utc_stamp(now: datetime | None = None) -> str:
+    """UTC timestamp for file names, e.g. ``20261116T174938Z``."""
+    return (now or datetime.now(UTC)).astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _free_path(path: Path) -> Path:
+    """``path`` or, if it exists, ``<stem>_2<suffix>``, ``_3``, ..."""
+    candidate, n = path, 1
+    while candidate.exists():
+        n += 1
+        candidate = path.with_name(f"{path.stem}_{n}{path.suffix}")
+    return candidate
+
+
+def write_manifest_addendum(
+    result_dir: str | os.PathLike[str],
+    new_files: list[Path],
+    stamp: str,
+) -> tuple[Path, str]:
+    """Record files added to a sealed result folder in an addendum manifest.
+
+    Writes ``SHA256SUMS.addendum-<stamp>`` (``sha256sum`` format) listing the
+    SHA-256 of each new file plus the current ``SHA256SUMS`` (which chains the
+    addendum to the original manifest). The original manifest is not touched;
+    ``sha256sum -c SHA256SUMS.addendum-<stamp>`` verifies the addendum.
+
+    Returns:
+        ``(addendum path, SHA-256 of the addendum)``.
+    """
+    root = Path(result_dir).resolve()
+    lines = [
+        f"{sha256_file(f)}  {Path(f).resolve().relative_to(root).as_posix()}"
+        for f in new_files
+    ]
+    sums = root / SHA256SUMS_NAME
+    if sums.is_file():
+        lines.append(f"{sha256_file(sums)}  {SHA256SUMS_NAME}")
+    path = _free_path(root / f"{ADDENDUM_PREFIX}{stamp}")
+    with open(path, "x", encoding="utf-8") as fh:  # never overwrite
+        fh.write("\n".join(lines) + "\n")
+    return path, sha256_file(path)
 
 
 def report_from_folder(
@@ -721,19 +820,34 @@ def report_from_folder(
 ) -> ReportFromFolderOutcome:
     """(Re)generate the PDF report for an existing result folder.
 
-    Integrity first: an existing ``SHA256SUMS`` is verified *before* anything
-    is written. Only if it verifies (or none exists) is the manifest rewritten
-    afterwards to include the new PDF/timeline; a failed verification leaves
-    the original manifest untouched so the discrepancy stays visible.
+    Shared by ``sandroid --report-from`` and the TUI ``P`` key. Evidence
+    rules:
+
+    1. The existing ``SHA256SUMS`` (and any addenda) is verified *before*
+       anything is written. On a mismatch nothing is written and
+       :class:`EvidenceVerificationError` is raised.
+    2. No existing file is ever overwritten: the PDF is written as
+       ``Sandroid_Forensic_Report_regenerated_<UTC>.pdf`` (only a folder
+       without manifest and without a PDF gets the default name), an
+       existing ``timeline.png`` is reused, a missing one is not added.
+    3. In a sealed folder the new PDF is recorded in
+       ``SHA256SUMS.addendum-<UTC>`` (plus a log line); the original
+       ``SHA256SUMS``/``manifest.json`` stay unchanged. A folder without any
+       manifest gets a fresh one.
 
     Args:
         result_dir: Existing result folder.
         json_file: Results JSON (located automatically if omitted).
-        output_pdf: Output path (default ``<result_dir>/Sandroid_Forensic_Report.pdf``).
-        update_manifest: Rewrite the manifest afterwards (see above).
+        output_pdf: Explicit output path; must not exist yet.
+        update_manifest: Record the new PDF (addendum or new manifest).
 
     Returns:
         A :class:`ReportFromFolderOutcome`.
+
+    Raises:
+        FileNotFoundError: ``result_dir`` does not exist.
+        EvidenceVerificationError: The folder does not match its manifest.
+        FileExistsError: ``output_pdf`` already exists.
     """
     from sandroid.core.pdf_report import generate_pdf_report
 
@@ -742,27 +856,58 @@ def report_from_folder(
         raise FileNotFoundError(f"Result folder not found: {root}")
     check = verify_hash_manifest(root)
     if check.present and not check.ok:
-        logger.warning(
-            "Evidence manifest verification FAILED for %s: %d modified, %d missing "
-            "file(s). The existing manifest is left unchanged.",
-            root,
-            len(check.mismatched),
-            len(check.missing),
+        error = EvidenceVerificationError(root, check)
+        logger.error("%s", error)
+        raise error
+    sealed = check.present or (root / MANIFEST_NAME).exists()
+    stamp = utc_stamp()
+    if output_pdf is not None:
+        out = Path(output_pdf)
+        if out.exists():
+            raise FileExistsError(f"Refusing to overwrite existing file: {out}")
+    elif not sealed and not (root / DEFAULT_PDF_NAME).exists():
+        out = root / DEFAULT_PDF_NAME
+    else:
+        out = _free_path(root / REGENERATED_PDF_TEMPLATE.format(stamp=stamp))
+    try:
+        pdf = generate_pdf_report(
+            root, json_file=json_file, output_pdf=out, write_timeline=False
         )
-    pdf = generate_pdf_report(root, json_file=json_file, output_pdf=output_pdf)
+    except BaseException:
+        # Do not leave a half-written report behind (it did not exist before).
+        out.unlink(missing_ok=True)
+        raise
     outcome = ReportFromFolderOutcome(pdf=pdf, check=check)
-    if update_manifest and (not check.present or check.ok):
+    if not update_manifest:
+        return outcome
+    if sealed:
+        outcome.addendum, outcome.addendum_sha256 = write_manifest_addendum(
+            root, [pdf], stamp
+        )
+        logger.info(
+            "Report regenerated: %s (SHA-256 %s). Recorded in %s (SHA-256 %s); "
+            "the original %s was verified and left unchanged.",
+            pdf.name,
+            sha256_file(pdf),
+            outcome.addendum.name,
+            outcome.addendum_sha256,
+            SHA256SUMS_NAME,
+        )
+    else:
         outcome.manifest = write_hash_manifest(root)
     return outcome
 
 
 __all__ = [
+    "ADDENDUM_PREFIX",
     "DEFAULT_PDF_NAME",
     "DEFAULT_RESULTS_NAME",
     "HASH_ALGORITHMS",
     "MANIFEST_NAME",
+    "REGENERATED_PDF_TEMPLATE",
     "RUN_METADATA_KEY",
     "SHA256SUMS_NAME",
+    "EvidenceVerificationError",
     "FinalizeOutcome",
     "ManifestCheck",
     "ManifestInfo",
@@ -782,7 +927,9 @@ __all__ = [
     "strip_ansi",
     "strip_markup",
     "to_iso",
+    "utc_stamp",
     "verify_hash_manifest",
     "write_hash_manifest",
+    "write_manifest_addendum",
     "write_results_json",
 ]

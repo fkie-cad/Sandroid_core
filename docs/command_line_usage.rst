@@ -251,11 +251,30 @@ Set or clear HTTP proxy settings on the device.
 
 Install an APK on the device in headless mode.
 
-**Action Import**::
+**Action Import (headless replay)**::
 
-   sandroid --import-action /path/to/action.json
+   sandroid --import-action results/runs/<run_id>/recording.txt -n 2 --report
+   sandroid --import-action results/runs/<run_id>/
 
-Import a previously exported action recording file.
+Replay a recording made in the TUI without the TUI: a forensic analysis runs
+and the recording is replayed via the Player in every run (``-n``, ``--report``,
+``--network``, ``--hash``, ``--show-deleted`` and ``-f`` apply). Pass the run
+bundle's ``recording.txt`` or the bundle folder. The replay starts from the
+device's current state, so bring the device to the state the recording expects
+(e.g. load the snapshot used when recording). JSON action files cannot be
+replayed and are rejected.
+
+**Headless forensic capture window**::
+
+   sandroid --headless --mode forensic -n 2 --report
+
+Each run opens a 60 s capture window (API: ``capture_window``);
+the console prints ``Run k/N: PERFORM THE ACTION ON THE DEVICE NOW (W s
+remaining)`` and counts down. Perform the same action in every run. At the end
+a short summary with the result paths is printed (no JSON dump; the results
+are in the session folder and in ``-f FILE`` if given). Exit codes: ``0``
+success, ``1`` analysis failed, ``3`` the analysis ran but the results JSON, a
+requested PDF report or the evidence manifest could not be written.
 
 **Device Settings**::
 

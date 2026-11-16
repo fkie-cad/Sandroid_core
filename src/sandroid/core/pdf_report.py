@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 from functools import cache
 from importlib import resources
 from pathlib import Path
@@ -40,6 +41,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.platypus.doctemplate import LayoutError
 
 from . import timeline_generator
 from .run_report import (
@@ -54,9 +56,31 @@ from .run_report import (
 
 logger = logging.getLogger(__name__)
 
-#: Maximum diff lines shown per changed file (table cells cannot split
-#: across pages); the complete diff is always in the results JSON.
+#: Maximum diff lines shown in one table cell (table cells cannot split
+#: across pages); longer diffs continue in additional rows.
 MAX_DIFF_LINES = 40
+
+#: Maximum diff lines shown per changed file over all continuation rows; the
+#: complete diff is always in the results JSON.
+MAX_DIFF_LINES_TOTAL = 200
+
+#: Maximum characters shown per diff line / per plain table entry. Database
+#: diffs can contain single rows of >25,000 characters (icon BLOBs).
+MAX_LINE_CHARS = 400
+MAX_ENTRY_CHARS = 2000
+
+#: Maximum rendered height (pt) of a single table cell. A table row can not
+#: be split across pages, so every cell must fit on one page together with
+#: the repeated header row (frame height is ~685 pt).
+MAX_CELL_HEIGHT = 480.0
+
+#: Target height (pt) of one continuation row of a long diff. Smaller than
+#: :data:`MAX_CELL_HEIGHT` so rows fill pages well (a row that does not fit
+#: moves to the next page as a whole).
+DIFF_CHUNK_HEIGHT = 240.0
+
+#: Default cell padding of a ReportLab table (left + right).
+_CELL_HPAD = 12
 
 #: Page geometry.
 MARGIN_X = 50
@@ -176,6 +200,116 @@ def _txt(value: Any) -> str:
     return escape(plain_text(str(value)))
 
 
+def _clip(text: str, limit: int) -> str:
+    """Shorten ``text`` to ``limit`` characters with an explicit marker."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]} … [{len(text) - limit} more characters]"
+
+
+def bounded_lines_paragraph(
+    lines: list[str],
+    style: ParagraphStyle,
+    width: float,
+    *,
+    max_lines: int = MAX_DIFF_LINES,
+    max_line_chars: int = MAX_LINE_CHARS,
+    max_height: float = MAX_CELL_HEIGHT,
+    see_also: str = "the results file",
+) -> Paragraph:
+    """Paragraph for a table cell whose height never exceeds ``max_height``.
+
+    Long lines are clipped to ``max_line_chars``; at most ``max_lines`` lines
+    are shown, fewer if the wrapped text would still be too tall. Omitted
+    lines are stated explicitly ("… N more line(s) not shown — see …") so a
+    reader knows the excerpt is incomplete.
+
+    Args:
+        lines: Plain-text lines (unescaped).
+        style: Paragraph style.
+        width: Available cell width in points (without padding).
+        max_lines: Upper bound of shown lines.
+        max_line_chars: Upper bound of characters per shown line.
+        max_height: Upper bound of the rendered height in points.
+        see_also: Where the complete data can be found.
+
+    Returns:
+        A :class:`Paragraph` that fits into ``width`` x ``max_height``.
+    """
+    clipped = [_clip(plain_text(str(ln)), max_line_chars) for ln in lines]
+    shown = min(len(clipped), max_lines)
+    while True:
+        text = "<br/>".join(escape(ln) for ln in clipped[:shown])
+        omitted = len(clipped) - shown
+        if omitted:
+            note = (
+                f"<i>… {omitted} more line(s) not shown — see "
+                f"{escape(see_also)}</i>"
+            )
+            text = f"{text}<br/>{note}" if text else note
+        para = Paragraph(text, style)
+        _w, height = para.wrap(width, 1e9)
+        if height <= max_height or shown == 0:
+            return para
+        # Shrink proportionally (at least one line per iteration).
+        shown = max(0, min(shown - 1, int(shown * max_height / height)))
+
+
+def split_lines_into_cells(
+    lines: list[str],
+    style: ParagraphStyle,
+    width: float,
+    *,
+    max_total: int = MAX_DIFF_LINES_TOTAL,
+    max_lines: int = MAX_DIFF_LINES,
+    max_line_chars: int = MAX_LINE_CHARS,
+    max_height: float = MAX_CELL_HEIGHT,
+    chunk_height: float = DIFF_CHUNK_HEIGHT,
+    see_also: str = "the results file",
+) -> list[Paragraph]:
+    """Distribute ``lines`` over several cells that each fit on a page.
+
+    Used for diffs: lines are grouped into cells of about ``chunk_height``;
+    every returned :class:`Paragraph` is at most ``max_height`` tall and
+    holds at most ``max_lines`` lines, so a long diff
+    becomes continuation rows instead of one row taller than a page. At most
+    ``max_total`` lines are shown; the last cell then states how many lines
+    were left out and where the complete data is.
+    """
+    clipped = [_clip(plain_text(str(ln)), max_line_chars) for ln in lines]
+    shown, rest = clipped[:max_total], clipped[max_total:]
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    height = 0.0
+    for ln in shown:
+        _w, h = Paragraph(escape(ln), style).wrap(width, 1e9)
+        if current and (height + h > chunk_height or len(current) >= max_lines):
+            chunks.append(current)
+            current, height = [], 0.0
+        current.append(ln)
+        height += h
+    if current or not chunks:
+        chunks.append(current)
+    cells = [
+        bounded_lines_paragraph(
+            chunk,
+            style,
+            width,
+            max_lines=max_lines,
+            max_line_chars=max_line_chars + 40,
+            max_height=max_height,
+            see_also=see_also,
+        )
+        for chunk in chunks
+    ]
+    if rest:
+        note = (
+            f"<i>… {len(rest)} more line(s) not shown — see {escape(see_also)}</i>"
+        )
+        cells.append(Paragraph(note, style))
+    return cells
+
+
 def find_results_json(result_dir: str | os.PathLike[str]) -> Path:
     """Locate the results JSON inside a result folder.
 
@@ -231,7 +365,9 @@ class PDFReport:
     data = None
     inputFileName = ""
 
-    def __init__(self, path, result_file_to_parse, results_dir=None):
+    def __init__(
+        self, path, result_file_to_parse, results_dir=None, write_timeline=True
+    ):
         self.inputFileName = str(result_file_to_parse)
         try:
             with open(self.inputFileName, "rb") as inputFile:
@@ -260,13 +396,28 @@ class PDFReport:
         self.zebra = Color(0.96, 0.97, 0.97, 1)
         self.white = Color(1, 1, 1, 1)
         self._init_styles()
+        self.results_name = os.path.basename(self.inputFileName)
+        #: Sections that could not be laid out and were replaced by a note:
+        #: ``[(section title, reason), ...]``.
+        self.degraded_sections: list[tuple[str, str]] = []
+        self._builder_errors: list[tuple[str, str]] = []
 
-        self.firstPage()
-        self.summaryTableMaker()
-        self.settingsTableMaker()
-        if self.data.get("Changed Files") or self.data.get("New Files"):
-            self.timelinePage()
-        self.pageHeader("Detailed Report")
+        with tempfile.TemporaryDirectory(prefix="sandroid_pdf_") as tmp:
+            self._timeline_png = self._prepare_timeline(write_timeline, Path(tmp))
+            self._build()
+
+    # ---- story assembly ---------------------------------------------------
+
+    def _section_plan(self) -> list[tuple[str, Any]]:
+        """Ordered ``(title, builder)`` list; each builder appends flowables."""
+        plan: list[tuple[str, Any]] = [
+            ("Title page", self.firstPage),
+            ("Summary", self.summaryTableMaker),
+            ("Analysis settings", self.settingsTableMaker),
+        ]
+        if self._timeline_png:
+            plan.append(("Timeline", self.timelinePage))
+        plan.append(("Detailed Report", lambda: self.pageHeader("Detailed Report")))
         for key, title in (
             ("Changed Files", "Changed Files"),
             ("New Files", "New Files"),
@@ -279,37 +430,142 @@ class PDFReport:
             if key not in self.data:
                 continue
             if key == "Changed Files":
-                self.changedFilesTableMaker()
+                plan.append((title, self.changedFilesTableMaker))
             else:
-                self.generalTableMaker(key, title)
+                plan.append(
+                    (title, lambda k=key, t=title: self.generalTableMaker(k, t))
+                )
         if "APK Hashes" in self.other:
-            self.APKTableMaker()
+            plan.append(("APKs & Hashes", self.APKTableMaker))
         if "Artifact Hashes" in self.other:
-            self.newFileHashesTableMaker()
-            self.changedFileHashesTableMaker()
-
+            plan.append(("Hashes of new files", self.newFileHashesTableMaker))
+            plan.append(
+                (
+                    "Hashes of changed files (before / after action)",
+                    self.changedFileHashesTableMaker,
+                )
+            )
         screenshot_dir = find_screenshot_dir(self.results_dir)
         if screenshot_dir is not None:
-            self.elements.append(PageBreak())
-            self.sectionTitle("Screenshots")
-            self.image_grid(screenshot_dir)
 
-        device = self.data.get("Device Name", "")
-        version = (self.meta.get("host") or {}).get("sandroid_version") or _version()
-        self.doc = SimpleDocTemplate(
-            self.path,
+            def screenshots():
+                self.elements.append(PageBreak())
+                self.sectionTitle("Screenshots")
+                self.image_grid(screenshot_dir)
+
+            plan.append(("Screenshots", screenshots))
+        return plan
+
+    def _render_section(self, title: str, builder) -> list[Any]:
+        """Run one section builder in isolation and return its flowables.
+
+        A builder that raises is replaced by a placeholder note, so a defect
+        in one section never costs the whole report.
+        """
+        saved = self.elements
+        self.elements = []
+        try:
+            builder()
+            return self.elements
+        except Exception as exc:
+            logger.error(
+                "PDF section %r could not be built: %s", title, exc, exc_info=True
+            )
+            reason = f"{type(exc).__name__}: {exc}"
+            self._builder_errors.append((title, reason))
+            return self._placeholder(title, reason)
+        finally:
+            self.elements = saved
+
+    def _placeholder(self, title: str, reason: Any) -> list[Any]:
+        """Flowables shown instead of a section that could not be rendered."""
+        reason_text = _clip(str(reason).splitlines()[0] if str(reason) else "", 300)
+        self.elements = []
+        self.sectionTitle(title)
+        self.note(
+            f"<b>This section could not be laid out in the PDF</b> "
+            f"({_txt(reason_text)}). The complete data is in "
+            f"{_txt(self.results_name)} and the raw/ folder of this result."
+        )
+        self.elements.append(Spacer(10, 12))
+        return self.elements
+
+    def _story(self, skip: dict[str, str]) -> list[Any]:
+        story: list[Any] = []
+        for title, builder in self._section_plan():
+            if title in skip:
+                story.extend(self._placeholder(title, skip[title]))
+            else:
+                story.extend(self._render_section(title, builder))
+        return story
+
+    def _doc(self, target, **kwargs) -> SimpleDocTemplate:
+        return SimpleDocTemplate(
+            target,
             pagesize=A4,
             leftMargin=MARGIN_X,
             rightMargin=MARGIN_X,
             topMargin=MARGIN_TOP,
             bottomMargin=MARGIN_BOTTOM,
-            title=f"Sandroid Forensic Report – {device}",
-            author="Sandroid (Fraunhofer FKIE)",
-            subject=f"Results file SHA-256 {self.input_sha256}",
-            creator=f"Sandroid {version}",
+            **kwargs,
         )
+
+    def _unrenderable_sections(self, skip: dict[str, str]) -> dict[str, str]:
+        """Lay out every section alone and return those that fail."""
+        bad: dict[str, str] = {}
+        for title, builder in self._section_plan():
+            if title in skip:
+                continue
+            flowables = self._render_section(title, builder)
+            try:
+                self._doc(io.BytesIO()).build(flowables)
+            except Exception as exc:
+                kind = (
+                    "layout error"
+                    if isinstance(exc, LayoutError)
+                    else type(exc).__name__
+                )
+                bad[title] = f"{kind}: {(str(exc).splitlines() or [''])[0]}"
+        return bad
+
+    def _build(self) -> None:
+        device = self.data.get("Device Name", "")
+        version = (self.meta.get("host") or {}).get("sandroid_version") or _version()
         footer = f"Sandroid {version} · {device} · generated {self.generated_at}"
-        self.doc.multiBuild(self.elements, canvasmaker=_make_canvas_class(footer))
+        meta = {
+            "title": f"Sandroid Forensic Report – {device}",
+            "author": "Sandroid (Fraunhofer FKIE)",
+            "subject": f"Results file SHA-256 {self.input_sha256}",
+            "creator": f"Sandroid {version}",
+        }
+        skip: dict[str, str] = {}
+        while True:
+            self._builder_errors = []
+            self.elements = self._story(skip)
+            builder_errors = self._builder_errors
+            self.doc = self._doc(self.path, **meta)
+            try:
+                self.doc.multiBuild(
+                    self.elements, canvasmaker=_make_canvas_class(footer)
+                )
+                break
+            except Exception as exc:
+                # LayoutError (a flowable taller than a page) or a ReportLab
+                # error raised while drawing: find the section(s) responsible.
+                bad = self._unrenderable_sections(skip)
+                if not bad:
+                    raise
+                for title, reason in bad.items():
+                    logger.error(
+                        "PDF section %r does not fit on a page and is replaced "
+                        "by a note (%s); the data is in %s.",
+                        title,
+                        reason,
+                        self.results_name,
+                    )
+                skip.update(bad)
+                logger.debug("Retrying PDF layout after: %s", exc)
+        self.degraded_sections = builder_errors + list(skip.items())
 
     # ---- styles -----------------------------------------------------------
 
@@ -492,8 +748,10 @@ class PDFReport:
             "File hashes are given as SHA-256 (MD5 retained for compatibility). "
             "A manifest of all files in the result folder (manifest.json, "
             "SHA256SUMS) is written at the end of each run; its SHA-256 is "
-            "recorded in the Sandroid log. Diff excerpts in this report may be "
-            "shortened; the complete data is in the results file."
+            "recorded in the Sandroid log. Long diffs continue over several "
+            f"rows; lines over {MAX_LINE_CHARS} characters and diffs over "
+            f"{MAX_DIFF_LINES_TOTAL} lines are shortened, which is marked where "
+            "it happens. The complete data is in the results file."
         )
         self.elements.append(PageBreak())
 
@@ -561,13 +819,30 @@ class PDFReport:
 
     # ---- timeline ---------------------------------------------------------
 
-    def timelinePage(self):
+    def _prepare_timeline(self, write_timeline: bool, tmp_dir: Path) -> str | None:
+        """Return the timeline image for the report (``None`` if no events).
+
+        With ``write_timeline`` the image is (re)rendered to
+        ``<results_dir>/timeline.png`` (normal end of a run, before the
+        manifest is written). Otherwise the result folder is treated as
+        sealed evidence: an existing ``timeline.png`` is reused unchanged and a
+        missing one is rendered into ``tmp_dir`` only.
+        """
+        if not (self.data.get("Changed Files") or self.data.get("New Files")):
+            return None
         png = self.results_dir / "timeline.png"
+        if not write_timeline:
+            if png.is_file():
+                return str(png)
+            png = tmp_dir / "timeline.png"
         try:
-            produced = timeline_generator.parse_timeline(self.inputFileName, str(png))
+            return timeline_generator.parse_timeline(self.inputFileName, str(png))
         except Exception as exc:
             logger.warning("Timeline could not be generated: %s", exc)
-            produced = None
+            return None
+
+    def timelinePage(self):
+        produced = self._timeline_png
         if not produced:
             return
         self.elements.append(CondPageBreak(9 * inch))
@@ -595,7 +870,16 @@ class PDFReport:
         rows = [self.make_header(["No.", "Entry"])]
         for num, entry in enumerate(entries, 1):
             rows.append(
-                [Paragraph(str(num), self.body), Paragraph(_txt(entry), self.body_wrap)]
+                [
+                    Paragraph(str(num), self.body),
+                    bounded_lines_paragraph(
+                        [_clip(str(entry), MAX_ENTRY_CHARS)],
+                        self.body_wrap,
+                        FRAME_WIDTH - 30 - _CELL_HPAD,
+                        max_line_chars=MAX_ENTRY_CHARS + 40,
+                        see_also=self.results_name,
+                    ),
+                ]
             )
         self.elements.append(self._table(rows, [30, FRAME_WIDTH - 30]))
         self.elements.append(Spacer(10, 14))
@@ -608,6 +892,7 @@ class PDFReport:
             self.elements.append(Spacer(10, 12))
             return
         rows = [self.make_header(["No.", "File", "Changes"])]
+        diff_width = FRAME_WIDTH - 220
         for num, item in enumerate(entries, 1):
             if isinstance(item, dict) and item:
                 file_name = next(iter(item))
@@ -620,21 +905,25 @@ class PDFReport:
             for block in changes or []:
                 lines.extend(str(block).strip("\n").splitlines())
             lines = [ln.strip() for ln in lines if ln.strip()]
-            shown = lines[:MAX_DIFF_LINES]
-            text = "<br/>".join(_txt(ln) for ln in shown)
-            if len(lines) > MAX_DIFF_LINES:
-                text += (
-                    f"<br/><i>… {len(lines) - MAX_DIFF_LINES} more line(s), "
-                    "see results file</i>"
-                )
-            rows.append(
-                [
-                    Paragraph(str(num), self.body),
-                    Paragraph(_txt(file_name), self.body_wrap),
-                    Paragraph(text, self.body_wrap),
-                ]
+            cells = split_lines_into_cells(
+                lines,
+                self.body_wrap,
+                diff_width - _CELL_HPAD,
+                see_also=f"{self.results_name} / raw/",
             )
-        self.elements.append(self._table(rows, [30, 190, FRAME_WIDTH - 220]))
+            name_text = _txt(_clip(str(file_name), MAX_LINE_CHARS))
+            for part, cell in enumerate(cells, 1):
+                if part == 1:
+                    no_cell = Paragraph(str(num), self.body)
+                    name_cell = Paragraph(name_text, self.body_wrap)
+                else:
+                    no_cell = Paragraph(f"<i>{num}</i>", self.body)
+                    name_cell = Paragraph(
+                        f"<i>{name_text} (continued, part {part}/{len(cells)})</i>",
+                        self.body_wrap,
+                    )
+                rows.append([no_cell, name_cell, cell])
+        self.elements.append(self._table(rows, [30, 190, diff_width]))
         self.elements.append(Spacer(10, 14))
 
     def APKTableMaker(self):
@@ -812,6 +1101,8 @@ def generate_pdf_report(
     result_dir: str | os.PathLike[str],
     json_file: str | os.PathLike[str] | None = None,
     output_pdf: str | os.PathLike[str] | None = None,
+    *,
+    write_timeline: bool = True,
 ) -> Path:
     """Render the PDF report for a finished result folder.
 
@@ -821,14 +1112,22 @@ def generate_pdf_report(
             omitted.
         output_pdf: Output path; defaults to
             ``<result_dir>/Sandroid_Forensic_Report.pdf``.
+        write_timeline: Render ``timeline.png`` into ``result_dir``. Pass
+            ``False`` for sealed result folders (an existing image is reused,
+            a missing one is rendered to a temporary file).
 
     Returns:
-        Path of the written PDF.
+        Path of the written PDF. Sections that could not be laid out are
+        replaced by a note in the PDF and logged as errors.
     """
     root = Path(result_dir)
     json_path = Path(json_file) if json_file else find_results_json(root)
     out = Path(output_pdf) if output_pdf else root / DEFAULT_PDF_NAME
-    PDFReport(str(out), str(json_path), results_dir=root)
+    report = PDFReport(
+        str(out), str(json_path), results_dir=root, write_timeline=write_timeline
+    )
+    for title, reason in report.degraded_sections:
+        logger.warning("PDF report section %r omitted: %s", title, reason)
     logger.info(
         "PDF report generated: %s (SHA-256 %s)", out, sha256_file(out)
     )

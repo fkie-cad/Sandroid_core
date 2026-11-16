@@ -490,6 +490,86 @@ class TestPdf:
         assert out == tmp_path / run_report.DEFAULT_PDF_NAME
         assert out.read_bytes()[:5] == b"%PDF-"
 
+    def test_huge_diffs_never_exceed_a_page(self, tmp_path, clean_env):
+        """P2-H3: the Wikipedia run's PDF failed with a 15718 pt table row.
+
+        Shape taken from the real bundle: app_icons.db has 5 diff lines of up
+        to 26,286 characters (icon BLOBs), wikipedia.db a 53-line diff.
+        """
+        data = _results()
+        blob_lines = [
+            f"[INSERT] Table [icons] row [{i},'pkg',x'{'89504e47' * 3300}']"
+            for i in range(5)
+        ]
+        wiki_lines = [
+            f"[INSERT] Table [Category] row [{i},2026,11,'Category:Example "
+            f"category number {i} with a long name','en',1] has been added"
+            for i in range(53)
+        ]
+        many_lines = [f"Updated attribute: /root/pkg[{i}] to 'x'" for i in range(260)]
+        data["Changed Files"] = [
+            {"/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db": blob_lines},
+            {"/data/data/org.wikipedia/databases/wikipedia.db": wiki_lines},
+            {"/data/system/users/0/package-restrictions.xml": many_lines},
+        ]
+        data["Network"] = ["x" * 50_000]
+        (tmp_path / "sandroid.json").write_text(json.dumps(data))
+
+        report = pdf_report.PDFReport(
+            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
+        )
+        assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
+        assert report.degraded_sections == []
+        texts = "\n".join(_paragraph_texts(report.elements))
+        # All 53 wikipedia.db lines are in the report (continuation rows).
+        assert "Category:Example category number 52" in texts
+        assert "continued, part 2/" in texts
+        # Long lines and over-long diffs are shortened, visibly.
+        assert "more characters]" in texts
+        assert "60 more line(s) not shown — see sandroid.json / raw/" in texts
+
+    def test_cell_paragraph_height_is_bounded(self):
+        style = pdf_report.ParagraphStyle("t", fontName="Helvetica", fontSize=7.5, leading=9.5)
+        para = pdf_report.bounded_lines_paragraph(["word " * 4000] * 30, style, 260)
+        assert para.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT
+        cells = pdf_report.split_lines_into_cells(["y " * 300] * 300, style, 260)
+        assert all(c.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT for c in cells)
+        assert "100 more line(s) not shown" in cells[-1].text
+
+    def test_unlayoutable_section_degrades_instead_of_failing(
+        self, tmp_path, clean_env, monkeypatch
+    ):
+        """A section that cannot be laid out is replaced by a note."""
+
+        def too_tall(self, key, title=None):
+            self.sectionTitle(title or key)
+            if key == "Processes":  # ReportLab drawing error (negative width)
+                self.elements.append(pdf_report.Table([[pdf_report.Spacer(10, 9)]]))
+            else:  # LayoutError: one row taller than a page
+                self.elements.append(
+                    pdf_report.Table([[pdf_report.Spacer(10, 5000)]], colWidths=[100])
+                )
+
+        def broken(self):
+            raise ValueError("bad data")
+
+        monkeypatch.setattr(pdf_report.PDFReport, "generalTableMaker", too_tall)
+        monkeypatch.setattr(pdf_report.PDFReport, "APKTableMaker", broken)
+        (tmp_path / "sandroid.json").write_text(json.dumps(_results()))
+        report = pdf_report.PDFReport(
+            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
+        )
+        assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
+        titles = {t for t, _ in report.degraded_sections}
+        assert "APKs & Hashes" in titles
+        assert "New Files" in titles
+        assert "Processes" in titles
+        assert any("layout error" in r for _, r in report.degraded_sections)
+        texts = "\n".join(_paragraph_texts(report.elements))
+        assert "could not be laid out in the PDF" in texts
+        # Unaffected sections are still there.
+        assert "GroundTruth.db" in texts
+
     def test_find_results_json(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             pdf_report.find_results_json(tmp_path)
@@ -540,22 +620,83 @@ class TestFinalize:
         assert outcome.errors == ["pdf: render failed"]
         assert outcome.manifest is not None
 
-    def test_report_from_folder_keeps_manifest_on_tamper(self, tmp_path, clean_env):
+    @staticmethod
+    def _snapshot(folder: Path) -> dict[str, bytes]:
+        return {
+            p.relative_to(folder).as_posix(): p.read_bytes()
+            for p in sorted(folder.rglob("*"))
+            if p.is_file()
+        }
+
+    def _sealed_run(self, tmp_path) -> Path:
+        outcome = run_report.finalize_run(tmp_path, _results(), generate_pdf=True)
+        assert outcome.errors == []
+        assert outcome.pdf is not None
+        return tmp_path
+
+    def test_report_from_unsealed_folder_writes_default_pdf_and_manifest(
+        self, tmp_path, clean_env
+    ):
         (tmp_path / "sandroid.json").write_text(json.dumps(_results()))
         first = run_report.report_from_folder(tmp_path)
         assert first.check.present is False
+        assert first.pdf == tmp_path / run_report.DEFAULT_PDF_NAME
         assert first.manifest is not None
+        assert not (tmp_path / "timeline.png").exists()  # nothing extra added
+        assert run_report.verify_hash_manifest(tmp_path).ok
 
-        second = run_report.report_from_folder(tmp_path)
-        assert second.check.ok
-        assert second.manifest is not None
+    def test_report_from_sealed_folder_never_overwrites(self, tmp_path, clean_env):
+        """P2-H4: intact bundle -> new PDF name + addendum, originals untouched."""
+        root = self._sealed_run(tmp_path)
+        before = self._snapshot(root)
 
-        sums_before = (tmp_path / "SHA256SUMS").read_bytes()
-        (tmp_path / "sandroid.json").write_text(json.dumps(_results()) + " ")
-        third = run_report.report_from_folder(tmp_path)
-        assert third.check.mismatched == ["sandroid.json"]
-        assert third.manifest is None
-        assert (tmp_path / "SHA256SUMS").read_bytes() == sums_before
+        outcome = run_report.report_from_folder(root)
+        assert outcome.check.ok
+        assert outcome.manifest is None
+        assert outcome.pdf.name.startswith("Sandroid_Forensic_Report_regenerated_")
+        assert outcome.pdf.name.endswith("Z.pdf")
+        after = self._snapshot(root)
+        # Every original file is byte-identical, incl. PDF, timeline, SHA256SUMS.
+        assert {k: after[k] for k in before} == before
+        added = set(after) - set(before)
+        assert added == {outcome.pdf.name, outcome.addendum.name}
+        assert outcome.addendum.name.startswith("SHA256SUMS.addendum-")
+        lines = outcome.addendum.read_text().splitlines()
+        assert lines == [
+            f"{run_report.sha256_file(outcome.pdf)}  {outcome.pdf.name}",
+            f"{run_report.sha256_file(root / 'SHA256SUMS')}  SHA256SUMS",
+        ]
+        check = run_report.verify_hash_manifest(root)
+        assert check.ok
+        assert check.unlisted == []
+
+        # A second regeneration in the same second gets yet another name.
+        again = run_report.report_from_folder(root)
+        assert again.pdf != outcome.pdf
+        assert again.addendum != outcome.addendum
+        assert run_report.verify_hash_manifest(root).ok
+
+        # Tampering with a regenerated PDF is detected through the addendum.
+        outcome.pdf.write_bytes(b"%PDF-forged")
+        assert run_report.verify_hash_manifest(root).mismatched == [outcome.pdf.name]
+
+    def test_report_from_tampered_folder_writes_nothing(self, tmp_path, clean_env):
+        """P2-H4: verification runs first; a mismatch aborts before writing."""
+        root = self._sealed_run(tmp_path)
+        (root / "sandroid.json").write_text(json.dumps(_results()) + " ")
+        before = self._snapshot(root)
+        with pytest.raises(run_report.EvidenceVerificationError) as info:
+            run_report.report_from_folder(root)
+        assert info.value.check.mismatched == ["sandroid.json"]
+        assert "Nothing was written" in str(info.value)
+        assert self._snapshot(root) == before
+
+    def test_report_from_refuses_existing_output(self, tmp_path, clean_env):
+        root = self._sealed_run(tmp_path)
+        with pytest.raises(FileExistsError):
+            run_report.report_from_folder(
+                root, output_pdf=root / run_report.DEFAULT_PDF_NAME
+            )
 
     def test_cli_report_from(self, tmp_path, clean_env):
         from click.testing import CliRunner
@@ -568,3 +709,24 @@ class TestFinalize:
         assert (tmp_path / run_report.DEFAULT_PDF_NAME).exists()
         assert (tmp_path / "SHA256SUMS").exists()
         assert "Report regeneration requested" in (tmp_path / "sandroid_report.log").read_text()
+
+        res = CliRunner().invoke(main, ["--report-from", str(tmp_path)])
+        assert res.exit_code == 0, res.output
+        log = (tmp_path / "sandroid_report.log").read_text()
+        assert "Recorded in SHA256SUMS.addendum-" in log
+
+    def test_cli_report_from_tampered_exits_2_and_writes_nothing(
+        self, tmp_path, clean_env
+    ):
+        from click.testing import CliRunner
+
+        from sandroid.cli import main
+
+        root = self._sealed_run(tmp_path)
+        (root / "sandroid.json").write_text("{}")
+        before = self._snapshot(root)
+        res = CliRunner().invoke(main, ["--report-from", str(root)])
+        assert res.exit_code == 2, res.output
+        assert "verification FAILED" in res.output
+        assert "PDF report written" not in res.output
+        assert self._snapshot(root) == before
