@@ -1284,7 +1284,7 @@ class BypassService:
         # Categories the user has *armed* (intends to apply). Distinct from
         # active: a category can be armed while the app is stopped (applied on
         # the next Start/Restart) and active without being armed (started
-        # directly, e.g. Ctrl+P SSL unpin). The panel renders armed ∪ active.
+        # directly, e.g. Ctrl+P SSL unpin). The panel renders armed | active.
         self._armed: set[str] = set()
         self._on_message: Callable[[Any], None] | None = None
         # Display string of the currently-registered TaskService entry (None
@@ -1877,7 +1877,7 @@ class BypassService:
         category: str,
         on_message: Callable[[Any], None] | None = None,
     ) -> tuple[bool, str]:
-        """Toggle a category against the armed ∪ active set.
+        """Toggle a category against the armed | active set.
 
         - ON + running     -> arm and flip the flag on live (instant).
         - ON + not running  -> arm only; applied by the next Start/Restart.

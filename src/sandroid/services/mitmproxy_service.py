@@ -15,10 +15,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Import config helpers with a fallback for standalone usage (mirrors
 # core/proxy_manager.py).

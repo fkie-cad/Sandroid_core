@@ -55,13 +55,27 @@ persistent run history, and an experimental AI Chat assistant.
 - Per-tool permission gate (allow once / always / never, persisted).
 - New `[ai]` and `[mcp]` config sections with secret redaction in `sandroid-config show`. **Note:** prompts, device context and tool output are sent to the configured endpoint — prefer a local endpoint (e.g. Ollama) and set the key via `SANDROID_AI__API_KEY`.
 
+#### Evidence documentation & reporting
+- **SHA-256** alongside MD5 for artifacts and APKs (new JSON keys; existing keys unchanged), keyed by full device path.
+- **`Run Metadata`** in every results JSON: Sandroid/frida/friTap/dexray versions, host, device serial, AVD, Android version/API level, build fingerprint, ISO-8601 start/end timestamps with timezone, and the (secret-free) analysis settings.
+- **Evidence manifest**: `manifest.json` + `SHA256SUMS` over the whole result folder (verifiable with `sha256sum -c` / `shasum -a 256 -c`); its own hash is logged.
+- **`sandroid --report-from <dir>`** verifies the manifest and (re)generates the PDF for an existing result folder; `P` in **Files → Diffs** does the same for a run; `report.generate_pdf` creates it after every Play.
+- PDF title page with run metadata, readable wrapping tables, deterministic timeline.
+
+#### Device selection & safety defaults
+- **`--serial/-s`**, `$ANDROID_SERIAL` and `emulator.serial` select the device; every adb call is pinned to it.
+- **AI Chat is off unless configured**, accepts only local endpoints unless `ai.allow_remote = true`, shows a data-egress notice naming endpoint and model, and no MCP server is enabled by default (the bundled demo server returns clearly marked fake data only).
+- All bypass categories are labelled *experimental* and off by default.
+
 #### Tooling
-- Hermetic test suite (~1100 tests); `tests/conftest.py` blocks all real adb/emulator/frida access.
+- Hermetic test suite (~1300 tests); `tests/conftest.py` blocks all real adb/emulator/frida access.
 - CI runs ruff and pytest on Python 3.12 and 3.13 for `main` and `dev`, and checks the built distribution.
 - Releases are tagged `v<version>` with notes taken from this changelog.
 
 ### Changed
-- **friTap 2.0** compatibility.
+- **friTap 2.0** compatibility; tested with friTap 2.6.7, AndroidFridaManager 2.0.7 (verified frida-server downloads), dexray-intercept 1.0.1.9, objection 1.12.5, mvt 2026.11, frida 17.26.
+- Dependencies have upper bounds for fast-moving packages; `mcp`, `mitmproxy`, `androguard` and `psutil` are core dependencies (`.[ai]` is kept as an empty alias).
+- Package metadata now states the actual license (GPL-3.0).
 - Simplified app picker (system apps toggle on `Ctrl+S`).
 - Spotlight header self-heals a stale "paused" state against the live process.
 - Configuration is saved to `~/.config/sandroid/` again instead of the platformdirs location.
@@ -77,7 +91,22 @@ persistent run history, and an experimental AI Chat assistant.
 - kprobe backend: off-thread setup, path-mode scoping, preflight self-check hang, noisy teardown warnings.
 - `ADB_PATH` is quoted when building shell commands (paths with spaces, Windows).
 - ChangedFiles `.xml` branch reuses the joined pull paths.
-<!-- Integration: add the 2.1 stabilisation fixes from the release branches here. -->
+- **Intra-file diffs restored**: the first pull after the action was always empty, so changed SQLite databases and XML/ABX files showed "Not enough data for intra file analysis" instead of row/attribute diffs.
+- **Network results**: capture files are located on disk (the last capture was skipped with the noise filter off or N=1), TCP/UDP targets and IPv6 are reported with their DNS names, and a missing noise capture no longer wipes the result.
+- Record→Play from the TUI now runs the same gatherers as the CLI (processes, sockets, network per `[analysis]` settings) and writes the full results JSON; processes/sockets polling stops with the action.
+- Snapshot loads that fail abort the run; the guest clock is resynced to the host after every snapshot load (it drifted minutes behind).
+- Noise: ART profiles, `package-dex-usage`, `monotonic_clock.xml`, battery history are always filtered; the dry run also subtracts deleted files.
+- Artifact hashes are computed over the full pull tree (they were empty) and split APKs are hashed per part.
+- `adb root` + `setenforce 0` are applied on every path that needs them (`--install-apk`, `--dexray`, `--fritap`, …); `--install-apk` no longer prints "too many values to unpack".
+- The TUI starts without the AI dependencies; the forensic APK manager no longer crashes on a missing `WarningModal`; `features/screenshot.py` imports cleanly; several silently broken imports fixed; importing Sandroid never parses `sys.argv`.
+- Headless: the CLI configuration is kept (wrong device name in reports), forensic mode forwards `--network` and no longer needs a package.
+- TUI results are stored in one place under `paths.results_path` (previously split between the CWD and the run bundle); quitting no longer hangs on leftover helper threads.
+- PDF report: logo shipped as package data, no crash without `RAW_RESULTS_PATH`, no empty file-name rows, no ANSI escape codes in PDF or JSON; the screenshot grid no longer converts/deletes the original PNGs.
+- friTap: spawned targets are resumed (Android killed them after 10 s), hooks of dead jobs are unregistered, the panel shows when capturing stopped, and `fritap_output.json` is written on close.
+- dexray-intercept: fixed a deadlock during script load ("TransportError … timeout") and stop not stopping the job.
+- objection command lines fixed for objection 1.12; `frida.server_auto_start` is honoured; frida-server download errors (offline, rate limit, digest mismatch) are explained; MVT IOC download fallback fixed; `mitmweb` is found next to the Python interpreter.
+- AI Chat: tools from external MCP servers and evidence deletion always require confirmation; the API key is never written to logs, results or the config file from the environment.
+- `json_encoder` no longer recurses on duck-typed objects.
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.
