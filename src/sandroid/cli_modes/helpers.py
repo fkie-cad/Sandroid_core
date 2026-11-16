@@ -79,6 +79,7 @@ def build_cli_overrides(
     trigdroid: str | None,
     trigdroid_ccf: str | None,
     report: bool,
+    serial: str | None = None,
 ) -> dict:
     """Translate Click parameters into the nested override dict for ConfigLoader.
 
@@ -100,6 +101,7 @@ def build_cli_overrides(
         trigdroid: TrigDroid package name.
         trigdroid_ccf: TrigDroid CCF mode.
         report: Generate PDF report.
+        serial: ADB serial of the device to use (``--serial``).
 
     Returns:
         Dictionary of CLI overrides for ``ConfigLoader.load(cli_overrides=...)``.
@@ -151,5 +153,8 @@ def build_cli_overrides(
 
     if report:
         cli_overrides["report"] = {"generate_pdf": True}
+
+    if serial:
+        cli_overrides["emulator"] = {"serial": serial}
 
     return cli_overrides

@@ -68,6 +68,17 @@ def __getattr__(name: str):
     "--environment", "-e", help="Environment name (development, testing, production)"
 )
 @click.option(
+    "--serial",
+    "-s",
+    metavar="SERIAL",
+    default=None,
+    help=(
+        "ADB serial of the device to use (e.g. emulator-5556). Default: "
+        "$ANDROID_SERIAL, then config emulator.serial, then auto-select "
+        "(prefers emulators)."
+    ),
+)
+@click.option(
     "--file", "-f", type=click.Path(), help="Save output to the specified file"
 )
 @click.option(
@@ -121,7 +132,7 @@ def __getattr__(name: str):
 @click.option(
     "--hash",
     is_flag=True,
-    help="Create before/after md5 hashes of all changed and new files",
+    help="Create before/after MD5 + SHA-256 hashes of all changed and new files",
 )
 @click.option(
     "--apk", is_flag=True, help="List all APKs from the emulator and their hashes"
@@ -271,6 +282,7 @@ def __getattr__(name: str):
 def main(
     config: str | None,
     environment: str | None,
+    serial: str | None,
     file: str | None,
     loglevel: str | None,
     number: int | None,
@@ -308,7 +320,7 @@ def main(
     with_fritap: str | None,
     report_from: str | None = None,
 ) -> None:
-    """Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
+    r"""Sandroid: Extract forensic and malware artifacts from Android Virtual Devices.
 
     Main entry point for the Sandroid CLI application. Handles configuration
     loading, logging setup, and dispatches to the appropriate execution mode:
@@ -413,11 +425,22 @@ def main(
             trigdroid=trigdroid,
             trigdroid_ccf=trigdroid_ccf,
             report=report,
+            serial=serial,
         )
 
         sandroid_config = loader.load(
             config_file=config, environment=environment, cli_overrides=cli_overrides
         )
+
+        # Device selection precedence: --serial > $ANDROID_SERIAL > config.
+        if not serial and os.environ.get("ANDROID_SERIAL"):
+            sandroid_config.emulator.serial = os.environ["ANDROID_SERIAL"]
+
+        # Make get_config() (run history/bundles, services) return this exact
+        # config instead of re-loading defaults from disk.
+        from .config import set_config
+
+        set_config(sandroid_config)
 
         # Re-initialize console with the configured theme preset
         SandroidConsole.initialize(sandroid_config.theme.preset)

@@ -16,6 +16,30 @@ from sandroid.config import SandroidConfig
 logger = logging.getLogger(__name__)
 
 
+def apply_serial_selection(serial: str | None = None) -> str | None:
+    """Pin all adb traffic to an explicitly requested device.
+
+    ``serial`` (``--serial`` / config ``emulator.serial``) wins over the
+    ``ANDROID_SERIAL`` environment variable. The serial is set as the adb
+    target right away (so even pre-selection calls such as ``adb root`` use
+    ``-s``) and handed to the DeviceManager so auto-selection picks it.
+
+    Returns:
+        The serial in effect, or None for automatic selection.
+    """
+    import os
+
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_manager import DeviceManager
+
+    wanted = serial or os.environ.get("ANDROID_SERIAL") or None
+    DeviceManager.set_preferred_serial(serial or None)
+    if wanted:
+        Adb.set_target_device(wanted)
+        logger.info(f"Using device {wanted} (explicitly selected)")
+    return wanted
+
+
 def prepare_device(console: Any | None = None) -> bool:
     """Ensure ``adb root`` and SELinux permissive mode on the active device.
 
@@ -98,9 +122,14 @@ def initialize_core(config: SandroidConfig, prepare: bool = False) -> None:
     from sandroid.core.toolbox import Toolbox
 
     Toolbox.config = config
+    emulator_cfg = getattr(config, "emulator", None)
+    adb_path = getattr(emulator_cfg, "adb_path", None)
+    if adb_path and not Adb.ADB_PATH:
+        Adb.ADB_PATH = str(adb_path)  # configured adb wins over PATH lookup
     # IMPORTANT: Adb.init() must come before Toolbox.init() because
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
+    apply_serial_selection(getattr(emulator_cfg, "serial", None))
     if prepare:
         # Before Toolbox.init(): that step creates the FridaManager, which
         # should already see a rooted, permissive device.

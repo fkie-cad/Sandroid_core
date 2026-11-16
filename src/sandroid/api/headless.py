@@ -211,17 +211,13 @@ class SandroidHeadlessAPI(SandroidAPI):
 
             # Import and initialize core components
             from sandroid.core.adb import Adb
+            from sandroid.core.initializer import initialize_core
             from sandroid.core.toolbox import Toolbox
 
-            # Set config on Toolbox (required for initialization)
-            Toolbox.config = self._config
-
-            # Initialize ADB first (required by Toolbox)
-            Adb.init()
+            # Toolbox.config, configured adb path, --serial/ANDROID_SERIAL
+            # device pinning, Adb.init() and Toolbox.init() -- in that order.
+            initialize_core(self._config)
             self._adb = Adb
-
-            # Initialize Toolbox
-            Toolbox.init()
 
             # Initialize session files
             Toolbox.init_files()
