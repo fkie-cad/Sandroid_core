@@ -885,6 +885,10 @@ class MitmproxyPanel(Widget):
                 self.app.call_from_thread(
                     self._apply_reachability_result, result, addr, gen, quiet
                 )
+                if settle:
+                    # A state refresh during the restart could not read the
+                    # device proxy (system_server down); re-read it now.
+                    self.app.call_from_thread(self._kick_state_refresh)
             except Exception:
                 pass
 
