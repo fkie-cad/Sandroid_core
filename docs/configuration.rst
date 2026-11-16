@@ -320,6 +320,18 @@ mitmproxy (``[mitmproxy]``)
    # Listen port for the mitmproxy HTTP proxy
    proxy_port = 8080
 
+   # Bind address for the proxy and app-proxy SOCKS listeners. 127.0.0.1 keeps
+   # intercepted traffic off the LAN and is enough for emulators (10.0.2.2 is
+   # the host loopback) and USB devices routed via adb reverse. Set 0.0.0.0
+   # only for a physical device that reaches the host over Wi-Fi.
+   listen_host = "127.0.0.1"
+
+   # Also point the device's global http_proxy at mitmproxy when it is started
+   # with Enter in the Mitmproxy tab (off: start touches nothing on the device;
+   # use Ctrl+D). The device proxy Sandroid set is cleared when mitmproxy stops
+   # and when Sandroid exits.
+   auto_device_proxy = false
+
    # Port for the mitmweb web UI
    web_port = 8081
 

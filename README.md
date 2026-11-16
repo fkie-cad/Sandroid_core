@@ -149,7 +149,7 @@ Sandroid can route a target app's traffic through an embedded **mitmproxy** inst
 
 | Key | Action |
 |---|---|
-| `Enter` | start / stop `mitmweb` (proxy on `:8080`, web UI on `http://127.0.0.1:8081/`) |
+| `Enter` | start / stop `mitmweb` (proxy on `127.0.0.1:8080`, web UI on `http://127.0.0.1:8081/`); start does **not** touch the device unless `mitmproxy.auto_device_proxy = true` |
 | `Ctrl+D` | toggle the **Device Proxy** (global `http_proxy` setting → our mitmproxy) |
 | `Ctrl+N` | install the mitmproxy CA into the device's **system** trust store |
 | `y` | **Proxy Settings** modal: Device Proxy, **App Proxies** and CA in one place |
@@ -157,6 +157,8 @@ Sandroid can route a target app's traffic through an embedded **mitmproxy** inst
 | `Ctrl+O` / `Ctrl+A` | open the web UI / manage addons |
 
 Requires `mitmweb` on `PATH` (`pip install mitmproxy`).
+
+Ports come from `[mitmproxy]` in the config (`proxy_port`, `web_port`). mitmproxy listens on `127.0.0.1` only (`mitmproxy.listen_host`), so intercepted traffic is not exposed to the LAN. That is enough for emulators (the device reaches the host loopback as `10.0.2.2`) and for USB devices routed via `adb reverse` (Proxy Settings, `y`). Only a physical device on Wi-Fi needs `listen_host = "0.0.0.0"`. Starting mitmproxy leaves the device alone by default; set `mitmproxy.auto_device_proxy = true` to also point the Device Proxy at it on `Enter`. The Device Proxy Sandroid set is cleared when mitmproxy stops and when Sandroid exits.
 
 **App Proxies.** Besides the global device proxy, individual apps can be routed through a proxy *per UID*: Sandroid pushes a small [gost](https://github.com/go-gost/gost) redirector to the device and adds iptables `REDIRECT` rules for that app only — either to Sandroid's mitmproxy or to an external proxy such as Burp or ZAP. QUIC (UDP/443) is blocked for proxied apps by default (`focus.block_quic`) so they fall back to interceptable TCP/TLS. On emulators the host IP is detected automatically; an `adb reverse` fallback is offered when the device cannot reach the host.
 
