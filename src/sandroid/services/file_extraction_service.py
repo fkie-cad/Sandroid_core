@@ -656,85 +656,95 @@ class FileExtractionService:
     # Hash Calculation for Analysis Results
     # =========================================================================
 
-    def calculate_hashes(self) -> dict[str, Any]:
-        """Calculate MD5 hashes for new and changed files from forensic analysis.
+    @staticmethod
+    def _pull_tree_files(folder: Path) -> dict[str, Path]:
+        """Map device paths to local files for a (nested) pull directory.
+
+        Pull slots mirror the device tree (``new_pull/data/data/...``), so the
+        device path of a local file is ``"/" + <path relative to the slot>``.
+        """
+        if not folder.is_dir():
+            return {}
+        files: dict[str, Path] = {}
+        for path in sorted(folder.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                files["/" + path.relative_to(folder).as_posix()] = path
+        return files
+
+    def calculate_hashes(self, raw_results_path: str | None = None) -> dict[str, Any]:
+        """Calculate MD5 and SHA-256 hashes for new and changed files.
 
         Processes files from analysis snapshots:
         - new_pull: Newly created files
         - first_pull: Files before changes
         - second_pull: Files after changes
 
-        Filters out noise files that naturally change during analysis.
+        Pull directories are walked recursively and files are keyed by their
+        device path (e.g. ``/data/data/<pkg>/databases/x.db``). Files that are
+        also in ``noise_pull`` are excluded.
+
+        Args:
+            raw_results_path: The run's ``raw`` folder. Defaults to the
+                ``RAW_RESULTS_PATH`` environment variable (legacy behaviour).
 
         Returns:
-            Dictionary with structure:
-            {
-                "new_file_hashes": {filename: md5_hash, ...},
-                "changed_file_hashes(old,new)": {filename: [old_hash, new_hash], ...}
-            }
+            Dictionary with structure (MD5 keys kept for compatibility)::
+
+                {
+                    "new_file_hashes": {path: md5, ...},
+                    "changed_file_hashes(old,new)": {path: [old_md5, new_md5]},
+                    "new_file_hashes_sha256": {path: sha256, ...},
+                    "changed_file_hashes_sha256(old,new)": {path: [old, new]},
+                }
+
+            Missing versions are given as ``"n/a"``.
         """
+        from sandroid.core.run_report import hash_file
+
         self._logger.info("Calculating Hashes")
 
-        base_folder = Path(os.getenv("RAW_RESULTS_PATH", ""))
-        hashes: dict[str, Any] = {}
-        new_file_hashes: dict[str, str] = {}  # path : hash
-        change_file_hashes: dict[str, list] = {}  # path : [old_hash, new_hash]
-
-        new_pull = base_folder / "new_pull"
-        noise_pull = base_folder / "noise_pull"
-        first_pull = base_folder / "first_pull"
-        second_pull = base_folder / "second_pull"
-
-        # Build set of noise files to exclude
-        noise_files = (
-            {f.name for f in noise_pull.iterdir()} if noise_pull.exists() else set()
+        base_folder = Path(
+            raw_results_path
+            if raw_results_path is not None
+            else os.getenv("RAW_RESULTS_PATH", "")
         )
+        noise_files = set(self._pull_tree_files(base_folder / "noise_pull"))
 
-        # Process newly created files
-        if new_pull.exists():
-            for file_path in new_pull.iterdir():
-                if file_path.name in noise_files:
+        def _hashes(folder_name: str) -> dict[str, dict[str, str]]:
+            result: dict[str, dict[str, str]] = {}
+            for device_path, local in self._pull_tree_files(
+                base_folder / folder_name
+            ).items():
+                if device_path in noise_files:
                     continue
-                data = file_path.read_bytes()
-                self._logger.debug(f"Hashing {file_path.name}")
-                new_file_hashes[file_path.name] = hashlib.md5(data).hexdigest()
+                self._logger.debug(f"Hashing {folder_name}:{device_path}")
+                try:
+                    result[device_path] = hash_file(local)
+                except OSError as e:
+                    self._logger.warning(f"Could not hash {local}: {e}")
+            return result
 
-        # Process old versions of changed files
-        if first_pull.exists():
-            for file_path in first_pull.iterdir():
-                if file_path.name in noise_files:
-                    continue
-                data = file_path.read_bytes()
-                self._logger.debug(f"Hashing old version of {file_path.name}")
-                change_file_hashes[file_path.name] = [
-                    hashlib.md5(data).hexdigest(),
-                    "n/a",
-                ]
+        new = _hashes("new_pull")
+        old = _hashes("first_pull")
+        cur = _hashes("second_pull")
 
-        # Process new versions of changed files
-        if second_pull.exists():
-            for file_path in second_pull.iterdir():
-                if file_path.name in noise_files:
-                    continue
-                data = file_path.read_bytes()
-                self._logger.debug(f"Hashing new version of {file_path.name}")
-                if file_path.name in change_file_hashes:
-                    change_file_hashes[file_path.name][1] = hashlib.md5(
-                        data
-                    ).hexdigest()
-                else:
-                    change_file_hashes[file_path.name] = [
-                        "n/a",
-                        hashlib.md5(data).hexdigest(),
-                    ]
-
-        hashes["new_file_hashes"] = new_file_hashes
-        hashes["changed_file_hashes(old,new)"] = change_file_hashes
-
-        return hashes
+        na = {"md5": "n/a", "sha256": "n/a"}
+        changed_paths = sorted(set(old) | set(cur))
+        return {
+            "new_file_hashes": {p: h["md5"] for p, h in new.items()},
+            "changed_file_hashes(old,new)": {
+                p: [old.get(p, na)["md5"], cur.get(p, na)["md5"]]
+                for p in changed_paths
+            },
+            "new_file_hashes_sha256": {p: h["sha256"] for p, h in new.items()},
+            "changed_file_hashes_sha256(old,new)": {
+                p: [old.get(p, na)["sha256"], cur.get(p, na)["sha256"]]
+                for p in changed_paths
+            },
+        }
 
     def pull_and_hash_apks(self) -> dict[str, Any]:
-        """Pull APKs from the emulator and calculate their MD5 hashes.
+        """Pull APKs from the emulator and calculate their MD5/SHA-256 hashes.
 
         Queries all packages on the device, pulls each APK, computes its hash,
         and deletes the local copy after hashing.
@@ -742,7 +752,8 @@ class FileExtractionService:
         Returns:
             Dictionary with structure:
             {
-                "apk_hashes": ["com.package: hash1", "com.package2: hash2", ...]
+                "apk_hashes": ["com.package: md5", ...],
+                "apk_hashes_sha256": ["com.package: sha256", ...],
             }
         """
         self._logger.info("Pulling and hashing APKs")
@@ -750,6 +761,7 @@ class FileExtractionService:
         base_folder = Path(os.getenv("RAW_RESULTS_PATH", ""))
         list_of_all_packages = []
         names_and_hashes = []
+        names_and_sha256: list[str] = []
 
         adb = self._get_adb()
 
@@ -770,17 +782,29 @@ class FileExtractionService:
             adb.send_adb_command(f"pull {package_path} {apk_file}")
 
             if apk_file.exists():
-                data = apk_file.read_bytes()
                 self._logger.debug(f"Hashing apk {package}")
-                names_and_hashes.append(f"{package}: {hashlib.md5(data).hexdigest()}")
+                digests = self._hash_apk(apk_file)
+                names_and_hashes.append(f"{package}: {digests['md5']}")
+                names_and_sha256.append(f"{package}: {digests['sha256']}")
                 apk_file.unlink()
             else:
                 self._logger.error(
                     f"Something went wrong looking for a package: {package}"
                 )
                 names_and_hashes.append(f"{package}: n/a")
+                names_and_sha256.append(f"{package}: n/a")
 
-        return {"apk_hashes": names_and_hashes}
+        return {"apk_hashes": names_and_hashes, "apk_hashes_sha256": names_and_sha256}
+
+    @staticmethod
+    def _hash_apk(apk_file: Path) -> dict[str, str]:
+        """MD5 + SHA-256 of a pulled APK (``"n/a"`` if it cannot be read)."""
+        from sandroid.core.run_report import hash_file
+
+        try:
+            return hash_file(apk_file)
+        except OSError:
+            return {"md5": "n/a", "sha256": "n/a"}
 
     # =========================================================================
     # Action Export

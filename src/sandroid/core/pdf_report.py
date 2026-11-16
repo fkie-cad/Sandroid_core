@@ -1,19 +1,37 @@
-"""Adapted From https://github.com/jurasec/python-reportlab-example"""
+"""PDF forensic report.
 
+Originally adapted from https://github.com/jurasec/python-reportlab-example.
+
+All inputs are derived from the result folder (the results JSON and
+``raw/screenshots``); no environment variables or working-directory relative
+paths are involved, so a report can be (re)generated from any finished result
+folder via :func:`generate_pdf_report`. Logos are loaded from the installed
+package (``sandroid/assets``). Evidence files are never modified.
+"""
+
+from __future__ import annotations
+
+import io
 import json
 import logging
 import os
+from functools import cache
+from importlib import resources
+from pathlib import Path
+from typing import Any
+from xml.sax.saxutils import escape
 
 from PIL import Image as PILImage
-
-logger = logging.getLogger(__name__)
-from reportlab.graphics.shapes import Drawing, Line
+from reportlab.lib import colors
 from reportlab.lib.colors import Color
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4, inch
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from reportlab.platypus import (
+    CondPageBreak,
     Image,
     PageBreak,
     Paragraph,
@@ -24,9 +42,77 @@ from reportlab.platypus import (
 )
 
 from . import timeline_generator
+from .run_report import (
+    DEFAULT_PDF_NAME,
+    DEFAULT_RESULTS_NAME,
+    RUN_METADATA_KEY,
+    iso_now,
+    plain_text,
+    sanitize_results,
+    sha256_file,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Maximum diff lines shown per changed file (table cells cannot split
+#: across pages); the complete diff is always in the results JSON.
+MAX_DIFF_LINES = 40
+
+#: Page geometry.
+MARGIN_X = 50
+MARGIN_TOP = 75
+MARGIN_BOTTOM = 70
+FRAME_WIDTH = A4[0] - 2 * MARGIN_X
+
+#: Keys in the results JSON that are not artefact lists.
+_NON_ARTEFACT_KEYS = {
+    "Device Name",
+    "Emulator relative action timestamp",
+    "Action Duration",
+    "Other Data",
+    RUN_METADATA_KEY,
+}
+
+_SCREENSHOT_EXTS = (".png", ".jpg", ".jpeg")
+
+
+# ---------------------------------------------------------------------------
+# Assets
+# ---------------------------------------------------------------------------
+
+
+@cache
+def _asset_bytes(name: str) -> bytes:
+    """Return the bytes of a packaged asset (``sandroid/assets/<name>``)."""
+    return resources.files("sandroid").joinpath("assets", name).read_bytes()
+
+
+def asset_image_reader(name: str) -> ImageReader:
+    """ImageReader for a packaged asset, independent of the working directory."""
+    return ImageReader(io.BytesIO(_asset_bytes(name)))
+
+
+FRAUNHOFER_LOGO = "Fraunhofer_Logo.jpg"
+SANDROID_LOGO = "sandroid_logo.png"
+
+
+# ---------------------------------------------------------------------------
+# Canvas with header logos and "Page x of y" footer
+# ---------------------------------------------------------------------------
+
+
+def _make_canvas_class(footer_text: str):
+    class _FooterCanvas(FooterCanvas):
+        footer_left = footer_text
+
+    return _FooterCanvas
 
 
 class FooterCanvas(canvas.Canvas):
+    """Canvas that draws the logos and a ``Page x of y`` footer."""
+
+    footer_left = ""
+
     def __init__(self, *args, **kwargs):
         canvas.Canvas.__init__(self, *args, **kwargs)
         self.pages = []
@@ -46,666 +132,713 @@ class FooterCanvas(canvas.Canvas):
         canvas.Canvas.save(self)
 
     def draw_canvas(self, page_count):
-        page = "Page %s of %s" % (self._pageNumber, page_count)
-        x = 128
+        page = f"Page {self._pageNumber} of {page_count}"
         self.saveState()
-        self.setStrokeColorRGB(0, 0, 0)
-        self.setLineWidth(0.5)
         self.drawImage(
-            "assets/Fraunhofer_Logo.jpg",
-            self.width - inch * 8 - 5,
+            asset_image_reader(FRAUNHOFER_LOGO),
+            MARGIN_X,
             self.height - 50,
             width=100,
             height=20,
             preserveAspectRatio=True,
+            anchor="w",
         )
         self.drawImage(
-            "assets/sandroid_logo.png",
-            self.width - inch * 2,
+            asset_image_reader(SANDROID_LOGO),
+            self.width - MARGIN_X - 100,
             self.height - 50,
             width=100,
             height=20,
             preserveAspectRatio=True,
+            anchor="e",
             mask="auto",
         )
-        self.line(66, 58, A4[0] - 66, 58)
-        self.setFont("Times-Roman", 10)
-        self.drawString(A4[0] - x, 45, page)
+        self.setStrokeColorRGB(0, 0, 0)
+        self.setLineWidth(0.5)
+        self.line(MARGIN_X, 58, A4[0] - MARGIN_X, 58)
+        self.setFont("Helvetica", 7.5)
+        self.setFillColorRGB(0.3, 0.3, 0.3)
+        if self.footer_left:
+            self.drawString(MARGIN_X, 45, self.footer_left)
+        self.drawRightString(A4[0] - MARGIN_X, 45, page)
         self.restoreState()
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _txt(value: Any) -> str:
+    """Plain, XML-escaped text for a Paragraph."""
+    if value is None:
+        return "–"
+    return escape(plain_text(str(value)))
+
+
+def find_results_json(result_dir: str | os.PathLike[str]) -> Path:
+    """Locate the results JSON inside a result folder.
+
+    Prefers ``sandroid.json``; otherwise the newest top-level ``*.json`` that
+    looks like a Sandroid result (has a ``"Device Name"`` key).
+
+    Raises:
+        FileNotFoundError: If no results JSON is found.
+    """
+    root = Path(result_dir)
+    preferred = root / DEFAULT_RESULTS_NAME
+    if preferred.is_file():
+        return preferred
+    candidates = sorted(
+        root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    for cand in candidates:
+        try:
+            data = json.loads(cand.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and "Device Name" in data:
+            return cand
+    raise FileNotFoundError(f"No Sandroid results JSON found in {root}")
+
+
+def find_screenshot_dir(result_dir: str | os.PathLike[str]) -> Path | None:
+    """Return the screenshot folder of a result folder, if it has images."""
+    root = Path(result_dir)
+    for cand in (root / "raw" / "screenshots", root / "screenshots"):
+        if cand.is_dir() and any(
+            p.suffix.lower() in _SCREENSHOT_EXTS for p in cand.iterdir()
+        ):
+            return cand
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+
 class PDFReport:
+    """Render a results JSON into a PDF report.
+
+    Args:
+        path: Output PDF path.
+        result_file_to_parse: Results JSON path.
+        results_dir: The result folder (screenshots, timeline image). Defaults
+            to the folder that contains the JSON file.
+    """
+
     data = None
     inputFileName = ""
 
-    def __init__(self, path, result_file_to_parse):
-        self.inputFileName = result_file_to_parse
+    def __init__(self, path, result_file_to_parse, results_dir=None):
+        self.inputFileName = str(result_file_to_parse)
         try:
             with open(self.inputFileName, "rb") as inputFile:
-                self.data = json.loads(inputFile.read())
+                self.data = sanitize_results(json.loads(inputFile.read()))
         except OSError as e:
             logger.error(f"Failed to open input file '{self.inputFileName}': {e}")
             raise
 
-        self.path = path
-        self.styleSheet = getSampleStyleSheet()
-        self.elements = []
+        self.path = str(path)
+        self.results_dir = Path(
+            results_dir
+            if results_dir is not None
+            else Path(self.inputFileName).resolve().parent
+        )
+        self.meta: dict[str, Any] = self.data.get(RUN_METADATA_KEY) or {}
+        self.other: dict[str, Any] = self.data.get("Other Data") or {}
+        self.input_sha256 = sha256_file(self.inputFileName)
+        self.generated_at = iso_now()
+        self.elements: list[Any] = []
 
-        self.header_font_color = Color((12.0 / 255), (154.0 / 255), (124.0 / 255), 1)
-        self.highlight_color = Color((255 / 255), (111 / 255), (89.0 / 255), 1)
-        self.small_title_font_color = Color(
-            (12.0 / 255), (154.0 / 255), (124.0 / 255), 1
-        )
-        self.table_line_color = Color((234.0 / 255), (210.0 / 255), (172.0 / 255), 1)
-        self.table_header_background_color = Color(
-            (31.0 / 255), (32.0 / 255), (65.0 / 255), 1
-        )
+        self.header_font_color = Color(12 / 255, 154 / 255, 124 / 255, 1)
+        self.highlight_color = Color(255 / 255, 111 / 255, 89 / 255, 1)
+        self.small_title_font_color = self.header_font_color
+        self.table_line_color = Color(0.82, 0.82, 0.82, 1)
+        self.table_header_background_color = Color(31 / 255, 32 / 255, 65 / 255, 1)
+        self.zebra = Color(0.96, 0.97, 0.97, 1)
         self.white = Color(1, 1, 1, 1)
+        self._init_styles()
 
         self.firstPage()
         self.summaryTableMaker()
-        if "Changed Files" in self.data.keys():
+        self.settingsTableMaker()
+        if self.data.get("Changed Files") or self.data.get("New Files"):
             self.timelinePage()
         self.pageHeader("Detailed Report")
-        for collected_data_item in self.data.keys():
-            match collected_data_item:
-                case "Changed Files":
-                    self.changedFilesTableMaker()
-                case "New Files":
-                    self.generalTableMaker("New Files")
-                case "Network":
-                    self.generalTableMaker("Network")
-                    self.generalTableMaker("Network IP:Port (send/recv)")
-                case "Deleted Files":
-                    self.generalTableMaker("Deleted Files")
-                case "Processes":
-                    self.generalTableMaker("Processes")
-                case "Listening Sockets":
-                    self.generalTableMaker("Listening Sockets")
-        for collected_data_item in self.data["Other Data"].keys():
-            match collected_data_item:
-                case "APK Hashes":
-                    self.APKTableMaker()
-                case "Artifact Hashes":
-                    self.newFileHashesTableMaker()
-                    self.changedFileHashesTableMaker()
+        for key, title in (
+            ("Changed Files", "Changed Files"),
+            ("New Files", "New Files"),
+            ("Deleted Files", "Deleted Files"),
+            ("Processes", "Processes"),
+            ("Listening Sockets", "Listening Sockets"),
+            ("Network", "Network (DNS names)"),
+            ("Network IP:Port (send/recv)", "Network IP:Port (send/recv)"),
+        ):
+            if key not in self.data:
+                continue
+            if key == "Changed Files":
+                self.changedFilesTableMaker()
+            else:
+                self.generalTableMaker(key, title)
+        if "APK Hashes" in self.other:
+            self.APKTableMaker()
+        if "Artifact Hashes" in self.other:
+            self.newFileHashesTableMaker()
+            self.changedFileHashesTableMaker()
 
-        if len(os.listdir(f"{os.getenv('RAW_RESULTS_PATH')}screenshots")) != 0:
-            self.pageHeader("Screenshots")
-            self.image_grid()
+        screenshot_dir = find_screenshot_dir(self.results_dir)
+        if screenshot_dir is not None:
+            self.elements.append(PageBreak())
+            self.sectionTitle("Screenshots")
+            self.image_grid(screenshot_dir)
 
-        # Build
-        self.doc = SimpleDocTemplate(path, pagesize=A4)
-        self.doc.multiBuild(self.elements, canvasmaker=FooterCanvas)
+        device = self.data.get("Device Name", "")
+        version = (self.meta.get("host") or {}).get("sandroid_version") or _version()
+        self.doc = SimpleDocTemplate(
+            self.path,
+            pagesize=A4,
+            leftMargin=MARGIN_X,
+            rightMargin=MARGIN_X,
+            topMargin=MARGIN_TOP,
+            bottomMargin=MARGIN_BOTTOM,
+            title=f"Sandroid Forensic Report – {device}",
+            author="Sandroid (Fraunhofer FKIE)",
+            subject=f"Results file SHA-256 {self.input_sha256}",
+            creator=f"Sandroid {version}",
+        )
+        footer = f"Sandroid {version} · {device} · generated {self.generated_at}"
+        self.doc.multiBuild(self.elements, canvasmaker=_make_canvas_class(footer))
+
+    # ---- styles -----------------------------------------------------------
+
+    def _init_styles(self):
+        self.body = ParagraphStyle(
+            "body", fontName="Helvetica", fontSize=7.5, leading=9.5
+        )
+        self.body_wrap = ParagraphStyle(
+            "body_wrap", parent=self.body, wordWrap="CJK"
+        )
+        self.mono = ParagraphStyle(
+            "mono", fontName="Courier", fontSize=6, leading=8, wordWrap="CJK"
+        )
+        self.center = ParagraphStyle("center", parent=self.body, alignment=TA_CENTER)
+        self.header_cell = ParagraphStyle(
+            "header_cell",
+            parent=self.body,
+            fontName="Helvetica-Bold",
+            textColor=self.white,
+            alignment=TA_LEFT,
+        )
+        self.section_style = ParagraphStyle(
+            "section",
+            fontName="Helvetica-Bold",
+            fontSize=12,
+            leading=15,
+            textColor=self.small_title_font_color,
+            spaceAfter=6,
+        )
+        self.note_style = ParagraphStyle(
+            "note",
+            parent=self.body,
+            fontName="Helvetica-Oblique",
+            textColor=colors.HexColor("#555555"),
+        )
+
+    def _table_style(self, header=True, zebra=True):
+        cmds = [
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, self.table_line_color),
+            ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
+        ]
+        if header:
+            cmds.append(
+                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color)
+            )
+        if zebra:
+            cmds.append(
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1 if header else 0),
+                    (-1, -1),
+                    [self.white, self.zebra],
+                )
+            )
+        return TableStyle(cmds)
+
+    def _table(self, rows, col_widths, header=True):
+        table = Table(rows, colWidths=col_widths, repeatRows=1 if header else 0)
+        table.setStyle(self._table_style(header=header))
+        return table
+
+    def sectionTitle(self, text):
+        self.elements.append(CondPageBreak(4 * inch))
+        self.elements.append(Paragraph(_txt(text), self.section_style))
+
+    def note(self, text):
+        self.elements.append(Paragraph(text, self.note_style))
+
+    # ---- title page -------------------------------------------------------
 
     def firstPage(self):
-        img = Image("assets/Fraunhofer_Logo.jpg")
-        img.drawHeight = 0.5 * inch
-        img.drawWidth = 0.5 * inch
-        img.hAlign = "LEFT"
-        self.elements.append(img)
-
-        spacer = Spacer(30, 100)
-        self.elements.append(spacer)
-
-        img = Image("assets/sandroid_logo.png")
-        img.drawHeight = 2.5 * inch
-        img.drawWidth = 2.5 * inch
-        self.elements.append(img)
-
-        spacer = Spacer(10, 40)
-        self.elements.append(spacer)
-
-        titleText = "Sandroid Forensic Report"
-        titleStyle = ParagraphStyle(
-            "Hed0",
+        logos = Table(
+            [
+                [
+                    Image(io.BytesIO(_asset_bytes(FRAUNHOFER_LOGO)), 0.6 * inch, 0.6 * inch),
+                    Image(io.BytesIO(_asset_bytes(SANDROID_LOGO)), 1.1 * inch, 1.1 * inch),
+                ]
+            ],
+            colWidths=[FRAME_WIDTH / 2, FRAME_WIDTH / 2],
+        )
+        logos.setStyle(
+            TableStyle(
+                [
+                    ("ALIGN", (0, 0), (0, 0), "LEFT"),
+                    ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
+        self.elements.append(logos)
+        self.elements.append(Spacer(10, 18))
+        title_style = ParagraphStyle(
+            "title",
             fontName="Helvetica-Bold",
-            fontSize=30,
-            leading=14,
-            justifyBreaks=1,
-            alignment=TA_CENTER,
-            justifyLastLine=1,
-        )
-        title = Paragraph(titleText, titleStyle)
-        self.elements.append(title)
-
-        spacer = Spacer(10, 200)
-        self.elements.append(spacer)
-
-        psDetalle = ParagraphStyle(
-            "Resumen",
-            fontSize=9,
-            leading=14,
-            justifyBreaks=1,
+            fontSize=24,
+            leading=30,
             alignment=TA_LEFT,
-            justifyLastLine=1,
+            textColor=self.table_header_background_color,
         )
-        text = (
-            """SANDROID FORENSIC REPORT<br/>
-        Device Name: """
-            + str(self.data["Device Name"])
-            + """<br/>"""
+        sub_style = ParagraphStyle(
+            "subtitle",
+            fontName="Helvetica",
+            fontSize=11,
+            leading=15,
+            textColor=colors.HexColor("#444444"),
         )
+        self.elements.append(Paragraph("Sandroid Forensic Report", title_style))
+        self.elements.append(
+            Paragraph(
+                "Automated forensic analysis of an Android Virtual Device",
+                sub_style,
+            )
+        )
+        self.elements.append(Spacer(10, 14))
+        self.elements.append(Paragraph("Run metadata", self.section_style))
 
-        text += (
-            """Emulator relative action timestamp: """
-            + str(self.data["Emulator relative action timestamp"])
-            + """<br/>
-        Action Duration: """
-            + str(self.data["Action Duration"])
-            + """ Seconds<br/>
-        """
+        md = self.meta
+        host = md.get("host") or {}
+        dev = md.get("device") or {}
+        tools = host.get("tool_versions") or {}
+        tool_str = ", ".join(f"{k} {v}" for k, v in tools.items() if v) or None
+        android = dev.get("android_version")
+        if android and dev.get("api_level") is not None:
+            android = f"{android} (API level {dev.get('api_level')})"
+        rows = [
+            ("Report generated", self.generated_at),
+            ("Analysis started", md.get("started_at")),
+            ("Analysis ended", md.get("ended_at")),
+            ("Action duration", f"{self.data.get('Action Duration', '–')} s"),
+            (
+                "Emulator action timestamp",
+                self.data.get("Emulator relative action timestamp"),
+            ),
+            ("Run ID / mode", " / ".join(str(x) for x in (md.get("run_id"), md.get("mode")) if x) or None),
+            ("Device name", self.data.get("Device Name")),
+            ("Device serial", dev.get("serial")),
+            ("AVD name", dev.get("avd_name")),
+            ("Device model", dev.get("model")),
+            ("Android version", android),
+            ("Security patch level", dev.get("security_patch")),
+            ("Build fingerprint", dev.get("build_fingerprint")),
+            ("Sandroid version", host.get("sandroid_version")),
+            ("Host OS", host.get("host_os")),
+            ("Host name", host.get("host_name")),
+            (
+                "Python",
+                " ".join(
+                    x
+                    for x in (
+                        host.get("python_implementation"),
+                        host.get("python_version"),
+                    )
+                    if x
+                )
+                or None,
+            ),
+            ("Tool versions", tool_str),
+            ("Results file", os.path.basename(self.inputFileName)),
+            ("Results file SHA-256", self.input_sha256),
+        ]
+        table_rows = []
+        for key, value in rows:
+            style = self.mono if key in ("Build fingerprint", "Results file SHA-256") else self.body_wrap
+            table_rows.append(
+                [Paragraph(f"<b>{_txt(key)}</b>", self.body), Paragraph(_txt(value), style)]
+            )
+        table = Table(table_rows, colWidths=[130, FRAME_WIDTH - 130])
+        table.setStyle(self._table_style(header=False))
+        self.elements.append(table)
+        self.elements.append(Spacer(10, 10))
+        if not md:
+            self.note(
+                "Run metadata (timestamps, device build, tool versions) was not "
+                "recorded in this results file; it was produced by an older "
+                "Sandroid version. Values shown as “–” are unknown."
+            )
+        self.note(
+            "File hashes are given as SHA-256 (MD5 retained for compatibility). "
+            "A manifest of all files in the result folder (manifest.json, "
+            "SHA256SUMS) is written at the end of each run; its SHA-256 is "
+            "recorded in the Sandroid log. Diff excerpts in this report may be "
+            "shortened; the complete data is in the results file."
         )
-        paragraphReportSummary = Paragraph(text, psDetalle)
-        self.elements.append(paragraphReportSummary)
         self.elements.append(PageBreak())
+
+    # ---- summary / settings -----------------------------------------------
 
     def pageHeader(self, content):
-        spacer = Spacer(10, 30)
-        self.elements.append(spacer)
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=20,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.header_font_color,
+        self.elements.append(CondPageBreak(4 * inch))
+        style = ParagraphStyle(
+            "pageheader",
             fontName="Helvetica-Bold",
+            fontSize=17,
+            leading=22,
+            textColor=self.header_font_color,
+            spaceBefore=6,
+            spaceAfter=10,
         )
-        paragraphReportHeader = Paragraph(content, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 20)
-        self.elements.append(spacer)
-
-        d = Drawing(500, 1)
-        line = Line(-100, 0, 600, 0)
-        line.strokeColor = self.header_font_color
-        line.strokeWidth = 2
-        d.add(line)
-        self.elements.append(d)
-
-        spacer = Spacer(10, 40)
-        self.elements.append(spacer)
-
-    def timelinePage(self):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "Timeline"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        timeline_generator.parse_timeline(self.inputFileName)
-
-        img = Image(f"{os.getenv('RESULTS_PATH')}timeline.png")
-        img.drawWidth, img.drawHeight = A4
-        img.drawWidth = img.drawWidth * 0.7
-        img.drawHeight = img.drawHeight * 0.8
-        self.elements.append(img)
-
-    def generalTableMaker(self, json_section_to_tableize):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = json_section_to_tableize
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-        """
-        Create the line items
-        """
-        data = [self.make_header(["No.", "Artifact"])]
-        lineNum = 1
-        formattedLineData = []
-
-        alignStyle = [
-            ParagraphStyle(name="01", alignment=TA_CENTER),
-            ParagraphStyle(name="02", alignment=TA_LEFT),
-            ParagraphStyle(name="03", alignment=TA_CENTER),
-            ParagraphStyle(name="04", alignment=TA_CENTER),
-            ParagraphStyle(name="05", alignment=TA_CENTER),
-        ]
-        fontSize = 8
-        for row in self.data[json_section_to_tableize]:
-            lineData = [str(lineNum), row]
-            # data.append(lineData)
-            columnNumber = 0
-            for item in lineData:
-                ptext = "<font size='%s'>%s</font>" % (fontSize - 1, item)
-                p = Paragraph(ptext, alignStyle[columnNumber])
-                formattedLineData.append(p)
-                columnNumber = columnNumber + 1
-            data.append(formattedLineData)
-            formattedLineData = []
-            lineNum = lineNum + 1
-
-        table = Table(data, colWidths=[50, 450])
-        tStyle = TableStyle(
-            [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color),
-                ("SPAN", (0, -1), (-2, -1)),
-            ]
-        )
-        table.setStyle(tStyle)
-        self.elements.append(table)
-        self.elements.append(PageBreak())
+        self.elements.append(Paragraph(_txt(content), style))
 
     def summaryTableMaker(self):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "Summary"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-
-        tStyle = TableStyle(
-            [
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (-2, -1), (-1, -1), self.highlight_color),
-            ]
-        )
-
-        fontSize = 8
-
-        lineData = []
+        self.sectionTitle("Summary")
+        rows = []
         total = 0
-        for section in self.data:
-            if section in [
-                "Device Name",
-                "Emulator relative action timestamp",
-                "Action Duration",
-                "Other Data",
-            ]:
+        for section, value in self.data.items():
+            if section in _NON_ARTEFACT_KEYS:
                 continue
-            lineData.append([section, len(self.data[section])])
-            total += len(self.data[section])
-        for section in self.data["Other Data"]:
-            if section in ["Timeline Data"]:
-                continue
-            if section in ["Artifact Hashes"]:
-                len_new = len(
-                    self.data["Other Data"]["Artifact Hashes"][0]["new_file_hashes"]
-                )
-                len_changed = len(
-                    self.data["Other Data"]["Artifact Hashes"][0][
-                        "changed_file_hashes(old,new)"
-                    ]
-                )
-                lineData.append(["Hashes of files created during action", len_new])
-                lineData.append(["Before/after Hashes of changed files", len_changed])
-                total += len_new + len_changed
-                continue
-            lineData.append([section, len(self.data["Other Data"][section][0])])
-            total += len(self.data["Other Data"][section][0])
-        lineData.append(["Total number of artifacts found", str(total)])
-
-        table = Table(lineData, colWidths=[400, 100])
-        table.setStyle(tStyle)
+            count = len(value) if isinstance(value, (list, dict)) else 0
+            rows.append([section, count])
+            total += count
+        hashes = self._artifact_hashes()
+        if hashes is not None:
+            n_new = len(hashes.get("new_file_hashes") or {})
+            n_changed = len(hashes.get("changed_file_hashes(old,new)") or {})
+            rows.append(["Hashes of files created during action", n_new])
+            rows.append(["Before/after hashes of changed files", n_changed])
+            total += n_new + n_changed
+        apks = self._list_other("APK Hashes")
+        if apks is not None:
+            rows.append(["APK hashes", len(apks)])
+            total += len(apks)
+        rows.append(["Total number of artifacts found", total])
+        data = [
+            [Paragraph(_txt(a), self.body), Paragraph(_txt(b), self.body)]
+            for a, b in rows
+        ]
+        table = Table(data, colWidths=[FRAME_WIDTH - 80, 80])
+        style = self._table_style(header=False)
+        style.add("ALIGN", (1, 0), (1, -1), "RIGHT")
+        style.add("BACKGROUND", (0, -1), (-1, -1), self.highlight_color)
+        table.setStyle(style)
         self.elements.append(table)
+        self.elements.append(Spacer(10, 16))
 
+    def settingsTableMaker(self):
+        settings = self.meta.get("settings") or {}
+        if not settings:
+            return
+        self.sectionTitle("Analysis settings")
+        rows = [self.make_header(["Setting", "Value"])]
+        for key, value in _flatten(settings):
+            rows.append(
+                [Paragraph(_txt(key), self.body_wrap), Paragraph(_txt(value), self.body_wrap)]
+            )
+        self.elements.append(self._table(rows, [200, FRAME_WIDTH - 200]))
         self.elements.append(PageBreak())
+
+    # ---- timeline ---------------------------------------------------------
+
+    def timelinePage(self):
+        png = self.results_dir / "timeline.png"
+        try:
+            produced = timeline_generator.parse_timeline(self.inputFileName, str(png))
+        except Exception as exc:
+            logger.warning("Timeline could not be generated: %s", exc)
+            produced = None
+        if not produced:
+            return
+        self.elements.append(CondPageBreak(9 * inch))
+        self.elements.append(Paragraph("Timeline", self.section_style))
+        self.note(
+            "Changed (left) and newly created (right) files by seconds after the "
+            "start of the recorded action, as observed by the file-system "
+            "timestamp collector."
+        )
+        with PILImage.open(produced) as im:
+            w, h = im.size
+        max_w, max_h = FRAME_WIDTH, A4[1] - MARGIN_TOP - MARGIN_BOTTOM - 90
+        scale = min(max_w / w, max_h / h)
+        self.elements.append(Image(produced, width=w * scale, height=h * scale))
+
+    # ---- artefact tables --------------------------------------------------
+
+    def generalTableMaker(self, json_section_to_tableize, title=None):
+        self.sectionTitle(title or json_section_to_tableize)
+        entries = self.data.get(json_section_to_tableize) or []
+        if not entries:
+            self.note("No entries.")
+            self.elements.append(Spacer(10, 12))
+            return
+        rows = [self.make_header(["No.", "Entry"])]
+        for num, entry in enumerate(entries, 1):
+            rows.append(
+                [Paragraph(str(num), self.body), Paragraph(_txt(entry), self.body_wrap)]
+            )
+        self.elements.append(self._table(rows, [30, FRAME_WIDTH - 30]))
+        self.elements.append(Spacer(10, 14))
 
     def changedFilesTableMaker(self):
-        from .toolbox import Toolbox
-
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "Changed Files"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-
-        styles = getSampleStyleSheet()
-        body_style = styles["BodyText"]
-        body_style.alignment = TA_LEFT
-        body_style.fontSize = 7
-
-        # Create table headers
-        data = [self.make_header(["No.", "File Name", "Changes"])]
-
-        # Populate data from JSON
-        lineNum = 1
-        for item in self.data["Changed Files"]:
-            if isinstance(item, dict):
-                # Handle dictionary entries (file name and changes)
-                file_name = list(item.keys())[0]
-                changes = "\n\n".join(item[file_name])
+        self.sectionTitle("Changed Files")
+        entries = self.data.get("Changed Files") or []
+        if not entries:
+            self.note("No entries.")
+            self.elements.append(Spacer(10, 12))
+            return
+        rows = [self.make_header(["No.", "File", "Changes"])]
+        for num, item in enumerate(entries, 1):
+            if isinstance(item, dict) and item:
+                file_name = next(iter(item))
+                changes = item[file_name]
             else:
-                # Handle regular file names
-                file_name = item
-                changes = ""
-
-            # Create Paragraphs for cell content
-            index_cell = Paragraph(str(lineNum), body_style)
-            file_name_cell = Paragraph(file_name, body_style)
-            changes_cell = Paragraph(Toolbox.truncate(changes), body_style)
-
-            # Add row to data
-            data.append([index_cell, file_name_cell, changes_cell])
-            lineNum += 1
-
-        # Create table with specified column widths
-        table = Table(data, colWidths=[50, 250, 200])
-
-        # Apply table style (similar to other tables)
-        tStyle = TableStyle(
-            [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color),
-                ("SPAN", (0, -1), (-2, -1)),
-            ]
-        )
-        table.setStyle(tStyle)
-
-        # Add table to elements list
-        self.elements.append(table)
-
-        # Add page break after the table
-        self.elements.append(PageBreak())
+                file_name, changes = item, []
+            if isinstance(changes, str):
+                changes = [changes]
+            lines: list[str] = []
+            for block in changes or []:
+                lines.extend(str(block).strip("\n").splitlines())
+            lines = [ln.strip() for ln in lines if ln.strip()]
+            shown = lines[:MAX_DIFF_LINES]
+            text = "<br/>".join(_txt(ln) for ln in shown)
+            if len(lines) > MAX_DIFF_LINES:
+                text += (
+                    f"<br/><i>… {len(lines) - MAX_DIFF_LINES} more line(s), "
+                    "see results file</i>"
+                )
+            rows.append(
+                [
+                    Paragraph(str(num), self.body),
+                    Paragraph(_txt(file_name), self.body_wrap),
+                    Paragraph(text, self.body_wrap),
+                ]
+            )
+        self.elements.append(self._table(rows, [30, 190, FRAME_WIDTH - 220]))
+        self.elements.append(Spacer(10, 14))
 
     def APKTableMaker(self):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "APKs & Hashes"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-        """
-        Create the line items
-        """
-        data = [self.make_header(["No.", "APK", "Hash (md5)"])]
-        lineNum = 1
-        formattedLineData = []
-
-        alignStyle = [
-            ParagraphStyle(name="01", alignment=TA_CENTER),
-            ParagraphStyle(name="02", alignment=TA_LEFT),
-            ParagraphStyle(name="03", alignment=TA_CENTER),
-            ParagraphStyle(name="04", alignment=TA_CENTER),
-            ParagraphStyle(name="05", alignment=TA_CENTER),
-        ]
-        fontSize = 8
-        for row in self.data["Other Data"]["APK Hashes"][0]:
-            apk, hash = row.split(": ", 1)
-            lineData = [str(lineNum), apk, hash]
-            # data.append(lineData)
-            columnNumber = 0
-            for item in lineData:
-                ptext = "<font size='%s'>%s</font>" % (fontSize - 1, item)
-                p = Paragraph(ptext, alignStyle[columnNumber])
-                formattedLineData.append(p)
-                columnNumber = columnNumber + 1
-            data.append(formattedLineData)
-            formattedLineData = []
-            lineNum = lineNum + 1
-
-        table = Table(data, colWidths=[50, 250, 200])
-        tStyle = TableStyle(
-            [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color),
-                ("SPAN", (0, -1), (-2, -1)),
-            ]
-        )
-        table.setStyle(tStyle)
-        self.elements.append(table)
-        self.elements.append(PageBreak())
-
-    def image_grid(self):
-        img_dir = f"{os.getenv('RAW_RESULTS_PATH')}screenshots/"
-        img_list = os.listdir(img_dir)
-        self.convert_png_to_jpeg(img_list, img_dir)
-        img_list = os.listdir(img_dir)
-
-        # Figure out appropriate scaling factors
-        img = PILImage.open(img_dir + img_list[0])
-        img_width, img_height = img.size
-        a4_width, a4_height = A4
-        a4_width = a4_width - 1.5 * inch  # margins
-        points_per_inch = 72
-        dpi = 300
-        a4_width_inches = a4_width / points_per_inch
-        a4_height_inches = a4_height / points_per_inch
-        new_width = a4_width_inches / 4
-        scale_factor = new_width / img_width
-        new_height = img_height * scale_factor
-
-        # Determine the number of images per row based on the square root of the total number of images
-        images_per_row = 4
-
-        # Create a list to hold the rows of images
-        image_rows = []
-
-        # Loop through the images, creating a new row for each set of images_per_row images
-        for i in range(0, len(img_list), images_per_row):
-            # Create a row of images
-            image_row = [
-                Image(
-                    img_dir + img_path, width=new_width * inch, height=new_height * inch
-                )
-                for img_path in img_list[i : i + images_per_row]
-            ]
-            # Add the row of images to the list of rows
-            image_rows.append(image_row)
-
-        # Create a table with the rows of images
-        image_table = Table(image_rows)
-        self.elements.append(image_table)
-
-    def convert_png_to_jpeg(self, filenames, img_dir):
-        for filename in filenames:
-            if filename.endswith(".png"):
-                img = PILImage.open(img_dir + filename)
-                rgb_img = img.convert("RGB")
-                jpeg_filename = filename[:-4] + ".jpeg"
-                rgb_img.save(img_dir + jpeg_filename, "JPEG", quality=90)
-                os.remove(img_dir + filename)  # remove the original PNG file
+        apks = self._list_other("APK Hashes") or []
+        sha_map = _parse_pkg_hashes(self._list_other("APK Hashes SHA-256") or [])
+        self.sectionTitle("APKs & Hashes")
+        if not apks:
+            self.note("No entries.")
+            return
+        rows = [self.make_header(["No.", "Package", "Hashes"])]
+        for num, (pkg, md5) in enumerate(_parse_pkg_hashes(apks).items(), 1):
+            rows.append(
+                [
+                    Paragraph(str(num), self.body),
+                    Paragraph(_txt(pkg), self.body_wrap),
+                    self._hash_cell(sha_map.get(pkg), md5),
+                ]
+            )
+        self.elements.append(self._table(rows, [30, 175, FRAME_WIDTH - 205]))
+        self.elements.append(Spacer(10, 14))
 
     def newFileHashesTableMaker(self):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "Hashes of new files"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-
-        styles = getSampleStyleSheet()
-        body_style = styles["BodyText"]
-        body_style.alignment = TA_LEFT
-        body_style.fontSize = 7
-
-        # Initialize data list with headers
-        table = [self.make_header(["No.", "File Name", "Hash"])]
-
-        new_file_hashes = self.data["Other Data"]["Artifact Hashes"][0][
-            "new_file_hashes"
-        ]
-
-        lineNum = 1
-        for file_name, hash in new_file_hashes.items():
-            # Create Paragraphs for cell content
-            index_cell = Paragraph(str(lineNum), body_style)
-            file_name_cell = Paragraph(file_name, body_style)
-            hash_cell = Paragraph(hash, body_style)
-
-            # Add row to table
-            table.append([index_cell, file_name_cell, hash_cell])
-            lineNum += 1
-
-        # Create table with specified column widths
-        table = Table(table, colWidths=[50, 250, 200])
-
-        # Apply table style (similar to other tables)
-        tStyle = TableStyle(
-            [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color),
-                ("SPAN", (0, -1), (-2, -1)),
-            ]
-        )
-        table.setStyle(tStyle)
-
-        # Add table to elements list
-        self.elements.append(table)
-
-        # Add page break after the table
-        self.elements.append(PageBreak())
+        hashes = self._artifact_hashes() or {}
+        md5s = hashes.get("new_file_hashes") or {}
+        shas = hashes.get("new_file_hashes_sha256") or {}
+        self.sectionTitle("Hashes of new files")
+        if not md5s and not shas:
+            self.note("No entries.")
+            self.elements.append(Spacer(10, 12))
+            return
+        rows = [self.make_header(["No.", "File", "Hashes"])]
+        for num, name in enumerate(sorted(set(md5s) | set(shas)), 1):
+            rows.append(
+                [
+                    Paragraph(str(num), self.body),
+                    Paragraph(_txt(name), self.body_wrap),
+                    self._hash_cell(shas.get(name), md5s.get(name)),
+                ]
+            )
+        self.elements.append(self._table(rows, [30, 175, FRAME_WIDTH - 205]))
+        self.elements.append(Spacer(10, 14))
 
     def changedFileHashesTableMaker(self):
-        psHeaderText = ParagraphStyle(
-            "Hed0",
-            fontSize=12,
-            alignment=TA_LEFT,
-            borderWidth=3,
-            textColor=self.small_title_font_color,
-        )
-        text = "Changed File Hashes"
-        paragraphReportHeader = Paragraph(text, psHeaderText)
-        self.elements.append(paragraphReportHeader)
-
-        spacer = Spacer(10, 22)
-        self.elements.append(spacer)
-
-        styles = getSampleStyleSheet()
-        body_style = styles["BodyText"]
-        body_style.alignment = TA_LEFT
-        body_style.fontSize = 7
-
-        # Initialize data list with headers
-        table = [
-            self.make_header(
-                ["No.", "File Name", "Hash Before Action", "Hash After Action"]
+        hashes = self._artifact_hashes() or {}
+        md5s = hashes.get("changed_file_hashes(old,new)") or {}
+        shas = hashes.get("changed_file_hashes_sha256(old,new)") or {}
+        self.sectionTitle("Hashes of changed files (before / after action)")
+        if not md5s and not shas:
+            self.note("No entries.")
+            self.elements.append(Spacer(10, 12))
+            return
+        rows = [self.make_header(["No.", "File", "Before action", "After action"])]
+        width = (FRAME_WIDTH - 25 - 120) / 2
+        for num, name in enumerate(sorted(set(md5s) | set(shas)), 1):
+            md5_pair = list(md5s.get(name) or [None, None]) + [None, None]
+            sha_pair = list(shas.get(name) or [None, None]) + [None, None]
+            rows.append(
+                [
+                    Paragraph(str(num), self.body),
+                    Paragraph(_txt(name), self.body_wrap),
+                    self._hash_cell(sha_pair[0], md5_pair[0]),
+                    self._hash_cell(sha_pair[1], md5_pair[1]),
+                ]
             )
-        ]
+        self.elements.append(self._table(rows, [25, 120, width, width]))
+        self.elements.append(Spacer(10, 14))
 
-        changed_file_hashes = self.data["Other Data"]["Artifact Hashes"][0][
-            "changed_file_hashes(old,new)"
-        ]
+    # ---- screenshots ------------------------------------------------------
 
-        lineNum = 1
-        for file_name, hash_list in changed_file_hashes.items():
-            # Create Paragraphs for cell content
-            index_cell = Paragraph(str(lineNum), body_style)
-            file_name_cell = Paragraph(file_name, body_style)
-            before_hash_cell = Paragraph(hash_list[0], body_style)
-            after_hash_cell = Paragraph(hash_list[1], body_style)
-
-            # Add row to table
-            table.append(
-                [index_cell, file_name_cell, before_hash_cell, after_hash_cell]
-            )
-            lineNum += 1
-
-        # Create table with specified column widths
-        table = Table(table, colWidths=[25, 245, 115, 115])
-
-        # Apply table style (similar to other tables)
-        tStyle = TableStyle(
-            [  # ('GRID',(0, 0), (-1, -1), 0.5, grey),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                # ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("LINEABOVE", (0, 0), (-1, -1), 1, self.table_line_color),
-                ("BACKGROUND", (0, 0), (-1, 0), self.table_header_background_color),
-                ("SPAN", (0, -1), (-2, -1)),
-            ]
+    def image_grid(self, img_dir=None):
+        """Lay out screenshots in a 4-column grid (files are not modified)."""
+        img_dir = Path(img_dir) if img_dir is not None else find_screenshot_dir(
+            self.results_dir
         )
-        table.setStyle(tStyle)
+        if img_dir is None:
+            return
+        files = sorted(
+            p for p in img_dir.iterdir() if p.suffix.lower() in _SCREENSHOT_EXTS
+        )
+        per_row = 4
+        cell_w = FRAME_WIDTH / per_row - 6
+        cells = []
+        for path in files:
+            try:
+                with PILImage.open(path) as im:
+                    w, h = im.size
+            except Exception as exc:
+                logger.warning("Skipping unreadable screenshot %s: %s", path, exc)
+                continue
+            scale = min(cell_w / w, (2.6 * inch) / h)
+            cells.append(
+                [
+                    Image(str(path), width=w * scale, height=h * scale),
+                    Paragraph(_txt(path.name), ParagraphStyle(
+                        "cap", parent=self.body, fontSize=6, alignment=TA_CENTER,
+                        wordWrap="CJK")),
+                ]
+            )
+        rows = []
+        for i in range(0, len(cells), per_row):
+            chunk = cells[i : i + per_row]
+            chunk += [""] * (per_row - len(chunk))
+            rows.append(chunk)
+        if rows:
+            table = Table(rows, colWidths=[FRAME_WIDTH / per_row] * per_row)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ]
+                )
+            )
+            self.elements.append(table)
 
-        # Add table to elements list
-        self.elements.append(table)
+    # ---- small helpers ----------------------------------------------------
 
-        # Add page break after the table
-        self.elements.append(PageBreak())
+    def _hash_cell(self, sha256, md5):
+        parts = []
+        if sha256:
+            parts.append(f"SHA-256: {_txt(sha256)}")
+        if md5:
+            parts.append(f"MD5: {_txt(md5)}")
+        return Paragraph("<br/>".join(parts) or "n/a", self.mono)
 
-    def draw_panel(self, x, y, width, height, main_number, title, symbol):
-        self.setStrokeColor(self.small_title_font_color)
-        self.setFillColor(self.small_title_font_color)  # Light grey fill color
-        self.rect(x, y, width, height, fill=1)
+    def _list_other(self, key):
+        value = self.other.get(key)
+        if value is None:
+            return None
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            merged = []
+            for sub in value:
+                merged.extend(sub)
+            return merged
+        return value if isinstance(value, list) else [value]
 
-        # Draw Main Number
-        self.setFont("Helvetica-Bold", 24)
-        self.drawCentredString(x + width / 2, y + height / 2 + 10, str(main_number))
-
-        # Draw Title/Description
-        self.setFont("Helvetica", 12)
-        self.drawCentredString(x + width / 2, y + height - 20, title)
-
-        # Draw Symbol (using text as placeholder for simplicity)
-        self.setFont("Helvetica-Bold", 36)
-        self.drawCentredString(x + width / 2, y + height / 2 - 30, symbol)
+    def _artifact_hashes(self):
+        value = self.other.get("Artifact Hashes")
+        if isinstance(value, list):
+            value = value[-1] if value else None
+        return value if isinstance(value, dict) else None
 
     def make_header(self, header_array):
-        result = []
-        fontSize = 8
-        centered = ParagraphStyle(
-            name="centered",
-            alignment=TA_CENTER,
-            textColor=self.white,
-            fontName="Helvetica-Bold",
-        )
-        for text in header_array:
-            ptext = "<font size='%s'><b>%s</b></font>" % (fontSize, text)
-            titlesTable = Paragraph(ptext, centered)
-            result.append(titlesTable)
-        return result
+        return [Paragraph(f"<b>{_txt(t)}</b>", self.header_cell) for t in header_array]
+
+    def draw_panel(self, *args, **kwargs):  # pragma: no cover - legacy no-op
+        """Unused legacy helper kept for API compatibility."""
 
 
-if __name__ == "__main__":
-    report = PDFReport(
-        "Sandroid_Forensic_Report.pdf", f"{os.getenv('RAW_RESULTS_PATH')}sandroid.json"
+def _parse_pkg_hashes(entries) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for row in entries:
+        pkg, sep, digest = str(row).partition(": ")
+        out[pkg] = digest if sep else ""
+    return out
+
+
+def _flatten(value, prefix=""):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield from _flatten(v, f"{prefix}.{k}" if prefix else str(k))
+    elif isinstance(value, list):
+        yield prefix, ", ".join(str(v) for v in value) if value else "[]"
+    else:
+        yield prefix, value
+
+
+def _version() -> str:
+    from sandroid._version import __version__
+
+    return __version__
+
+
+def generate_pdf_report(
+    result_dir: str | os.PathLike[str],
+    json_file: str | os.PathLike[str] | None = None,
+    output_pdf: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Render the PDF report for a finished result folder.
+
+    Args:
+        result_dir: The run's result folder.
+        json_file: Results JSON; located with :func:`find_results_json` if
+            omitted.
+        output_pdf: Output path; defaults to
+            ``<result_dir>/Sandroid_Forensic_Report.pdf``.
+
+    Returns:
+        Path of the written PDF.
+    """
+    root = Path(result_dir)
+    json_path = Path(json_file) if json_file else find_results_json(root)
+    out = Path(output_pdf) if output_pdf else root / DEFAULT_PDF_NAME
+    PDFReport(str(out), str(json_path), results_dir=root)
+    logger.info(
+        "PDF report generated: %s (SHA-256 %s)", out, sha256_file(out)
     )
+    return out
+
+
+__all__ = ["PDFReport", "find_results_json", "generate_pdf_report"]
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    print(generate_pdf_report(sys.argv[1] if len(sys.argv) > 1 else "."))
