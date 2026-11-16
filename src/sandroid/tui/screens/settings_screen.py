@@ -498,8 +498,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         # Results Path (§11 configurable data-storage root). Run bundles
         # (runs/<id>/) live under this directory; run_history/run_bundle
         # resolve their storage root from get_config().paths.results_path, so
-        # saving here (SettingsController.save -> reset_config_cache) moves
-        # future Record->Play runs to the new root on the next get_config().
+        # saving here (SettingsController.save updates the live config in
+        # place) moves future Record->Play runs to the new root.
         with Horizontal(classes="setting-row"):
             yield Label("Results Path:", classes="setting-label")
             yield Input(
@@ -1215,8 +1215,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
         # Monitor per-category visibility Selects don't map to a single flat
         # key -- they must be assembled into one dict written under
-        # "tui.monitor_event_visibility". SettingsController._apply_setting
-        # does a full setattr() REPLACE (not a merge), so re-read ALL 6
+        # "tui.monitor_event_visibility". SettingsController.save (via
+        # config.update_config) does a full REPLACE (not a merge), so re-read ALL 6
         # Selects' *current* values every time any one of them fires
         # Changed (the one that just changed has already updated its
         # .value by now) and write the complete dict. This makes each edit
@@ -1269,14 +1269,10 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             return
 
         # The two Monitor-tab numeric fields must not stage an out-of-schema-
-        # range value: ``_apply_setting`` writes via plain ``setattr`` on the
-        # nested ``TUIConfig`` instance, which has no ``validate_assignment``
-        # (only the top-level ``SandroidConfig`` does), so Field(ge=/le=)
-        # constraints are NOT enforced on save -- an out-of-range value would
-        # persist silently and only fail on the *next* config load, where
-        # ``get_config()``'s broad exception fallback would silently reset the
-        # WHOLE config to defaults. Same "drop rather than persist a bad
-        # value" precedent as the blank-default-path guard above.
+        # range value. ``SettingsController.save`` validates the whole config
+        # and refuses to save, but dropping the override here keeps the
+        # established "drop rather than stage a bad value" behaviour of the
+        # blank-default-path guard above for these live-validated fields.
         if widget_id == "setting-tui--monitor_buffer_interval":
             try:
                 value = float(event.value)
@@ -1415,6 +1411,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             self.dismiss(None)
             return
 
+        from sandroid.config import ConfigUpdateError
+
         try:
             if self._controller:
                 updated_config = self._controller.save(self._pending)
@@ -1426,6 +1424,11 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             else:
                 self.app.call_later(self._refresh_app)
                 self.dismiss(None)
+        except ConfigUpdateError as e:
+            # Invalid value (e.g. Number of Runs < 2): nothing was applied or
+            # written -- keep the screen open so the user can correct it.
+            logger.warning(f"Settings not saved: {e}")
+            self.notify(f"Not saved: {e}", severity="error", title="Invalid setting")
         except Exception as e:
             logger.error(f"Failed to save settings: {e}", exc_info=True)
             self.notify(f"Save failed: {e}", severity="error")

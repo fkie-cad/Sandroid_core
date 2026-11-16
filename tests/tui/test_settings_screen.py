@@ -7,7 +7,7 @@ Covers two independent additions to the Settings screen:
   the ``on_select_changed`` save-path special-case for their
   ``setting-tui--monitor_event_visibility__<category>`` ids. The critical
   regression this guards against: ``SettingsController.save`` /
-  ``_apply_setting`` does a full ``setattr`` REPLACE of the whole
+  ``update_config`` does a full REPLACE of the whole
   ``monitor_event_visibility`` dict, not a merge. If the special-case handler
   only ever inserted the one changed category into a fresh dict, saving
   would silently wipe the other 5 categories back to nothing (or to their
@@ -30,8 +30,8 @@ covers.
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 from textual.app import App, ComposeResult
@@ -44,6 +44,9 @@ from sandroid.core.toolbox import Toolbox
 from sandroid.tui.screens.settings_screen import SettingsScreen
 from sandroid.tui.widgets.chat_panel import ChatPanel
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 _ALL_ALWAYS_NOISE_VERBOSE = {
     "create": "always",
     "modify": "always",
@@ -54,25 +57,24 @@ _ALL_ALWAYS_NOISE_VERBOSE = {
 }
 
 
-class _StubLoader:
-    """Stand-in for ``ConfigLoader`` that never touches disk.
+@pytest.fixture
+def live_config(tmp_path):
+    """Install a config as the live ``get_config()`` singleton.
 
-    ``SettingsController.save`` instantiates ``ConfigLoader()`` itself (no
-    DI seam), so this is monkeypatched in over the class name inside the
-    ``settings_controller`` module. ``load()`` hands back the exact
-    pre-built config instance (not a copy) so the test can assert on it
-    in-place after ``_apply_setting`` mutates it; ``detect_and_save`` never
-    writes to a real file.
+    ``SettingsController.save`` applies changes to the live singleton in
+    place and persists only the changed keys to the config file in use --
+    here a throwaway ``--config``-style file under ``tmp_path``.
     """
+    from sandroid.config import set_config
 
-    def __init__(self, preset_config: SandroidConfig) -> None:
-        self._preset_config = preset_config
+    def _install(config: SandroidConfig) -> Path:
+        cfg_file = tmp_path / "explicit.toml"
+        cfg_file.write_text("")
+        set_config(config, source_file=cfg_file)
+        return cfg_file
 
-    def load(self) -> SandroidConfig:
-        return self._preset_config
-
-    def detect_and_save(self, config: SandroidConfig) -> Path:
-        return Path("/dev/null")
+    yield _install
+    set_config(None)
 
 
 class _MonitorSettingsHarness(App):
@@ -169,7 +171,7 @@ async def test_compose_uses_preexisting_nondefault_visibility_values() -> None:
 
 @pytest.mark.asyncio
 async def test_changing_one_category_preserves_others_through_save(
-    monkeypatch,
+    live_config,
 ) -> None:
     """Changing ONE Select must not wipe the other 5 categories on save.
 
@@ -188,10 +190,7 @@ async def test_changing_one_category_preserves_others_through_save(
         "noise": "verbose",
     }
 
-    monkeypatch.setattr(
-        "sandroid.tui.controllers.settings_controller.ConfigLoader",
-        lambda: _StubLoader(preset_config),
-    )
+    live_config(preset_config)
 
     app = _MonitorSettingsHarness(preset_config)
     async with app.run_test() as pilot:
@@ -217,8 +216,8 @@ async def test_changing_one_category_preserves_others_through_save(
         screen.action_save()
         await pilot.pause()
 
-    # The save path (real SettingsController.save/_apply_setting, only the
-    # disk-touching ConfigLoader stubbed out) must have applied the same
+    # The save path (real SettingsController.save -> update_config, writing
+    # to a tmp --config file) must have applied the same
     # full dict -- "attrs" must still be "never", not reset to "always".
     assert preset_config.tui.monitor_event_visibility == expected_after_edit
 
@@ -557,10 +556,9 @@ async def test_out_of_range_monitor_buffer_interval_is_not_staged(
 ) -> None:
     """An out-of-schema-range buffer interval must not be staged.
 
-    ``TUIConfig`` has no ``validate_assignment``, so ``_apply_setting``'s
-    plain ``setattr`` on save would silently accept an invalid value and only
-    fail on the *next* config load (where ``get_config()``'s broad exception
-    fallback resets the WHOLE config to defaults). Schema bounds: [0.0, 5.0].
+    Save would refuse an out-of-range value anyway (``update_config``
+    validates the whole config), but the field drops it at staging time so
+    the rest of the pending changes still save. Schema bounds: [0.0, 5.0].
     Mirrors the blank-default-path guard: an invalid value DROPS any pending
     override entirely (falling back to the on-disk value on save), the same
     behavior as blanking the default-path Input.

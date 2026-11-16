@@ -10,7 +10,6 @@ Extracted modules:
 - ``css_resolver`` -- CSS file resolution logic
 """
 
-import atexit
 import concurrent.futures
 import logging
 import time
@@ -20,10 +19,10 @@ from typing import TYPE_CHECKING, Optional
 from textual.app import App
 from textual.binding import Binding
 
-from sandroid.tui.terminal_reset import reset_terminal
-
-atexit.register(reset_terminal)
-
+# NOTE: no import-time atexit(reset_terminal) here -- merely importing this
+# module (headless runs, sandroid-config, tests) must not emit terminal
+# escape sequences / ``stty`` on exit. ``launcher.run_tui`` registers
+# ``reset_terminal_hard`` for real TUI sessions.
 from sandroid.core.adb_device_monitor import AdbDeviceMonitor
 from sandroid.core.enums import ViewMode
 from sandroid.core.menu_controller import MenuController
@@ -453,12 +452,18 @@ class SandroidTUI(App):
         )
 
     def _load_config(self):
-        """Load Sandroid config for TUI settings (returns None on failure)."""
-        try:
-            from sandroid.config.loader import ConfigLoader
+        """Return the live Sandroid config for the TUI (None on failure).
 
-            loader = ConfigLoader()
-            return loader.load()
+        Uses the process-wide ``get_config()`` singleton -- the config the CLI
+        loaded with ``--config`` / ``--environment`` / flag overrides and
+        installed via ``set_config()`` -- instead of re-reading the
+        auto-discovered files, so the Settings screen shows (and saves on top
+        of) the values actually in effect.
+        """
+        try:
+            from sandroid.config import get_config
+
+            return get_config()
         except Exception as e:
             logger.debug(f"Could not load config: {e}")
             return None

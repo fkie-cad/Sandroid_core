@@ -358,7 +358,16 @@ def main(
 
     try:
         loader = ConfigLoader()
-        if not loader._config_files:
+        # An explicit --config file, an --environment config or SANDROID_*
+        # environment variables are all valid configuration sources on their
+        # own -- only refuse when there is none at all.
+        has_config_source = bool(
+            loader._config_files
+            or config
+            or environment
+            or loader.load_environment_vars()
+        )
+        if not has_config_source:
             console.print("[error]Error: No configuration found![/error]")
             console.print(
                 "[warning]Please run 'sandroid-config init' first to set up Sandroid.[/warning]"
@@ -444,7 +453,7 @@ def main(
         # config instead of re-loading defaults from disk.
         from .config import set_config
 
-        set_config(sandroid_config)
+        set_config(sandroid_config, source_file=config)
 
         # Re-initialize console with the configured theme preset
         SandroidConsole.initialize(sandroid_config.theme.preset)

@@ -25,11 +25,10 @@ if TYPE_CHECKING:
 # Import config helpers with a fallback for standalone usage (mirrors
 # core/proxy_manager.py).
 try:
-    from sandroid.config import ConfigLoader, get_config, reset_config_cache
+    from sandroid.config import get_config, update_config
 except ImportError:  # pragma: no cover - config package always present in app
     get_config = None
-    ConfigLoader = None
-    reset_config_cache = None
+    update_config = None
 
 logger = logging.getLogger(__name__)
 
@@ -1034,13 +1033,13 @@ class MitmproxyService:
                 resolved.append(p)
         self._enabled_addons = resolved
 
-        if ConfigLoader is not None and reset_config_cache is not None:
+        if update_config is not None:
+            # Update the live config in place and persist just this key to
+            # the config file in use -- never reset the cache, which would
+            # drop --config/--environment/CLI overrides on the next
+            # get_config().
             try:
-                ConfigLoader().load_and_update_section(
-                    "mitmproxy",
-                    {"enabled_addons": [str(p) for p in resolved]},
-                )
-                reset_config_cache()
+                update_config({"mitmproxy.enabled_addons": [str(p) for p in resolved]})
             except Exception as exc:
                 logger.warning("Failed to persist enabled addons: %s", exc)
 

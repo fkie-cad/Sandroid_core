@@ -7,7 +7,7 @@ and runtime log level changes.
 import logging
 from typing import TYPE_CHECKING, Any
 
-from sandroid.config import ConfigLoader, SandroidConfig, reset_config_cache
+from sandroid.config import SandroidConfig, update_config
 from sandroid.tui.themes import THEMES, get_theme, get_theme_css_path
 
 if TYPE_CHECKING:
@@ -68,17 +68,21 @@ class SettingsController:
                      Keys use the format "section.field" (e.g., "frida.server_port")
                      or just "field" for top-level settings (e.g., "log_level").
 
+        The changes are validated against the whole *live* config first
+        (``get_config()``, which carries ``--config`` / ``--environment`` /
+        CLI-flag overrides) and applied to it in place -- the config is NOT
+        re-loaded from disk, so e.g. ``--network`` or a ``--config`` results
+        path survive a save. Only the changed keys are written, to the config
+        file actually in use (the ``--config`` file when given).
+
         Returns:
-            Updated SandroidConfig instance.
+            The live (updated) SandroidConfig instance.
+
+        Raises:
+            sandroid.config.ConfigUpdateError: If a value is invalid (e.g.
+                ``analysis.number_of_runs = 1``). Nothing is applied or written.
         """
-        loader = ConfigLoader()
-        config = loader.load()
-
-        for key, value in pending.items():
-            self._apply_setting(config, key, value)
-
-        loader.detect_and_save(config)
-        reset_config_cache()
+        config, _saved_path = update_config(pending)
 
         # Apply runtime effects
         if "log_level" in pending:
@@ -88,25 +92,6 @@ class SettingsController:
         self._original_theme_name = None
 
         return config
-
-    def _apply_setting(self, config: SandroidConfig, key: str, value: Any) -> None:
-        """Apply a single setting to the config object.
-
-        Args:
-            config: Config to modify.
-            key: Dotted key path (e.g., "frida.server_port" or "log_level").
-            value: New value.
-        """
-        parts = key.split(".")
-        if len(parts) == 1:
-            # Top-level setting
-            if hasattr(config, parts[0]):
-                setattr(config, parts[0], value)
-        elif len(parts) == 2:
-            # Nested setting (e.g., "frida.server_port")
-            section = getattr(config, parts[0], None)
-            if section is not None and hasattr(section, parts[1]):
-                setattr(section, parts[1], value)
 
     def apply_log_level(self, new_level: str) -> None:
         """Change the runtime log level.
