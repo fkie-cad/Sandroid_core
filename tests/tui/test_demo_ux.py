@@ -331,3 +331,35 @@ async def test_recording_modal_footer_says_esc_stops_and_saves() -> None:
         assert str(modal.query_one("#btn-cancel").label) == "Discard"
         modal.is_recording = False  # don't trigger a real stop on teardown
         await pilot.pause()
+
+
+# --------------------------------------------------------------------------
+# ? catalog
+# --------------------------------------------------------------------------
+
+
+async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
+    from textual.widgets import OptionList
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("question_mark")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "HelpScreen"
+        options = app.screen.query_one("#kb-list", OptionList)
+        rows = [
+            str(options.get_option_at_index(i).prompt)
+            for i in range(options.option_count)
+        ]
+        text = "\n".join(rows)
+        assert "[Shift+C]" in text  # spotlight spawn
+        assert "\\[c]" in text or "[c]" in text  # spotlight attach
+        # Record/Play lead the Recording section.
+        first = next(i for i, r in enumerate(rows) if "Recording" in r)
+        assert "Record an action" in rows[first + 1]
+        assert "Play loaded action" in rows[first + 2]
+        # Panel-scoped keys are listed (read from the panels' BINDINGS).
+        assert "Spotlight panel (when focused)" in text
+        assert "PDF report" in text
+        await pilot.press("escape")

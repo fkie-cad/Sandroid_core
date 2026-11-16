@@ -82,6 +82,10 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
 ]
 
 
+#: Option-id prefix of the (non-rebindable) panel-key rows.
+_PANEL_PREFIX = "panel:"
+
+
 def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
     """``[(key, description)]`` of a panel class's own BINDINGS (best effort)."""
     import importlib
@@ -303,7 +307,7 @@ class HelpScreen(ModalScreen):
         """Description-column text, with slot assignment for slot rows."""
         if action.name.startswith("load_slot_"):
             tag = slots.get(action.name.rsplit("_", 1)[-1])
-            return f"→ {tag}" if tag else "(empty)"
+            return f"→ {tag} (press twice)" if tag else "(empty)"
         if action.name.startswith("save_slot_"):
             return "save current state"
         return action.description or action.display_name
@@ -377,7 +381,15 @@ class HelpScreen(ModalScreen):
             option_list.add_option(Option(f"[dim]{header}[/]", disabled=True))
             index += 1
 
-            for action in sorted(actions, key=lambda a: a.display_name.lower()):
+            # The demo/main flow (Record, Play) leads; the rest alphabetical.
+            for action in sorted(
+                actions,
+                key=lambda a: (
+                    a.name not in ("record", "play"),
+                    a.name != "record",
+                    a.display_name.lower(),
+                ),
+            ):
                 rebindable = action.name in self._defaults
                 key = self._effective_key(action.name) if rebindable else action.key
                 key_display = _format_key_display(key)
@@ -407,8 +419,16 @@ class HelpScreen(ModalScreen):
             )
             index += 1
             for key, desc in rows:
-                label = self._columns(desc, "", _format_key_display(key), colored=False)
-                option_list.add_option(Option(f"[dim]{label}  (panel)[/]", disabled=True))
+                label = self._columns(
+                    desc, heading, _format_key_display(key), colored=False
+                )
+                # Enabled (so the list can scroll down to it from the
+                # keyboard) but not rebindable: no id in self._defaults.
+                option_list.add_option(
+                    Option(
+                        f"[#8b949e]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{key}"
+                    )
+                )
                 index += 1
 
         # Restore / set highlight to a sane enabled index.
@@ -451,6 +471,15 @@ class HelpScreen(ModalScreen):
 
     def _detail_markup(self, action_id: str) -> str:
         """Full, untruncated detail for one action: name · category, description, key."""
+        if action_id.startswith(_PANEL_PREFIX):
+            heading, _, key = action_id[len(_PANEL_PREFIX) :].partition("|")
+            return (
+                f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
+                "[#c9d1d9]Works only while this panel has focus "
+                "(Shift+←/→ or a click switches panels).[/]\n\n"
+                f"[dim]Key[/]  [#8b949e]\\[{_format_key_display(key)}][/]"
+                "   [dim](fixed — cannot be rebound)[/]"
+            )
         action = self._controller.get_action_by_name(action_id)
         if action is None:
             return ""

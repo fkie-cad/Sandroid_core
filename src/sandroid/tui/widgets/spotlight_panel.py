@@ -24,6 +24,7 @@ import threading
 import time
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, Static
@@ -106,18 +107,24 @@ class SpotlightPanel(Widget):
     }
     """
 
+    # Only Start/Resume goes into the global footer: the bypass toggles and
+    # the Shift-letter actions are already shown (and clickable) inside the
+    # panel itself, and listing all 11 pushed the global keys (r Record,
+    # p Play, ? Help, ...) off a 200-column footer.
     BINDINGS = [
-        ("1", "toggle_bypass('ssl')", "SSL (exp.)"),
-        ("2", "toggle_bypass('root')", "Root (exp.)"),
-        ("3", "toggle_bypass('frida')", "Frida (exp.)"),
-        ("4", "toggle_bypass('debug')", "Debug (exp.)"),
-        ("5", "toggle_bypass('integrity')", "Integ (exp.)"),
-        ("enter", "primary", "Start/Resume"),
-        ("R", "restart_app", "Restart"),
-        ("A", "attach_app", "Attach"),
-        ("P", "start_paused", "Start paused"),
-        ("K", "kill_app", "Kill"),
-        ("X", "clear_spotlight", "Clear"),
+        Binding("1", "toggle_bypass('ssl')", "Bypass SSL (exp.)", show=False),
+        Binding("2", "toggle_bypass('root')", "Bypass root (exp.)", show=False),
+        Binding("3", "toggle_bypass('frida')", "Bypass Frida (exp.)", show=False),
+        Binding("4", "toggle_bypass('debug')", "Bypass debug (exp.)", show=False),
+        Binding(
+            "5", "toggle_bypass('integrity')", "Bypass integrity (exp.)", show=False
+        ),
+        Binding("enter", "primary", "Start/Resume"),
+        Binding("R", "restart_app", "Restart", show=False),
+        Binding("A", "attach_app", "Attach", show=False),
+        Binding("P", "start_paused", "Start paused", show=False),
+        Binding("K", "kill_app", "Kill", show=False),
+        Binding("X", "clear_spotlight", "Clear", show=False),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -354,7 +361,7 @@ class SpotlightPanel(Widget):
         on = set(self._on_categories())
         lines.append(
             "[#7dd3fc bold]Bypass[/] "
-            "[#5b6479](1-5 toggle · armed applies on Start)[/]"
+            "[#5b6479](keys 1-5 in this panel · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:
