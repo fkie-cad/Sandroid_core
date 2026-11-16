@@ -140,7 +140,7 @@ class MitmproxyPanel(Widget):
             log = self.query_one("#mitm-log", RichLog)
             log.write(
                 "[#5b6479]Enter: start/stop · Ctrl+D: device proxy · "
-                "Ctrl+N: install CA · Ctrl+P: SSL unpin · "
+                "Ctrl+N: install CA · Ctrl+P: SSL unpin (exp.) · "
                 "y: proxy settings[/]"
             )
         except Exception:
@@ -666,7 +666,7 @@ class MitmproxyPanel(Widget):
         if app:
             # Use [~] not [i] — RichLog markup parses [i] as an italic tag and
             # swallows it.
-            self._append_line(f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS")
+            self._append_line(f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS (exp.)")
 
     def _nudge_ca(self) -> None:
         """Hint Ctrl+N to install the CA when the device is routed but untrusted.

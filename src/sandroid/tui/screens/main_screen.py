@@ -252,7 +252,7 @@ class MainScreen(Screen):
             activity_log.show_welcome()
             activity_log.write(
                 "[dim]Press [bold #ff00ff]?[/] for help, "
-                "[bold #ff00ff]Ctrl+P[/] for command palette[/]"
+                "[bold #ff00ff]Ctrl+Shift+P[/] for command palette[/]"
             )
             logger.debug("[MAIN_SCREEN] on_mount: welcome shown")
         except Exception as e:

@@ -207,7 +207,7 @@ TRIGDROID_HOOKS = ToolHookInfo(
 # ============================================================================
 SSL_UNPIN_TOOL = ToolHookInfo(
     name="ssl_unpin",
-    display_name="SSL Pinning Bypass",
+    display_name="SSL Pinning Bypass (exp.)",
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.SSL_TLS],
     native_hooks=[
@@ -245,7 +245,7 @@ SSL_UNPIN_TOOL = ToolHookInfo(
 # overlaps are advisory, not fatal.
 FRIDA_DETECTION_BYPASS_TOOL = ToolHookInfo(
     name="frida_detection_bypass",
-    display_name="Frida Detection Bypass",
+    display_name="Frida Detection Bypass (exp.)",
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.FRIDA_DETECTION, HookCategory.PROCESS],
     native_hooks=[
@@ -272,7 +272,7 @@ FRIDA_DETECTION_BYPASS_TOOL = ToolHookInfo(
 
 ROOT_DETECTION_BYPASS_TOOL = ToolHookInfo(
     name="root_detection_bypass",
-    display_name="Root Detection Bypass",
+    display_name="Root Detection Bypass (exp.)",
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.ROOT_DETECTION, HookCategory.BUILD_PROPERTIES],
     native_hooks=[
@@ -293,7 +293,7 @@ ROOT_DETECTION_BYPASS_TOOL = ToolHookInfo(
 
 DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
     name="debug_detection_bypass",
-    display_name="Debug Detection Bypass",
+    display_name="Debug Detection Bypass (exp.)",
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.DEBUG_DETECTION],
     native_hooks=[
