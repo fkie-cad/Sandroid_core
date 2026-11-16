@@ -97,7 +97,7 @@ def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
     # Stub the setup/service accessors the CLI path calls.
     from sandroid.core import initializer
 
-    monkeypatch.setattr(initializer, "initialize_core", lambda cfg: None)
+    monkeypatch.setattr(initializer, "initialize_core", lambda cfg, **kw: None)
 
     setup_service = MagicMock()
     setup_service.check_critical_setup.return_value = MagicMock(success=True)
@@ -121,6 +121,11 @@ def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
 
     toolbox = _FakeToolbox()
     adb = MagicMock()
+    # The metadata only keeps a device name the device itself confirms.
+    adb.send_adb_command.side_effect = lambda cmd: {
+        "get-serialno": ("emulator-5554\n", ""),
+        "shell getprop ro.boot.qemu.avd_name": ("emu-test\n", ""),
+    }.get(cmd, ("", ""))
 
     cli_analysis.run_analysis(
         config,

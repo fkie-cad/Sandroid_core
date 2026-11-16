@@ -991,6 +991,8 @@ class RecordingController:
                 config.raw_results_path = run_bundle.raw_dir(run_id)
                 config.results_path = str(run_bundle.bundle_dir(run_id))
                 config.device_name = device_name
+                # Recorded in the run metadata as the settings actually used.
+                self._last_run_config = config
 
                 # Bracket the actual engine run with the Replay indicator and the
                 # disconnect-guard suppression: the engine's LoadSnapshotStep
@@ -1222,6 +1224,7 @@ class RecordingController:
             generate_pdf = bool(
                 getattr(getattr(cfg, "report", None), "generate_pdf", False)
             )
+            run_config = getattr(self, "_last_run_config", None)
             outcome = run_report.finalize_run(
                 bundle_dir,
                 result.to_json_dict(),
@@ -1231,6 +1234,11 @@ class RecordingController:
                 run_id=run_id,
                 mode="tui-play",
                 generate_pdf=generate_pdf,
+                run_settings=(
+                    run_report.describe_run_settings(run_config)
+                    if run_config is not None
+                    else None
+                ),
             )
             if outcome.pdf is not None:
                 self._ui(self._log_success, f"PDF report: {outcome.pdf}")

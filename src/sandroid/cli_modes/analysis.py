@@ -65,7 +65,7 @@ def run_analysis(
         from sandroid.core.initializer import initialize_core
         from sandroid.features.trigdroid import Trigdroid
 
-        initialize_core(config)
+        initialize_core(config, require=True)
 
         # Critical environment validation only (deferred checks not needed
         # for non-interactive mode)
@@ -113,7 +113,11 @@ def run_analysis(
         run_config.results_path = ""
         run_config.raw_results_path = ""
 
-        from sandroid.core.run_report import finalize_run, iso_now
+        from sandroid.core.run_report import (
+            describe_run_settings,
+            finalize_run,
+            iso_now,
+        )
 
         started_at = iso_now()
         result = AnalysisEngine(run_config).run()
@@ -135,6 +139,7 @@ def run_analysis(
                 ended_at=ended_at,
                 mode="cli-trigdroid",
                 generate_pdf=config.report.generate_pdf,
+                run_settings=describe_run_settings(run_config),
             )
             if outcome.pdf is not None:
                 console.print(f"[success]PDF report: {outcome.pdf}[/success]")

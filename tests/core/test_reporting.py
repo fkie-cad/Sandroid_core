@@ -190,9 +190,11 @@ class TestPlainText:
 
 class TestMetadata:
     def test_device_metadata_from_fake_adb(self):
-        meta = run_report.collect_device_metadata(FakeAdb(DEVICE_ANSWERS), "dev")
+        meta = run_report.collect_device_metadata(
+            FakeAdb(DEVICE_ANSWERS), "SanDroid_-_API_35"
+        )
         assert meta == {
-            "device_name": "dev",
+            "device_name": "SanDroid_-_API_35",
             "serial": "emulator-5554",
             "avd_name": "SanDroid_-_API_35",
             "android_version": "15",
@@ -213,10 +215,71 @@ class TestMetadata:
             def send_adb_command(self, command):
                 raise OSError("no adb")
 
+        # The device did not answer: the label (e.g. the config default
+        # "Pixel_6_Pro_API_31") is not recorded as if it were confirmed.
         meta = run_report.collect_device_metadata(Broken(), "x")
-        assert meta["device_name"] == "x"
+        assert meta["device_name"] is None
         assert meta["serial"] is None
         assert run_report.collect_device_metadata(None)["serial"] is None
+        # No adb at all (offline tooling): only the label is known.
+        assert run_report.collect_device_metadata(None, "x")["device_name"] == "x"
+
+    def test_device_metadata_replaces_unconfirmed_label(self):
+        """A config-default label never survives when the device says otherwise."""
+        meta = run_report.collect_device_metadata(
+            FakeAdb(DEVICE_ANSWERS), "Pixel_6_Pro_API_31"
+        )
+        assert meta["device_name"] == "SanDroid_-_API_35"
+        physical = {
+            "get-serialno": "1A2B3C\n",
+            "shell getprop ro.product.model": "Pixel 6 Pro\n",
+        }
+        meta = run_report.collect_device_metadata(FakeAdb(physical), "Pixel_6_Pro")
+        assert meta["device_name"] == "Pixel_6_Pro"  # resolve_device_name form
+        meta = run_report.collect_device_metadata(FakeAdb(physical), "Other")
+        assert meta["device_name"] == "Pixel_6_Pro"
+
+    def test_finalize_run_without_device_writes_unknown_device(self, tmp_path):
+        """N2: no answering device -> Device Name "unknown", device_name null."""
+
+        class Silent:
+            def send_adb_command(self, command):
+                return "", "adb: device 'emulator-5999' not found"
+
+        outcome = run_report.finalize_run(
+            tmp_path,
+            {"Device Name": "Pixel_6_Pro_API_31", "New Files": []},
+            adb=Silent(),
+            write_manifest=False,
+        )
+        doc = json.loads(outcome.results_json.read_text(encoding="utf-8"))
+        assert doc["Device Name"] == "unknown"
+        device = doc[run_report.RUN_METADATA_KEY]["device"]
+        assert device["device_name"] is None
+        assert device["serial"] is None
+        assert "Pixel_6" not in json.dumps(doc)
+
+    def test_run_settings_override_config_settings(self):
+        """Metadata records the settings used, not the config file's wishes."""
+        from sandroid.analysis.run_config import RunConfig
+        from sandroid.config.schema import SandroidConfig
+
+        cfg = SandroidConfig(
+            analysis={
+                "capture_network": True,
+                "capture_processes": True,
+                "avoid_strong_noise_filter": False,
+            }
+        )
+        used = RunConfig(network=False, processes=False, noise_filter=False)
+        meta = run_report.build_run_metadata(
+            config=cfg, run_settings=run_report.describe_run_settings(used)
+        )
+        analysis = meta["settings"]["analysis"]
+        assert analysis["capture_network"] is False
+        assert analysis["capture_processes"] is False
+        assert analysis["avoid_strong_noise_filter"] is True
+        assert meta["run_settings"]["capture_network"] is False
 
     def test_host_metadata(self):
         from sandroid._version import __version__

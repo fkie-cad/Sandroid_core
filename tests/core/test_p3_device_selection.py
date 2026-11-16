@@ -405,3 +405,135 @@ def test_fake_adb_is_not_a_real_adb(fake_adb):
     """Sanity: the fake is the only adb these tests run."""
     assert Path(Adb.ADB_PATH).name == "fakeadb"
     assert os.access(Adb.ADB_PATH, os.X_OK)
+
+
+# ---------------------------------------------------------------------------
+# Headless forensic follows [analysis]; metadata records what was used
+# ---------------------------------------------------------------------------
+
+
+def _toolbox_with(analysis: dict):
+    from sandroid.config.schema import SandroidConfig
+
+    return SimpleNamespace(
+        config=SandroidConfig(analysis=analysis),
+        create_snapshot=lambda name: None,
+    )
+
+
+def test_headless_settings_follow_config_with_overrides():
+    from sandroid.api.analysis_runners import resolve_analysis_config
+
+    tb = _toolbox_with(
+        {
+            "capture_network": True,
+            "capture_processes": True,
+            "avoid_strong_noise_filter": False,
+            "show_deleted_files": True,
+        }
+    )
+    ac = resolve_analysis_config(tb, runs=2)
+    assert ac.capture_network is True
+    assert ac.capture_processes is True
+    assert ac.dry_run is True
+    assert ac.show_deleted is True
+    # Explicit values (API callers) still win.
+    ac = resolve_analysis_config(
+        tb, runs=2, capture_network=False, monitor_processes=False, dry_run=False
+    )
+    assert (ac.capture_network, ac.capture_processes, ac.dry_run) == (
+        False,
+        False,
+        False,
+    )
+    # --avoid-strong-noise-filter ends up in the config -> no dry run.
+    tb = _toolbox_with({"avoid_strong_noise_filter": True})
+    assert resolve_analysis_config(tb, runs=2).dry_run is False
+
+
+@pytest.mark.parametrize("recording", [None, "/abs/recording.txt"])
+def test_headless_forensic_and_replay_use_config_and_record_it(monkeypatch, recording):
+    """Forensic + --import-action: engine and Run Metadata get the same settings."""
+    import asyncio
+
+    from sandroid.analysis.engine import AnalysisEngine
+    from sandroid.analysis.run_config import RunResult
+    from sandroid.api import analysis_runners
+    from sandroid.core import run_report
+
+    seen = {}
+
+    def fake_init(self, config, **kwargs):
+        seen["run_config"] = config
+
+    monkeypatch.setattr(AnalysisEngine, "__init__", fake_init)
+    monkeypatch.setattr(AnalysisEngine, "run", lambda self: RunResult(device_name="d"))
+    monkeypatch.setattr(
+        run_report,
+        "finalize_run",
+        lambda *a, **k: (
+            seen.setdefault("finalize", k)
+            and SimpleNamespace(results_json="x", pdf=None, errors=[])
+        ),
+    )
+    if recording:
+        from sandroid.features import player
+
+        monkeypatch.setattr(player, "Player", lambda recording_path: "PLAYER")
+
+    tb = _toolbox_with({"capture_network": True, "capture_processes": True})
+    asyncio.run(
+        analysis_runners.run_forensic_analysis(
+            toolbox=tb,
+            runs=2,
+            track_deleted=None,
+            compute_hashes=None,
+            recording_path=recording,
+        )
+    )
+    rc = seen["run_config"]
+    assert (rc.network, rc.processes, rc.noise_filter) == (True, True, True)
+    used = seen["finalize"]["run_settings"]
+    assert used["capture_network"] is True
+    assert used["capture_processes"] is True
+    assert used["avoid_strong_noise_filter"] is False
+
+
+def test_cli_headless_passes_unset_flags_as_none(monkeypatch):
+    """No --network/--hash/-d on the CLI -> None, so [analysis] applies."""
+    import sandroid.api as api_pkg
+    from sandroid.cli_modes import headless as mode
+
+    calls = {}
+
+    class _FakeAPI:
+        def __init__(self, config=None, config_path=None):
+            pass
+
+        async def initialize(self):
+            return SimpleNamespace(success=True)
+
+        async def run_analysis(self, **kwargs):
+            calls.update(kwargs)
+            return {}
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(api_pkg, "SandroidHeadlessAPI", _FakeAPI)
+    mode.run_headless_analysis(
+        sandroid_config=object(),
+        active_logger=None,
+        package=None,
+        batch_config=None,
+        mode="forensic",
+        runs=2,
+        network=False,
+        hash_files=False,
+        show_deleted=False,
+        output_file=None,
+        recording_path="/abs/recording.txt",
+    )
+    assert calls["capture_network"] is None
+    assert calls["compute_hashes"] is None
+    assert calls["track_deleted"] is None
