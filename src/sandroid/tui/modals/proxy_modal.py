@@ -315,9 +315,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                     TabPane("Device", id="tab-device"),
                     VerticalScroll(classes="tab-scroll"),
                 ):
-                    yield Static(
-                        "Checking…", id="device-status", classes="status-line"
-                    )
+                    yield Static("Checking…", id="device-status", classes="status-line")
                     with RadioSet(id="device-radio-set"):
                         yield RadioButton(
                             "Off — no device proxy",
@@ -328,9 +326,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                             f"Our mitmproxy ({self._mitmweb_addr()})",
                             id="device-radio-ours",
                         )
-                        yield RadioButton(
-                            "External proxy", id="device-radio-external"
-                        )
+                        yield RadioButton("External proxy", id="device-radio-external")
                         yield RadioButton(
                             "Our mitmproxy via adb reverse (127.0.0.1)",
                             id="device-radio-reverse",
@@ -361,15 +357,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         id="app-proxy-note",
                     )
                     yield Checkbox(
-                        "Block QUIC (UDP 443) — force apps onto interceptable "
-                        "TCP/TLS",
+                        "Block QUIC (UDP 443) — force apps onto interceptable TCP/TLS",
                         value=get_config().focus.block_quic,
                         id="block-quic-checkbox",
                     )
                     with Horizontal(classes="app-proxy-buttons"):
-                        yield Button(
-                            "Add app", id="app-add-btn", classes="-secondary"
-                        )
+                        yield Button("Add app", id="app-add-btn", classes="-secondary")
                         yield Button(
                             "Proxy spotlight app",
                             id="app-add-spotlight-btn",
@@ -392,17 +385,13 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                             id="custom-path-input",
                         )
                     yield Label("Device Info", classes="section-header")
-                    yield Static(
-                        "Checking...", id="device-info", classes="device-info"
-                    )
+                    yield Static("Checking...", id="device-info", classes="device-info")
                     yield Label("Zygote Injection", classes="section-header")
                     yield Static(
                         "Checking...", id="zygote-status", classes="zygote-status"
                     )
                     with Horizontal(classes="button-row"):
-                        yield Button(
-                            "Push CA", id="btn-push-ca", classes="-secondary"
-                        )
+                        yield Button("Push CA", id="btn-push-ca", classes="-secondary")
                         yield Button(
                             "Inject CA", id="btn-inject-ca", classes="-secondary"
                         )
@@ -417,9 +406,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         "[dim]Ctrl+S=Apply  A=Add app  F=Spotlight  "
                         "P=Push CA  I=Inject CA  Esc=Cancel[/dim]"
                     ),
-                    "input": (
-                        "[dim]Ctrl+S=Apply  Tab=Next  Esc=Cancel[/dim]"
-                    ),
+                    "input": ("[dim]Ctrl+S=Apply  Tab=Next  Esc=Cancel[/dim]"),
                     "radioset": (
                         "[dim]Ctrl+S=Apply  Space=Select  P=Push CA  "
                         "I=Inject CA  Esc=Cancel[/dim]"
@@ -491,9 +478,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
                 view = get_mitmproxy_service().capture_view()
             except Exception as exc:  # pragma: no cover - defensive
-                self.app.call_from_thread(
-                    self._on_device_probe_failed, str(exc)
-                )
+                self.app.call_from_thread(self._on_device_probe_failed, str(exc))
                 return
             self.app.call_from_thread(self._on_device_probe_done, view)
 
@@ -522,8 +507,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
         if state == "ours":
             status_widget.update(
-                f"[green]●[/green] Device points at our mitmproxy "
-                f"— [bold]{addr}[/bold]"
+                f"[green]●[/green] Device points at our mitmproxy — [bold]{addr}[/bold]"
             )
             if addr.startswith("127.0.0.1:"):
                 self._select_device_radio("device-radio-reverse")
@@ -531,8 +515,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 self._select_device_radio("device-radio-ours")
         elif state == "external":
             status_widget.update(
-                f"[#6ba3ff]●[/] Device points at external proxy "
-                f"— [bold]{addr}[/bold]"
+                f"[#6ba3ff]●[/] Device points at external proxy — [bold]{addr}[/bold]"
             )
             try:
                 self.query_one("#device-ext-input", Input).value = addr
@@ -540,9 +523,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 pass
             self._select_device_radio("device-radio-external")
         else:
-            status_widget.update(
-                "[#5b6479]○[/] No device proxy configured"
-            )
+            status_widget.update("[#5b6479]○[/] No device proxy configured")
             self._select_device_radio("device-radio-off")
 
     def _select_device_radio(self, radio_id: str) -> None:
@@ -892,8 +873,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 ConfirmModal(
                     title="Enable ADB Root?",
                     message=(
-                        "CA injection requires root access.\n"
-                        "Enable adb root now?"
+                        "CA injection requires root access.\nEnable adb root now?"
                     ),
                 ),
                 self._on_root_confirm,
@@ -953,17 +933,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         live_state = truth.get("state", "none")
         live_addr = truth.get("addr", "")
         desired_addr = desired_config.address if desired_config else ""
-        overwriting_foreign = (
-            live_state == "external" and live_addr != desired_addr
-        )
+        overwriting_foreign = live_state == "external" and live_addr != desired_addr
         if overwriting_foreign:
             from sandroid.tui.modals.confirm_modal import ConfirmModal
 
             if desired_config is None:
-                msg = (
-                    f"The device proxy currently points to {live_addr} — "
-                    "clear it?"
-                )
+                msg = f"The device proxy currently points to {live_addr} — clear it?"
             else:
                 msg = (
                     f"The device proxy currently points to {live_addr} — "
@@ -987,9 +962,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     def _on_device_overwrite_confirm(self, confirmed: bool) -> None:
         """Continue Apply after the foreign-device-proxy confirmation."""
         if not confirmed:
-            self.notify(
-                "Device proxy left unchanged", severity="warning"
-            )
+            self.notify("Device proxy left unchanged", severity="warning")
             return
         self._apply_commit(
             self._pending_device_config,
@@ -1021,9 +994,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 if _reverse_registered(port):
                     Adb.reverse_remove(f"tcp:{port}")
             except Exception as exc:  # pragma: no cover - defensive
-                self.notify(
-                    f"adb reverse teardown failed: {exc}", severity="warning"
-                )
+                self.notify(f"adb reverse teardown failed: {exc}", severity="warning")
 
         # 1. Device proxy.
         if desired_config is None:
@@ -1042,9 +1013,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 try:
                     Adb.reverse(f"tcp:{port}", f"tcp:{port}")
                 except Exception as exc:
-                    self.notify(
-                        f"adb reverse failed: {exc}", severity="error"
-                    )
+                    self.notify(f"adb reverse failed: {exc}", severity="error")
                     return
             else:
                 _teardown_reverse()
@@ -1096,8 +1065,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             live = {}
         # Normalize live targets to the working-state convention ("" == ours).
         live_norm = {
-            pkg: ("" if target == "ours" else target)
-            for pkg, target in live.items()
+            pkg: ("" if target == "ours" else target) for pkg, target in live.items()
         }
         desired = dict(self._app_rows)
 
@@ -1121,9 +1089,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         failures = [msg for ok, msg in results if not ok]
         if failures:
             summary = "; ".join(failures[:3])
-            self.notify(
-                f"Some app proxies failed: {summary}", severity="error"
-            )
+            self.notify(f"Some app proxies failed: {summary}", severity="error")
         else:
             self.notify(
                 f"App proxies updated ({len(results)} change"

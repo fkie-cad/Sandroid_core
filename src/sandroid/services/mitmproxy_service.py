@@ -1202,8 +1202,7 @@ class MitmproxyService:
         # read side alive on this build). Hold stdin open with `sleep` so nc
         # reads the response — a bare pipe yields empty stdout (false negative).
         inner = (
-            f"{{ printf '{request}'; sleep 2; }} | "
-            f"toybox nc -w {timeout} {host} {port}"
+            f"{{ printf '{request}'; sleep 2; }} | toybox nc -w {timeout} {host} {port}"
         )
         got_http = False
         tool_missing = False
@@ -1362,9 +1361,7 @@ class MitmproxyService:
                 listen_host = "127.0.0.1"
                 if get_config is not None:
                     try:
-                        listen_host = (
-                            get_config().mitmproxy.listen_host or "127.0.0.1"
-                        )
+                        listen_host = get_config().mitmproxy.listen_host or "127.0.0.1"
                     except Exception as exc:  # pragma: no cover - defensive
                         logger.warning("Failed to read listen_host: %s", exc)
 
@@ -1472,9 +1469,7 @@ class MitmproxyService:
             )
             return True
 
-    def stop(
-        self, timeout: float = 3.0, *, release_device_proxy: bool = True
-    ) -> None:
+    def stop(self, timeout: float = 3.0, *, release_device_proxy: bool = True) -> None:
         """Stop mitmweb (idempotent).
 
         Args:

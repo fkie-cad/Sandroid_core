@@ -383,9 +383,7 @@ def init(
         android_config: dict = {}
         if not skip_avd_setup:
             android_config = (
-                _avd_config_from_detection()
-                if non_interactive
-                else _setup_avd_config()
+                _avd_config_from_detection() if non_interactive else _setup_avd_config()
             )
 
         # ---- TUI setup ----  (defaults when non-interactive)
@@ -466,9 +464,7 @@ def init(
         console.print(
             "\u2022 Use [cyan]sandroid-config ioc[/cyan] to manage IOC files for MVT"
         )
-        console.print(
-            "\u2022 Run [cyan]sandroid[/cyan] to start Sandroid (TUI)"
-        )
+        console.print("\u2022 Run [cyan]sandroid[/cyan] to start Sandroid (TUI)")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Setup cancelled by user.[/yellow]")

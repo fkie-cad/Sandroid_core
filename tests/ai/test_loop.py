@@ -406,9 +406,9 @@ def test_cancel_mid_multi_tool_dispatch_leaves_every_tool_call_answered(test_reg
     assistant_msg = next(m for m in messages if m.get("role") == "assistant")
     declared_ids = {tc["id"] for tc in assistant_msg["tool_calls"]}
     answered_ids = {m["tool_call_id"] for m in messages if m.get("role") == "tool"}
-    assert (
-        declared_ids == answered_ids == {"call_a", "call_b"}
-    ), "every declared tool_call_id must have a matching tool-role response"
+    assert declared_ids == answered_ids == {"call_a", "call_b"}, (
+        "every declared tool_call_id must have a matching tool-role response"
+    )
 
     call_b_response = next(m for m in messages if m.get("tool_call_id") == "call_b")
     assert "cancelled" in json.loads(call_b_response["content"])["error"]
@@ -646,9 +646,9 @@ def test_cancelled_approve_refuses_but_does_not_persist(
     tool_message = next(m for m in messages if m.get("role") == "tool")
     payload = json.loads(tool_message["content"])
     assert "error" in payload
-    assert not permission_store.is_never(
-        "reversible_tool"
-    ), "a cancelled wait must not be conflated with an explicit decline"
+    assert not permission_store.is_never("reversible_tool"), (
+        "a cancelled wait must not be conflated with an explicit decline"
+    )
     assert not permission_store.is_allowed("reversible_tool")
 
 
@@ -1067,9 +1067,9 @@ def test_logical_failure_result_releases_newly_acquired_lease(
         owner_id="A",
     )
 
-    assert (
-        arbiter.snapshot() == {}
-    ), "a genuine {'started': False} failure must release the newly-acquired lease"
+    assert arbiter.snapshot() == {}, (
+        "a genuine {'started': False} failure must release the newly-acquired lease"
+    )
 
 
 def test_benign_already_running_result_keeps_the_lease(
@@ -1104,9 +1104,9 @@ def test_benign_already_running_result_keeps_the_lease(
         owner_id="A",
     )
 
-    assert arbiter.snapshot() == {
-        ResourceId.MITMPROXY: "A"
-    }, "a benign 'running: True' result must keep the newly-acquired lease"
+    assert arbiter.snapshot() == {ResourceId.MITMPROXY: "A"}, (
+        "a benign 'running: True' result must keep the newly-acquired lease"
+    )
 
 
 def test_raising_tool_rolls_back_newly_acquired_lease(

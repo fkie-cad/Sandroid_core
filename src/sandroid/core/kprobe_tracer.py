@@ -638,7 +638,7 @@ class KprobeTracer:
         """
         inst = cls._instance_dir(tracefs)
         path_list = [paths] if isinstance(paths, str) else list(paths)
-        globs = [f'{p.rstrip("/")}/*' for p in path_list]
+        globs = [f"{p.rstrip('/')}/*" for p in path_list]
         for name, field in cls._PATH_FILTER_FIELDS.items():
             expr = " || ".join(f'{field} ~ "{g}"' for g in globs)
             cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")

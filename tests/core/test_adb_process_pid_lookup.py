@@ -41,7 +41,10 @@ def test_helper_processes_are_not_the_app():
 
 
 def test_main_process_is_found_by_exact_name():
-    ps_a = PS_A + "u0_a153       7023   462   7000000 99999 do_epoll_wait 0 S com.android.chrome\n"
+    ps_a = (
+        PS_A
+        + "u0_a153       7023   462   7000000 99999 do_epoll_wait 0 S com.android.chrome\n"
+    )
     assert (
         get_pid_for_package_name(
             _send(ps_a), "com.android.chrome", use_frida_fallback=False

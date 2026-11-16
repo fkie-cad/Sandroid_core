@@ -183,15 +183,29 @@ def create_timeline(events, filename, duration):
         label_ys = _spread_labels([e[1] for e in group], stop)
         for (label, ts, colour, _kind), y_label in zip(group, label_ys, strict=True):
             x_label = side * 0.18
-            ax.scatter(0, ts, s=22, facecolor=colour, edgecolor="black",
-                       linewidth=0.4, zorder=3)
-            ax.plot((0, side * 0.08, x_label), (ts, ts, y_label),
-                    color=colour, linewidth=0.6, alpha=0.8, zorder=2)
+            ax.scatter(
+                0,
+                ts,
+                s=22,
+                facecolor=colour,
+                edgecolor="black",
+                linewidth=0.4,
+                zorder=3,
+            )
+            ax.plot(
+                (0, side * 0.08, x_label),
+                (ts, ts, y_label),
+                color=colour,
+                linewidth=0.6,
+                alpha=0.8,
+                zorder=2,
+            )
             ax.text(
                 x_label + side * 0.01,
                 y_label,
-                f"{_short(label)}  ({ts:.0f}s)" if side < 0 else
-                f"({ts:.0f}s)  {_short(label)}",
+                f"{_short(label)}  ({ts:.0f}s)"
+                if side < 0
+                else f"({ts:.0f}s)  {_short(label)}",
                 ha="right" if side < 0 else "left",
                 va="center",
                 fontsize=6.5,
@@ -204,13 +218,28 @@ def create_timeline(events, filename, duration):
     ax.set_xticks([])
     for spine in ("top", "right", "bottom"):
         ax.spines[spine].set_visible(False)
-    ax.text(-0.9, -stop * 0.02, "Changed files", ha="center", va="bottom",
-            fontsize=8, fontweight="bold", color=CHANGED_COLOR)
-    ax.text(0.5, -stop * 0.02, "New files", ha="center", va="bottom",
-            fontsize=8, fontweight="bold", color=NEW_COLOR)
+    ax.text(
+        -0.9,
+        -stop * 0.02,
+        "Changed files",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        fontweight="bold",
+        color=CHANGED_COLOR,
+    )
+    ax.text(
+        0.5,
+        -stop * 0.02,
+        "New files",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        fontweight="bold",
+        color=NEW_COLOR,
+    )
     if notes:
-        fig.text(0.5, 0.005, "; ".join(notes), ha="center", fontsize=7,
-                 style="italic")
+        fig.text(0.5, 0.005, "; ".join(notes), ha="center", fontsize=7, style="italic")
     fig.tight_layout()
     fig.savefig(filename, bbox_inches="tight", pad_inches=0.1)
     plt.close(fig)

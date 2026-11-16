@@ -80,9 +80,7 @@ def ensure_frida_running(
         _install_frida_then(app, on_ready, _cancel)
 
     app.push_screen(
-        FridaInstallModal(
-            device_name=_active_device_name(), feature_name=feature_name
-        ),
+        FridaInstallModal(device_name=_active_device_name(), feature_name=feature_name),
         on_result,
     )
 

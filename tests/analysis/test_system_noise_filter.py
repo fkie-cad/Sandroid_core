@@ -92,7 +92,9 @@ def test_wikipedia_run_keeps_only_app_evidence():
 
     assert kept == WIKI_APP
     assert set(filtered) == set(WIKI_NOISE)
-    assert all(pattern in DEFAULT_SYSTEM_NOISE_PATTERNS for pattern in filtered.values())
+    assert all(
+        pattern in DEFAULT_SYSTEM_NOISE_PATTERNS for pattern in filtered.values()
+    )
 
 
 def test_ground_truth_run_without_spotlight():
@@ -219,7 +221,9 @@ def test_engine_wires_filter_and_reports_filtered_noise(caplog):
     assert report["Changed Files"] == {}
     assert report["Deleted Files"] == {}
 
-    summary = [r.getMessage() for r in caplog.records if "File changes:" in r.getMessage()]
+    summary = [
+        r.getMessage() for r in caplog.records if "File changes:" in r.getMessage()
+    ]
     assert summary == [
         "File changes: 1 changed, 1 new, 0 deleted "
         "(0 system-noise file(s) hidden, see Other Data -> Filtered Noise)"

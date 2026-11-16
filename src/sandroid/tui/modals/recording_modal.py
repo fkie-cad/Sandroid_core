@@ -83,9 +83,7 @@ class RecordSettingsModal(ForensicModal[RecordSettings]):
 
     #: Same text for every focused widget type: Enter submits from the inputs
     #: too (``ENTER_SUBMITS_FROM_INPUT``).
-    FOOTER_HINT = (
-        "[dim]Enter=Start  Tab=Next  Esc=Cancel (nothing recorded)[/dim]"
-    )
+    FOOTER_HINT = "[dim]Enter=Start  Tab=Next  Esc=Cancel (nothing recorded)[/dim]"
 
     DEFAULT_CSS = """
     RecordSettingsModal .modal-container {

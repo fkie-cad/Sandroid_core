@@ -155,7 +155,11 @@ def test_stop_keeps_session_for_other_tools():
             "10.0.2.15:47204 → 1.2.3.4:443",
         ),
         (
-            {"src_addr": "2001:db8::1", "dst_addr": "2001:db8::2", "ss_family": "AF_INET6"},
+            {
+                "src_addr": "2001:db8::1",
+                "dst_addr": "2001:db8::2",
+                "ss_family": "AF_INET6",
+            },
             "2001:db8::1:47204 → 2001:db8::2:443",
         ),
     ],

@@ -523,9 +523,7 @@ def write_hash_manifest(
             )
             continue
         if full.is_symlink():
-            excluded.append(
-                {"path": rel, "reason": f"symlink to {full.readlink()}"}
-            )
+            excluded.append({"path": rel, "reason": f"symlink to {full.readlink()}"})
             continue
         try:
             digests = hash_file(full)
@@ -587,9 +585,7 @@ class ManifestCheck:
 
 
 def _addendum_files(root: Path) -> list[Path]:
-    return sorted(
-        p for p in root.glob(f"{ADDENDUM_PREFIX}*") if p.is_file()
-    )
+    return sorted(p for p in root.glob(f"{ADDENDUM_PREFIX}*") if p.is_file())
 
 
 def _read_sums(path: Path) -> list[tuple[str, str]]:
@@ -714,7 +710,9 @@ def finalize_run(
     out_json = Path(output_name)
     if not out_json.is_absolute():
         out_json = root / out_json
-    outcome = FinalizeOutcome(results_json=write_results_json(results, out_json, metadata))
+    outcome = FinalizeOutcome(
+        results_json=write_results_json(results, out_json, metadata)
+    )
     logger.info("Results written: %s", out_json)
 
     if generate_pdf:

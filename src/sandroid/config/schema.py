@@ -138,8 +138,7 @@ class FridaConfig(BaseModel):
         ge=1,
         le=10,
         description=(
-            "Max spawn-freeze attempts before failing loud "
-            "(spawn-reliability ladder)"
+            "Max spawn-freeze attempts before failing loud (spawn-reliability ladder)"
         ),
     )
     spawn_splash_window: float = Field(

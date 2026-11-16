@@ -168,9 +168,7 @@ class MitmproxyPanel(Widget):
             except Exception as exc:
                 logger.debug("Focus stale-cleanup skipped: %s", exc)
 
-        threading.Thread(
-            target=_run, name="mitm-focus-cleanup", daemon=True
-        ).start()
+        threading.Thread(target=_run, name="mitm-focus-cleanup", daemon=True).start()
 
     def _kick_reverse_cleanup(self) -> None:
         """Drop a SIGKILL'd prior run's stale ``adb reverse`` tunnel at mount.
@@ -325,9 +323,7 @@ class MitmproxyPanel(Widget):
             code = 0
         color = self._status_color(code)
         proto_color = self._protocol_color(proto)
-        app_col = (
-            f"  [#22d3ee]{self._short_name(app):<14}[/]" if app else ""
-        )
+        app_col = f"  [#22d3ee]{self._short_name(app):<14}[/]" if app else ""
         return (
             f"[#5b6479]{ts}[/]  "
             f"[{proto_color}]{proto:<8}[/]  "
@@ -715,7 +711,9 @@ class MitmproxyPanel(Widget):
         if app:
             # Use [~] not [i] — RichLog markup parses [i] as an italic tag and
             # swallows it.
-            self._append_line(f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS (exp.)")
+            self._append_line(
+                f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS (exp.)"
+            )
 
     def _nudge_ca(self) -> None:
         """Hint Ctrl+N to install the CA when the device is routed but untrusted.
@@ -727,8 +725,7 @@ class MitmproxyPanel(Widget):
         """
         if not self._ca_ok:
             self._append_line(
-                "[INFO] [~] device routed — press Ctrl+N to install the CA "
-                "for HTTPS"
+                "[INFO] [~] device routed — press Ctrl+N to install the CA for HTTPS"
             )
 
     def _kick_state_refresh(self) -> None:
@@ -1264,9 +1261,7 @@ class MitmproxyPanel(Widget):
             from sandroid.tui.modals import ensure_frida_running
 
             def _on_cancel() -> None:
-                self._append_line(
-                    "[INFO] SSL unpin cancelled — frida-server required"
-                )
+                self._append_line("[INFO] SSL unpin cancelled — frida-server required")
                 self._refresh_header()
 
             ensure_frida_running(
@@ -1327,9 +1322,7 @@ class MitmproxyPanel(Widget):
 
                 fm = get_focus_manager()
                 for pkg, target in app_routes.items():
-                    ok, msg = fm.enable_focus(
-                        pkg, None if target == "ours" else target
-                    )
+                    ok, msg = fm.enable_focus(pkg, None if target == "ours" else target)
                     self._append_line(f"[{'INFO' if ok else 'ERROR'}] {msg}")
             except Exception as exc:
                 self._append_line(f"[ERROR] App proxy re-apply: {exc}")

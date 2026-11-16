@@ -981,7 +981,7 @@ def get_app_proxy_status() -> dict[str, Any]:
             "enabled": {
                 "type": "boolean",
                 "description": (
-                    "True to REJECT UDP/443 on app-proxy lanes, False to " "allow it."
+                    "True to REJECT UDP/443 on app-proxy lanes, False to allow it."
                 ),
             },
         },

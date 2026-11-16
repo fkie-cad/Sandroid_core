@@ -109,9 +109,7 @@ def test_call_tool_reverse_string_round_trips_real_data(manager):
 def test_demo_lookup_self_identifies_as_fake(manager):
     manager.start()
 
-    result = manager.call_tool(
-        SERVER, "demo_fake_ioc_lookup", {"indicator": "1.2.3.4"}
-    )
+    result = manager.call_tool(SERVER, "demo_fake_ioc_lookup", {"indicator": "1.2.3.4"})
 
     assert result.isError is False
     payload = result.content[0].text
@@ -157,8 +155,7 @@ def test_bridge_registers_and_dispatches_both_mcp_tools(manager):
         assert spec.description.startswith("[external MCP server")
 
     assert (
-        registry.dispatch(f"mcp:{SERVER}:demo_reverse_string", {"text": "abc"})
-        == "cba"
+        registry.dispatch(f"mcp:{SERVER}:demo_reverse_string", {"text": "abc"}) == "cba"
     )
     lookup_result = registry.dispatch(
         f"mcp:{SERVER}:demo_fake_ioc_lookup", {"indicator": "8.8.8.8"}
@@ -175,9 +172,7 @@ def test_start_is_noop_when_ai_not_configured(monkeypatch):
 
     cfg = FakeSandroidConfig(mcp=FakeMCPConfig(servers=[_dummy_server_config()]))
     monkeypatch.setattr(config_module, "get_config", lambda: cfg)
-    monkeypatch.setattr(
-        safety, "get_ai_settings", lambda *a, **kw: safety.AISettings()
-    )
+    monkeypatch.setattr(safety, "get_ai_settings", lambda *a, **kw: safety.AISettings())
     mgr = MCPClientManager()
     try:
         mgr.start()
@@ -225,7 +220,6 @@ def test_default_config_enables_no_mcp_server():
 
     assert MCPConfig().servers == []
     assert SandroidConfig().mcp.servers == []
-
 
 
 def test_disabled_server_is_not_connected(fake_config):

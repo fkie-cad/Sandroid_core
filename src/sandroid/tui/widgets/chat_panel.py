@@ -1657,7 +1657,7 @@ class ChatPanel(Widget):
             n_priv = sum(1 for row in rows if row["privileged"])
             noun = "subtask" if n == 1 else "subtasks"
             priv = f" [{warn}]⚠ {n_priv} privileged[/]" if n_priv else ""
-            markup = f"[{tool}]▸ {n} {noun} running[/]{priv} " f"[{muted}](↑ expand)[/]"
+            markup = f"[{tool}]▸ {n} {noun} running[/]{priv} [{muted}](↑ expand)[/]"
         else:
             header = (
                 f"[{tool}]▾ {len(rows)} running[/] "

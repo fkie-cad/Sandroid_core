@@ -53,6 +53,7 @@ def _job_state(job) -> str | None:
         return get_state()
     return getattr(job, "state", None)
 
+
 # FriTap hooks SSL/TLS functions - used for conflict detection with other Frida tools
 FRITAP_SSL_HOOKS = [
     "SSL_read",
@@ -658,7 +659,9 @@ class FriTap(DataGatherBase):
             pass
         return None
 
-    _AFM_JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+    _AFM_JOB_ID = re.compile(
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    )
 
     def _prune_dead_hook_owners(self, toolbox, conflicts: dict) -> dict:
         """Drop hook registrations whose owning JobManager job is gone.

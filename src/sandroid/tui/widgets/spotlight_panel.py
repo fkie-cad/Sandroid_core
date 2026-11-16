@@ -319,9 +319,7 @@ class SpotlightPanel(Widget):
         bypass_tag = (
             f"[#4ade80]bypass: {','.join(on)}[/]" if on else "[#5b6479]bypass: none[/]"
         )
-        return (
-            f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
-        )
+        return f"{state}  [b]{package}[/]  hooks: [b]{len(hooks)}[/]  {bypass_tag}"
 
     def _render_body(self) -> str:
         spotlight = self._spotlight()
@@ -854,7 +852,8 @@ class SpotlightPanel(Widget):
                     )
                     logger.error(
                         "Spotlight action %s exceeded %.0fs watchdog; abandoning",
-                        label, self._ACTION_TIMEOUT,
+                        label,
+                        self._ACTION_TIMEOUT,
                     )
                 self._notify(msg, "information" if ok else "error")
             except Exception as exc:
@@ -867,9 +866,7 @@ class SpotlightPanel(Widget):
                 self._action_inflight = False
                 self._post(self.refresh_panel)
 
-        self.run_worker(
-            _job, name=f"spotlight_{label}", exclusive=False, thread=True
-        )
+        self.run_worker(_job, name=f"spotlight_{label}", exclusive=False, thread=True)
 
     # -- frida-server pre-flight ------------------------------------------
 
@@ -924,9 +921,7 @@ class SpotlightPanel(Widget):
                 # Derived from ``feature`` so the wording fits every caller
                 # (spawn/restart/attach AND the bypass toggle) instead of always
                 # saying "spawn". Mirrors the modal's own "{feature} requires…".
-                self._notify(
-                    f"{feature} requires frida-server — cancelled.", "warning"
-                )
+                self._notify(f"{feature} requires frida-server — cancelled.", "warning")
                 return
             self._install_frida_then(then)
 
@@ -981,9 +976,7 @@ class SpotlightPanel(Widget):
                 self._notify("frida-server started.", "information")
                 self._post(then)
             else:
-                self._notify(
-                    "frida-server still not running — cannot spawn.", "error"
-                )
+                self._notify("frida-server still not running — cannot spawn.", "error")
 
         self.run_worker(
             _job, name="spotlight_frida_install", exclusive=False, thread=True

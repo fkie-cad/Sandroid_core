@@ -386,8 +386,7 @@ def test_kprobe_supported_serializes_concurrent_probes_for_same_serial(monkeypat
     # before repeating any device round-trip).
     root_checks = [c for c in fake.commands if c == "root"]
     assert len(root_checks) == 1, (
-        f"expected exactly one preflight run, got {len(root_checks)}: "
-        f"{fake.commands}"
+        f"expected exactly one preflight run, got {len(root_checks)}: {fake.commands}"
     )
 
 

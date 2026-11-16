@@ -618,9 +618,7 @@ class EmulatorService:
         for command in commands:
             try:
                 adb.send_adb_command(command, serial=serial)
-                stdout, _stderr = adb.send_adb_command(
-                    "shell date +%s", serial=serial
-                )
+                stdout, _stderr = adb.send_adb_command("shell date +%s", serial=serial)
                 guest = int(str(stdout).strip().splitlines()[-1])
             except Exception as exc:
                 self._logger.debug(f"Guest clock resync via {command!r} failed: {exc}")

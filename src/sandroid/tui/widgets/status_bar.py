@@ -261,8 +261,7 @@ class StatusBar(Static):
             )
             row(
                 "App",
-                f"[{primary}]{self.spotlight_app}[/] "
-                f"[{mode_color} bold]\\[{mode}][/]",
+                f"[{primary}]{self.spotlight_app}[/] [{mode_color} bold]\\[{mode}][/]",
             )
             if self.spotlight_pid and self.spotlight_paused:
                 state = "[#fbbf24]◐ paused[/]"
@@ -321,8 +320,7 @@ class StatusBar(Static):
         elif self.mitmweb_address:
             row(
                 "Proxy",
-                f"[{stop}]○ mitmproxy {self.mitmweb_address}[/] "
-                f"[{muted}](stopped)[/]",
+                f"[{stop}]○ mitmproxy {self.mitmweb_address}[/] [{muted}](stopped)[/]",
             )
         else:
             row("Proxy", f"[{stop}]○ mitmproxy stopped[/]")

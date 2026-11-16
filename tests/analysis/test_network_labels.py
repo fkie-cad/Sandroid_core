@@ -74,7 +74,9 @@ def test_ipv6_flow_bytes_are_counted(tmp_path, monkeypatch):
     wrpcap(
         str(folder / "network_trace_run_1.pcap"),
         [
-            Ether() / IPv6(src=dev, dst=server) / TCP(sport=46622, dport=443, flags="S"),
+            Ether()
+            / IPv6(src=dev, dst=server)
+            / TCP(sport=46622, dport=443, flags="S"),
             Ether()
             / IPv6(src=server, dst=dev)
             / TCP(sport=443, dport=46622, flags="SA"),

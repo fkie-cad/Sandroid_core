@@ -562,11 +562,16 @@ class CAManager:
                 pem_path = Path(tempfile.gettempdir()) / "sandroid-ca-cert.pem"
                 result = subprocess.run(
                     [
-                        "openssl", "x509",
-                        "-inform", "DER",
-                        "-in", str(local_path),
-                        "-outform", "PEM",
-                        "-out", str(pem_path),
+                        "openssl",
+                        "x509",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(local_path),
+                        "-outform",
+                        "PEM",
+                        "-out",
+                        str(pem_path),
                     ],
                     check=False,
                     capture_output=True,
@@ -647,9 +652,7 @@ class CAManager:
             pass
 
         try:
-            stdout, _ = Adb.send_adb_command(
-                "shell getprop ro.build.version.sdk"
-            )
+            stdout, _ = Adb.send_adb_command("shell getprop ro.build.version.sdk")
             if stdout and stdout.strip().isdigit():
                 return int(stdout.strip())
         except Exception:
@@ -826,9 +829,7 @@ class CAManager:
                 init_verify = (
                     f"nsenter --mount=/proc/1/ns/mnt -- ls {apex_ca}/{cert_name}"
                 )
-                stdout, _ = Adb.send_adb_command(
-                    f"shell {self._root_cmd(init_verify)}"
-                )
+                stdout, _ = Adb.send_adb_command(f"shell {self._root_cmd(init_verify)}")
                 if cert_name not in (stdout or ""):
                     return False, "Bind-mount into init namespace failed"
                 logger.info("Bind-mount into init namespace (PID 1) succeeded")
@@ -836,9 +837,7 @@ class CAManager:
                 init_verify = (
                     f"nsenter --mount=/proc/1/ns/mnt -- ls {sys_ca}/{cert_name}"
                 )
-                stdout, _ = Adb.send_adb_command(
-                    f"shell {self._root_cmd(init_verify)}"
-                )
+                stdout, _ = Adb.send_adb_command(f"shell {self._root_cmd(init_verify)}")
                 if cert_name not in (stdout or ""):
                     return False, "tmpfs overlay not visible in init namespace"
                 logger.info("tmpfs CA overlay visible in init namespace (PID 1)")
@@ -995,15 +994,20 @@ class CAManager:
 
             pubkey = subprocess.run(
                 ["openssl", "x509", "-in", str(cert_path), "-pubkey", "-noout"],
-                check=True, capture_output=True,
+                check=True,
+                capture_output=True,
             )
             der = subprocess.run(
                 ["openssl", "pkey", "-pubin", "-outform", "der"],
-                input=pubkey.stdout, check=True, capture_output=True,
+                input=pubkey.stdout,
+                check=True,
+                capture_output=True,
             )
             dgst = subprocess.run(
                 ["openssl", "dgst", "-sha256", "-binary"],
-                input=der.stdout, check=True, capture_output=True,
+                input=der.stdout,
+                check=True,
+                capture_output=True,
             )
             return base64.b64encode(dgst.stdout).decode("ascii")
         except Exception as e:
@@ -1028,9 +1032,7 @@ class CAManager:
         if not spki_hash:
             return False, "Could not compute SPKI hash (is OpenSSL installed?)"
 
-        flag_line = (
-            f"chrome --ignore-certificate-errors-spki-list={spki_hash}"
-        )
+        flag_line = f"chrome --ignore-certificate-errors-spki-list={spki_hash}"
         logger.info(f"Chrome CT bypass SPKI: {spki_hash}")
 
         try:
@@ -1141,9 +1143,7 @@ class CAManager:
             zygote64_pid=zygote64_pid,
         )
 
-    def inject_ca_into_zygote(
-        self, cert_path: Path | None = None
-    ) -> InjectionResult:
+    def inject_ca_into_zygote(self, cert_path: Path | None = None) -> InjectionResult:
         """Inject CA certificate into Zygote namespace for system-wide trust.
 
         Version-aware: uses legacy cp for API < 34, tmpfs + bind-mount for
@@ -1182,9 +1182,7 @@ class CAManager:
 
             # 3. Get Zygote PIDs
             zygote_pid, zygote64_pid = self.get_zygote_pids()
-            zygote_pids = [
-                p for p in [zygote_pid, zygote64_pid] if p is not None
-            ]
+            zygote_pids = [p for p in [zygote_pid, zygote64_pid] if p is not None]
             if not zygote_pids:
                 return InjectionResult(
                     success=False,
@@ -1202,9 +1200,7 @@ class CAManager:
 
             # 5. Determine strategy
             strategy, api_level = self.determine_injection_strategy()
-            logger.info(
-                f"Using {strategy.value} injection (API level: {api_level})"
-            )
+            logger.info(f"Using {strategy.value} injection (API level: {api_level})")
 
             # 6. Dispatch
             if strategy == InjectionStrategy.BIND_MOUNT:
@@ -1221,9 +1217,7 @@ class CAManager:
 
         except Exception as e:
             logger.error(f"Error injecting CA: {e}")
-            return InjectionResult(
-                success=False, message=f"Error injecting CA: {e}"
-            )
+            return InjectionResult(success=False, message=f"Error injecting CA: {e}")
 
 
 class FocusManager:
@@ -1687,8 +1681,7 @@ class FocusManager:
         # 1. Data-dir owner — the exact Linux UID, no version dependence.
         try:
             out, _ = Adb.send_adb_command(
-                "shell "
-                + self._ca._root_cmd(f"stat -c %u /data/data/{package}")
+                "shell " + self._ca._root_cmd(f"stat -c %u /data/data/{package}")
             )
             val = (out or "").strip()
             if val.isdigit():
@@ -1845,26 +1838,20 @@ class FocusManager:
         # pattern just above.
         dst = self._binary_dst
         try:
-            Adb.send_adb_command(
-                f"shell {self._ca._root_cmd(f'rm -f {dst}')}"
-            )
+            Adb.send_adb_command(f"shell {self._ca._root_cmd(f'rm -f {dst}')}")
             Adb.send_adb_command(f"push {cached} {dst}")
             check_stdout, check_stderr = Adb.send_adb_command(f"shell ls {dst}")
             if dst not in (check_stdout or ""):
                 detail = check_stderr or check_stdout or "file not found after push"
                 return False, f"Failed to push gost: {detail.strip()}"
-            Adb.send_adb_command(
-                f"shell {self._ca._root_cmd(f'chmod 755 {dst}')}"
-            )
+            Adb.send_adb_command(f"shell {self._ca._root_cmd(f'chmod 755 {dst}')}")
         except Exception as exc:
             return False, f"Failed to install gost: {exc}"
 
         self._binary_pushed = True
         return True, "gost installed"
 
-    def _download_binary(
-        self, url: str, dst: str, sha256: str
-    ) -> tuple[bool, str]:
+    def _download_binary(self, url: str, dst: str, sha256: str) -> tuple[bool, str]:
         """Download the gost ``.tar.gz``, extract the ``gost`` ELF to ``dst``.
 
         The gost release ships gzip tarballs (``LICENSE``, ``README*``, and a
@@ -1895,9 +1882,7 @@ class FocusManager:
                     None,
                 )
                 if member is None:
-                    return False, (
-                        f"gost archive has no 'gost' member: {url}"
-                    )
+                    return False, (f"gost archive has no 'gost' member: {url}")
                 extracted = tf.extractfile(member)
                 if extracted is None:
                     return False, "Could not read 'gost' member from archive."
@@ -1959,9 +1944,7 @@ class FocusManager:
         except OSError as exc:
             return False, f"Could not resolve external proxy host '{host}': {exc}"
 
-    def _build_upstream(
-        self, target: str | None, lane: int
-    ) -> tuple[bool, str]:
+    def _build_upstream(self, target: str | None, lane: int) -> tuple[bool, str]:
         """Build the gost ``-F`` upstream for a lane (host-side resolved).
 
         ``target=None`` ⇒ our mitmproxy: ``socks5://<host_ip>:<socks_port>`` (the
@@ -2028,9 +2011,7 @@ class FocusManager:
         unquoted — keeping the exact ``su ... sh -c "<cmd> &"`` backgrounding via
         a detached Popen (mirrors ``frida_manager.run_frida_server``).
         """
-        inner = (
-            f"{self._binary_dst} -L red://:{redirect_port} -F {upstream} &"
-        )
+        inner = f"{self._binary_dst} -L red://:{redirect_port} -F {upstream} &"
         if self._ca._use_su:
             shell_cmd = f"su -c 'sh -c \"{inner}\"'"
         else:
@@ -2071,9 +2052,7 @@ class FocusManager:
     def _port_listening(self, redirect_port: int, needle: str) -> bool:
         for tool in ("ss -ltn", "netstat -ltn"):
             try:
-                out, _ = Adb.send_adb_command(
-                    f"shell {self._ca._root_cmd(tool)}"
-                )
+                out, _ = Adb.send_adb_command(f"shell {self._ca._root_cmd(tool)}")
             except Exception:
                 continue
             if needle in (out or ""):
@@ -2152,9 +2131,7 @@ class FocusManager:
             try:
                 out, _ = Adb.send_adb_command(
                     "shell "
-                    + self._ca._root_cmd(
-                        "ip6tables -t nat -S OUTPUT 2>/dev/null"
-                    )
+                    + self._ca._root_cmd("ip6tables -t nat -S OUTPUT 2>/dev/null")
                 )
                 self._ip6_ok = "OUTPUT" in (out or "")
             except Exception:
@@ -2167,17 +2144,13 @@ class FocusManager:
         return self._ip6_ok
 
     def _rule_body(self, uid: int, redirect_port: int, tagged: bool) -> str:
-        comment = (
-            f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
-        )
+        comment = f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
         return (
             f"-t nat {{op}} OUTPUT -m owner --uid-owner {uid} -p tcp "
             f"{comment}-j REDIRECT --to-ports {redirect_port}"
         )
 
-    def _add_rules(
-        self, lane: int, uid: int, redirect_port: int
-    ) -> tuple[bool, str]:
+    def _add_rules(self, lane: int, uid: int, redirect_port: int) -> tuple[bool, str]:
         """Add the v4+v6 redirect rules for a lane (delete-then-add, tagged).
 
         Falls back to an untagged exact-tuple rule if ``xt_comment`` is
@@ -2203,9 +2176,7 @@ class FocusManager:
             self._delete_rule_loop(tbl, body)
             add_cmd = f"{tbl} {body.format(op='-A')}"
             try:
-                _, err = Adb.send_adb_command(
-                    f"shell {self._ca._root_cmd(add_cmd)}"
-                )
+                _, err = Adb.send_adb_command(f"shell {self._ca._root_cmd(add_cmd)}")
             except Exception as exc:
                 err = str(exc)
             if self._is_comment_error(err):
@@ -2227,17 +2198,13 @@ class FocusManager:
                     v4_ok = False
                     v4_err = err.strip()
                 else:
-                    logger.warning(
-                        "ip6tables rule add warning: %s", err.strip()
-                    )
+                    logger.warning("ip6tables rule add warning: %s", err.strip())
         self._lane_rule_specs[lane] = specs
         if not v4_ok:
             return False, f"iptables redirect rule failed: {v4_err}"
         return True, "rules added"
 
-    def _quic_rule_body(
-        self, uid: int, tagged: bool, target: str = "REJECT"
-    ) -> str:
+    def _quic_rule_body(self, uid: int, tagged: bool, target: str = "REJECT") -> str:
         """A filter-table OUTPUT rule REJECTing the UID's QUIC (UDP/443).
 
         No ``-t nat`` ⇒ the (default) filter table, kept separate from the nat
@@ -2246,9 +2213,7 @@ class FocusManager:
         directly delete-able via the shared ``_delete_rule_loop`` (if ``{uid}``
         survived into the spec, ``body.format(op='-D')`` would raise KeyError).
         """
-        comment = (
-            f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
-        )
+        comment = f'-m comment --comment "{self._RULE_TAG}" ' if tagged else ""
         return (
             f"{{op}} OUTPUT -m owner --uid-owner {uid} -p udp --dport 443 "
             f"{comment}-j {target}"
@@ -2320,9 +2285,7 @@ class FocusManager:
         del_cmd = f"{tbl} {body.format(op='-D')}"
         for _ in range(10):
             try:
-                _, err = Adb.send_adb_command(
-                    f"shell {self._ca._root_cmd(del_cmd)}"
-                )
+                _, err = Adb.send_adb_command(f"shell {self._ca._root_cmd(del_cmd)}")
             except Exception:
                 return
             if err and ("No chain/target/match" in err or "does a matching" in err):
@@ -2396,12 +2359,10 @@ class FocusManager:
                     spec = line.strip()
                     if not spec.startswith("-A "):
                         continue
-                    del_spec = "-D " + spec[len("-A "):]
+                    del_spec = "-D " + spec[len("-A ") :]
                     del_cmd = f"{tbl} {table_flag}{del_spec}"
                     try:
-                        Adb.send_adb_command(
-                            f"shell {self._ca._root_cmd(del_cmd)}"
-                        )
+                        Adb.send_adb_command(f"shell {self._ca._root_cmd(del_cmd)}")
                     except Exception:
                         pass
         # Kill any stray gost redirectors (current) and ipt2socks (legacy),

@@ -33,7 +33,17 @@ class FakeProc:
         self.running = False
 
 
-SAFE = ["qemu-system-aarch64", "-avd", "X", "-port", "5556", "-feature", "-Vulkan", "-gpu", "host"]
+SAFE = [
+    "qemu-system-aarch64",
+    "-avd",
+    "X",
+    "-port",
+    "5556",
+    "-feature",
+    "-Vulkan",
+    "-gpu",
+    "host",
+]
 UNSAFE = ["qemu-system-aarch64", "-avd", "X", "-port", "5556", "-no-boot-anim"]
 
 

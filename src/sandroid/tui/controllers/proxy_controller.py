@@ -90,8 +90,7 @@ class ProxyController:
                 self._log_success("CA certificate injected into Zygote")
             elif result.proxy_config is not None:
                 self._log_success(
-                    f"Proxy settings applied — device at "
-                    f"{result.proxy_config.address}"
+                    f"Proxy settings applied — device at {result.proxy_config.address}"
                 )
             else:
                 self._log_success("Proxy settings applied")

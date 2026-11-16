@@ -150,8 +150,7 @@ def path_belongs_to_package(file_path: str, package: str) -> bool:
         return False
     prefixes = tuple(package + sep for sep in _PACKAGE_COMPONENT_SEPARATORS)
     return any(
-        part == package or part.startswith(prefixes)
-        for part in file_path.split("/")
+        part == package or part.startswith(prefixes) for part in file_path.split("/")
     )
 
 

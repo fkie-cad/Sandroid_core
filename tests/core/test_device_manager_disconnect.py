@@ -99,8 +99,7 @@ def test_normal_refresh_does_not_fire_change_callback(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1"
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1"
             ),
             "",
         ),
@@ -192,8 +191,7 @@ def test_ready_active_device_with_empty_version_repopulates_and_repaints(monkeyp
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1"
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1"
             ),
             "",
         ),
@@ -228,8 +226,7 @@ def test_ready_device_with_version_is_not_repopulated(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1"
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1"
             ),
             "",
         ),
@@ -270,10 +267,8 @@ def test_repopulate_non_active_device_does_not_repaint(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1",
-                "emulator-5556 device product:sdk model:sdk "
-                "device:emu transport_id:2",
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1",
+                "emulator-5556 device product:sdk model:sdk device:emu transport_id:2",
             ),
             "",
         ),
@@ -390,8 +385,7 @@ def test_zombie_device_not_reprobed_within_cooldown(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1"
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1"
             ),
             "",
         ),
@@ -420,8 +414,7 @@ def test_zombie_device_reprobed_after_cooldown_elapses(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1"
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1"
             ),
             "",
         ),
@@ -448,10 +441,8 @@ def test_refresh_devices_auto_select_false_leaves_no_active_device(monkeypatch):
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1",
-                "emulator-5556 device product:sdk model:sdk "
-                "device:emu transport_id:2",
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1",
+                "emulator-5556 device product:sdk model:sdk device:emu transport_id:2",
             ),
             "",
         ),
@@ -474,8 +465,7 @@ def test_refresh_devices_default_auto_selects_with_no_active_device(monkeypatch)
         "send_adb_command",
         lambda command: (
             _devices_output(
-                "emulator-5554 device product:sdk model:sdk "
-                "device:emu transport_id:1",
+                "emulator-5554 device product:sdk model:sdk device:emu transport_id:1",
             ),
             "",
         ),

@@ -223,9 +223,9 @@ async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
         # one -- since the real backend silently ignores any system message
         # past the first.
         assert sum(1 for m in sent_messages if m["role"] == "system") == 1
-        assert not any(
-            sentinel in m.get("content", "") for m in panel._messages
-        ), "the ambient block must never persist into self._messages"
+        assert not any(sentinel in m.get("content", "") for m in panel._messages), (
+            "the ambient block must never persist into self._messages"
+        )
         assert panel._messages[0] == {
             "role": "system",
             "content": ORCHESTRATOR_SYSTEM_PROMPT,
@@ -1458,9 +1458,7 @@ async def test_unconfigured_chat_shows_clear_state_and_sends_nothing(monkeypatch
 
 
 async def test_remote_endpoint_refused_without_allow_remote(monkeypatch):
-    _set_ai(
-        monkeypatch, base_url="https://api.example.com/v1", api_key="k", model="m"
-    )
+    _set_ai(monkeypatch, base_url="https://api.example.com/v1", api_key="k", model="m")
     called = []
     monkeypatch.setattr(
         chat_panel_module, "run_agent_turn", lambda *a, **kw: called.append(a)

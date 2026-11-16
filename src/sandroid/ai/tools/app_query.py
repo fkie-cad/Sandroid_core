@@ -74,8 +74,7 @@ _APK_PULL_TIMEOUT_SECONDS = 180
 @sandroid_tool(
     name="get_foreground_app",
     description=(
-        "Get the package and activity name currently focused/foreground on "
-        "the device."
+        "Get the package and activity name currently focused/foreground on the device."
     ),
     parameters={"type": "object", "properties": {}, "required": []},
     risk=RiskTier.READ_ONLY,

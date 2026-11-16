@@ -412,8 +412,7 @@ def kill_pid(
     pid = int(pid)
     if signal not in _ALLOWED_SIGNALS:
         raise ValueError(
-            f"unsupported signal {signal!r}, must be one of "
-            f"{sorted(_ALLOWED_SIGNALS)}"
+            f"unsupported signal {signal!r}, must be one of {sorted(_ALLOWED_SIGNALS)}"
         )
 
     def _alive() -> bool:

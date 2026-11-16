@@ -59,7 +59,9 @@ def reset_device_handles_after_snapshot_load() -> None:
             try:
                 jm.reset_session(timeout_per_job=1.0, detach_timeout=1.0)
             except Exception:
-                logger.debug("JobManager reset after snapshot load failed", exc_info=True)
+                logger.debug(
+                    "JobManager reset after snapshot load failed", exc_info=True
+                )
             jm.device = None
         frida_svc.invalidate_frida_device_cache()
     except Exception:
@@ -1073,9 +1075,7 @@ class RecordingController:
         # when monitor wasn't running to begin with, and in the true-no-op
         # case covered by _stop_monitor_before_revert).
         if monitor_config_for_resume is not None and self._on_monitor_resume_available:
-            self._ui(
-                self._on_monitor_resume_available, monitor_config_for_resume
-            )
+            self._ui(self._on_monitor_resume_available, monitor_config_for_resume)
 
     def _emit_progress(self, update: Any) -> None:
         """Marshal an engine ``ProgressUpdate`` to a UI-thread log line.
@@ -1235,14 +1235,10 @@ class RecordingController:
             if outcome.pdf is not None:
                 self._ui(self._log_success, f"PDF report: {outcome.pdf}")
             for err in outcome.errors:
-                self._ui(
-                    self._log_warning, f"Report finalisation issue: {err}"
-                )
+                self._ui(self._log_warning, f"Report finalisation issue: {err}")
         except Exception as e:
             logger.exception("finalize_run failed")
-            self._ui(
-                self._log_warning, f"Could not write run report files: {e}"
-            )
+            self._ui(self._log_warning, f"Could not write run report files: {e}")
 
     # =========================================================================
     # Export Operations

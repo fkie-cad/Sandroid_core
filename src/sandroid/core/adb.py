@@ -638,8 +638,7 @@ class Adb:
             stdout, stderr = cls.send_adb_command(f"shell am start -n {component}")
         else:
             stdout, stderr = cls.send_adb_command(
-                f"shell monkey -p {package_name} "
-                "-c android.intent.category.LAUNCHER 1"
+                f"shell monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
             )
 
         combined = f"{stdout or ''}\n{stderr or ''}".strip()

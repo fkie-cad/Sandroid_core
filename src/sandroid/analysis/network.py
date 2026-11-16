@@ -707,9 +707,7 @@ class Network(DataGatherBase):
                 continue
             for rr in records:
                 if isinstance(rr, DNSRR) and rr.type in (1, 28) and qname:
-                    answers.setdefault(str(rr.rdata), set()).add(
-                        qname.rstrip(".")
-                    )
+                    answers.setdefault(str(rr.rdata), set()).add(qname.rstrip("."))
         return answers
 
     @staticmethod
@@ -747,9 +745,7 @@ class Network(DataGatherBase):
         return None
 
     @classmethod
-    def _sni_names_in(
-        cls, packets: list[Any], ip_address: str, port: int
-    ) -> set[str]:
+    def _sni_names_in(cls, packets: list[Any], ip_address: str, port: int) -> set[str]:
         """TLS SNI host names the guest sent to ``ip_address:port``."""
         names: set[str] = set()
         for pkt in packets:

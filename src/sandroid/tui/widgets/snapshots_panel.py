@@ -41,6 +41,7 @@ def _forget_device_handles() -> None:
 
     reset_device_handles_after_snapshot_load()
 
+
 # Clickable action-cell id -> panel action method. Routed from
 # MainScreen.on_click (same dispatch as the bottom tab bar / arrow).
 _ACTION_CELLS = {

@@ -417,11 +417,11 @@ class FridaManager:
         # before launching frida-server. This fixes a crash on Android 15+ where ART
         # requires these env vars but they aren't inherited by `adb shell` sessions.
         env_setup = (
-            'ZPID=$(pidof zygote64 || pidof zygote); '
+            "ZPID=$(pidof zygote64 || pidof zygote); "
             'if [ -n "$ZPID" ]; then '
             'export BOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr "\\0" "\\n" | grep "^BOOTCLASSPATH=" | cut -d= -f2-); '
             'export DEX2OATBOOTCLASSPATH=$(cat /proc/$ZPID/environ | tr "\\0" "\\n" | grep "^DEX2OATBOOTCLASSPATH=" | cut -d= -f2-); '
-            'fi; '
+            "fi; "
         )
 
         if frida_server_path is self.run_frida_server.__defaults__[0]:
@@ -453,9 +453,7 @@ class FridaManager:
             # Use is_frida_server_running() as authoritative check
             if self.is_frida_server_running():
                 if self.verbose:
-                    self.logger.debug(
-                        "[*] frida-server started successfully"
-                    )
+                    self.logger.debug("[*] frida-server started successfully")
                 return True
 
             # frida-server not detected - try to get error info
@@ -468,9 +466,7 @@ class FridaManager:
                     )
                     return True
                 if stderr_text.strip():
-                    self.logger.error(
-                        f"Failed to start frida-server: {stderr_text}"
-                    )
+                    self.logger.error(f"Failed to start frida-server: {stderr_text}")
                 else:
                     self.logger.error(
                         "frida-server process started but not detected as running"

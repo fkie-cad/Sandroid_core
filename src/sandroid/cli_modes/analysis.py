@@ -140,9 +140,7 @@ def run_analysis(
                 console.print(f"[success]PDF report: {outcome.pdf}[/success]")
             for err in outcome.errors:
                 documentation_failed = True
-                console.print(
-                    f"{err}", style="error", soft_wrap=True, markup=False
-                )
+                console.print(f"{err}", style="error", soft_wrap=True, markup=False)
         except OSError:
             # Fall back to the plain writer for its user-facing error messages.
             results_json = json.dumps(

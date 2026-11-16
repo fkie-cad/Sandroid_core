@@ -1098,7 +1098,9 @@ class AnalysisEngine:
             gatherer = self.gatherers.get(key)
             if gatherer is None:
                 continue
-            noise_filter = noise_filter or getattr(gatherer, "system_noise_filter", None)
+            noise_filter = noise_filter or getattr(
+                gatherer, "system_noise_filter", None
+            )
             hidden = getattr(gatherer, "filtered_noise", None)
             report[section] = dict(sorted(hidden.items())) if hidden else {}
         enabled = bool(noise_filter is not None and noise_filter.enabled)

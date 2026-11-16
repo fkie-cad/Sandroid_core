@@ -733,8 +733,7 @@ class FileExtractionService:
         return {
             "new_file_hashes": {p: h["md5"] for p, h in new.items()},
             "changed_file_hashes(old,new)": {
-                p: [old.get(p, na)["md5"], cur.get(p, na)["md5"]]
-                for p in changed_paths
+                p: [old.get(p, na)["md5"], cur.get(p, na)["md5"]] for p in changed_paths
             },
             "new_file_hashes_sha256": {p: h["sha256"] for p, h in new.items()},
             "changed_file_hashes_sha256(old,new)": {
@@ -787,7 +786,11 @@ class FileExtractionService:
             # split as "<package>/<split file name>".
             for device_apk in apk_paths:
                 apk_name = device_apk.rsplit("/", 1)[-1]
-                label = package if apk_name == "base.apk" or len(apk_paths) == 1 else f"{package}/{apk_name}"
+                label = (
+                    package
+                    if apk_name == "base.apk" or len(apk_paths) == 1
+                    else f"{package}/{apk_name}"
+                )
                 apk_file = base_folder / f"{package}__{apk_name}"
 
                 adb.send_adb_command(f"pull {device_apk} {apk_file}")

@@ -425,9 +425,7 @@ class HelpScreen(ModalScreen):
                 # Enabled (so the list can scroll down to it from the
                 # keyboard) but not rebindable: no id in self._defaults.
                 option_list.add_option(
-                    Option(
-                        f"[#8b949e]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{key}"
-                    )
+                    Option(f"[#8b949e]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{key}")
                 )
                 index += 1
 

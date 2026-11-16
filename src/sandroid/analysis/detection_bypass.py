@@ -77,9 +77,9 @@ def _java_bridge_prelude() -> str:
 
         import frida_tools
 
-        src = (
-            Path(frida_tools.__file__).parent / "bridges" / "java.js"
-        ).read_text("utf-8")
+        src = (Path(frida_tools.__file__).parent / "bridges" / "java.js").read_text(
+            "utf-8"
+        )
         # java.js evaluates to `var bridge = (function () { ... })();`; scope it
         # in an IIFE and publish the result as the global `Java`.
         return (
@@ -1394,9 +1394,7 @@ class BypassService:
                     elif ptype == "ready":
                         logger.info(f"[Bypass] {payload.get('message', 'Ready')}")
                     elif ptype == "debug":
-                        logger.debug(
-                            f"[Bypass] {hook}: {payload.get('error', '')}"
-                        )
+                        logger.debug(f"[Bypass] {hook}: {payload.get('error', '')}")
             cb = self._on_message
             if cb:
                 try:
@@ -1522,7 +1520,9 @@ class BypassService:
         preamble = (
             "'use strict';\n"
             + _java_bridge_prelude()
-            + "var FLAGS = " + json.dumps(initial_flags) + ";\n"
+            + "var FLAGS = "
+            + json.dumps(initial_flags)
+            + ";\n"
             "rpc.exports = {\n"
             "    setFlags: function (f) {\n"
             "        if (f) {\n"
@@ -1547,7 +1547,9 @@ class BypassService:
                 "(function () {\ntry {\n"
                 + src
                 + "\n} catch (e) {\n"
-                + "send({merge_error: " + label + ", error: '' + e});\n"
+                + "send({merge_error: "
+                + label
+                + ", error: '' + e});\n"
                 + "}\n})();\n"
             )
         return "".join(parts)
@@ -1738,12 +1740,8 @@ class BypassService:
                 # a 2nd create_script on a paused spawn SIGSEGVs the agent
                 # (#218). Flipping flags off (empty target) is always allowed.
                 if target and not paused and jm.is_paused():
-                    logger.warning(
-                        "set_active(live) while session paused; skipping"
-                    )
-                    return False, (
-                        "Session paused — resume before changing hooks"
-                    )
+                    logger.warning("set_active(live) while session paused; skipping")
+                    return False, ("Session paused — resume before changing hooks")
 
             # Empty target -> flip every flag off but keep the script resident
             # (instant re-enable). Explicit teardown is stop_all's job.
@@ -1765,9 +1763,7 @@ class BypassService:
             # Ensure the combined script is loaded (bakes flags = target on a
             # fresh load; reuses an existing live job otherwise).
             flags = self._flag_dict(target)
-            ok, msg, fresh = self._ensure_loaded(
-                paused=paused, initial_flags=flags
-            )
+            ok, msg, fresh = self._ensure_loaded(paused=paused, initial_flags=flags)
             if not ok:
                 return False, msg
 
@@ -1784,9 +1780,7 @@ class BypassService:
                 try:
                     script.exports_sync.set_flags(flags)
                 except Exception as exc:
-                    logger.warning(
-                        "[Bypass] set_flags failed: %s — reloading", exc
-                    )
+                    logger.warning("[Bypass] set_flags failed: %s — reloading", exc)
                     self._reset_script_state()
                     ok2, msg2, _ = self._ensure_loaded(
                         paused=paused, initial_flags=flags
@@ -1807,8 +1801,7 @@ class BypassService:
 
         if active_now:
             display = "Bypass (experimental): " + ", ".join(
-                self._plain_name(c)
-                for c in self._categories_by_priority(active_now)
+                self._plain_name(c) for c in self._categories_by_priority(active_now)
             )
             self._register_task(display)
             return True, display
@@ -1900,9 +1893,7 @@ class BypassService:
             if self._spotlight_running():
                 with self._lock:
                     target = set(self._active) | {category}
-                ok, msg = self.set_active(
-                    target, paused=False, on_message=on_message
-                )
+                ok, msg = self.set_active(target, paused=False, on_message=on_message)
                 if not ok:
                     self._disarm(category)
                     return False, msg
@@ -2020,8 +2011,7 @@ class BypassService:
         jm, pid = spotlight.spawn_app_paused(package)
         if not pid or pid <= 0:
             return False, (
-                f"Failed to spawn {package} "
-                "(no PID — is frida-server running?)"
+                f"Failed to spawn {package} (no PID — is frida-server running?)"
             )
 
         if not self.is_paused_session():
@@ -2049,8 +2039,7 @@ class BypassService:
             if not active_n:
                 return True, f"Spawned (paused) {package} (no bypasses armed)"
             return True, (
-                f"Spawned (paused) {package} with {active_n} bypass(es) "
-                "(Resume to run)"
+                f"Spawned (paused) {package} with {active_n} bypass(es) (Resume to run)"
             )
 
         # 4'. Resume exactly once, preserving the anti-Frida self-kill
@@ -2389,6 +2378,7 @@ class BypassService:
             spotlight.set_pid(None)
         except Exception:
             pass
+
 
 _INSTANCE: BypassService | None = None
 _INSTANCE_LOCK = threading.Lock()

@@ -170,7 +170,9 @@ def test_prepare_device_roots_and_sets_permissive(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        Adb, "send_adb_command", classmethod(lambda cls, c, serial=None: fake.send_adb_command(c))
+        Adb,
+        "send_adb_command",
+        classmethod(lambda cls, c, serial=None: fake.send_adb_command(c)),
     )
     printed = []
     console = SimpleNamespace(print=printed.append)
@@ -184,7 +186,9 @@ def test_prepare_device_reports_missing_root(monkeypatch):
 
     fake = _FakeAdb({"root": ("", "adbd cannot run as root in production builds")})
     monkeypatch.setattr(
-        Adb, "send_adb_command", classmethod(lambda cls, c, serial=None: fake.send_adb_command(c))
+        Adb,
+        "send_adb_command",
+        classmethod(lambda cls, c, serial=None: fake.send_adb_command(c)),
     )
     assert initializer.prepare_device(None) is False
     assert "shell setenforce 0" not in fake.calls
@@ -406,7 +410,9 @@ def test_toolbox_init_never_parses_sys_argv(monkeypatch, toolbox_args):
     monkeypatch.setattr(sys, "argv", ["my_script.py", "--my-own-flag"])
     Toolbox.args = None
     monkeypatch.setattr(services, "get_initialization_service", _InitService)
-    monkeypatch.setattr(Toolbox, "_get_active_device_serial", classmethod(lambda c: None))
+    monkeypatch.setattr(
+        Toolbox, "_get_active_device_serial", classmethod(lambda c: None)
+    )
     Toolbox.init()
     assert seen["args"] is None
 
@@ -603,10 +609,29 @@ def test_cli_serial_option_and_override():
 
     assert "--serial" in CliRunner().invoke(main, ["--help"]).output
     values = dict.fromkeys(
-        ["file", "loglevel", "number", "whitelist", "screenshot", "trigdroid", "trigdroid_ccf"]
+        [
+            "file",
+            "loglevel",
+            "number",
+            "whitelist",
+            "screenshot",
+            "trigdroid",
+            "trigdroid_ccf",
+        ]
     )
     flags = dict.fromkeys(
-        ["debug", "avoid_strong_noise_filter", "network", "show_deleted", "no_processes", "sockets", "hash_files", "apk", "degrade_network", "report"],
+        [
+            "debug",
+            "avoid_strong_noise_filter",
+            "network",
+            "show_deleted",
+            "no_processes",
+            "sockets",
+            "hash_files",
+            "apk",
+            "degrade_network",
+            "report",
+        ],
         False,
     )
     overrides = build_cli_overrides(**values, **flags, serial="emulator-5558")
@@ -702,9 +727,7 @@ def test_exit_helper_hard_exits_only_with_lingering_threads(monkeypatch):
     exited = []
     monkeypatch.setattr(interactive, "_stop_capture_children", lambda: None)
     monkeypatch.setattr("os._exit", exited.append)
-    monkeypatch.setattr(
-        "sandroid.tui.terminal_reset.reset_terminal_hard", lambda: None
-    )
+    monkeypatch.setattr("sandroid.tui.terminal_reset.reset_terminal_hard", lambda: None)
     monkeypatch.setattr("logging.shutdown", lambda: None)
     interactive._exit_without_lingering_threads(grace=0.1)
     assert exited == []

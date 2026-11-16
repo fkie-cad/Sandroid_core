@@ -106,7 +106,8 @@ def test_shared_prefs_inserts_are_adds_not_moves(tmp_path):
 
 def test_shared_prefs_value_update_and_removal(tmp_path):
     second_text = PREFS_FIRST.replace(
-        'name="exploreFeedVisitCount" value="3"', 'name="exploreFeedVisitCount" value="4"'
+        'name="exploreFeedVisitCount" value="3"',
+        'name="exploreFeedVisitCount" value="4"',
     ).replace('    <boolean name="showSearchTabTooltip" value="false" />\n', "")
     first = _write(tmp_path, "first.xml", PREFS_FIRST)
     second = _write(tmp_path, "second.xml", second_text)

@@ -1164,8 +1164,7 @@ class SandroidTUI(App):
                 spotlight = get_spotlight_service()
                 if not spotlight.get_app_tuple():
                     self.notify(
-                        "No spotlight app. Press c (attach) or Shift+C "
-                        "(spawn) first.",
+                        "No spotlight app. Press c (attach) or Shift+C (spawn) first.",
                         severity="warning",
                     )
                     return

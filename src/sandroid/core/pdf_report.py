@@ -242,10 +242,7 @@ def bounded_lines_paragraph(
         text = "<br/>".join(escape(ln) for ln in clipped[:shown])
         omitted = len(clipped) - shown
         if omitted:
-            note = (
-                f"<i>… {omitted} more line(s) not shown — see "
-                f"{escape(see_also)}</i>"
-            )
+            note = f"<i>… {omitted} more line(s) not shown — see {escape(see_also)}</i>"
             text = f"{text}<br/>{note}" if text else note
         para = Paragraph(text, style)
         _w, height = para.wrap(width, 1e9)
@@ -303,9 +300,7 @@ def split_lines_into_cells(
         for chunk in chunks
     ]
     if rest:
-        note = (
-            f"<i>… {len(rest)} more line(s) not shown — see {escape(see_also)}</i>"
-        )
+        note = f"<i>… {len(rest)} more line(s) not shown — see {escape(see_also)}</i>"
         cells.append(Paragraph(note, style))
     return cells
 
@@ -573,9 +568,7 @@ class PDFReport:
         self.body = ParagraphStyle(
             "body", fontName="Helvetica", fontSize=7.5, leading=9.5
         )
-        self.body_wrap = ParagraphStyle(
-            "body_wrap", parent=self.body, wordWrap="CJK"
-        )
+        self.body_wrap = ParagraphStyle("body_wrap", parent=self.body, wordWrap="CJK")
         self.mono = ParagraphStyle(
             "mono", fontName="Courier", fontSize=6, leading=8, wordWrap="CJK"
         )
@@ -642,8 +635,14 @@ class PDFReport:
         logos = Table(
             [
                 [
-                    Image(io.BytesIO(_asset_bytes(FRAUNHOFER_LOGO)), 0.6 * inch, 0.6 * inch),
-                    Image(io.BytesIO(_asset_bytes(SANDROID_LOGO)), 1.1 * inch, 1.1 * inch),
+                    Image(
+                        io.BytesIO(_asset_bytes(FRAUNHOFER_LOGO)),
+                        0.6 * inch,
+                        0.6 * inch,
+                    ),
+                    Image(
+                        io.BytesIO(_asset_bytes(SANDROID_LOGO)), 1.1 * inch, 1.1 * inch
+                    ),
                 ]
             ],
             colWidths=[FRAME_WIDTH / 2, FRAME_WIDTH / 2],
@@ -701,7 +700,11 @@ class PDFReport:
                 "Emulator action timestamp",
                 self.data.get("Emulator relative action timestamp"),
             ),
-            ("Run ID / mode", " / ".join(str(x) for x in (md.get("run_id"), md.get("mode")) if x) or None),
+            (
+                "Run ID / mode",
+                " / ".join(str(x) for x in (md.get("run_id"), md.get("mode")) if x)
+                or None,
+            ),
             ("Device name", self.data.get("Device Name")),
             ("Device serial", dev.get("serial")),
             ("AVD name", dev.get("avd_name")),
@@ -730,9 +733,16 @@ class PDFReport:
         ]
         table_rows = []
         for key, value in rows:
-            style = self.mono if key in ("Build fingerprint", "Results file SHA-256") else self.body_wrap
+            style = (
+                self.mono
+                if key in ("Build fingerprint", "Results file SHA-256")
+                else self.body_wrap
+            )
             table_rows.append(
-                [Paragraph(f"<b>{_txt(key)}</b>", self.body), Paragraph(_txt(value), style)]
+                [
+                    Paragraph(f"<b>{_txt(key)}</b>", self.body),
+                    Paragraph(_txt(value), style),
+                ]
             )
         table = Table(table_rows, colWidths=[130, FRAME_WIDTH - 130])
         table.setStyle(self._table_style(header=False))
@@ -812,7 +822,10 @@ class PDFReport:
         rows = [self.make_header(["Setting", "Value"])]
         for key, value in _flatten(settings):
             rows.append(
-                [Paragraph(_txt(key), self.body_wrap), Paragraph(_txt(value), self.body_wrap)]
+                [
+                    Paragraph(_txt(key), self.body_wrap),
+                    Paragraph(_txt(value), self.body_wrap),
+                ]
             )
         self.elements.append(self._table(rows, [200, FRAME_WIDTH - 200]))
         self.elements.append(PageBreak())
@@ -995,8 +1008,10 @@ class PDFReport:
 
     def image_grid(self, img_dir=None):
         """Lay out screenshots in a 4-column grid (files are not modified)."""
-        img_dir = Path(img_dir) if img_dir is not None else find_screenshot_dir(
-            self.results_dir
+        img_dir = (
+            Path(img_dir)
+            if img_dir is not None
+            else find_screenshot_dir(self.results_dir)
         )
         if img_dir is None:
             return
@@ -1017,9 +1032,16 @@ class PDFReport:
             cells.append(
                 [
                     Image(str(path), width=w * scale, height=h * scale),
-                    Paragraph(_txt(path.name), ParagraphStyle(
-                        "cap", parent=self.body, fontSize=6, alignment=TA_CENTER,
-                        wordWrap="CJK")),
+                    Paragraph(
+                        _txt(path.name),
+                        ParagraphStyle(
+                            "cap",
+                            parent=self.body,
+                            fontSize=6,
+                            alignment=TA_CENTER,
+                            wordWrap="CJK",
+                        ),
+                    ),
                 ]
             )
         rows = []
@@ -1128,9 +1150,7 @@ def generate_pdf_report(
     )
     for title, reason in report.degraded_sections:
         logger.warning("PDF report section %r omitted: %s", title, reason)
-    logger.info(
-        "PDF report generated: %s (SHA-256 %s)", out, sha256_file(out)
-    )
+    logger.info("PDF report generated: %s (SHA-256 %s)", out, sha256_file(out))
     return out
 
 

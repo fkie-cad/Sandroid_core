@@ -8,7 +8,9 @@ from sandroid.services import mitmproxy_service
 
 
 def test_prefers_path(monkeypatch):
-    monkeypatch.setattr(mitmproxy_service.shutil, "which", lambda name: "/usr/x/mitmweb")
+    monkeypatch.setattr(
+        mitmproxy_service.shutil, "which", lambda name: "/usr/x/mitmweb"
+    )
     assert mitmproxy_service._find_mitmweb() == "/usr/x/mitmweb"
 
 

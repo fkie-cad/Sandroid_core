@@ -189,7 +189,9 @@ class TestClassify:
         """AFM's TransportError text contains 'may have crashed' — remedy is a
         server restart, so it MUST classify as dirty, not crash.
         """
-        msg = "TransportError: server may have crashed or restarted; restart frida-server"
+        msg = (
+            "TransportError: server may have crashed or restarted; restart frida-server"
+        )
         assert "crash" in msg  # the trap
         assert classify_spawn_failure(msg) == "dirty"
 
@@ -216,8 +218,7 @@ class TestClassify:
             classify_spawn_failure("", exc=frida.ProcessNotFoundError("x")) == "crash"
         )
         assert (
-            classify_spawn_failure("", exc=frida.InvalidOperationError("x"))
-            == "benign"
+            classify_spawn_failure("", exc=frida.InvalidOperationError("x")) == "benign"
         )
 
 
@@ -265,9 +266,7 @@ class TestRetryLadder:
         monkeypatch.setattr(bypass, "_teardown_failed_spawn", teardown)
         sfn = make_spawn_fn([(True, "Spawned com.x with 1 bypass")], spotlight)
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         assert len(sfn.calls) == 1
@@ -279,9 +278,7 @@ class TestRetryLadder:
         monkeypatch.setattr(bypass, "_poll_liveness", poll)
         sfn = make_spawn_fn([(True, "Applied live")], spotlight)
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         assert len(sfn.calls) == 1  # single call, no ladder
@@ -307,14 +304,10 @@ class TestRetryLadder:
         cfg(attempts=4, window=0.0)
         monkeypatch.setattr(bypass, "_frida_device", object)
         # attempt 1 spawns ok but pid vanished; attempt 2 survives.
-        monkeypatch.setattr(
-            bypass, "_poll_liveness", Mock(side_effect=[False, True])
-        )
+        monkeypatch.setattr(bypass, "_poll_liveness", Mock(side_effect=[False, True]))
         sfn = make_spawn_fn([(True, "Spawned"), (True, "Spawned")], spotlight)
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         assert len(sfn.calls) == 2  # re-spawned, not a silent success
@@ -328,9 +321,7 @@ class TestRetryLadder:
         monkeypatch.setattr(bypass, "_poll_liveness", Mock(return_value=False))
         sfn = make_spawn_fn([(True, "Spawned")] * 3, spotlight)
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is False
         assert len(sfn.calls) == 3  # exactly N spawn attempts
@@ -350,9 +341,7 @@ class TestRetryLadder:
             [(False, "Process already running; skipping resume")], spotlight
         )
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True  # benign => treated as success
         assert len(sfn.calls) == 1
@@ -375,9 +364,7 @@ class TestRetryLadder:
             spotlight,
         )
 
-        ok, msg = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         assert len(sfn.calls) == 2
@@ -401,9 +388,7 @@ class TestRetryLadder:
             spotlight,
         )
 
-        ok, _ = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, _ = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         recover.assert_called_once()  # dead-server symptom => restart, not bare retry
@@ -427,9 +412,7 @@ class TestRetryLadder:
             spotlight,
         )
 
-        ok, _ = bypass.apply_to_fresh_spawn_with_retry(
-            "com.x", {"ssl"}, spawn_fn=sfn
-        )
+        ok, _ = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
 
         assert ok is True
         recover.assert_called_once()  # at most once across the whole ladder
@@ -441,9 +424,7 @@ class TestRetryLadder:
         fm.restart_frida_server_and_wait.return_value = True
         svc = Mock()
         svc.get_frida_manager.return_value = fm
-        monkeypatch.setattr(
-            "sandroid.services.get_frida_session_service", lambda: svc
-        )
+        monkeypatch.setattr("sandroid.services.get_frida_session_service", lambda: svc)
 
         bypass._recover_frida_server()
 

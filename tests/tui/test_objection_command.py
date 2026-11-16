@@ -9,7 +9,10 @@ from sandroid.tui.modals.objection_modal import ObjectionConfig, build_objection
 
 def test_attach_command():
     cmd = build_objection_command(
-        "com.example.app", ObjectionConfig(spawn_mode=False), None, serial="emulator-5556"
+        "com.example.app",
+        ObjectionConfig(spawn_mode=False),
+        None,
+        serial="emulator-5556",
     )
     assert cmd[1:] == ["-S", "emulator-5556", "-n", "com.example.app", "start"]
 
@@ -19,7 +22,15 @@ def test_spawn_with_bypass_script():
         "com.example.app", ObjectionConfig(spawn_mode=True), "/x/b.js", serial="s1"
     )
     assert cmd[1:] == [
-        "-S", "s1", "-n", "com.example.app", "-s", "-p", "start", "-S", "/x/b.js"
+        "-S",
+        "s1",
+        "-n",
+        "com.example.app",
+        "-s",
+        "-p",
+        "start",
+        "-S",
+        "/x/b.js",
     ]
 
 

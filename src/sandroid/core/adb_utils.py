@@ -36,6 +36,7 @@ def quote_host_arg(arg: str, windows: bool | None = None) -> str:
         return subprocess.list2cmdline([arg])
     return shlex.quote(arg)
 
+
 # Benign ADB patterns that should be logged but not treated as errors
 BENIGN_ADB_PATTERNS = [
     "daemon not running",

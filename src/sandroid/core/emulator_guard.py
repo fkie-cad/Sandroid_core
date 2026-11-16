@@ -183,7 +183,9 @@ class EmulatorMemoryGuard:
         if self.action != "kill":
             self._notify(msg, logging.ERROR)
             return "over-limit"
-        self._notify(msg + " Shutting the emulator down to protect the host.", logging.ERROR)
+        self._notify(
+            msg + " Shutting the emulator down to protect the host.", logging.ERROR
+        )
         self._shutdown(serial, proc)
         return "killed"
 

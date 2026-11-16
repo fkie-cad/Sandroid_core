@@ -215,7 +215,9 @@ class _ServerFM:
 def _auto(monkeypatch, enabled=True):
     from sandroid.core import frida_manager
 
-    monkeypatch.setattr(frida_manager, "frida_server_auto_start_enabled", lambda: enabled)
+    monkeypatch.setattr(
+        frida_manager, "frida_server_auto_start_enabled", lambda: enabled
+    )
     return frida_manager
 
 
@@ -262,7 +264,9 @@ def test_headless_ensure_frida_server_prints_reason(monkeypatch):
     printed = []
     console = type("C", (), {"print": lambda self, m: printed.append(m)})()
     monkeypatch.setattr(
-        frida_manager, "auto_start_frida_server", lambda: (False, "device is not rooted")
+        frida_manager,
+        "auto_start_frida_server",
+        lambda: (False, "device is not rooted"),
     )
     monkeypatch.setattr(frida_manager, "frida_server_auto_start_enabled", lambda: True)
     assert initializer.ensure_frida_server(console) is False

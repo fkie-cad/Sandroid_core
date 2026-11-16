@@ -97,7 +97,9 @@ def run_report_from(result_dir: str) -> int:
             try:
                 _append_log(root, buffer.records)
             except OSError as exc:
-                console.print(f"[warning]Could not write {REPORT_LOG_NAME}: {exc}[/warning]")
+                console.print(
+                    f"[warning]Could not write {REPORT_LOG_NAME}: {exc}[/warning]"
+                )
 
     check = outcome.check
     if check.present:
@@ -106,7 +108,9 @@ def run_report_from(result_dir: str) -> int:
             f"({SHA256SUMS_NAME}, nothing was modified).[/success]"
         )
     else:
-        console.print("[warning]No evidence manifest existed; a new one was written.[/warning]")
+        console.print(
+            "[warning]No evidence manifest existed; a new one was written.[/warning]"
+        )
     _plain(console, f"PDF report written: {outcome.pdf}", "success")
     if outcome.addendum is not None:
         _plain(

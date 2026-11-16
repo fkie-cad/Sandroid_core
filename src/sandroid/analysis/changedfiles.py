@@ -92,9 +92,7 @@ class ChangedFiles(DataGatherBase):
                     changed_files.append(file)
             # Candidates only (before intersection/noise filtering) -> DEBUG;
             # the engine logs the final counts once.
-            logger.debug(
-                "%d changed-file candidate(s) in this run", len(changed_files)
-            )
+            logger.debug("%d changed-file candidate(s) in this run", len(changed_files))
             self.fileListList.append(changed_files)
 
     def return_data(self) -> dict[str, list[Any]]:

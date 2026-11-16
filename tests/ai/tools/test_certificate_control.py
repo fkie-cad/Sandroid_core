@@ -228,8 +228,7 @@ def test_enable_adb_root_not_rooted_failure(monkeypatch):
         SimpleNamespace(
             enable_adb_root=lambda: (
                 False,
-                "Device does not support adb root. Please ensure the device "
-                "is rooted.",
+                "Device does not support adb root. Please ensure the device is rooted.",
             )
         ),
     )

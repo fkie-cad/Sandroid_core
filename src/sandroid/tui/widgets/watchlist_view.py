@@ -1155,7 +1155,7 @@ class WatchlistView(FilesSubViewBase):
         self._cancel_wildcard_timer()
         self._update_header()
         self._notify(
-            "Auto mode paused — device offline. Resumes automatically " "on reconnect.",
+            "Auto mode paused — device offline. Resumes automatically on reconnect.",
             "warning",
         )
 
@@ -1261,8 +1261,7 @@ class WatchlistView(FilesSubViewBase):
             self._persist_index()
         except Exception:
             logger.debug(
-                "Watchlist: failed to persist membership after "
-                "wildcard re-expansion",
+                "Watchlist: failed to persist membership after wildcard re-expansion",
                 exc_info=True,
             )
         self._reload_rows()

@@ -29,9 +29,12 @@ def _build_abx(text):
     return (
         b"ABX\x00"
         + bytes([0x10])  # START_DOCUMENT
-        + bytes([0x32]) + _interned("foo")  # START_TAG foo
-        + bytes([0x04]) + _raw_string(text)  # TEXT
-        + bytes([0x33]) + _interned("foo")  # END_TAG foo
+        + bytes([0x32])
+        + _interned("foo")  # START_TAG foo
+        + bytes([0x04])
+        + _raw_string(text)  # TEXT
+        + bytes([0x33])
+        + _interned("foo")  # END_TAG foo
         + bytes([0x11])  # END_DOCUMENT
     )
 

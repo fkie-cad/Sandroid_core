@@ -618,8 +618,7 @@ class TrigDroidBypass:
             "mode": self.mode,
             "enabled_bypasses": self.enabled_bypasses,
             "delegated_bypasses": {
-                cat: svc.is_active(cat)
-                for cat in sorted(self._delegated_categories)
+                cat: svc.is_active(cat) for cat in sorted(self._delegated_categories)
             },
         }
         if self.script:
@@ -644,9 +643,7 @@ class TrigDroidBypass:
                 try:
                     svc.stop(category)
                 except Exception as e:
-                    logger.warning(
-                        f"Error stopping delegated {category} bypass: {e}"
-                    )
+                    logger.warning(f"Error stopping delegated {category} bypass: {e}")
             self._delegated_categories.clear()
 
         if self.job_id:

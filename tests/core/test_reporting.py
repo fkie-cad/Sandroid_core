@@ -66,8 +66,10 @@ def _results(tmp_path: Path | None = None) -> dict:
             {
                 "/data/data/de.fkie.ground_truth/databases/GroundTruth.db": [
                     f"\t[{ESC}[32mINSERT{ESC}[0m] Table [t] row [1,'<x> & y']",
-                    ("\t\\[[success]INSERT[/success]] Table \\[t] row "
-                    "\\[[success]2,'b'[/success]] has been added"),
+                    (
+                        "\t\\[[success]INSERT[/success]] Table \\[t] row "
+                        "\\[[success]2,'b'[/success]] has been added"
+                    ),
                 ]
             },
         ],
@@ -81,9 +83,13 @@ def _results(tmp_path: Path | None = None) -> dict:
             "Artifact Hashes": [
                 {
                     "new_file_hashes": {"/data/data/x/file_2.txt": "0" * 32},
-                    "changed_file_hashes(old,new)": {"/data/data/x/a.db": ["1" * 32, "2" * 32]},
+                    "changed_file_hashes(old,new)": {
+                        "/data/data/x/a.db": ["1" * 32, "2" * 32]
+                    },
                     "new_file_hashes_sha256": {"/data/data/x/file_2.txt": "a" * 64},
-                    "changed_file_hashes_sha256(old,new)": {"/data/data/x/a.db": ["b" * 64, "c" * 64]},
+                    "changed_file_hashes_sha256(old,new)": {
+                        "/data/data/x/a.db": ["b" * 64, "c" * 64]
+                    },
                 }
             ],
             "APK Hashes": [["com.example: " + "d" * 32]],
@@ -238,7 +244,9 @@ class TestMetadata:
         assert settings["analysis"]["hash_files"] is True
 
     def test_redact_secret_keys(self):
-        assert run_report._redact({"api_key": "x", "n": 1, "nested": {"token": "t"}}) == {
+        assert run_report._redact(
+            {"api_key": "x", "n": 1, "nested": {"token": "t"}}
+        ) == {
             "api_key": "<redacted>",
             "n": 1,
             "nested": {"token": "<redacted>"},
@@ -289,12 +297,21 @@ class TestManifest:
         manifest = json.loads(info.manifest_path.read_text())
         paths = {f["path"]: f for f in manifest["files"]}
         assert set(paths) == {"raw/network_trace_pull/trace.pcap", "sandroid.json"}
-        assert paths["raw/network_trace_pull/trace.pcap"]["sha256"] == hashlib.sha256(b"pcap").hexdigest()
-        assert paths["raw/network_trace_pull/trace.pcap"]["md5"] == hashlib.md5(b"pcap").hexdigest()
+        assert (
+            paths["raw/network_trace_pull/trace.pcap"]["sha256"]
+            == hashlib.sha256(b"pcap").hexdigest()
+        )
+        assert (
+            paths["raw/network_trace_pull/trace.pcap"]["md5"]
+            == hashlib.md5(b"pcap").hexdigest()
+        )
         assert manifest["excluded"][0]["path"] == "sandroid.log"
         sums = info.sha256sums_path.read_text().splitlines()
         assert any(line.endswith("  manifest.json") for line in sums)
-        assert info.sha256sums_sha256 == hashlib.sha256(info.sha256sums_path.read_bytes()).hexdigest()
+        assert (
+            info.sha256sums_sha256
+            == hashlib.sha256(info.sha256sums_path.read_bytes()).hexdigest()
+        )
         assert info.sha256sums_sha256 in caplog.text
 
         check = run_report.verify_hash_manifest(tmp_path)
@@ -345,7 +362,9 @@ class TestServiceHashing:
         md5 = lambda b: hashlib.md5(b).hexdigest()  # noqa: E731
         sha = lambda b: hashlib.sha256(b).hexdigest()  # noqa: E731
         assert h["new_file_hashes"] == {"/data/data/p/files/new.txt": md5(b"new")}
-        assert h["new_file_hashes_sha256"] == {"/data/data/p/files/new.txt": sha(b"new")}
+        assert h["new_file_hashes_sha256"] == {
+            "/data/data/p/files/new.txt": sha(b"new")
+        }
         assert h["changed_file_hashes(old,new)"] == {
             "/data/data/p/db/a.db": [md5(b"old"), md5(b"cur")],
             "/data/data/p/db/b.db": ["n/a", md5(b"only-new")],
@@ -372,7 +391,9 @@ class TestServiceHashing:
         svc = _service()
         svc._get_adb = lambda: adb
         result = svc.pull_and_hash_apks()
-        assert result["apk_hashes"] == [f"com.example: {hashlib.md5(b'APKDATA').hexdigest()}"]
+        assert result["apk_hashes"] == [
+            f"com.example: {hashlib.md5(b'APKDATA').hexdigest()}"
+        ]
         assert result["apk_hashes_sha256"] == [
             f"com.example: {hashlib.sha256(b'APKDATA').hexdigest()}"
         ]
@@ -508,7 +529,9 @@ class TestPdf:
         ]
         many_lines = [f"Updated attribute: /root/pkg[{i}] to 'x'" for i in range(260)]
         data["Changed Files"] = [
-            {"/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db": blob_lines},
+            {
+                "/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db": blob_lines
+            },
             {"/data/data/org.wikipedia/databases/wikipedia.db": wiki_lines},
             {"/data/system/users/0/package-restrictions.xml": many_lines},
         ]
@@ -529,7 +552,9 @@ class TestPdf:
         assert "60 more line(s) not shown — see sandroid.json / raw/" in texts
 
     def test_cell_paragraph_height_is_bounded(self):
-        style = pdf_report.ParagraphStyle("t", fontName="Helvetica", fontSize=7.5, leading=9.5)
+        style = pdf_report.ParagraphStyle(
+            "t", fontName="Helvetica", fontSize=7.5, leading=9.5
+        )
         para = pdf_report.bounded_lines_paragraph(["word " * 4000] * 30, style, 260)
         assert para.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT
         cells = pdf_report.split_lines_into_cells(["y " * 300] * 300, style, 260)
@@ -606,7 +631,10 @@ class TestFinalize:
         assert meta["mode"] == "test"
         assert outcome.pdf is not None
         assert outcome.pdf.exists()
-        listed = {f["path"] for f in json.loads(outcome.manifest.manifest_path.read_text())["files"]}
+        listed = {
+            f["path"]
+            for f in json.loads(outcome.manifest.manifest_path.read_text())["files"]
+        }
         assert {"sandroid.json", run_report.DEFAULT_PDF_NAME, "timeline.png"} <= listed
         assert run_report.verify_hash_manifest(tmp_path).ok
 
@@ -708,7 +736,10 @@ class TestFinalize:
         assert res.exit_code == 0, res.output
         assert (tmp_path / run_report.DEFAULT_PDF_NAME).exists()
         assert (tmp_path / "SHA256SUMS").exists()
-        assert "Report regeneration requested" in (tmp_path / "sandroid_report.log").read_text()
+        assert (
+            "Report regeneration requested"
+            in (tmp_path / "sandroid_report.log").read_text()
+        )
 
         res = CliRunner().invoke(main, ["--report-from", str(tmp_path)])
         assert res.exit_code == 0, res.output

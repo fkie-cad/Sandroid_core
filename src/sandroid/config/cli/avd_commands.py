@@ -716,7 +716,9 @@ def _start_avd(
         # Guest Vulkan off in every mode: SwiftShader Vulkan leaks host memory
         # on each snapshot load.
         if headless:
-            cmd.extend(["-no-window", "-no-boot-anim", *emulator_launch_args(headless=True)])
+            cmd.extend(
+                ["-no-window", "-no-boot-anim", *emulator_launch_args(headless=True)]
+            )
         else:
             cmd.extend(emulator_launch_args())
 

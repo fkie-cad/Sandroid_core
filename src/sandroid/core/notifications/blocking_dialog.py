@@ -287,9 +287,7 @@ class BlockingDialogService:
                 full_message = message
                 if action_hint:
                     full_message += f"\n\n{action_hint}"
-                level = (
-                    dialog_type if dialog_type in ("warning", "error") else "info"
-                )
+                level = dialog_type if dialog_type in ("warning", "error") else "info"
                 if threading.current_thread() is threading.main_thread():
                     # On the UI thread a synchronous bus request would block
                     # the event loop waiting for its own modal -- show it
