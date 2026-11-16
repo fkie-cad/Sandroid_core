@@ -152,6 +152,15 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
                     error="User cancelled configuration or startup error occurred",
                 )
 
+            if getattr(fritap, "target_gone", None):
+                # The target died while start() returned (attach crash):
+                # friTap already stopped itself -- don't register a dead task.
+                return CommandResult(
+                    success=False,
+                    message=f"FriTap target is gone ({fritap.target_gone})",
+                    error=str(fritap.target_gone),
+                )
+
             # Register with task_service
             task_service = ctx.task_service or get_task_service()
             try:
