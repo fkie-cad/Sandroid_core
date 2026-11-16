@@ -206,6 +206,28 @@ class RecordingController:
         """Default logging when no callback provided."""
         logger.info(message)
 
+    def _ui(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Run a UI callback on the main thread; never raise.
+
+        ``App.call_from_thread`` re-raises whatever the callback raised and
+        raises itself once the app has stopped (crash or quit). On the
+        playback worker that used to abort the thread before the run was
+        persisted, so a UI problem lost the analysis results (P2-H1). UI
+        updates are best-effort; persistence must never depend on them.
+        """
+        try:
+            self._call_from_thread(fn, *args)
+        except Exception:
+            logger.debug("UI update %r failed (ignored)", fn, exc_info=True)
+
+    @staticmethod
+    def _guarded(fn: Callable[..., Any], *args: Any) -> None:
+        """Call ``fn(*args)`` directly, logging instead of raising."""
+        try:
+            fn(*args)
+        except Exception:
+            logger.debug("Callback %r failed (ignored)", fn, exc_info=True)
+
     def _get_toolbox(self) -> Any:
         """Get Toolbox reference."""
         if self._toolbox:
@@ -409,15 +431,15 @@ class RecordingController:
         self._current_noise_filter = noise_filter
 
         if self._suppress_disconnect_guard:
-            self._call_from_thread(self._suppress_disconnect_guard, True)
+            self._ui(self._suppress_disconnect_guard, True)
         try:
             self._get_toolbox().create_snapshot(b"tmp")
         except Exception as e:
             if self._suppress_disconnect_guard:
-                self._call_from_thread(self._suppress_disconnect_guard, False)
+                self._ui(self._suppress_disconnect_guard, False)
             return {"success": False, "message": f"Failed to create snapshot: {e}"}
         if self._suppress_disconnect_guard:
-            self._call_from_thread(self._suppress_disconnect_guard, False)
+            self._ui(self._suppress_disconnect_guard, False)
 
         from sandroid.tui.utils.recording_wrapper import RecordingWrapper
 
@@ -432,8 +454,8 @@ class RecordingController:
             stop_callback=wrapper.stop,
         )
         if self._set_recording_indicator:
-            self._call_from_thread(self._set_recording_indicator, True)
-        self._call_from_thread(
+            self._ui(self._set_recording_indicator, True)
+        self._ui(
             self._log_info,
             f"[AI] Recording '{self._current_recording_label}' started",
         )
@@ -462,8 +484,8 @@ class RecordingController:
         duration = wrapper.elapsed_seconds if wrapper else 0
 
         if self._set_recording_indicator:
-            self._call_from_thread(self._set_recording_indicator, False)
-        self._call_from_thread(
+            self._ui(self._set_recording_indicator, False)
+        self._ui(
             self._log_success,
             f"[AI] Recording stopped: {event_count} events, {duration}s",
         )
@@ -699,12 +721,12 @@ class RecordingController:
 
             task_service.stop("monitor")
 
-            self._call_from_thread(
+            self._ui(
                 self._log_warning,
                 "monitor stopped — won't survive Play's snapshot revert.",
             )
             if self._on_monitor_stopped_for_playback:
-                self._call_from_thread(self._on_monitor_stopped_for_playback)
+                self._ui(self._on_monitor_stopped_for_playback)
 
             return config
         except Exception as e:
@@ -828,9 +850,9 @@ class RecordingController:
                 # idempotent when the matching arm never ran.
                 try:
                     if self._set_replay_indicator:
-                        self._call_from_thread(self._set_replay_indicator, True)
+                        self._ui(self._set_replay_indicator, True)
                     if self._suppress_disconnect_guard:
-                        self._suppress_disconnect_guard(True)
+                        self._guarded(self._suppress_disconnect_guard, True)
                     result = AnalysisEngine(
                         config,
                         progress=self._emit_progress,
@@ -844,12 +866,12 @@ class RecordingController:
                     error = result.error
                 finally:
                     if self._suppress_disconnect_guard:
-                        self._suppress_disconnect_guard(False)
+                        self._guarded(self._suppress_disconnect_guard, False)
                     if self._set_replay_indicator:
-                        self._call_from_thread(self._set_replay_indicator, False)
+                        self._ui(self._set_replay_indicator, False)
             except Exception as e:
                 error = f"Playback failed: {e}"
-                self._call_from_thread(self._log_error, error)
+                self._ui(self._log_error, error)
         finally:
             self._is_replaying = False
             self._release_replay_world_lease()
@@ -857,19 +879,26 @@ class RecordingController:
         # Persist regardless of a mid-pipeline error, so a failed/partial run
         # is still visible in Diffs (with its error message) instead of
         # silently vanishing — this is exactly why RunRecord.error exists.
-        self._call_from_thread(self._log_info, "Saving results...")
-        saved_run_id = self._persist_run(
-            run_id=run_id,
-            result=result,
-            recording_path=abs_rec,
-            bundle_dir=str(run_bundle.bundle_dir(run_id)),
-            device_name=device_name,
-            recorded_at=recorded_at,
-            error=error,
-        )
+        # Every UI touch goes through _ui(), which never raises, so a dead or
+        # broken UI can no longer skip this step (P2-H1).
+        self._ui(self._log_info, "Saving results...")
+        try:
+            saved_run_id = self._persist_run(
+                run_id=run_id,
+                result=result,
+                recording_path=abs_rec,
+                bundle_dir=str(run_bundle.bundle_dir(run_id)),
+                device_name=device_name,
+                recorded_at=recorded_at,
+                error=error,
+            )
+        except Exception as e:
+            logger.exception("Persisting run %s failed", run_id)
+            self._ui(self._log_error, f"Could not save run {run_id}: {e}")
+            saved_run_id = None
 
         if error is None and result is not None:
-            self._call_from_thread(
+            self._ui(
                 self._log_success,
                 f"Analysis complete: {len(result.changed_files)} changed, "
                 f"{len(result.new_files)} new, "
@@ -877,7 +906,7 @@ class RecordingController:
             )
 
         if saved_run_id and self._on_run_saved:
-            self._call_from_thread(self._on_run_saved, saved_run_id)
+            self._ui(self._on_run_saved, saved_run_id)
 
         # Offer to resume monitoring once Play is fully done — regardless of
         # success/error above, since resuming monitor is orthogonal to whether
@@ -886,7 +915,7 @@ class RecordingController:
         # when monitor wasn't running to begin with, and in the true-no-op
         # case covered by _stop_monitor_before_revert).
         if monitor_config_for_resume is not None and self._on_monitor_resume_available:
-            self._call_from_thread(
+            self._ui(
                 self._on_monitor_resume_available, monitor_config_for_resume
             )
 
@@ -903,7 +932,7 @@ class RecordingController:
         line = f"{label}: {message}" if message else label
         if not line:
             return
-        self._call_from_thread(self._log_info, line)
+        self._ui(self._log_info, line)
 
     def _persist_run(
         self,
@@ -972,7 +1001,7 @@ class RecordingController:
         try:
             run_bundle.write_manifest(record)
         except Exception as e:
-            self._call_from_thread(
+            self._ui(
                 self._log_warning,
                 f"Could not save run history: {e}",
             )
@@ -1012,7 +1041,7 @@ class RecordingController:
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
-            self._call_from_thread(
+            self._ui(
                 self._log_info,
                 f"[warning]Could not save legacy results summary: {e}[/warning]",
             )
@@ -1046,14 +1075,14 @@ class RecordingController:
                 generate_pdf=generate_pdf,
             )
             if outcome.pdf is not None:
-                self._call_from_thread(self._log_success, f"PDF report: {outcome.pdf}")
+                self._ui(self._log_success, f"PDF report: {outcome.pdf}")
             for err in outcome.errors:
-                self._call_from_thread(
+                self._ui(
                     self._log_warning, f"Report finalisation issue: {err}"
                 )
         except Exception as e:
             logger.exception("finalize_run failed")
-            self._call_from_thread(
+            self._ui(
                 self._log_warning, f"Could not write run report files: {e}"
             )
 

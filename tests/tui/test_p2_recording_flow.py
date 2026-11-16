@@ -97,3 +97,60 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
 
         assert app._exception is None
         assert len(view.query(DiffView)) == 1
+
+
+# ---------------------------------------------------------------------------
+# P2-H1: persistence must not depend on UI updates
+# ---------------------------------------------------------------------------
+
+
+def _playback_controller(monkeypatch, tmp_path, **overrides):
+    """A RecordingController wired to the lightweight fakes of the monitor
+    safety-net tests (no device, engine pipeline neutered).
+    """
+    # tests/ is not a package; pytest puts this directory on sys.path.
+    from test_recording_controller_monitor_safety import _make_controller
+
+    return _make_controller(monkeypatch, tmp_path, **overrides)
+
+
+def test_run_is_persisted_even_when_every_ui_update_fails(monkeypatch, tmp_path):
+    """When the TUI died (or a UI callback raised), call_from_thread raises on
+    the playback worker. That used to abort the worker before _persist_run,
+    so run.json, sandroid.json and the index entry were never written.
+    """
+
+    def broken_call_from_thread(fn, *args):
+        raise RuntimeError("App is not running")
+
+    saved: list[str] = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch,
+        tmp_path,
+        call_from_thread=broken_call_from_thread,
+        on_run_saved=saved.append,
+        set_replay_indicator=lambda active: None,
+    )
+
+    controller._run_playback_analysis()
+
+    runs = list((tmp_path / "runs").glob("*/run.json"))
+    assert len(runs) == 1
+    index = run_history.load_index()
+    assert [e["run_id"] for e in index] == [runs[0].parent.name]
+    assert (tmp_path / "sandroid.json").exists()
+    assert controller.is_replaying is False
+
+
+def test_disconnect_guard_failure_does_not_abort_the_replay(monkeypatch, tmp_path):
+    def broken_guard(active: bool) -> None:
+        raise RuntimeError("no app")
+
+    controller, toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, suppress_disconnect_guard=broken_guard
+    )
+    controller._run_playback_analysis()
+    assert toolbox.load_snapshot_calls
+    index = run_history.load_index()
+    assert len(index) == 1
+    assert not index[0].get("error")
