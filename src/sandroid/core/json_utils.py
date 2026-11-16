@@ -26,12 +26,19 @@ def json_encoder(obj):
     Returns:
         A JSON-serializable representation of *obj*.
     """
-    # Handle Pydantic models (v2)
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    # Handle Pydantic models (v1)
-    if hasattr(obj, "dict"):
-        return obj.dict()
+    # Handle Pydantic models (v2, then v1). Only accept a real dict back:
+    # duck-typed objects (e.g. mocks) return another non-serialisable object
+    # from these methods, which would make json recurse until memory runs out.
+    for method in ("model_dump", "dict"):
+        dump = getattr(obj, method, None)
+        if callable(dump):
+            try:
+                dumped = dump()
+            except Exception:  # noqa: BLE001 - fall through to other strategies
+                continue
+            if isinstance(dumped, dict):
+                return dumped
+            return str(obj)
     # Handle dataclasses
     if is_dataclass(obj) and not isinstance(obj, type):
         return asdict(obj)

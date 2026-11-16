@@ -532,11 +532,16 @@ def test_playback_persists_full_results_json(tmp_path, monkeypatch) -> None:
         recorded_at="t0",
         error=None,
     )
-    for folder in (session, bundle):
-        data = json.loads((folder / "sandroid.json").read_text())
-        assert data["Processes"] == ["yes"]
-        assert data["Network IP:Port (send/recv)"][0].startswith("192.102.162.236")
-        assert "Other Data" in data
+    # Full results (+ run metadata) live in the run bundle ...
+    data = json.loads((bundle / "sandroid.json").read_text())
+    assert data["Processes"] == ["yes"]
+    assert data["Network IP:Port (send/recv)"][0].startswith("192.102.162.236")
+    assert "Other Data" in data
+    assert "Run Metadata" in data
+    # ... and the session-level sandroid.json points at them.
+    pointer = json.loads((session / "sandroid.json").read_text())
+    assert pointer["Run ID"] == "r1"
+    assert pointer["Results"] == str(bundle / "sandroid.json")
 
 
 def test_dry_run_deletions_are_subtracted(monkeypatch) -> None:
@@ -618,3 +623,13 @@ def test_xml_beautify_handles_three_arg_update_text() -> None:
     assert "Unknown" not in out
     assert 'Updated text: /root/Element[2] to "1794842548"' in out
     assert '(was "1")' in out
+
+
+def test_json_encoder_does_not_recurse_on_duck_typed_objects() -> None:
+    """Mocks answer ``model_dump`` with another mock; must not recurse forever."""
+    import json
+
+    from sandroid.core.json_utils import json_encoder
+
+    out = json.loads(json.dumps({"cfg": MagicMock()}, default=json_encoder))
+    assert isinstance(out["cfg"], str)
