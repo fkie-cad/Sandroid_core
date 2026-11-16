@@ -10,8 +10,6 @@ from __future__ import annotations
 from logging import getLogger
 from typing import Any
 
-from sandroid.core.events.events import FileChanged
-
 from .base_di import DataGatherBase
 from .filters import filter_noise_files, intersect_file_lists
 
@@ -68,7 +66,7 @@ class DeletedFiles(DataGatherBase):
         This method pulls the entire filesystem and compares it to the baseline
         to identify deleted files.
         """
-        logger.info(
+        logger.debug(
             "Gathering information on deleted files, pulling entire filesystem and comparing to baseline"
         )
 
@@ -82,15 +80,19 @@ class DeletedFiles(DataGatherBase):
         for file in baseline:  # Get deleted files
             if file not in allFiles:
                 deletedFiles.append(file)
-                # Publish event for each deleted file
-                FileChanged(
-                    file_path=file, change_type="deleted", source="deletedfiles"
-                ).publish()
+                # Only a candidate: most vanish from the result after the
+                # cross-run intersection and noise subtraction, so keep the
+                # per-file detail at DEBUG (the engine logs the final count).
+                logger.debug("Deleted-file candidate: %s", file)
         if self._get_toolbox().is_dry_run():
             self.noise_deleted_files.update(deletedFiles)
         else:
             self.deletedFileListList.append(deletedFiles)
-        logger.debug(str(len(deletedFiles)) + " Files were detected as deleted")
+        logger.debug(
+            "%d deleted-file candidate(s) in this %s (before noise filtering)",
+            len(deletedFiles),
+            "dry run" if self._get_toolbox().is_dry_run() else "run",
+        )
 
     def return_data(self) -> dict[str, list[str]]:
         """Return processed data on deleted files.
@@ -138,4 +140,4 @@ class DeletedFiles(DataGatherBase):
             preserve_sqlite_xml=True,
         )
         files_from_all_pulls = self._exclude_whitelist(files_from_all_pulls)
-        return files_from_all_pulls
+        return self._apply_system_noise(files_from_all_pulls)

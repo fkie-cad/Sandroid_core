@@ -114,6 +114,11 @@ class RunConfig:
         raw_results_path: Raw-results dir for the run (bundle-local; env-pinned).
         device_name: Active device name captured at run start (device-stability
             guard).
+        system_noise_filter: Hide the curated system/GMS noise paths
+            (``None`` -> ``analysis.system_noise_filter``).
+        noise_patterns: Extra noise globs (``None`` -> ``analysis.noise_patterns``).
+        protected_packages: Packages never filtered as noise, in addition to
+            the spotlight app (``None`` -> ``analysis.protected_packages``).
     """
 
     number_of_runs: int = 2
@@ -132,6 +137,37 @@ class RunConfig:
     results_path: str = ""
     raw_results_path: str = ""
     device_name: str = ""
+    system_noise_filter: bool | None = None
+    noise_patterns: list[str] | None = None
+    protected_packages: list[str] | None = None
+
+    def noise_settings(self) -> tuple[bool, list[str], list[str]]:
+        """Resolve ``(enabled, extra_patterns, protected_packages)``.
+
+        Fields left at ``None`` follow the user's ``[analysis]`` config; if
+        that cannot be loaded the filter stays on with no extras.
+        """
+        enabled, patterns, protected = True, [], []
+        try:
+            from sandroid.config import get_config
+
+            cfg = get_config()
+            analysis = cfg.analysis
+            enabled = bool(getattr(analysis, "system_noise_filter", True))
+            patterns = list(getattr(analysis, "noise_patterns", None) or [])
+            protected = list(getattr(analysis, "protected_packages", None) or [])
+            trig_pkg = getattr(getattr(cfg, "trigdroid", None), "package_name", None)
+            if isinstance(trig_pkg, str) and trig_pkg:
+                protected.append(trig_pkg)
+        except Exception:  # config is optional here
+            pass
+        if self.system_noise_filter is not None:
+            enabled = bool(self.system_noise_filter)
+        if self.noise_patterns is not None:
+            patterns = list(self.noise_patterns)
+        if self.protected_packages is not None:
+            protected = list(self.protected_packages)
+        return enabled, patterns, protected
 
     @classmethod
     def from_sandroid_config(
