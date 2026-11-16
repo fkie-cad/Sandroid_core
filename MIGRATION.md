@@ -1,12 +1,48 @@
-# Migration Guide: Sandroid Legacy to PyPI Package
+# Migration Guide
 
-This guide helps you migrate from the legacy Sandroid installation to the new PyPI-based package with modern configuration management.
+- [Upgrading from 2.0.x to 2.1](#upgrading-from-20x-to-21)
+- [Migrating from the legacy installation](#migrating-from-the-legacy-installation)
+
+## Upgrading from 2.0.x to 2.1
+
+```bash
+pip install --upgrade sandroid    # requires Python >= 3.12
+```
+
+### Breaking changes
+
+| Change | What to do |
+|---|---|
+| **Python 3.12+ required.** 3.10 and 3.11 are no longer supported (tested on 3.12 and 3.13). | Recreate your virtualenv with Python 3.12 or 3.13. |
+| **Legacy Rich menu removed** (`sandroid -i` / `--interactive`). | Use the Textual TUI (`sandroid`) or `--headless`. |
+| **`--ai` (Gemini video summarisation) removed**, together with its Gemini API-key setting. | The new AI Chat (`Ctrl+Y`, EXPERIMENTAL) talks to any OpenAI-compatible endpoint; configure it under `[ai]` (see README). |
+| **TUI views removed.** The Forensic/Malware/Security views (switched with `TAB`) are replaced by one flat action catalog (`?`); `--view` no longer has an effect. | Drop `--view` from scripts (`analysis.default_view` is ignored by the TUI). `--mode` for `--headless` is unchanged. |
+| **TUI layout redesigned**: the `Ctrl+B` bottom panel with Spotlight/Mitmproxy/Snapshots tabs became always-on tool tabs **Spotlight / Network / Snapshots / Files**; navigation uses `Shift+Arrows`. | Press `?` for the current keymap and to re-check custom bindings in `tui.keybindings`. |
+| **Record/Play moved** into **Files -> Diffs** (`r`/`p` there); results are stored as run bundles under `<results_path>/runs/<run_id>/`. | Old flat `runs/run_*.json` histories are still read. |
+| **Proxy redesign**: the on-device redirector changed from `ipt2socks` to `gost`; Device Proxy and per-app App Proxies are configured in one modal (`y`). | Nothing to migrate; the `focus.*` config keys are new (defaults work). |
+| **Config save location**: configuration is saved to `~/.config/sandroid/` again (2.0.0 could write to the platformdirs location, e.g. `~/Library/Application Support/sandroid/` on macOS). | If settings seem lost after upgrading, move that file to `~/.config/sandroid/sandroid.toml`. |
+
+### New (opt-in) features
+
+- AI Chat dock (`Ctrl+Y`) -- **EXPERIMENTAL**; sends device data to the configured LLM endpoint, so prefer a local endpoint (e.g. Ollama) and pass the key via `SANDROID_AI__API_KEY`.
+- mitmproxy integration: Device/App proxies, CA injection into the system trust store, custom addons.
+- Frida bypass suite (SSL / Root / Frida / Debug / Integrity) -- **EXPERIMENTAL**.
+- kprobe-based filesystem monitor (`tui.monitor_backend = "kprobe"`, falls back to fsmon).
+- Snapshot slots, run history, real-time device disconnect/reconnect detection.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
+
+---
+
+## Migrating from the Legacy Installation
+
+This part helps you migrate from the legacy Sandroid installation (source checkout + `./sandroid` script) to the PyPI-based package with modern configuration management.
 
 ## Overview of Changes
 
 ### What's New
 - **PyPI Installation**: Install with `pip install sandroid`
-- **Modern Configuration**: YAML/TOML/JSON configuration files with validation
+- **Modern Configuration**: TOML (default), YAML or JSON configuration files with validation
 - **XDG Base Directory Compliance**: Follows standard config file locations
 - **Environment Variables**: Full support with `SANDROID_` prefix
 - **Configuration CLI**: `sandroid-config` tool for configuration management
@@ -27,8 +63,8 @@ This guide helps you migrate from the legacy Sandroid installation to the new Py
 # Install from PyPI
 pip install sandroid
 
-# Or install with optional dependencies
-pip install sandroid[ai,dev]
+# Or install with the optional static-analysis extras
+pip install "sandroid[full]"
 
 # Initialize default configuration
 sandroid-config init
@@ -37,9 +73,10 @@ sandroid-config init
 sandroid --help
 ```
 
-### Legacy Installation (Still Supported)
+### Legacy Installation (Deprecated)
 
-The old installation method still works:
+The old installation method is deprecated, unmaintained and untested; it may
+break at any time:
 
 ```bash
 git clone <repository>
@@ -55,10 +92,11 @@ cd Sandroid_core
 Generate a default configuration file:
 
 ```bash
-# Create default config in user directory (~/.config/sandroid/sandroid.yaml)
+# Create default config in user directory (~/.config/sandroid/sandroid.toml)
 sandroid-config init
 
-# Or create in specific location
+# Or create in a specific location / format
+sandroid-config init --output ./my-config.toml
 sandroid-config init --output ./my-config.yaml --format yaml
 ```
 
@@ -74,11 +112,11 @@ android_emulator_path = "~/Android/Sdk/emulator/emulator"
 ```
 
 #### After (Modern)
-```yaml
-# ~/.config/sandroid/sandroid.yaml
-emulator:
-  device_name: Pixel_6_Pro_API_31
-  android_emulator_path: ~/Android/Sdk/emulator/emulator
+```toml
+# ~/.config/sandroid/sandroid.toml
+[emulator]
+device_name = "Pixel_6_Pro_API_31"
+android_emulator_path = "~/Android/Sdk/emulator/emulator"
 ```
 
 ### 3. Environment Variables
@@ -134,13 +172,13 @@ sandroid-config show --format json
 
 ```bash
 # Set individual values
-sandroid-config set emulator.device_name "Pixel_7_Pro_API_33"
-sandroid-config set analysis.number_of_runs 3
-sandroid-config set analysis.monitor_network true
+sandroid-config set -k emulator.device_name -v "Pixel_7_Pro_API_33"
+sandroid-config set -k analysis.number_of_runs -v 3
+sandroid-config set -k analysis.capture_network -v true
 
 # Get individual values
-sandroid-config get emulator.device_name
-sandroid-config get analysis.monitor_network
+sandroid-config get -k emulator.device_name
+sandroid-config get -k analysis.capture_network
 ```
 
 ### Validate Configuration
@@ -150,7 +188,7 @@ sandroid-config get analysis.monitor_network
 sandroid-config validate
 
 # Validate specific config file
-sandroid-config validate --config ./my-config.yaml
+sandroid-config validate --config ./my-config.toml
 ```
 
 ### Find Configuration Files
@@ -166,13 +204,13 @@ Create different configurations for different environments:
 
 ```bash
 # Create development config
-sandroid-config init --output development.yaml
-# Edit development.yaml for dev-specific settings
+sandroid-config init --output development.toml
+# Edit development.toml for dev-specific settings
 
 # Use development config
 sandroid --environment development
 # or
-sandroid --config development.yaml
+sandroid --config development.toml
 ```
 
 ## Configuration Hierarchy
@@ -190,11 +228,11 @@ Configuration values are loaded in this order (highest priority first):
 
 Sandroid looks for configuration files in these locations (in order):
 
-1. **Current directory**: `./sandroid.yaml`, `./config.yaml`, then `.toml`, `.json`
-2. **User config directory**: `~/.config/sandroid/sandroid.yaml`
-3. **System config directories**: `/etc/sandroid/sandroid.yaml`
+1. **Current directory**: `./sandroid.toml`, `./config.toml` (then `.yaml`, `.yml`, `.json`)
+2. **User config directory**: `~/.config/sandroid/sandroid.toml`
+3. **Platform config directories** (e.g. `~/Library/Application Support/sandroid/` on macOS)
 
-Supported formats: `.yaml`, `.yml`, `.toml`, `.json` (YAML preferred)
+Run `sandroid-config paths` for the exact list. Supported formats: `.toml` (default, preferred), `.yaml`, `.yml`, `.json`
 
 ## Environment Variables
 
@@ -211,13 +249,13 @@ export SANDROID_ANALYSIS__NUMBER_OF_RUNS=5
 export SANDROID_PATHS__RESULTS_PATH="/custom/results"
 ```
 
-## Docker Usage
+## Docker Usage (best effort)
 
-The Docker installation remains the same, but you can now mount config files:
+The Docker image (`docker/dockerfile`) is not tested in CI. You can mount config files:
 
 ```bash
 # Mount custom configuration
-docker run -v $(pwd)/my-config.yaml:/app/config.yaml sandroid --config /app/config.yaml
+docker run -it -v $(pwd)/my-config.toml:/sandroid/my-config.toml sandroid sandroid --config /sandroid/my-config.toml
 
 # Or use environment variables
 docker run -e SANDROID_LOG_LEVEL=DEBUG sandroid
@@ -242,10 +280,9 @@ sandroid-config show
 
 If you encounter issues with the new package:
 
-1. **Check Python version**: Requires Python 3.10+
-2. **Check dependencies**: Run `pip install -e .` in development
+1. **Check Python version**: Requires Python 3.12+
+2. **Check dependencies**: Run `pip install -e ".[dev,full]"` in development
 3. **Check configuration**: Use `sandroid-config validate`
-4. **Use legacy mode**: Fall back to `./sandroid` script if needed
 
 ### Migration Checklist
 
@@ -255,7 +292,7 @@ If you encounter issues with the new package:
 - [ ] Update environment variables to use `SANDROID_` prefix
 - [ ] Update scripts to use `sandroid` command instead of `./sandroid`
 - [ ] Test configuration: `sandroid-config validate`
-- [ ] Test analysis: `sandroid --dry-run`
+- [ ] Test the CLI: `sandroid --help`, then start the TUI with `sandroid`
 
 ## Support
 
@@ -265,4 +302,4 @@ For migration issues:
 3. Use `sandroid --help` for CLI help
 4. File issues on the project repository
 
-The legacy installation method will continue to work during the transition period.
+The legacy installation method is deprecated and will be removed in a future release.

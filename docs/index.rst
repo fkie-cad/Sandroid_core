@@ -25,14 +25,19 @@ Features
 
 🛡️ **Security Analysis**
    - Malware behavior monitoring
-   - SSL/TLS traffic interception (friTap)
+   - SSL/TLS traffic interception (friTap, mitmproxy with device/app proxies and CA injection)
+   - Frida bypass suite for SSL pinning / root / Frida / debug / integrity checks (experimental)
    - Memory dumping capabilities
    - Automated trigger execution (TrigDroid)
+
+🤖 **AI Chat (experimental)**
+   - Chat assistant driving Sandroid tools via any OpenAI-compatible endpoint
+     (prefer a local one such as Ollama -- device data is sent to it)
 
 📊 **Reporting**
    - JSON output format
    - PDF report generation
-   - AI-powered analysis summaries
+   - Persistent run history (run bundles)
    - Comprehensive logging
 
 Quick Start

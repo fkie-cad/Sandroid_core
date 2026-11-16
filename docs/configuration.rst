@@ -37,8 +37,11 @@ Configuration File Locations
 Sandroid searches for configuration files in this order:
 
 1. **Current directory**: ``./sandroid.toml``, ``./config.toml``
-2. **User config**: ``~/.config/sandroid/sandroid.toml``
-3. **System config**: ``/etc/sandroid/sandroid.toml``
+2. **User config**: ``~/.config/sandroid/sandroid.toml`` (written by ``sandroid-config init``)
+3. **Platform config directories** (e.g. ``~/Library/Application Support/sandroid/`` on macOS)
+
+For each directory ``.toml``, ``.yaml``, ``.yml`` and ``.json`` are tried in
+that order; TOML is the default and recommended format.
 
 **Check Configuration Paths:**
 
@@ -102,19 +105,22 @@ Configuration Formats
 Configuration Sections
 ----------------------
 
-Core Settings
-~~~~~~~~~~~~~
+The reference below lists every key of the main sections with its default
+value (generated from ``sandroid/config/schema.py``). Keys shown as
+``<not set>`` have no default (paths are auto-detected). ``sandroid-config show``
+prints your effective configuration.
+
+Top-level keys:
 
 .. code-block:: toml
 
-   # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-   log_level = "INFO"
-
-   # Output file for analysis results
+   log_level = "INFO"              # DEBUG, INFO, WARNING, ERROR, CRITICAL
    output_file = "sandroid.json"
+   # whitelist_file = "whitelist.txt"
+   environment = "production"
 
-Emulator Configuration
-~~~~~~~~~~~~~~~~~~~~~~
+Emulator (``[emulator]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: toml
 
@@ -122,138 +128,371 @@ Emulator Configuration
    # Android Virtual Device name
    device_name = "Pixel_6_Pro_API_31"
 
-   # Path to Android emulator binary
-   android_emulator_path = "~/Android/Sdk/emulator/emulator"
+   # Path to Android emulator executable (auto-detected if not provided)
+   # android_emulator_path = <not set>
 
-   # Path to AVD manager
-   avd_manager_path = "~/Android/Sdk/cmdline-tools/latest/bin/avdmanager"
+   # Path to Android SDK (auto-detected if not provided)
+   # sdk_path = <not set>
 
-Frida Configuration
+   # Path to ADB executable (auto-detected if not provided)
+   # adb_path = <not set>
+
+   # Android AVD home directory (auto-detected if not provided)
+   # avd_home = <not set>
+
+   # AVD name to use for Sandroid analysis
+   # selected_avd = <not set>
+
+   # Start AVD in headless mode (no UI)
+   avd_headless = false
+
+   # Automatically start AVD when needed
+   avd_auto_start = false
+
+Frida (``[frida]``)
 ~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: toml
 
    [frida]
-   # Frida server version (use "latest" for auto-download)
-   server_version = "latest"
+   # Automatically start Frida server if not running
+   server_auto_start = true
 
-   # Installation path on device
-   install_path = "/data/local/tmp/"
+   # Frida server port
+   server_port = 27042
 
-   # Connection timeout (seconds)
-   timeout = 30
+   # Timeout for spawning processes (seconds)
+   spawn_timeout = 30
 
-Analysis Settings
-~~~~~~~~~~~~~~~~~
+   # Frida-server version to install. 'host' matches the installed frida Python
+   # package (frida.__version__), 'latest' grabs the newest from GitHub, or
+   # specify an explicit version like '17.9.11'. Legacy 'auto' is accepted as
+   # an alias for 'host'.
+   server_version = "host"
 
-.. code-block:: toml
+   # Max spawn-freeze attempts before failing loud (spawn-reliability ladder)
+   spawn_attempts = 4
 
-   [analysis]
-   # Number of analysis runs (minimum 2 for comparison)
-   number_of_runs = 2
+   # Seconds to poll the spawned PID for liveness after resume (crash-relaunch
+   # detection)
+   spawn_splash_window = 5.0
 
-   # Capture running processes
-   capture_processes = true
+   # Seconds to sleep between spawn re-attempts
+   spawn_retry_sleep = 0.6
 
-   # Capture network traffic
-   capture_network = false
-
-   # Perform full filesystem scan for deleted files
-   show_deleted_files = false
-
-   # Calculate MD5 hashes for changed/new files
-   calculate_hashes = false
-
-   # List all installed APKs
-   list_apks = false
-
-   # Skip noise filtering (comprehensive analysis)
-   avoid_noise_filter = false
-
-Network Configuration
-~~~~~~~~~~~~~~~~~~~~~
-
-.. code-block:: toml
-
-   [network]
-   # Enable network traffic capture
-   capture_enabled = false
-
-   # HTTP proxy configuration
-   proxy_host = "127.0.0.1"
-   proxy_port = 8080
-
-   # Network interface for monitoring
-   interface = "eth0"
-
-Path Configuration
-~~~~~~~~~~~~~~~~~~
+Paths (``[paths]``)
+~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: toml
 
    [paths]
-   # Main results directory
-   results_path = "./results/"
+   # Directory for analysis results
+   results_path = "results"
 
-   # Raw analysis data
-   raw_results_path = "./results/raw/"
+   # Directory for raw analysis data
+   raw_results_path = "results/raw"
 
-   # Temporary files
-   temp_path = "/tmp/sandroid/"
+   # Directory for temporary files
+   temp_path = "/var/folders/yy/5j4pjh1x5k35lpzkcxst2llnvrp4kt/T/sandroid"
 
-   # Cache directory
-   cache_path = "~/.cache/sandroid/"
+   # Directory for cache files
+   cache_path = "~/.cache/sandroid"
 
-   # Log files location
-   log_path = "~/.cache/sandroid/logs/"
+Analysis (``[analysis]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-TrigDroid Integration
+.. code-block:: toml
+
+   [analysis]
+   # Minimum number of analysis runs
+   number_of_runs = 2
+
+   # Disable strong noise filtering (dry run)
+   avoid_strong_noise_filter = false
+
+   # Screenshot interval in seconds
+   # screenshot_interval = <not set>
+
+   # Generate MD5 hashes of changed/new files
+   hash_files = false
+
+   # Capture active processes during analysis run
+   capture_processes = true
+
+   # Capture listening sockets during analysis run
+   capture_sockets = false
+
+   # Capture network traffic during analysis run
+   capture_network = false
+
+   # Perform full filesystem checks for deleted files
+   show_deleted_files = false
+
+   # List all APKs and their hashes
+   list_apks = false
+
+   # Simulate UMTS/3G connection speeds
+   degrade_network = false
+
+   # Default view mode for interactive menu (forensic, malware, or security)
+   default_view = "forensic"
+
+Report (``[report]``)
 ~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: toml
 
-   [trigdroid]
-   # Enable TrigDroid malware triggers
-   enabled = false
-
-   # Trigger execution timeout (seconds)
-   timeout = 300
-
-   # Trigger categories to execute
-   trigger_sets = ["network", "filesystem", "permissions"]
-
-Report Generation
-~~~~~~~~~~~~~~~~~
-
-.. code-block:: toml
-
    [report]
-   # Generate PDF reports
+   # Generate PDF report
    generate_pdf = false
 
    # Include screenshots in reports
    include_screenshots = true
 
-   # Include AI analysis in reports
-   include_ai_analysis = true
+   # Custom report template path
+   # template_path = <not set>
 
-   # Report template
-   template = "default"
-
-Feature Configuration
-~~~~~~~~~~~~~~~~~~~~~
+TUI (``[tui]``)
+~~~~~~~~~~~~~~~
 
 .. code-block:: toml
 
-   [features]
-   # Screenshot interval (0 = disabled, >0 = seconds between screenshots)
-   screenshot_interval = 0
+   [tui]
+   # Path to custom CSS file for TUI styling. If not set, uses default styles.
+   # custom_css_path = <not set>
 
-   # Enable action recording
-   recording_enabled = false
+   # TUI theme: default, dark, light, high_contrast, cyberpunk, nord, dracula,
+   # solarized
+   theme = "default"
 
-   # Maximum screenshot resolution
-   max_screenshot_size = "1920x1080"
+   # Show current theme name in status bar. Disabled by default.
+   show_theme_indicator = false
+
+   # Custom logo color (hex, e.g., '#00ff00'). Overrides theme's logo color.
+   # logo_color = <not set>
+
+   # Custom 'Sandroid' text color in logo (hex, e.g., '#ffffff'). Overrides
+   # theme.
+   # logo_text_color = <not set>
+
+   # If True, Ctrl+C exits immediately. If False (default), shows quit
+   # confirmation dialog.
+   immediate_exit_on_ctrl_c = false
+
+   # Monitor output buffer flush interval in seconds. Lower values = faster
+   # display, higher CPU. 0 = near-realtime.
+   monitor_buffer_interval = 0.15
+
+   # Maximum lines kept in Monitor observer log. Higher values use more memory
+   # but allow scrolling back further.
+   monitor_max_lines = 500
+
+   # Per-category Monitor visibility: 'always', 'verbose', or 'never'.
+   # Categories: create, modify, delete, rename, attrs, noise (monitor
+   # OPEN/CLOSE).
+   monitor_event_visibility = { create = "always", modify = "always", delete = "always", rename = "always", attrs = "always", noise = "verbose" }
+
+   # Filesystem monitor backend: 'kprobe' (kernel tracefs kprobes; prefer
+   # kprobe, auto-fall-back to fsmon when the kernel lacks support) or 'fsmon'
+   # (the fsmon binary).
+   monitor_backend = "kprobe"
+
+   # Override keys: maps a binding id (the MenuController action name) to a key
+   # string, e.g. {'proxy': 'ctrl+y'}. Edited by the in-app ? keybinding editor
+   # or by hand.
+   keybindings = {}
+
+   # Per-AVD snapshot slot memory: maps an AVD name to a slot table
+   # {slot_number: snapshot_tag}, e.g. {'Pixel_6_API_33': {'1': 'clean-boot',
+   # '3': 'post-install'}}. Edited via the Snapshots tab (assign/save to slot).
+   snapshot_slots = {}
+
+   # Save to an occupied slot: 'ask' (prompt), 'overwrite' (re-save in place),
+   # 'fresh' (new timestamped snapshot + re-point).
+   snapshot_save_mode = "ask"
+
+mitmproxy (``[mitmproxy]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   [mitmproxy]
+   # Listen port for the mitmproxy HTTP proxy
+   proxy_port = 8080
+
+   # Port for the mitmweb web UI
+   web_port = 8081
+
+   # Bind host for the mitmweb web UI
+   web_host = "127.0.0.1"
+
+   # Directory scanned for user-supplied mitmproxy addons
+   addons_dir = "~/.config/sandroid/mitm_addons"
+
+   # Resolved absolute path strings of addons to load into mitmweb
+   enabled_addons = []
+
+   # DEPRECATED: vestigial mode field. The proxy UI now derives display and
+   # control from ground truth (device http_proxy + live app-proxy lanes), not
+   # this stored mode. Kept (with its validator) so existing configs validate;
+   # no longer drives behavior.
+   capture_scope = "none"
+
+   # Base host SOCKS5 port for our-mitmproxy app-proxy lanes
+   socks_base = 8082
+
+   # Number of app-proxy lanes (each = 1 on-device redirector + 1 mitmproxy
+   # SOCKS port for our-mitmproxy lanes)
+   focus_lanes = 5
+
+   # Write every captured flow to a structured, queryable log under the
+   # session's raw-results directory (mitm_flows/), so the AI chat's
+   # get_captured_flows/get_flow_detail tools can read what was intercepted.
+   # Disable to skip this bookkeeping entirely.
+   flow_log_enabled = true
+
+   # Maximum number of flow records kept in the structured flow log. Once
+   # exceeded, the oldest records (and their detail files) are dropped to make
+   # room for new ones.
+   max_stored_flows = 5000
+
+   # Maximum request/response body size, in bytes, captured per side into a
+   # flow's detail file. Capped once at capture time -- raising this later
+   # cannot recover bodies already truncated under a smaller value.
+   max_captured_body_bytes = 65536
+
+App Proxies (``[focus]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   [focus]
+   # Base on-device REDIRECT port for app-proxy lanes
+   redirect_base = 60080
+
+   # On-device path for the gost binary
+   gost_binary_dst = "/data/local/tmp/gost"
+
+   # Force the host IP our-mitmproxy lanes forward to (blank = auto, 10.0.2.2
+   # on emulator)
+   host_ip_override = ""
+
+   # REJECT UDP/443 (QUIC) for proxied apps so they fall back to interceptable
+   # TCP/TLS. Off = QUIC bypasses the app proxy.
+   block_quic = true
+
+   # gost release tag whose assets are downloaded
+   gost_version = "v3.2.6"
+
+   # Path to the lane→app sidecar map (consumers must expanduser() it)
+   sidecar_path = "~/.cache/sandroid/focus_lanes.json"
+
+   # Per-ABI gost download URLs and sha256 checksums. NOTE: assets are .tar.gz
+   # archives; the sha256 is of the EXTRACTED `gost` ELF, not the tarball (the
+   # download path extracts before checksumming).
+   # gost_assets = <not set>
+
+   # DEPRECATED (ipt2socks): superseded by gost_binary_dst
+   binary_dst = "/data/local/tmp/ipt2socks"
+
+   # DEPRECATED (ipt2socks): superseded by gost_version
+   ipt2socks_version = "v1.1.4"
+
+   # DEPRECATED (ipt2socks): superseded by gost_assets
+   ipt2socks_assets = {}
+
+MVT forensic scan (``[mvt]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   [mvt]
+   # Enable MVT forensic evidence scanning
+   enabled = false
+
+   # Path to STIX2 IOC file or directory containing IOC files
+   # ioc_path = <not set>
+
+   # URL to download STIX2 IOC files (e.g., from Amnesty International)
+   # ioc_url = <not set>
+
+   # Automatically update IOC files from URL before scanning
+   auto_update_iocs = false
+
+   # Scan SMS messages for IOC matches
+   scan_sms = true
+
+   # Scan call logs for IOC matches
+   scan_calls = true
+
+   # Scan installed applications for IOC matches
+   scan_apps = true
+
+   # Scan filesystem for IOC matches
+   scan_files = true
+
+   # Output format for MVT results (json, csv, or both)
+   output_format = "json"
+
+   # Remember IOC source preference (skip choice modal)
+   remember_ioc_choice = false
+
+AI Chat (``[ai]``) -- EXPERIMENTAL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   [ai]
+   # OpenAI-compatible chat-completions base URL
+   # base_url = <not set>
+
+   # API key for the endpoint -- prefer the SANDROID_AI__API_KEY environment
+   # variable; a key in this file is stored in plaintext
+   # api_key = <not set>
+
+   # Model name to request
+   # model = <not set>
+
+   # Show the model's full reasoning/thinking text in the Chat transcript. Off
+   # (default) collapses it into a single 'Thought for Ns' line once the
+   # reasoning phase ends.
+   show_verbose_thinking = false
+
+   # Show the small animated ASCII mascot in the Chat panel.
+   show_chat_mascot = true
+
+   # Always-available host directory for the AI's file tools. Bare relative
+   # paths given to list_host_dir/read_host_file/push_path/install_apk are
+   # resolved against this directory -- drop a file here (e.g. an APK to
+   # install) and the AI can reach it by filename alone. Created automatically
+   # if missing.
+   data_share_path = "~/Sandroid/ai_share"
+
+   # Additional host roots the AI's file tools may access, beyond
+   # data_share_path and the current session's results/raw-results/cache
+   # directories. Empty by default.
+   extra_host_paths = []
+
+MCP servers (``[mcp]``) -- EXPERIMENTAL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   # One table per MCP server whose tools the AI Chat may use.
+   # Default: only the bundled demo server (returns fabricated data!).
+   [[mcp.servers]]
+   name = "sandroid-dummy"
+   transport = "stdio"        # "stdio" (command/args) or "sse" (url)
+   command = "python"
+   args = ["-m", "sandroid.ai.mcp_dummy_server"]
+   enabled = true
+
+
+Further sections -- ``[network]``, ``[trigdroid]``, ``[timeouts]``,
+``[device_paths]``, ``[external_urls]``, ``[display]``, ``[credentials]`` --
+contain advanced tuning knobs (timeouts, on-device paths, download URLs,
+display widths) whose defaults rarely need changing; see
+``sandroid-config show`` or :doc:`api/config` for the full schema.
 
 Environment Variables
 ---------------------
@@ -281,7 +520,7 @@ Use double underscores (``__``) for nested values:
 
 .. code-block:: bash
 
-   export SANDROID_ANALYSIS__MONITOR_NETWORK=true
+   export SANDROID_ANALYSIS__CAPTURE_NETWORK=true
    export SANDROID_REPORT__GENERATE_PDF=false
 
 **Complete Example:**
@@ -297,15 +536,15 @@ Use double underscores (``__``) for nested values:
 
    # Analysis settings
    export SANDROID_ANALYSIS__NUMBER_OF_RUNS=3
-   export SANDROID_ANALYSIS__MONITOR_NETWORK=true
+   export SANDROID_ANALYSIS__CAPTURE_NETWORK=true
    export SANDROID_ANALYSIS__SHOW_DELETED_FILES=true
-   export SANDROID_ANALYSIS__CALCULATE_HASHES=true
+   export SANDROID_ANALYSIS__HASH_FILES=true
 
-   # Features
-   export SANDROID_FEATURES__SCREENSHOT_INTERVAL=5
+   export SANDROID_ANALYSIS__SCREENSHOT_INTERVAL=5
 
-   # AI and reporting
-   export SANDROID_AI__ENABLED=true
+   # AI Chat (experimental) and reporting
+   export SANDROID_AI__BASE_URL=http://localhost:11434/v1
+   export SANDROID_AI__MODEL=qwen2.5:14b
    export SANDROID_AI__API_KEY=your_api_key_here
    export SANDROID_REPORT__GENERATE_PDF=true
 
@@ -328,15 +567,15 @@ Configuration Management
 
 ::
 
-   sandroid-config set analysis.capture_network true
-   sandroid-config set emulator.device_name MyDevice
+   sandroid-config set -k analysis.capture_network -v true
+   sandroid-config set -k emulator.device_name -v MyDevice
 
 **Get Configuration Value:**
 
 ::
 
-   sandroid-config get analysis.number_of_runs
-   sandroid-config get paths.results_path
+   sandroid-config get -k analysis.number_of_runs
+   sandroid-config get -k paths.results_path
 
 Configuration Templates
 -----------------------
@@ -356,15 +595,12 @@ Configuration Templates
    capture_processes = true
    capture_network = true
    show_deleted_files = true
-   calculate_hashes = true
-   avoid_noise_filter = true
-
-   [features]
+   hash_files = true
    screenshot_interval = 5
 
    [trigdroid]
    enabled = true
-   timeout = 600
+   package_name = "com.suspicious.app"
 
    [report]
    generate_pdf = true
@@ -383,8 +619,6 @@ Configuration Templates
    number_of_runs = 1
    capture_processes = false
    capture_network = false
-
-   [features]
    screenshot_interval = 10
 
    [paths]
@@ -404,12 +638,7 @@ Configuration Templates
    number_of_runs = 1
    capture_processes = true
    capture_network = true
-
-   [features]
    screenshot_interval = 30
-
-   [network]
-   capture_enabled = true
 
 Environment-Specific Configuration
 ----------------------------------
@@ -521,7 +750,7 @@ Troubleshooting Configuration
    sandroid-config validate
 
    # Check for syntax errors
-   python -c "import tomli; tomli.load(open('config.toml', 'rb'))"
+   python -c "import tomllib; tomllib.load(open('config.toml', 'rb'))"
 
 **Environment Variables Not Working:**
 
@@ -577,8 +806,8 @@ Integration with Tools
    - name: Configure Sandroid
      run: |
        sandroid-config init
-       sandroid-config set analysis.number_of_runs 1
-       sandroid-config set features.screenshot_interval 10
+       sandroid-config set -k analysis.number_of_runs -v 1
+       sandroid-config set -k analysis.screenshot_interval -v 10
 
    - name: Run Analysis
      env:
