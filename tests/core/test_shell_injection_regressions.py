@@ -320,3 +320,28 @@ def test_kprobe_path_filter_is_host_safe(fake_adb):
     calls = fake_adb.calls()
     assert calls
     assert all(c[0] == "shell" and len(c) == 2 for c in calls)
+
+
+_SNAPSHOT_VERBS = {"create": "save", "load": "load", "delete": "del"}
+
+
+@pytest.mark.parametrize("verb", sorted(_SNAPSHOT_VERBS))
+def test_snapshot_console_ko_reply_is_a_failure(verb):
+    """The console answers errors with "KO: ..." on stdout (adb exits 0)."""
+    from sandroid.services.emulator_service import EmulatorService
+
+    sent = []
+
+    class _Adb:
+        @staticmethod
+        def send_telnet_command(command, serial=None):
+            sent.append(command)
+            return "KO: bad sub-command\r\n", ""
+
+        @staticmethod
+        def send_adb_command(command, serial=None):
+            return "device", ""
+
+    svc = EmulatorService(adb=_Adb())
+    assert getattr(svc, f"{verb}_snapshot")("sandroid_x") is False
+    assert sent == [f"avd snapshot {_SNAPSHOT_VERBS[verb]} sandroid_x"]
