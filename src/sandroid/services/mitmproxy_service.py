@@ -828,6 +828,8 @@ class MitmproxyService:
         # mitmproxy, so it can be cleared on stop and on exit -- also when the
         # TUI did not get to unmount cleanly. None = we set nothing.
         self._owned_device_proxy: str | None = None
+        # Serial of the device that proxy was set on (cleanup targets it).
+        self._owned_device_proxy_serial: str | None = None
         atexit.register(self._atexit_cleanup)
 
     @property
@@ -1758,24 +1760,55 @@ class MitmproxyService:
         """The device proxy address Sandroid set to this mitmproxy, if any."""
         return self._owned_device_proxy
 
-    def note_device_proxy(self, address: str | None) -> None:
-        """Record (``"ip:port"``) or forget (``None``) the device proxy we set."""
-        self._owned_device_proxy = address or None
+    @property
+    def owned_device_proxy_serial(self) -> str | None:
+        """Serial of the device :attr:`owned_device_proxy` was set on."""
+        return self._owned_device_proxy_serial
 
-    def release_device_proxy(self) -> bool:
+    def note_device_proxy(self, address: str | None, serial: str | None = None) -> None:
+        """Record (``"ip:port"``) or forget (``None``) the device proxy we set.
+
+        Args:
+            address: The proxy address set on the device, or None to forget.
+            serial: Device it was set on; defaults to the current adb target.
+        """
+        self._owned_device_proxy = address or None
+        if not self._owned_device_proxy:
+            self._owned_device_proxy_serial = None
+            return
+        if serial is None:
+            try:
+                from sandroid.core.adb import Adb
+
+                serial = Adb.get_target_device()
+            except Exception:
+                serial = None
+        self._owned_device_proxy_serial = serial
+
+    def release_device_proxy(self, serial: str | None = None) -> bool:
         """Clear the device http_proxy if it still points where we set it.
 
-        A proxy someone else changed in the meantime is left alone. Also drops
+        Runs against the device the proxy was SET on (recorded by
+        :meth:`note_device_proxy`), not whatever device is selected now. A
+        proxy someone else changed in the meantime is left alone. Also drops
         the ``adb reverse`` tunnel when the proxy we set was a loopback route.
         Blocking (ADB); best-effort, never raises.
+
+        Args:
+            serial: Only release when the proxy was set on this device
+                (used on device switch); None releases it wherever it is.
 
         Returns:
             True when a proxy was cleared.
         """
         addr = self._owned_device_proxy
+        owner = self._owned_device_proxy_serial
         if not addr:
             return False
+        if serial is not None and owner is not None and owner != serial:
+            return False
         self._owned_device_proxy = None
+        self._owned_device_proxy_serial = None
         cleared = False
         try:
             from sandroid.core.adb import Adb
@@ -1785,14 +1818,19 @@ class MitmproxyService:
                 _reverse_registered,
             )
 
-            pm = ProxyManager()
-            status, cfg = pm.get_proxy_settings()
-            if status == ProxyStatus.SET and cfg is not None and cfg.address == addr:
-                cleared, _ = pm.unset_proxy()
-            if addr.startswith("127.0.0.1:"):
-                port = int(addr.rsplit(":", 1)[1])
-                if _reverse_registered(port):
-                    Adb.reverse_remove(f"tcp:{port}")
+            with Adb.targeting(owner):
+                pm = ProxyManager()
+                status, cfg = pm.get_proxy_settings()
+                if (
+                    status == ProxyStatus.SET
+                    and cfg is not None
+                    and cfg.address == addr
+                ):
+                    cleared, _ = pm.unset_proxy()
+                if addr.startswith("127.0.0.1:"):
+                    port = int(addr.rsplit(":", 1)[1])
+                    if _reverse_registered(port):
+                        Adb.reverse_remove(f"tcp:{port}")
         except Exception as exc:
             logger.debug("Releasing device proxy %s failed: %s", addr, exc)
         return cleared

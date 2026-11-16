@@ -1436,6 +1436,10 @@ class CAManager:
             return InjectionResult(success=False, message=f"Error injecting CA: {e}")
 
 
+#: Sentinel: "the serial adb currently targets" (``None`` is a real value).
+_CURRENT_SERIAL = object()
+
+
 class FocusManager:
     """Per-app proxy ("App Proxies") lane pool.
 
@@ -1502,9 +1506,13 @@ class FocusManager:
         # separate from _lane_rule_specs (which are nat REDIRECT rules) so the
         # toggle can add/remove just the QUIC rules.
         self._lane_quic_specs: dict[int, list[tuple[str, str]]] = {}
+        # Per-lane device serial the lane's gost/iptables live on. Lanes are
+        # torn down on THAT device (Adb.targeting), never on whatever device
+        # happens to be selected later, and are looked up per serial.
+        self._lane_serials: dict[int, str | None] = {}
         self._binary_pushed = False
-        # cleanup_stale() runs once at the first enable of a session.
-        self._cleaned_this_session = False
+        # cleanup_stale() runs once per device at its first enable.
+        self._cleaned_serials: set[str | None] = set()
         # Tri-state cache: is the ip6tables `nat` table usable? Probed once
         # (IPv4-only emulators lack it); when False we skip all ip6tables ops
         # so we don't spam "Table does not exist" warnings on every rule.
@@ -1581,6 +1589,7 @@ class FocusManager:
                 self._lane_targets.pop(i, None)
                 self._lane_uids.pop(i, None)
                 self._lane_quic_specs.pop(i, None)
+                self._lane_serials.pop(i, None)
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -1606,6 +1615,7 @@ class FocusManager:
         """
         with self._lock:
             self._ensure_lanes()
+            serial = Adb.get_target_device()
 
             # 1. Resolve package.
             if not package:
@@ -1615,8 +1625,8 @@ class FocusManager:
             if not is_valid_package_name(package):
                 return False, f"Invalid package name {package!r}."
 
-            # 2. Already proxied / pool exhausted.
-            if package in self._lanes.values():
+            # 2. Already proxied (on THIS device) / pool exhausted.
+            if self._lane_index_for(package, serial) is not None:
                 return True, f"{package} already proxied"
             free = self._first_free_lane()
             if free is None:
@@ -1633,9 +1643,9 @@ class FocusManager:
                 return False, "Focus requires root (su)."
 
             # 4. Housekeeping: clear stale rules/processes once per session.
-            if not self._cleaned_this_session:
+            if serial not in self._cleaned_serials:
                 self._cleanup_stale_locked()
-                self._cleaned_this_session = True
+                self._cleaned_serials.add(serial)
 
             # 5. owner-match capability probe.
             ok, msg = self._probe_owner_match()
@@ -1707,6 +1717,7 @@ class FocusManager:
             self._lanes[lane] = package
             self._lane_targets[lane] = lane_target
             self._lane_uids[lane] = uid
+            self._lane_serials[lane] = serial
             # Block QUIC (UDP/443) so the app falls back to interceptable
             # TCP/TLS — the TCP-only nat REDIRECT can't touch HTTP/3. Tracked
             # even when off so set_quic_blocking() can toggle it later.
@@ -1755,6 +1766,28 @@ class FocusManager:
             self._teardown_lane(lane)
             self._write_sidecar()
             return True, f"App proxy removed for {package}"
+
+    def release_serial(self, serial: str | None) -> int:
+        """Tear down every lane that lives on *serial* (e.g. on device switch).
+
+        The rules and gost processes are removed on that device explicitly
+        (``Adb.targeting``), whatever device is selected meanwhile.
+
+        Returns:
+            The number of lanes released.
+        """
+        with self._lock:
+            lanes = [
+                lane
+                for lane, pkg in self._lanes.items()
+                if pkg and self._lane_serials.get(lane) == serial
+            ]
+            for lane in lanes:
+                self._teardown_lane(lane)
+            if lanes:
+                self._write_sidecar()
+            self._cleaned_serials.discard(serial)
+            return len(lanes)
 
     def focused_apps(self) -> list[str]:
         """Return the packages currently assigned to a lane."""
@@ -1835,15 +1868,16 @@ class FocusManager:
             for lane, package in self._lanes.items():
                 if not package:
                     continue
-                if enabled:
-                    uid = self._lane_uids.get(lane)
-                    if uid is None or lane in self._lane_quic_specs:
-                        continue  # unknown uid, or already blocked.
-                    self._add_quic_block(lane, uid)
-                else:
-                    for tbl, body in self._lane_quic_specs.get(lane, []):
-                        self._delete_rule_loop(tbl, body)
-                    self._lane_quic_specs.pop(lane, None)
+                with Adb.targeting(self._lane_serials.get(lane)):
+                    if enabled:
+                        uid = self._lane_uids.get(lane)
+                        if uid is None or lane in self._lane_quic_specs:
+                            continue  # unknown uid, or already blocked.
+                        self._add_quic_block(lane, uid)
+                    else:
+                        for tbl, body in self._lane_quic_specs.get(lane, []):
+                            self._delete_rule_loop(tbl, body)
+                        self._lane_quic_specs.pop(lane, None)
 
     def cleanup_stale(self) -> None:
         """Remove every tagged rule + stray gost/ipt2socks and clear lane state.
@@ -1876,9 +1910,14 @@ class FocusManager:
                 return i
         return None
 
-    def _lane_index_for(self, package: str) -> int | None:
+    def _lane_index_for(
+        self, package: str, serial: str | None | object = _CURRENT_SERIAL
+    ) -> int | None:
+        """Lane serving *package* on *serial* (default: the current target)."""
+        if serial is _CURRENT_SERIAL:
+            serial = Adb.get_target_device()
         for i, p in self._lanes.items():
-            if p == package:
+            if p == package and self._lane_serials.get(i, serial) == serial:
                 return i
         return None
 
@@ -2548,11 +2587,13 @@ class FocusManager:
     def _teardown_lane(self, lane: int) -> None:
         """Rules-first removal, then kill the lane's gost; free the slot."""
         package = self._lanes.get(lane)
-        self._remove_lane_rules(lane)
-        self._kill_lane_process(self._redirect_port(lane))
+        with Adb.targeting(self._lane_serials.get(lane)):
+            self._remove_lane_rules(lane)
+            self._kill_lane_process(self._redirect_port(lane))
         self._lanes[lane] = None
         self._lane_targets.pop(lane, None)
         self._lane_uids.pop(lane, None)
+        self._lane_serials.pop(lane, None)
         if package:
             self._remove_from_state(package)
 
@@ -2608,11 +2649,18 @@ class FocusManager:
             )
         except Exception:
             pass
-        self._lanes.clear()
-        self._lane_targets.clear()
-        self._lane_rule_specs.clear()
-        self._lane_uids.clear()
-        self._lane_quic_specs.clear()
+        # Forget only the lanes of THIS device: lanes on another device are
+        # still live there and must stay tracked so they can be torn down.
+        serial = Adb.get_target_device()
+        for lane in list(self._lanes):
+            if self._lane_serials.get(lane, serial) != serial:
+                continue
+            self._lanes.pop(lane, None)
+            self._lane_targets.pop(lane, None)
+            self._lane_rule_specs.pop(lane, None)
+            self._lane_uids.pop(lane, None)
+            self._lane_quic_specs.pop(lane, None)
+            self._lane_serials.pop(lane, None)
         try:
             self._write_sidecar()
         except Exception:

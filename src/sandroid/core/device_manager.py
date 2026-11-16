@@ -521,7 +521,7 @@ class DeviceManager:
 
         # Reset state if switching to a different device
         if self._active_device and self._active_device.serial != serial:
-            self._reset_device_state()
+            self._reset_device_state(previous_serial=self._active_device.serial)
 
         self._active_device = device
 
@@ -584,14 +584,23 @@ class DeviceManager:
         except Exception as e:
             logger.debug(f"Could not record device name {name!r}: {e}")
 
-    def _reset_device_state(self) -> None:
+    def _reset_device_state(self, previous_serial: str | None = None) -> None:
         """Reset all device-specific state when switching devices.
 
         This clears:
+        - The device proxy and app-proxy lanes Sandroid set on the previous
+          device (released ON that device, explicitly by serial)
         - Spotlight application
         - Running background tasks
         - Cached file information
         """
+        if previous_serial:
+            from .adb import Adb
+
+            # Pin to the old device: the global target may already point at
+            # the new one.
+            with Adb.targeting(previous_serial):
+                self._release_proxies_on(previous_serial)
         try:
             from sandroid.services import get_spotlight_service, get_task_service
 
@@ -611,6 +620,34 @@ class DeviceManager:
 
         except Exception as e:
             logger.error(f"Failed to reset device state: {e}")
+
+    @staticmethod
+    def _release_proxies_on(serial: str) -> None:
+        """Undo the proxy state Sandroid owns on *serial* (best effort).
+
+        Without this a device switch left the old device pointed at our
+        mitmproxy (and its per-app iptables lanes/gost running), and the later
+        cleanup ran against the NEW device. Only already-created singletons
+        are touched -- nothing is instantiated just to find nothing to do.
+        """
+        try:
+            from sandroid.core import proxy_manager
+
+            focus = proxy_manager._FOCUS_INSTANCE
+            if focus is not None:
+                released = focus.release_serial(serial)
+                if released:
+                    logger.info(f"Released {released} app-proxy lane(s) on {serial}")
+        except Exception as e:
+            logger.warning(f"Could not release app-proxy lanes on {serial}: {e}")
+        try:
+            from sandroid.services import mitmproxy_service
+
+            service = mitmproxy_service._INSTANCE
+            if service is not None and service.owned_device_proxy:
+                service.release_device_proxy(serial=serial)
+        except Exception as e:
+            logger.warning(f"Could not release the device proxy on {serial}: {e}")
 
     def check_capability(self, capability: DeviceCapability) -> bool:
         """Check if the active device has a specific capability.
