@@ -666,7 +666,6 @@ def _start_avd(
         True if AVD started successfully
     """
     import os
-    import subprocess
 
     try:
         emulator_path = android_env.get("emulator_path")
@@ -732,14 +731,11 @@ def _start_avd(
 
         console.print(f"[dim]Command: {' '.join(cmd)}[/dim]")
 
-        # Start emulator in background with validated command
-        process = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        # Start emulator in background with validated command; its output
+        # goes to a log file (a never-drained stderr pipe stalls it later).
+        from sandroid.core.emulator import check_emulator_startup, spawn_emulator
+
+        process, log_path = spawn_emulator(cmd, avd_name, env)
 
         console.print(f"[green]>[/green] AVD '{avd_name}' starting in background...")
         console.print(f"[dim]Process ID: {process.pid}[/dim]")
@@ -750,9 +746,7 @@ def _start_avd(
             console.print("[dim]Running with UI[/dim]")
 
         # Verify emulator process survives initial startup
-        from sandroid.core.emulator import check_emulator_startup
-
-        ok, error_msg = check_emulator_startup(process)
+        ok, error_msg = check_emulator_startup(process, log_path)
         if not ok:
             console.print(f"[red]Emulator startup failed: {error_msg}[/red]")
             return False

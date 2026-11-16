@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from sandroid.core.adb_utils import quote_host_arg
+from sandroid.core.adb_utils import quote_host_arg, validate_snapshot_name
 from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,19 @@ class ConfigServiceProtocol(Protocol):
     def get_device_name(self) -> str:
         """Get the device name."""
         ...
+
+
+def _snapshot_command(verb: str, name: str | bytes) -> str:
+    """Build ``avd snapshot <verb> <name>`` for a validated snapshot name.
+
+    Snapshot names reach the emulator console through ``adb emu`` (host
+    shell) and become directory names in the AVD, so only
+    :data:`~sandroid.core.adb_utils.SNAPSHOT_NAME_RE` names are accepted.
+
+    Raises:
+        ValueError: *name* is not a safe snapshot name.
+    """
+    return f"avd snapshot {verb} {validate_snapshot_name(name)}"
 
 
 class EmulatorService:
@@ -533,11 +546,7 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot save {name}"
-            else:
-                command = b"avd snapshot save " + name
+            command = _snapshot_command("save", name)
 
             stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
@@ -569,11 +578,7 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot load {name}"
-            else:
-                command = b"avd snapshot load " + name
+            command = _snapshot_command("load", name)
 
             stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
@@ -695,16 +700,14 @@ class EmulatorService:
         adb = self._get_adb()
 
         try:
-            # Handle both string and bytes for name
-            if isinstance(name, str):
-                command = f"avd snapshot del {name}"
-            else:
-                command = b"avd snapshot del " + name
+            command = _snapshot_command("del", name)
 
-            _stdout, stderr = adb.send_telnet_command(command)
+            stdout, stderr = adb.send_telnet_command(command)
 
-            if stderr:
-                self._logger.error(f"Failed to delete snapshot: {stderr}")
+            # Like save/load, the console reports failures (unknown snapshot,
+            # bad sub-command) as "KO: ..." on stdout while adb exits 0.
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to delete snapshot: {stderr or stdout}")
                 return False
 
             self._logger.info(f"Snapshot '{name}' deleted successfully")
@@ -736,63 +739,138 @@ class EmulatorService:
     # Emulator Lifecycle Methods
     # =========================================================================
 
-    def restart(self) -> bool:
-        """Restart the Android emulator.
+    def restart(self, boot_timeout: float = 180.0) -> bool:
+        """Restart the running Android emulator and wait until it has booted.
 
-        Attempts to kill the current emulator and start a new instance.
+        Relaunches the AVD that is actually running (``adb emu avd name``;
+        the configured device name is only a fallback) with the safe launch
+        flags (:func:`~sandroid.core.emulator_guard.emulator_launch_args`),
+        output to a log file, and only reports success once the new instance
+        is online with ``sys.boot_completed=1``.
+
+        Args:
+            boot_timeout: Seconds to wait for the restarted emulator to boot.
 
         Returns:
-            True if restart initiated successfully.
+            True once the restarted emulator has booted; False if it crashed
+            on startup or did not boot within ``boot_timeout``.
+
+        Raises:
+            RuntimeError: The emulator executable is missing or cannot be
+                started.
         """
+        from sandroid.core.emulator import (
+            Emulator,
+            check_emulator_startup,
+            spawn_emulator,
+        )
+        from sandroid.core.emulator_guard import emulator_launch_args
+
         self._logger.info("Restarting emulator")
         adb = self._get_adb()
+        serial = self._target_serial(adb)
 
-        # Get emulator configuration
-        device_name = self._get_device_name()
-        emulator_path = self._get_emulator_path()
+        # Resolve the AVD BEFORE killing it: afterwards there is nobody left
+        # to ask. The configured name is only a fallback.
+        avd_name = None
+        get_name = getattr(adb, "get_current_avd_name", None)
+        if callable(get_name):
+            try:
+                avd_name = get_name()
+            except Exception:
+                avd_name = None
+        if not avd_name:
+            avd_name = self._get_device_name()
+            self._logger.warning(
+                f"Could not query the running AVD name; restarting configured "
+                f"AVD '{avd_name}'"
+            )
+        emulator_path = self._get_emulator_path() or Emulator.detect_emulator_path()
+        if not emulator_path:
+            raise RuntimeError("Emulator executable not found (emulator path unset)")
 
-        # Try to kill existing emulator
         try:
             _stdout, stderr = adb.send_telnet_command(b"kill")
-
             if stderr:
                 self._logger.warning(
-                    f"Emulator {device_name} was not running, starting now"
+                    f"Emulator {avd_name} was not running, starting now"
                 )
-
+            else:
+                self._wait_for_device_gone(adb, serial)
         except Exception as e:
             self._logger.debug(
                 f"Kill command failed (emulator may not be running): {e}"
             )
 
-        # Start new emulator instance
-        from sandroid.core.emulator_guard import emulator_launch_args
-
+        command = [emulator_path, "-avd", avd_name, *emulator_launch_args()]
         try:
-            subprocess.Popen(
-                [emulator_path, "@", device_name, *emulator_launch_args()],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-
-            # Wait for emulator to start
-            time.sleep(5)
-
-            self._logger.info(f"Emulator {device_name} restart initiated")
-            return True
-
+            process, log_path = spawn_emulator(command, avd_name)
         except FileNotFoundError as e:
             error_msg = f"Emulator executable not found at '{emulator_path}': {e}"
             self._logger.error(error_msg)
             raise RuntimeError(error_msg) from e
         except (OSError, subprocess.SubprocessError) as e:
-            error_msg = f"Failed to start emulator '{device_name}': {e}"
+            error_msg = f"Failed to start emulator '{avd_name}': {e}"
             self._logger.error(error_msg)
             raise RuntimeError(error_msg) from e
-        except Exception as e:
-            self._logger.error(f"Failed to start emulator: {e}")
+
+        ok, error_msg = check_emulator_startup(process, log_path)
+        if not ok:
+            self._logger.error(
+                f"Emulator '{avd_name}' crashed during startup: {error_msg}"
+            )
             return False
+
+        if not self._wait_for_boot_completed(adb, serial, boot_timeout):
+            self._logger.error(
+                f"Emulator '{avd_name}' did not finish booting within "
+                f"{boot_timeout:.0f}s (log: {log_path})"
+            )
+            return False
+
+        self._logger.info(f"Emulator {avd_name} restarted")
+        return True
+
+    @staticmethod
+    def _target_serial(adb: Any) -> str | None:
+        getter = getattr(adb, "get_target_device", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _wait_for_device_gone(
+        self, adb: AdbProtocol, serial: str | None, timeout: float = 30.0
+    ) -> None:
+        """Poll until the killed emulator has left ``adb`` (best effort)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                stdout, _ = adb.send_adb_command("get-state", serial=serial)
+            except Exception:
+                return
+            if (stdout or "").strip() != "device":
+                return
+            time.sleep(1.0)
+
+    def _wait_for_boot_completed(
+        self, adb: AdbProtocol, serial: str | None, timeout: float
+    ) -> bool:
+        """Poll ``sys.boot_completed`` until it reads ``1`` or *timeout* passes."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                stdout, _ = adb.send_adb_command(
+                    "shell getprop sys.boot_completed", serial=serial
+                )
+                if (stdout or "").strip() == "1":
+                    return True
+            except Exception:
+                pass
+            time.sleep(2.0)
+        return False
 
     def kill(self) -> bool:
         """Kill the running emulator.

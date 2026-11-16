@@ -15,10 +15,13 @@ All public methods remain accessible on the ``Adb`` class so that callers
 do not need any changes.
 """
 
+import contextlib
 import functools
 import re
 import shutil
 import subprocess
+import threading
+from collections.abc import Iterator
 from logging import getLogger
 from typing import Any
 
@@ -30,6 +33,7 @@ from sandroid.core import adb_packages as _pkg
 from sandroid.core import adb_process as _proc
 from sandroid.core import adb_queries as _qry
 from sandroid.core.adb_utils import (
+    device_shell_arg,
     is_adb_error_actionable,
     log_adb_result,
     quote_host_arg,
@@ -38,6 +42,9 @@ from sandroid.core.adb_utils import (
 PIPE = subprocess.PIPE
 
 logger = getLogger(__name__)
+
+#: Per-thread serial override set by :meth:`Adb.targeting`.
+_thread_target = threading.local()
 
 
 class Adb:
@@ -76,10 +83,36 @@ class Adb:
     def get_target_device(cls) -> str | None:
         """Get the current target device serial.
 
+        Inside :meth:`targeting` this is the serial pinned for the calling
+        thread.
+
         Returns:
             The target device serial, or None if not set
         """
+        pinned = getattr(_thread_target, "serial", None)
+        if pinned is not None:
+            return pinned
         return cls._target_device
+
+    @classmethod
+    @contextlib.contextmanager
+    def targeting(cls, serial: str | None) -> Iterator[None]:
+        """Pin every adb call of the CURRENT thread to *serial* for a block.
+
+        Used to clean up state owned by a specific device (e.g. the proxy or
+        app-proxy lanes set on a device the user just switched away from)
+        without touching the shared global target other threads use.
+        ``None`` leaves the targeting unchanged.
+        """
+        if serial is None:
+            yield
+            return
+        previous = getattr(_thread_target, "serial", None)
+        _thread_target.serial = serial
+        try:
+            yield
+        finally:
+            _thread_target.serial = previous
 
     @classmethod
     def selected_serial(cls) -> str | None:
@@ -115,7 +148,7 @@ class Adb:
         Returns:
             The command with device targeting if applicable
         """
-        target = serial if serial is not None else cls._target_device
+        target = serial if serial is not None else cls.get_target_device()
         if target:
             return f"-s {target} {command}"
         return command
@@ -159,7 +192,7 @@ class Adb:
             serial: Device serial override; defaults to the global target.
         """
         argv = [cls.get_executable()]
-        target = serial if serial is not None else cls._target_device
+        target = serial if serial is not None else cls.get_target_device()
         if target:
             argv += ["-s", target]
         return argv
@@ -657,12 +690,15 @@ class Adb:
         Returns:
             Tuple of (success, message).
         """
+        # Both values are quoted for the device AND host shell: they can come
+        # from AI tool arguments or a restored spotlight selection.
         if activity_name:
-            component = f"{package_name}/{activity_name}"
+            component = device_shell_arg(f"{package_name}/{activity_name}")
             stdout, stderr = cls.send_adb_command(f"shell am start -n {component}")
         else:
             stdout, stderr = cls.send_adb_command(
-                f"shell monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
+                f"shell monkey -p {device_shell_arg(package_name)}"
+                " -c android.intent.category.LAUNCHER 1"
             )
 
         combined = f"{stdout or ''}\n{stderr or ''}".strip()
@@ -691,7 +727,9 @@ class Adb:
         Returns:
             Tuple of (success, message).
         """
-        stdout, stderr = cls.send_adb_command(f"shell am force-stop {package_name}")
+        stdout, stderr = cls.send_adb_command(
+            f"shell am force-stop {device_shell_arg(package_name)}"
+        )
         combined = f"{stdout or ''}\n{stderr or ''}".strip()
         lc = combined.lower()
         if "error" in lc or "exception" in lc:

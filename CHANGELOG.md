@@ -155,6 +155,16 @@ persistent run history, and an experimental AI Chat assistant.
 - `--trigdroid-ccf` (never functional with the current TrigDroid API) is hidden and fails with a clear error; `--trigdroid … -f dir/out.json` also writes the results to `dir/out.json` (the directory was dropped) and prints the final path.
 - Importing the TUI module no longer registers a terminal reset at exit, which printed escape sequences / `stty` errors after headless and `sandroid-config` runs.
 - Docs: non-working commands fixed (`--output` → `-f`, `--number 1` → `-n 2`, CI/Docker/script examples use `--headless`), exit-code table matches the code (1 = analysis/config error, 2 = invalid command line, 3 = documentation failed).
+- The device proxy and app-proxy lanes are bound to the device they were set on: switching devices releases them on the old device, and later cleanup never runs against the newly selected one; "already proxied" is checked per device.
+- Emulator memory guard: the qemu behind a serial is found by its console port socket (emulators started without `-port` get auto-assigned ports), so with two emulators the guard no longer measures or stops the wrong one; ambiguous cases are left alone with a warning.
+- Starting an AVD from the TUI disables guest Vulkan like the CLI; detached emulators log to `~/.cache/sandroid/emulator/<avd>.log` instead of a pipe that stalled them after ~64 KiB of output; "Restart emulator" relaunches the running AVD with the safe flags and only reports success once it has booted.
+- Deleting a snapshot the console rejects (`KO: …`) is reported as a failure.
+- Headless API network capture starts tcpdump detached on the device (it blocked for 30 s), honours `output_file`, and stops exactly its own tcpdump PID instead of `pkill tcpdump`.
+
+#### Security
+- Host command injection from the device or the AI: values that reach `adb` through the host shell — device filenames (watchlist auto-refresh, wildcard spotlight files), package names, PIDs, snapshot names, emulator-console arguments, root/kprobe command wrappers — are now quoted for both the host and the device shell or validated (Android package format, `[A-Za-z0-9._-]` snapshot names, positive integer PIDs). Previously a device file named `$(cmd)` or a READ_ONLY AI tool call such as `get_process_detail(pid="1;cmd")` ran `cmd` on the analyst's machine without approval.
+- AI tool arguments are type-checked against each tool's JSON schema before dispatch; `set_spotlight_app`, `enable_app_proxy` and the spotlight service reject invalid package names; `get_file_diff` accepts only one absolute path without wildcards.
+- The tool-approval prompt no longer hides arguments past 300 characters: long arguments are flagged and shown in full (scrollable), model-supplied markup is escaped, and an omitted package shows the spotlight app it resolves to.
 
 ### Removed
 - Legacy Rich interactive menu (`-i`), Gemini video summarisation (`--ai`), TUI view modes, the `ipt2socks` redirector, the stale `docker/requirements.txt`.

@@ -30,23 +30,14 @@ identically (a bare filename resolves against the AI data-share folder;
 anything else must fall within an allowed host root -- see
 ``list_allowed_host_paths`` in :mod:`sandroid.ai.tools.host_files`).
 
-Injection hardening: :meth:`sandroid.core.adb.Adb.uninstall_apk` and
-``.launch_app`` build their underlying ADB command strings via unquoted
-f-string interpolation internally, and are *not* modified here (confirmed
-scope: fix at new call sites only, leave the shared functions and their
-other callers -- TUI/CLI/headless API -- unchanged). ``package_name`` (both
-tools) and ``activity_name`` (``launch_app``) are ``shlex.quote()``-d at
-this call site first, *and* every tool accepting a ``package_name`` here
-also validates it against Android's real package-identifier format via
+Injection hardening: :meth:`sandroid.core.adb.Adb.uninstall_apk`,
+``.launch_app`` and ``.force_stop`` quote ``package_name``/``activity_name``
+for both the device and the host shell themselves
+(:func:`sandroid.core.adb_utils.device_shell_arg`), so the tools pass the raw
+values. Every tool accepting a ``package_name`` here additionally validates
+it against Android's package-identifier format via
 :func:`sandroid.ai.tools._shared.validate_package_name` before it is used
-anywhere -- validation and quoting solve different problems (device-side
-re-injection vs. host-side shell injection), so both are kept.
-``Adb.send_adb_command`` invokes the shell with ``shell=True`` (confirmed in
-``adb.py``), so a quoted argument survives the shell's own re-parsing
-intact; for the ordinary package/activity names these tools are meant for
-(letters, digits, ``.``/``_``/``-``/``/``), ``shlex.quote()`` is a no-op --
-it only ever adds quoting around characters outside that safe set, i.e.
-exactly the characters an injection attempt would need.
+anywhere (it also reaches non-shell argv lists and host paths).
 
 **``install_apk``'s ``apk_path`` is deliberately never ``shlex.quote()``-d**
 (review-caught bug, fixed here): :meth:`sandroid.core.adb.Adb.install_apk`
@@ -67,7 +58,6 @@ correct, since there is nothing hazardous left in the string for either of
 them to mishandle.
 """
 
-import shlex
 from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
@@ -200,9 +190,8 @@ def uninstall_apk(package_name: str) -> dict[str, Any]:
 
     Real integration point: :meth:`sandroid.core.adb.Adb.uninstall_apk`.
     ``package_name`` is validated via
-    :func:`sandroid.ai.tools._shared.validate_package_name` and then
-    ``shlex.quote()``-d before being passed on -- see the module docstring
-    for the confirmed injection-hardening scope.
+    :func:`sandroid.ai.tools._shared.validate_package_name`; the core
+    function quotes it for the device and host shell.
 
     ``can_remember_choice=False``: *which* package gets removed is exactly
     the argument-dependent risk that rule exists for (matching
@@ -223,7 +212,7 @@ def uninstall_apk(package_name: str) -> dict[str, Any]:
             identifier format.
     """
     package_name = validate_package_name(package_name)
-    uninstalled = Adb.uninstall_apk(shlex.quote(package_name))
+    uninstalled = Adb.uninstall_apk(package_name)
     return {"uninstalled": uninstalled, "package_name": package_name}
 
 
@@ -264,10 +253,9 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
 
     Real integration point: :meth:`sandroid.core.adb.Adb.launch_app`.
     ``package_name`` is validated via
-    :func:`sandroid.ai.tools._shared.validate_package_name`. Both
-    ``package_name`` and ``activity_name`` (when given) are also
-    ``shlex.quote()``-d before being passed on -- see the module docstring
-    for the confirmed injection-hardening scope.
+    :func:`sandroid.ai.tools._shared.validate_package_name`. The core
+    function quotes ``package_name``/``activity_name`` for the device and
+    host shell.
 
     Args:
         package_name: Fully qualified package name to launch.
@@ -284,8 +272,8 @@ def launch_app(package_name: str, activity_name: str | None = None) -> dict[str,
             identifier format.
     """
     package_name = validate_package_name(package_name)
-    quoted_activity = shlex.quote(activity_name) if activity_name else None
-    success, message = Adb.launch_app(shlex.quote(package_name), quoted_activity)
+    # Adb.launch_app quotes both values for the device and host shell itself.
+    success, message = Adb.launch_app(package_name, activity_name or None)
     return {
         "launched": success,
         "package_name": package_name,

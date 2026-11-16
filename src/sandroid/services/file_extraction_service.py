@@ -25,13 +25,15 @@ Usage:
 import hashlib
 import logging
 import os
-import shlex
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from sandroid.core.adb_utils import quote_host_arg
+from sandroid.core.adb_utils import (
+    device_shell_arg,
+    quote_host_arg,
+)
 from sandroid.services.protocols import EventBusProtocol
 
 # Import config with fallback for standalone usage
@@ -60,16 +62,6 @@ def pull_command(remote_path: str, local_path: str | Path) -> str:
         The ``pull ...`` command for ``send_adb_command``.
     """
     return f"pull {quote_host_arg(remote_path)} {quote_host_arg(str(local_path))}"
-
-
-def device_shell_arg(path: str) -> str:
-    """Quote ``path`` for an ``adb shell`` command run via the host shell.
-
-    ``adb shell`` joins its arguments and hands them to the *device* shell,
-    so the path is quoted for the device shell first and the result again
-    for the host shell.
-    """
-    return quote_host_arg(shlex.quote(path))
 
 
 @dataclass

@@ -94,7 +94,6 @@ from __future__ import annotations
 import functools
 import logging
 import os
-import shlex
 import threading
 import time
 from dataclasses import dataclass
@@ -107,6 +106,7 @@ from textual.widgets import ContentSwitcher, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from sandroid.core import file_diff, watchlist_store
+from sandroid.core.adb_utils import device_shell_arg
 from sandroid.services import get_file_extraction_service, get_forensic_service
 from sandroid.services.file_extraction_service import is_sqlite_file
 
@@ -997,21 +997,21 @@ class WatchlistView(FilesSubViewBase):
         canned ``(stdout, stderr)`` tuples, without touching the real
         Adb/subprocess machinery.
 
-        QUOTING: the same ``shell "..."`` wrapping ``proxy_manager.py``'s
-        ``_device_tcp_reachable``/``mitmproxy_service.py`` already use.
-        ``Adb.send_adb_command`` runs the whole string through the HOST
-        shell (``shell=True``), which would otherwise split
-        ``'%n %Y %s'`` back into three bare words before ``adb`` ever sees
-        them. Wrapping the entire remote command in one double-quoted
-        argument makes the host shell hand it to ``adb`` intact, for the
-        DEVICE's shell to interpret the inner single quotes correctly.
+        QUOTING: ``Adb.send_adb_command`` runs the whole string through the
+        HOST shell (``shell=True``) and ``adb shell`` then hands it to the
+        DEVICE shell, so every word -- the ``'%n %Y %s'`` format and each
+        path -- is quoted for both shells via ``device_shell_arg``. Paths
+        come from device listings (wildcard expansion), so a filename like
+        ``$(cmd)`` must never be interpreted by either shell; a double-quoted
+        host wrapper would still expand it on the host.
         ``%n`` (filename) is included specifically so a per-path failure (an
         unreadable/deleted path writes to stderr, not stdout) can't silently
         shift every subsequent path's (mtime, size) into the wrong row.
         """
-        quoted_paths = " ".join(shlex.quote(p) for p in paths)
-        inner = f"stat -c '%n %Y %s' {quoted_paths}"
-        return WatchlistView._adb().send_adb_command(f'shell "{inner}"')
+        quoted_paths = " ".join(device_shell_arg(p) for p in paths)
+        return WatchlistView._adb().send_adb_command(
+            f"shell stat -c {device_shell_arg('%n %Y %s')} {quoted_paths}"
+        )
 
     @staticmethod
     def _parse_stat_output(stdout: str) -> dict[str, tuple[int, int]]:

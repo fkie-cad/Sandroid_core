@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 #: Flags Sandroid passes to every emulator it launches.
 SAFE_EMULATOR_ARGS: list[str] = ["-feature", "-Vulkan"]
 
-_DEFAULT_CONSOLE_PORT = 5554
 _GB = 1024**3
 
 
@@ -58,22 +57,95 @@ def vulkan_disabled(cmdline: list[str]) -> bool:
     return False
 
 
-def console_port(cmdline: list[str]) -> int:
-    """Console port of an emulator command line (``-port N``, default 5554)."""
+def console_port(cmdline: list[str]) -> int | None:
+    """Explicit console port of an emulator command line (``-port N``).
+
+    Returns ``None`` when the command line has no ``-port``/``-ports``: the
+    emulator then auto-assigns the first free even port from 5554, so the
+    port cannot be derived from the command line (Sandroid itself never
+    passes ``-port``).
+    """
     for i, arg in enumerate(cmdline[:-1]):
         if arg in ("-port", "-ports"):
             try:
                 return int(cmdline[i + 1].split(",")[0])
             except ValueError:
-                break
-    return _DEFAULT_CONSOLE_PORT
+                return None
+    return None
+
+
+def _proc_listens_on(proc: Any, port: int) -> bool | None:
+    """True/False if *proc* has a TCP LISTEN socket on *port*; None if unknown."""
+    getter = getattr(proc, "net_connections", None) or getattr(
+        proc, "connections", None
+    )
+    if getter is None:
+        return None
+    try:
+        conns = getter(kind="tcp")
+    except Exception:  # AccessDenied, NoSuchProcess, ...
+        return None
+    for conn in conns:
+        laddr = getattr(conn, "laddr", None)
+        if (
+            laddr
+            and getattr(laddr, "port", None) == port
+            and getattr(conn, "status", "") == "LISTEN"
+        ):
+            return True
+    return False
+
+
+def _lsof_listener_pids(port: int) -> set[int] | None:
+    """PIDs with a TCP LISTEN socket on *port* via ``lsof``; None if unknown."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode not in (0, 1):  # 1 == no matching socket
+        return None
+    return {int(tok) for tok in result.stdout.split() if tok.isdigit()}
+
+
+#: Serials we already warned about (could not identify their qemu process).
+_unidentified_serials: set[str] = set()
+
+
+def _warn_unidentified(serial: str, reason: str) -> None:
+    if serial in _unidentified_serials:
+        return
+    _unidentified_serials.add(serial)
+    logger.warning(
+        "Emulator memory guard: cannot identify the qemu process behind %s "
+        "(%s); it is not monitored and will never be stopped by the guard.",
+        serial,
+        reason,
+    )
 
 
 def find_emulator_process(serial: str | None) -> Any | None:
     """Return the ``psutil.Process`` of the qemu behind ``emulator-<port>``.
 
+    Matching, most reliable first:
+
+    1. a qemu started with an explicit ``-port <port>``;
+    2. the qemu that owns the TCP LISTEN socket on the console port (per
+       process via psutil, falling back to ``lsof`` where psutil is denied);
+    3. the only running qemu without ``-port`` when no socket information is
+       available at all.
+
+    Anything else is ambiguous: ``None`` is returned (and a warning logged
+    once per serial) so the guard never measures or kills the wrong
+    emulator -- e.g. the analyst's own AVD on another auto-assigned port.
+
     Returns ``None`` for non-emulator serials, when psutil is unavailable or
-    no matching process is found.
+    no unique matching process is found.
     """
     if not serial:
         return None
@@ -85,6 +157,7 @@ def find_emulator_process(serial: str | None) -> Any | None:
         import psutil
     except ImportError:  # pragma: no cover - psutil is a core dependency
         return None
+    implicit: list[Any] = []
     for proc in psutil.process_iter(["name", "cmdline"]):
         try:
             name = proc.info.get("name") or ""
@@ -93,8 +166,36 @@ def find_emulator_process(serial: str | None) -> Any | None:
             continue
         if not name.startswith("qemu-system") or not cmdline:
             continue
-        if console_port(cmdline) == port:
+        explicit = console_port(cmdline)
+        if explicit == port:
             return proc
+        if explicit is None:
+            implicit.append(proc)
+    if not implicit:
+        return None
+
+    unknown: list[Any] = []
+    for proc in implicit:
+        listening = _proc_listens_on(proc, port)
+        if listening:
+            return proc
+        if listening is None:
+            unknown.append(proc)
+    if not unknown:
+        return None  # every candidate answered: none owns this console port
+
+    pids = _lsof_listener_pids(port)
+    if pids is not None:
+        owners = [p for p in unknown if p.pid in pids]
+        if len(owners) == 1:
+            return owners[0]
+        if not owners:
+            return None
+    elif len(implicit) == 1:
+        return implicit[0]
+    _warn_unidentified(
+        serial, f"{len(implicit)} emulators without -port, console owner unknown"
+    )
     return None
 
 

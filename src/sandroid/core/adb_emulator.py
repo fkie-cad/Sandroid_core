@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-from sandroid.core.adb_utils import is_adb_error_actionable
+from sandroid.core.adb_utils import is_adb_error_actionable, quote_host_arg
 
 logger = getLogger(__name__)
 
@@ -56,7 +56,14 @@ def send_telnet_command(
     with _TELNET_LOCK:
         if isinstance(command, bytes):
             command = command.decode("utf-8")
-        stdout, stderr = send_command("emu " + command)
+        # ``adb emu`` joins its argv with spaces and the console splits on
+        # whitespace again, so quoting every word for the HOST shell keeps
+        # the console command identical while values such as snapshot names
+        # or capture/screenshot paths can never run anything host-side.
+        # Splitting on all whitespace also turns embedded newlines (which the
+        # console would read as a second command) into plain separators.
+        quoted = " ".join(quote_host_arg(word) for word in command.split())
+        stdout, stderr = send_command("emu " + quoted)
         if stderr and is_adb_error_actionable(stderr):
             logger.error(f'Telnet command "{command}" failed: {stderr.strip()}')
         elif stderr:

@@ -84,7 +84,8 @@ def test_vulkan_disabled(cmdline, expected):
 
 def test_console_port():
     assert eg.console_port(["-avd", "A", "-port", "5558"]) == 5558
-    assert eg.console_port(["-avd", "A"]) == 5554
+    # No -port: the emulator auto-assigns the port, it is NOT always 5554.
+    assert eg.console_port(["-avd", "A"]) is None
 
 
 def test_under_limit_safe_flags_is_silent(monkeypatch):
@@ -145,3 +146,112 @@ def test_config_defaults():
     cfg = EmulatorConfig()
     assert cfg.max_host_memory_gb == 10.0
     assert cfg.memory_guard_action == "kill"
+
+
+# -- matching the qemu behind a serial (C4) ---------------------------------
+
+
+class _Conn:
+    def __init__(self, port, status="LISTEN"):
+        self.laddr = type("A", (), {"port": port})()
+        self.status = status
+
+
+class _Qemu:
+    def __init__(self, pid, cmdline, listen=(), denied=False):
+        self.pid = pid
+        self.info = {"name": "qemu-system-aarch64", "cmdline": cmdline}
+        self._listen = listen
+        self._denied = denied
+
+    def net_connections(self, kind="tcp"):
+        if self._denied:
+            raise PermissionError("denied")
+        return [_Conn(p) for p in self._listen] + [_Conn(1, "ESTABLISHED")]
+
+
+@pytest.fixture
+def procs(monkeypatch):
+    import psutil
+
+    class _Running(list):
+        lsof_calls: list[int]
+
+    running = _Running()
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: list(running))
+    monkeypatch.setattr(eg, "_unidentified_serials", set())
+    lsof_calls = []
+
+    def _no_lsof(port):
+        lsof_calls.append(port)
+
+    monkeypatch.setattr(eg, "_lsof_listener_pids", _no_lsof)
+    running.lsof_calls = lsof_calls
+    return running
+
+
+def test_explicit_port_still_matches(procs):
+    procs += [
+        _Qemu(1, ["qemu", "-avd", "A", "-port", "5556"]),
+        _Qemu(2, ["qemu", "-avd", "B", "-port", "5554"]),
+    ]
+    assert eg.find_emulator_process("emulator-5554").pid == 2
+
+
+def test_two_auto_port_emulators_match_by_listen_socket(procs):
+    """The analyst's AVD listed first must not be taken for emulator-5554."""
+    user = _Qemu(111, ["qemu", "-avd", "UserAVD"], listen=(5556, 5557))
+    sandbox = _Qemu(222, ["qemu", "-avd", "Sandbox"], listen=(5554, 5555))
+    procs += [user, sandbox]
+    assert eg.find_emulator_process("emulator-5554") is sandbox
+    assert eg.find_emulator_process("emulator-5556") is user
+    assert eg.find_emulator_process("emulator-5558") is None
+
+
+def test_unknown_owner_with_two_emulators_is_not_guessed(procs, caplog):
+    procs += [
+        _Qemu(111, ["qemu", "-avd", "UserAVD"], denied=True),
+        _Qemu(222, ["qemu", "-avd", "Sandbox"], denied=True),
+    ]
+    with caplog.at_level(logging.WARNING):
+        assert eg.find_emulator_process("emulator-5554") is None
+        assert eg.find_emulator_process("emulator-5554") is None
+    assert len([r for r in caplog.records if "cannot identify" in r.message]) == 1
+    assert procs.lsof_calls == [5554, 5554]
+
+
+def test_lsof_fallback_identifies_owner(procs, monkeypatch):
+    procs += [
+        _Qemu(111, ["qemu", "-avd", "UserAVD"], denied=True),
+        _Qemu(222, ["qemu", "-avd", "Sandbox"], denied=True),
+    ]
+    monkeypatch.setattr(eg, "_lsof_listener_pids", lambda port: {222})
+    assert eg.find_emulator_process("emulator-5554").pid == 222
+
+
+def test_single_emulator_without_socket_info_is_matched(procs):
+    procs.append(_Qemu(7, ["qemu", "-avd", "Only"], denied=True))
+    assert eg.find_emulator_process("emulator-5556").pid == 7
+
+
+def test_single_emulator_on_another_port_is_not_matched(procs):
+    procs.append(_Qemu(7, ["qemu", "-avd", "Only"], listen=(5556,)))
+    assert eg.find_emulator_process("emulator-5554") is None
+
+
+def test_guard_never_kills_the_wrong_emulator(procs, monkeypatch):
+    """c4 repro: user AVD (14 GB, port 5556) + sandbox (2 GB, port 5554)."""
+    user = _Qemu(111, ["qemu", "-avd", "UserAVD"], listen=(5556,))
+    sandbox = _Qemu(222, ["qemu", "-avd", "Sandbox", "-feature", "-Vulkan"])
+    sandbox._listen = (5554,)
+    for proc, rss in ((user, 14 * GB), (sandbox, 2 * GB)):
+        proc.cmdline = lambda p=proc: p.info["cmdline"]
+        proc.memory_info = lambda r=rss: type("M", (), {"rss": r})()
+    procs += [user, sandbox]
+    killed = []
+    monkeypatch.setattr(eg.subprocess, "run", lambda argv, **kw: killed.append(argv))
+    g = eg.EmulatorMemoryGuard(
+        lambda: "emulator-5554", limit_gb=10, notify=lambda m, lvl: None
+    )
+    assert g.check_once() is None
+    assert killed == []

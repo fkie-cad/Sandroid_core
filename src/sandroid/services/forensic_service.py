@@ -31,6 +31,7 @@ from typing import Any
 
 import dateutil.parser as dp
 
+from sandroid.core.adb_utils import device_glob_arg
 from sandroid.services.forensic_service_types import (
     AdbProtocol,
     Snapshot,
@@ -273,10 +274,12 @@ class ForensicService:
         is_recursive = file_path.endswith("/*")
         search_path = file_path[:-2] if is_recursive else file_path
 
+        # Literal parts quoted for device + host shell; ``*``/``?`` stay bare
+        # so the device shell still expands the pattern.
         if is_recursive:
-            cmd = f"shell find {search_path} -type f"
+            cmd = f"shell find {device_glob_arg(search_path)} -type f"
         else:
-            cmd = f"shell ls -1A {search_path}"
+            cmd = f"shell ls -1A {device_glob_arg(search_path)}"
 
         stdout, stderr = adb.send_adb_command(cmd)
 

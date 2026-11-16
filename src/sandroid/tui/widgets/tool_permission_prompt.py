@@ -11,9 +11,10 @@ interrupt the surrounding transcript.
 import json
 from collections.abc import Callable
 
+from rich.markup import escape
 from textual.app import ComposeResult
-from textual.containers import Horizontal
-from textual.widgets import Button, Label
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, Label, Static
 
 from sandroid.ai.tools.registry import ToolSpec
 
@@ -44,6 +45,36 @@ def _format_args_preview(arguments: dict) -> str:
     """
     preview = json.dumps(dict(sorted(arguments.items())))
     return _truncate(preview, _ARGS_PREVIEW_MAX_LEN)
+
+
+def _format_args_full(arguments: dict) -> str:
+    """Render the complete arguments (sorted, indented) for review."""
+    return json.dumps(dict(sorted(arguments.items())), indent=2, ensure_ascii=False)
+
+
+#: Argument names that fall back to the spotlight app when omitted.
+_SPOTLIGHT_DEFAULT_PARAMS = ("package", "package_name")
+
+
+def _spotlight_default_note(spec: ToolSpec, arguments: dict) -> str | None:
+    """Name the spotlight app an omitted ``package``/``package_name`` resolves to.
+
+    Tools such as ``enable_app_proxy()`` act on the spotlight app when called
+    without a package; showing the resolved name lets the user see WHICH app
+    they are approving. Best effort -- ``None`` when nothing applies.
+    """
+    properties = (spec.parameters or {}).get("properties") or {}
+    for param in _SPOTLIGHT_DEFAULT_PARAMS:
+        if param in properties and not arguments.get(param):
+            try:
+                from sandroid.services import get_spotlight_service
+
+                package = get_spotlight_service().get_effective_package()
+            except Exception:
+                package = None
+            target = f"'{package}'" if package else "none selected"
+            return f"{param} omitted → current spotlight app: {target}"
+    return None
 
 
 class ToolPermissionPrompt(Horizontal):
@@ -78,9 +109,20 @@ class ToolPermissionPrompt(Horizontal):
         border: round $warning;
     }
 
+    ToolPermissionPrompt .tool-permission-body {
+        width: 1fr;
+        height: auto;
+    }
+
     ToolPermissionPrompt .tool-permission-message {
         width: 1fr;
         content-align: left middle;
+    }
+
+    ToolPermissionPrompt .tool-permission-args {
+        height: auto;
+        max-height: 10;
+        border-left: tall $warning;
     }
 
     ToolPermissionPrompt Button {
@@ -117,13 +159,35 @@ class ToolPermissionPrompt(Horizontal):
         """Build the message line and its buttons."""
         description = _truncate(self._spec.description, _DESCRIPTION_MAX_LEN)
         args_preview = _format_args_preview(self._arguments)
+        args_full = _format_args_full(self._arguments)
+        truncated = (
+            len(json.dumps(dict(sorted(self._arguments.items()))))
+            > _ARGS_PREVIEW_MAX_LEN
+        )
         never_label = "Never" if self._spec.can_remember_choice else "Decline"
 
-        yield Label(
-            f"[bold]{self._spec.name}[/] wants to run — {description} "
-            f"(args: {args_preview})",
-            classes="tool-permission-message",
+        # Everything model-controlled is markup-escaped: a ``[/]`` or
+        # ``[#000000 on #000000]`` inside an argument must not hide text.
+        if truncated:
+            args_text = (
+                "args TRUNCATED in this line — review the FULL arguments "
+                f"below ({len(args_full)} chars)"
+            )
+        else:
+            args_text = f"args: {escape(args_preview)}"
+        message = (
+            f"[bold]{escape(self._spec.name)}[/] wants to run — "
+            f"{escape(description)} ({args_text})"
         )
+        note = _spotlight_default_note(self._spec, self._arguments)
+        if note:
+            message += f"\n[b]{escape(note)}[/b]"
+
+        with Vertical(classes="tool-permission-body"):
+            yield Label(message, classes="tool-permission-message")
+            if truncated:
+                with VerticalScroll(classes="tool-permission-args"):
+                    yield Static(args_full, markup=False, id="tool-permission-args")
         yield Button("Run once", id="btn-once", classes="-primary")
         if self._spec.can_remember_choice:
             yield Button("Allow always", id="btn-always", classes="-secondary")

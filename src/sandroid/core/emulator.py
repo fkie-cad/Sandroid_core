@@ -1,9 +1,11 @@
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
 from logging import getLogger
+from pathlib import Path
 
 logger = getLogger(__name__)
 
@@ -12,14 +14,67 @@ EMULATOR_ERROR_KEYWORDS = ("PANIC", "ERROR", "WARNING", "Fatal")
 _STARTUP_GRACE_PERIOD = 3
 
 
-def check_emulator_startup(process: subprocess.Popen) -> tuple[bool, str]:
+#: Where detached emulators write their stdout/stderr (one file per AVD).
+EMULATOR_LOG_DIR = Path("~/.cache/sandroid/emulator").expanduser()
+
+
+def emulator_log_path(avd_name: str) -> Path:
+    """Return the log file a detached emulator for *avd_name* writes to."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", avd_name or "") or "emulator"
+    return EMULATOR_LOG_DIR / f"{safe}.log"
+
+
+def spawn_emulator(
+    command: list[str], avd_name: str, env: dict[str, str] | None = None
+) -> tuple[subprocess.Popen, Path | None]:
+    """Start a detached emulator whose output goes to a log file.
+
+    The emulator outlives the call (``start_new_session=True``), so its
+    output must never go to a pipe nobody drains: once the ~64 KiB pipe
+    buffer fills the emulator blocks on its next log write. stdout and
+    stderr are written to :func:`emulator_log_path` instead (truncated per
+    launch), or discarded if the log file cannot be created.
+
+    Returns:
+        ``(process, log_path)``; ``log_path`` is ``None`` when output is
+        discarded.
+
+    Raises:
+        OSError / subprocess.SubprocessError: The process could not start.
+    """
+    log_path: Path | None = emulator_log_path(avd_name)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        sink = open(log_path, "wb")
+    except OSError:
+        log_path, sink = None, None
+    try:
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=sink if sink is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT if sink is not None else subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        if sink is not None:
+            sink.close()  # the child keeps its own descriptor
+    return process, log_path
+
+
+def check_emulator_startup(
+    process: subprocess.Popen, log_path: str | Path | None = None
+) -> tuple[bool, str]:
     """Check whether an emulator process survived initial startup.
 
     Waits briefly, then checks if the process is still running.
-    If it exited, reads stderr and filters for error keywords.
+    If it exited, reads its output and filters for error keywords.
 
     Args:
-        process: The emulator Popen process (must have stderr=PIPE).
+        process: The emulator Popen process.
+        log_path: Log file the process writes to (see :func:`spawn_emulator`).
+            Without it, ``process.stderr`` is read if it is a pipe.
 
     Returns:
         Tuple of (success, error_message). On success error_message is empty.
@@ -31,7 +86,10 @@ def check_emulator_startup(process: subprocess.Popen) -> tuple[bool, str]:
 
     stderr_output = ""
     try:
-        stderr_output = process.stderr.read().decode(errors="replace")
+        if log_path is not None:
+            stderr_output = Path(log_path).read_bytes().decode(errors="replace")
+        elif process.stderr is not None:
+            stderr_output = process.stderr.read().decode(errors="replace")
     except OSError:
         pass
     error_lines = [
@@ -201,17 +259,15 @@ class Emulator:
             logger.info(
                 f"Starting emulator '{avd_name}' with command: {' '.join(command)}"
             )
-            # Use Popen for non-blocking start
-            # start_new_session=True isolates emulator from terminal signals (e.g., Ctrl+C)
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
+            # Non-blocking, detached (start_new_session isolates it from
+            # terminal signals such as Ctrl+C); output goes to a log file.
+            process, log_path = spawn_emulator(command, avd_name)
+            logger.info(
+                f"Emulator '{avd_name}' is starting up (PID {process.pid}, "
+                f"log {log_path})..."
             )
-            logger.info(f"Emulator '{avd_name}' is starting up (PID {process.pid})...")
 
-            ok, error_msg = check_emulator_startup(process)
+            ok, error_msg = check_emulator_startup(process, log_path)
             if not ok:
                 logger.error(
                     f"Emulator '{avd_name}' crashed during startup: {error_msg}"

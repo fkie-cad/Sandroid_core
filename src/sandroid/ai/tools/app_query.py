@@ -29,6 +29,7 @@ from sandroid.ai.tools._shared import (
     PACKAGE_NAME_PARAM,
     parse_pm_path_output,
     resolve_package_name,
+    validate_package_name,
 )
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb import Adb
@@ -121,6 +122,7 @@ def is_package_installed(package_name: str) -> dict[str, bool]:
     Returns:
         ``{"installed": bool}``.
     """
+    package_name = validate_package_name(package_name)
     return {"installed": Adb._is_package_installed(package_name)}
 
 
