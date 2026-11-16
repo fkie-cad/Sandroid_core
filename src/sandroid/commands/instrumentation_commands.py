@@ -147,10 +147,11 @@ class MalwareMonitorCommand(CommandHandler):
 
             # Start monitoring (will show interactive config if TTY)
             if not monitor.start_monitoring():
+                reason = getattr(monitor, "last_error", None) or "unknown error"
                 return CommandResult(
                     success=False,
-                    message="Failed to start malware monitoring",
-                    error="MalwareMonitor.start_monitoring() returned False",
+                    message=f"Failed to start malware monitoring: {reason}",
+                    error=reason,
                 )
 
             # Get spotlight app info for task registration
@@ -161,7 +162,9 @@ class MalwareMonitorCommand(CommandHandler):
             spotlight_app = spotlight.get_app_tuple()
             if spotlight_app:
                 app_name = spotlight_app[0]
-                app_pid = spotlight.get_pid()
+                # The monitor knows the pid it spawned/attached to; the
+                # spotlight may still hold a previous run's pid.
+                app_pid = getattr(monitor, "_app_pid", None) or spotlight.get_pid()
 
             # Register as background task
             task_service = ctx.task_service or get_task_service()
@@ -352,10 +355,11 @@ class ReconfigureHooksCommand(RequiresFrida):
 
             # Start monitoring with new configuration
             if not monitor.start_monitoring():
+                reason = getattr(monitor, "last_error", None) or "unknown error"
                 return CommandResult(
                     success=False,
-                    message="Failed to restart monitoring with new configuration",
-                    error="MalwareMonitor.start_monitoring() returned False",
+                    message=f"Failed to restart monitoring: {reason}",
+                    error=reason,
                 )
 
             # Get updated spotlight app info
@@ -366,7 +370,9 @@ class ReconfigureHooksCommand(RequiresFrida):
             spotlight_app = spotlight.get_app_tuple()
             if spotlight_app:
                 app_name = spotlight_app[0]
-                app_pid = spotlight.get_pid()
+                # The monitor knows the pid it spawned/attached to; the
+                # spotlight may still hold a previous run's pid.
+                app_pid = getattr(monitor, "_app_pid", None) or spotlight.get_pid()
 
             # Register as background task
             task_service = ctx.task_service or get_task_service()

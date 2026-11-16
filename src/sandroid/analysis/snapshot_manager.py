@@ -42,6 +42,59 @@ class SnapshotManager:
         """Check if the current session is interactive (TTY)."""
         return sys.stdin.isatty() and sys.stdout.isatty()
 
+    @staticmethod
+    def _tui_active() -> bool:
+        """True when a TUI owns the terminal (questions must go to a modal).
+
+        ``click.getchar()`` on a TUI worker thread competes with Textual for
+        stdin: the TUI dexray start sat idle for minutes until a keypress
+        happened to reach it (P2-H6).
+        """
+        try:
+            from sandroid.core.ui_request_bus import UIRequestBus
+
+            return UIRequestBus.get().has_active_handler()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_emulator(toolbox) -> bool:
+        """Snapshots only exist on emulators; assume yes if unknown."""
+        check = getattr(toolbox, "is_emulator_device", None)
+        if not callable(check):
+            return True
+        try:
+            return bool(check())
+        except Exception:
+            return True
+
+    def discard_snapshot(self, toolbox) -> bool:
+        """Delete the temporary pre-analysis snapshot (if one was created).
+
+        Called after the revert question on stop, and when the analysis
+        failed to start, so no ``sandroid_malware_*`` snapshot is left on the
+        AVD. Never raises.
+
+        Returns:
+            True if a snapshot was deleted.
+        """
+        name = self.snapshot_name
+        self.snapshot_name = None
+        self.should_revert_snapshot = False
+        if not name:
+            return False
+        label = name.decode() if isinstance(name, bytes) else str(name)
+        try:
+            ok = toolbox.delete_snapshot(name)
+        except Exception as e:
+            logger.warning(f"Could not delete temporary snapshot {label}: {e}")
+            return False
+        if ok is False:
+            logger.warning(f"Could not delete temporary snapshot {label}")
+            return False
+        logger.info(f"Deleted temporary snapshot: {label}")
+        return True
+
     def create_pre_analysis_snapshot(
         self, toolbox, prefix: str = "sandroid_malware"
     ) -> None:
@@ -54,6 +107,23 @@ class SnapshotManager:
             prefix: Prefix for the snapshot name. Defaults to "sandroid_malware".
         """
         if not (toolbox.is_spawn_mode() and self._is_interactive()):
+            return
+        if not self._is_emulator(toolbox):
+            return
+
+        if self._tui_active():
+            from sandroid.core.ui_request_bus import request_confirm
+
+            create = request_confirm(
+                "Snapshot before analysis?",
+                "Save the current AVD state before spawning the app, so you "
+                "can revert to it when the analysis stops. The snapshot is "
+                "temporary and deleted afterwards.",
+            )
+            if create:
+                self._save_snapshot(toolbox, prefix)
+            else:
+                logger.info("User declined snapshot creation")
             return
 
         import click
@@ -99,19 +169,33 @@ class SnapshotManager:
         console.print(f"[accent]{choice}[/accent]")
 
         if choice != "n":  # Default to yes (Enter, y, or any other key)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.snapshot_name = f"{prefix}_{timestamp}".encode()
-
-            console.print(
-                f"\n[primary]Creating snapshot: [accent]{self.snapshot_name.decode()}[/accent][/primary]"
-            )
-            toolbox.create_snapshot(self.snapshot_name)
-            self.should_revert_snapshot = True
-            console.print("[success]\u2713 Snapshot created successfully[/success]\n")
-            logger.info(f"Created snapshot: {self.snapshot_name.decode()}")
+            console.print("\n[primary]Creating snapshot...[/primary]")
+            if self._save_snapshot(toolbox, prefix):
+                console.print(
+                    "[success]\u2713 Snapshot created successfully[/success]\n"
+                )
+            else:
+                console.print("[warning]Snapshot could not be created[/warning]\n")
         else:
             console.print("\n[warning]Skipping snapshot creation[/warning]\n")
             logger.info("User declined snapshot creation")
+
+    def _save_snapshot(self, toolbox, prefix: str) -> bool:
+        """Save ``<prefix>_<timestamp>``; remember it only if the save worked."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = f"{prefix}_{timestamp}"
+        try:
+            ok = toolbox.create_snapshot(name.encode())
+        except Exception as e:
+            logger.warning(f"Snapshot {name} could not be created: {e}")
+            return False
+        if ok is False:
+            logger.warning(f"Snapshot {name} could not be created")
+            return False
+        self.snapshot_name = name.encode()
+        self.should_revert_snapshot = True
+        logger.info(f"Created snapshot: {name}")
+        return True
 
     def prompt_snapshot_revert(self, toolbox) -> None:
         """Prompt the user to revert to the pre-analysis snapshot if one was created.
@@ -120,6 +204,23 @@ class SnapshotManager:
             toolbox: The Toolbox instance for snapshot operations.
         """
         if not (self.snapshot_name and self.should_revert_snapshot):
+            return
+
+        if self._tui_active():
+            from sandroid.core.ui_request_bus import request_confirm
+
+            label = self.snapshot_name.decode()
+            if request_confirm(
+                "Revert to pre-analysis snapshot?",
+                f"Restore the AVD to '{label}' (the state before the analysis)? "
+                "All changes made during the analysis will be lost.",
+            ):
+                if toolbox.load_snapshot(self.snapshot_name) is False:
+                    logger.warning(f"Could not revert to snapshot {label}")
+                else:
+                    logger.info(f"Reverted to snapshot: {label}")
+            else:
+                logger.info("User declined snapshot revert")
             return
 
         if not self._is_interactive():

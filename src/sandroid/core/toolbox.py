@@ -477,8 +477,8 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def create_snapshot(cls, name):
-        """Delegates to EmulatorService.create_snapshot()."""
-        _service("get_emulator_service").create_snapshot(
+        """Delegates to EmulatorService.create_snapshot(); returns its success bool."""
+        return _service("get_emulator_service").create_snapshot(
             name if isinstance(name, str) else name.decode("utf-8")
         )
 
