@@ -157,7 +157,14 @@ class LoadSnapshotStep(Step):
     path_sensitive = True
 
     def run(self, ctx: EngineContext) -> None:
-        ctx.toolbox.load_snapshot(_SNAPSHOT_NAME)
+        # ``Toolbox.load_snapshot`` returns the emulator service's success flag
+        # (older/fake toolboxes return ``None``, treated as success). A failed
+        # revert is fatal: every later pull/diff would silently compare the
+        # post-action state against itself ("No changes detected").
+        if ctx.toolbox.load_snapshot(_SNAPSHOT_NAME) is False:
+            raise FatalStepError(
+                f"Failed to load emulator snapshot {_SNAPSHOT_NAME.decode()!r}"
+            )
 
 
 class BaselineStep(Step):
@@ -241,11 +248,11 @@ class StartCaptureStep(Step):
 class StopCaptureStep(Step):
     """Stop a background capture gatherer.
 
-    Only :class:`~sandroid.analysis.network.Network` has a real ``stop()`` (this
-    fixes its legacy never-stopped leak). ``Processes``/``Sockets`` self-
-    terminate after ``action_duration`` seconds and expose no ``stop()``, so the
-    step is a no-op for them and their results are read from ``return_data()``
-    after the loop.
+    ``Network.stop()`` ends the emulator pcap capture; ``Processes``/``Sockets``
+    (``PollingCaptureMixin``) stop polling and *join* their thread, so the
+    run's (or dry run's noise) list is stored before the next step -- the
+    legacy fire-and-forget threads kept polling across the snapshot revert and
+    could still be running when results were materialized.
     """
 
     kind = "stop_capture"
@@ -288,18 +295,36 @@ class GatherStep(Step):
         self.gatherer = gatherer
 
     def run(self, ctx: EngineContext) -> None:
-        # ChangedFiles/NewFiles fetch through DataGatherBase._fetch_changed_files,
-        # which calls forensic_service.fetch_changed_files() directly and so
-        # never passes through Toolbox._fetch_changed_files -- the only place
-        # that syncs the service's action-time window. Without this, the
-        # gatherer scans against whatever window a *previous* run's PullStep
-        # last synced (or (0, 0) on the very first run), silently reporting
-        # empty results while the correctly-windowed Pull that follows still
-        # pulls real file content.
-        ctx.forensic_service.set_action_window(
-            ctx.action_window_service.get_action_time(),
-            ctx.action_window_service.get_duration(),
-        )
+        # Scan the device ONCE per action window, through the toolbox, before
+        # the gatherer runs. ``Toolbox.fetch_changed_files`` syncs the forensic
+        # service's action window (a stale/(0, 0) window silently produced
+        # empty results), wires the timeline callback, and populates BOTH the
+        # action-window cache and the forensic service's own cache:
+        #
+        # * the gatherers (which read ``forensic_service.fetch_changed_files``)
+        #   then hit the cache instead of re-listing the filesystem, and
+        # * the ``PullStep("first")`` that runs *after* the snapshot revert
+        #   reads the cached post-action list. Without the cache it rescanned
+        #   the reverted filesystem, found nothing inside the action window,
+        #   and ``raw/first_pull/`` stayed empty -- so every changed file
+        #   reported "Not enough data for intra file analysis".
+        #
+        # The cache is invalidated by ``set_action_time`` (next replay / dry
+        # run), so each window still gets exactly one fresh scan.
+        ctx.toolbox.fetch_changed_files()
+        # Belt and braces for toolboxes that do not sync the window themselves:
+        # make sure the forensic service scans the *current* window. Only
+        # re-set it when it differs -- ``set_action_window`` invalidates the
+        # forensic cache the scan above just populated.
+        action_time = ctx.action_window_service.get_action_time()
+        duration = ctx.action_window_service.get_duration()
+        fs = ctx.forensic_service
+        try:
+            current = (fs.get_action_time(), fs.get_action_duration())
+        except Exception:
+            current = None
+        if current != (action_time, duration):
+            fs.set_action_window(action_time, duration)
         self.gatherer.gather()
 
     @property
@@ -520,8 +545,12 @@ class AnalysisPlan:
 
         if total <= 1:
             # ---- N=1 special case: single run yields both pulls ----
+            # The single run is also the only chance to capture network /
+            # processes / sockets (with N>=2 run 1 is reserved for pull0).
             rn = 1
+            steps += AnalysisPlan._capture_steps(gatherers, config, rn, start=True)
             steps.append(ActionStep(action, run_number=rn))
+            steps += AnalysisPlan._capture_steps(gatherers, config, rn, start=False)
             steps.append(GatherStep(cf, run_number=rn))
             steps.append(GatherStep(nf, run_number=rn))
             if want_deleted:
@@ -671,6 +700,7 @@ class AnalysisEngine:
         self.adb: Any = None
         self.gatherers: dict[str, DataGatherBase] = {}
         self._expected_device: str = ""
+        self._expected_serial: str = ""
 
     # ---- resolution helpers ------------------------------------------------
 
@@ -812,6 +842,22 @@ class AnalysisEngine:
         """Best-effort read of the currently-active device name."""
         return str(getattr(self.toolbox, "device_name", "") or "")
 
+    @staticmethod
+    def _active_serial() -> str:
+        """Best-effort adb serial of the DeviceManager's active device.
+
+        ``Toolbox.device_name`` is a session label that device switches do not
+        update, so on its own the guard never fired in production; the serial
+        is what ``Adb`` actually targets.
+        """
+        try:
+            from sandroid.core.device_manager import DeviceManager
+
+            device = DeviceManager.get().active_device
+            return str(getattr(device, "serial", "") or "") if device else ""
+        except Exception:
+            return ""
+
     def _guard_device(self) -> None:
         """Raise :class:`FatalStepError` if the active device changed mid-run.
 
@@ -821,6 +867,14 @@ class AnalysisEngine:
         wrong (fresh, empty) folder. The recording itself is immune (absolute
         path), but path-sensitive steps must fail fast.
         """
+        if self._expected_serial:
+            serial = self._active_serial()
+            if serial and serial != self._expected_serial:
+                raise FatalStepError(
+                    f"Active device changed mid-run "
+                    f"({self._expected_serial!r} -> {serial!r}); aborting to "
+                    f"avoid acting on the wrong device."
+                )
         if not self._expected_device:
             return
         current = self._current_device()
@@ -893,6 +947,7 @@ class AnalysisEngine:
         """
         self._resolve_services()
         self._expected_device = self.config.device_name or self._current_device()
+        self._expected_serial = self._active_serial()
         result = RunResult(device_name=self._expected_device)
 
         with _pinned_env(self.config):

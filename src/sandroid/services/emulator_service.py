@@ -532,10 +532,11 @@ class EmulatorService:
             else:
                 command = b"avd snapshot save " + name
 
-            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
+            stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
-            if stderr:
-                self._logger.error(f"Failed to create snapshot: {stderr}")
+            # The console reports failures as "KO: ..." on stdout (adb exit 0).
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to create snapshot: {stderr or stdout}")
                 return False
 
             self._logger.info(f"Snapshot '{name}' created successfully")
@@ -567,10 +568,12 @@ class EmulatorService:
             else:
                 command = b"avd snapshot load " + name
 
-            _stdout, stderr = adb.send_telnet_command(command, serial=serial)
+            stdout, stderr = adb.send_telnet_command(command, serial=serial)
 
-            if stderr:
-                self._logger.error(f"Failed to load snapshot: {stderr}")
+            # The console reports failures (e.g. unknown snapshot) as
+            # "KO: ..." on stdout while adb itself exits 0.
+            if stderr or "KO:" in str(stdout or ""):
+                self._logger.error(f"Failed to load snapshot: {stderr or stdout}")
                 return False
 
             # Reverting VM state disrupts the ADB transport for a variable

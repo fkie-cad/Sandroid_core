@@ -481,8 +481,8 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def load_snapshot(cls, name):
-        """Delegates to EmulatorService.load_snapshot()."""
-        _service("get_emulator_service").load_snapshot(
+        """Delegates to EmulatorService.load_snapshot(); returns its success bool."""
+        return _service("get_emulator_service").load_snapshot(
             name if isinstance(name, str) else name.decode("utf-8")
         )
 
