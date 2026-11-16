@@ -1114,6 +1114,17 @@ class AnalysisEngine:
         }
         if noise_filter is not None:
             header["protected_packages"] = list(noise_filter.protected_packages)
+        network = self.gatherers.get("network")
+        hidden_network = getattr(network, "filtered_network_noise", None)
+        if network is not None and isinstance(hidden_network, dict):
+            header["network_note"] = (
+                "DNS names / IP:port targets also seen in the dry run whose "
+                "volume in the action runs was comparable to that background "
+                "(entry -> both volumes). Busier ones stay in the results, "
+                "annotated 'also seen in background'."
+            )
+            for section, hidden in hidden_network.items():
+                report[section] = dict(sorted(hidden.items())) if hidden else {}
         return {**header, **report}
 
     def _log_file_summary(self, result: RunResult) -> None:
