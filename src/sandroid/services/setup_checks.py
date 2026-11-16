@@ -227,8 +227,8 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
                 "(binder calls from root, e.g. APK install or Frida, may be denied)"
             )
         else:
-            check.status = SetupCheckStatus.PASSED
-            check.message = "SELinux setenforce command accepted"
+            check.status = SetupCheckStatus.WARNING
+            check.message = "Could not verify SELinux mode (getenforce gave no output)"
 
     except Exception as e:
         check.status = SetupCheckStatus.WARNING

@@ -83,6 +83,21 @@ def test_install_apk_detects_failure_reported_on_stdout(monkeypatch):
         adb_packages.install_apk(fake.send_adb_command, "/tmp/x.apk")
 
 
+def test_install_apk_without_success_output_is_a_failure(monkeypatch):
+    from sandroid.core import adb_packages
+    from sandroid.core.exceptions import APKInstallError
+
+    monkeypatch.setattr(adb_packages, "find_aapt_paths", list)
+    with pytest.raises(APKInstallError):
+        adb_packages.install_apk(lambda cmd: ("", ""), "/tmp/x.apk")
+
+
+def test_selinux_check_unverifiable_is_a_warning():
+    from sandroid.services.setup_checks import check_and_set_selinux
+
+    assert not check_and_set_selinux(_FakeAdb({})).passed
+
+
 def test_install_apk_success_returns_package(monkeypatch):
     from sandroid.core import adb_packages
 

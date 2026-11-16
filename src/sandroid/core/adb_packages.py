@@ -141,8 +141,12 @@ def install_apk(
         logger.error(f"APK installation failed: {reason}")
         raise APKInstallError(apk_file, reason)
 
-    if "Success" not in stdout:
-        logger.warning(f"APK installation status unclear: {stdout}")
+    if "Success" not in (stdout or ""):
+        # pm always prints "Success" on success; anything else (incl. no
+        # output at all, e.g. adb itself failed) must not be reported as OK.
+        reason = combined or "adb install produced no 'Success' output"
+        logger.error(f"APK installation status unclear: {reason}")
+        raise APKInstallError(apk_file, reason)
 
     for aapt_path in find_aapt_paths():
         package_name = extract_package_name_with_aapt(aapt_path, apk_path)
