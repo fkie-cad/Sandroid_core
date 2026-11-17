@@ -16,7 +16,6 @@ import pytest
 from textual.app import App, ComposeResult
 
 from sandroid.core import run_history
-from sandroid.tui.widgets.diff_view import DiffView
 from sandroid.tui.widgets.diffs_view import DiffsView
 
 
@@ -76,16 +75,17 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
     results_root, monkeypatch
 ) -> None:
     """A STATE_CHANGED event published off the UI thread (snapshot load,
-    device poll, recording start, ...) re-renders the selected run's
-    DiffView. That mount used to run in the publisher's empty contextvars
-    context and crash the whole TUI with NoActiveAppError.
+    device poll, recording start, ...) re-renders the Runs table. The old
+    DiffView mount ran in the publisher's empty contextvars context and
+    crashed the whole TUI with NoActiveAppError.
     """
     _save_run("20261116_100000_aaaaaa")
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
+        table = view.query_one("#runs-table")
         await _wait_for(pilot, lambda: view._detail_record is not None)
-        await _wait_for(pilot, lambda: len(view.query(DiffView)) == 1)
+        await _wait_for(pilot, lambda: table.row_count == 1)
         monkeypatch.setattr(view, "_is_on_screen", lambda: True)
 
         callbacks = [cb for _etype, cb in view._event_handlers]
@@ -96,7 +96,7 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
         await pilot.pause(0.2)
 
         assert app._exception is None
-        assert len(view.query(DiffView)) == 1
+        assert table.row_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -510,8 +510,9 @@ async def test_n_without_a_focused_run_reaches_the_global_binding(
     app = _DiffsWithGlobalN()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: len(view.query(DiffView)) == 1)
-        view.query_one(DiffView).focus()  # a diff entry, not the Runs rail
+        await _wait_for(pilot, lambda: view.query_one("#runs-table").row_count == 1)
+        # The lens itself, not its runs table.
+        super(DiffsView, view).focus()
         await pilot.pause()
         await pilot.press("n")
         await pilot.pause(0.1)

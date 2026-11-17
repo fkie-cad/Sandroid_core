@@ -33,10 +33,10 @@ their state in the caption (``mitm ● :8080 · device ✓ · CA ✓ · friTap �
 and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
 
-REVIEW scope: ``on_scope_changed`` loads the run's flows -- a
-``<run dir>/mitm_flows/`` log when the run folder carries one, otherwise the
-session log filtered to the run's start/end window (``run.json``
-``recorded_at``/``completed_at``), which the caption says.
+REVIEW scope: ``on_scope_changed`` loads the run's flows -- run bundles do
+not store flows, so the session log is filtered to the run's time window
+(``run_history.resolve_scope``: Play press -> end of analysis), which the
+caption says. ``L`` (MainScreen) returns to LIVE.
 """
 
 from __future__ import annotations
@@ -371,42 +371,23 @@ def _flow_dir() -> Path:
     return resolve_flow_dir()
 
 
-def _run_window(run_id: str) -> tuple[Path | None, float, float] | None:
-    """``(run dir, start epoch, end epoch)`` of a run, or None if unknown.
+def _run_window(scope: str) -> tuple[str, float | None, float | None] | None:
+    """``(label, start epoch, end epoch)`` of the scoped run, or None.
 
-    ``run_id`` is the run directory as an absolute path (the scope
-    convention); a bare run id is resolved through ``run_history``. Kept as
-    one small function so it can be swapped for a shared run-history helper.
+    Thin adapter over the shared ``run_history.resolve_scope`` (``scope`` is
+    the run folder as an absolute path; times are the Play press and the end
+    of its analysis, from ``run.json``).
     """
-    run_dir: Path | None = Path(run_id) if run_id else None
-    data: dict[str, Any] = {}
-    if run_dir is not None and (run_dir / "run.json").is_file():
-        try:
-            data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-    if not data:
-        try:
-            from sandroid.core import run_history
+    from sandroid.core import run_history
 
-            record = run_history.load_run(Path(run_id).name)
-            data = record.to_dict()
-            run_dir = Path(record.bundle_dir) if record.bundle_dir else run_dir
-        except Exception:
-            return None
-    try:
-        start = datetime.fromisoformat(str(data["recorded_at"])).timestamp()
-    except (KeyError, ValueError, TypeError):
+    run = run_history.resolve_scope(scope)
+    if run is None:
         return None
-    end = None
-    try:
-        if data.get("completed_at"):
-            end = datetime.fromisoformat(str(data["completed_at"])).timestamp()
-    except (ValueError, TypeError):
-        end = None
-    if end is None:
-        end = start + float(data.get("duration") or 0)
-    return run_dir, start, max(start, end)
+    start = run.started_at.timestamp() if run.started_at else None
+    end = run.ended_at.timestamp() if run.ended_at else start
+    if start is not None and end is not None:
+        end = max(start, end)
+    return run.label, start, end
 
 
 # --------------------------------------------------------------------------
@@ -631,6 +612,7 @@ class NetworkPanel(Widget):
         # review model
         self._scope: str | None = None
         self._scope_label: str | None = None
+        self._scope_label_given = False
         self._review: list[FlowRow] = []
         self._review_note = ""
         self._review_window: tuple[float, float] | None = None
@@ -903,7 +885,7 @@ class NetworkPanel(Widget):
         readable width instead of scrolling sideways.
         """
         avail = self.size.width or 120
-        who = 18 if avail >= 110 else 16
+        who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
         cols = [("time", "Time", 8), ("who", "Recipient", who)]
         cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 9)]
         if avail < 76:
@@ -1119,7 +1101,7 @@ class NetworkPanel(Widget):
                 )
                 return (
                     f"No flows were captured during {label}",
-                    f"looked for flows between {span}",
+                    f"looked for flows between {span} · L back to LIVE",
                 )
             return f"No flow data for {label}", self._review_note
         mitm = self.mitm
@@ -1155,8 +1137,6 @@ class NetworkPanel(Widget):
         return title
 
     def _review_note_short(self) -> str:
-        if self._review_note == "run":
-            return "flows saved with the run"
         if self._review_window is not None:
             return "flows in the run's time window"
         return ""
@@ -1217,9 +1197,9 @@ class NetworkPanel(Widget):
     def on_scope_changed(self, message) -> None:
         run_id = getattr(message, "run_id", None)
         self._scope = run_id
-        self._scope_label = getattr(message, "label", None) or (
-            f"Run {Path(run_id).name}" if run_id else None
-        )
+        given = getattr(message, "label", None)
+        self._scope_label_given = bool(given)
+        self._scope_label = given or (f"Run {Path(run_id).name}" if run_id else None)
         self._review = []
         self._review_window = None
         self._review_note = ""
@@ -1246,7 +1226,7 @@ class NetworkPanel(Widget):
             result = self.load_run_flows(run_id)
         except Exception:
             logger.debug("network review load failed", exc_info=True)
-            result = ([], "", None)
+            result = ([], "", None, None)
         try:
             self.app.call_from_thread(self._apply_review, run_id, result)
         except Exception:
@@ -1254,26 +1234,22 @@ class NetworkPanel(Widget):
 
     def load_run_flows(
         self, run_id: str
-    ) -> tuple[list[FlowRow], str, tuple[float, float] | None]:
-        """``(rows, source, window)`` of a run (any thread).
+    ) -> tuple[list[FlowRow], str, tuple[float, float] | None, str | None]:
+        """``(rows, source, window, label)`` of a run (any thread).
 
-        ``source`` is ``"run"`` when the run folder carries its own
-        ``mitm_flows/`` log, ``"window"`` when the session log was filtered
-        by the run's start/end time, or a short reason when neither works.
+        Run bundles do not store flows, so the session's ``flows.jsonl`` is
+        filtered by the run's time window (Play press -> end of analysis,
+        from ``run_history.resolve_scope``); ``source`` is ``"window"`` then,
+        or a short reason when the run or its times are unknown.
         """
         from sandroid.services.mitmproxy_flow_log import HARD_LIMIT_CAP, query_flows
 
         window = _run_window(run_id)
-        run_dir = window[0] if window else Path(run_id)
-        own = run_dir / "mitm_flows" if run_dir is not None else None
-        if own is not None and (own / "flows.jsonl").is_file():
-            res = query_flows(own, limit=HARD_LIMIT_CAP)
-            rows = [FlowRow.from_record(r, own) for r in res["flows"]]
-            span = (window[1], window[2]) if window else None
-            return rows, "run", span
         if window is None:
-            return [], "no start/end time recorded for this run", None
-        _, start, end = window
+            return [], "this run's record could not be read", None, None
+        label, start, end = window
+        if start is None or end is None:
+            return [], "no start/end time recorded for this run", None, label
         start -= 2.0
         end += 2.0
         flow_dir = _flow_dir()
@@ -1286,16 +1262,18 @@ class NetworkPanel(Widget):
                 limit=HARD_LIMIT_CAP,
             )
             rows = [FlowRow.from_record(r, flow_dir) for r in res["flows"]]
-        return rows, "window", (start, end)
+        return rows, "window", (start, end), label
 
     def _apply_review(self, run_id: str, result) -> None:
         if run_id != self._scope:
             return  # the scope moved on while loading
-        rows, source, window = result
-        if source == "window" and window is not None:
+        rows, source, window, label = result
+        if window is not None:
             a, b = window
             rows = rows + [r for r in self._live if r.kind == "tls" and a <= r.ts <= b]
             rows.sort(key=lambda r: r.ts)
+        if label and not self._scope_label_given:
+            self._scope_label = label
         self._review = rows[-self.MAX_ROWS :]
         self._review_note = source
         self._review_window = window

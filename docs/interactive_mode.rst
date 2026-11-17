@@ -54,6 +54,7 @@ Key                         Action
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
 ``r`` / ``p``               Record / Play (replay + diff) -- from any lens
+``L`` (Shift+L)             Back to LIVE while reviewing a run (``◆ REVIEW``)
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
 ``Ctrl+Y``                  AI Chat in the right-hand slot
@@ -180,8 +181,26 @@ Record/Play results and the run history (``r``/``p`` work from every lens;
    activity are shown.
 
 Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
-and listed in the run history (per device). ``x`` / ``i`` export / import a
-recording.
+and listed in the Runs lens (per device, newest first): ``#``, label, when,
+how long (``×3`` for a run with three replays) and what changed
+(files · hosts, ``⚠`` step errors, ``✕`` aborted). ``x`` / ``i`` export /
+import a recording.
+
+==================  =========================================================
+Key (Runs lens)     Action
+==================  =========================================================
+``Enter``           Inspector: *Summary* (time, device, status, evidence
+                    check, errors, settings used), *Changes* (files, hosts),
+                    *Report* (PDF files, folder)
+``v``               **Review** this run: the header shows ``◆ REVIEW <label>``
+                    and the Files / Network lenses show this run instead of
+                    the live session; ``v`` again or ``L`` (any lens) goes
+                    back to LIVE. Recording or replaying always goes LIVE.
+``=``               Compare with the run under review (or the previous run)
+``z``               The run's full file diff (search / export)
+Shift+``P``         Write a PDF report for the run
+``n`` / ``Del``     Rename / delete the run (each asks first)
+==================  =========================================================
 
 Other Actions
 -------------

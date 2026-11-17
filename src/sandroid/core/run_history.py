@@ -494,18 +494,212 @@ def is_run_count_high(device_name: str | None = None) -> bool:
     return run_count(device_name) > RUN_COUNT_WARNING_THRESHOLD
 
 
+# ---------------------------------------------------------------------------
+# Review scope: resolve a run for the TUI's REVIEW mode
+# ---------------------------------------------------------------------------
+#
+# ``MainScreen.set_scope(run_id, label)`` takes a *scope id*: the run's bundle
+# directory as an absolute path string (``str(Path)``), see
+# :func:`scope_for_run`. Lenses resolve it with the helpers below; they read
+# only the run folder, so a scope stays valid even if the configured results
+# path changes later.
+
+#: Results JSON written into every run bundle by ``run_report.finalize_run``.
+RESULTS_JSON_NAME = "sandroid.json"
+
+
+@dataclass(frozen=True)
+class FileDiffRow:
+    """One file a run changed, created or deleted.
+
+    ``diff`` holds the diff lines (Rich markup included) for a changed file
+    the diff engine could diff (sqlite/xml/text), else ``None``.
+    """
+
+    kind: str  # "changed" | "new" | "deleted"
+    path: str
+    diff: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class ScopedRun:
+    """What a lens needs to show one run in REVIEW scope."""
+
+    run_id: str
+    run_dir: Path
+    label: str
+    device_name: str
+    started_at: datetime | None
+    ended_at: datetime | None
+    error: str | None = None
+
+
+def scope_for_run(run_id: str) -> str:
+    """The scope id of ``run_id``: its bundle folder as an absolute path string."""
+    return str(_bundle_dir(run_id).resolve())
+
+
+def run_dir_for_scope(scope: str | os.PathLike[str] | None) -> Path | None:
+    """The run folder of a scope id, or ``None`` (LIVE / unknown run).
+
+    ``scope`` is the absolute run folder (what :func:`scope_for_run` returns
+    and ``MainScreen.scope`` holds); a bare run id is accepted as well. Only a
+    folder that holds a ``run.json`` counts.
+    """
+    if not scope:
+        return None
+    candidate = Path(scope).expanduser()
+    if not candidate.is_absolute():
+        candidate = _bundle_dir(str(scope))
+    try:
+        if (candidate / "run.json").is_file():
+            return candidate.resolve()
+    except OSError:
+        pass
+    return None
+
+
+def load_run_dir(run_dir: str | os.PathLike[str]) -> RunRecord:
+    """Load the :class:`RunRecord` stored in a run folder (label applied).
+
+    Raises :class:`RunHistoryError` if ``run.json`` is missing or corrupt.
+    """
+    path = Path(run_dir) / "run.json"
+    if not path.is_file():
+        raise RunHistoryError(f"No run in '{run_dir}'")
+    try:
+        with open(path, encoding="utf-8") as f:
+            record = RunRecord.from_dict(json.load(f))
+    except Exception as exc:
+        raise RunHistoryError(f"Run in '{run_dir}' is corrupt: {exc}") from exc
+    return _apply_label(record)
+
+
+def read_results_doc(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
+    """The run's full results JSON (``sandroid.json``), or ``None``.
+
+    Holds ``"Run Metadata"`` (start/end, settings used), ``"Run Errors"``,
+    ``"Network"`` and the other gatherer outputs. Can be large: read it off
+    the UI thread.
+    """
+    path = Path(run_dir) / RESULTS_JSON_NAME
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        logger.debug("run_history: no results doc in %s (%s)", run_dir, exc)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_time(value: Any) -> datetime | None:
+    """ISO string -> timezone-aware datetime (naive values are local time)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def resolve_scope(scope: str | os.PathLike[str] | None) -> ScopedRun | None:
+    """Everything a lens needs about the run under review, or ``None``.
+
+    ``started_at``/``ended_at`` are timezone-aware (stored naive values are
+    local time): the Play's start and the end of its analysis, from
+    ``run.json`` (``recorded_at``/``completed_at``), falling back to the
+    results JSON's ``"Run Metadata"``. Use them as the run's time window.
+    """
+    run_dir = run_dir_for_scope(scope)
+    if run_dir is None:
+        return None
+    try:
+        record = load_run_dir(run_dir)
+    except RunHistoryError as exc:
+        logger.debug("run_history: cannot resolve scope %s: %s", scope, exc)
+        return None
+    started = _parse_time(record.recorded_at)
+    ended = _parse_time(record.completed_at)
+    if started is None or ended is None:
+        meta = (read_results_doc(run_dir) or {}).get("Run Metadata") or {}
+        started = started or _parse_time(meta.get("started_at"))
+        ended = ended or _parse_time(meta.get("ended_at"))
+    return ScopedRun(
+        run_id=record.run_id,
+        run_dir=run_dir,
+        label=record.label,
+        device_name=record.device_name,
+        started_at=started,
+        ended_at=ended,
+        error=record.error,
+    )
+
+
+def run_time_window(
+    scope: str | os.PathLike[str] | None,
+) -> tuple[datetime | None, datetime | None]:
+    """``(started_at, ended_at)`` of the scoped run; ``(None, None)`` if unknown."""
+    run = resolve_scope(scope)
+    if run is None:
+        return None, None
+    return run.started_at, run.ended_at
+
+
+def file_diff_rows(
+    source: RunRecord | str | os.PathLike[str] | None,
+) -> list[FileDiffRow]:
+    """The run's changed / new / deleted files as flat rows.
+
+    ``source`` is a loaded :class:`RunRecord` or a scope id / run folder.
+    Same data the Runs lens shows: changed files first (with their diff lines
+    where the engine produced one), then new, then deleted.
+    """
+    if isinstance(source, RunRecord):
+        record: RunRecord | None = source
+    else:
+        run_dir = run_dir_for_scope(source)
+        try:
+            record = load_run_dir(run_dir) if run_dir is not None else None
+        except RunHistoryError:
+            record = None
+    if record is None:
+        return []
+    rows: list[FileDiffRow] = []
+    for entry in record.changed_files or []:
+        if isinstance(entry, dict):
+            for path, lines in entry.items():
+                diff = [str(x) for x in lines] if isinstance(lines, list) else None
+                rows.append(FileDiffRow("changed", str(path), diff))
+        else:
+            rows.append(FileDiffRow("changed", str(entry)))
+    rows.extend(FileDiffRow("new", str(p)) for p in record.new_files or [])
+    rows.extend(FileDiffRow("deleted", str(p)) for p in record.deleted_files or [])
+    return rows
+
+
 __all__ = [
+    "RESULTS_JSON_NAME",
     "RUN_COUNT_WARNING_THRESHOLD",
     "SCHEMA_VERSION",
+    "FileDiffRow",
     "RunHistoryError",
     "RunRecord",
+    "ScopedRun",
     "clear_all",
     "delete_run",
+    "file_diff_rows",
     "is_run_count_high",
     "load_index",
     "load_run",
+    "load_run_dir",
     "new_run_id",
+    "read_results_doc",
+    "resolve_scope",
     "run_count",
+    "run_dir_for_scope",
+    "run_time_window",
     "save_run",
+    "scope_for_run",
     "update_label",
 ]

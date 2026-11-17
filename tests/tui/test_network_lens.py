@@ -257,21 +257,35 @@ def test_fetch_new_is_cursor_based_and_cheap_when_idle(flow_dir):
     assert [r["seq"] for r in res2[1]] == [cursor + 1, cursor + 2]
 
 
-def test_run_window_reads_run_json(tmp_path):
-    run = tmp_path / "runs" / "r1"
-    run.mkdir(parents=True)
-    t0 = datetime(2026, 11, 17, 10, 0, 0)
-    (run / "run.json").write_text(
+def write_run(run_dir: Path, start: float, end: float, label: str = "") -> Path:
+    """A minimal but complete ``run.json`` (what ``run_history`` loads)."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.json").write_text(
         json.dumps(
             {
-                "recorded_at": t0.isoformat(),
-                "completed_at": datetime(2026, 11, 17, 10, 1, 0).isoformat(),
+                "schema_version": 2,
+                "run_id": run_dir.name,
+                "label": label,
+                "recorded_at": datetime.fromtimestamp(start).isoformat(),
+                "completed_at": datetime.fromtimestamp(end).isoformat(),
+                "device_name": "demo",
+                "recording_path": "",
+                "duration": int(end - start),
+                "bundle_dir": str(run_dir),
             }
         )
     )
-    run_dir, start, end = np_mod._run_window(str(run))
-    assert run_dir == run
+    return run_dir
+
+
+def test_run_window_uses_the_shared_run_history_resolver(tmp_path):
+    t0 = datetime(2026, 11, 17, 10, 0, 0).timestamp()
+    run = write_run(tmp_path / "runs" / "r1", t0, t0 + 60, label="Run 7")
+    label, start, end = np_mod._run_window(str(run))
+    assert label == "Run 7"
+    assert start == pytest.approx(t0)
     assert end - start == pytest.approx(60)
+    assert np_mod._run_window(str(tmp_path / "nope")) is None
 
 
 # --------------------------------------------------------------------------
@@ -487,17 +501,8 @@ async def test_proxy_controls_stay_bound(flow_dir, monkeypatch):
 
 async def test_review_scope_filters_by_run_window(flow_dir, tmp_path):
     base = time.time() - 1000
-    run = tmp_path / "runs" / "20261117_100000_ab12cd"
-    run.mkdir(parents=True)
     # window covers flows 3..5 (t = 20 s .. 40 s)
-    (run / "run.json").write_text(
-        json.dumps(
-            {
-                "recorded_at": datetime.fromtimestamp(base + 19).isoformat(),
-                "completed_at": datetime.fromtimestamp(base + 41).isoformat(),
-            }
-        )
-    )
+    run = write_run(tmp_path / "runs" / "20261117_100000_ab12cd", base + 19, base + 41)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir, base=base)
@@ -517,36 +522,22 @@ async def test_review_scope_filters_by_run_window(flow_dir, tmp_path):
         assert panel.table.row_count == live_rows
 
 
-async def test_review_scope_prefers_flows_saved_with_the_run(flow_dir, tmp_path):
-    run = tmp_path / "runs" / "r2"
-    write_flows(run / "mitm_flows", time.time() - 5000, specs=_SPECS[1:3])
-    (run / "run.json").write_text(
-        json.dumps({"recorded_at": datetime.now().isoformat(), "duration": 5})
-    )
-    empty = tmp_path / "runs" / "r0"
-    empty.mkdir()
-    (empty / "run.json").write_text(
-        json.dumps(
-            {
-                "recorded_at": datetime.fromtimestamp(1).isoformat(),
-                "completed_at": datetime.fromtimestamp(2).isoformat(),
-            }
-        )
-    )
+async def test_review_scope_empty_and_unknown_runs(flow_dir, tmp_path):
+    empty = write_run(tmp_path / "runs" / "r0", 1, 2, label="Run 1")
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
-        ms.set_scope(str(run))
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
-        assert panel._review_note == "run"
-        assert panel.table.row_count == 2
-        assert "saved with the run" in ms._lens_captions["network"][0]
-        ms.set_scope(str(empty), label="Run 1")
+        ms.set_scope(str(empty))  # label comes from run.json
         await _wait(pilot, lambda: not panel._review_loading)
         await _settle(pilot)
         assert panel.table.has_class("-empty")
         assert "No flows were captured during Run 1" in str(
+            panel.query_one("#net-empty-head").render()
+        )
+        ms.set_scope(str(tmp_path / "missing"), label="Run 9")
+        await _wait(pilot, lambda: not panel._review_loading)
+        await _settle(pilot)
+        assert "No flow data for Run 9" in str(
             panel.query_one("#net-empty-head").render()
         )
 

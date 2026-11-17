@@ -114,6 +114,8 @@ class MainScreen(Screen):
         Binding("shift+left", "unfocused_nav('cycle', -1)", show=False),
         Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
         Binding("enter", "inspect", "Inspect"),
+        # Back to LIVE from REVIEW scope (shown only while reviewing a run).
+        Binding("L", "back_to_live", "Live"),
     ]
 
     #: Current review scope: a run id, or None for the live session. Watch it
@@ -125,7 +127,13 @@ class MainScreen(Screen):
             return self.focused is None
         if action == "inspect":
             return hasattr(self.lens_widget(), "inspect_selected")
+        if action == "back_to_live":
+            return self.scope_run is not None
         return True
+
+    def action_back_to_live(self) -> None:
+        """``L`` -- leave REVIEW scope (no-op in LIVE)."""
+        self.set_scope(None)
 
     def action_unfocused_nav(self, kind: str, delta: int) -> None:
         if kind == "level":
@@ -827,6 +835,7 @@ class MainScreen(Screen):
 
     def watch_scope_run(self, run_id: str | None) -> None:
         self._update_scope_pill()
+        self.refresh_bindings()  # "L Live" shows only in REVIEW
         for spec in LENSES:
             self._post_scope(spec.id)
 
