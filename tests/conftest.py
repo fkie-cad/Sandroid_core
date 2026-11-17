@@ -348,6 +348,16 @@ def _block_device_access(request, monkeypatch):
         emulator_guard = None
     if emulator_guard is not None:
         monkeypatch.setattr(emulator_guard, "start_memory_guard", lambda config: None)
+    # On hosts without adb (CI runners) ``Adb.init`` calls ``exit(1)`` the
+    # first time a widget asks the device anything. Give it a placeholder
+    # path: the Popen guard above blocks every ``adb`` call anyway, so code
+    # under test takes its normal "command failed" path.
+    try:
+        from sandroid.core.adb import Adb
+    except Exception:
+        Adb = None
+    if Adb is not None and not Adb.ADB_PATH:
+        monkeypatch.setattr(Adb, "ADB_PATH", "adb")
 
     start = len(_blocked)
     yield
