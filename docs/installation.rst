@@ -109,7 +109,7 @@ known to work:
 
 Verify root with ``adb root && adb shell id`` (must report ``uid=0(root)``).
 
-**Snapshots are required** for the Record/Play workflow and the Snapshots tab.
+**Snapshots are required** for the Record/Play workflow and the snapshot picker (``S``).
 Do not start the emulator with ``-no-snapshot``; use ``-no-snapshot-save`` if
 you do not want the quick-boot snapshot overwritten, or start it with
 ``sandroid-config avd start``.

@@ -890,24 +890,12 @@ class WatchlistView(FilesSubViewBase):
     # `a`=Analyze binding, the same established precedent as d/p/n above).
 
     def _is_watchlist_visible(self) -> bool:
-        """True only while the Files tab is on screen AND Watchlist is its
-        active inner sub-view.
-
-        Mirrors SnapshotsPanel's ``_is_on_screen()``, extended one
-        ``ContentSwitcher`` level deeper for the Files tab's own inner
-        switcher. Uses ``self.screen.query_one`` (not ``self.app.query_one``)
-        -- widgets must reach ancestors via the screen, not the app's default
-        screen, to avoid a silent ``NoMatches`` (see FilesPanel/SnapshotsPanel
-        for the same convention).
+        """True only while the Files lens is active AND Watchlist is its
+        active inner sub-view (``lens_shell.is_shown``: no ancestor hidden).
         """
-        try:
-            outer = self.screen.query_one("#tool-body", ContentSwitcher)
-            if outer.current != "files-panel":
-                return False
-            inner = self.screen.query_one("#files-body", ContentSwitcher)
-            return inner.current == "files-watchlist"
-        except Exception:
-            return False
+        from .lens_shell import is_shown
+
+        return is_shown(self)
 
     def action_toggle_auto(self) -> None:
         if self._auto_enabled:

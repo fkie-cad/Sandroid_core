@@ -3,10 +3,7 @@
 import os
 import threading
 
-from rich.box import ROUNDED
 from rich.console import RenderableType
-from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 
@@ -25,14 +22,12 @@ from sandroid.tui.themes import FIXED_COLORS
 class StatusBar(Static):
     """Status bar showing current application state.
 
-    Displays:
-    - Current view mode (FORENSIC/MALWARE/SECURITY)
-    - Active device (emulator/physical)
-    - Frida server status
-    - Spotlight application name
-    - Background tasks (when running)
-    - Record/Replay mode (only while one is active — see ``recording_active``/
-      ``replay_active``, set by app.py's ``_set_status_bar_mode``)
+    A compact strip (at most ``MAX_ROWS`` rows, full width) under the shell
+    header: App state (pid / paused), Frida, Hooks + bypass (when active),
+    Proxy (engine, device route, per-app lanes), Capture (when running) and
+    Record/Replay (while active -- see ``recording_active``/``replay_active``,
+    set by app.py's ``_set_status_bar_mode``). Device and package names are
+    exposed through :meth:`breadcrumb_markup` for the header instead.
 
     Status indicators (running/stopped, spawn/attach) use fixed colors
     that don't change with theme for instant recognition.
@@ -199,15 +194,32 @@ class StatusBar(Static):
 
         return colors
 
-    def render(self) -> RenderableType:
-        r"""Render the glance band as an aligned label/value grid.
+    def breadcrumb_markup(self) -> str:
+        """Device ▸ app breadcrumb for the shell header (markup, no I/O)."""
+        colors = self._get_theme_colors()
+        muted = colors["text_muted"]
+        parts = []
+        if self.active_device:
+            device = f"{self.device_type} {self.active_device}".strip()
+            specs = []
+            if self.device_android_version or self.device_api_level:
+                specs.append(f"A{self.device_android_version or '?'}")
+            if self.device_rooted is True:
+                specs.append("root")
+            spec_txt = f" [{muted}]{' · '.join(specs)}[/]" if specs else ""
+            parts.append(f"{device}{spec_txt}")
+        else:
+            parts.append(f"[{muted}]no device — D to select[/]")
+        if self.spotlight_app and self.spotlight_app != "None":
+            parts.append(f"[b]{self.spotlight_app}[/b]")
+        return "  [dim]▸[/dim]  ".join(parts)
 
-        Returns a borderless Rich grid: right-justified muted labels, a faint
-        gutter rule, then the value column. FIXED_COLORS drive the status
-        glyphs (running/stopped, spawn/attach) so they read identically across
-        themes; theme colors drive labels and primary text. Multi-part items
-        (Device, App) use a continuation row (blank label) for their detail
-        line. Per-task detail still lives in the footer's task bar.
+    def _segments(self) -> list[Text]:
+        """Status segments in priority order (most important first).
+
+        Only what changes decisions is shown; idle tools (no capture, no
+        hooks) are omitted rather than printed as "none" -- the header owns
+        device + app identity, the pill owns record/replay/review.
         """
         colors = self._get_theme_colors()
         muted = colors["text_muted"]
@@ -215,189 +227,123 @@ class StatusBar(Static):
         warn = colors["warning"]
         run = FIXED_COLORS["running"]
         stop = FIXED_COLORS["stopped"]
+        segs: list[str] = []
 
-        grid = Table.grid(padding=(0, 1))
-        grid.add_column(justify="right", style=muted, no_wrap=True)  # label
-        grid.add_column(style=muted, no_wrap=True)  # gutter rule
-        grid.add_column(overflow="fold")  # value
-
-        def row(label: str, value_markup: str) -> None:
-            grid.add_row(label, "│", Text.from_markup(value_markup))
-
-        # -- Device specs (the device NAME rides the panel's top border) --
-        # All specs are cached on the Device object — no ADB on render.
-        if self.active_device:
-            specs = []
-            if self.device_android_version or self.device_api_level:
-                ver = self.device_android_version or "?"
-                api = self.device_api_level or "?"
-                specs.append(f"Android {ver} [{muted}]· API {api}[/]")
-            if self.device_rooted is True:
-                specs.append(f"[{run}]root ✓[/]")
-            elif self.device_rooted is False:
-                specs.append(f"[{stop}]root ✗[/]")
-            if specs:
-                row("OS", f" [{muted}]·[/] ".join(specs))
-
-        # -- Frida (FIXED colors; version-mismatch logic untouched) -------
-        if self.frida_status == "Running":
-            if self._frida_version_mismatch:
-                frida_display = "[#facc15 bold]● Running[/] [#facc15]⚠ mismatch[/]"
-            else:
-                frida_display = f"[{run} bold]● Running[/]"
-        elif self.frida_status == "Checking...":
-            frida_display = f"[{muted}]○ Checking…[/]"
-        else:
-            frida_display = f"[{stop}]○ Not running[/]"
-        row("Frida", frida_display)
-
-        # -- App: package + mode, then pid/state continuation line --------
+        # App state (package itself is in the header breadcrumb).
         if self.spotlight_app and self.spotlight_app != "None":
-            mode = "SPAWN" if self.spawn_mode else "ATTACH"
-            mode_color = (
-                FIXED_COLORS["spawn_mode"]
-                if self.spawn_mode
-                else FIXED_COLORS["attach_mode"]
-            )
-            row(
-                "App",
-                f"[{primary}]{self.spotlight_app}[/] [{mode_color} bold]\\[{mode}][/]",
-            )
+            mode = "spawn" if self.spawn_mode else "attach"
             if self.spotlight_pid and self.spotlight_paused:
-                state = "[#fbbf24]◐ paused[/]"
+                state = f"[#fbbf24]◐ paused[/] [{muted}]pid {self.spotlight_pid}[/]"
             elif self.spotlight_pid:
-                state = f"[{run}]● running[/]"
+                state = f"[{run}]● running[/] [{muted}]pid {self.spotlight_pid}[/]"
             else:
                 state = f"[{stop}]○ not running[/]"
-            pid_part = (
-                f"[{muted}]pid[/] [b]{self.spotlight_pid}[/]  "
-                if self.spotlight_pid
-                else ""
-            )
-            row("", f"{pid_part}{state}")
+            segs.append(f"[{muted}]App[/] {state} [{muted}]· {mode}[/]")
         else:
-            row("App", f"[{muted}]None[/]")
+            segs.append(f"[{muted}]App ○ none[/]")
 
-        # -- Hooks + Bypass -----------------------------------------------
-        on = set(self.bypass_categories)
-        bypass_cells = [
-            f"[{run}]●[/] {label}"
-            for category, label in (
-                ("ssl", "SSL (exp.)"),
-                ("root", "Root (exp.)"),
-                ("frida", "Frida (exp.)"),
-                ("debug", "Debug (exp.)"),
-                ("integrity", "Integ (exp.)"),
-            )
-            if category in on
-        ]
-        bypass_display = " ".join(bypass_cells) if bypass_cells else f"[{muted}]none[/]"
-        row(
-            "Hooks",
-            f"[b]{self.hook_count}[/] [{muted}]active · bypass[/] {bypass_display}",
-        )
+        # Frida.
+        if self.frida_status == "Running":
+            if self._frida_version_mismatch:
+                frida = "[#facc15]● running ⚠ version mismatch[/]"
+            else:
+                frida = f"[{run}]● running[/]"
+        elif self.frida_status == "Checking...":
+            frida = f"[{muted}]◌ checking[/]"
+        else:
+            frida = f"[{stop}]○ off[/]"
+        segs.append(f"[{muted}]Frida[/] {frida}")
 
-        # -- Proxy: mitmproxy engine + its two coexisting routing layers --
-        # One "Proxy" label group (Device/Apps ride continuation rows, like
-        # the App row above) so the band reads as a single proxy category.
-        # All three derive from ground truth: mitmproxy's own liveness, the
-        # device's global http_proxy, and the per-app proxy lanes. A device
-        # http_proxy at our own mitmproxy address is "ours"; any other host is
-        # external. "Device"/"Apps" are dim inline sub-labels in the value col.
+        # Hooks + bypass, only when something is active.
+        active = set(self.bypass_categories)
+        on = [c for c in ("ssl", "root", "frida", "debug", "integrity") if c in active]
+        if self.hook_count or on:
+            bypass = f" [{muted}]· bypass[/] [{run}]{' '.join(on)}[/]" if on else ""
+            segs.append(f"[{muted}]Hooks[/] [b]{self.hook_count}[/]{bypass}")
+
+        # Proxy: engine + device route + per-app lanes, on one segment.
         pointed_at_us = bool(self.proxy_address) and (
             self.proxy_address == self.mitmweb_address
-            # A loopback proxy is our adb-reverse route, never a foreign
-            # proxy — treat it as ours so the glance matches the panel.
+            # A loopback proxy is our adb-reverse route, never foreign.
             or self.proxy_address.startswith("127.0.0.1:")
         )
-
-        # Line 1 (label "Proxy") — mitmproxy's own engine status. The address
-        # shows even when stopped (mitmweb_address is the configured host:port
-        # regardless of liveness), so you can always see where our proxy is —
-        # or would be — without having to start it.
         if self.mitmweb_running:
-            row("Proxy", f"[{run}]● mitmproxy {self.mitmweb_address or '?'}[/]")
-        elif self.mitmweb_address:
-            row(
-                "Proxy",
-                f"[{stop}]○ mitmproxy {self.mitmweb_address}[/] [{muted}](stopped)[/]",
-            )
+            proxy = f"[{run}]● {self.mitmweb_address or 'mitmproxy'}[/]"
         else:
-            row("Proxy", f"[{stop}]○ mitmproxy stopped[/]")
-
-        # Line 2 (continuation) — where the global device http_proxy points.
-        # When the device points at our address but the engine is stopped,
-        # green "our mitmproxy" reads as "all good" while traffic actually
-        # goes nowhere — flag it amber as a dead route, not a live one.
+            proxy = f"[{stop}]○ off[/]"
         if pointed_at_us:
             if self.mitmweb_running:
-                device_val = f"[{run}]● our mitmproxy[/]"
+                proxy += f" [{muted}]· device[/] [{run}]✓[/]"
             else:
-                device_val = f"[{warn}]● our mitmproxy[/] [{muted}](stopped)[/]"
+                # Device points at our stopped proxy: traffic goes nowhere.
+                proxy += f" [{warn}]· device → stopped proxy[/]"
         elif self.proxy_address:
-            device_val = f"[{primary}]● {self.proxy_address}[/] [{muted}](external)[/]"
-        else:
-            device_val = f"[{muted}]○ none[/]"
-        row("", f"[{muted}]Device[/]  {device_val}")
-
-        # Line 3 (continuation) — per-app lanes: N at our mitmproxy, M external.
+            proxy += f" [{muted}]· device →[/] [{primary}]{self.proxy_address}[/]"
         proxied = list(self.app_proxies.values())
         n_ours = sum(1 for v in proxied if v == "ours")
         m_ext = len(proxied) - n_ours
-        if n_ours + m_ext == 0:
-            apps_val = f"[{muted}]○ none[/]"
-        else:
-            parts = []
-            if n_ours:
-                parts.append(f"[{run}]{n_ours} → mitmproxy[/]")
-            if m_ext:
-                dot = "· " if parts else ""
-                parts.append(f"[{muted}]{dot}{m_ext} → ext[/]")
-            apps_val = " ".join(parts)
-        row("", f"[{muted}]Apps[/]    {apps_val}")
+        if n_ours:
+            proxy += f" [{muted}]·[/] [{run}]{n_ours} app(s)[/]"
+        if m_ext:
+            proxy += f" [{muted}]· {m_ext} → ext[/]"
+        segs.append(f"[{muted}]Proxy[/] {proxy}")
 
-        # -- Net ----------------------------------------------------------
+        # Capture, only while running.
         if self.network_capture_running:
             filename = (
                 os.path.basename(self.network_capture_file)
                 if self.network_capture_file
                 else "capture.pcap"
             )
-            row("Net", f"[{run}]● {filename}[/]")
-        else:
-            row("Net", f"[{muted}]○ idle[/]")
+            segs.append(f"[{muted}]Capture[/] [{run}]● {filename}[/]")
 
-        # -- Mode: Record/Replay indicator ---------------------------------
-        # Fixed colors (same convention as Proxy/Frida's running/spawn
-        # glyphs), shown only while one is active — an idle glance shows no
-        # Mode row at all. Recording wins if both were somehow true (they
-        # can't overlap in practice: replay only auto-chains once recording
-        # has fully stopped).
         if self.recording_active:
-            row("Mode", f"[{stop} bold]● RECORDING[/]")
+            segs.append(f"[{stop} bold]● RECORDING[/]")
         elif self.replay_active:
-            row("Mode", f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING[/]")
+            segs.append(f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING[/]")
 
-        # Optional theme indicator as its own row.
         if self.show_theme_indicator:
-            row("Theme", f"[{primary}]{self.current_theme}[/] [{muted}](^t)[/]")
+            segs.append(f"[{muted}]Theme[/] [{primary}]{self.current_theme}[/]")
 
-        # Wrap the grid in a titled box; the device name rides the top border.
-        if self.active_device:
-            title = Text.from_markup(
-                f"[{primary} bold] {self.device_type} {self.active_device} [/]"
-            )
-        else:
-            title = Text.from_markup(f"[{muted}] No device [/]")
-        return Panel(
-            grid,
-            title=title,
-            title_align="left",
-            border_style=primary,
-            box=ROUNDED,
-            padding=(0, 1),
-            expand=True,
-        )
+        out = []
+        for markup in segs:
+            try:
+                out.append(Text.from_markup(markup))
+            except Exception:
+                out.append(Text(markup))
+        return out
+
+    #: Maximum rows the status strip may take (the rest is dropped).
+    MAX_ROWS = 2
+
+    def on_resize(self, event) -> None:
+        self.refresh(layout=True)
+
+    def render(self) -> RenderableType:
+        """Render the status strip: segments packed into at most two rows.
+
+        Segments are never split across rows; whatever does not fit in
+        ``MAX_ROWS`` is dropped (lowest priority last). FIXED_COLORS drive the
+        status glyphs so they read identically across themes.
+        """
+        width = self.content_size.width or 160
+        gap = "    "
+        rows: list[Text] = [Text()]
+        for seg in self._segments():
+            row = rows[-1]
+            needed = seg.cell_len + (len(gap) if row.cell_len else 0)
+            if row.cell_len and row.cell_len + needed > width:
+                if len(rows) >= self.MAX_ROWS:
+                    continue
+                rows.append(Text())
+                row = rows[-1]
+            if row.cell_len:
+                row.append(gap)
+            row.append_text(seg)
+        result = Text("\n").join(rows)
+        result.no_wrap = True
+        result.overflow = "ellipsis"
+        return result
 
     def update_from_toolbox(self) -> None:
         """Update status from Toolbox state."""

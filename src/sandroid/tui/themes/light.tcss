@@ -25,40 +25,65 @@ Screen {
 }
 
 MainScreen {
-    layout: horizontal;
+    layout: vertical;
     background: #FAFAFA;
 }
 
-/* Left panel - Menu */
-#left-panel {
-    width: 45%;
-    height: 100%;
-    background: #FFFFFF;
-    border: solid #E0E0E0;
-    border-title-color: #1976D2;
-    padding: 0 1;
-}
-
-/* Right panel - Activity */
-#right-panel {
-    width: 55%;
-    height: 100%;
-    background: #FFFFFF;
-    border: solid #E0E0E0;
-    border-title-color: #388E3C;
-    padding: 0 1;
-}
-
-/* Status bar at top */
+/* Status strip under the header (1-2 rows, full width) */
 #status-bar {
-    dock: top;
     height: auto;
+    max-height: 2;
     background: #E3F2FD;
     color: #1976D2;
     padding: 0 1;
 }
 
-/* Activity log styling */
+/* Lens frame: the active lens gets the full width */
+#lens-host {
+    background: #FFFFFF;
+    border: round #E0E0E0;
+    border-title-color: #1976D2;
+    border-subtitle-color: #757575;
+}
+
+#lens-host:focus-within {
+    border: round #E0E0E0;
+}
+
+/* Right-hand side slot: Inspector or AI chat (one at a time) */
+Inspector {
+    background: #FFFFFF;
+    border: round #E0E0E0;
+    border-title-color: #388E3C;
+    border-subtitle-color: #757575;
+}
+
+Inspector:focus-within {
+    border: round #1976D2;
+}
+
+#chat-dock {
+    background: #FFFFFF;
+    border: round #E0E0E0;
+    border-title-color: #388E3C;
+}
+
+/* Log ticker (newest line) + bottom drawer (` toggles) */
+LogTicker {
+    background: #FFFFFF;
+    color: #757575;
+}
+
+#log-ticker-hint {
+    color: #757575;
+}
+
+LogDrawer {
+    background: #FFFFFF;
+    border-top: solid #E0E0E0;
+}
+
+/* Activity log styling (inside the drawer) */
 ActivityLog {
     height: 1fr;
     min-height: 3;
@@ -66,11 +91,9 @@ ActivityLog {
     background: #FFFFFF;
 }
 
-#activity-title {
-    text-align: center;
-    text-style: bold;
+/* Header scope pill (LIVE) */
+#scope-pill.-live {
     color: #388E3C;
-    padding: 1 0;
 }
 
 /* Help screen overlay */
@@ -429,36 +452,33 @@ Button.-primary {
     color: #757575;
 }
 
-/* ========== Tool Panel & Chat Panel Theming ========== */
+/* ========== Lens Bar & Chat Panel Theming ========== */
 /* Overrides MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
-   there) so the tool-tab strip and AI chat panel follow this theme instead
+   there) so the lens bar and AI chat panel follow this theme instead
    of staying frozen on the default Midnight Cyan hardcoded values. */
 
-#tool-tabbar {
+#lens-bar {
+    background: #FAFAFA;
+    border-left: heavy #FAFAFA;
+}
+
+#lens-bar.-level-active {
+    border-left: heavy #1976D2;
+}
+
+.lens-tab {
+    color: #757575;
     background: #FAFAFA;
 }
 
-.tool-tab {
-    color: #757575;
-    background: #FFFFFF;
-}
-
-.tool-tab:hover {
+.lens-tab:hover {
     color: #212121;
     background: #E3F2FD;
 }
 
-.tool-tab.-active {
+.lens-tab.-active {
     color: #FFFFFF;
     background: #1976D2;
-}
-
-#tool-body {
-    border-top: solid #E0E0E0;
-}
-
-#chat-dock {
-    border-top: solid #E0E0E0;
 }
 
 ChatPanel {

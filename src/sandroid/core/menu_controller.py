@@ -131,7 +131,7 @@ class MenuController:
             ["forensic", "malware"],
             description=(
                 "Replay the current recording N times and diff the results "
-                "(opens Files > Diffs; Shift+P there = PDF report)"
+                "(opens the Runs lens; Shift+P there = PDF report)"
             ),
             inline_text="[p]lay the currently loaded action",
         )
@@ -460,40 +460,55 @@ class MenuController:
             inline_text="[Shift+D] device selector",
         )
 
+        # ===== Lenses (TUI) =====
+        # Digits 1-4 switch the full-width analysis view; Shift+Left/Right
+        # cycles. TUI-only: the palette dispatches these directly (app.py).
+        for key, lens, label in (
+            ("1", "app", "App"),
+            ("2", "network", "Network"),
+            ("3", "files", "Files"),
+            ("4", "runs", "Runs"),
+        ):
+            self._register(
+                f"lens_{lens}",
+                f"{label} lens",
+                key,
+                ActionCategory.NAVIGATION,
+                ["forensic", "malware", "security"],
+                description=f"Show the {label} lens (full width; Enter = details)",
+                inline_text=f"[{key}] {label} lens",
+            )
+        self._register(
+            "toggle_log",
+            "Toggle log drawer",
+            "grave_accent",
+            ActionCategory.NAVIGATION,
+            ["forensic", "malware", "security"],
+            description="Show/hide the activity log drawer (the ticker shows the "
+            "newest line)",
+            inline_text="[`] log drawer",
+        )
+
         # ===== Snapshot Actions (Emulator-only) =====
-        # Slot memory: keys [1-8] LOAD the snapshot assigned to a slot, and
-        # [Ctrl+1-8] (or [S] then a digit, in terminals that can't send
-        # Ctrl+digit) SAVE the current state into a slot. Assignments live per-AVD
-        # in config (tui.snapshot_slots) and are managed from the Snapshots tab.
+        # [S] (or [0]) opens the snapshot picker: list/create/load/delete,
+        # [1-8] there loads a slot (confirmed), [s] then a digit saves into a
+        # slot. [Ctrl+1-8] save to a slot directly (kitty keyboard protocol
+        # terminals only). Assignments live per-AVD in config
+        # (tui.snapshot_slots).
         self._register(
             "show_snapshots",
-            "Open snapshots",
-            "0",
+            "Snapshots",
+            "S",
             ActionCategory.SNAPSHOTS,
             ["forensic", "malware"],
-            description="Open the Snapshots tab",
-            inline_text=(
-                "key [0] opens snapshots, [1-8] twice loads a slot, "
-                "[Ctrl+1-8] or [S]+digit saves"
+            description=(
+                "Open the snapshot picker (also 0): load/create/delete, "
+                "1-8 load a slot, s then 1-8 save into a slot"
             ),
+            inline_text="[S] snapshots",
             required_capabilities=[DeviceCapability.SNAPSHOTS],
             unavailable_reason="Snapshots only available on emulators",
         )
-        for i in range(1, 9):
-            self._register(
-                f"load_slot_{i}",
-                f"Load slot {i}",
-                str(i),
-                ActionCategory.SNAPSHOTS,
-                ["forensic", "malware"],
-                description=(
-                    f"Press {i} twice: load the snapshot in slot {i} "
-                    "(reverts the emulator)"
-                ),
-                inline_text=f"load slot [{i}] (press twice)",
-                required_capabilities=[DeviceCapability.SNAPSHOTS],
-                unavailable_reason="Snapshots only available on emulators",
-            )
         for i in range(1, 9):
             self._register(
                 f"save_slot_{i}",
@@ -506,20 +521,6 @@ class MenuController:
                 required_capabilities=[DeviceCapability.SNAPSHOTS],
                 unavailable_reason="Snapshots only available on emulators",
             )
-        self._register(
-            "pick_save_slot",
-            "Save to slot…",
-            "S",
-            ActionCategory.SNAPSHOTS,
-            ["forensic", "malware"],
-            description=(
-                "Pick a slot (1-8) to save the current state into; works in "
-                "every terminal (Ctrl+1-8 needs the kitty keyboard protocol)"
-            ),
-            inline_text="[S] then 1-8: save to slot",
-            required_capabilities=[DeviceCapability.SNAPSHOTS],
-            unavailable_reason="Snapshots only available on emulators",
-        )
 
     def _register(
         self,

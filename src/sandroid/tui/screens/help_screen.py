@@ -72,14 +72,31 @@ _CATEGORY_ORDER: list[ActionCategory] = [
 # catalog can never drift from what the panels actually do. Shown (fixed, not
 # rebindable) after the global categories: (heading, module, class name).
 _PANEL_SECTIONS: list[tuple[str, str, str]] = [
-    ("Tool panel navigation", "sandroid.tui.screens.main_screen", "_ToolPanel"),
-    ("Spotlight panel", "sandroid.tui.widgets.spotlight_panel", "SpotlightPanel"),
-    ("Files › Diffs", "sandroid.tui.widgets.diffs_view", "DiffsView"),
-    ("Files › Watchlist", "sandroid.tui.widgets.watchlist_view", "WatchlistView"),
-    ("Snapshots panel", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
+    ("Lens navigation", "sandroid.tui.screens.main_screen", "_LensHost"),
+    ("Main screen", "sandroid.tui.screens.main_screen", "MainScreen"),
+    ("Inspector", "sandroid.tui.widgets.lens_shell", "Inspector"),
+    ("App lens", "sandroid.tui.widgets.spotlight_panel", "SpotlightPanel"),
+    ("App lens › b bypass", "sandroid.tui.widgets.spotlight_panel", "BypassChordModal"),
     ("Network › mitmproxy", "sandroid.tui.widgets.mitmproxy_panel", "MitmproxyPanel"),
     ("Network › friTap", "sandroid.tui.widgets.fritap_panel", "FriTapPanel"),
+    ("Files › Watchlist", "sandroid.tui.widgets.watchlist_view", "WatchlistView"),
+    ("Runs lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
+    (
+        "Snapshot picker (S)",
+        "sandroid.tui.modals.snapshot_save_choice_modal",
+        "SnapshotPickerModal",
+    ),
+    ("Snapshot list", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
 ]
+
+#: Binding ids from earlier releases that may linger in a user's
+#: ``tui.keybindings``: never applied (``app.effective_keymap``), shown or
+#: re-saved. ``load_slot_N``: digits are lenses now (slots load from the
+#: snapshot picker); ``pick_save_slot``: ``S`` opens the picker (``s`` inside
+#: it saves to a slot).
+LEGACY_BINDING_IDS = frozenset(
+    {f"load_slot_{i}" for i in range(1, 9)} | {"pick_save_slot"}
+)
 
 
 #: Option-id prefix of the (non-rebindable) panel-key rows.
@@ -267,7 +284,12 @@ class HelpScreen(ModalScreen):
         self._defaults = {b.id: b.key for b in app.BINDINGS if b.id}
         cfg = getattr(app, "sandroid_config", None)
         if cfg is not None and getattr(cfg, "tui", None) is not None:
-            self._pending = dict(cfg.tui.keybindings)
+            # Drop retired ids so they neither crash nor get re-persisted.
+            self._pending = {
+                k: v
+                for k, v in dict(cfg.tui.keybindings or {}).items()
+                if k not in LEGACY_BINDING_IDS and isinstance(v, str)
+            }
         else:
             self._pending = {}
         self._rebuild_list()
@@ -280,34 +302,9 @@ class HelpScreen(ModalScreen):
             "Ctrl+R reset all · Esc close[/dim]"
         )
 
-    def _snapshots_panel(self):
-        """Find the SnapshotsPanel under the main screen (for slot assignments)."""
-        try:
-            for screen in self.app.screen_stack:
-                try:
-                    return screen.query_one("#snapshots-panel")
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return None
-
-    def _slot_assignments(self) -> dict[str, str]:
-        """Current AVD's ``{slot: tag}`` map, reusing the panel's AVD keying."""
-        panel = self._snapshots_panel()
-        if panel is not None and hasattr(panel, "_slot_map"):
-            try:
-                return panel._slot_map()
-            except Exception:
-                return {}
-        return {}
-
     @staticmethod
-    def _row_description(action: Action, slots: dict[str, str]) -> str:
-        """Description-column text, with slot assignment for slot rows."""
-        if action.name.startswith("load_slot_"):
-            tag = slots.get(action.name.rsplit("_", 1)[-1])
-            return f"→ {tag} (press twice)" if tag else "(empty)"
+    def _row_description(action: Action) -> str:
+        """Description-column text."""
         if action.name.startswith("save_slot_"):
             return "save current state"
         return action.description or action.display_name
@@ -342,8 +339,6 @@ class HelpScreen(ModalScreen):
 
         previous = option_list.highlighted
         option_list.clear_options()
-
-        slots = self._slot_assignments()
 
         by_category: dict[ActionCategory, list[Action]] = {}
         for action in self._controller.get_all_actions():
@@ -393,7 +388,7 @@ class HelpScreen(ModalScreen):
                 rebindable = action.name in self._defaults
                 key = self._effective_key(action.name) if rebindable else action.key
                 key_display = _format_key_display(key)
-                desc = self._row_description(action, slots)
+                desc = self._row_description(action)
                 if rebindable:
                     label = self._columns(
                         action.display_name, desc, key_display, colored=True
@@ -473,8 +468,8 @@ class HelpScreen(ModalScreen):
             heading, _, key = action_id[len(_PANEL_PREFIX) :].partition("|")
             return (
                 f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
-                "[#c9d1d9]Works only while this panel has focus "
-                "(Shift+←/→ or a click switches panels).[/]\n\n"
+                "[#c9d1d9]Works only while this lens / view has focus "
+                "(1-4 or Shift+←/→ switch lenses).[/]\n\n"
                 f"[dim]Key[/]  [#8b949e]\\[{_format_key_display(key)}][/]"
                 "   [dim](fixed — cannot be rebound)[/]"
             )
@@ -483,10 +478,6 @@ class HelpScreen(ModalScreen):
             return ""
         rebindable = action.name in self._defaults
         full_desc = action.description or action.display_name
-        # Slot rows: append the assigned snapshot tag (cheap config read).
-        if action.name.startswith("load_slot_"):
-            tag = self._slot_assignments().get(action.name.rsplit("_", 1)[-1])
-            full_desc += f"  [dim]({('→ ' + tag) if tag else 'empty'})[/]"
         cat = action.category.name.title()
         cur = self._effective_key(action.name) if rebindable else action.key
         cur_disp = _format_key_display(cur)

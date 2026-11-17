@@ -1,4 +1,4 @@
-"""Diffs sub-tab: Play's persistent Changed/New/Deleted run history.
+"""Runs lens: Play's persistent Changed/New/Deleted run history.
 
 Replaces the old one-shot ``AnalysisSummaryModal`` popup: every completed
 Play is now a row in a collapsible bottom "Runs" bar (an ``OptionList``,
@@ -55,7 +55,7 @@ _EMPTY_OPTION_ID = "__no_runs__"
 
 
 class DiffsView(FilesSubViewBase):
-    """Play run-history sub-tab: full-width diff detail + bottom Runs bar.
+    """Runs lens (id ``runs-panel``): full-width diff detail + bottom Runs bar.
 
     Bindings (when focused):
         r / p: Record / replay -- global app keys, they work here too.
@@ -616,7 +616,7 @@ class DiffsView(FilesSubViewBase):
             if label.lower().endswith(".apk") or "/" in label:
                 message += (
                     "\nThis looks like a file path. To install an APK, "
-                    "choose No and press n outside the Diffs tab."
+                    "choose No and press n outside the Runs lens."
                 )
             self.app.push_screen(
                 ConfirmModal(title="Rename run", message=message),
@@ -772,15 +772,10 @@ class DiffsView(FilesSubViewBase):
         self._event_handlers = []
 
     def _is_on_screen(self) -> bool:
-        """True if the Files tab is showing AND Diffs is its active sub-tab."""
-        try:
-            outer = self.screen.query_one("#tool-body", ContentSwitcher)
-            if outer.current != "files-panel":
-                return False
-            inner = self.screen.query_one("#files-body", ContentSwitcher)
-            return inner.current == "files-diffs"
-        except Exception:
-            return False
+        """True if the Runs lens (this view) is the visible one."""
+        from .lens_shell import is_shown
+
+        return is_shown(self)
 
     def _refresh_if_visible(self) -> None:
         if self._is_on_screen():

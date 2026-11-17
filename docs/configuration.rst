@@ -422,7 +422,7 @@ TUI (``[tui]``)
 
    # Per-AVD snapshot slot memory: maps an AVD name to a slot table
    # {slot_number: snapshot_tag}, e.g. {'Pixel_6_API_33': {'1': 'clean-boot',
-   # '3': 'post-install'}}. Edited via the Snapshots tab (assign/save to slot).
+   # '3': 'post-install'}}. Edited via the snapshot picker (key S).
    snapshot_slots = {}
 
    # Save to an occupied slot: 'ask' (prompt), 'overwrite' (re-save in place),

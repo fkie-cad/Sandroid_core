@@ -12,7 +12,6 @@ Extracted modules:
 
 import concurrent.futures
 import logging
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -58,7 +57,7 @@ from sandroid.tui.key_display import format_key
 from sandroid.tui.launcher import run_tui, run_tui_guarded
 from sandroid.tui.modal_manager import ModalManager
 from sandroid.tui.screens.command_palette import CommandPalette
-from sandroid.tui.screens.help_screen import HelpScreen
+from sandroid.tui.screens.help_screen import LEGACY_BINDING_IDS, HelpScreen
 from sandroid.tui.screens.main_screen import MainScreen
 from sandroid.tui.themes import THEMES, get_theme
 from sandroid.tui.utils import copy_to_clipboard
@@ -86,6 +85,18 @@ def get_tui_app() -> Optional["SandroidTUI"]:
     return _current_tui_app
 
 
+def effective_keymap(keybindings: dict | None) -> dict[str, str]:
+    """``tui.keybindings`` without legacy ids / malformed entries."""
+    keymap: dict[str, str] = {}
+    for binding_id, key in (keybindings or {}).items():
+        if binding_id in LEGACY_BINDING_IDS:
+            logger.debug("Ignoring retired keybinding id %r", binding_id)
+            continue
+        if isinstance(binding_id, str) and isinstance(key, str) and key:
+            keymap[binding_id] = key
+    return keymap
+
+
 class SandroidTUI(App):
     """Textual-based TUI for Android forensic analysis (mitmproxy-like UX)."""
 
@@ -102,15 +113,31 @@ class SandroidTUI(App):
         Binding("r", "record", "Record", id="record"),
         Binding("p", "play", "Play/Replay", id="play"),
         # Navigation
-        Binding("D", "show_device_selector", "Devices", priority=True),
+        # Lenses: 1-4 switch the full-width analysis view (Shift+←/→ cycles).
+        # Only "1" is shown, labelled "1-4", to keep the footer short.
+        Binding(
+            "1", "switch_lens('app')", "Lens", key_display="1-4", id="lens_app"
+        ),
+        Binding(
+            "2", "switch_lens('network')", "Network lens", show=False,
+            id="lens_network",
+        ),
+        Binding(
+            "3", "switch_lens('files')", "Files lens", show=False, id="lens_files"
+        ),
+        Binding(
+            "4", "switch_lens('runs')", "Runs lens", show=False, id="lens_runs"
+        ),
+        Binding("grave_accent", "toggle_log", "Log", show=False, id="toggle_log"),
+        Binding("D", "show_device_selector", "Devices", show=False, priority=True),
         Binding("q", "request_quit", "Quit"),
-        Binding("escape", "maybe_quit", "Back", priority=True),
+        Binding("escape", "maybe_quit", "Back", show=False, priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
-        Binding("ctrl+b", "focus_tools", "Tools", show=True),
-        Binding("ctrl+y", "toggle_chat", "AI Chat", show=True),
+        Binding("ctrl+b", "focus_tools", "Focus lens", show=False),
+        Binding("ctrl+y", "toggle_chat", "AI Chat", show=False),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -171,20 +198,13 @@ class SandroidTUI(App):
         ),
         # Other
         Binding("n", "install_apk", "Install APK", show=False, id="new_apk"),
-        # Snapshots -- [0] opens the tab, [1-8] load slots (press the digit
-        # twice: a lone digit only arms the load, see action_load_slot),
-        # [Ctrl+1-8] save to slots. Ctrl+digit only reaches us in terminals
-        # with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty,
-        # recent iTerm2); [S] then a digit is the terminal-safe fallback.
-        Binding("0", "open_snapshots", "Snapshots", show=False, id="show_snapshots"),
-        Binding("1", "load_slot('1')", "Load slot 1", show=False, id="load_slot_1"),
-        Binding("2", "load_slot('2')", "Load slot 2", show=False, id="load_slot_2"),
-        Binding("3", "load_slot('3')", "Load slot 3", show=False, id="load_slot_3"),
-        Binding("4", "load_slot('4')", "Load slot 4", show=False, id="load_slot_4"),
-        Binding("5", "load_slot('5')", "Load slot 5", show=False, id="load_slot_5"),
-        Binding("6", "load_slot('6')", "Load slot 6", show=False, id="load_slot_6"),
-        Binding("7", "load_slot('7')", "Load slot 7", show=False, id="load_slot_7"),
-        Binding("8", "load_slot('8')", "Load slot 8", show=False, id="load_slot_8"),
+        # Snapshots -- [S] (or [0]) opens the snapshot picker: list, create,
+        # load/delete with confirm, assign, [1-8] load a slot (confirmed),
+        # [s] then a digit saves into a slot. [Ctrl+1-8] save to a slot
+        # directly -- only in terminals with the kitty keyboard protocol
+        # (kitty, WezTerm, foot, Ghostty, recent iTerm2).
+        Binding("S", "open_snapshots", "Snapshots", show=False, id="show_snapshots"),
+        Binding("0", "open_snapshots", "Snapshots", show=False),
         Binding(
             "ctrl+1", "save_slot('1')", "Save slot 1", show=False, id="save_slot_1"
         ),
@@ -209,12 +229,9 @@ class SandroidTUI(App):
         Binding(
             "ctrl+8", "save_slot('8')", "Save slot 8", show=False, id="save_slot_8"
         ),
-        Binding(
-            "S", "pick_save_slot", "Save to slot", show=False, id="pick_save_slot"
-        ),
         # Clipboard / Settings
         Binding("Y", "copy_log", "Copy Log", show=False),
-        Binding("comma", "show_settings", "Settings", show=True),
+        Binding("comma", "show_settings", "Settings", show=False),
     ]
     # fmt: on
 
@@ -552,7 +569,7 @@ class SandroidTUI(App):
         try:
             cfg = self._sandroid_config
             if cfg is not None and getattr(cfg, "tui", None) is not None:
-                self.set_keymap(cfg.tui.keybindings or {})
+                self.set_keymap(effective_keymap(cfg.tui.keybindings))
         except Exception as exc:
             logger.debug(f"Failed to apply keybindings: {exc}")
         # Start the periodic background device-state poll (detects an active
@@ -660,8 +677,10 @@ class SandroidTUI(App):
                 message=(
                     "Sandroid runs as this terminal UI by default.\n"
                     "\n"
+                    "  1-4           App · Network · Files · Runs\n"
+                    "  ⏎ / Esc       details on demand / close them\n"
+                    "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
-                    "  Ctrl+Shift+P  command palette\n"
                     "  D             select device\n"
                     "\n"
                     "For scripted runs see: sandroid --help (--headless).\n"
@@ -1049,97 +1068,71 @@ class SandroidTUI(App):
             return
         self.push_screen(HelpScreen())
 
+    def _snapshot_picker(self):
+        """The open SnapshotPickerModal, or None."""
+        from sandroid.tui.modals import SnapshotPickerModal
+
+        screen = self.screen
+        return screen if isinstance(screen, SnapshotPickerModal) else None
+
     def _snapshots_panel(self):
-        """The SnapshotsPanel on the main screen, or None if unavailable."""
-        screen = self._get_main_screen()
-        if screen is None:
-            return None
-        try:
-            from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+        """The SnapshotsPanel of the open snapshot picker, or None."""
+        picker = self._snapshot_picker()
+        return picker.panel() if picker is not None else None
 
-            return screen.query_one("#snapshots-panel", SnapshotsPanel)
-        except Exception:
-            return None
-
-    #: Seconds within which the same digit must be pressed again to really
-    #: load a snapshot slot (see ``action_load_slot``).
-    SLOT_CONFIRM_WINDOW = 3.0
-
-    def action_load_slot(self, slot: str) -> None:
-        """Load the snapshot assigned to ``slot`` -- press the digit twice.
-
-        Loading a snapshot reverts the whole emulator, and the digits 1-5 are
-        also the Spotlight panel's bypass toggles: one digit pressed with the
-        wrong focus used to wipe the device state mid-demo. The first press
-        now only arms the load and says so (toast); the same digit again
-        within ``SLOT_CONFIRM_WINDOW`` seconds loads it. Empty slots / non
-        emulators are reported straight away by the panel (nothing to arm).
-        """
-        panel = self._snapshots_panel()
-        if panel is None:
+    def _with_snapshots_panel(self, fn) -> None:
+        """Run ``fn(panel)`` on the picker's panel, opening the picker first."""
+        picker = self._snapshot_picker()
+        if picker is not None:
+            picker.run_with_panel(fn)
             return
-        slot = str(slot)
-        now = time.monotonic()
-        pending = getattr(self, "_pending_slot_load", None)
-        if (
-            pending is not None
-            and pending[0] == slot
-            and now - pending[1] <= self.SLOT_CONFIRM_WINDOW
-        ):
-            self._pending_slot_load = None
-            panel.load_slot(slot)
-            return
-        tag = panel.slot_tag(slot) if hasattr(panel, "slot_tag") else None
-        if not tag:
-            # Nothing to confirm -- let the panel explain (empty slot, no
-            # emulator, ...).
-            self._pending_slot_load = None
-            panel.load_slot(slot)
-            return
-        self._pending_slot_load = (slot, now)
-        self.notify(
-            f"Press [b]{slot}[/b] again to load slot {slot} ('{tag}'). "
-            "This reverts the emulator.",
-            title="Load snapshot?",
-            severity="warning",
-            timeout=self.SLOT_CONFIRM_WINDOW,
-        )
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.open_snapshot_picker(then=fn)
+
+    def action_switch_lens(self, lens: str) -> None:
+        """Digits 1-4: switch the lens (only while the main screen is on top)."""
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.switch_lens(lens)
+
+    def action_toggle_log(self) -> None:
+        """Backtick: show/hide the bottom log drawer."""
+        ms = self._get_main_screen()
+        if ms is not None:
+            ms.toggle_log_drawer()
 
     def action_save_slot(self, slot: str) -> None:
-        """Save the current state into ``slot`` (keys Ctrl+1-8)."""
-        panel = self._snapshots_panel()
-        if panel is not None:
-            panel.save_slot(slot)
+        """Save the current state into ``slot`` (keys Ctrl+1-8).
+
+        Goes through the snapshot picker (opened if needed) so the save and
+        its progress are visible.
+        """
+        self._with_snapshots_panel(lambda panel: panel.save_slot(slot))
 
     def action_pick_save_slot(self) -> None:
-        """Ask for a slot digit, then save into it (key S).
+        """Open the picker and ask for a slot digit to save into.
 
-        Terminal-safe twin of Ctrl+1-8, which most terminals cannot send.
+        Kept for callers of the retired ``S``=save-to-slot key (inside the
+        picker this is ``s``).
         """
-        panel = self._snapshots_panel()
-        if panel is None:
-            return
-        from sandroid.tui.modals import SnapshotSlotPickerModal
+        from sandroid.tui.modals import SnapshotPickerModal
 
-        try:
-            slots = panel._slot_map() if hasattr(panel, "_slot_map") else {}
-        except Exception:
-            slots = {}
+        def _ask(_panel) -> None:
+            picker = self._snapshot_picker()
+            if isinstance(picker, SnapshotPickerModal):
+                picker.action_save_to_slot()
 
-        def on_pick(slot: str | None) -> None:
-            if slot:
-                self.action_save_slot(slot)
-
-        self.push_screen(SnapshotSlotPickerModal(slots), on_pick)
+        self._with_snapshots_panel(_ask)
 
     def action_open_snapshots(self) -> None:
-        """Open the Snapshots tab in the bottom strip (key 0)."""
+        """Open the snapshot picker (keys S and 0)."""
         screen = self._get_main_screen()
         if screen is not None:
-            screen.open_snapshots_tab()
+            screen.open_snapshot_picker()
 
     def action_toggle_chat(self) -> None:
-        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y)."""
+        """Toggle the AI chat in the right-hand side slot (Ctrl+Y)."""
         screen = self._get_main_screen()
         if screen is not None:
             screen.toggle_chat_panel()
@@ -1272,24 +1265,16 @@ class SandroidTUI(App):
             _dispatch()
 
     def action_focus_tools(self) -> None:
-        """Focus the active tool panel (Ctrl+B).
-
-        The tool strip is always visible now; this just moves focus into it so
-        Shift+Arrow level/tab-cycling and per-panel keys work. All tool logic
-        lives on MainScreen (which owns the widgets); the app just forwards
-        the key.
-        """
+        """Focus the active lens (Ctrl+B), e.g. after typing in the chat."""
         ms = self._get_main_screen()
         if ms is None:
             return
-        try:
-            from textual.widgets import ContentSwitcher
-
-            current = ms.query_one("#tool-body", ContentSwitcher).current
-            if current:
-                ms.query_one(f"#{current}").focus()
-        except Exception:
-            pass
+        panel = ms.lens_widget()
+        if panel is not None:
+            try:
+                panel.focus()
+            except Exception:
+                pass
 
     def action_show_device_selector(self) -> None:
         """Show the device selection modal."""
@@ -1663,7 +1648,7 @@ class SandroidTUI(App):
         if rc.is_replaying:
             self.notify(
                 "A replay is still running -- wait for it to finish "
-                "(progress in Files > Diffs).",
+                "(progress in the Runs lens, 4).",
                 title=f"Cannot {what}",
                 severity="warning",
             )
@@ -1737,7 +1722,7 @@ class SandroidTUI(App):
         # *selection* — lives in DiffsView.on_new_run via _notify_diffs_new_run).
         ms = self._get_main_screen()
         if ms is not None:
-            ms.open_files_tab(sub_tab="files-diffs")
+            ms.open_runs_lens()
         return rc.start_playback()
 
     def _confirm_stop_replay(self) -> None:
@@ -1752,7 +1737,7 @@ class SandroidTUI(App):
             ConfirmModal(
                 title="Stop replay",
                 message="A replay is running. Stop it now? The partial run "
-                "is still saved in Files > Diffs.",
+                "is still saved in the Runs lens (4).",
             ),
             on_result,
         )
@@ -1760,7 +1745,7 @@ class SandroidTUI(App):
     def _notify_diffs_new_run(self, run_id: str) -> None:
         """Tell DiffsView a new run was saved (RecordingController's on_run_saved).
 
-        Always safe to call even if the Files tab isn't showing right now —
+        Always safe to call even if the Runs lens isn't showing right now —
         DiffsView keeps its own selection/unread state; the gated
         auto-select-vs-unread-marker logic lives entirely in
         DiffsView.on_new_run, not here.
@@ -1769,7 +1754,7 @@ class SandroidTUI(App):
         if ms is None:
             return
         try:
-            view = ms.query_one("#files-diffs")
+            view = ms.query_one("#runs-panel")
         except Exception:
             return
         if hasattr(view, "on_new_run"):
@@ -1950,13 +1935,13 @@ class SandroidTUI(App):
         ms = self._get_main_screen()
         if ms:
             ms.execute_action_by_key(key)
-            # friTap (h) gets a first-class tab — jump to it so the toggle has
-            # a visible home (mirrors 0 → open_snapshots_tab).
+            # friTap (h) lives in the Network lens -- jump to it so the toggle
+            # has a visible home.
             if key == "h":
                 ms.open_fritap_tab()
         # Spotlight selection (C attach / Shift+C spawn) does NOT force the
         # panel open — it stays minimized by default. The panel live-updates
-        # via the EventBus whether shown or hidden; press Ctrl+B to view it.
+        # via the EventBus whether shown or hidden; press 1 to view it.
 
     def on_command_palette_action_selected(
         self,
@@ -1968,6 +1953,13 @@ class SandroidTUI(App):
             "help": self.action_show_help,
             "quit": self.action_request_quit,
             "pick_save_slot": self.action_pick_save_slot,
+            "show_snapshots": self.action_open_snapshots,
+            "toggle_log": self.action_toggle_log,
+            "toggle_chat": self.action_toggle_chat,
+            "lens_app": lambda: self.action_switch_lens("app"),
+            "lens_network": lambda: self.action_switch_lens("network"),
+            "lens_files": lambda: self.action_switch_lens("files"),
+            "lens_runs": lambda: self.action_switch_lens("runs"),
         }
         handler = dispatch.get(message.action_name)
         if handler:

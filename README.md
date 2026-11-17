@@ -31,7 +31,7 @@ Whether you're investigating malicious apps, assessing security flaws, or collec
 - **A rooted Android emulator (AVD).** Sandroid needs root on the device (it runs `adb root`, pushes and starts `frida-server`, and sets SELinux to *permissive* with `setenforce 0` itself). Two setups are known to work:
   - a **Google APIs** system image (`google_apis`, *not* `google_apis_playstore`) — `adb root` works out of the box; or
   - a **Google Play** system image rooted with [rootAVD](https://gitlab.com/newbit/rootAVD) (Magisk) **plus the Magisk `adb_root` module**, so that `adbd` itself runs as root. This is how the Sandroid team's own AVDs are set up.
-- **AVD snapshots** must be enabled — the record/play workflow and the Snapshots tab rely on them. Do **not** start the emulator with `-no-snapshot`; if you do not want the emulator to overwrite its quick-boot snapshot on exit use `-no-snapshot-save` (or simply start it via `sandroid-config avd start`).
+- **AVD snapshots** must be enabled — the record/play workflow and the snapshot picker (`S`) rely on them. Do **not** start the emulator with `-no-snapshot`; if you do not want the emulator to overwrite its quick-boot snapshot on exit use `-no-snapshot-save` (or simply start it via `sandroid-config avd start`).
 - **Physical devices** are only partially supported: they must be rooted, and everything that relies on the emulator (snapshots, emulator-console network capture/degradation, `-no-snapshot-*` boot modes) is unavailable.
 - Linux and macOS are the primary platforms; Windows works best via WSL2.
 
@@ -55,16 +55,20 @@ See [SETUP.md](SETUP.md) for all installation possibilities.
 
 ## Interactive TUI
 
-Sandroid's default interface is an interactive terminal UI (Textual). It consists of a **glance band** at the top (device, frida-server, proxy and spotlight state at a glance), an **activity log**, a row of **always-on tool tabs**, and an optional **AI Chat dock**:
+Sandroid's default interface is an interactive terminal UI (Textual) built around **lenses**: one full-width analysis view at a time, details only on demand. Top to bottom: a one-row **header** (device ▸ app breadcrumb, the `● LIVE` / `◆ REVIEW` scope pill, clock), a 1–2 row **status strip** (app state, frida-server, hooks/bypass, proxy), the **lens bar**, the active lens, a one-row **log ticker** (newest log line) and the footer.
 
-| Tool tab | What it does |
-|---|---|
-| **Spotlight** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`), and toggle the Frida bypass categories `1`–`5` (SSL, Root, Frida, Debug, Integrity). |
-| **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
-| **Snapshots** | AVD snapshot list: create (`c`), load (`l`), delete (`d`), assign to a slot (`a`). Globally, `0` opens the tab, `1`–`8` (pressed twice) load a slot and `Ctrl+1`–`Ctrl+8` save into a slot (8 slots per AVD). `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2); in Terminal.app, GNOME Terminal/VTE or tmux press `S` and then the slot digit instead. |
-| **Files** | Three sub-tabs: **Monitor** (live filesystem events), **Watchlist** (Spotlight Files: pull/diff selected files) and **Diffs** (Record → Play run history, see below). |
+| Key | Lens | What it shows |
+|---|---|---|
+| `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
+| `2` | **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
+| `3` | **Files** | Two sub-tabs: **Monitor** (live filesystem events) and **Watchlist** (Spotlight Files: pull/diff selected files). |
+| `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |
 
-Navigation: `Ctrl+B` focuses the tool tabs, `Shift+←/→` cycles tabs/sub-tabs, `Shift+↑/↓` moves between tab levels. `?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `Ctrl+Y` toggles the **AI Chat** dock, `D` switches devices and `q` quits. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
+`Shift+←/→` also cycles the lenses (`Shift+↓` then `Shift+←/→` switches a lens's own sub-tabs). `Enter` on a row opens the **Inspector** on the right where a lens supports it; `Esc` closes it. `Ctrl+Y` opens the **AI Chat** in the same right-hand slot. `` ` `` (backtick) opens the **log drawer** with the full activity log.
+
+**Snapshots** are a picker, not a tab: `S` (or `0`) lists the AVD's snapshots — create (`c`), load (`Enter`/`l`, confirmed), delete (`d`), assign to a slot (`a`), load slot `1`–`8` (confirmed), and `s` then a digit saves the current state into a slot (8 slots per AVD). `Ctrl+1`–`Ctrl+8` save into a slot directly, but `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
+
+`?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `D` switches devices and `q` quits. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
 
 > The 2.0 "views" (Forensic / Malware / Security, switched with `TAB`) are gone — all actions live in one flat catalog. Fully non-interactive runs are available via `--headless`.
 
@@ -74,7 +78,7 @@ Navigation: `Ctrl+B` focuses the tool tabs, `Shift+←/→` cycles tabs/sub-tabs
 
 ### Record → Play and run history
 
-From any panel, `r` records your interactions with the device (Esc/Enter in the recording window stops and saves) and `p` plays them back, landing on **Files → Diffs**: Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Diffs tab's run history, scoped to the active device. Runs are never deleted automatically.
+From any panel, `r` records your interactions with the device (Esc/Enter in the recording window stops and saves) and `p` plays them back, landing on the **Runs** lens (`4`): Sandroid reverts the emulator to the snapshot taken before recording, replays the recording, measures background noise with a dry run of the same duration (unless `--avoid-strong-noise-filter`) and diffs the filesystem, so only artifacts caused by your action remain (changed / new / deleted files with inline diffs, processes, sockets, network). Every Play is stored as a self-contained **run bundle** under `<results_path>/runs/<run_id>/` (`run.json` manifest, `recording.txt`, the raw pull tree) and listed in the Runs lens, scoped to the active device. Runs are never deleted automatically.
 
 ### File monitor (kprobe)
 

@@ -24,13 +24,22 @@ Starting the TUI
 Screen Layout
 -------------
 
-- **Glance band** (top, boxed, device name in the border): frida-server state,
-  mitmproxy engine, Device Proxy and App Proxies, spotlight app -- derived from
-  the live device state.
-- **Activity log**: real-time command output and status messages.
-- **Tool tabs** (always visible): **Spotlight**, **Network**, **Snapshots**,
-  **Files** -- see below.
-- **AI Chat dock** (optional, ``Ctrl+Y``, experimental): see :ref:`ai-chat`.
+Sandroid shows one **lens** (a full-width analysis view) at a time and keeps
+everything else out of the way until you ask for it:
+
+- **Header** (one row): ``Sandroid ▸ device ▸ app``, the last loaded snapshot,
+  the scope pill (``● LIVE``; ``● REC`` while recording; ``◆ REVIEW Run …``
+  while reviewing a run) and the clock.
+- **Status strip** (one or two rows): app state and pid, frida-server, active
+  hooks and bypasses, mitmproxy / Device Proxy / App Proxies, capture.
+- **Lens bar**: ``1 App  2 Network  3 Files  4 Runs`` (a lens may show an
+  alert badge such as ``⚑2``).
+- **Lens** (full width). ``Enter`` on a row opens the **Inspector** on the
+  right where the lens offers details; ``Esc`` closes it.
+- **Log ticker** (one row): the newest activity-log line. The backtick key
+  opens the **log drawer** with the full activity log.
+- **AI Chat** (optional, ``Ctrl+Y``, experimental) opens in the same
+  right-hand slot as the Inspector: see :ref:`ai-chat`.
 
 Navigation
 ~~~~~~~~~~
@@ -38,38 +47,49 @@ Navigation
 ==========================  ==================================================
 Key                         Action
 ==========================  ==================================================
-``r`` / ``p``               Record / Play (replay + diff) -- from any panel
+``1`` - ``4``               App / Network / Files / Runs lens
+``Shift+Left/Right``        Previous/next lens (or sub-tab after Shift+Down)
+``Shift+Up/Down``           Move between the lens bar and a lens's sub-tabs
+``Enter`` / ``Esc``         Open the Inspector (where offered) / close it
+Backtick (grave accent)     Toggle the log drawer
+``S`` (or ``0``)            Snapshot picker
+``r`` / ``p``               Record / Play (replay + diff) -- from any lens
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
-``Ctrl+B``                  Focus the tool tabs
-``Shift+Left/Right``        Previous/next tab (or sub-tab)
-``Shift+Up/Down``           Move between tab levels (tabs / sub-tabs)
-``Ctrl+Y``                  Toggle the AI Chat dock
+``Ctrl+Y``                  AI Chat in the right-hand slot
+``Ctrl+B``                  Focus the active lens (e.g. after the chat)
 ``D`` (Shift+D)             Switch device
 ``q`` / ``Ctrl+C``          Quit
 ==========================  ==================================================
 
-Every binding can be changed in the ``?`` editor (with live conflict
-detection); overrides are stored in ``tui.keybindings`` in your config. Keys
-are case-sensitive: an upper-case key means Shift+key and is shown as ``⇧R``
-in the footer and ``Shift+R`` in the ``?`` list. The ``?`` list also shows
-each panel's own keys (they only work while that panel has focus).
+``Esc`` closes the Inspector / AI Chat first, then the log drawer; it never
+quits. Every binding can be changed in the ``?`` editor (with live conflict
+detection); overrides are stored in ``tui.keybindings`` in your config.
+Overrides for ids from 2.1 that no longer exist (``load_slot_1`` …
+``load_slot_8``, ``pick_save_slot``) are ignored. Keys are case-sensitive:
+an upper-case key means Shift+key and is shown as ``⇧R`` in the footer and
+``Shift+R`` in the ``?`` list. The ``?`` list also shows each lens's own keys
+(they only work while that lens has focus). The footer shows at most seven
+keys: Record, Play, the active lens's own keys, ``1-4``, quit and help.
 
-Tool Tabs
----------
+Lenses
+------
 
-Spotlight
-~~~~~~~~~
+App (1)
+~~~~~~~
 
-The app under investigation. ``c`` attaches to the foreground app, ``C``
-(Shift+C) spawns an installed app as spotlight. With the tab focused:
+The app under investigation (the spotlight). ``c`` attaches to the
+foreground app, ``C`` (Shift+C) spawns an installed app as spotlight. With the
+lens focused:
 
 - ``Enter`` start (or resume a paused start), Shift+``A`` attach, Shift+``P``
   start paused, Shift+``R`` restart with the armed hooks, Shift+``K`` kill and
   tear down hooks, Shift+``X`` clear the selection
-- ``1``-``5`` toggle/arm the Frida bypass categories **SSL**, **Root**,
-  **Frida**, **Debug** and **Integrity** (PairIP/licensing/attestation).
-  ``Ctrl+P`` toggles SSL unpinning globally.
+- ``b`` then ``1``-``5`` toggles/arms the Frida bypass categories **SSL**,
+  **Root**, **Frida**, **Debug** and **Integrity**
+  (PairIP/licensing/attestation); ``b`` then ``o`` opens the Objection shell
+  (elsewhere ``b`` opens it directly). ``Ctrl+P`` toggles SSL unpinning
+  globally.
 
 .. warning::
 
@@ -78,8 +98,8 @@ The app under investigation. ``c`` attaches to the foreground app, ``C``
    Chromium/cronet BoringSSL and mbedTLS / Meta Network Stack, but hardened
    apps may still detect or defeat it. Verify results independently.
 
-Network
-~~~~~~~
+Network (2)
+~~~~~~~~~~~
 
 Two sub-tabs:
 
@@ -101,26 +121,26 @@ Two sub-tabs:
 **friTap** -- status header and live log tail of friTap TLS key extraction
 (``h`` starts friTap for the spotlight app).
 
-Snapshots
-~~~~~~~~~
+Snapshot picker (S)
+~~~~~~~~~~~~~~~~~~~
 
-AVD snapshot list: ``c`` create, ``l`` load, ``d`` delete, ``a`` assign to a
-slot, ``Ctrl+R`` refresh. Globally, ``0`` opens the tab, ``1``-``8`` **pressed
-twice** (within 3 s) load a slot -- the first press only asks, because loading
-reverts the emulator and ``1``-``5`` are also Spotlight's bypass toggles -- and
-``Ctrl+1``-``Ctrl+8`` save the current state into a slot (8 slots per AVD).
-Snapshots require an emulator.
+Snapshots are not a lens. ``S`` (or ``0``) opens the picker with the AVD's
+snapshots: ``c`` create, ``Enter``/``l`` load, ``d`` delete (both confirmed),
+``a`` assign the highlighted snapshot to a slot, ``Ctrl+R`` refresh. ``1``-``8``
+load that slot after a confirm; ``s`` then ``1``-``8`` saves the current state
+into a slot (8 slots per AVD). ``Ctrl+1``-``Ctrl+8`` save into a slot from
+anywhere. The header shows the last loaded snapshot. Snapshots require an
+emulator.
 
 .. note::
 
    ``Ctrl`` + digit can only be sent by terminals that speak the kitty
    keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
-   Terminal.app, GNOME Terminal/VTE and tmux never deliver it. In any
-   terminal, press ``S`` (Shift+S) and then the slot digit ``1``-``8``
-   instead (``Esc`` cancels).
+   Terminal.app, GNOME Terminal/VTE and tmux never deliver it -- use ``S``
+   then ``s`` and the slot digit instead.
 
-Files
-~~~~~
+Files (3)
+~~~~~~~~~
 
 - **Monitor** -- live filesystem events (``o`` / ``Enter`` start/stop). The
   default ``kprobe`` backend uses kernel tracefs kprobes (per-process and
@@ -129,23 +149,27 @@ Files
   Per-category visibility is configurable in the Monitor settings.
 - **Watchlist** -- Spotlight Files: add device files to watch (``n``), pull
   and diff them (``u`` one, Shift+``U`` all; ``l`` opens the list).
-- **Diffs** -- Record/Play results and the run history (``r``/``p`` work from
-  every panel; Shift+``P`` here generates the PDF report of the selected run):
 
-  1. ``r`` **Record**: name the run and the number of replays, then Sandroid
-     snapshots the device and records your input (Esc in the settings form
-     cancels without recording).
-  2. Interact with the device, then stop: ``Esc``/``Enter`` (or *Stop*) stop
-     and save, and the replay starts automatically; *Discard* throws the
-     recording away.
-  3. ``p`` **Play** (again): the emulator is reverted to the snapshot, the recording
-     is replayed, background noise is measured with a dry run, and changed /
-     new / deleted files (with inline diffs), processes, sockets and network
-     activity are shown.
+Runs (4)
+~~~~~~~~
 
-  Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
-  and listed in the run history (per device). ``x`` / ``i`` export / import a
-  recording.
+Record/Play results and the run history (``r``/``p`` work from every lens;
+``p`` lands here; Shift+``P`` generates the PDF report of the selected run):
+
+1. ``r`` **Record**: name the run and the number of replays, then Sandroid
+   snapshots the device and records your input (Esc in the settings form
+   cancels without recording).
+2. Interact with the device, then stop: ``Esc``/``Enter`` (or *Stop*) stop
+   and save, and the replay starts automatically; *Discard* throws the
+   recording away.
+3. ``p`` **Play** (again): the emulator is reverted to the snapshot, the recording
+   is replayed, background noise is measured with a dry run, and changed /
+   new / deleted files (with inline diffs), processes, sockets and network
+   activity are shown.
+
+Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
+and listed in the run history (per device). ``x`` / ``i`` export / import a
+recording.
 
 Other Actions
 -------------
@@ -176,7 +200,7 @@ Press ``?`` for the authoritative, up-to-date list.
 AI Chat (EXPERIMENTAL)
 ----------------------
 
-``Ctrl+Y`` opens a chat dock backed by any OpenAI-compatible chat-completions
+``Ctrl+Y`` opens a chat in the right-hand slot, backed by any OpenAI-compatible chat-completions
 endpoint. The assistant can query the device and drive ~76 Sandroid tools
 (app lifecycle, flows, certificates, file transfer, monitor, record/replay),
 spawn background subtasks, and use tools from configured MCP servers. Each

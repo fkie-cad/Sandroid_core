@@ -66,18 +66,21 @@ async def test_chat_panel_mounts_without_error():
 
 
 def test_chat_tab_registered_in_tool_tabs():
-    """Chat is no longer one of the left tool tabs -- it docks separately
-    (see ``MainScreen.toggle_chat_panel``) -- so it must never reappear in
-    ``_TOOL_TABS`` (the 4-way Spotlight/Network/Snapshots/Files cycle).
+    """Chat is not a lens -- it lives in the right-hand side slot (see
+    ``MainScreen.toggle_chat_panel``) -- so it must never appear in the lens
+    registry / ``_TOOL_TABS``.
     """
+    from sandroid.tui.widgets.lens_shell import LENSES
+
     assert "tab-chat" not in MainScreen._TOOL_TABS
+    assert "chat" not in {spec.id for spec in LENSES}
 
 
 @pytest.mark.smoke
 async def test_toggle_chat_panel_shows_and_hides_the_dock():
-    """``Ctrl+Y`` (``MainScreen.toggle_chat_panel``) shows/hides ``#chat-dock``
-    via its ``visible`` CSS class, focusing ``#chat-input`` when opening and
-    the active tool panel when closing.
+    """``Ctrl+Y`` (``MainScreen.toggle_chat_panel``) opens the chat in the
+    side slot (focusing ``#chat-input``) and closes it again (focus back to
+    the active lens).
     """
     app = App()
     screen = MainScreen()
@@ -86,19 +89,22 @@ async def test_toggle_chat_panel_shows_and_hides_the_dock():
         await pilot.pause()
 
         dock = screen.query_one("#chat-dock")
-        assert not dock.has_class("visible")
+        assert not dock.display or not screen.chat_is_open
+        assert screen.side_slot_mode is None
 
         screen.toggle_chat_panel()
         await pilot.pause()
 
-        assert dock.has_class("visible")
+        assert screen.chat_is_open
+        assert screen.query_one("#side-slot").has_class("-open", "-chat")
         assert isinstance(app.focused, Input)
         assert app.focused.id == "chat-input"
 
         screen.toggle_chat_panel()
         await pilot.pause()
 
-        assert not dock.has_class("visible")
+        assert screen.side_slot_mode is None
+        assert not screen.query_one("#side-slot").has_class("-open")
         assert app.focused is not None
         assert app.focused.id == "spotlight-panel"
 

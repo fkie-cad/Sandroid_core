@@ -274,7 +274,20 @@ class QuitController:
 
     @staticmethod
     def _escape_on_main_screen(screen: Any) -> None:
-        """Esc on the main screen: leave a focused input, else hint at ``q``."""
+        """Esc on the main screen: close the side slot / log drawer, leave a
+        focused input, else hint at ``q``.
+
+        The screen's own ``handle_escape`` (MainScreen) runs first: it closes
+        an open Inspector / AI chat, then the log drawer, and declines (False)
+        when a text input outside the side slot has focus.
+        """
+        handle = getattr(screen, "handle_escape", None)
+        if handle is not None:
+            try:
+                if handle():
+                    return
+            except Exception:
+                logger.debug("Esc: screen.handle_escape failed", exc_info=True)
         focused = getattr(screen, "focused", None)
         try:
             from textual.widgets import Input, TextArea

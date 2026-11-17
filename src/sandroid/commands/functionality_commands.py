@@ -126,7 +126,7 @@ class RecorderCommand(CommandHandler):
             )
         return CommandResult(
             success=True,
-            message="Start recording from the Files -> Diffs panel (press 'r').",
+            message="Start recording from the TUI (press 'r' in any lens).",
             should_return_to_menu=True,
         )
 
@@ -170,7 +170,7 @@ class PlayerCommand(CommandHandler):
             )
         return CommandResult(
             success=True,
-            message="Replay from the Files -> Diffs panel (press 'p').",
+            message="Replay from the TUI (press 'p'; results open in the Runs lens).",
             should_return_to_menu=True,
         )
 

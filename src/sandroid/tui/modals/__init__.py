@@ -59,6 +59,7 @@ from .screen_recording_modal import ScreenRecordingModal, ScreenRecordingResult
 from .screenshot_modal import ScreenshotModal, ScreenshotResult
 from .selection_modal import SelectionModal
 from .snapshot_save_choice_modal import (
+    SnapshotPickerModal,
     SnapshotSaveChoiceModal,
     SnapshotSaveChoiceResult,
     SnapshotSlotPickerModal,
@@ -131,6 +132,7 @@ __all__ = [
     "ScreenshotResult",
     "SelectionModal",
     "SnapshotInfo",
+    "SnapshotPickerModal",
     "SnapshotSaveChoiceModal",
     "SnapshotSaveChoiceResult",
     "SnapshotSelectionModal",

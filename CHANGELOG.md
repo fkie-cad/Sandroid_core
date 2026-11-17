@@ -5,6 +5,14 @@ All notable changes to the Sandroid project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **TUI: Lenses + Inspector shell.** The tool tabs and the half-screen "Background Activity" log are replaced by full-width **lenses** — `1` App (was Spotlight), `2` Network, `3` Files, `4` Runs (was Files → Diffs) — with `Shift+←/→` still cycling them. `Enter` on a row opens an on-demand **Inspector** on the right where a lens offers details; `Esc` closes it (before anything else, never quits). The header shows a device ▸ app breadcrumb, the last loaded snapshot and a `● LIVE` / `● REC` / `◆ REVIEW Run …` scope pill; the status band is condensed to one or two rows; the footer shows at most seven keys.
+- **Activity log → log drawer**: a one-row ticker shows the newest log line; `` ` `` (backtick) toggles a bottom drawer with the full log. **AI Chat** (`Ctrl+Y`) opens in the right-hand slot shared with the Inspector.
+- **Snapshots are a picker, not a tab**: `S` (or `0`) opens it — list, create, load / delete with confirm, assign to slot, `1`–`8` load a slot (confirmed), `s` then a digit saves into a slot. `Ctrl+1`–`Ctrl+8` still save directly.
+- **Keys**: digits `1`–`4` now switch lenses (the press-twice slot loading on `1`–`8` is gone); Spotlight's bypass toggles moved from `1`–`5` to `b` then `1`–`5` in the App lens (`b` `o` opens Objection there; elsewhere `b` is still Objection). Keybinding overrides for the removed ids `load_slot_1`…`load_slot_8` and `pick_save_slot` are ignored; `show_snapshots` now names the `S` picker key.
+
 ## [2.1.0] - 2026-11-17
 
 Sandroid 2.1 redesigns the TUI around always-on tool tabs, adds an mitmproxy-based

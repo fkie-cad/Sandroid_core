@@ -1,19 +1,12 @@
-"""TUI panel for the "Files" tab — unifying monitor, the Spotlight-Files
-watchlist, and Play's Changed/New/Deleted diffing under one home.
+"""TUI panel for the "Files" lens — monitor and the Spotlight-Files watchlist.
 
-This module is the **Foundation** slice of a larger plan (see the
-architecture doc this was built from): the outer tab wiring, the inner
-sub-tab switcher (``Monitor | Watchlist | Diffs``), and the shared glance
-strip. ``MonitorView`` (monitor's live event stream), ``WatchlistView`` (the
-Spotlight-Files watchlist's CRUD/pull/diff), and ``DiffsView`` (Play's
-run-history) are all *real* implementations and live in their own modules —
-``tui/widgets/monitor_view.py``, ``tui/widgets/watchlist_view.py``, and
-``tui/widgets/diffs_view.py`` respectively — split out because each is
-substantial and each depends on other subsystems (monitor's EventBus stream;
-``ForensicService``/``FileExtractionService``/``core/watchlist_store.py``;
-``DiffView``/``core/run_history.py``). All three are imported lazily inside
-``FilesPanel.compose()`` to avoid a circular import (each in turn imports
-:class:`FilesSubViewBase` from this module).
+The inner sub-tab switcher (``Monitor | Watchlist``) plus the shared glance
+strip. ``MonitorView`` (monitor's live event stream) and ``WatchlistView``
+(the Spotlight-Files watchlist's CRUD/pull/diff) live in their own modules
+(``tui/widgets/monitor_view.py``, ``tui/widgets/watchlist_view.py``) and are
+imported lazily inside ``FilesPanel.compose()`` to avoid a circular import
+(each imports :class:`FilesSubViewBase` from this module). Play's run history
+(``DiffsView``, formerly the Diffs sub-tab) is its own lens now: Runs.
 
 Mirrors :class:`SnapshotsPanel` (visibility-gated polling via
 ``_is_on_screen()``) and :class:`FriTapPanel`/:class:`SpotlightPanel` (the
@@ -41,11 +34,10 @@ logger = logging.getLogger(__name__)
 _SUBTAB_TO_PANEL = {
     "files-tab-monitor": "files-monitor",
     "files-tab-watchlist": "files-watchlist",
-    "files-tab-diffs": "files-diffs",
 }
 
 # Cycling order for Shift+Left/Right while the inner level is active.
-_SUBTAB_ORDER = ["files-monitor", "files-watchlist", "files-diffs"]
+_SUBTAB_ORDER = ["files-monitor", "files-watchlist"]
 
 # How often the glance strip re-renders while the Files tab is on screen.
 # Cheap by design (glance_fragment() must not do I/O), so this can be quick.
@@ -53,7 +45,7 @@ _GLANCE_INTERVAL = 3.0
 
 
 class FilesSubViewBase(Widget):
-    """Shared base for the three Files sub-tab views (Monitor/Watchlist/Diffs).
+    """Shared base for the Files sub-views (Monitor/Watchlist) and DiffsView.
 
     Each real sub-view (``MonitorView`` on monitor, ``WatchlistView`` on the
     Spotlight-Files watchlist, ``DiffsView`` on Play's run history) overrides
@@ -96,13 +88,13 @@ class FilesSubViewBase(Widget):
 
 
 class FilesPanel(Widget):
-    """Outer "Files" tab: inner Monitor/Watchlist/Diffs switcher + glance strip.
+    """The Files lens: inner Monitor/Watchlist switcher + glance strip.
 
     Owns no bindings of its own — sub-tab cycling and the active-level
     highlight are driven externally by ``MainScreen.shift_nav_level``/
     ``cycle_active_level`` (Shift+Up/Down/Left/Right), via ``cycle_subtab``/
     ``set_subtab_bar_active`` below (the duck-typed contract
-    ``NetworkPanel`` also implements). See ``_ToolPanel``'s class docstring
+    ``NetworkPanel`` also implements). See ``_LensHost``'s class docstring
     (``tui/screens/main_screen.py``) for the full navigation scheme.
 
     This frees plain ``Tab``/``Shift+Tab`` back up for normal Textual focus
@@ -174,10 +166,9 @@ class FilesPanel(Widget):
     # -- compose / mount ---------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        # Lazy import: monitor_view.py/watchlist_view.py/diffs_view.py all
+        # Lazy import: monitor_view.py/watchlist_view.py (and diffs_view.py)
         # import FilesSubViewBase from this module, so importing any of them
         # at module level here would be circular. See the module docstring.
-        from .diffs_view import DiffsView
         from .monitor_view import MonitorView
         from .watchlist_view import WatchlistView
 
@@ -188,12 +179,10 @@ class FilesPanel(Widget):
                 classes="files-subtab -active",
             )
             yield Static("Watchlist", id="files-tab-watchlist", classes="files-subtab")
-            yield Static("Diffs", id="files-tab-diffs", classes="files-subtab")
         yield Static(self._render_glance(), id="files-glance")
         with ContentSwitcher(initial="files-monitor", id="files-body"):
             yield MonitorView(id="files-monitor")
             yield WatchlistView(id="files-watchlist")
-            yield DiffsView(id="files-diffs")
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -285,10 +274,9 @@ class FilesPanel(Widget):
     def select_subtab(self, panel_id: str) -> None:
         """Public: switch to a specific inner Files sub-tab from outside.
 
-        Used by ``MainScreen.open_files_tab(sub_tab=...)`` — Play jumping
-        straight to Diffs is the "tab-switch on Play-press" half of the
-        unified focus rule, which always happens. The separate, gated
-        run-*selection* half lives in DiffsView.on_new_run, not here.
+        Used by ``MainScreen.open_files_tab(sub_tab=...)`` — ``o`` jumping
+        to Monitor once it starts, ``l`` to Watchlist. (Play lands on the
+        Runs lens instead.)
         """
         self._select_subtab(panel_id)
 
@@ -322,19 +310,17 @@ class FilesPanel(Widget):
 
     # -- glance strip --------------------------------------------------------
     #
-    # Load-bearing plumbing for later work: Monitor/Watchlist/Diffs will each
+    # Load-bearing plumbing for later work: Monitor/Watchlist will each
     # grow real badges/counters, all surfaced through glance_fragment(). This
-    # panel owns the actual strip Static and re-renders it from all three
+    # panel owns the actual strip Static and re-renders it from both
     # fragments (never lets a sub-view touch the strip directly), so there is
-    # exactly one re-render mechanism instead of three bespoke ones.
+    # exactly one re-render mechanism instead of bespoke ones.
 
     def _is_on_screen(self) -> bool:
-        """True if the Files tab is the shown tool-body child."""
-        try:
-            switcher = self.screen.query_one("#tool-body", ContentSwitcher)
-            return switcher.current == "files-panel"
-        except Exception:
-            return False
+        """True if the Files lens is the visible one."""
+        from .lens_shell import is_shown
+
+        return is_shown(self)
 
     def _tick_glance(self) -> None:
         """Interval tick (main thread): no-op unless the Files tab is on screen."""

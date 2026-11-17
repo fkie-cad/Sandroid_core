@@ -17,6 +17,9 @@ class SandroidFooter(Widget):
     #: Actions always shown first (see ``_rebuild_keys``).
     PINNED_ACTIONS = frozenset({"record", "play", "app.record", "app.play"})
 
+    #: The footer never shows more than this many keys (calm; ``?`` has all).
+    MAX_KEYS = 7
+
     DEFAULT_CSS = """
     SandroidFooter {
         dock: bottom;
@@ -56,6 +59,24 @@ class SandroidFooter(Widget):
         if self.is_attached and screen is self.screen:
             self.call_after_refresh(self._rebuild_keys)
 
+    @classmethod
+    def footer_entries(cls, entries: list, app) -> list:
+        """Pick at most ``MAX_KEYS`` shown bindings, context first.
+
+        Order: the main flow (Record / Play, so it survives truncation on
+        narrow projector terminals), then the focused lens/widget's own keys
+        (the context), then the few global keys the app still shows (lens
+        digits, Help, Quit). Context keys are trimmed first.
+        """
+        shown = [e for e in entries if e[1].show]
+        pinned = [e for e in shown if e[1].action in cls.PINNED_ACTIONS]
+        rest = [e for e in shown if e[1].action not in cls.PINNED_ACTIONS]
+        global_keys = [e for e in rest if e[0] is app]
+        context = [e for e in rest if e[0] is not app]
+        budget = max(0, cls.MAX_KEYS - len(pinned) - len(global_keys))
+        picked = pinned + context[:budget] + global_keys
+        return picked[: cls.MAX_KEYS]
+
     def _rebuild_keys(self) -> None:
         """Rebuild keybinding display from current active bindings."""
         try:
@@ -63,13 +84,8 @@ class SandroidFooter(Widget):
         except Exception:
             return
         keys_container.remove_children()
-        active_bindings = self.screen.active_bindings
-        # The main flow (Record / Play) leads the footer on every panel so it
-        # survives truncation on narrow (projector) terminals; Textual would
-        # otherwise list the focused panel's own keys first.
-        entries = sorted(
-            active_bindings.values(),
-            key=lambda e: e[1].action not in self.PINNED_ACTIONS,
+        entries = self.footer_entries(
+            list(self.screen.active_bindings.values()), self.app
         )
         footer_keys = [
             FooterKey(
@@ -81,7 +97,6 @@ class SandroidFooter(Widget):
                 tooltip=tooltip or binding.description,
             )
             for _, binding, enabled, tooltip in entries
-            if binding.show
         ]
         if footer_keys:
             keys_container.mount(*footer_keys)

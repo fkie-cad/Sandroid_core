@@ -1,4 +1,4 @@
-"""Choice modal for saving into an already-occupied snapshot slot."""
+"""Snapshot modals: the picker (S / 0), the slot chooser and the save choice."""
 
 from dataclasses import dataclass
 
@@ -261,3 +261,133 @@ class SnapshotSlotPickerModal(ForensicModal[str]):
     def action_pick(self, slot: str) -> None:
         """Dismiss with the chosen slot."""
         self.dismiss(str(slot))
+
+
+class SnapshotPickerModal(ForensicModal[None]):
+    """Snapshot picker -- keys ``S`` / ``0`` (snapshots are no longer a tab).
+
+    Hosts a :class:`~sandroid.tui.widgets.snapshots_panel.SnapshotsPanel`
+    (list, create, load / delete with confirm, assign to slot) and adds the
+    slot keys: ``1``-``8`` load that slot after a confirm, ``s`` then a digit
+    saves the current state into a slot. Esc closes.
+
+    ``then(panel)`` (optional) runs once the panel is mounted -- the app's
+    Ctrl+1-8 save keys use it to save through the picker's panel.
+    """
+
+    BINDINGS = [
+        *[
+            Binding(str(i), f"load_slot('{i}')", f"Load slot {i}", show=False)
+            for i in range(1, 9)
+        ],
+        Binding("s", "save_to_slot", "Save to slot", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    SnapshotPickerModal .modal-container {
+        width: 84;
+        max-width: 96%;
+        height: auto;
+        padding: 0 1;
+    }
+    SnapshotPickerModal .modal-title {
+        height: 1;
+        margin-bottom: 0;
+    }
+    SnapshotPickerModal #snapshots-panel {
+        height: auto;
+        max-height: 24;
+    }
+    SnapshotPickerModal SnapshotsPanel > #snapshots-list {
+        height: auto;
+        min-height: 3;
+        max-height: 14;
+    }
+    SnapshotPickerModal SnapshotsPanel > #snapshots-actions {
+        dock: none;
+    }
+    SnapshotPickerModal KeyHintFooter {
+        margin-top: 0;
+    }
+    """
+
+    #: Hint line for the picker (the panel's own action row shows c/l/d/a).
+    HINT = "[dim]⏎ load · 1-8 load slot · s save to slot · Esc close[/dim]"
+
+    def __init__(self, then=None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._then = then
+
+    def compose(self) -> ComposeResult:
+        from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
+
+        with Vertical(classes="modal-container"):
+            yield Label("Snapshots", classes="modal-title")
+            yield SnapshotsPanel(id="snapshots-panel")
+            yield KeyHintFooter(
+                hints=dict.fromkeys(("default", "list", "button"), self.HINT)
+            )
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        if self._then is not None:
+            then, self._then = self._then, None
+            self.call_after_refresh(self.run_with_panel, then)
+
+    def panel(self):
+        """The hosted SnapshotsPanel, or None."""
+        try:
+            return self.query_one("#snapshots-panel")
+        except Exception:
+            return None
+
+    def run_with_panel(self, fn) -> None:
+        panel = self.panel()
+        if panel is not None:
+            fn(panel)
+
+    def on_option_list_option_selected(self, event) -> None:
+        """Enter / click on a row loads it (with the panel's confirm)."""
+        panel = self.panel()
+        if panel is not None:
+            event.stop()
+            panel.action_load()
+
+    def action_load_slot(self, slot: str) -> None:
+        """Load ``slot`` after a confirm; empty slots are explained instead."""
+        panel = self.panel()
+        if panel is None:
+            return
+        tag = panel.slot_tag(slot)
+        if not tag:
+            panel.load_slot(slot)  # explains: empty slot / no emulator
+            return
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                panel.load_slot(slot)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title="Load snapshot",
+                message=f"Load slot {slot} ('{tag}')? Current state will be lost.",
+            ),
+            on_result,
+        )
+
+    def action_save_to_slot(self) -> None:
+        """``s``: pick a slot digit, then save the current state into it."""
+        panel = self.panel()
+        if panel is None:
+            return
+        try:
+            slots = panel._slot_map()
+        except Exception:
+            slots = {}
+
+        def on_pick(slot: str | None) -> None:
+            if slot:
+                panel.save_slot(slot)
+
+        self.app.push_screen(SnapshotSlotPickerModal(slots), on_pick)

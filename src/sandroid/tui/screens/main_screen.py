@@ -1,4 +1,9 @@
-"""Main screen for Sandroid TUI."""
+"""Main screen for Sandroid TUI: the "Lenses + Inspector" shell.
+
+The layout pieces and the contract lens authors rely on (lens registry,
+Enter→Inspector hook, scope, badges, log drawer) are documented in
+``sandroid.tui.widgets.lens_shell``'s module docstring.
+"""
 
 import logging
 from typing import TYPE_CHECKING
@@ -6,8 +11,9 @@ from typing import TYPE_CHECKING
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import ContentSwitcher, Header, Static
+from textual.widgets import ContentSwitcher, DataTable, OptionList, Static
 
 from sandroid.core.menu_controller import MenuController
 from sandroid.services import get_frida_session_service, get_ui_service
@@ -16,10 +22,22 @@ from sandroid.tui.widgets import (
     FilesPanel,
     NetworkPanel,
     SandroidFooter,
-    SnapshotsPanel,
     SpotlightPanel,
     StatusBar,
     load_chat_panel_class,
+)
+from sandroid.tui.widgets.diffs_view import DiffsView
+from sandroid.tui.widgets.lens_shell import (
+    LENS_BY_ID,
+    LENS_BY_WIDGET,
+    LENSES,
+    Inspector,
+    InspectorContent,
+    LensBar,
+    LogDrawer,
+    LogTicker,
+    ScopeChanged,
+    ShellHeader,
 )
 
 if TYPE_CHECKING:
@@ -29,40 +47,33 @@ logger = logging.getLogger(__name__)
 
 #: Task sources whose TASK_OUTPUT events must NOT reach Background Activity
 #: because they already have their own dedicated display surface (monitor's
-#: output lives in the Files tab's Monitor sub-tab -- see
+#: output lives in the Files lens's Monitor sub-tab -- see
 #: ``tui/widgets/monitor_view.py``). A frozenset (not a bare equality check)
 #: makes this rule explicit and extensible to future dedicated-tab tools.
 #: Lifecycle notices (TASK_STARTED/TASK_STOPPED) are NOT filtered -- only
 #: TASK_OUTPUT, so monitor's start/stop still appears in Background Activity.
 _ACTIVITY_LOG_EXCLUDED_SOURCES = frozenset({"monitor"})
 
+#: Legacy ``open_files_tab(sub_tab=...)`` targets that now live in their own
+#: lens (the Diffs sub-tab became the Runs lens).
+_SUBTAB_TO_LENS = {"files-diffs": "runs"}
 
-class _ToolPanel(Vertical):
-    """Wrapper for the permanent tool area (tab strip + tool body).
 
-    Owns the Shift+Arrow level-navigation bindings. Because they live here
-    (an ancestor of the focused inner panel) they only fire when focus is
-    inside the tool area — never stolen from the activity log, which keeps
-    its normal behaviour.
+class _LensHost(Vertical):
+    """Frame around the active lens; owns the Shift+Arrow navigation keys.
 
-    Shift+Up/Down move the active "nav level" between the outer tool-tab bar
-    and the current tab's own inner sub-tab bar (where it has one; a no-op
-    otherwise). Shift+Left/Right cycle whichever level is currently active:
-    the outer tool tabs, or the current tab's own sub-tabs. All four are
-    one-line delegations to ``MainScreen``, which owns the actual level state
-    and cycling logic (``shift_nav_level``/``cycle_active_level``).
+    Because the bindings live here (an ancestor of the focused lens) they
+    only fire while focus is inside the lens area -- never stolen from the
+    log drawer or the side slot.
 
-    Deliberately **not** plain Left/Right/Tab/Shift+Tab (the retired scheme):
-    Watchlist/Diffs (inside the Files tab) hand keyboard focus to a child
-    ``OptionList``, whose *built-in* plain Up/Down row-navigation would
-    silently swallow a plain-arrow level-switching binding whenever
-    Watchlist/Diffs is the visible sub-tab. Textual's ``OptionList``/
-    ``RichLog`` do not bind any Shift-modified arrow key, so
-    Shift+Up/Down/Left/Right bubble up through the DOM to here exactly like
-    plain Left/Right used to — this is the mechanism the whole scheme relies
-    on. As a side effect, this also frees ``Tab`` back up for normal Textual
-    focus traversal inside the Files tab instead of being overloaded for
-    sub-tab cycling.
+    Shift+Up/Down move the active "nav level" between the lens bar and the
+    current lens's own inner sub-tab bar (Network: mitmproxy/friTap, Files:
+    Monitor/Watchlist; a no-op where a lens has none). Shift+Left/Right cycle
+    whichever level is active: the lenses, or the lens's own sub-tabs. All
+    four delegate to ``MainScreen`` (``shift_nav_level``/
+    ``cycle_active_level``). Shift-arrows are used because the lenses hand
+    focus to OptionLists/RichLogs whose plain-arrow bindings would swallow
+    them; Textual binds no Shift+arrow there, so they bubble up to here.
     """
 
     BINDINGS = [
@@ -85,33 +96,35 @@ class _ToolPanel(Vertical):
         self.screen.cycle_active_level(1)
 
 
-class MainScreen(Screen):
-    """Main screen with split-pane layout.
+#: Backwards-compatible name (the help screen and older code referred to it).
+_ToolPanel = _LensHost
 
-    Layout:
-    - Header with clock
-    - Status bar showing application state
-    - Left panel: Menu with actions
-    - Right panel: Activity log
-    - Footer with key bindings
+
+class MainScreen(Screen):
+    """Main screen: header, lens bar, full-width lens, on-demand side slot.
+
+    Global keys live on the app; this screen only adds the Shift+Arrow
+    fallback while NOTHING has focus (normally ``_LensHost`` catches them)
+    and Enter → Inspector for lenses that implement ``inspect_selected``.
     """
 
-    # Bindings are handled by the main app. The only exception: Shift+Arrow
-    # tool navigation while NOTHING has focus (e.g. after Esc left an input
-    # or a modal closed) -- normally those keys are caught by ``_ToolPanel``
-    # because focus sits inside the tool area; with no focus they would be
-    # dead. ``check_action`` limits these to the unfocused case so they never
-    # take Shift+Arrows away from a focused widget (activity log, inputs).
     BINDINGS = [
         Binding("shift+up", "unfocused_nav('level', -1)", show=False),
         Binding("shift+down", "unfocused_nav('level', 1)", show=False),
         Binding("shift+left", "unfocused_nav('cycle', -1)", show=False),
         Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
+        Binding("enter", "inspect", "Inspect"),
     ]
+
+    #: Current review scope: a run id, or None for the live session. Watch it
+    #: (``self.watch(screen, "scope_run", cb)``) or handle ``ScopeChanged``.
+    scope_run: reactive[str | None] = reactive(None, init=False)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "unfocused_nav":
             return self.focused is None
+        if action == "inspect":
+            return hasattr(self.lens_widget(), "inspect_selected")
         return True
 
     def action_unfocused_nav(self, kind: str, delta: int) -> None:
@@ -120,65 +133,56 @@ class MainScreen(Screen):
         else:
             self.cycle_active_level(delta)
 
-    # These values are also themed: each of the 8 .tcss files (styles.tcss +
-    # themes/*.tcss) defines matching selectors for #tool-tabbar/.tool-tab/
-    # #tool-body/#chat-dock, and since a loaded stylesheet file always beats
-    # a widget's own DEFAULT_CSS in Textual's cascade, that file-level CSS is
-    # what actually wins at runtime for every theme (including "default",
-    # whose styles.tcss rules reproduce the exact hex below). The values here
-    # now only serve as a fallback/default-theme baseline -- e.g. if a theme
-    # file ever fails to load, the UI still renders with a sensible look
-    # instead of blank/unstyled widgets. None of the 8 theme files define a
-    # ``.-level-active`` rule, though, so that one rule below is what
-    # actually wins at runtime for every theme -- no theme-file edits needed.
-    #
-    # #tool-panel is a plain Vertical that fills the space below the dock:top
-    # status band: a single-row tab strip (#tool-tabbar) on top and the active
-    # tool body (#tool-body, a ContentSwitcher) filling the rest. The tool area
-    # is permanently visible — nothing collapses or pops up.
+    # Theme files (styles.tcss + themes/*.tcss) restyle these ids; a loaded
+    # stylesheet beats DEFAULT_CSS, so the values here are only the
+    # default-theme baseline / fallback.
     DEFAULT_CSS = """
-    #tool-tabbar {
-        height: 1;
-        background: #0a1124;
-        padding: 0 0 0 1;
-        /* Always reserve the left-border column (colored to match the
-           background, so it's invisible) -- switching only the color
-           in -level-active below avoids any width shift on toggle, and
-           a left/right border costs a column, never a row, so it can't
-           repeat the height-collapse bug a bottom border caused here. */
-        border-left: heavy #0a1124;
+    MainScreen {
+        layout: vertical;
     }
-    #tool-tabbar.-level-active {
-        border-left: heavy #38bdf8;
+    MainScreen #status-bar {
+        height: auto;
+        max-height: 2;
     }
-    .tool-tab {
-        width: auto;
-        padding: 0 2;
-        margin: 0 1 0 0;
-        color: #8f9bb3;
-        background: #11203a;
-    }
-    .tool-tab:hover {
-        color: #cbd5e1;
-        background: #1f2937;
-    }
-    .tool-tab.-active {
-        color: #06121f;
-        text-style: bold;
-        background: #38bdf8;
-    }
-    #tool-body {
-        display: block;
+    MainScreen #workspace {
         height: 1fr;
-        border-top: solid #1f2d4d;
     }
-    #chat-dock {
+    MainScreen #lens-host {
+        width: 1fr;
+        height: 1fr;
+        border: round #1f2d4d;
+        border-title-color: #7dd3fc;
+        border-subtitle-color: #5b6479;
+        background: #080c18;
+    }
+    MainScreen #lens-host:focus-within {
+        border: round #2b4a75;
+    }
+    MainScreen #lens-body {
+        height: 1fr;
+    }
+    MainScreen #side-slot {
         display: none;
-        height: 67%;
-        min-height: 8;
-        border-top: solid #1f2d4d;
+        width: 40%;
+        min-width: 56;
+        height: 1fr;
     }
-    #chat-dock.visible {
+    MainScreen #side-slot.-open {
+        display: block;
+    }
+    MainScreen #side-slot > #inspector {
+        display: none;
+    }
+    MainScreen #side-slot.-inspector > #inspector {
+        display: block;
+    }
+    MainScreen #chat-dock {
+        display: none;
+        height: 1fr;
+        border: round #1f2d4d;
+        border-title-color: #7dd3fc;
+    }
+    MainScreen #side-slot.-chat > #chat-dock {
         display: block;
     }
     """
@@ -203,53 +207,37 @@ class MainScreen(Screen):
         self.action_queue = action_queue
         self._controller = MenuController.get()
         self._event_handlers = []
-        # Active Shift+Arrow nav level: "outer" (the tool-tab bar) or "inner"
-        # (the current tab's own sub-tab bar, where it has one). See
-        # shift_nav_level()/cycle_active_level().
+        # Active Shift+Arrow nav level: "outer" (the lens bar) or "inner"
+        # (the current lens's own sub-tab bar, where it has one).
         self._nav_level = "outer"
+        # Side slot mode: None (closed), "inspector" or "chat".
+        self._side_mode: str | None = None
+        self._scope_label: str | None = None
+        # lens id -> (title, info) for the lens frame.
+        self._lens_captions: dict[str, tuple[str | None, str | None]] = {}
         logger.debug("[MAIN_SCREEN] __init__ complete")
 
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
         logger.debug("[MAIN_SCREEN] compose start")
-        yield Header(show_clock=True)
-
-        with Horizontal():
-            with Vertical(id="left-panel"):
-                yield StatusBar(id="status-bar")
-                # Permanent tool area: a single-row tab strip + the active
-                # tool body. Nothing collapses; Shift+Up/Down move the active
-                # nav level between this outer bar and a tab's own inner
-                # sub-tab bar (where it has one), Shift+Left/Right cycle
-                # whichever level is active, and clicking a tab works too.
-                # A ContentSwitcher holds the four bodies.
-                with _ToolPanel(id="tool-panel"):
-                    # Starts "-level-active" to match the default nav level
-                    # ("outer", set in __init__) so the highlight is correct
-                    # from the very first render.
-                    with Horizontal(id="tool-tabbar", classes="-level-active"):
-                        yield Static(
-                            "Spotlight",
-                            id="tab-spotlight",
-                            classes="tool-tab -active",
-                        )
-                        yield Static("Network", id="tab-network", classes="tool-tab")
-                        yield Static(
-                            "Snapshots", id="tab-snapshots", classes="tool-tab"
-                        )
-                        yield Static("Files", id="tab-files", classes="tool-tab")
-                    with ContentSwitcher(initial="spotlight-panel", id="tool-body"):
-                        yield SpotlightPanel(id="spotlight-panel")
-                        yield NetworkPanel(id="network-panel")
-                        yield SnapshotsPanel(id="snapshots-panel")
-                        yield FilesPanel(id="files-panel")
-
-            with Vertical(id="right-panel"):
-                yield Static("[bold]Background Activity[/bold]", id="activity-title")
-                yield ActivityLog(id="activity-log")
+        yield ShellHeader(id="shell-header")
+        yield StatusBar(id="status-bar")
+        # Starts "-level-active" to match the default nav level ("outer").
+        yield LensBar(id="lens-bar", classes="-level-active")
+        with Horizontal(id="workspace"):
+            with _LensHost(id="lens-host"):
+                with ContentSwitcher(initial=LENSES[0].widget_id, id="lens-body"):
+                    yield SpotlightPanel(id="spotlight-panel")
+                    yield NetworkPanel(id="network-panel")
+                    yield FilesPanel(id="files-panel")
+                    yield DiffsView(id="runs-panel")
+            with Vertical(id="side-slot"):
+                yield Inspector(id="inspector")
                 with Vertical(id="chat-dock"):
                     yield self._make_chat_panel()
-
+        yield LogTicker(id="log-ticker")
+        with LogDrawer(id="log-drawer"):
+            yield ActivityLog(id="activity-log")
         yield SandroidFooter()
         logger.debug("[MAIN_SCREEN] compose complete")
 
@@ -266,15 +254,23 @@ class MainScreen(Screen):
         # for the main thread — but the main thread is stuck in on_mount.
         self.call_later(self._subscribe_to_events)
         logger.debug("[MAIN_SCREEN] on_mount: event subscription deferred")
+        self._update_lens_frame()
+        try:
+            self.query_one("#chat-dock").border_title = "AI chat"
+        except Exception:
+            pass
 
         # Show welcome message immediately (fast)
         try:
             activity_log = self.query_one("#activity-log", ActivityLog)
             logger.debug("[MAIN_SCREEN] on_mount: activity_log found")
-            activity_log.show_welcome()
+            # One line instead of the old logo banner: the log lives in a
+            # 12-row drawer now (the ticker shows this line until the next).
+            from sandroid._version import __version__
+
             activity_log.write(
-                "[dim]Press [bold #ff00ff]?[/] for help, "
-                "[bold #ff00ff]Ctrl+Shift+P[/] for command palette[/]"
+                f"[dim]Sandroid {__version__} · [bold]?[/] help · "
+                "[bold]1-4[/] lenses · [bold]`[/] this log[/]"
             )
             logger.debug("[MAIN_SCREEN] on_mount: welcome shown")
         except Exception as e:
@@ -285,118 +281,154 @@ class MainScreen(Screen):
         self.call_later(self._deferred_mount_updates)
         logger.debug("[MAIN_SCREEN] on_mount complete, deferred updates scheduled")
 
-    # Clickable tab id -> ContentSwitcher child id (the panel widget's id).
-    # Insertion order must match the visible tab-bar order -- cycle_bottom_tab
-    # cycles in this dict's order.
-    _TOOL_TABS = {
-        "tab-spotlight": "spotlight-panel",
-        "tab-network": "network-panel",
-        "tab-snapshots": "snapshots-panel",
-        "tab-files": "files-panel",
-    }
+    # -- clicks ---------------------------------------------------------------
 
     def on_click(self, event) -> None:
-        """Route clicks on the tool tab bar.
+        """Route clicks on the lens bar and on lens action cells.
 
-        A tab name switches to that panel. Clicks elsewhere are ignored
-        (event is not stopped, so normal handling continues).
+        Clicks elsewhere are ignored (event is not stopped, so normal handling
+        continues).
         """
         wid = getattr(getattr(event, "widget", None), "id", None)
-        if wid in self._TOOL_TABS:
-            self._select_bottom_tab(self._TOOL_TABS[wid])
-        elif wid and wid.startswith(("act-", "snap-")):
-            # Tool-panel action cells. Route to the ACTIVE tool child
-            # (spotlight uses act-*, snapshots uses snap-*). The hasattr guard
-            # keeps panels without a dispatcher (e.g. MitmproxyPanel) safe.
-            current = self._bottom_current()
-            if current:
+        if not wid:
+            return
+        if wid.startswith("lens-tab-"):
+            self.switch_lens(wid[len("lens-tab-") :])
+        elif wid.startswith(("act-", "snap-")):
+            # Lens action cells (spotlight uses act-*). The hasattr guard keeps
+            # lenses without a dispatcher safe.
+            panel = self.lens_widget()
+            if panel is not None and hasattr(panel, "dispatch_action_cell"):
                 try:
-                    panel = self.query_one(f"#{current}")
-                    if hasattr(panel, "dispatch_action_cell"):
-                        panel.dispatch_action_cell(wid)
+                    panel.dispatch_action_cell(wid)
                 except Exception:
                     pass
 
-    def _bottom_current(self) -> str | None:
-        """Return the id of the currently selected tool body, if any."""
+    # -- lenses ---------------------------------------------------------------
+
+    @property
+    def active_lens(self) -> str:
+        """Id of the active lens (``"app"``, ``"network"``, ``"files"``, ``"runs"``)."""
+        spec = LENS_BY_WIDGET.get(self._bottom_current() or "")
+        return spec.id if spec else LENSES[0].id
+
+    def is_lens_active(self, lens_id: str) -> bool:
+        return self.active_lens == lens_id
+
+    def lens_widget(self, lens_id: str | None = None):
+        """The body widget of ``lens_id`` (default: the active lens), or None."""
+        spec = LENS_BY_ID.get(lens_id or self.active_lens)
+        if spec is None:
+            return None
         try:
-            return self.query_one("#tool-body", ContentSwitcher).current
+            return self.query_one(f"#{spec.widget_id}")
+        except Exception:
+            return None
+
+    def switch_lens(self, lens_id: str) -> None:
+        """Make ``lens_id`` the active lens and focus it."""
+        spec = LENS_BY_ID.get(lens_id)
+        if spec is not None:
+            self._select_bottom_tab(spec.widget_id)
+
+    def cycle_lens(self, delta: int) -> None:
+        """Switch to the lens ``delta`` steps away (wraps)."""
+        order = [spec.id for spec in LENSES]
+        try:
+            idx = order.index(self.active_lens)
+        except ValueError:
+            idx = 0
+        self.switch_lens(order[(idx + delta) % len(order)])
+
+    def set_lens_badge(self, lens_id: str, text: str | None) -> None:
+        """Show ``text`` (e.g. ``"⚑2"``) after the lens name; None clears it."""
+        try:
+            self.query_one("#lens-bar", LensBar).set_badge(lens_id, text)
+        except Exception:
+            pass
+
+    def set_lens_caption(
+        self, lens_id: str, title: str | None = None, info: str | None = None
+    ) -> None:
+        """Frame caption for ``lens_id``: ``"<Label> · title"`` and right-side info."""
+        self._lens_captions[lens_id] = (title, info)
+        if lens_id == self.active_lens:
+            self._update_lens_frame()
+
+    def _update_lens_frame(self) -> None:
+        spec = LENS_BY_ID[self.active_lens]
+        title, info = self._lens_captions.get(spec.id, (None, None))
+        try:
+            host = self.query_one("#lens-host")
+        except Exception:
+            return
+        # No caption: no frame title (the lens bar already names the lens).
+        host.border_title = f"{spec.label} · {title}" if title else ""
+        host.border_subtitle = info or ""
+        try:
+            self.query_one("#lens-bar", LensBar).set_active(spec.id)
+        except Exception:
+            pass
+
+    #: Lens-bar tab id -> lens body widget id (legacy name, in lens order).
+    _TOOL_TABS = {f"lens-tab-{s.id}": s.widget_id for s in LENSES}
+
+    def _bottom_current(self) -> str | None:
+        """Return the widget id of the active lens body, if any."""
+        try:
+            return self.query_one("#lens-body", ContentSwitcher).current
         except Exception:
             return None
 
     def _current_panel_widget(self):
-        """Return the currently active tool-body panel widget, if any."""
-        current = self._bottom_current()
-        if not current:
-            return None
-        try:
-            return self.query_one(f"#{current}")
-        except Exception:
-            return None
+        """Return the active lens body widget, if any."""
+        return self.lens_widget()
 
     def _select_bottom_tab(self, panel_id: str) -> None:
-        """Switch the active tool tab and focus its panel."""
+        """Switch the active lens (by body widget id) and focus it."""
         try:
-            self.query_one("#tool-body", ContentSwitcher).current = panel_id
+            self.query_one("#lens-body", ContentSwitcher).current = panel_id
         except Exception:
             return
-        # Reflect the active tab in the bar.
-        for tab_id, pid in self._TOOL_TABS.items():
-            try:
-                self.query_one(f"#{tab_id}").set_class(pid == panel_id, "-active")
-            except Exception:
-                pass
+        self._update_lens_frame()
         try:
             self.query_one(f"#{panel_id}").focus()
         except Exception:
             pass
-        # Let a freshly-activated panel refresh itself immediately (e.g.
-        # the Snapshots tab fetches its list as soon as it is shown; the
-        # friTap header reads live TaskService state so it isn't stale).
+        # Let a freshly-activated lens refresh itself immediately.
         try:
             panel_widget = self.query_one(f"#{panel_id}")
-            if hasattr(panel_widget, "refresh_snapshots"):
-                panel_widget.refresh_snapshots()
-            if hasattr(panel_widget, "refresh_header"):
-                panel_widget.refresh_header()
-            if hasattr(panel_widget, "refresh_glance"):
-                panel_widget.refresh_glance()
+            for hook in (
+                "refresh_snapshots",
+                "refresh_header",
+                "refresh_glance",
+                "on_activated",
+                "on_lens_activated",
+            ):
+                if hasattr(panel_widget, hook):
+                    try:
+                        getattr(panel_widget, hook)()
+                    except Exception:
+                        logger.debug("lens hook %s failed", hook, exc_info=True)
         except Exception:
             pass
         self.call_after_refresh(self._ensure_view_focus)
-        # Whenever the OUTER tab changes -- by any means (keyboard via
-        # cycle_bottom_tab, mouse via on_click's tab-bar routing, or a
-        # programmatic jump like open_fritap_tab/open_files_tab) -- force the
-        # active nav level back to "outer" and clear any stale inner
-        # highlight, so a highlight never points at a sub-tab bar that's no
-        # longer the visible one. A subsequent select_subtab() call (e.g.
-        # open_fritap_tab landing on friTap) will re-enter "inner" itself via
-        # set_nav_level_inner(), so this ordering is correct either way.
+        # Whenever the lens changes -- by any means -- the active nav level
+        # goes back to "outer" and stale inner highlights are cleared. A
+        # following select_subtab() (open_fritap_tab) re-enters "inner".
         self._reset_nav_level_to_outer()
+        self.refresh_bindings()
 
     def _reset_nav_level_to_outer(self) -> None:
-        """Force the active nav level back to "outer" + clear stale highlights.
-
-        Clears the inner highlight on EVERY panel that has one, not just
-        whichever is current -- by the time this runs (called from
-        ``_select_bottom_tab``, after ``#tool-body`` has already switched),
-        the panel that actually held a stale highlight is the one we just
-        navigated AWAY from, not the newly-active one. All current
-        implementers (``FilesPanel``/``NetworkPanel``) are cheap,
-        idempotent no-ops when already inactive, so clearing all of them
-        unconditionally is simpler and correct regardless of direction.
-        """
+        """Force the active nav level back to "outer" + clear stale highlights."""
         self._nav_level = "outer"
         try:
-            self.query_one("#tool-tabbar").set_class(True, "-level-active")
+            self.query_one("#lens-bar").set_class(True, "-level-active")
         except Exception:
             pass
-        for pid in self._TOOL_TABS.values():
-            try:
-                panel = self.query_one(f"#{pid}")
-            except Exception:
-                continue
-            if hasattr(panel, "set_subtab_bar_active"):
+        for spec in LENSES:
+            panel = self.lens_widget(spec.id)
+            if panel is not None and hasattr(panel, "set_subtab_bar_active"):
                 try:
                     panel.set_subtab_bar_active(False)
                 except Exception:
@@ -405,14 +437,9 @@ class MainScreen(Screen):
     def shift_nav_level(self, delta: int) -> None:
         """Move the active nav level (Shift+Up/Down).
 
-        ``delta=-1`` (up) moves to the outer tool-tab bar; ``delta=+1``
-        (down) moves to the current tab's own inner sub-tab bar. No-ops the
-        down transition if the current outer panel widget doesn't implement
-        the duck-typed ``set_subtab_bar_active`` hook (e.g. Spotlight,
-        Snapshots have no inner sub-tab bar of their own). Updates the
-        ``-level-active`` CSS class on ``#tool-tabbar`` and, if applicable,
-        on the current panel's own sub-tab bar (via
-        ``set_subtab_bar_active``).
+        ``delta=-1`` (up) moves to the lens bar; ``delta=+1`` (down) moves to
+        the active lens's own inner sub-tab bar -- a no-op if the lens has no
+        ``set_subtab_bar_active`` hook.
         """
         panel = self._current_panel_widget()
         has_inner_bar = panel is not None and hasattr(panel, "set_subtab_bar_active")
@@ -422,16 +449,14 @@ class MainScreen(Screen):
         elif has_inner_bar:
             new_level = "inner"
         else:
-            return  # No inner sub-tab bar on this tab; nothing to move to.
+            return
 
         if new_level == self._nav_level:
             return
 
         self._nav_level = new_level
         try:
-            self.query_one("#tool-tabbar").set_class(
-                new_level == "outer", "-level-active"
-            )
+            self.query_one("#lens-bar").set_class(new_level == "outer", "-level-active")
         except Exception:
             pass
         if has_inner_bar:
@@ -441,11 +466,10 @@ class MainScreen(Screen):
                 pass
 
     def cycle_active_level(self, delta: int) -> None:
-        """Cycle whichever level is currently active (Shift+Left/Right).
+        """Cycle whichever level is active (Shift+Left/Right).
 
-        Outer active: cycles the outer tool tabs (today's
-        ``cycle_bottom_tab``). Inner active: cycles the current tab's own
-        sub-tabs via its duck-typed ``cycle_subtab`` hook.
+        Outer: cycles the lenses. Inner: cycles the active lens's own sub-tabs
+        via its duck-typed ``cycle_subtab`` hook.
         """
         if self._nav_level == "inner":
             panel = self._current_panel_widget()
@@ -456,17 +480,17 @@ class MainScreen(Screen):
                     pass
                 self.call_after_refresh(self._ensure_view_focus)
             return
-        self.cycle_bottom_tab(delta)
+        self.cycle_lens(delta)
 
     def _ensure_view_focus(self) -> None:
         """After a view switch, never leave the caret in a text input.
 
-        Switching tabs/sub-tabs focuses the new view's list/log. If focus
+        Switching lenses/sub-tabs focuses the new view's list/log. If focus
         nevertheless ends up in a text field (Watchlist's "Add path" input,
         e.g. via Textual re-homing focus away from a widget the switch just
         hid), the next shortcut -- ``P`` for the PDF report -- would be typed
         into it. Move focus to the first non-input focusable widget of the
-        active panel instead (or to nothing, which keeps global keys live).
+        active lens instead (or to nothing, which keeps global keys live).
         """
         from textual.widgets import Input, TextArea
 
@@ -477,12 +501,10 @@ class MainScreen(Screen):
         if panel is None:
             return
         if focused is None:
-            panel.focus()  # panels forward to their list/log
+            panel.focus()  # lenses forward to their list/log
             return
         if panel not in focused.ancestors:
             return  # e.g. the AI chat input -- not part of the switched view
-        # Nearest enclosing view first: a non-input focusable sibling of the
-        # input (Watchlist's list), then progressively wider containers.
         chain = [w for w in self.focus_chain if not isinstance(w, Input | TextArea)]
         for ancestor in focused.ancestors:
             for widget in chain:
@@ -494,36 +516,43 @@ class MainScreen(Screen):
         self.set_focus(panel if panel.focusable else None)
 
     def set_nav_level_inner(self) -> None:
-        """Move the active nav level to "inner" (called by a panel's own click).
-
-        ``FilesPanel``/``NetworkPanel``'s own ``_select_subtab`` calls this
-        right after already highlighting its own sub-tab bar directly --
-        clicking a sub-tab is "entering" that level, not staying at outer, so
-        this only clears ``#tool-tabbar``'s own highlight and updates the
-        tracked level; it deliberately does NOT touch the panel's own bar
-        class, since the panel just set that itself.
-        """
+        """Move the active nav level to "inner" (called by a lens's own click)."""
         self._nav_level = "inner"
         try:
-            self.query_one("#tool-tabbar").set_class(False, "-level-active")
+            self.query_one("#lens-bar").set_class(False, "-level-active")
         except Exception:
             pass
 
+    # -- legacy navigation helpers (other code calls these) -------------------
+
     def open_snapshots_tab(self) -> None:
-        """Switch to the Snapshots tab (key 0)."""
-        self._select_bottom_tab("snapshots-panel")
+        """Snapshots are no longer a tab: open the snapshot picker (S / 0)."""
+        self.open_snapshot_picker()
+
+    def open_snapshot_picker(self, then=None) -> None:
+        """Push the snapshot picker; ``then(panel)`` runs once it is mounted."""
+        from sandroid.tui.modals import SnapshotPickerModal
+
+        current = self.app.screen
+        if isinstance(current, SnapshotPickerModal):
+            if then is not None:
+                current.run_with_panel(then)
+            return
+        self.app.push_screen(SnapshotPickerModal(then=then))
+
+    def note_snapshot(self, tag: str | None, slot: str | None = None) -> None:
+        """Remember the last loaded snapshot for the header (cheap, no I/O)."""
+        label = ""
+        if tag:
+            label = f"slot {slot} · {tag}" if slot else tag
+        try:
+            self.query_one("#shell-header", ShellHeader).set_snapshot(label)
+        except Exception:
+            pass
 
     def open_fritap_tab(self) -> None:
-        """Switch to the Network tab and land on its friTap sub-tab (key h).
-
-        friTap no longer has its own outer tab -- it's nested inside
-        ``NetworkPanel`` alongside Mitmproxy -- so this now mirrors
-        ``open_files_tab``'s ``sub_tab`` pattern: switch the outer tab, then
-        drive the panel's own inner switcher. Real, live call site:
-        ``app.py``'s ``action_action_key`` calls this whenever the ``h`` key
-        toggles friTap, specifically so the toggle has a visible home.
-        """
-        self._select_bottom_tab("network-panel")
+        """Switch to the Network lens and its friTap sub-tab (key h)."""
+        self.switch_lens("network")
         try:
             panel = self.query_one("#network-panel")
             if hasattr(panel, "select_subtab"):
@@ -532,17 +561,17 @@ class MainScreen(Screen):
             pass
 
     def open_files_tab(self, sub_tab: str | None = None) -> None:
-        """Switch to the Files tab, optionally landing on a specific inner sub-tab.
+        """Switch to the Files lens, optionally landing on an inner sub-tab.
 
-        ``sub_tab`` is the inner ContentSwitcher child id (e.g.
-        ``"files-diffs"``). Used by Play, which must always land on Diffs on
-        press — the "tab-switch on Play-press" half of the unified focus
-        rule, which always happens regardless of what run history looks
-        like. The separate, gated half (whether the just-completed run also
-        steals the current *selection*) lives in DiffsView.on_new_run, not
-        here.
+        ``sub_tab`` is the Files inner ContentSwitcher child id
+        (``"files-monitor"``/``"files-watchlist"``). The former
+        ``"files-diffs"`` sub-tab is now the Runs lens and is redirected there
+        (Play lands on it on every press).
         """
-        self._select_bottom_tab("files-panel")
+        if sub_tab in _SUBTAB_TO_LENS:
+            self.switch_lens(_SUBTAB_TO_LENS[sub_tab])
+            return
+        self.switch_lens("files")
         if sub_tab:
             try:
                 panel = self.query_one("#files-panel")
@@ -551,20 +580,146 @@ class MainScreen(Screen):
             except Exception:
                 pass
 
-    def cycle_bottom_tab(self, delta: int) -> None:
-        """Switch the active tab by *delta* (outer level of Shift+Left/Right).
+    def open_runs_lens(self) -> None:
+        """Switch to the Runs lens (run history / diffs)."""
+        self.switch_lens("runs")
 
-        Bound on the tool-panel wrapper (via ``cycle_active_level``) so it
-        only fires when focus is inside the tool area; never steals
-        Shift+Left/Right from the activity log.
-        """
-        order = list(self._TOOL_TABS.values())
-        current = self._bottom_current() or order[0]
+    def cycle_bottom_tab(self, delta: int) -> None:
+        """Legacy name of :meth:`cycle_lens`."""
+        self.cycle_lens(delta)
+
+    # -- side slot: inspector + chat ------------------------------------------
+
+    def _side_slot(self):
         try:
-            idx = order.index(current)
-        except ValueError:
-            idx = 0
-        self._select_bottom_tab(order[(idx + delta) % len(order)])
+            return self.query_one("#side-slot")
+        except Exception:
+            return None
+
+    def _set_side_mode(self, mode: str | None) -> None:
+        slot = self._side_slot()
+        if slot is None:
+            return
+        self._side_mode = mode
+        slot.set_class(mode is not None, "-open")
+        slot.set_class(mode == "inspector", "-inspector")
+        slot.set_class(mode == "chat", "-chat")
+        self.refresh_bindings()
+
+    @property
+    def side_slot_mode(self) -> str | None:
+        """``"inspector"``, ``"chat"`` or None (closed)."""
+        return self._side_mode
+
+    @property
+    def inspector_is_open(self) -> bool:
+        return self._side_mode == "inspector"
+
+    @property
+    def chat_is_open(self) -> bool:
+        return self._side_mode == "chat"
+
+    @property
+    def inspector_content(self) -> InspectorContent | None:
+        """What the Inspector shows (also while closed: the last content)."""
+        try:
+            return self.query_one("#inspector", Inspector).content
+        except Exception:
+            return None
+
+    def open_inspector(self, content: InspectorContent) -> None:
+        """Show ``content`` in the right-hand Inspector (replaces the chat)."""
+        try:
+            inspector = self.query_one("#inspector", Inspector)
+        except Exception:
+            return
+        if content.lens is None:
+            content.lens = self.active_lens
+        inspector.show(content)
+        if self._side_mode != "inspector":
+            self._set_side_mode("inspector")
+
+    def update_inspector(self, content: InspectorContent) -> None:
+        """Replace the Inspector content in place -- only if it is open."""
+        if self.inspector_is_open:
+            self.open_inspector(content)
+
+    def close_inspector(self) -> None:
+        """Close the Inspector (no-op if the chat or nothing is in the slot)."""
+        if self.inspector_is_open:
+            self.close_side_slot()
+
+    def close_side_slot(self) -> None:
+        """Close whatever is in the side slot and return focus to the lens."""
+        if self._side_mode is None:
+            return
+        refocus = self.focused is None or self._side_slot() in (
+            self.focused.ancestors if self.focused else ()
+        )
+        self._set_side_mode(None)
+        if refocus:
+            panel = self.lens_widget()
+            if panel is not None:
+                try:
+                    panel.focus()
+                except Exception:
+                    pass
+
+    def action_inspect(self) -> None:
+        """Enter reached the screen: ask the active lens for Inspector content."""
+        self._inspect_active_lens()
+
+    def _inspect_active_lens(self) -> bool:
+        lens = self.lens_widget()
+        hook = getattr(lens, "inspect_selected", None)
+        if hook is None:
+            return False
+        try:
+            content = hook()
+        except Exception:
+            logger.debug("inspect_selected failed", exc_info=True)
+            return False
+        if content is None:
+            return False
+        self.open_inspector(content)
+        return True
+
+    def _selection_from_active_lens(self, event) -> None:
+        lens = self.lens_widget()
+        control = getattr(event, "control", None)
+        if lens is None or control is None or not hasattr(lens, "inspect_selected"):
+            return
+        if lens is control or lens in control.ancestors:
+            self._inspect_active_lens()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self._selection_from_active_lens(event)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        self._selection_from_active_lens(event)
+
+    def handle_escape(self) -> bool:
+        """Esc on the main screen (called by the App's priority Esc handler).
+
+        Order: a focused text input outside the side slot keeps the old
+        behaviour (Esc leaves the input -> return False); otherwise an open
+        side slot (Inspector or chat) closes, then an open log drawer.
+        Returns True when Esc was consumed here.
+        """
+        from textual.widgets import Input, TextArea
+
+        focused = self.focused
+        slot = self._side_slot()
+        in_slot = focused is not None and slot is not None and slot in focused.ancestors
+        if isinstance(focused, Input | TextArea) and not in_slot:
+            return False
+        if self._side_mode is not None:
+            self.close_side_slot()
+            return True
+        if self.log_drawer_is_open:
+            self.toggle_log_drawer()
+            return True
+        return False
 
     @staticmethod
     def _make_chat_panel() -> Static:
@@ -589,38 +744,129 @@ class MainScreen(Screen):
         )
 
     def toggle_chat_panel(self) -> None:
-        """Toggle the AI Chat dock at the bottom of the right panel (Ctrl+Y).
+        """Toggle the AI chat in the right-hand side slot (Ctrl+Y).
 
-        Non-modal: the left tool tabs stay fully live/interactive while the
-        dock is open. ChatPanel itself never unmounts -- only #chat-dock's
-        `display` flips via the `.visible` class -- so conversation history
-        and scroll position persist across toggles.
+        Shares the slot with the Inspector (only one at a time). Non-modal:
+        the lens stays live. ChatPanel never unmounts -- only the slot's
+        classes flip -- so conversation history and scroll persist.
         """
+        if self._side_mode == "chat":
+            self.close_side_slot()
+            return
+        self._set_side_mode("chat")
         try:
-            dock = self.query_one("#chat-dock")
+            panel = self.query_one("#chat-panel")
+            if hasattr(panel, "refresh_header"):
+                panel.refresh_header()
+        except Exception:
+            pass
+        try:
+            self.query_one("#chat-input").focus()
+        except Exception:
+            pass
+
+    # -- log drawer + ticker --------------------------------------------------
+
+    @property
+    def log_drawer_is_open(self) -> bool:
+        try:
+            return self.query_one("#log-drawer").has_class("-open")
+        except Exception:
+            return False
+
+    def toggle_log_drawer(self) -> None:
+        """Show/hide the bottom log drawer (backtick)."""
+        try:
+            drawer = self.query_one("#log-drawer", LogDrawer)
         except Exception:
             return
-        showing = not dock.has_class("visible")
-        dock.set_class(showing, "visible")
-
+        showing = not drawer.has_class("-open")
+        drawer.set_class(showing, "-open")
+        try:
+            self.query_one("#log-ticker", LogTicker).set_drawer_open(showing)
+        except Exception:
+            pass
         if showing:
             try:
-                panel = self.query_one("#chat-panel")
-                if hasattr(panel, "refresh_header"):
-                    panel.refresh_header()
-            except Exception:
-                pass
-            try:
-                self.query_one("#chat-input").focus()
+                self.query_one("#activity-log", ActivityLog).scroll_end(animate=False)
             except Exception:
                 pass
         else:
-            current = self._bottom_current()
-            if current:
-                try:
-                    self.query_one(f"#{current}").focus()
-                except Exception:
-                    pass
+            focused = self.focused
+            if focused is None or drawer in focused.ancestors or focused is drawer:
+                panel = self.lens_widget()
+                if panel is not None:
+                    panel.focus()
+
+    def on_activity_log_line_written(self, event: ActivityLog.LineWritten) -> None:
+        try:
+            self.query_one("#log-ticker", LogTicker).show_line(event.content)
+        except Exception:
+            pass
+
+    # -- scope (LIVE / REVIEW) ------------------------------------------------
+
+    @property
+    def scope(self) -> str | None:
+        """The run id under review, or None for the live session."""
+        return self.scope_run
+
+    def set_scope(self, run_id: str | None, label: str | None = None) -> None:
+        """Switch every lens to reviewing ``run_id`` (None = back to LIVE).
+
+        ``label`` is what the header pill shows after "REVIEW" (default
+        ``"Run <run_id>"``).
+        """
+        self._scope_label = label
+        if run_id == self.scope_run:
+            self._update_scope_pill()
+            for spec in LENSES:
+                self._post_scope(spec.id)
+            return
+        self.scope_run = run_id
+
+    def watch_scope_run(self, run_id: str | None) -> None:
+        self._update_scope_pill()
+        for spec in LENSES:
+            self._post_scope(spec.id)
+
+    def _post_scope(self, lens_id: str) -> None:
+        widget = self.lens_widget(lens_id)
+        if widget is not None:
+            widget.post_message(ScopeChanged(self.scope_run, self._scope_label))
+
+    def _update_scope_pill(self) -> None:
+        try:
+            header = self.query_one("#shell-header", ShellHeader)
+        except Exception:
+            return
+        if self.scope_run is not None:
+            label = self._scope_label or f"Run {self.scope_run}"
+            header.set_pill(f"◆ REVIEW {label}", "review")
+            return
+        recording = replaying = False
+        try:
+            bar = self.query_one("#status-bar", StatusBar)
+            recording = bool(getattr(bar, "recording_active", False))
+            replaying = bool(getattr(bar, "replay_active", False))
+        except Exception:
+            pass
+        if recording:
+            header.set_pill("● REC", "rec")
+        elif replaying:
+            header.set_pill("● REPLAY", "rec")
+        else:
+            header.set_pill("● LIVE", "")
+
+    def _update_header(self) -> None:
+        """Header breadcrumb + pill from the status bar's cached state."""
+        try:
+            bar = self.query_one("#status-bar", StatusBar)
+            crumb = bar.breadcrumb_markup()
+            self.query_one("#shell-header", ShellHeader).set_crumb(crumb)
+        except Exception:
+            pass
+        self._update_scope_pill()
 
     def _deferred_mount_updates(self) -> None:
         """Run deferred updates after UI has rendered.
@@ -643,8 +889,8 @@ class MainScreen(Screen):
         # These were stored in EventBus history since no subscribers existed yet
         self._display_buffered_logs()
 
-        # Land focus in the tool area (Spotlight tab) on startup rather than
-        # wherever Textual's tab order happens to pick.
+        # Land focus in the active lens (App) on startup rather than wherever
+        # Textual's tab order happens to pick.
         try:
             self.query_one("#spotlight-panel").focus()
         except Exception:
@@ -658,6 +904,7 @@ class MainScreen(Screen):
             # update its attributes without re-rendering on this path).
             status_bar = self.query_one("#status-bar", StatusBar)
             status_bar.refresh_status()
+            self._update_header()
         except ImportError:
             logger.warning("Toolbox not available")
         except Exception as e:
@@ -1297,6 +1544,7 @@ class MainScreen(Screen):
             status_bar.refresh_status()
         except Exception:
             pass
+        self._update_header()
 
     def refresh_status(self) -> None:
         """Refresh the status bar from current state."""

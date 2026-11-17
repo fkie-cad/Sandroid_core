@@ -5,6 +5,7 @@ import time
 from collections import deque
 from datetime import datetime
 
+from textual.message import Message
 from textual.widgets import RichLog
 
 from sandroid._version import __version__
@@ -22,7 +23,16 @@ class ActivityLog(RichLog):
     - Timestamp prefixing
     - Task started/stopped use fixed colors for consistent recognition
     - Other colors are pulled from the current theme
+    - Every write posts :class:`ActivityLog.LineWritten` (the main screen's
+      one-row log ticker mirrors it while the log drawer is closed)
     """
+
+    class LineWritten(Message):
+        """A line was written; ``content`` is what was passed to write()."""
+
+        def __init__(self, content) -> None:
+            super().__init__()
+            self.content = content
 
     def __init__(self, **kwargs):
         """Initialize the activity log."""
@@ -93,6 +103,7 @@ class ActivityLog(RichLog):
             shrink=shrink,
             scroll_end=scroll_end,
         )
+        self.post_message(self.LineWritten(content))
 
     def clear(self) -> None:
         """Clear the log content."""

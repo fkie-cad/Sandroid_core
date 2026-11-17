@@ -1,8 +1,9 @@
 """TUI panel for listing / creating / loading / deleting AVD snapshots.
 
-The Snapshots tab lives in the permanent tool area alongside the
-spotlight and mitmproxy panels. It surfaces the AVD's saved snapshots and
-offers the four lifecycle actions (Create / Load / Delete / Refresh).
+Snapshots are not a lens: this panel lives inside the snapshot picker modal
+(``S`` / ``0``, :class:`~sandroid.tui.modals.SnapshotPickerModal`). It
+surfaces the AVD's saved snapshots and offers the lifecycle actions
+(Create / Load / Delete / Assign / Refresh).
 
 It is intentionally **stateless** in the same spirit as :class:`SpotlightPanel`:
 it owns no manager instances and reads everything live from the process-wide
@@ -25,7 +26,9 @@ from typing import TYPE_CHECKING
 
 from textual.containers import Horizontal
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, OptionList, Static
+from textual.widgets import OptionList, Static
+
+from sandroid.tui.widgets.lens_shell import is_shown
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -42,8 +45,7 @@ def _forget_device_handles() -> None:
     reset_device_handles_after_snapshot_load()
 
 
-# Clickable action-cell id -> panel action method. Routed from
-# MainScreen.on_click (same dispatch as the bottom tab bar / arrow).
+# Clickable action-cell id -> panel action method (see on_click).
 _ACTION_CELLS = {
     "snap-create": "action_create",
     "snap-load": "action_load",
@@ -54,12 +56,12 @@ _ACTION_CELLS = {
 
 # How often the slow fallback poll re-checks the snapshot list (seconds).
 # Telnet ``list`` is slow, so this stays lazy: each tick is a no-op unless this
-# panel is the active tool-body ContentSwitcher child.
+# panel is on screen (the picker is open).
 _POLL_INTERVAL = 9.0
 
 
 class SnapshotsPanel(Widget):
-    """Bottom-strip panel: AVD snapshot list + create/load/delete actions.
+    """Snapshot list + create/load/delete/assign actions (hosted by the picker).
 
     Bindings (when focused):
         c: create a snapshot (prompts for a name; blank = timestamp)
@@ -75,7 +77,7 @@ class SnapshotsPanel(Widget):
     non-priority pass — so these shadow the globals only while the snapshots
     panel is focused. ``OptionList`` binds only navigation keys (up/down/enter/
     home/end/pageup/pagedown), so the letter keys never clash with it nor with
-    ``_ToolPanel``'s Shift+Arrow level/tab cycling. The action row is also
+    the picker's slot digits. The action row is also
     clickable.
     """
 
@@ -188,14 +190,14 @@ class SnapshotsPanel(Widget):
             yield Static("^r refresh", id="snap-refresh", classes="act-cell")
 
     def on_mount(self) -> None:
+        self._app_ref = self.app
         self._subscribe_events()
-        # Only fetch if the tab is already on screen — the slow telnet ``list``
-        # must not run for a hidden tab. When the user opens the tab,
-        # MainScreen._select_bottom_tab triggers refresh_snapshots() directly.
+        # Only fetch while on screen -- the slow telnet ``list`` must not run
+        # for a hidden panel.
         self._refresh_if_visible()
         # Event-driven refresh (STATE_CHANGED) covers most cases; this slow
         # poll is the safety net. Stopped in on_unmount; each tick is a no-op
-        # unless this panel is the active tool-body child.
+        # unless this panel is on screen.
         self._poll_timer = self.set_interval(_POLL_INTERVAL, self._poll)
 
     def on_unmount(self) -> None:
@@ -212,9 +214,8 @@ class SnapshotsPanel(Widget):
     def focus(self, scroll_visible: bool = True):
         """Delegate focus to the OptionList so row navigation works.
 
-        ``MainScreen._select_bottom_tab`` focuses ``#snapshots-panel`` (this
-        container), but up/down/enter row navigation needs the OptionList
-        focused. Forward focus there, falling back to the container.
+        Focusing ``#snapshots-panel`` (this container) is not enough for
+        up/down/enter row navigation -- the OptionList needs focus. Forward focus there, falling back to the container.
         """
         try:
             self.query_one("#snapshots-list", OptionList).focus(scroll_visible)
@@ -369,7 +370,9 @@ class SnapshotsPanel(Widget):
         try:
             option_list.clear_options()
             if not self._emulator_available():
-                option_list.add_option("Snapshots require a running emulator")
+                option_list.add_option(
+                    "[#5b6479]start an emulator (D) to save and load snapshots[/]"
+                )
                 return
             if not self._snapshots:
                 option_list.add_option("[#5b6479]no snapshots — press c to create[/]")
@@ -478,7 +481,7 @@ class SnapshotsPanel(Widget):
         ``Adb.get_avd_snapshots`` returns ``[]`` on a physical device and never
         raises, so a missing emulator simply yields an empty list.
         """
-        if self._refresh_inflight:
+        if self._refresh_inflight or not self.is_attached:
             return
         if not self._emulator_available():
             # Still reflect the unavailable state in the UI.
@@ -510,25 +513,18 @@ class SnapshotsPanel(Widget):
 
     # -- live poll (slow fallback) ----------------------------------------
 
-    def _is_active_child(self) -> bool:
-        """True if this panel is the active tool-body ContentSwitcher child."""
-        try:
-            switcher = self.screen.query_one("#tool-body", ContentSwitcher)
-            return switcher.current == "snapshots-panel"
-        except Exception:
-            return False
-
     def _is_on_screen(self) -> bool:
-        """True if the Snapshots tab is the shown tool-body child."""
-        return self._is_active_child()
+        """True while this panel is mounted and visible (the picker is open)."""
+        return is_shown(self)
+
+    _is_active_child = _is_on_screen
 
     def _refresh_if_visible(self) -> None:
         """Refresh only when the tab is on screen (main thread).
 
-        Used by on-mount and the EventBus callbacks so a hidden tab never
-        triggers the slow telnet ``list``. Explicit refreshes (the ``r`` key /
-        cell, after an action, and the tab-activation hook) call
-        ``refresh_snapshots`` directly instead.
+        Used by on-mount and the EventBus callbacks so a hidden panel never
+        triggers the slow telnet ``list``. Explicit refreshes (Ctrl+R / the
+        cell, after an action) call ``refresh_snapshots`` directly instead.
         """
         if self._is_on_screen():
             self.refresh_snapshots()
@@ -611,6 +607,7 @@ class SnapshotsPanel(Widget):
                 if self._toolbox().load_snapshot(tag) is False:
                     return False, f"Could not load '{tag}' (see the log)"
                 _forget_device_handles()
+                self._post(self._note_loaded, tag, None)
                 return True, f"Loaded '{tag}'"
 
             self._run_action_bg(_work, "load", refresh_after=True)
@@ -670,9 +667,8 @@ class SnapshotsPanel(Widget):
     def slot_tag(self, slot: int | str) -> str | None:
         """Tag assigned to ``slot`` if it could be loaded right now, else None.
 
-        Used by the app's double-press guard for the global 1-8 keys: only a
-        loadable slot needs arming; anything else is reported immediately by
-        :meth:`load_slot`.
+        Used by the picker's 1-8 keys: only a loadable slot needs a confirm;
+        anything else is reported immediately by :meth:`load_slot`.
         """
         try:
             if not self._emulator_available():
@@ -684,10 +680,8 @@ class SnapshotsPanel(Widget):
     def load_slot(self, slot: int | str) -> None:
         """Load the snapshot assigned to ``slot`` (no confirm here).
 
-        Reachable from the app's ``1``-``8`` bindings even when the tab is not
-        on screen, so it never depends on a populated list. The app arms the
-        load on the first digit and calls this on the second (see
-        ``SandroidTUI.action_load_slot``).
+        Never depends on a populated list. The picker's ``1``-``8`` keys ask
+        for a confirm first (see ``SnapshotPickerModal.action_load_slot``).
         """
         if not self._require_emulator():
             return
@@ -695,7 +689,7 @@ class SnapshotsPanel(Widget):
         tag = self._slot_map().get(slot)
         if not tag:
             self._notify(
-                f"Slot {slot} is empty — assign a snapshot from the Snapshots tab.",
+                f"Slot {slot} is empty — highlight a snapshot and press a to assign.",
                 "warning",
             )
             return
@@ -713,6 +707,7 @@ class SnapshotsPanel(Widget):
             if self._toolbox().load_snapshot(tag) is False:
                 return False, f"Could not load slot {slot} ('{tag}', see the log)"
             _forget_device_handles()
+            self._post(self._note_loaded, tag, slot)
             return True, f"Loaded slot {slot} ('{tag}')"
 
         self._run_action_bg(_work, f"load slot {slot}", refresh_after=True)
@@ -806,10 +801,28 @@ class SnapshotsPanel(Widget):
         )
 
     def dispatch_action_cell(self, wid: str) -> None:
-        """Run the action bound to a clicked action cell (from MainScreen)."""
+        """Run the action bound to a clicked action cell."""
         method = _ACTION_CELLS.get(wid)
         if method:
             getattr(self, method)()
+
+    def on_click(self, event) -> None:
+        """Route clicks on the action row (the picker is not MainScreen)."""
+        wid = getattr(getattr(event, "widget", None), "id", None)
+        if wid in _ACTION_CELLS:
+            event.stop()
+            self.dispatch_action_cell(wid)
+
+    def _note_loaded(self, tag: str, slot: str | None) -> None:
+        """Tell the main screen which snapshot is loaded (header indicator)."""
+        try:
+            app = getattr(self, "_app_ref", None) or self.app
+            for screen in app.screen_stack:
+                note = getattr(screen, "note_snapshot", None)
+                if note is not None:
+                    note(tag, slot)
+        except Exception:
+            pass
 
     # -- background action runner -----------------------------------------
 
@@ -871,7 +884,15 @@ class SnapshotsPanel(Widget):
         self._post(self._do_notify, message, severity)
 
     def _do_notify(self, message: str, severity: str) -> None:
+        # The picker may have closed (panel unmounted) while a worker ran;
+        # fall back to the app captured at mount.
+        app = getattr(self, "_app_ref", None)
         try:
-            self.app.notify(message, severity=severity)
+            app = self.app
+        except Exception:
+            pass
+        try:
+            if app is not None:
+                app.notify(message, severity=severity)
         except Exception:
             pass

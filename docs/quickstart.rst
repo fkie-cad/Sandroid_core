@@ -36,28 +36,30 @@ Basic Usage
 .. important::
 
    Do **not** use ``-no-snapshot``: Sandroid's Record/Play workflow and the
-   Snapshots tab need AVD snapshots. ``-no-snapshot-save`` (do not overwrite
+   snapshot picker (``S``) need AVD snapshots. ``-no-snapshot-save`` (do not overwrite
    the quick-boot snapshot on exit) is fine.
 
 **3. Run Sandroid**::
 
    sandroid
 
-Sandroid launches the Textual TUI. The top **glance band** shows device,
-frida-server, proxy and spotlight state; below the activity log are four
-always-on tool tabs:
+Sandroid launches the Textual TUI. The header shows device, app and the
+``● LIVE`` scope; a short status strip shows frida-server, hooks and proxy
+state. Below it, four **lenses** take the full width -- switch with
+``1``-``4``:
 
-- **Spotlight** -- the app under investigation (start, attach, restart, kill)
-  and the Frida bypass toggles ``1``-``5`` (SSL, Root, Frida, Debug, Integrity;
-  experimental)
-- **Network** -- *Mitmproxy* (proxying, CA injection) and *friTap* sub-tabs
-- **Snapshots** -- create/load/delete AVD snapshots, 8 quick slots
-- **Files** -- *Monitor* (live file events), *Watchlist* (Spotlight files) and
-  *Diffs* (Record/Play run history)
+- ``1`` **App** -- the app under investigation (start, attach, restart, kill);
+  ``b`` then ``1``-``5`` toggles the Frida bypasses (SSL, Root, Frida, Debug,
+  Integrity; experimental)
+- ``2`` **Network** -- *Mitmproxy* (proxying, CA injection) and *friTap*
+- ``3`` **Files** -- *Monitor* (live file events) and *Watchlist*
+  (Spotlight files)
+- ``4`` **Runs** -- Record/Play run history and diffs
 
-Press ``?`` for every action and its key (all keys are rebindable),
-``Ctrl+Shift+P`` for the command palette, ``Ctrl+B`` to focus the tool tabs
-and ``Shift+Arrows`` to move between tabs.
+``Enter`` opens details (Inspector) where a lens offers them, ``Esc`` closes
+them. ``S`` opens the snapshot picker (8 quick slots) and the backtick key
+the activity log. Press ``?`` for every action and its key (all keys are
+rebindable) and ``Ctrl+Shift+P`` for the command palette.
 
 First Analysis - Recording User Actions
 ---------------------------------------
@@ -83,7 +85,7 @@ First Analysis - Recording User Actions
 **4. Play and View Results**
 
    Stopping the recording starts the replay automatically; ``p`` replays it
-   again later. Sandroid opens **Files -> Diffs**, reverts to the snapshot, replays
+   again later. Sandroid opens the **Runs** lens, reverts to the snapshot, replays
    your recording, measures background noise with a dry run of the same
    duration and pulls/diffs everything that changed. The result shows:
 
@@ -92,7 +94,7 @@ First Analysis - Recording User Actions
    - **Deleted files** (with ``--show-deleted``)
    - **Processes**, **listening sockets** and **network** activity (with ``--network``)
 
-   Each Play is stored as a run bundle and stays available in the Diffs run
+   Each Play is stored as a run bundle and stays available in the Runs
    history.
 
 Command-Line Options

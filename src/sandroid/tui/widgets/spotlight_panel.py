@@ -27,15 +27,18 @@ from typing import TYPE_CHECKING
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Static
+from textual.widgets import Static
+
+from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
 
-# (binding key, category, label) for the immediate bypass toggles. All
-# bypass tiers are experimental, hence the "(exp.)" tag.
+# (chord digit, category, label) for the immediate bypass toggles: ``b`` then
+# the digit (BypassChordModal). All bypass tiers are experimental, hence the
+# "(exp.)" tag.
 _BYPASS_TOGGLES = [
     ("1", "ssl", "SSL (exp.)"),
     ("2", "root", "Root (exp.)"),
@@ -67,7 +70,8 @@ class SpotlightPanel(Widget):
     """Bottom-left panel: spotlight app status + live state + actions.
 
     Bindings (when focused):
-        1/2/3/4: toggle/arm SSL / Root / Frida / Debug bypass
+        b then 1-5: toggle/arm SSL / Root / Frida / Debug / Integrity bypass
+                 (``b`` then ``o`` launches Objection, the global ``b``)
         Enter:   primary (Start if stopped · Resume if paused)
         R:       restart (force-stop + respawn with armed hooks)
         A:       attach to the live process + apply armed hooks
@@ -77,6 +81,9 @@ class SpotlightPanel(Widget):
 
     Lowercase s/r/a/p/x are deliberately NOT bound — they shadow the
     destructive global shortcuts (Screenshot/Record/Analyze/Play/Export).
+    Digits are the global lens keys, so the bypass toggles are a ``b`` chord
+    (shadowing the global ``b`` = Objection only while this lens has focus;
+    the chord offers Objection as ``o``).
     The action row is also clickable.
     """
 
@@ -119,14 +126,8 @@ class SpotlightPanel(Widget):
     # panel itself, and listing all 11 pushed the global keys (r Record,
     # p Play, ? Help, ...) off a 200-column footer.
     BINDINGS = [
-        Binding("1", "toggle_bypass('ssl')", "Bypass SSL (exp.)", show=False),
-        Binding("2", "toggle_bypass('root')", "Bypass root (exp.)", show=False),
-        Binding("3", "toggle_bypass('frida')", "Bypass Frida (exp.)", show=False),
-        Binding("4", "toggle_bypass('debug')", "Bypass debug (exp.)", show=False),
-        Binding(
-            "5", "toggle_bypass('integrity')", "Bypass integrity (exp.)", show=False
-        ),
         Binding("enter", "primary", "Start/Resume"),
+        Binding("b", "bypass_chord", "Bypass…"),
         Binding("R", "restart_app", "Restart", show=False),
         Binding("A", "attach_app", "Attach", show=False),
         Binding("P", "start_paused", "Start paused", show=False),
@@ -366,8 +367,7 @@ class SpotlightPanel(Widget):
         # 3. Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
         lines.append(
-            "[#7dd3fc bold]Bypass[/] "
-            "[#5b6479](keys 1-5 in this panel · armed applies on Start)[/]"
+            "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-5 · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:
@@ -406,12 +406,10 @@ class SpotlightPanel(Widget):
     # -- live running-state poll (slow fallback) --------------------------
 
     def _is_active_child(self) -> bool:
-        """True if this panel is the active tool-body ContentSwitcher child."""
-        try:
-            switcher = self.screen.query_one("#tool-body", ContentSwitcher)
-            return switcher.current == "spotlight-panel"
-        except Exception:
-            return False
+        """True if this panel (the App lens) is the visible lens."""
+        from .lens_shell import is_shown
+
+        return is_shown(self)
 
     def _poll_running_state(self) -> None:
         """Timer tick (main thread): re-check the app's PID off-thread.
@@ -545,6 +543,25 @@ class SpotlightPanel(Widget):
             logger.debug("paused-state reconciliation failed", exc_info=True)
 
     # -- bypass toggles ---------------------------------------------------
+
+    def action_bypass_chord(self) -> None:
+        """``b``: open the bypass chord; a digit toggles, ``o`` = Objection."""
+        try:
+            on = set(self._on_categories())
+        except Exception:
+            on = set()
+
+        def on_pick(choice: str | None) -> None:
+            if not choice:
+                return
+            if choice == "objection":
+                action = getattr(self.app, "action_objection", None)
+                if action is not None:
+                    action()
+                return
+            self.action_toggle_bypass(choice)
+
+        self.app.push_screen(BypassChordModal(on), on_pick)
 
     def action_toggle_bypass(self, category: str) -> None:
         """Toggle/arm a bypass category via the process-wide BypassService.
@@ -1023,3 +1040,59 @@ class SpotlightPanel(Widget):
             self.app.notify(message, severity=severity)
         except Exception:
             pass
+
+
+class BypassChordModal(_FridaModalBase):
+    """``b`` then a digit: toggle a bypass category (``o`` = Objection).
+
+    Same style as the ``S`` slot picker: a plain digit picks, Esc cancels.
+    Dismisses with the category name, ``"objection"`` or ``None``.
+    """
+
+    BINDINGS = [
+        *[
+            Binding(key, f"pick('{category}')", label, show=False, priority=True)
+            for key, category, label in _BYPASS_TOGGLES
+        ],
+        Binding("o", "pick('objection')", "Objection", show=False, priority=True),
+        Binding("b", "pick('objection')", "Objection", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    BypassChordModal .modal-container {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+    }
+    BypassChordModal #bypass-chord-list {
+        height: auto;
+        width: 100%;
+    }
+    """
+
+    def __init__(self, on_categories: set[str] | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._on = set(on_categories or ())
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Vertical
+        from textual.widgets import Label
+
+        from sandroid.tui.modals.base import KeyHintFooter
+
+        rows = []
+        for key, category, label in _BYPASS_TOGGLES:
+            is_on = category in self._on
+            mark = "[#4ade80]● on [/]" if is_on else "[#5b6479]○ off[/]"
+            rows.append(f"  [b]{key}[/]  {mark}  {label}")
+        rows.append("")
+        rows.append("  [b]o[/]  Objection shell [dim](b b works too)[/dim]")
+        with Vertical(classes="modal-container"):
+            yield Label("Bypass", classes="modal-title")
+            yield Static("\n".join(rows), id="bypass-chord-list")
+            yield KeyHintFooter(
+                hints={"default": "[dim]1-5 toggle · o Objection · Esc cancel[/dim]"}
+            )
+
+    def action_pick(self, choice: str) -> None:
+        self.dismiss(choice)

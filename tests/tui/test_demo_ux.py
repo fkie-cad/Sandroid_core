@@ -1,7 +1,7 @@
 """Usability / keybinding regressions found in the 2.1 live demo rehearsal.
 
-Covers the global Record/Play keys, Shift-aware key labels, the double-press
-guard on snapshot-slot loading, Shift+Arrow focus handling, the Record
+Covers the global Record/Play keys, Shift-aware key labels, the confirm
+guard on snapshot-slot loading (picker), Shift+Arrow focus handling, the Record
 settings modal and smaller fixes (recording duration, ...). The full
 ``SandroidTUI`` is driven through Textual's pilot; the suite-wide conftest
 blocks every device access, so "no device connected" is the natural state.
@@ -146,7 +146,7 @@ async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
         await _settle(pilot)
         assert started == []
         assert any("Nothing recorded yet" in m for m in _messages(app))
-        assert app.screen.query_one("#tool-body").current == "spotlight-panel"
+        assert app.screen.query_one("#lens-body").current == "spotlight-panel"
 
 
 async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
@@ -163,15 +163,16 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         await pilot.press("p")
         await _settle(pilot)
         assert started == [1]
-        assert app.screen.query_one("#tool-body").current == "files-panel"
+        assert app.screen.query_one("#lens-body").current == "runs-panel"
 
 
 # --------------------------------------------------------------------------
-# snapshot slots: a lone digit must not revert the emulator
+# snapshot slots: digits are lenses; slots load from the picker, confirmed
 # --------------------------------------------------------------------------
 
 
-async def test_slot_digit_needs_second_press(monkeypatch) -> None:
+async def test_slot_digit_in_picker_needs_confirm(monkeypatch) -> None:
+    from sandroid.tui.modals import ConfirmModal, SnapshotPickerModal
     from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
 
     loads: list[str] = []
@@ -180,39 +181,24 @@ async def test_slot_digit_needs_second_press(monkeypatch) -> None:
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
         await _boot(app, pilot)
-        # Focus off the Spotlight panel (where 1-5 are bypass toggles).
-        app.screen.open_snapshots_tab()
+        await pilot.press("S")
         await _settle(pilot)
+        assert isinstance(app.screen, SnapshotPickerModal)
         await pilot.press("7")
         await _settle(pilot)
         assert loads == []
-        assert any("again to load slot 7" in m for m in _messages(app))
+        assert isinstance(app.screen, ConfirmModal)
+        await pilot.press("escape")  # cancel: nothing loaded
+        await _settle(pilot)
+        assert loads == []
         await pilot.press("7")
+        await _settle(pilot)
+        app.screen.dismiss(True)
         await _settle(pilot)
         assert loads == ["7"]
 
 
-async def test_slot_press_expires(monkeypatch) -> None:
-    from sandroid.tui.app import SandroidTUI
-    from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
-
-    loads: list[str] = []
-    monkeypatch.setattr(SnapshotsPanel, "slot_tag", lambda self, s: "clean")
-    monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
-    monkeypatch.setattr(SandroidTUI, "SLOT_CONFIRM_WINDOW", 0.0)
-    app = _app()
-    async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
-        app.screen.open_snapshots_tab()
-        await _settle(pilot)
-        await pilot.press("6")
-        await _settle(pilot)
-        await pilot.press("6")
-        await _settle(pilot)
-        assert loads == []
-
-
-async def test_digit_on_spotlight_toggles_bypass_not_slot(monkeypatch) -> None:
+async def test_digit_on_main_screen_switches_lens_not_slot(monkeypatch) -> None:
     from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
     from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
 
@@ -226,9 +212,10 @@ async def test_digit_on_spotlight_toggles_bypass_not_slot(monkeypatch) -> None:
     async with app.run_test(size=SIZE, notifications=True) as pilot:
         await _boot(app, pilot)
         assert app.focused.id == "spotlight-panel"
-        await pilot.press("1", "1")
+        await pilot.press("2")
         await _settle(pilot)
-        assert toggles == ["ssl", "ssl"]
+        assert app.screen.active_lens == "network"
+        assert toggles == []
         assert loads == []
 
 
@@ -245,7 +232,7 @@ async def test_shift_arrow_moves_focus_into_each_panel() -> None:
         for _ in range(4):
             await pilot.press("shift+right")
             await _settle(pilot)
-            current = app.screen.query_one("#tool-body").current
+            current = app.screen.query_one("#lens-body").current
             panel = app.screen.query_one(f"#{current}")
             assert app.focused is not None
             assert panel in app.focused.ancestors_with_self, current
@@ -271,7 +258,7 @@ async def test_files_subtabs_cycle_past_watchlist() -> None:
             await _settle(pilot)
             visited.append(app.screen.query_one("#files-body").current)
             assert type(app.focused).__name__ != "_AddPathInput"
-        assert len(set(visited)) == 3
+        assert set(visited) == {"files-monitor", "files-watchlist"}
 
 
 # --------------------------------------------------------------------------
@@ -360,7 +347,8 @@ async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
         assert "Record an action" in rows[first + 1]
         assert "Play loaded action" in rows[first + 2]
         # Panel-scoped keys are listed (read from the panels' BINDINGS).
-        assert "Spotlight panel (when focused)" in text
+        assert "App lens (when focused)" in text
+        assert "Snapshot picker (S) (when focused)" in text
         assert "PDF report" in text
         await pilot.press("escape")
 
@@ -654,12 +642,20 @@ def test_app_bindings_have_no_duplicate_keys() -> None:
     dupes = {k for k in keys if keys.count(k) > 1}
     assert not dupes, dupes
     by_id = {b.id: b for b in SandroidTUI.BINDINGS if b.id}
-    assert by_id["pick_save_slot"].key == "S"
+    assert by_id["show_snapshots"].key == "S"
+    assert "pick_save_slot" not in by_id
+    assert not any(i.startswith("load_slot_") for i in by_id)
+    assert [by_id[f"lens_{n}"].key for n in ("app", "network", "files", "runs")] == [
+        "1",
+        "2",
+        "3",
+        "4",
+    ]
 
 
-async def test_shift_s_then_digit_saves_slot(monkeypatch) -> None:
-    """Terminal-safe fallback for Ctrl+1-8 (not sendable outside kitty)."""
-    from sandroid.tui.modals import SnapshotSlotPickerModal
+async def test_picker_s_then_digit_saves_slot(monkeypatch) -> None:
+    """Terminal-safe fallback for Ctrl+1-8: S opens the picker, s then a digit."""
+    from sandroid.tui.modals import SnapshotPickerModal, SnapshotSlotPickerModal
     from sandroid.tui.widgets.snapshots_panel import SnapshotsPanel
 
     saves = []
@@ -669,19 +665,30 @@ async def test_shift_s_then_digit_saves_slot(monkeypatch) -> None:
         await _boot(app, pilot)
         await pilot.press("S")
         await _settle(pilot)
+        assert isinstance(app.screen, SnapshotPickerModal)
+        await pilot.press("s")
+        await _settle(pilot)
         assert isinstance(app.screen, SnapshotSlotPickerModal)
         await pilot.press("3")
         await _settle(pilot)
-        assert type(app.screen).__name__ == "MainScreen"
+        assert isinstance(app.screen, SnapshotPickerModal)
         assert saves == ["3"]
 
-        # Esc cancels without saving.
-        await pilot.press("S")
+        # Esc cancels without saving, a second Esc closes the picker.
+        await pilot.press("s")
         await _settle(pilot)
         await pilot.press("escape")
         await _settle(pilot)
-        assert type(app.screen).__name__ == "MainScreen"
         assert saves == ["3"]
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+
+        # Ctrl+digit saves through the picker (opened on demand).
+        app.action_save_slot("5")
+        await _settle(pilot)
+        assert isinstance(app.screen, SnapshotPickerModal)
+        assert saves == ["3", "5"]
 
 
 async def test_view_switch_never_leaves_focus_in_text_input(monkeypatch) -> None:
@@ -724,10 +731,10 @@ async def test_shift_arrows_work_with_nothing_focused() -> None:
         await _boot(app, pilot)
         app.screen.set_focus(None)
         await _settle(pilot)
-        before = app.screen.query_one("#tool-body").current
+        before = app.screen.query_one("#lens-body").current
         await pilot.press("shift+right")
         await _settle(pilot)
-        after = app.screen.query_one("#tool-body").current
+        after = app.screen.query_one("#lens-body").current
         assert after != before
         assert app.focused is not None
 
