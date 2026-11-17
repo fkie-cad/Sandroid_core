@@ -120,7 +120,8 @@ async def test_legacy_navigation_helpers_redirect() -> None:
         ms.open_fritap_tab()
         await _settle(pilot)
         assert ms.active_lens == "network"
-        assert ms.query_one("#network-body").current == "fritap-panel"
+        assert ms.inspector_is_open  # friTap tab of the Capture status page
+        assert ms.query_one("#inspector").tab_index == 1
         ms.cycle_bottom_tab(1)
         await _settle(pilot)
         assert ms.active_lens == "files"
@@ -139,6 +140,8 @@ async def test_lens_badge_and_caption() -> None:
         assert host.border_title == ""  # app lens: no caption set
         await pilot.press("2")
         await _settle(pilot)
+        # The Network lens captions itself on activation; set ours again.
+        ms.set_lens_caption("network", "flows", "10 of 247")
         assert host.border_title == "Network · flows"
         assert host.border_subtitle == "10 of 247"
         ms.set_lens_badge("network", None)

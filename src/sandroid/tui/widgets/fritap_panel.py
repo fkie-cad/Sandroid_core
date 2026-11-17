@@ -1,4 +1,4 @@
-"""TUI panel that observes and drives the friTap SSL/TLS interception engine.
+"""Non-visual friTap observer for the Network lens.
 
 friTap already has a "manager": the ``FriTapCommand`` (key ``h``) plus the AFM
 ``JobManager`` + ``TaskService`` + the EventBus message stream. So this panel is
@@ -9,20 +9,26 @@ command (the same path the ``h`` key runs), which owns all preconditions, the
 config modal, task registration, the paused-spawn guard, and dual-path cleanup
 — all on a worker thread so the UI never blocks.
 
-Mirrors ``MitmproxyPanel`` (panel structure, header/log, OS folder opener) and
-``SpotlightPanel`` (the thread-safe EventBus idiom: capture the running loop in
-``on_mount`` and marshal callbacks with ``loop.call_soon_threadsafe`` — never
-``call_from_thread``, which would deadlock when friTap publishes from its Frida
-/ logger threads).
+Mounted *hidden* inside the Network lens (like ``MitmproxyPanel``): the lens
+shows friTap's state in its caption (``friTap ●``) and on the friTap tab of its
+"Capture status" Inspector page (``h`` or ``I``), built from
+:meth:`FriTapPanel.status_rows` and the bounded ``recent_lines`` tail. friTap's
+output itself reaches the ActivityLog drawer through ``MainScreen``'s generic
+TASK_OUTPUT handler, so this widget does not write it there a second time.
 
-Bindings (when focused):
-    Enter:  start / stop friTap (delegates to FriTapCommand)
-    Ctrl+O: open the friTap results folder in the OS file manager
-    Ctrl+L: clear the log view + reset the activity counters
+Uses ``SpotlightPanel``'s thread-safe EventBus idiom: capture the running loop
+in ``on_mount`` and marshal callbacks with ``loop.call_soon_threadsafe`` —
+never ``call_from_thread``, which would deadlock when friTap publishes from its
+Frida / logger threads.
+
+Actions (bound on the Network lens):
+    h (global):  start / stop friTap (delegates to FriTapCommand)
+    Ctrl+F:      open the friTap results folder in the OS file manager
 """
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import subprocess
@@ -32,7 +38,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from textual.widget import Widget
-from textual.widgets import RichLog, Static
 
 from sandroid.services import get_network_capture_service, get_task_service
 
@@ -43,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class FriTapPanel(Widget):
-    """Bottom-left panel: friTap status header + live log tail.
+    """Hidden friTap observer (id ``fritap-panel``): state + bounded log tail.
 
     Stateless: owns no manager instances. The single source of truth is the
     process-wide ``TaskService`` (lifecycle/state) + the EventBus (log tail),
@@ -52,32 +57,21 @@ class FriTapPanel(Widget):
 
     DEFAULT_CSS = """
     FriTapPanel {
-        layout: vertical;
-        height: 1fr;
-        background: #080c18;
-    }
-    FriTapPanel > #fritap-header {
-        height: 1;
-        color: #38bdf8;
-        text-style: bold;
-        padding: 0 1;
-    }
-    FriTapPanel > #fritap-log {
-        height: 1fr;
-        background: #050811;
-        scrollbar-size: 1 1;
+        display: none;
+        height: 0;
     }
     """
 
-    BINDINGS = [
-        ("enter", "toggle_running", "Start/Stop"),
-        ("ctrl+o", "open_output", "Open output"),
-        ("ctrl+l", "clear_log", "Clear log"),
-    ]
+    #: friTap lines kept for the Inspector page.
+    RECENT_LINES = 200
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.can_focus = True
+        self.can_focus = False
+        # Plain-text tail for the lens's friTap Inspector page.
+        self.recent_lines: collections.deque[str] = collections.deque(
+            maxlen=self.RECENT_LINES
+        )
         # Captured in on_mount; used to marshal EventBus callbacks (which fire
         # on Frida/logger threads) back onto the Textual main thread.
         self._main_loop = None
@@ -90,23 +84,10 @@ class FriTapPanel(Widget):
     # -- compose / mount --------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render_header(), id="fritap-header")
-        yield RichLog(
-            highlight=False,
-            markup=True,
-            wrap=False,
-            auto_scroll=True,
-            id="fritap-log",
-        )
+        return iter(())
 
     def on_mount(self) -> None:
         self._subscribe_events()
-        try:
-            self.query_one("#fritap-log", RichLog).write(
-                "[#5b6479]Enter: start/stop · Ctrl+O: open output · Ctrl+L: clear[/]"
-            )
-        except Exception:
-            pass
         self.refresh_header()
 
     def on_unmount(self) -> None:
@@ -193,7 +174,7 @@ class FriTapPanel(Widget):
 
         ``EventBusHandler.emit`` wraps error/warning log lines in
         ``[error]…[/error]`` / ``[warning]…[/warning]``. These are NOT Rich
-        styles — the RichLog has ``markup=True``, so left in place they render
+        styles — left in place they would render in the Inspector page
         as the literal text ``[error]``. Strip them, but remember they were
         there so the colour/counter dispatch can still treat the line as an
         error/warning.
@@ -205,11 +186,6 @@ class FriTapPanel(Widget):
         return line, was_error, was_warning
 
     def _append_line(self, line: str) -> None:
-        try:
-            log = self.query_one("#fritap-log", RichLog)
-        except Exception:
-            return
-
         # A fresh session resets the glance counters (the engine emits this
         # sentinel only when activity-log output is enabled).
         if "FriTap started for" in line:
@@ -217,22 +193,18 @@ class FriTapPanel(Widget):
 
         stripped, was_error, was_warning = self._strip_pseudo_tags(line)
 
-        # Prefix/substring dispatch with explicit hex colours. Shapes come from
-        # fritap_formatter.py: keylog "🔑 …", datalog "… (N bytes)", error
-        # "ERROR: …".
+        # Prefix/substring dispatch. Shapes come from fritap_formatter.py:
+        # keylog "🔑 …", datalog "… (N bytes)", error "ERROR: …".
         if "🔑" in stripped:
             self._keys += 1
-            log.write(f"[#a78bfa]{stripped}[/]")
         elif "bytes)" in stripped:
             self._datalog += 1
-            log.write(f"[#7dd3fc]{stripped}[/]")
         elif was_error or "ERROR:" in stripped:
             self._errors += 1
-            log.write(f"[#fb7185]{stripped}[/]")
+            stripped = f"✗ {stripped}"
         elif was_warning:
-            log.write(f"[#facc15]{stripped}[/]")
-        else:
-            log.write(f"[#5b6479]{stripped}[/]")
+            stripped = f"! {stripped}"
+        self.recent_lines.append(stripped)
 
         self.refresh_header()
 
@@ -306,15 +278,54 @@ class FriTapPanel(Widget):
         return f"{head}   {'  '.join(checks)}   {counters}"
 
     def refresh_header(self) -> None:
-        """Re-render the status header (main thread; best-effort).
+        """Tell the Network lens friTap's state changed (main thread)."""
+        node = self.parent
+        while node is not None and not hasattr(node, "refresh_status"):
+            node = node.parent
+        if node is not None:
+            try:
+                node.refresh_status()
+            except Exception:
+                logger.debug("network lens status refresh failed", exc_info=True)
 
-        Public so ``MainScreen._select_bottom_tab`` can refresh it the moment
-        the friTap tab is activated, avoiding a stale header.
-        """
+    def is_running(self) -> bool:
         try:
-            self.query_one("#fritap-header", Static).update(self._render_header())
+            return bool(get_task_service().is_running("fritap"))
+        except Exception:
+            return False
+
+    def status_rows(self) -> list[tuple[str, str]]:
+        """``[(label, markup)]`` for the friTap Inspector page."""
+        rows = [("friTap", self._render_header().split("   ", 1)[0])]
+        task = None
+        try:
+            task = get_task_service().get_task("fritap")
         except Exception:
             pass
+        inst = getattr(task, "instance", None)
+        if self.is_running():
+            rows.append(
+                (
+                    "keylog",
+                    self._check_tag("", bool(getattr(inst, "keylog_path", None))),
+                )
+            )
+            rows.append(
+                (
+                    "json",
+                    self._check_tag("", bool(getattr(inst, "json_output_path", None))),
+                )
+            )
+        try:
+            net_on = bool(get_network_capture_service().is_capturing())
+        except Exception:
+            net_on = False
+        rows.append(("pcap", "[#4ade80]●[/] capturing" if net_on else "[#5b6479]○[/]"))
+        err = f"[#fb7185]{self._errors}[/]" if self._errors else "0"
+        rows.append(
+            ("seen", f"keys {self._keys} · data {self._datalog} · errors {err}")
+        )
+        return rows
 
     # -- actions ----------------------------------------------------------
 
@@ -327,12 +338,7 @@ class FriTapPanel(Widget):
         worker thread (``is_blocking_io=True``). So we just trigger it; do NOT
         wrap this in a second worker (double-dispatch).
         """
-        try:
-            self.query_one("#fritap-log", RichLog).write(
-                "[#7dd3fc][INFO] friTap toggle requested…[/]"
-            )
-        except Exception:
-            pass
+        self.recent_lines.append("friTap toggle requested…")
         try:
             self.app.action_action_key("h")
         except Exception as exc:
@@ -340,10 +346,7 @@ class FriTapPanel(Widget):
         self.refresh_header()
 
     def action_clear_log(self) -> None:
-        try:
-            self.query_one("#fritap-log", RichLog).clear()
-        except Exception:
-            pass
+        self.recent_lines.clear()
         self._keys = self._datalog = self._errors = 0
         self.refresh_header()
 

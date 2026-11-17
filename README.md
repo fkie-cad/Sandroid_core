@@ -60,11 +60,11 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 | Key | Lens | What it shows |
 |---|---|---|
 | `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
-| `2` | **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
+| `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters, `v` shows the spotlight app only, `N` shows OS noise (hidden by default). Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
 | `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. |
 | `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |
 
-`Shift+←/→` also cycles the lenses (`Shift+↓` then `Shift+←/→` switches a lens's own sub-tabs). `Enter` on a row opens the **Inspector** on the right where a lens supports it; `Esc` closes it. `Ctrl+Y` opens the **AI Chat** in the same right-hand slot. `` ` `` (backtick) opens the **log drawer** with the full activity log.
+`Shift+←/→` also cycles the lenses. `Enter` on a row opens the **Inspector** on the right where a lens supports it; `Esc` closes it. `Ctrl+Y` opens the **AI Chat** in the same right-hand slot. `` ` `` (backtick) opens the **log drawer** with the full activity log.
 
 **Snapshots** are a picker, not a tab: `S` (or `0`) lists the AVD's snapshots — create (`c`), load (`Enter`/`l`, confirmed), delete (`d`), assign to a slot (`a`), load slot `1`–`8` (confirmed), and `s` then a digit saves the current state into a slot (8 slots per AVD). `Ctrl+1`–`Ctrl+8` save into a slot directly, but `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
 
@@ -82,7 +82,7 @@ From any panel, `r` records your interactions with the device (Esc/Enter in the 
 
 ### File monitor (kprobe)
 
-The **Monitor** sub-tab (`o`) streams filesystem events from the device. The default backend (`tui.monitor_backend = "kprobe"`) uses kernel tracefs kprobes: kernel-verified per-PID attribution, following the whole child-process tree, path-scoped capture, and no binary pushed to the device. On kernels without the required support it falls back to the `fsmon` binary automatically (or set `monitor_backend = "fsmon"`).
+The file monitor (`o`) streams filesystem events from the device into the **Files** lens. The default backend (`tui.monitor_backend = "kprobe"`) uses kernel tracefs kprobes: kernel-verified per-PID attribution, following the whole child-process tree, path-scoped capture, and no binary pushed to the device. On kernels without the required support it falls back to the `fsmon` binary automatically (or set `monitor_backend = "fsmon"`).
 
 ## Usage
 
@@ -148,16 +148,17 @@ Output & Debugging:
 
 ## Network Interception & Bypass
 
-Sandroid can route a target app's traffic through an embedded **mitmproxy** instance and defeat the common defences that get in the way of inspection. Everything lives in **Network → Mitmproxy**; each step is its own keystroke, so none has a surprising side effect on the others:
+Sandroid can route a target app's traffic through an embedded **mitmproxy** instance and defeat the common defences that get in the way of inspection. Everything lives in the **Network** lens (`2`); each step is its own keystroke, so none has a surprising side effect on the others:
 
 | Key | Action |
 |---|---|
-| `Enter` | start / stop `mitmweb` (proxy on `127.0.0.1:8080`, web UI on `http://127.0.0.1:8081/`); start does **not** touch the device unless `mitmproxy.auto_device_proxy = true` |
+| `Enter` (while nothing is captured) / `M` | start / stop `mitmweb` (proxy on `127.0.0.1:8080`, web UI on `http://127.0.0.1:8081/`); start does **not** touch the device unless `mitmproxy.auto_device_proxy = true` |
 | `Ctrl+D` | toggle the **Device Proxy** (global `http_proxy` setting → our mitmproxy) |
 | `Ctrl+N` | install the mitmproxy CA into the device's **system** trust store |
 | `y` | **Proxy Settings** modal: Device Proxy, **App Proxies** and CA in one place |
 | `Ctrl+R` | restart `mitmweb` and re-apply device + app proxies |
 | `Ctrl+O` / `Ctrl+A` | open the web UI / manage addons |
+| `I` | Capture status page (mitmproxy and friTap state, keys, recent messages); mitmproxy's messages also go to the log drawer (`` ` ``) |
 
 Requires `mitmweb` on `PATH` (`pip install mitmproxy`).
 
@@ -176,7 +177,7 @@ Ports come from `[mitmproxy]` in the config (`proxy_port`, `web_port`). mitmprox
 - `~/.config/sandroid/mitm_addons/` — per-user; created on first run with a `README.md` and an `examples/example_logger.py` template.
 - `./mitm_addons/` in the current working directory — handy for shipping addons together with a project.
 
-To enable addons, press `Ctrl+A` in the Mitmproxy sub-tab for the addon manager — a checklist of every discovered addon. Tick the ones to load (or type a custom path directly); the selection is saved to your config under `mitmproxy.enabled_addons` and restored on the next run. A minimal addon looks like this:
+To enable addons, press `Ctrl+A` in the Network lens for the addon manager — a checklist of every discovered addon. Tick the ones to load (or type a custom path directly); the selection is saved to your config under `mitmproxy.enabled_addons` and restored on the next run. A minimal addon looks like this:
 
 ```python
 # ~/.config/sandroid/mitm_addons/log_urls.py

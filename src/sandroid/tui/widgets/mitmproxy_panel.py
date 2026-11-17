@@ -1,13 +1,29 @@
-"""TUI panel that hosts and observes a mitmweb subprocess.
+"""Non-visual controller that hosts and observes a mitmweb subprocess.
 
-Interactive flow inspection happens in mitmweb's web UI (press ``o`` to
-open it in the default browser). The panel itself shows lifecycle state
-and a tail of mitmweb's log output.
+The Network lens (:class:`~sandroid.tui.widgets.network_panel.NetworkPanel`)
+owns everything on screen: the flow table, the caption (``mitm ● :8080 ·
+CA ✓``), the empty-state hint and the "Capture status" Inspector page. This
+widget is mounted *hidden* inside the lens and keeps all of the proxy
+plumbing it always had -- start/stop, Device Proxy, CA injection, SSL unpin,
+addons, reachability probes, focus-lane cleanup -- so none of that logic
+moved. The lens forwards its keys here (``NetworkPanel.action_mitm``).
+
+Output routing (was a RichLog tail):
+
+* ``[INFO]``/``[ERROR]`` lines and mitmweb chatter (verbose mode only) go to
+  the ActivityLog drawer (`` ` ``), tagged ``mitm``;
+* ``[TLS_FAIL]`` lines become ✗ rows in the lens (``owner.add_tls_failure``);
+* ``[FLOW]`` lines only nudge the lens to poll ``flows.jsonl`` early (the
+  table reads the structured log, not stdout).
+
+Interactive flow inspection beyond the lens's Inspector still happens in
+mitmweb's web UI (Ctrl+O).
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import concurrent.futures
 import logging
 import os
@@ -19,8 +35,8 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from textual.widget import Widget
-from textual.widgets import RichLog, Static
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
 
@@ -31,58 +47,37 @@ logger = logging.getLogger(__name__)
 
 
 class MitmproxyPanel(Widget):
-    """Bottom-left panel: mitmweb status header + log tail.
+    """Hidden mitmweb controller for the Network lens (id ``mitm-panel``).
 
     Starting the mitmweb process is decoupled from routing device traffic into
-    it. Enter only starts/stops the process; the Device Proxy and per-app App
-    Proxies are independent, coexisting layers managed separately.
+    it. Start/Stop only starts/stops the process; the Device Proxy and per-app
+    App Proxies are independent, coexisting layers managed separately.
 
     Each setup step is its own keystroke — start, route, trust — so none has a
-    surprising side effect on the others.
+    surprising side effect on the others. The keys are bound on the Network
+    lens (see ``NetworkPanel.BINDINGS``) and call the ``action_*`` methods
+    below:
 
-    Bindings (when focused):
-        Enter:  start / stop mitmweb (bare — touches nothing on the device)
+        Enter / M: start / stop mitmweb (bare — touches nothing on the device)
         Ctrl+D: toggle the Device Proxy on/off (our mitmproxy)
         Ctrl+N: install the mitmproxy CA into the system trust store
         Ctrl+R: restart mitmweb and re-apply device + app proxies
         Ctrl+O: open web UI in browser
-        Ctrl+L: clear log view
         Ctrl+V: toggle verbose plumbing
         Ctrl+P: toggle SSL unpin
         Ctrl+A: manage addons
-        y:      open Proxy Settings (device + app proxies + CA)
+        y:      open Proxy Settings (device + app proxies + CA; global key)
     """
 
     DEFAULT_CSS = """
     MitmproxyPanel {
-        layout: vertical;
-        height: 1fr;
-        background: #080c18;
-    }
-    MitmproxyPanel > #mitm-header {
-        height: 1;
-        color: #38bdf8;
-        text-style: bold;
-        padding: 0 1;
-    }
-    MitmproxyPanel > #mitm-log {
-        height: 1fr;
-        background: #050811;
-        scrollbar-size: 1 1;
+        display: none;
+        height: 0;
     }
     """
 
-    BINDINGS = [
-        ("enter", "toggle_running", "Start/Stop"),
-        ("ctrl+d", "toggle_device", "Device proxy"),
-        ("ctrl+n", "inject_ca", "Install CA"),
-        ("ctrl+r", "restart", "Restart"),
-        ("ctrl+o", "open_browser", "Open web UI"),
-        ("ctrl+l", "clear_log", "Clear log"),
-        ("ctrl+v", "toggle_verbose", "Verbose plumbing"),
-        ("ctrl+p", "toggle_ssl_unpin", "SSL Unpin"),
-        ("ctrl+a", "manage_addons", "Addons"),
-    ]
+    #: Recent controller lines kept for the "Capture status" Inspector page.
+    RECENT_LINES = 40
 
     #: Bounded watchdog for the off-thread SSL toggle (> the BypassService's
     #: 15s readiness wait + session-setup overhead).
@@ -137,17 +132,14 @@ class MitmproxyPanel(Widget):
         # onto the main loop with a non-blocking call_soon_threadsafe instead
         # of call_from_thread (see _on_service_line).
         self._main_loop: asyncio.AbstractEventLoop | None = None
-        self.can_focus = True
+        # Plain-text tail of what this controller reported (Inspector page).
+        self.recent_lines: collections.deque[str] = collections.deque(
+            maxlen=self.RECENT_LINES
+        )
+        self.can_focus = False
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render_header(), id="mitm-header")
-        yield RichLog(
-            highlight=False,
-            markup=True,
-            wrap=False,
-            auto_scroll=True,
-            id="mitm-log",
-        )
+        return iter(())
 
     def on_mount(self) -> None:
         try:
@@ -156,15 +148,6 @@ class MitmproxyPanel(Widget):
             self._main_loop = None
         self._service.add_listener(self._on_service_line)
         self._refresh_header()
-        try:
-            log = self.query_one("#mitm-log", RichLog)
-            log.write(
-                "[#5b6479]Enter: start/stop · Ctrl+D: device proxy · "
-                "Ctrl+N: install CA · Ctrl+P: SSL unpin (exp.) · "
-                "y: proxy settings[/]"
-            )
-        except Exception:
-            pass
         self._kick_state_refresh()
         self._kick_focus_cleanup()
         self._kick_reverse_cleanup()
@@ -303,33 +286,92 @@ class MitmproxyPanel(Widget):
         except RuntimeError:
             pass
 
-    def _append_line(self, line: str) -> None:
+    # -- output routing (lens rows + ActivityLog drawer) ---------------------
+
+    def _owner(self):
+        """The Network lens hosting this controller (duck-typed), or None."""
+        node = self.parent
+        while node is not None:
+            if hasattr(node, "add_tls_failure"):
+                return node
+            node = node.parent
+        return None
+
+    def _log(self, line: str) -> None:
+        """Write one controller line to the ActivityLog drawer, tagged ``mitm``.
+
+        ``line`` keeps its ``[INFO]``/``[ERROR]`` prefix convention; the prefix
+        picks the colour and is dropped from the text. Best-effort: without a
+        mounted MainScreen (unit tests) the line only lands in
+        ``recent_lines``.
+        """
+        if line.startswith("[ERROR]"):
+            text, color = line[len("[ERROR]") :].strip(), "#fb7185"
+        elif line.startswith("[INFO]"):
+            text, color = line[len("[INFO]") :].strip(), ""
+        else:
+            text, color = line.strip(), "#5b6479"
+        if not text:
+            return
+        self.recent_lines.append(("✗ " if color == "#fb7185" else "") + text)
+        body = escape(text)
+        if color:
+            body = f"[{color}]{body}[/]"
         try:
-            log = self.query_one("#mitm-log", RichLog)
+            from sandroid.tui.widgets.activity_log import ActivityLog
+
+            self.screen.query_one("#activity-log", ActivityLog).log_message(
+                body, "mitm"
+            )
+        except Exception:
+            pass
+
+    def _append_line(self, line: str) -> None:
+        """Route one service/controller line (UI thread)."""
+        owner = self._owner()
+        try:
             if line.startswith("[FLOW]|"):
-                log.write(self._format_flow(line))
                 self._note_direct_flow(line)
+                if owner is not None:
+                    owner.flow_hint()
+            elif line.startswith("[FLOW_ERR]|"):
+                # Errored flows are in flows.jsonl (with ``error``) too.
+                if owner is not None:
+                    owner.flow_hint()
             elif line.startswith("[TLS_FAIL]|"):
-                log.write(self._format_tls_fail(line))
+                parsed = self._parse_tls_fail(line)
+                if owner is not None and parsed is not None:
+                    owner.add_tls_failure(*parsed)
                 if (
                     not self._service.ssl_unpin_is_active()
                     and not self._unpin_hint_shown
                 ):
                     self._unpin_hint_shown = True
-                    log.write(
-                        "[#7dd3fc][INFO] TLS pinning detected? "
-                        "Press Ctrl+P to bypass for spotlight app[/]"
+                    self._log(
+                        "[INFO] TLS pinning detected? Press Ctrl+P to bypass "
+                        "for the spotlight app"
                     )
-            elif line.startswith("[ERROR]"):
-                log.write(f"[#fb7185]{line}[/]")
-            elif line.startswith("[INFO]"):
-                log.write(f"[#7dd3fc]{line}[/]")
-            else:
-                # mitmweb's own chatter (only visible when verbose mode is on)
-                log.write(f"[#5b6479]{line}[/]")
+            elif line.startswith(("[ERROR]", "[INFO]")):
+                self._log(line)
+            elif self._service.state.verbose:
+                # mitmweb's own chatter (only shown when verbose mode is on)
+                self._log(line)
             self._refresh_header()
         except Exception:
-            pass
+            logger.debug("mitm line routing failed", exc_info=True)
+
+    @staticmethod
+    def _parse_tls_fail(line: str) -> tuple[str, str, str, str] | None:
+        """``[TLS_FAIL]|HH:MM:SS|host|reason[|app]`` -> (ts, host, reason, app)."""
+        parts = line.split("|", 4)
+        if len(parts) == 5:
+            _, ts, host, reason, app = parts
+        elif len(parts) == 4:
+            _, ts, host, reason = parts
+            app = ""
+        else:
+            return None
+        return ts, host, reason, app
 
     def _note_direct_flow(self, line: str) -> None:
         """Retract an "unreachable" verdict once Device-Proxy flows arrive.
@@ -348,84 +390,9 @@ class MitmproxyPanel(Widget):
         self._cancel_reprobe()
         if not was_unreachable:
             return
-        try:
-            self.query_one("#mitm-log", RichLog).write(
-                "[#7dd3fc][INFO] [OK] device traffic is arriving — "
-                "device→mitmproxy reachable after all[/]"
-            )
-        except Exception:
-            pass
-
-    @staticmethod
-    def _status_color(code: int) -> str:
-        if 200 <= code < 300:
-            return "#4ade80"
-        if 300 <= code < 400:
-            return "#7dd3fc"
-        if 400 <= code < 500:
-            return "#facc15"
-        return "#fb7185"
-
-    @staticmethod
-    def _protocol_color(proto: str) -> str:
-        # Plaintext stands out (red-ish), TLS is muted, WebSocket is amber.
-        if proto.startswith("WS"):
-            return "#facc15"
-        if proto.startswith("HTTPS"):
-            return "#a78bfa"
-        return "#fb7185"  # plain HTTP — interesting because it's unencrypted
-
-    def _format_flow(self, line: str) -> str:
-        # Focus:  [FLOW]|HH:MM:SS|protocol|status|method|host_path|size|app
-        # New:    [FLOW]|HH:MM:SS|protocol|status|method|host_path|size
-        # Legacy: [FLOW]|HH:MM:SS|status|method|host_path|size
-        parts = line.split("|", 7)
-        app = ""
-        if len(parts) == 8:
-            _, ts, proto, status, method, host_path, size, app = parts
-        elif len(parts) == 7:
-            _, ts, proto, status, method, host_path, size = parts
-        elif len(parts) == 6:
-            _, ts, status, method, host_path, size = parts
-            proto = "?"
-        else:
-            return line
-        try:
-            code = int(status)
-        except ValueError:
-            code = 0
-        color = self._status_color(code)
-        proto_color = self._protocol_color(proto)
-        app_col = f"  [#22d3ee]{self._short_name(app):<14}[/]" if app else ""
-        return (
-            f"[#5b6479]{ts}[/]  "
-            f"[{proto_color}]{proto:<8}[/]  "
-            f"[{color}]{status:>3}[/]  "
-            f"[#7dd3fc]{method:<4}[/]  "
-            f"{host_path:<40}  "
-            f"[#5b6479]{size:>8}[/]"
-            f"{app_col}"
-        )
-
-    def _format_tls_fail(self, line: str) -> str:
-        # Focus:  [TLS_FAIL]|HH:MM:SS|host|reason|app
-        # Legacy: [TLS_FAIL]|HH:MM:SS|host|reason
-        parts = line.split("|", 4)
-        app = ""
-        if len(parts) == 5:
-            _, ts, host, reason, app = parts
-        elif len(parts) == 4:
-            _, ts, host, reason = parts
-        else:
-            return line
-        app_col = f"  [#22d3ee]{self._short_name(app)}[/]" if app else ""
-        return (
-            f"[#5b6479]{ts}[/]  "
-            f"[#fb7185 bold]✗  [/]  "
-            f"[#fb7185]TLS [/]  "
-            f"{host}  "
-            f"[#5b6479]({reason})[/]"
-            f"{app_col}"
+        self._log(
+            "[INFO] [OK] device traffic is arriving — "
+            "device→mitmproxy reachable after all"
         )
 
     @staticmethod
@@ -564,23 +531,129 @@ class MitmproxyPanel(Widget):
         )
 
     def _refresh_header(self) -> None:
-        try:
-            self.query_one("#mitm-header", Static).update(self._render_header())
-        except Exception:
-            pass
+        """Tell the lens the status changed (caption, empty state, Inspector)."""
+        owner = self._owner()
+        if owner is not None:
+            try:
+                owner.refresh_status()
+            except Exception:
+                logger.debug("network lens status refresh failed", exc_info=True)
         # Emit the steady-state 0-flows hint once (this method is the per-line
         # chokepoint). Guarded by its OWN flag so it never spams the log.
         if self._zero_flow_soft_signal() and not self._zero_flow_hint_shown:
             self._zero_flow_hint_shown = True
-            try:
-                log = self.query_one("#mitm-log", RichLog)
-                log.write(
-                    "[#5b6479][~] 0 flows since arming — is the device "
-                    "reaching the proxy? A QUIC-only app (YouTube) won't show "
-                    "here; use an App Proxy with block_quic.[/]"
-                )
-            except Exception:
-                pass
+            self._log(
+                "[INFO] [~] 0 flows since arming — is the device reaching the "
+                "proxy? A QUIC-only app (YouTube) won't show here; use an App "
+                "Proxy with block_quic."
+            )
+
+    # -- compact status for the lens -----------------------------------------
+
+    def status_caption(self) -> str:
+        """One calm caption fragment, e.g. ``mitm ● :8080 · device ✓ · CA ✓``."""
+        st = self._service.state
+        if not self._service.is_running():
+            return "[#5b6479]mitm ○ off[/]"
+        parts = [f"[#4ade80]mitm ●[/] :{st.proxy_port}"]
+        if self._proxy_state == "ours" and self._reach_state == "unreachable":
+            parts.append("[#fb7185]device ✗[/]")
+        elif self._proxy_state == "ours":
+            parts.append("device ✓")
+        elif self._proxy_state == "other":
+            parts.append("[#5b6479]device → ext[/]")
+        try:
+            from sandroid.core.proxy_manager import get_focus_manager
+
+            routes = get_focus_manager().app_proxies()
+        except Exception:
+            routes = {}
+        if routes:
+            parts.append(f"apps {len(routes)}")
+        parts.append("CA ✓" if self._ca_ok else "[#5b6479]CA ○[/]")
+        if self._service.ssl_unpin_is_active():
+            parts.append("unpin ✓")
+        return " · ".join(parts)
+
+    def empty_hint(self) -> tuple[str, str]:
+        """``(headline, dim hint)`` for the lens when nothing is captured."""
+        st = self._service.state
+        if not self._service.is_running():
+            return (
+                "No flows yet — ⏎ starts mitmproxy",
+                "then ^D routes the device · ^N installs the CA · y proxy settings",
+            )
+        if self._proxy_state == "ours" and self._reach_state == "unreachable":
+            addr = escape(self._proxy_addr or f":{st.proxy_port}")
+            return (
+                f"[#fb7185]The device can't reach mitmproxy at {addr}[/]",
+                "check the host IP, or route via adb reverse in Proxy Settings (y)",
+            )
+        if self._zero_flow_soft_signal():
+            return (
+                "Still no flows since the device was routed",
+                "device reaching the proxy?  QUIC-only app?  "
+                "use an App Proxy with block_quic (y)",
+            )
+        try:
+            from sandroid.core.proxy_manager import get_focus_manager
+
+            routed_apps = bool(get_focus_manager().app_proxies())
+        except Exception:
+            routed_apps = False
+        if self._proxy_state != "ours" and not routed_apps:
+            return (
+                f"mitmproxy is listening on :{st.proxy_port} — waiting for traffic",
+                "^D routes the device through it · y sets per-app proxies",
+            )
+        hint = "" if self._ca_ok else "^N installs the CA so HTTPS can be read"
+        return ("Waiting for the first flow…", hint)
+
+    def status_rows(self) -> list[tuple[str, str]]:
+        """``[(label, markup)]`` for the "Capture status" Inspector page."""
+        st = self._service.state
+        running = self._service.is_running()
+        rows = [
+            (
+                "mitmweb",
+                f"[#4ade80]● running[/]  {st.listen_host}:{st.proxy_port} → "
+                f"web :{st.web_port}"
+                if running
+                else f"[#5b6479]○ stopped[/]  (port {st.proxy_port})",
+            )
+        ]
+        capture = self._capture_tag()
+        if capture:
+            rows.append(("routing", capture))
+        rows.append(
+            (
+                "CA",
+                "[#4ade80]✓[/] in the system trust store"
+                if self._ca_ok
+                else "[#5b6479]○ not installed[/]  ^N",
+            )
+        )
+        rows.append(
+            ("Chrome CT", "[#4ade80]✓[/] bypassed" if self._ct_ok else "[#5b6479]○[/]")
+        )
+        if self._service.ssl_unpin_is_active():
+            target = escape(self._service.ssl_unpin_target() or "")
+            rows.append(("SSL unpin", f"[#4ade80]✓[/] {target}"))
+        else:
+            rows.append(("SSL unpin", "[#5b6479]○ off[/]  ^P"))
+        try:
+            addon_count = len(self._service.get_enabled_addons())
+        except Exception:
+            addon_count = 0
+        if addon_count:
+            rows.append(("addons", str(addon_count)))
+        if st.verbose:
+            rows.append(("verbose", "[#facc15]on[/]"))
+        if running:
+            rows.append(("flows seen", str(st.flows_seen)))
+        if st.tls_failures:
+            rows.append(("TLS failures", f"[#fb7185]{st.tls_failures}[/]"))
+        return rows
 
     def action_toggle_running(self) -> None:
         """Enter — bare Start/Stop of the mitmweb process.
@@ -786,7 +859,7 @@ class MitmproxyPanel(Widget):
         except Exception:
             app = None
         if app:
-            # Use [~] not [i] — RichLog markup parses [i] as an italic tag and
+            # Use [~] not [i] — log markup parses [i] as an italic tag and
             # swallows it.
             self._append_line(
                 f"[INFO] [~] spotlight {app[0]} — Ctrl+P to unpin TLS (exp.)"
@@ -939,7 +1012,7 @@ class MitmproxyPanel(Widget):
         Device token red, logs an ``[ERROR]`` + a neutral remedy hint and
         schedules a follow-up re-probe; reachable logs one quiet confirmation.
         A result from a superseded probe (``gen`` older than the latest kick)
-        is dropped. Uses ``[~]`` for hints, never ``[i]`` (RichLog parses
+        is dropped. Uses ``[~]`` for hints, never ``[i]`` (log markup parses
         ``[i]`` as italic markup).
         """
         if gen is not None and gen != self._probe_gen:
@@ -1481,7 +1554,7 @@ class MitmproxyPanel(Widget):
         """Handle messages from the SSL unpin Frida script.
 
         Fires on the Frida message-delivery thread, so it must NOT touch the
-        RichLog directly — marshal to the UI thread (mirror _on_service_line).
+        log directly — marshal to the UI thread (mirror _on_service_line).
         """
         if not isinstance(payload, dict):
             return
@@ -1543,10 +1616,8 @@ class MitmproxyPanel(Widget):
             logger.warning("Failed to open browser: %s", exc)
 
     def action_clear_log(self) -> None:
-        try:
-            self.query_one("#mitm-log", RichLog).clear()
-        except Exception:
-            pass
+        """Forget the recent-lines tail (the drawer keeps its own history)."""
+        self.recent_lines.clear()
 
     def action_toggle_verbose(self) -> None:
         self._service.set_verbose(not self._service.state.verbose)

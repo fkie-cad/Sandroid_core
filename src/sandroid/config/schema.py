@@ -837,7 +837,7 @@ class MitmproxyConfig(BaseModel):
         default=False,
         description=(
             "Also point the device's global http_proxy at mitmproxy when it "
-            "is started with Enter in the Mitmproxy tab (off: start touches "
+            "is started with Enter in the Network lens (off: start touches "
             "nothing on the device; use Ctrl+D). Sandroid clears the device "
             "proxy it set when mitmproxy stops and when Sandroid exits."
         ),
