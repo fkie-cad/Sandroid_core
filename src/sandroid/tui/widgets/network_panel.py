@@ -17,14 +17,17 @@ Data flow
   at the bottom and only follows them while the cursor sits on the last row
   and no flow is open in the Inspector -- a user who scrolled or selected a
   row is never yanked.
-* ``[TLS_FAIL]`` lines (no HTTP flow exists for those, so they are not in
-  ``flows.jsonl``) become ✗ rows; while the lens is not in view they count
-  into the lens-bar badge (``⚑N``) until the lens is activated again.
+* ``[TLS_FAIL]`` lines become ✗ rows at once; the addon also writes them to
+  ``flows.jsonl`` (``kind: "tls"``, no detail file), and the poll pairs that
+  record with the stdout row instead of adding it twice. While the lens is
+  not in view they count into the lens-bar badge (``⚑N``) until the lens is
+  activated again.
   Errored flows come from ``flows.jsonl`` (their ``error`` field) as ✗ rows.
 
-Filters: ``/`` text (host, path, app, recipient), ``T`` (target) spotlight
-app only, ``N`` show OS noise (connectivity checks, Play services background
-traffic; hidden by default). ``N`` is "show hidden noise" in the Files lens
+Filters: ``/`` text (host, path, app, recipient, status; Esc clears it),
+``T`` (target) spotlight app only, ``N`` show OS noise (connectivity checks,
+Play services background traffic, Google ``*-pa`` APIs, Sandroid's own
+``mitm.it`` probe; hidden by default, the caption counts what it hides). ``N`` is "show hidden noise" in the Files lens
 too, and ``v`` is only the Runs lens's "review". The frame caption carries the
 counts ("38 of 412").
 
@@ -63,6 +66,7 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.tui.utils.ui_thread import in_app_context
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
@@ -158,6 +162,29 @@ _NOISE_SUFFIXES: tuple[str, ...] = (
     "notifications-pa.googleapis.com",
     "youtubei.googleapis.com",
     "lamssettings-pa.googleapis.com",
+    "play-lh.googleusercontent.com",
+    "android-safebrowsing.google.com",
+    "safebrowsing.googleapis.com",
+    "remoteprovisioning.googleapis.com",
+    "dl.google.com",
+    # Sandroid's own device->mitmproxy reachability probe (GET http://mitm.it/).
+    "mitm.it",
+)
+#: Google's private ("-pa") API hosts are the OS / Play services / Google
+#: apps talking to Google (infinitedata-pa, phonedeviceverification-pa,
+#: playstoregatewayadapter-pa, geller-pa, locationhistory-pa, ...). An app
+#: under analysis reaches Google through public hosts -- except Firebase
+#: Analytics, which is the app's own tracker and stays visible.
+_PA_SUFFIX = "-pa.googleapis.com"
+_PA_NOT_NOISE = ("firebaselogging-pa.googleapis.com",)
+#: www.googleapis.com paths only Play services uses (experiments/config,
+#: anti-abuse, attestation, device check-in).
+_NOISE_GOOGLEAPIS_PATHS = (
+    "/experimentsandconfigs/",
+    "/androidantiabuse/",
+    "/androidcheck/",
+    "/checkin",
+    "/playatoms/",
 )
 _NOISE_HOST_PREFIXES = ("clients1.", "clients2.", "clients3.", "clients4.")
 _NOISE_APPS = frozenset(
@@ -200,12 +227,16 @@ def is_noise(host: str, path: str, app: str, focus_app: str | None = None) -> bo
         return False
     if app in _NOISE_APPS:
         return True
-    h = (host or "").lower()
+    h = (host or "").lower().rstrip(".")
     if any(_host_matches(h, s) for s in _NOISE_SUFFIXES):
+        return True
+    if h.endswith(_PA_SUFFIX) and not any(_host_matches(h, s) for s in _PA_NOT_NOISE):
         return True
     if h.startswith(_NOISE_HOST_PREFIXES) and h.endswith(".google.com"):
         return True
     p = (path or "").split("?", 1)[0]
+    if h == "www.googleapis.com" and p.startswith(_NOISE_GOOGLEAPIS_PATHS):
+        return True
     return p.endswith(_NOISE_PATHS)
 
 
@@ -269,6 +300,15 @@ def smart_request(method: str, host: str, path: str, width: int) -> Text:
     return text
 
 
+def protocol_label(protocol: str) -> str:
+    """``HTTPS/2.0`` -> ``HTTPS/2`` (older flow logs carry the long form)."""
+    proto = (protocol or "").strip()
+    for long, short in (("/2.0", "/2"), ("/3.0", "/3")):
+        if proto.endswith(long):
+            return proto[: -len(long)] + short
+    return proto
+
+
 def _short_error(error: str) -> str:
     e = (error or "").lower()
     for needle, word in (
@@ -327,11 +367,26 @@ class FlowRow:
     flow_dir: Path | None = None
     kind: str = "flow"  # "flow" | "tls"
     reason: str = ""
+    #: A flow-log TLS row already matched with its mitmweb stdout line.
+    paired: bool = False
 
     @classmethod
     def from_record(cls, rec: dict[str, Any], flow_dir: Path | None) -> FlowRow:
         seq = rec.get("seq")
         ts_end = rec.get("ts_end") or rec.get("ts_start") or 0.0
+        if rec.get("kind") == "tls":
+            # A persisted TLS handshake failure (no HTTP flow behind it).
+            return cls(
+                key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
+                ts=float(ts_end or 0.0),
+                method="TLS",
+                host=str(rec.get("host") or "?"),
+                path="",
+                app=str(rec.get("app") or ""),
+                seq=seq,
+                kind="tls",
+                reason=str(rec.get("tls_reason") or "tls"),
+            )
         return cls(
             key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
             ts=float(ts_end or 0.0),
@@ -430,14 +485,16 @@ def _headers_renderable(headers: Any) -> RenderableType:
     return grid
 
 
-def _hex_preview(raw: bytes, limit: int = 64) -> Text:
+def _hex_preview(raw: bytes, limit: int = 128, per_line: int = 8) -> Text:
+    """Hex + ASCII preview; 8 bytes a line fit the Inspector without wrapping."""
     out = Text(style="#8f9bb3")
     chunk = raw[:limit]
-    for off in range(0, len(chunk), 16):
-        line = chunk[off : off + 16]
+    width = per_line * 3 - 1
+    for off in range(0, len(chunk), per_line):
+        line = chunk[off : off + per_line]
         hexpart = " ".join(f"{b:02x}" for b in line)
         asc = "".join(chr(b) if 32 <= b < 127 else "·" for b in line)
-        out.append(f"{off:04x}  {hexpart:<47}  {asc}\n")
+        out.append(f"{off:04x}  {hexpart:<{width}}  {asc}\n")
     return out
 
 
@@ -452,6 +509,18 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
     content = body.get("content") or ""
     parts: list[RenderableType] = []
+    encoding = str(body.get("content_encoding") or "")
+    if encoding and body.get("decode_failed"):
+        parts.append(
+            Text(
+                f"{encoding}-encoded; could not be decoded, shown as received",
+                style="#facc15",
+            )
+        )
+    elif encoding:
+        wire = body.get("encoded_bytes")
+        on_wire = f" · {human_size(int(wire))} on the wire" if wire else ""
+        parts.append(Text(f"decoded from {encoding}{on_wire}", style="#5b6479"))
     if body.get("encoding") == "base64":
         try:
             raw = base64.b64decode(content)
@@ -498,6 +567,19 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
 # --------------------------------------------------------------------------
 # the lens
 # --------------------------------------------------------------------------
+
+
+class FlowTable(DataTable):
+    """The flow table: Home / End jump to the first / last row.
+
+    DataTable's own Home / End scroll sideways (the cursor is a row cursor
+    here, so they did nothing visible; End never reached the newest flow).
+    """
+
+    BINDINGS = [
+        Binding("home", "scroll_top", "First row", show=False),
+        Binding("end", "scroll_bottom", "Last row", show=False),
+    ]
 
 
 class NetworkPanel(Widget):
@@ -626,6 +708,8 @@ class NetworkPanel(Widget):
         self._show_noise = False
         self._focus_app: str | None = None
         self._shown = 0
+        # Rows hidden only because they are OS noise (shown in the caption).
+        self._noise_hidden = 0
         self._width = -1
         self._net_layout: list[tuple[str, str, int]] = []
         self._status_pending = False
@@ -634,8 +718,11 @@ class NetworkPanel(Widget):
     # -- compose / mount -------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="filter: host · path · app", id="net-filter")
-        table: DataTable = DataTable(
+        yield Input(
+            placeholder="filter: host · path · app · status (Esc clears)",
+            id="net-filter",
+        )
+        table: DataTable = FlowTable(
             id="net-flows",
             cursor_type="row",
             zebra_stripes=False,
@@ -810,6 +897,7 @@ class NetworkPanel(Widget):
                 for r in records
                 if (r.get("seq") or 0) > self._floor_seq
             ]
+            rows = [r for r in rows if not self._claim_live_tls(r)]
             if reset:
                 self._rebuild_if_live()
             if rows:
@@ -823,22 +911,54 @@ class NetworkPanel(Widget):
     def add_tls_failure(self, ts: str, host: str, reason: str, app: str) -> None:
         """A ``[TLS_FAIL]`` line from mitmweb (UI thread)."""
         self._tls_n += 1
-        row = FlowRow(
-            key=f"t{self._tls_n}",
-            ts=time.time(),
-            host=host or "?",
-            path="",
-            method="TLS",
-            app=app or "",
-            kind="tls",
-            reason=reason or "tls",
-        )
-        self._add_live([row])
+        now = time.time()
+        # The flow-log poll can beat mitmweb's stdout: then the row is there.
+        for r in reversed(self._live[-50:]):
+            if (
+                r.kind == "tls"
+                and r.key.startswith("f")
+                and not r.paired
+                and r.host == (host or "?")
+                and abs(r.ts - now) <= 10.0
+            ):
+                r.paired = True
+                break
+        else:
+            row = FlowRow(
+                key=f"t{self._tls_n}",
+                ts=now,
+                host=host or "?",
+                path="",
+                method="TLS",
+                app=app or "",
+                kind="tls",
+                reason=reason or "tls",
+            )
+            self._add_live([row])
         if not self._lens_active():
             self._unseen_tls += 1
             ms = self._main_screen()
             if ms is not None:
                 ms.set_lens_badge(LENS_ID, f"⚑{self._unseen_tls}")
+
+    def _claim_live_tls(self, row: FlowRow) -> bool:
+        """A persisted TLS failure that is already on screen (from mitmweb's
+        stdout, which is faster than the flow log): adopt its ``seq`` and
+        drop the duplicate. Returns True when ``row`` was a duplicate.
+        """
+        if row.kind != "tls":
+            return False
+        for live in reversed(self._live[-400:]):
+            if (
+                live.kind == "tls"
+                and live.seq is None
+                and live.key.startswith("t")
+                and live.host == row.host
+                and abs(live.ts - row.ts) <= 10.0
+            ):
+                live.seq = row.seq
+                return True
+        return False
 
     def _add_live(self, rows: list[FlowRow]) -> None:
         self._live.extend(rows)
@@ -864,19 +984,48 @@ class NetworkPanel(Widget):
             app = None
         return app[0] if app else None
 
-    def _passes(self, row: FlowRow) -> bool:
+    def _passes(self, row: FlowRow, *, noise: bool = True) -> bool:
+        """Whether ``row`` is shown (``noise=False``: ignore the noise filter)."""
         if self._app_only and self._focus_app and row.app != self._focus_app:
             return False
-        if not self._show_noise and is_noise(
-            row.host, row.path, row.app, self._focus_app
+        if (
+            noise
+            and not self._show_noise
+            and is_noise(row.host, row.path, row.app, self._focus_app)
         ):
             return False
         if self._filter:
             needle = self._filter.lower()
-            hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]}"
-            if needle not in hay.lower():
+            if needle not in self._haystack(row):
                 return False
         return True
+
+    @staticmethod
+    def _haystack(row: FlowRow) -> str:
+        """What ``/`` matches: host, path, method, app, recipient, status.
+
+        The status column's words are included, so ``/404``, ``/tls`` or
+        ``/✗`` (every failed row) work too.
+        """
+        if row.kind == "tls":
+            status = f"✗ tls failed {row.reason}"
+        elif row.error:
+            status = f"✗ {_short_error(row.error)} error"
+        else:
+            status = str(row.status) if row.status is not None else ""
+        hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
+        return hay.lower()
+
+    def _count_noise(self, rows: list[FlowRow]) -> int:
+        """How many of ``rows`` the noise filter alone hides."""
+        if self._show_noise:
+            return 0
+        return sum(
+            1
+            for row in rows
+            if is_noise(row.host, row.path, row.app, self._focus_app)
+            and self._passes(row, noise=False)
+        )
 
     # -- table -------------------------------------------------------------
 
@@ -890,7 +1039,7 @@ class NetworkPanel(Widget):
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
         cols = [("time", "Time", 8), ("who", "Recipient", who)]
-        cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 9)]
+        cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 10)]
         if avail < 76:
             cols = [c for c in cols if c[0] != "size"]
         if avail < 58:
@@ -965,6 +1114,7 @@ class NetworkPanel(Widget):
             keep = self._cursor_key()
         layout = self._columns(table)
         rows = [r for r in self._model() if self._passes(r)]
+        self._noise_hidden = self._count_noise(self._model())
         for row in rows:
             table.add_row(*self._cells(row, layout), key=row.key)
         self._shown = len(rows)
@@ -1000,6 +1150,7 @@ class NetworkPanel(Widget):
             return
         follow = self._at_tail(table) and not self._inspecting_flow()
         added = False
+        self._noise_hidden += self._count_noise(rows)
         for row in rows:
             if self._passes(row):
                 table.add_row(*self._cells(row, self._net_layout), key=row.key)
@@ -1119,6 +1270,13 @@ class NetworkPanel(Widget):
         if self._status_pending:
             return
         self._status_pending = True
+        if not in_app_context():
+            # Reached from a bare loop callback (no Textual app context): a
+            # timer started here would die with LookupError(active_app) and
+            # leave the caption stuck. call_later needs no context.
+            if not self.call_later(self._do_refresh_status):
+                self._status_pending = False
+            return
         try:
             self.set_timer(0.1, self._do_refresh_status)
         except Exception:
@@ -1135,8 +1293,9 @@ class NetworkPanel(Widget):
         mitm = self.mitm
         title = mitm.status_caption() if mitm is not None else ""
         fritap = self.fritap
-        if fritap is not None and fritap.is_running():
-            title += " · [#4ade80]friTap ●[/]"
+        token = fritap.caption_token() if fritap is not None else ""
+        if token:
+            title += f" · {token}"
         return title
 
     def _review_note_short(self) -> str:
@@ -1157,6 +1316,8 @@ class NetworkPanel(Widget):
             parts.append("app only")
         if self._show_noise:
             parts.append("+ OS noise")
+        elif self._noise_hidden:
+            parts.append(f"N: {self._noise_hidden} OS noise hidden")
         if self._filter:
             parts.append(f"“{escape(self._filter)}”")
         if self._shown:
@@ -1273,7 +1434,12 @@ class NetworkPanel(Widget):
         rows, source, window, label = result
         if window is not None:
             a, b = window
-            rows = rows + [r for r in self._live if r.kind == "tls" and a <= r.ts <= b]
+            # stdout-only TLS rows (not in the flow log: older mitmweb addon)
+            rows = rows + [
+                r
+                for r in self._live
+                if r.kind == "tls" and r.seq is None and a <= r.ts <= b
+            ]
             rows.sort(key=lambda r: r.ts)
         if label and not self._scope_label_given:
             self._scope_label = label
@@ -1355,7 +1521,8 @@ class NetworkPanel(Widget):
         elif row.status is not None:
             grid.add_row(
                 "status",
-                f"{row.status}" + (f" · {row.protocol}" if row.protocol else ""),
+                f"{row.status}"
+                + (f" · {protocol_label(row.protocol)}" if row.protocol else ""),
             )
         if row.ts_start:
             ms_taken = max(0.0, (row.ts - float(row.ts_start)) * 1000)
@@ -1518,6 +1685,38 @@ class NetworkPanel(Widget):
         self._filter = (text or "").strip()
         self._rebuild()
         self._do_refresh_status()
+
+    def handle_escape(self) -> bool:
+        """Esc (MainScreen hook): clear an active ``/`` filter.
+
+        Esc in the filter input clears it and returns to the table; with the
+        input closed, Esc clears a filter that is still applied. Returns True
+        when Esc was used here.
+        """
+        try:
+            box = self.query_one("#net-filter", Input)
+        except Exception:
+            return False
+        focused = self.screen.focused if self.is_attached else None
+        if focused is not box and not self._filter:
+            return False
+        if self._filter_timer is not None:
+            try:
+                self._filter_timer.stop()
+            except Exception:
+                pass
+            self._filter_timer = None
+        had_filter = bool(self._filter or box.value.strip())
+        box.value = ""
+        box.remove_class("-open")
+        self.set_filter("")
+        self.focus()
+        if had_filter:
+            try:
+                self.app.notify("Filter cleared", timeout=2)
+            except Exception:
+                pass
+        return True
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "net-filter":

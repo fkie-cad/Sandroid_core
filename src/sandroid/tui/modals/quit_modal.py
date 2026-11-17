@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import Button, Label
+from textual.widgets import Button, Label, Static
 
 from .base import DangerModal, KeyHintFooter
 
@@ -34,6 +34,12 @@ class QuitConfirmModal(DangerModal[bool]):
         max-width: 80%;
         max-height: 80%;
     }
+    QuitConfirmModal #quit-notes {
+        width: 100%;
+        height: auto;
+        text-align: center;
+        color: $text-muted;
+    }
     """
 
     def __init__(
@@ -41,15 +47,28 @@ class QuitConfirmModal(DangerModal[bool]):
         name: str = None,
         id: str = None,
         classes: str = None,
+        notes: list[str] | None = None,
     ):
-        """Initialize the quit confirmation modal."""
+        """Initialize the quit confirmation modal.
+
+        Args:
+            notes: What quitting tears down (e.g. "stops mitmweb", "clears
+                the device proxy"), shown under the question.
+        """
         super().__init__(name=name, id=id, classes=classes)
+        self._notes = list(notes or [])
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
         with Vertical(classes="modal-container"):
             yield Label("Quit Sandroid?", classes="modal-title")
             yield Label("Are you sure you want to exit?", classes="modal-message")
+            if self._notes:
+                yield Static(
+                    "Quitting " + ", ".join(self._notes) + ".",
+                    classes="modal-message",
+                    id="quit-notes",
+                )
             with Horizontal(classes="button-row"):
                 yield Button("Quit", classes="-primary", id="btn-quit")
                 yield Button("Cancel", classes="-secondary", id="btn-cancel")
@@ -67,12 +86,23 @@ class QuitConfirmModal(DangerModal[bool]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks."""
         if event.button.id == "btn-quit":
-            self.dismiss(True)
+            self.action_confirm()
         else:
             self._dismiss_with_refresh(False)
 
     def action_confirm(self) -> None:
-        """Confirm quit."""
+        """Confirm quit.
+
+        The exit watchdog is armed right here, in the dialog's own message
+        loop: if the app's loop is stuck the dismiss callback never runs, and
+        the watchdog still tears down mitmweb / the device proxy and exits.
+        """
+        try:
+            from sandroid.tui.controllers.quit_controller import arm_exit_watchdog
+
+            arm_exit_watchdog()
+        except Exception:
+            pass
         self.dismiss(True)
 
     def action_cancel(self) -> None:

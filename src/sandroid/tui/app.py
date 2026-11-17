@@ -12,6 +12,7 @@ Extracted modules:
 
 import concurrent.futures
 import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -133,6 +134,8 @@ class SandroidTUI(App):
         Binding("q", "request_quit", "Quit"),
         Binding("escape", "maybe_quit", "Back", show=False, priority=True),
         Binding("ctrl+c", "request_quit", "Quit", show=False, priority=True),
+        # Textual's own Ctrl+Q quits without asking (and without cleanup).
+        Binding("ctrl+q", "request_quit", "Quit", show=False, priority=True),
         Binding("question_mark", "show_help", "Help", priority=True),
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
@@ -430,7 +433,9 @@ class SandroidTUI(App):
             get_screen_stack=lambda: self.screen_stack,
             get_current_screen=lambda: self.screen,
             pop_screen=self.pop_screen,
-            exit_app=lambda: super(SandroidTUI, self).exit(),
+            # The same exit as Ctrl+C / SIGTERM: cleanup first (P3-H1: the
+            # base exit skipped it and left mitmweb + the device proxy).
+            exit_app=self.exit,
             force_ui_refresh=cb.force_ui_refresh,
         )
 
@@ -1015,11 +1020,38 @@ class SandroidTUI(App):
         """
         self._quit_controller.maybe_quit()
 
-    def exit(self, result=None, return_code: int = 0) -> None:
-        """Exit with cleanup of sessions and workers."""
+    #: Seconds the quit cleanup may take before the app exits anyway.
+    QUIT_CLEANUP_BUDGET = 12.0
+
+    def exit(self, result=None, return_code: int = 0, message=None) -> None:
+        """Exit after cleaning up sessions, mitmweb, the device proxy, workers.
+
+        Every quit path ends here (the quit dialog, Ctrl+C / Ctrl+Q, SIGTERM,
+        the startup screen). The cleanup runs on a helper thread, time-boxed,
+        so a stuck friTap unload or adb call cannot freeze the UI; the app
+        exits when it finished or after ``QUIT_CLEANUP_BUDGET`` seconds, and
+        the exit watchdog ends the process if even that does not happen. A
+        second call while cleaning up exits right away.
+        """
         global _current_tui_app
+        if getattr(self, "_exit_started", False):
+            self._finish_exit(result, return_code, message)
+            return
+        self._exit_started = True
         _current_tui_app = None
-        self._quit_controller.force_exit()
+        # Known now, even if the run ends before the cleanup thread is done.
+        self._return_value = result
+        self._return_code = return_code
+        from sandroid.tui.controllers.quit_controller import arm_exit_watchdog
+
+        arm_exit_watchdog(exit_code=return_code)
+        try:
+            self.notify(
+                "Quitting — stopping capture tools and clearing the device proxy…",
+                timeout=self.QUIT_CLEANUP_BUDGET,
+            )
+        except Exception:
+            pass
         # Stop a running replay: its thread worker cannot be cancelled by
         # Textual and would otherwise keep tapping on the device (P2-H1).
         try:
@@ -1040,7 +1072,40 @@ class SandroidTUI(App):
                 self.workers.cancel_all()
         except Exception:
             pass
-        super().exit(result, return_code)
+
+        def _cleanup() -> None:
+            try:
+                self._quit_controller.force_exit()
+            except Exception:
+                logger.debug("quit cleanup failed", exc_info=True)
+
+        def _orchestrate() -> None:
+            worker = threading.Thread(target=_cleanup, name="quit-cleanup", daemon=True)
+            worker.start()
+            worker.join(self.QUIT_CLEANUP_BUDGET)
+            if worker.is_alive():
+                logger.warning(
+                    "Quit cleanup still running after %.0fs; exiting anyway",
+                    self.QUIT_CLEANUP_BUDGET,
+                )
+            self._finish_exit(result, return_code, message)
+
+        threading.Thread(target=_orchestrate, name="quit", daemon=True).start()
+
+    def _finish_exit(self, result=None, return_code: int = 0, message=None) -> None:
+        """Tell Textual to exit (any thread; once)."""
+        lock = self.__dict__.setdefault("_exit_lock", threading.Lock())
+        with lock:
+            if getattr(self, "_exit_posted", False):
+                return
+            self._exit_posted = True
+        try:
+            if message is None:
+                super().exit(result, return_code)
+            else:
+                super().exit(result, return_code, message)
+        except RuntimeError:  # loop already closed
+            pass
 
     def on_unmount(self) -> None:
         """Stop the real-time device monitor on teardown.

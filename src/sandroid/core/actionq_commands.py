@@ -224,6 +224,9 @@ def execute_command_from_actionq(
         elif result.error == "Precondition not met":
             # Don't log warning for precondition failures - modal is shown to user
             logger.debug(f"Command '{char}' precondition not met: {result.message}")
+        elif result.error == "cancelled":
+            # The user said no in a dialog: not a failure.
+            logger.info(f"Command '{char}' cancelled: {result.message}")
         else:
             logger.warning(f"Command '{char}' failed: {result.error or result.message}")
 

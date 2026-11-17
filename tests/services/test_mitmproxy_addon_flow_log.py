@@ -367,3 +367,87 @@ def test_flow_log_disabled_when_env_var_empty(flow_paths, monkeypatch):
     addon.SandroidLogger().response(flow)
 
     assert not flow_paths["dir"].exists()
+
+
+# -- fix round 3: decoded bodies, TLS failures, protocol token -------------------
+
+
+def test_gzip_body_is_stored_decoded(addon, flow_paths):
+    """M1: gzip JSON was stored as wire bytes and shown as a hex dump."""
+    import gzip
+
+    flow = tflow.tflow(resp=True)
+    payload = b'{"items": [1, 2, 3], "title": "Featured"}'
+    flow.response.headers["content-type"] = "application/json"
+    flow.response.headers["content-encoding"] = "gzip"
+    flow.response.raw_content = gzip.compress(payload)
+
+    addon.SandroidLogger().response(flow)
+
+    detail = json.loads((flow_paths["details"] / f"{flow.id}.json").read_text())
+    body = detail["response_body"]
+    assert body["encoding"] == "utf-8"
+    assert body["content"] == payload.decode()
+    assert body["content_encoding"] == "gzip"
+    assert body["encoded_bytes"] == len(flow.response.raw_content)
+    assert body["size_bytes"] == len(payload)
+    # The record keeps the on-the-wire size (what the table shows).
+    rec = _read_lines(flow_paths["log"])[-1]
+    assert rec["response_bytes"] == len(flow.response.raw_content)
+
+
+def test_undecodable_body_is_kept_as_received(addon, flow_paths):
+    flow = tflow.tflow(resp=True)
+    flow.response.headers["content-encoding"] = "gzip"
+    flow.response.raw_content = b"\x1f\x8b\x08 this is not gzip"
+
+    addon.SandroidLogger().response(flow)
+
+    detail = json.loads((flow_paths["details"] / f"{flow.id}.json").read_text())
+    body = detail["response_body"]
+    assert body["decode_failed"] is True
+    assert body["content_encoding"] == "gzip"
+    assert body["size_bytes"] == len(flow.response.raw_content)
+
+
+def test_tls_failure_is_persisted_in_the_flow_log(addon, flow_paths, capsys):
+    """L7: TLS failures existed only as a stdout line."""
+    from types import SimpleNamespace
+
+    data = SimpleNamespace(
+        context=SimpleNamespace(
+            client=SimpleNamespace(sni="pinned.example.com", proxy_mode=None)
+        ),
+        conn=SimpleNamespace(error="Client TLS handshake failed: certificate unknown"),
+    )
+    addon.SandroidLogger().tls_failed_client(data)
+
+    assert "[TLS_FAIL]|" in capsys.readouterr().out
+    rec = _read_lines(flow_paths["log"])[-1]
+    assert rec["kind"] == "tls"
+    assert rec["host"] == "pinned.example.com"
+    assert rec["tls_reason"] == "cert"
+    assert rec["seq"] == 1
+    assert json.loads(flow_paths["meta"].read_text())["latest_seq"] == 1
+
+
+def test_protocol_token_is_short_for_http2(addon):
+    """L13: "HTTPS/2.0" -> "HTTPS/2" as the docs promise."""
+    flow = tflow.tflow(resp=True)
+    flow.request.scheme = "https"
+    flow.request.http_version = "HTTP/2.0"
+    assert addon._protocol(flow) == "HTTPS/2"
+    flow.request.http_version = "HTTP/1.1"
+    assert addon._protocol(flow) == "HTTPS/1.1"
+
+
+def test_parent_watch_needs_the_env_var(monkeypatch):
+    """The orphan guard only runs inside a mitmweb Sandroid started."""
+    import threading
+
+    monkeypatch.delenv("SANDROID_PARENT_PID", raising=False)
+    before = {t.name for t in threading.enumerate()}
+    ns: dict = {}
+    exec(compile(mitmproxy_service._ADDON_SOURCE, "<addon>", "exec"), ns)  # noqa: S102
+    after = {t.name for t in threading.enumerate()}
+    assert "sandroid-parent-watch" not in after - before

@@ -136,6 +136,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Group
+from rich.markup import escape
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -599,6 +600,26 @@ class Inspector(Vertical):
 
 _ALNUM = re.compile(r"[0-9A-Za-z]")
 _MARKUP = re.compile(r"\[/?[^\]]*\]")
+_ADB_RAW = re.compile(r"ADB command (?:warning|info) \(.*\):\s*")
+
+
+def humanize_log_line(line: str) -> str:
+    """Ticker form of one log line: no raw adb command lines.
+
+    ``ADB command warning (-s emulator-5554 shell '{ printf ...}'): <stderr>``
+    becomes ``adb: <stderr> (` log has the command)``; the drawer and the log
+    file keep the full line.
+    """
+    match = _ADB_RAW.search(line)
+    if match is None:
+        return line
+    # The command itself may contain "): " -- the stderr is what follows the
+    # last one.
+    head = line[: match.start()]
+    rest = line[match.start() :]
+    detail = rest.rsplit("): ", 1)[-1].strip() if "): " in rest else ""
+    detail = detail.splitlines()[0][:160] if detail else "command failed"
+    return f"{head}adb: {escape(detail)} [dim](` log has the command)[/dim]"
 
 
 class LogTicker(Horizontal):
@@ -637,7 +658,13 @@ class LogTicker(Horizontal):
             plain = _MARKUP.sub("", content).strip()
             if not _ALNUM.search(plain):
                 return  # blank lines, separators, logo art
-            renderable: Any = _as_text(content.strip().splitlines()[-1])
+            # A multi-line entry (a traceback, a block of tool output) shows
+            # its first line -- "ERROR: Task exception ..." reads better than
+            # the exception repr at the bottom.
+            lines = [ln for ln in content.strip().splitlines() if _ALNUM.search(ln)]
+            first = humanize_log_line(lines[0] if lines else content.strip())
+            plain = _MARKUP.sub("", first).strip()
+            renderable: Any = _as_text(first)
             renderable.no_wrap = True
             renderable.overflow = "ellipsis"
         else:
@@ -676,5 +703,10 @@ class LogDrawer(Vertical):
     }
     LogDrawer.-open {
         display: block;
+    }
+    LogDrawer > ActivityLog {
+        /* Lines wrap to the drawer; a horizontal scrollbar only left a
+           stray thumb glyph in the bottom row at 80-100 columns. */
+        overflow-x: hidden;
     }
     """

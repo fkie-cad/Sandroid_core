@@ -143,6 +143,17 @@ class MainScreen(Screen):
         if action == "unfocused_nav":
             return self.focused is None
         if action == "inspect":
+            # Not while the log drawer or the side slot has focus: Enter means
+            # nothing there, and the footer must not offer "⏎ Inspect".
+            focused = self.focused
+            if focused is not None:
+                for box_id in ("#log-drawer", "#side-slot"):
+                    try:
+                        box = self.query_one(box_id)
+                    except Exception:
+                        continue
+                    if focused is box or box in focused.ancestors:
+                        return False
             return hasattr(self.lens_widget(), "inspect_selected")
         if action == "back_to_live":
             return self.scope_run is not None
@@ -760,7 +771,18 @@ class MainScreen(Screen):
         focused = self.focused
         slot = self._side_slot()
         in_slot = focused is not None and slot is not None and slot in focused.ancestors
+        lens = self.lens_widget()
+        lens_escape = getattr(lens, "handle_escape", None)
         if isinstance(focused, Input | TextArea) and not in_slot:
+            # A lens's own input (the Network ``/`` filter) may use Esc to
+            # clear itself; any other input is just left.
+            if (
+                lens_escape is not None
+                and lens is not None
+                and lens in focused.ancestors
+                and lens_escape()
+            ):
+                return True
             return False
         if self._side_mode is not None:
             self.close_side_slot()
@@ -768,6 +790,12 @@ class MainScreen(Screen):
         if self.log_drawer_is_open:
             self.toggle_log_drawer()
             return True
+        # Then the lens (e.g. clear an applied filter).
+        if lens_escape is not None:
+            try:
+                return bool(lens_escape())
+            except Exception:
+                logger.debug("lens Esc hook failed", exc_info=True)
         return False
 
     @staticmethod
@@ -1279,10 +1307,13 @@ class MainScreen(Screen):
                     action_queue, action.key, app=self.app
                 )
 
-                # Display result message in activity log
+                # Display result message in activity log (a cancel is
+                # reported as information, not as an error)
                 if result.message:
                     self.app.call_from_thread(
-                        self._log_command_result, result.success, result.message
+                        self._log_command_result,
+                        result.success or result.error == "cancelled",
+                        result.message,
                     )
 
                 # Show device settings modal (tabbed, Shift+E)

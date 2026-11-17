@@ -97,10 +97,21 @@ def run_tui(
         startup_config=startup_config,
     )
 
+    from sandroid.tui.controllers.quit_controller import (
+        arm_exit_watchdog,
+        enable_hard_exit,
+        mark_app_returned,
+    )
+
+    # A quit that cannot finish (stuck UI loop, hung cleanup) ends the process
+    # after tearing down mitmweb and the device proxy.
+    enable_hard_exit(True)
+
     # Setup signal handler for graceful termination
     def signal_handler(signum, frame):
-        """Handle termination signals gracefully."""
+        """Handle termination signals gracefully (same cleanup as q -> y)."""
         reset_terminal()
+        arm_exit_watchdog()
         app.exit()
 
     # Register signal handlers for external termination
@@ -119,6 +130,7 @@ def run_tui(
         app.run()
         return app.return_code or 0
     finally:
+        mark_app_returned()
         reset_terminal()
         _shutdown_services(get_task_service, get_network_capture_service)
 
@@ -129,11 +141,23 @@ def _shutdown_services(get_task_service, get_network_capture_service) -> None:
     # outlives the app (crash or quit) and used to keep replaying for minutes.
     _cleanup_with_timeout(_cancel_replays, timeout=1.0)
     _cleanup_with_timeout(_shutdown_ui_bus, timeout=2.0)
+    # Idempotent: a no-op when the quit already stopped mitmweb.
+    _cleanup_with_timeout(_shutdown_network, timeout=5.0)
     _cleanup_with_timeout(lambda: get_task_service().stop_all(), timeout=2.0)
     _cleanup_with_timeout(
         lambda: _stop_network_capture(get_network_capture_service), timeout=3.0
     )
     _reset_tui_mode()
+
+
+def _shutdown_network() -> None:
+    """Clear our device proxy and stop mitmweb (if still up)."""
+    try:
+        from sandroid.tui.controllers.quit_controller import shutdown_network
+
+        shutdown_network(timeout=4.0)
+    except Exception:
+        pass
 
 
 def _cancel_replays() -> None:

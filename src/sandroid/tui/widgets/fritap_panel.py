@@ -29,7 +29,6 @@ Actions (bound on the Network lens):
 from __future__ import annotations
 
 import collections
-import contextvars
 import logging
 import os
 import subprocess
@@ -38,9 +37,11 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from textual.widget import Widget
 
 from sandroid.services import get_network_capture_service, get_task_service
+from sandroid.tui.utils.ui_thread import UiDispatcher
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -76,6 +77,7 @@ class FriTapPanel(Widget):
         # Captured in on_mount; used to marshal EventBus callbacks (which fire
         # on Frida/logger threads) back onto the Textual main thread.
         self._main_loop = None
+        self._ui = UiDispatcher()
         self._event_handlers: list = []
         # Glance-only, string-shape-based activity counters.
         self._keys = 0
@@ -98,32 +100,19 @@ class FriTapPanel(Widget):
 
     def _subscribe_events(self) -> None:
         try:
-            import asyncio
-
             from sandroid.core.events import EventBus, EventType
 
-            try:
-                self._main_loop = asyncio.get_running_loop()
-                # Loop callbacks run in the *scheduling* thread's contextvars
-                # context, which lacks Textual's active_app: a set_timer made in
-                # one then failed with LookupError. Run them in the UI context.
-                self._ui_ctx = contextvars.copy_context()
-            except RuntimeError:
-                self._main_loop = None
+            # Thread -> UI hand-off in the UI's contextvars context (see
+            # sandroid.tui.utils.ui_thread: a bare loop callback lacks
+            # Textual's active_app and its timers raised LookupError).
+            self._ui = UiDispatcher.capture()
+            self._main_loop = self._ui.loop
 
             bus = EventBus.get()
 
-            def _schedule(fn, *args) -> None:
-                # Fire-and-forget onto the main loop; never blocks the
-                # publisher's thread (avoids the call_from_thread deadlock).
-                loop = self._main_loop
-                try:
-                    if loop is not None and not loop.is_closed():
-                        loop.call_soon_threadsafe(
-                            fn, *args, context=getattr(self, "_ui_ctx", None)
-                        )
-                except RuntimeError:
-                    pass
+            # Fire-and-forget onto the main loop; never blocks the
+            # publisher's thread (avoids the call_from_thread deadlock).
+            _schedule = self._ui.post
 
             def _output_cb(event) -> None:
                 _schedule(self._on_task_output, event)
@@ -145,6 +134,15 @@ class FriTapPanel(Widget):
                 cb = _make_refresh_cb()
                 bus.subscribe(event_type, cb)
                 self._event_handlers.append((event_type, cb))
+
+            # friTap's own lifecycle (starting / stopping / hung / failed),
+            # which the task registry does not see.
+            def _phase_cb(event) -> None:
+                if getattr(event, "source", None) == "fritap":
+                    _schedule(self.refresh_header)
+
+            bus.subscribe(EventType.STATE_CHANGED, _phase_cb)
+            self._event_handlers.append((EventType.STATE_CHANGED, _phase_cb))
         except Exception as exc:
             logger.debug(f"FriTapPanel event subscribe failed: {exc}")
 
@@ -223,15 +221,42 @@ class FriTapPanel(Widget):
             return f"[#4ade80]{label} ✓[/]"
         return f"[#5b6479]{label} ○[/]"
 
+    @staticmethod
+    def _phase() -> tuple[str, str]:
+        """The lifecycle phase of friTap (see ``sandroid.analysis.fritap``)."""
+        try:
+            from sandroid.analysis.fritap import lifecycle
+
+            return lifecycle()
+        except Exception:
+            return "stopped", ""
+
+    def caption_token(self) -> str:
+        """The lens caption's friTap fragment ("" while stopped)."""
+        running = self.is_running()
+        phase, _detail = self._phase()
+        if phase == "starting" and not running:
+            return "[#facc15]friTap ◌ starting[/]"
+        if phase == "stopping":
+            return "[#facc15]friTap ◌ stopping[/]"
+        if not running:
+            return ""
+        if phase == "hung":
+            return "[#fbbf24]friTap ▲ app not responding[/]"
+        return "[#4ade80]friTap ●[/]"
+
+    @staticmethod
+    def _mark(ok: bool) -> str:
+        return "[#4ade80]✓[/]" if ok else "[#5b6479]○[/]"
+
     def _render_header(self) -> str:
         task = None
         running = False
         try:
-            svc = get_task_service()
-            running = bool(svc.is_running("fritap"))
-            task = svc.get_task("fritap")
+            task = get_task_service().get_task("fritap")
         except Exception:
             pass
+        running = self.is_running()
 
         inst = getattr(task, "instance", None)
 
@@ -260,6 +285,20 @@ class FriTapPanel(Widget):
                 head += f"  [#5b6479]pid {pid}[/]"
         else:
             head = "[#fb7185]○ stopped[/]"
+        phase, detail = self._phase()
+        if phase == "starting" and not running:
+            head = "[#facc15]◌ starting[/] (attaching, loading the agent)"
+        elif phase == "stopping":
+            head = "[#facc15]◌ stopping[/] (unloading the agent)"
+        elif phase == "hung" and running:
+            head = (
+                f"[#fbbf24]▲ {escape(detail or 'app not responding')}[/] — "
+                "h stops friTap"
+            )
+        elif phase == "failed" and not running:
+            head = f"[#fb7185]✗ failed[/] {escape(detail[:80])}"
+        elif phase == "stopped" and not running and detail:
+            head = f"[#fb7185]○ stopped[/] [#5b6479]({escape(detail)})[/]"
 
         checks = []
         if running:
@@ -312,16 +351,10 @@ class FriTapPanel(Widget):
         inst = getattr(task, "instance", None)
         if self.is_running():
             rows.append(
-                (
-                    "keylog",
-                    self._check_tag("", bool(getattr(inst, "keylog_path", None))),
-                )
+                ("keylog", self._mark(bool(getattr(inst, "keylog_path", None))))
             )
             rows.append(
-                (
-                    "json",
-                    self._check_tag("", bool(getattr(inst, "json_output_path", None))),
-                )
+                ("json", self._mark(bool(getattr(inst, "json_output_path", None))))
             )
         try:
             net_on = bool(get_network_capture_service().is_capturing())

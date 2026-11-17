@@ -525,3 +525,123 @@ def test_panel_reprobe_due_only_while_unreachable(panel, monkeypatch):
     p._reach_state = "unreachable"
     p._reprobe_due()
     assert kicks == [{"quiet": True}]
+
+
+# ── fix round 3: own process group, UI token, quit-time shutdown ────────
+
+
+@pytest.fixture
+def popen_kwargs(monkeypatch):
+    calls = []
+
+    def _popen(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return _FakeProc()
+
+    monkeypatch.setattr(ms, "_find_mitmweb", lambda: "/x/mitmweb")
+    monkeypatch.setattr(ms.subprocess, "Popen", _popen)
+    monkeypatch.setattr(ms.threading.Thread, "start", lambda self: None)
+    return calls
+
+
+def test_mitmweb_runs_in_its_own_group_and_knows_its_parent(make_service, popen_kwargs):
+    """H1: SIGTERM restored the proxy but orphaned the mitmweb child."""
+    import os
+
+    svc, _ = make_service()
+    assert svc.start()
+    _cmd, kwargs = popen_kwargs[0]
+    assert kwargs["env"]["SANDROID_PARENT_PID"] == str(os.getpid())
+    if os.name == "posix":
+        assert kwargs["start_new_session"] is True
+    svc._cleanup_addon()
+
+
+def test_stop_of_a_foreign_proc_never_signals_a_process_group(
+    make_service, monkeypatch
+):
+    """Only a real Popen child that leads its own group is killpg'd."""
+    import os
+
+    svc, _ = make_service()
+    proc = _FakeProc(pid=os.getpid())
+    svc._proc = proc
+    svc._own_group = True
+    groups = []
+    monkeypatch.setattr(ms.os, "killpg", lambda *a: groups.append(a))
+    svc.stop(release_device_proxy=False)
+    assert proc.terminated
+    assert groups == []
+    assert svc._proc is None
+
+
+def test_web_ui_token_is_passed_and_used_for_ctrl_o(
+    make_service, popen_kwargs, monkeypatch
+):
+    """M6: Ctrl+O opened mitmweb without its token (403)."""
+    monkeypatch.setattr(ms, "_web_password_supported", lambda binary: True)
+    svc, _ = make_service(web_port=8091)
+    assert svc.start()
+    cmd, _kwargs = popen_kwargs[0]
+    sets = [cmd[i + 1] for i, a in enumerate(cmd) if a == "--set"]
+    password = [s for s in sets if s.startswith("web_password=")]
+    assert password
+    token = svc._web_token
+    assert token
+    assert token not in password[0]  # only the argon2 hash is on the command line
+    assert svc.web_url() == f"http://127.0.0.1:8091/?token={token}"
+    assert svc.web_url(with_token=False) == "http://127.0.0.1:8091/"
+    svc._proc.terminated = True
+    svc.stop(release_device_proxy=False)
+    assert svc._web_token is None
+    assert svc.web_url() == "http://127.0.0.1:8091/"
+
+
+def test_web_password_only_for_a_mitmweb_of_this_environment(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(
+        "importlib.metadata.version", lambda name: "12.3.1", raising=True
+    )
+    assert ms._web_password_supported(f"{sys.prefix}/bin/mitmweb")
+    assert not ms._web_password_supported("/opt/homebrew/bin/mitmweb")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "10.4.2")
+    assert not ms._web_password_supported(f"{sys.prefix}/bin/mitmweb")
+
+
+def test_token_printed_by_a_foreign_mitmweb_is_remembered(make_service):
+    svc, _ = make_service()
+    proc = _FakeProc()
+    proc.stdout = iter(
+        ["Web server listening at http://127.0.0.1:8081/?token=abc123def\n"]
+    )
+    svc._proc = proc
+    svc._read_loop()
+    assert svc._web_token == "abc123def"  # noqa: S105
+    svc._proc = None
+
+
+def test_shutdown_releases_the_proxy_and_stops_mitmweb(make_service, monkeypatch):
+    svc, _ = make_service()
+    calls = []
+    monkeypatch.setattr(svc, "release_device_proxy", lambda: calls.append("proxy"))
+    svc._proc = _FakeProc()
+    monkeypatch.setattr(
+        svc, "stop", lambda **kw: calls.append(("stop", kw["release_device_proxy"]))
+    )
+    svc.shutdown()
+    assert calls == ["proxy", ("stop", False)]
+
+
+def test_probe_adb_failures_stay_out_of_the_ticker(caplog):
+    """M7: raw ``ADB command warning (<command line>)`` lines in the ticker."""
+    import logging
+
+    from sandroid.core.adb_utils import log_adb_result, quiet_adb_warnings
+
+    with caplog.at_level(logging.DEBUG, logger="sandroid.core.adb_utils"):
+        with quiet_adb_warnings():
+            log_adb_result("shell toybox nc ...", "", "error: closed")
+        log_adb_result("shell ls", "", "error: closed")
+    levels = [r.levelno for r in caplog.records if "ADB command" in r.getMessage()]
+    assert levels == [logging.DEBUG, logging.WARNING]

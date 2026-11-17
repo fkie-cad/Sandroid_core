@@ -22,10 +22,8 @@ mitmweb's web UI (Ctrl+O).
 
 from __future__ import annotations
 
-import asyncio
 import collections
 import concurrent.futures
-import contextvars
 import logging
 import os
 import subprocess
@@ -40,8 +38,11 @@ from rich.markup import escape
 from textual.widget import Widget
 
 from sandroid.services.mitmproxy_service import get_mitmproxy_service
+from sandroid.tui.utils.ui_thread import UiDispatcher
 
 if TYPE_CHECKING:
+    import asyncio
+
     from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ class MitmproxyPanel(Widget):
         self._reprobe_step = 0
         self._device_cb_registered = False
         self._unmounted = False
+        self._liveness_busy = False
         # When the device proxy was last armed (for the steady-state 0-flows
         # soft signal) and a one-shot guard so that hint logs only once. Its
         # OWN flag — never reuse _unpin_hint_shown (taken by the TLS hint).
@@ -133,6 +135,7 @@ class MitmproxyPanel(Widget):
         # onto the main loop with a non-blocking call_soon_threadsafe instead
         # of call_from_thread (see _on_service_line).
         self._main_loop: asyncio.AbstractEventLoop | None = None
+        self._ui = UiDispatcher()
         # Plain-text tail of what this controller reported (Inspector page).
         self.recent_lines: collections.deque[str] = collections.deque(
             maxlen=self.RECENT_LINES
@@ -143,20 +146,62 @@ class MitmproxyPanel(Widget):
         return iter(())
 
     def on_mount(self) -> None:
-        try:
-            self._main_loop = asyncio.get_running_loop()
-            # Loop callbacks run in the *scheduling* thread's contextvars
-            # context, which lacks Textual's active_app: a set_timer made in
-            # one then failed with LookupError. Run them in the UI context.
-            self._ui_ctx = contextvars.copy_context()
-        except RuntimeError:
-            self._main_loop = None
+        # Thread -> UI hand-off in the UI's contextvars context (see
+        # sandroid.tui.utils.ui_thread: a bare loop callback lacks Textual's
+        # active_app, so every mitmweb line's caption timer raised
+        # LookupError during live traffic).
+        self._ui = UiDispatcher.capture()
+        self._main_loop = self._ui.loop
         self._service.add_listener(self._on_service_line)
         self._refresh_header()
         self._kick_state_refresh()
         self._kick_focus_cleanup()
         self._kick_reverse_cleanup()
         self._subscribe_device_changes()
+        try:
+            self.set_interval(self._BYPASS_LIVENESS_SECONDS, self._kick_bypass_liveness)
+        except Exception:
+            pass
+
+    #: How often active bypass hooks are checked against their process.
+    _BYPASS_LIVENESS_SECONDS = 3.0
+
+    def _kick_bypass_liveness(self) -> None:
+        """Drop "SSL unpin ✓" (and other bypass hooks) once their app died.
+
+        A Zygote restart (Ctrl+N) or an app crash kills the hooked process;
+        the indicators used to keep claiming active hooks. Checked off the UI
+        thread (it may stop a Frida job), only while something is active.
+        """
+        if self._liveness_busy or self._unmounted:
+            return
+        try:
+            from sandroid.analysis.detection_bypass import get_bypass_service
+
+            svc = get_bypass_service()
+            if not svc.active_categories():
+                return
+        except Exception:
+            return
+        self._liveness_busy = True
+
+        def _run() -> None:
+            dropped: list[str] = []
+            try:
+                dropped = svc.reconcile_liveness()
+            except Exception as exc:
+                logger.debug("bypass liveness check failed: %s", exc)
+            finally:
+                self._ui.post(self._apply_bypass_liveness, dropped)
+
+        threading.Thread(target=_run, name="bypass-liveness", daemon=True).start()
+
+    def _apply_bypass_liveness(self, dropped: list[str]) -> None:
+        self._liveness_busy = False
+        if not dropped:
+            return
+        self._refresh_header()
+        self._refresh_status_bar()
 
     def _subscribe_device_changes(self) -> None:
         """Re-probe after a device reconnect (once per panel; best-effort).
@@ -178,16 +223,7 @@ class MitmproxyPanel(Widget):
         """Device-poll thread → UI thread (non-blocking, like _on_service_line)."""
         if self._unmounted:
             return
-        loop = self._main_loop
-        try:
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(
-                    self._handle_device_change,
-                    device,
-                    context=getattr(self, "_ui_ctx", None),
-                )
-        except RuntimeError:
-            pass
+        self._ui.post(self._handle_device_change, device)
 
     def _handle_device_change(self, device) -> None:
         """Drop the verdict on disconnect; re-check on (re)connect (UI thread).
@@ -288,14 +324,7 @@ class MitmproxyPanel(Widget):
         # if StatusBar's poll timer (main thread) tries to acquire that same
         # lock via is_running() in that window, the two threads deadlock and
         # the whole TUI freezes.
-        loop = self._main_loop
-        try:
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(
-                    self._append_line, line, context=getattr(self, "_ui_ctx", None)
-                )
-        except RuntimeError:
-            pass
+        self._ui.post(self._append_line, line)
 
     # -- output routing (lens rows + ActivityLog drawer) ---------------------
 
@@ -951,17 +980,21 @@ class MitmproxyPanel(Widget):
                 port = self._service.state.proxy_port
                 # Settle BEFORE reading http_proxy: settings is served by
                 # system_server, which is down during a Zygote restart.
-                if settle and not self._service.wait_device_settled():
+                if settle and not self._service.wait_device_settled(timeout=120.0):
                     result, addr = _not_settled_result(), ""
                 else:
+                    if settle:
+                        self._close_system_dialogs()
                     status, cfg = ProxyManager().get_proxy_settings()
                     if status == ProxyStatus.SET and cfg is not None:
                         host = cfg.ip
                     else:
                         host = resolve_proxy_host_ip()
                     if settle:
+                        # The network comes back after the package manager:
+                        # retry for ~30 s before any "CANNOT reach" verdict.
                         result = self._service.probe_after_device_restart(
-                            host, port, wait_settle=False
+                            host, port, wait_settle=False, attempts=7
                         )
                     else:
                         result = self._service.probe_device_reachability(host, port)
@@ -981,6 +1014,50 @@ class MitmproxyPanel(Widget):
                 pass
 
         threading.Thread(target=_run, name="mitm-reach-probe", daemon=True).start()
+
+    @staticmethod
+    def _close_system_dialogs() -> None:
+        """Close leftover system dialogs once the device settled (any thread).
+
+        After a Zygote restart a slow emulator shows "System UI isn't
+        responding" while it catches up; once it has settled the dialog is
+        stale. CLOSE_SYSTEM_DIALOGS (allowed for the shell user) closes
+        system dialogs, the shade and recents; it touches no app state.
+        """
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.adb_utils import quiet_adb_warnings
+
+            with quiet_adb_warnings():
+                Adb.send_adb_command(
+                    "shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS"
+                )
+        except Exception as exc:
+            logger.debug("closing system dialogs failed: %s", exc)
+
+    def _kick_settle_watch(self, reason: str) -> None:
+        """Wait (off-thread) for the device to settle, then tidy up and say so.
+
+        Used after a Zygote restart when no device proxy needs re-probing.
+        """
+        self._append_line(
+            f"[INFO] [~] waiting for the device to settle after {reason}…"
+        )
+
+        def _run() -> None:
+            settled = self._service.wait_device_settled(timeout=120.0)
+            if settled:
+                self._close_system_dialogs()
+                line = f"[INFO] [OK] device settled after {reason}"
+            else:
+                line = (
+                    f"[INFO] [~] the device is still busy 2 min after {reason}; "
+                    "it should recover on its own (choose Wait on 'isn't "
+                    "responding' dialogs)"
+                )
+            self._ui.post(self._append_line, line)
+
+        threading.Thread(target=_run, name="mitm-settle-watch", daemon=True).start()
 
     def _cancel_reprobe(self) -> None:
         """Stop a pending follow-up re-probe (idempotent)."""
@@ -1323,9 +1400,12 @@ class MitmproxyPanel(Widget):
                     message=(
                         "Installing the CA certificate requires restarting Zygote, "
                         "the process every Android app is forked from.\n\n"
-                        "All running apps will close and the screen may flicker for "
-                        "a few seconds. The device does NOT reboot; it recovers on "
-                        "its own.\n\n"
+                        "All running apps close and System UI restarts. The "
+                        "device does NOT reboot, but on a busy emulator it can "
+                        "take a minute or more to settle: expect 'System UI "
+                        "isn't responding' dialogs meanwhile (choose Wait). "
+                        "Sandroid waits for the device before it re-checks the "
+                        "proxy, then closes leftover dialogs.\n\n"
                         "Continue?"
                     ),
                     yes_label="Restart Zygote",
@@ -1419,6 +1499,8 @@ class MitmproxyPanel(Widget):
                     self._kick_reachability_probe(
                         settle=True, reason="the Zygote restart"
                     )
+                else:
+                    self._kick_settle_watch("the Zygote restart")
             elif result.needs_root:
                 from sandroid.tui.modals.confirm_modal import ConfirmModal
 
@@ -1581,14 +1663,7 @@ class MitmproxyPanel(Widget):
             line = f"[INFO] {payload.get('message', 'SSL hooks loaded')}"
         else:
             return
-        loop = self._main_loop
-        try:
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(
-                    self._append_line, line, context=getattr(self, "_ui_ctx", None)
-                )
-        except RuntimeError:
-            pass
+        self._ui.post(self._append_line, line)
 
     def action_restart(self) -> None:
         # Ctrl+R: restart mitmweb, then re-apply BOTH the device proxy and the
@@ -1626,11 +1701,34 @@ class MitmproxyPanel(Widget):
         self._refresh_header()
 
     def action_open_browser(self) -> None:
+        """Ctrl+O -- open mitmweb's UI, logged in (its token is in the URL)."""
+        if not self._service.is_running():
+            self._notify("mitmweb is not running — M starts it", "warning")
+            return
         url = self._service.web_url()
+        shown = self._service.web_url(with_token=False)
         try:
-            webbrowser.open(url)
+            opened = webbrowser.open(url)
         except Exception as exc:
             logger.warning("Failed to open browser: %s", exc)
+            opened = False
+        if not opened:
+            self._append_line(f"[ERROR] Could not open a browser — mitmweb UI: {url}")
+            self._notify(f"No browser opened — the URL is in the log (` ): {shown}")
+            return
+        token_note = (
+            " (logged in with its token)"
+            if self._service.has_web_token
+            else " (mitmweb may ask for the token it printed on start)"
+        )
+        self._append_line(f"[INFO] Opened mitmweb UI {shown}{token_note}")
+        self._notify(f"Opened mitmweb UI {shown}{token_note}")
+
+    def _notify(self, message: str, severity: str = "information") -> None:
+        try:
+            self.app.notify(message, severity=severity, timeout=4)
+        except Exception:
+            pass
 
     def action_clear_log(self) -> None:
         """Forget the recent-lines tail (the drawer keeps its own history)."""

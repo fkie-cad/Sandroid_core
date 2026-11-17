@@ -18,7 +18,6 @@ threads; UI updates are always marshalled back to the Textual main thread.
 from __future__ import annotations
 
 import concurrent.futures
-import contextvars
 import functools
 import logging
 import threading
@@ -32,6 +31,7 @@ from textual.widgets import Static
 
 from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 from sandroid.tui.modals.objection_modal import BYPASS_KEYS
+from sandroid.tui.utils.ui_thread import UiDispatcher
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -137,6 +137,7 @@ class SpotlightPanel(Widget):
         self.can_focus = True
         self._event_handlers: list = []
         self._main_loop = None
+        self._ui = UiDispatcher()
         # Slow fallback poll bookkeeping.
         self._poll_timer = None
         self._poll_inflight = False
@@ -202,18 +203,13 @@ class SpotlightPanel(Widget):
 
     def _subscribe_events(self) -> None:
         try:
-            import asyncio
-
             from sandroid.core.events import EventBus, EventType
 
-            try:
-                self._main_loop = asyncio.get_running_loop()
-                # Loop callbacks run in the *scheduling* thread's contextvars
-                # context, which lacks Textual's active_app: a set_timer made in
-                # one then failed with LookupError. Run them in the UI context.
-                self._ui_ctx = contextvars.copy_context()
-            except RuntimeError:
-                self._main_loop = None
+            # Thread -> UI hand-off in the UI's contextvars context (see
+            # sandroid.tui.utils.ui_thread: a bare loop callback lacks
+            # Textual's active_app and its timers raised LookupError).
+            self._ui = UiDispatcher.capture()
+            self._main_loop = self._ui.loop
 
             bus = EventBus.get()
 
@@ -221,15 +217,7 @@ class SpotlightPanel(Widget):
                 def _cb(_event) -> None:
                     # Fire-and-forget onto the main loop; never blocks the
                     # publisher's thread (avoids the call_from_thread deadlock).
-                    loop = self._main_loop
-                    try:
-                        if loop is not None and not loop.is_closed():
-                            loop.call_soon_threadsafe(
-                                self.refresh_panel,
-                                context=getattr(self, "_ui_ctx", None),
-                            )
-                    except RuntimeError:
-                        pass
+                    self._ui.post(self.refresh_panel)
 
                 return _cb
 
@@ -266,14 +254,7 @@ class SpotlightPanel(Widget):
         if threading.current_thread() is threading.main_thread():
             fn(*args)
             return
-        loop = self._main_loop
-        try:
-            if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(
-                    fn, *args, context=getattr(self, "_ui_ctx", None)
-                )
-        except RuntimeError:
-            pass
+        self._ui.post(fn, *args)
 
     # -- rendering --------------------------------------------------------
 

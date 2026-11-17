@@ -36,6 +36,7 @@ RESERVED: set[str] = {
     "question_mark",
     "escape",
     "ctrl+c",
+    "ctrl+q",
     # Vim scroll keys + G (multiplexes vim-bottom + forensic APKs).
     "j",
     "ctrl+j",
@@ -101,6 +102,7 @@ _GENERAL_KEYS: list[tuple[str, str]] = [
     ("ctrl+p", "SSL unpinning on/off"),
     ("Y", "Copy the log"),
     ("ctrl+c", "Quit (asks first, like q)"),
+    ("ctrl+q", "Quit (asks first, like q)"),
 ]
 
 #: Binding ids from earlier releases that may linger in a user's

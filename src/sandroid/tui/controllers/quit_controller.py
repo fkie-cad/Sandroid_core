@@ -29,10 +29,154 @@ Usage:
 """
 
 import logging
+import os
+import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bounded cleanup + exit watchdog (shared by every quit path)
+# ---------------------------------------------------------------------------
+#
+# Quitting used to hang after a friTap stop whose agent could not unload: the
+# dialog's exit skipped the cleanup, a non-daemon Frida thread blocked the
+# interpreter, no key worked any more and mitmweb plus the device proxy were
+# left behind. Now every quit path (dialog, Ctrl+C, Ctrl+Q, SIGTERM/SIGHUP)
+# goes through SandroidTUI.exit -> QuitController.force_exit, every cleanup
+# step is time-boxed, and a watchdog makes the process exit even when the
+# Textual loop itself is stuck -- after tearing down mitmweb and the device
+# proxy. The watchdog only hard-exits when the launcher enabled it (never in
+# tests or embedders).
+
+#: Seconds a quit may take (cleanup + Textual shutdown) before the watchdog
+#: tears down mitmweb / the device proxy and exits the process.
+EXIT_DEADLINE = 20.0
+#: Seconds the post-TUI part (exit summary, thread joins) may take.
+POST_RUN_DEADLINE = 30.0
+
+_hard_exit = {"enabled": False, "armed": False, "code": 0}
+_app_returned = threading.Event()
+_watchdog_lock = threading.Lock()
+
+
+def run_bounded(name: str, fn: Callable[[], Any], timeout: float) -> bool:
+    """Run ``fn`` on a daemon thread; give up waiting after ``timeout`` s.
+
+    Returns True when ``fn`` finished (successfully or with an exception,
+    which is logged) in time. A step that hangs is left behind on its daemon
+    thread, which cannot block the interpreter's exit.
+    """
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            fn()
+        except Exception as exc:
+            logger.debug("Quit step %r failed: %s", name, exc, exc_info=True)
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name=f"quit-{name}", daemon=True).start()
+    if done.wait(timeout):
+        return True
+    logger.warning("Quit: %s did not finish within %.0fs; going on", name, timeout)
+    return False
+
+
+def shutdown_network(timeout: float = 4.0) -> None:
+    """Clear the device proxy we set and stop mitmweb (time-boxed).
+
+    Touches only an mitmproxy service that exists already (no new one is
+    created on the way out).
+    """
+    try:
+        from sandroid.services import mitmproxy_service as ms
+    except Exception:
+        return
+    svc = ms._INSTANCE
+    if svc is None:
+        return
+    run_bounded("mitmproxy", lambda: svc.shutdown(timeout=min(2.0, timeout)), timeout)
+
+
+def emergency_cleanup() -> None:
+    """Last-resort teardown before a forced exit (any thread, time-boxed)."""
+    try:
+        from sandroid.core.ui_request_bus import UIRequestBus
+
+        UIRequestBus.get().shutdown()
+    except Exception:
+        pass
+    shutdown_network(timeout=5.0)
+
+
+def enable_hard_exit(enabled: bool = True) -> None:
+    """Let the exit watchdog end the process (the TUI launcher calls this)."""
+    _hard_exit["enabled"] = enabled
+    _hard_exit["armed"] = False
+    _app_returned.clear()
+
+
+def mark_app_returned() -> None:
+    """``App.run()`` returned: the watchdog moves on to its post-run deadline."""
+    _app_returned.set()
+
+
+def _force_process_exit(code: int, why: str) -> None:
+    logger.warning("%s; forcing exit", why)
+    emergency_cleanup()
+    try:
+        from sandroid.tui.terminal_reset import reset_terminal_hard
+
+        reset_terminal_hard()
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(f"\n[Sandroid] {why}; exited after cleanup.\n")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        logging.shutdown()
+    finally:
+        os._exit(code)
+
+
+def arm_exit_watchdog(exit_code: int = 0) -> bool:
+    """Start the exit watchdog (idempotent; no-op unless enabled).
+
+    If ``App.run()`` has not returned ``EXIT_DEADLINE`` seconds after the quit
+    began -- a stuck UI loop, a cleanup step that blocks the loop -- mitmweb
+    and the device proxy are torn down and the process exits. Once the app
+    returned, the rest (exit summary, joining helper threads) gets
+    ``POST_RUN_DEADLINE`` seconds.
+
+    Returns True when a watchdog is (now) running.
+    """
+    with _watchdog_lock:
+        if not _hard_exit["enabled"]:
+            return False
+        _hard_exit["code"] = exit_code
+        if _hard_exit["armed"]:
+            return True
+        _hard_exit["armed"] = True
+
+    def _watch() -> None:
+        if not _app_returned.wait(EXIT_DEADLINE):
+            _force_process_exit(
+                int(_hard_exit["code"] or 0),
+                f"Quit did not finish within {EXIT_DEADLINE:.0f}s",
+            )
+            return
+        threading.Event().wait(POST_RUN_DEADLINE)
+        _force_process_exit(
+            int(_hard_exit["code"] or 0),
+            f"Shutdown did not finish within {POST_RUN_DEADLINE:.0f}s after the UI closed",
+        )
+
+    threading.Thread(target=_watch, name="sandroid-exit-watchdog", daemon=True).start()
+    return True
 
 
 class QuitController:
@@ -318,7 +462,30 @@ class QuitController:
             if confirmed and self._exit_app:
                 self._exit_app()
 
-        self._push_modal(QuitConfirmModal(), on_quit_result)
+        self._push_modal(QuitConfirmModal(notes=self._quit_notes()), on_quit_result)
+
+    @staticmethod
+    def _quit_notes() -> list[str]:
+        """What quitting will tear down (shown in the confirm dialog)."""
+        notes: list[str] = []
+        try:
+            from sandroid.services import mitmproxy_service as ms
+
+            svc = ms._INSTANCE
+            if svc is not None and svc.is_running():
+                notes.append("stops mitmweb")
+            if svc is not None and svc.owned_device_proxy:
+                notes.append("clears the device proxy")
+        except Exception:
+            pass
+        try:
+            from sandroid.services import get_task_service
+
+            if get_task_service().is_running("fritap"):
+                notes.append("stops friTap")
+        except Exception:
+            pass
+        return notes
 
     def force_exit(self) -> None:
         """Exit the application, cleaning up any active sessions.
@@ -326,11 +493,7 @@ class QuitController:
         Performs cleanup of objection sessions, background tasks,
         workers, and other resources before exiting.
         """
-        from sandroid.services import (
-            get_network_capture_service,
-            get_objection_service,
-            get_task_service,
-        )
+        from sandroid.services import get_task_service
 
         # Shutdown UIRequestBus first to release any blocked threads
         try:
@@ -342,13 +505,21 @@ class QuitController:
         except Exception as e:
             logger.debug(f"Error shutting down UIRequestBus: {e}")
 
-        # Stop all background tasks (FriTap, network capture, etc.)
-        try:
-            logger.info("Stopping all background tasks before exit")
-            get_task_service().stop_all()
-        except Exception as e:
-            logger.debug(f"Error stopping background tasks: {e}")
+        # The device must not stay pointed at a mitmweb that is about to die,
+        # and mitmweb must not outlive Sandroid: first, and time-boxed.
+        shutdown_network(timeout=5.0)
 
+        # Stop all background tasks (FriTap, network capture, etc.). A friTap
+        # agent that cannot unload must not hold the quit up.
+        logger.info("Stopping all background tasks before exit")
+        run_bounded("background tasks", lambda: get_task_service().stop_all(), 8.0)
+
+        run_bounded("frida sessions", self._stop_frida_sessions, 6.0)
+        self._cleanup_rest()
+
+    @staticmethod
+    def _stop_frida_sessions() -> None:
+        """Stop Frida jobs not registered with the TaskService, then detach."""
         # Ensure Frida sessions are cleaned up even if not registered with TaskService
         try:
             from sandroid.services import get_frida_session_service
@@ -379,16 +550,23 @@ class QuitController:
         except Exception as e:
             logger.debug(f"Error cleaning up Frida sessions: {e}")
 
+    @staticmethod
+    def _cleanup_rest() -> None:
+        """Network capture, Objection, untracked work (each time-boxed)."""
+        from sandroid.services import (
+            get_network_capture_service,
+            get_objection_service,
+        )
+
         # Stop network capture if running
-        try:
+        def _stop_capture() -> None:
             if get_network_capture_service().is_capturing():
                 logger.info("Stopping network capture before exit")
                 from sandroid.analysis.network import Network
 
-                network = Network()
-                network.stop()
-        except Exception as e:
-            logger.debug(f"Error stopping network capture: {e}")
+                Network().stop()
+
+        run_bounded("network capture", _stop_capture, 4.0)
 
         # Clean up any active objection session
         try:

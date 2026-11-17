@@ -1928,6 +1928,57 @@ class BypassService:
         with self._lock:
             return sorted(self._armed | self._active)
 
+    def reconcile_liveness(self) -> list[str]:
+        """Drop the active categories when their hooked process is gone.
+
+        A Zygote restart (Ctrl+N), a crash or a force-stop kills the hooked
+        process; "SSL unpin ✓" and "Hooks 1 · bypass ssl" used to stay for as
+        long as Sandroid ran. Gone means: the Frida session detached or the
+        script was destroyed (``_is_job_live``), or the spotlight app now runs
+        under another PID. The armed set is kept, so the next Start/Restart
+        re-applies the categories. Blocking only when it stops the dead job:
+        call it off the UI thread.
+
+        Returns:
+            The categories that were dropped (empty while all is well, while
+            nothing is active, or while a load is in flight).
+        """
+        with self._lock:
+            active = sorted(self._active)
+            job, pid, package = self._job, self._process_id, self._app_package
+        if not active or job is None:
+            return []
+        if self._mutate_lock.locked():
+            return []  # a load / set_flags is in flight: not our call now
+        alive = True
+        try:
+            alive = self._is_job_live(Toolbox.get_frida_job_manager())
+        except Exception:
+            alive = True  # cannot tell: keep showing what we have
+        if alive and pid is not None:
+            try:
+                current = get_spotlight_service().get_pid()
+            except Exception:
+                current = None
+            if current is not None and current != pid:
+                alive = False
+        if alive:
+            return []
+        with self._lock:
+            if self._job is not job:  # replaced meanwhile (a new load)
+                return []
+        names = ", ".join(self.display_name(c) for c in active)
+        logger.warning(
+            "[Bypass] %s (PID %s) is gone, so its hooks (%s) are no longer "
+            "active. Start the app again to re-apply them (armed bypasses are "
+            "applied on Start), or press Ctrl+P for SSL unpin.",
+            package or "the hooked app",
+            pid if pid is not None else "?",
+            names,
+        )
+        self._reset_script_state()
+        return active
+
     def stop_all(self) -> list[str]:
         """Stop the resident bypass script for real and clear the armed set.
 

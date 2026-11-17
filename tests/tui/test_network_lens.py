@@ -593,3 +593,326 @@ def test_mitm_port_shown_is_the_configured_one(monkeypatch):
         ProxyManager, "get_host_ip", classmethod(lambda cls: "10.0.2.2")
     )
     assert ProxyManager.get_default_config().port == 8090
+
+
+# --------------------------------------------------------------------------
+# fix round 3 (live traffic test): noise, filter, keys, bodies, threads
+# --------------------------------------------------------------------------
+
+
+def test_noise_rules_cover_play_services_background_traffic():
+    """M5: ~90 Google background flows stayed visible with N off."""
+    for host, path in (
+        ("infinitedata-pa.googleapis.com", "/v1/x"),
+        ("phonedeviceverification-pa.googleapis.com", "/v1/a"),
+        ("prod-lt-playstoregatewayadapter-pa.googleapis.com", "/b"),
+        ("geller-pa.googleapis.com", "/c"),
+        ("www.googleapis.com", "/experimentsandconfigs/v1/getExperimentsAndConfigs"),
+        ("www.googleapis.com", "/androidantiabuse/v1/x/create"),
+        ("www.googleapis.com", "/androidcheck/v1/attestations/adAttest"),
+        ("play-lh.googleusercontent.com", "/icon.png"),
+        ("android-safebrowsing.google.com", "/v4/x"),
+        ("mitm.it", "/"),  # Sandroid's own reachability probe (L8)
+    ):
+        assert is_noise(host, path, ""), host + path
+    # The app's own analytics and ordinary Google APIs stay visible.
+    assert not is_noise("firebaselogging-pa.googleapis.com", "/v1/log", "")
+    assert not is_noise("www.googleapis.com", "/youtube/v3/videos", "")
+    assert not is_noise("en.wikipedia.org", "/api/rest_v1/feed", "")
+
+
+async def test_caption_says_how_much_noise_is_hidden(flow_dir):
+    """M5: "9 of 15" did not say that N brings the rest back."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        info = ms._lens_captions["network"][1]
+        assert "N: 2 OS noise hidden" in info
+        await pilot.press("N")
+        await _settle(pilot)
+        info = ms._lens_captions["network"][1]
+        assert "+ OS noise" in info
+        assert "hidden" not in info
+        await pilot.press("N")
+        write_flows(
+            flow_dir,
+            time.time(),
+            specs=[("GET", "geller-pa.googleapis.com", "/x", 200, "", None, "", None)],
+            start_seq=50,
+        )
+        panel.poll_now()
+        await _wait(
+            pilot, lambda: "N: 3 OS noise" in (ms._lens_captions["network"][1] or "")
+        )
+
+
+async def test_filter_matches_status_and_esc_clears_it(flow_dir):
+    """L4/L5: ``/200`` found nothing; Esc left a filter applied for good."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        shown = panel.table.row_count
+        await pilot.press("slash")
+        for ch in "200":
+            await pilot.press(ch)
+        await _wait(pilot, lambda: panel._filter == "200")
+        statuses = {
+            str(panel.table.get_row_at(i)[3]) for i in range(panel.table.row_count)
+        }
+        assert statuses == {"200"}
+        # Esc in the input: filter cleared, input closed, back on the table
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert panel._filter == ""
+        assert panel.table.row_count == shown
+        assert not panel.query_one("#net-filter").has_class("-open")
+        assert app.focused is panel.table
+        # an applied filter with the input closed: Esc clears it too
+        panel.set_filter("✗")
+        await _settle(pilot)
+        assert panel.table.row_count == 1  # the reset upload
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert panel._filter == ""
+        assert panel.table.row_count == shown
+
+
+async def test_end_and_home_jump_to_the_last_and_first_row(flow_dir):
+    """L14: End scrolled sideways instead of reaching the newest flow."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.table.focus()
+        await pilot.press("home")
+        await _settle(pilot)
+        assert panel.table.cursor_row == 0
+        await pilot.press("end")
+        await _settle(pilot)
+        assert panel.table.cursor_row == panel.table.row_count - 1
+
+
+def test_size_column_fits_three_digit_kilobytes():
+    """L2: "↓ 190.9 K" lost its B."""
+    panel = NetworkPanel()
+    layout = [
+        ("time", "Time", 8),
+        ("who", "Recipient", 18),
+        ("req", "Request", 40),
+        ("status", "Status", 9),
+        ("size", "Size", 10),
+    ]
+    row = FlowRow(key="f1", ts=0.0, host="a.io", status=200, resp_bytes=195482)
+    size = panel._cells(row, layout)[4].plain
+    assert size == "↓ 190.9 KB"
+    assert len(size) <= {k: w for k, _l, w in panel._layout()}["size"]
+
+
+def test_decoded_body_note_and_protocol_label():
+    """M1: decoded bodies say what they were decoded from; HTTPS/2 not 2.0."""
+    from rich.console import Console
+
+    from sandroid.tui.widgets.network_panel import protocol_label
+
+    def plain(r) -> str:
+        console = Console(width=80, record=True, color_system=None)
+        console.print(r)
+        return console.export_text()
+
+    body = _body('{"items": [1, 2]}')
+    body.update(content_encoding="gzip", encoded_bytes=31)
+    out = plain(body_renderable(body, "application/json"))
+    assert "decoded from gzip · 31 B on the wire" in out
+    assert '"items"' in out
+    broken = _body(b"\x1f\x8b\x08\x00garbage")
+    broken.update(content_encoding="gzip", decode_failed=True)
+    out = plain(body_renderable(broken, "application/json"))
+    assert "could not be decoded" in out
+    assert "1f 8b 08" in out
+    assert protocol_label("HTTPS/2.0") == "HTTPS/2"
+    assert protocol_label("HTTP/1.1") == "HTTP/1.1"
+
+
+async def test_persisted_tls_failures_are_one_row(flow_dir):
+    """L7: TLS failures are in flows.jsonl now; the stdout row is not doubled."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        panel.add_tls_failure("12:00:00", "pinned.example.com", "cert", "")
+        await _settle(pilot)
+        now = time.time()
+        with open(flow_dir / "flows.jsonl", "a", encoding="utf-8") as f:
+            for seq, host in ((200, "pinned.example.com"), (201, "other.example")):
+                f.write(
+                    json.dumps(
+                        {
+                            "seq": seq,
+                            "id": f"tls-{seq}",
+                            "kind": "tls",
+                            "ts_start": now,
+                            "ts_end": now,
+                            "protocol": "TLS",
+                            "method": "TLS",
+                            "host": host,
+                            "path": "",
+                            "status_code": None,
+                            "error": "TLS handshake failed (cert)",
+                            "tls_reason": "cert",
+                            "app": "",
+                        }
+                    )
+                    + "\n"
+                )
+        panel.poll_now()
+        await _wait(pilot, lambda: any(r.host == "other.example" for r in panel._live))
+        tls = [r for r in panel._live if r.kind == "tls"]
+        assert sorted(r.host for r in tls) == ["other.example", "pinned.example.com"]
+        assert all(r.reason == "cert" for r in tls)
+
+
+async def test_mitm_lines_from_a_thread_raise_no_lookup_error(flow_dir):
+    """M2: every mitmweb line from the reader thread started a caption timer
+    without Textual's app context: 562 ``LookupError: active_app`` in 28 min.
+    """
+    import threading
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        loop = panel.mitm._ui.loop
+        errors: list = []
+        loop.set_exception_handler(lambda _loop, ctx: errors.append(ctx))
+        lines = [f"[TLS_FAIL]|12:00:{i:02d}|host{i}.example|cert|" for i in range(30)]
+        lines += ["[INFO] Hooked: cronet:SSL_CTX_set_custom_verify"] * 3
+
+        def reader() -> None:
+            for line in lines:
+                panel.mitm._on_service_line(line)
+
+        worker = threading.Thread(target=reader)
+        worker.start()
+        worker.join()
+        await _wait(pilot, lambda: sum(r.kind == "tls" for r in panel._live) == 30)
+        await _wait(pilot, lambda: not panel._status_pending)
+        loop.set_exception_handler(None)
+        assert errors == []
+
+
+async def test_refresh_status_outside_the_app_context(flow_dir):
+    """A bare loop callback (no ``active_app``) must not start a timer."""
+    import contextvars
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        loop = panel.mitm._ui.loop
+        errors: list = []
+        loop.set_exception_handler(lambda _loop, ctx: errors.append(ctx))
+        ms._lens_captions["network"] = (None, None)
+        loop.call_soon(panel.refresh_status, context=contextvars.Context())
+        await _wait(pilot, lambda: ms._lens_captions["network"][1])
+        loop.set_exception_handler(None)
+        assert errors == []
+        assert not panel._status_pending
+
+
+async def test_ctrl_o_opens_mitmweb_with_its_token(flow_dir, monkeypatch):
+    """M6: Ctrl+O opened the UI without the token (403) and said nothing."""
+    import webbrowser
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        svc = panel.mitm._service
+        monkeypatch.setattr(svc, "is_running", lambda: True)
+        monkeypatch.setattr(svc, "_web_token", "s3cret-token")
+        opened: list[str] = []
+        monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+        await pilot.press("ctrl+o")
+        await _settle(pilot)
+        assert opened == [f"{svc.web_url(with_token=False)}?token=s3cret-token"]
+        toast = [n.message for n in app._notifications]
+        assert any("Opened mitmweb UI" in m and "token" in m for m in toast)
+        assert not any("s3cret-token" in m for m in toast)
+
+
+async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
+    """M3: "stopped" for ~50 s while starting, "running" ~20 s after stop."""
+    from sandroid.analysis import fritap as fritap_mod
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        fritap = panel.fritap
+        running = {"on": False}
+        monkeypatch.setattr(fritap, "is_running", lambda: running["on"])
+        try:
+            fritap_mod.set_lifecycle("starting", "org.wikipedia")
+            await _wait(pilot, lambda: "starting" in ms._lens_captions["network"][0])
+            running["on"] = True
+            fritap_mod.set_lifecycle("running", "org.wikipedia")
+            await _wait(pilot, lambda: "friTap ●" in ms._lens_captions["network"][0])
+            fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
+            await _wait(
+                pilot, lambda: "not responding" in ms._lens_captions["network"][0]
+            )
+            head = dict(fritap.status_rows())["friTap"]
+            assert "h stops friTap" in head
+            fritap_mod.set_lifecycle("stopping", "org.wikipedia")
+            await _wait(pilot, lambda: "stopping" in ms._lens_captions["network"][0])
+            running["on"] = False
+            fritap_mod.set_lifecycle("stopped", "agent still unloading")
+            await _wait(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
+            assert "agent still unloading" in dict(fritap.status_rows())["friTap"]
+        finally:
+            fritap_mod.set_lifecycle("stopped", "")
+
+
+def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
+    """M4: "unpin ✓" stayed 15 min after the Zygote restart killed the app."""
+    from types import SimpleNamespace
+
+    from sandroid.analysis import detection_bypass as db
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    svc = db.BypassService()
+    job = SimpleNamespace(state="running", get_id=lambda: "j1")
+    svc._job = job
+    svc._script = SimpleNamespace(is_destroyed=False)
+    svc._active = {"ssl"}
+    svc._process_id = 6008
+    svc._app_package = "org.wikipedia"
+    jm = SimpleNamespace(has_active_session=lambda: True, jobs={"j1": job})
+    monkeypatch.setattr(db.Toolbox, "get_frida_job_manager", lambda: jm)
+    spot = SimpleNamespace(get_pid=lambda: 6008)
+    monkeypatch.setattr(db, "get_spotlight_service", lambda: spot)
+    reset: list[int] = []
+    monkeypatch.setattr(svc, "_reset_script_state", lambda: reset.append(1))
+    monkeypatch.setattr(db, "get_bypass_service", lambda: svc)
+
+    mitm = MitmproxyPanel()
+    mitm._service = MitmproxyService()
+    monkeypatch.setattr(mitm._service, "is_running", lambda: True)
+    monkeypatch.setattr(mitm._service, "_bypass_service", lambda: svc)
+
+    assert svc.reconcile_liveness() == []  # alive: nothing changes
+    assert "unpin ✓" in mitm.status_caption()
+
+    # The Zygote restart: the session detaches, the app comes back as 8593.
+    jm.has_active_session = lambda: False
+    spot.get_pid = lambda: 8593
+    original_reset = db.BypassService._reset_script_state
+
+    def _reset() -> None:
+        reset.append(1)
+        original_reset(svc)
+
+    monkeypatch.setattr(svc, "_reset_script_state", _reset)
+    monkeypatch.setattr(db.BypassService, "_unregister_task", lambda self: None)
+    assert svc.reconcile_liveness() == ["ssl"]
+    assert reset == [1]
+    assert not svc.is_active("ssl")
+    assert "unpin" not in mitm.status_caption()
+    assert any(
+        "SSL unpin" in label and "off" in value for label, value in mitm.status_rows()
+    )

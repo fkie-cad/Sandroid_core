@@ -120,6 +120,14 @@ class MitmproxyAddonsModal(FridaModal[MitmproxyAddonsResult]):
                 for p in self._service.list_available_addons()
             ]
             yield SelectionList[str](*selections, id="addon-list")
+            if not selections:
+                yield Static(
+                    "No addons found. Drop a mitmproxy addon (.py) into the "
+                    "folder above (Open Folder; see README.md and examples/ "
+                    "there), or enter a path below.",
+                    id="addons-empty",
+                    classes="modal-message",
+                )
 
             yield Input(placeholder="Custom: /path/to/addon.py", id="custom-path")
 

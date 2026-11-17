@@ -4,13 +4,34 @@ This module provides consistent handling of ADB command output,
 distinguishing benign informational messages from actionable errors.
 """
 
+import contextlib
 import logging
 import os
 import re
 import shlex
 import subprocess
+import threading
 
 logger = logging.getLogger(__name__)
+
+_quiet = threading.local()
+
+
+@contextlib.contextmanager
+def quiet_adb_warnings():
+    """Log failed adb commands of this thread at DEBUG inside the block.
+
+    For probes whose failures are expected and reported in their own words
+    (the device->mitmproxy reachability probe, the post-restart settle
+    polls): their raw ``ADB command warning (<command line>)`` lines only
+    filled the log ticker. The log file still gets them at DEBUG.
+    """
+    depth = getattr(_quiet, "depth", 0)
+    _quiet.depth = depth + 1
+    try:
+        yield
+    finally:
+        _quiet.depth = depth
 
 
 def quote_host_arg(arg: str, windows: bool | None = None) -> str:
@@ -294,7 +315,11 @@ def log_adb_result(
         # ``get-state`` is a reachability probe: "device not found" is its
         # expected answer while a snapshot loads or the emulator boots, and
         # every caller handles it -- not something to warn the user about.
-        if is_adb_error_actionable(stderr) and "get-state" not in command:
+        if (
+            is_adb_error_actionable(stderr)
+            and "get-state" not in command
+            and not getattr(_quiet, "depth", 0)
+        ):
             logger.warning(f"ADB command warning ({command}): {stderr.strip()}")
         else:
             logger.debug(f"ADB command info ({command}): {stderr.strip()}")

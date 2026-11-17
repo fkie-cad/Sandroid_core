@@ -36,6 +36,9 @@ class ActivityLog(RichLog):
 
     def __init__(self, **kwargs):
         """Initialize the activity log."""
+        # min_width: wrap to the drawer's width (RichLog's default 78 made
+        # lines wider than an 80-column drawer, hence a horizontal scrollbar).
+        kwargs.setdefault("min_width", 20)
         super().__init__(
             highlight=True, markup=True, wrap=True, auto_scroll=True, **kwargs
         )
@@ -44,11 +47,56 @@ class ActivityLog(RichLog):
         # (normalized text, monotonic time) of the last few log lines, for
         # dropping the same message arriving again via a second channel.
         self._recent: deque[tuple[str, float]] = deque(maxlen=24)
+        # Recurring warnings/errors: key -> [last shown (monotonic), number
+        # suppressed since]. One error firing per network flow (a traceback
+        # each time) used to drown the drawer and the ticker.
+        self._repeats: dict[str, list[float]] = {}
 
     #: Seconds within which an identical (normalized) line is a duplicate.
     DEDUP_WINDOW = 3.0
     _TOOL_PREFIX_RE = re.compile(r"^(?:\[[*+!-]\]\s*)+")
     _MARKUP_RE = re.compile(r"\[/?[^\]]*\]")
+
+    #: Seconds a recurring warning/error (same text up to numbers and
+    #: addresses) is shown at most once; the next copy carries the count.
+    REPEAT_WINDOW = 60.0
+    _VOLATILE_RE = re.compile(r"0x[0-9a-fA-F]+|\d+")
+
+    @classmethod
+    def _repeat_key(cls, message: str) -> str:
+        """Identity of a warning/error regardless of ids, PIDs and times.
+
+        A multi-line message (a traceback) is keyed by its first and last
+        line: the same exception from the same place is one problem.
+        """
+        lines = [ln for ln in str(message).strip().splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        text = lines[0] if len(lines) == 1 else f"{lines[0]} … {lines[-1]}"
+        return cls._VOLATILE_RE.sub("#", cls._normalize(text))
+
+    def _repeat_suffix(self, message: str) -> str | None:
+        """None to drop a recurring warning/error, else a suffix to append.
+
+        The first copy is shown; further copies within ``REPEAT_WINDOW`` are
+        counted, and the next copy after it says how many were folded.
+        """
+        key = self._repeat_key(message)
+        if not key:
+            return ""
+        now = time.monotonic()
+        entry = self._repeats.get(key)
+        if entry is not None and now - entry[0] <= self.REPEAT_WINDOW:
+            entry[1] += 1
+            return None
+        folded = int(entry[1]) if entry is not None else 0
+        self._repeats[key] = [now, 0]
+        if len(self._repeats) > 256:
+            oldest = min(self._repeats, key=lambda k: self._repeats[k][0])
+            self._repeats.pop(oldest, None)
+        if folded:
+            return f" [dim](+{folded} more like this in the last minute)[/dim]"
+        return ""
 
     @classmethod
     def _normalize(cls, message: str) -> str:
@@ -265,11 +313,17 @@ class ActivityLog(RichLog):
         """
         if self._is_repeat(message):
             return
+        suffix = ""
+        if level_key in ("error", "warning"):
+            suffix = self._repeat_suffix(message)
+            if suffix is None:
+                return
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
         style = f"{colors[level_key]} bold" if bold else colors[level_key]
         self.write(
-            f"[{colors['text_muted']}]{timestamp}[/] [{style}]{label}:[/] {message}"
+            f"[{colors['text_muted']}]{timestamp}[/] [{style}]{label}:[/] "
+            f"{message}{suffix}"
         )
 
     def log_error(self, message: str) -> None:

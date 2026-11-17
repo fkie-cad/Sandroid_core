@@ -103,6 +103,14 @@ def _exit_without_lingering_threads(grace: float = 3.0, exit_code: int = 0) -> N
         len(lingering),
         ", ".join(t.name for t in lingering),
     )
+    # os._exit skips atexit, where mitmweb used to be stopped: it was left
+    # running (orphaned) with the device proxy still pointing at it.
+    try:
+        from sandroid.tui.controllers.quit_controller import shutdown_network
+
+        shutdown_network(timeout=4.0)
+    except Exception:
+        pass
     try:
         # os._exit skips atexit handlers: restore the terminal ourselves.
         from sandroid.tui.terminal_reset import reset_terminal_hard
@@ -178,8 +186,11 @@ def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
         if exit_code in (EXIT_STARTUP_FAILED, EXIT_STARTUP_ABORTED):
             _end_failed_startup(exit_code)
 
-        # After TUI exits, stop background tasks and print summary
-        get_task_service().stop_all()
+        # After TUI exits, stop background tasks and print summary (time-
+        # boxed: a friTap agent that cannot unload must not hang the exit)
+        from sandroid.tui.controllers.quit_controller import run_bounded
+
+        run_bounded("background tasks", lambda: get_task_service().stop_all(), 8.0)
 
         # Check for untracked background work on exit
         try:

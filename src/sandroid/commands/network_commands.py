@@ -146,6 +146,12 @@ class FriTapCommand(ToggleCommand, RequiresSpotlightApp):
             success = fritap.start(interactive=True)
 
             if not success:
+                if getattr(fritap, "cancelled", False):
+                    return CommandResult(
+                        success=False,
+                        message="friTap start cancelled",
+                        error="cancelled",
+                    )
                 return CommandResult(
                     success=False,
                     message="FriTap startup cancelled or failed",

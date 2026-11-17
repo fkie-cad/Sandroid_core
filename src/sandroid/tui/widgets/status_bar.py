@@ -267,10 +267,12 @@ class StatusBar(Static):
             # A loopback proxy is our adb-reverse route, never foreign.
             or self.proxy_address.startswith("127.0.0.1:")
         )
+        # "mitm ●" is our engine; "device" says where the device points, so
+        # a running mitmweb never reads as "the device is proxied".
         if self.mitmweb_running:
-            proxy = f"[{run}]● {self.mitmweb_address or 'mitmproxy'}[/]"
+            proxy = f"[{muted}]mitm[/] [{run}]● {self.mitmweb_address or 'on'}[/]"
         else:
-            proxy = f"[{stop}]○ off[/]"
+            proxy = f"[{muted}]mitm[/] [{stop}]○ off[/]"
         if pointed_at_us:
             if self.mitmweb_running:
                 proxy += f" [{muted}]· device[/] [{run}]✓[/]"
@@ -279,6 +281,8 @@ class StatusBar(Static):
                 proxy += f" [{warn}]· device → stopped proxy[/]"
         elif self.proxy_address:
             proxy += f" [{muted}]· device →[/] [{primary}]{self.proxy_address}[/]"
+        elif self.mitmweb_running:
+            proxy += f" [{muted}]· device ○[/]"
         proxied = list(self.app_proxies.values())
         n_ours = sum(1 for v in proxied if v == "ours")
         m_ext = len(proxied) - n_ours

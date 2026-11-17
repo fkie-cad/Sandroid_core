@@ -10,8 +10,11 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import secrets
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -162,6 +165,8 @@ def _protocol(flow: http.HTTPFlow) -> str:
     if getattr(flow, "websocket", None) is not None:
         return "WSS" if is_tls else "WS"
     ver = (req.http_version or "").replace("HTTP/", "")
+    if ver in ("2.0", "3.0"):
+        ver = ver[0]
     base = "HTTPS" if is_tls else "HTTP"
     return f"{base}/{ver}" if ver else base
 
@@ -321,6 +326,40 @@ def _cap_body(raw, max_bytes: int) -> dict:
     }
 
 
+def _body_record(msg, max_bytes: int) -> dict:
+    """The capped body of one side, decoded (gzip, br, deflate, zstd).
+
+    ``raw_content`` is what went over the wire: a gzip JSON response showed
+    as a hex dump. The decoded body is stored (still capped); the encoding
+    and the on-the-wire size are noted. A body that cannot be decoded is
+    stored as received, with ``decode_failed``.
+    """
+    if msg is None:
+        return _cap_body(None, max_bytes)
+    raw = msg.raw_content or b""
+    encoding = ""
+    try:
+        encoding = (msg.headers.get("content-encoding") or "").strip().lower()
+    except Exception:
+        encoding = ""
+    if not raw or encoding in ("", "identity", "none"):
+        return _cap_body(raw, max_bytes)
+    decoded = None
+    try:
+        decoded = msg.get_content(strict=True)
+    except Exception:
+        decoded = None
+    if decoded is None:
+        body = _cap_body(raw, max_bytes)
+        body["content_encoding"] = encoding
+        body["decode_failed"] = True
+        return body
+    body = _cap_body(decoded, max_bytes)
+    body["content_encoding"] = encoding
+    body["encoded_bytes"] = len(raw)
+    return body
+
+
 def _flow_ts_end(flow: http.HTTPFlow) -> float:
     if flow.response is not None:
         return flow.response.timestamp_end or flow.response.timestamp_start or time.time()
@@ -344,8 +383,8 @@ def _write_detail_file(log_path: str, flow: http.HTTPFlow, error) -> None:
         "id": flow.id,
         "request_headers": list(req.headers.items(multi=True)) if req else [],
         "response_headers": list(resp.headers.items(multi=True)) if resp else [],
-        "request_body": _cap_body(req.raw_content if req else None, max_body),
-        "response_body": _cap_body(resp.raw_content if resp else None, max_body),
+        "request_body": _body_record(req, max_body),
+        "response_body": _body_record(resp, max_body),
         "error": error,
     }
     details_dir = _details_dir(log_path)
@@ -588,7 +627,85 @@ class SandroidLogger:
         except Exception:
             pass
         print(f"[TLS_FAIL]|{_ts()}|{host}|{reason}|{app}", flush=True)
+        _append_tls_failure(host, reason, app)
 
+
+def _append_tls_failure(host: str, reason: str, app: str) -> None:
+    """Persist a TLS handshake failure in flows.jsonl (``kind: "tls"``).
+
+    There is no HTTP flow for it, so it used to exist only as a stdout line:
+    a later session or a reviewed run could not show which hosts pinned.
+    Same write-safety as _append_flow_record; no detail file.
+    """
+    log_path = _flow_log_path()
+    if not log_path:
+        return
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError:
+        return
+    now = time.time()
+    seq = _next_seq(log_path)
+    record = {
+        "seq": seq,
+        "id": f"tls-{seq}",
+        "kind": "tls",
+        "ts_start": now,
+        "ts_end": now,
+        "protocol": "TLS",
+        "method": "TLS",
+        "host": host or "?",
+        "path": "",
+        "status_code": None,
+        "error": f"TLS handshake failed ({reason})",
+        "tls_reason": reason,
+        "request_bytes": 0,
+        "response_bytes": None,
+        "app": app,
+        "request_content_type": None,
+        "response_content_type": None,
+    }
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        return
+    line_count = _line_count_after_append(log_path)
+    _update_meta_on_append(log_path, seq)
+    _maybe_trim(log_path, line_count)
+
+
+def _watch_parent() -> None:
+    """Exit when Sandroid is gone, so mitmweb is never left orphaned.
+
+    SANDROID_PARENT_PID is set by Sandroid when it starts mitmweb. If that
+    process dies without stopping us (SIGKILL, a hard exit), our parent
+    changes; then shut down (SIGTERM, then a hard exit).
+    """
+    try:
+        parent = int(os.environ.get("SANDROID_PARENT_PID") or 0)
+    except ValueError:
+        parent = 0
+    if parent <= 0 or not hasattr(os, "getppid"):
+        return
+    import signal
+    import threading
+
+    def _run() -> None:
+        while os.getppid() == parent:
+            time.sleep(2.0)
+        print("[INFO] Sandroid is gone; mitmweb exits", flush=True)
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            pass
+        time.sleep(5.0)
+        os._exit(0)
+
+    threading.Thread(target=_run, name="sandroid-parent-watch", daemon=True).start()
+
+
+_watch_parent()
 
 addons = [SandroidLogger()]
 '''
@@ -791,6 +908,37 @@ def _find_mitmweb() -> str | None:
     return str(sibling) if sibling.exists() else None
 
 
+def _web_password_supported(binary: str) -> bool:
+    """Whether ``binary`` is a mitmweb that knows ``--set web_password``.
+
+    mitmweb >= 11.1 protects its UI with a token (a URL without it is 403).
+    Only a mitmweb from this Python environment can be version-checked
+    without running it; for any other one the option is not passed (an
+    unknown option would stop mitmweb from starting).
+    """
+    try:
+        from importlib.metadata import version
+
+        parts = version("mitmproxy").split(".")
+        major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except Exception:
+        return False
+    if (major, minor) < (11, 1):
+        return False
+    prefix = os.path.abspath(sys.prefix) + os.sep
+    return os.path.abspath(binary).startswith(prefix)
+
+
+def _hash_web_password(token: str) -> str:
+    """argon2 hash of the UI token (so ``ps`` never shows it), else the token."""
+    try:
+        from argon2 import PasswordHasher
+
+        return PasswordHasher().hash(token)
+    except Exception:
+        return token
+
+
 class MitmproxyService:
     """Manages a single mitmweb subprocess.
 
@@ -829,6 +977,10 @@ class MitmproxyService:
         self._owned_device_proxy: str | None = None
         # Serial of the device that proxy was set on (cleanup targets it).
         self._owned_device_proxy_serial: str | None = None
+        # Token for mitmweb's web UI (None: not set by us / not supported).
+        self._web_token: str | None = None
+        # True when mitmweb runs in its own process group (killed as one).
+        self._own_group = False
         atexit.register(self._atexit_cleanup)
 
     @property
@@ -1186,6 +1338,16 @@ class MitmproxyService:
         Returns:
             A :class:`ReachabilityResult`.
         """
+        from sandroid.core.adb_utils import quiet_adb_warnings
+
+        with quiet_adb_warnings():
+            return self._probe_device_reachability(
+                host, port, timeout=timeout, listen_timeout=listen_timeout
+            )
+
+    def _probe_device_reachability(
+        self, host: str, port: int, *, timeout: int, listen_timeout: float
+    ) -> ReachabilityResult:
         from sandroid.core.adb import Adb
         from sandroid.core.adb_utils import device_shell_command
 
@@ -1315,16 +1477,18 @@ class MitmproxyService:
             True once settled, False when ``timeout`` passed first.
         """
         from sandroid.core.adb import Adb
+        from sandroid.core.adb_utils import quiet_adb_warnings
 
         deadline = time.monotonic() + timeout
         good = 0
         while True:
             ready = False
             try:
-                boot, _ = Adb.send_adb_command("shell getprop sys.boot_completed")
-                if (boot or "").strip() == "1":
-                    pm_out, _ = Adb.send_adb_command("shell pm path android")
-                    ready = "package:" in (pm_out or "")
+                with quiet_adb_warnings():
+                    boot, _ = Adb.send_adb_command("shell getprop sys.boot_completed")
+                    if (boot or "").strip() == "1":
+                        pm_out, _ = Adb.send_adb_command("shell pm path android")
+                        ready = "package:" in (pm_out or "")
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("settle poll failed: %s", exc)
             good = good + 1 if ready else 0
@@ -1398,8 +1562,19 @@ class MitmproxyService:
         except ValueError:
             pass
 
-    def web_url(self) -> str:
-        return f"http://{self._state.web_host}:{self._state.web_port}/"
+    def web_url(self, *, with_token: bool = True) -> str:
+        """The mitmweb UI address, with its access token when one is known.
+
+        mitmweb >= 11.1 answers a URL without the token with 403.
+        """
+        base = f"http://{self._state.web_host}:{self._state.web_port}/"
+        if with_token and self._web_token and self.is_running():
+            return f"{base}?token={self._web_token}"
+        return base
+
+    @property
+    def has_web_token(self) -> bool:
+        return bool(self._web_token) and self.is_running()
 
     def start(
         self,
@@ -1480,6 +1655,13 @@ class MitmproxyService:
             ]
             if self._addon_path:
                 cmd += ["-s", self._addon_path]
+            # Our own UI token, so Ctrl+O can open mitmweb already logged in
+            # (otherwise mitmweb prints a random one we never see: 403).
+            self._web_token = None
+            if _web_password_supported(binary):
+                token = secrets.token_urlsafe(18)
+                cmd += ["--set", f"web_password={_hash_web_password(token)}"]
+                self._web_token = token
 
             # Append user-enabled addons AFTER the internal logger so the
             # logger stays first and _read_loop's [FLOW]|/[TLS_FAIL]| parsing
@@ -1511,6 +1693,10 @@ class MitmproxyService:
             flow_log_env = self._resolve_flow_log_env()
 
             try:
+                # Own process group: stop() terminates mitmweb with anything
+                # it spawned, and a terminal signal aimed at Sandroid does not
+                # race our orderly stop. SANDROID_PARENT_PID lets the addon
+                # exit if Sandroid dies without stopping it.
                 self._proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -1520,9 +1706,12 @@ class MitmproxyService:
                     env={
                         **os.environ,
                         "SANDROID_FOCUS_MAP": sidecar_path,
+                        "SANDROID_PARENT_PID": str(os.getpid()),
                         **flow_log_env,
                     },
+                    start_new_session=os.name == "posix",
                 )
+                self._own_group = os.name == "posix"
             except Exception as exc:
                 self._state.last_error = f"spawn failed: {exc}"
                 logger.exception("Failed to spawn mitmweb")
@@ -1594,20 +1783,59 @@ class MitmproxyService:
             self._emit("[INFO] Stopping mitmweb...")
 
             try:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=1.0)
+                self._terminate(proc, timeout)
             except Exception as exc:
                 logger.warning("Error stopping mitmweb: %s", exc)
             finally:
                 self._proc = None
                 self._state.pid = None
+                self._web_token = None
                 self._cleanup_addon()
 
             self._emit("[INFO] mitmweb stopped")
+
+    def _signal_group(self, proc, sig: int) -> bool:
+        """Signal mitmweb's process group (True) or report it can't (False)."""
+        if not (self._own_group and isinstance(proc, subprocess.Popen)):
+            return False
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (OSError, AttributeError):
+            return False
+        if pgid != proc.pid:  # not the leader of its own group: leave it
+            return False
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            return False
+        return True
+
+    def _terminate(self, proc, timeout: float) -> None:
+        """SIGTERM mitmweb (its whole group), SIGKILL after ``timeout``."""
+        if not self._signal_group(proc, signal.SIGTERM):
+            proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if not self._signal_group(proc, signal.SIGKILL):
+                proc.kill()
+            proc.wait(timeout=1.0)
+
+    def shutdown(self, timeout: float = 2.0) -> None:
+        """Quit-time teardown: device proxy, SSL unpin, mitmweb. Never raises.
+
+        Every quit path (dialog, Ctrl+C/Ctrl+Q, SIGTERM, the exit watchdog)
+        runs this; it is idempotent.
+        """
+        try:
+            self.release_device_proxy()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("release_device_proxy on shutdown failed: %s", exc)
+        try:
+            if self._proc is not None:
+                self.stop(timeout=timeout, release_device_proxy=False)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("mitmweb stop on shutdown failed: %s", exc)
 
     def restart(self, **kwargs) -> bool:
         self.stop(release_device_proxy=False)
@@ -1735,6 +1963,12 @@ class MitmproxyService:
                     self._state.tls_failures += 1
                 elif line.startswith("[FLOW_ERR]|"):
                     self._state.flow_errors += 1
+                elif "?token=" in line and self._web_token is None:
+                    # A mitmweb we could not hand a token (another install)
+                    # prints its own: remember it for Ctrl+O.
+                    token = line.split("?token=", 1)[1].split()[0].strip("/")
+                    if token:
+                        self._web_token = token
                 self._emit(line)
         except Exception as exc:
             logger.debug("mitmweb reader exited: %s", exc)
@@ -1836,15 +2070,7 @@ class MitmproxyService:
 
     def _atexit_cleanup(self) -> None:
         # Never leave the device pointed at a mitmproxy that is about to die.
-        try:
-            self.release_device_proxy()
-        except Exception:
-            pass
-        try:
-            if self.is_running():
-                self.stop(timeout=1.0)
-        except Exception:
-            pass
+        self.shutdown(timeout=1.0)
         self._cleanup_addon()
 
     def _write_addon(self) -> None:

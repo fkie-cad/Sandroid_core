@@ -1054,3 +1054,271 @@ async def test_settings_have_no_default_view_row() -> None:
         assert type(app.screen).__name__ == "SettingsScreen"
         assert not app.screen.query("#setting-analysis--default_view")
         await pilot.press("escape")
+
+
+# --------------------------------------------------------------------------
+# fix round 3: quit paths, thread hand-off, log ticker
+# --------------------------------------------------------------------------
+
+
+async def test_ctrl_q_asks_before_quitting(monkeypatch) -> None:
+    """Textual's own Ctrl+Q quit at once, without the dialog and cleanup."""
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        calls: list[str] = []
+        monkeypatch.setattr(
+            app._quit_controller, "request_quit", lambda: calls.append("ctrl+q")
+        )
+        await pilot.press("ctrl+q")
+        await _settle(pilot)
+        assert calls == ["ctrl+q"]
+        assert app.is_running
+        assert app.return_code is None
+
+
+async def test_quit_dialog_exit_runs_the_cleanup(monkeypatch) -> None:
+    """H1: q -> y called the base exit and skipped force_exit.
+
+    mitmweb and the device proxy stayed behind.
+    """
+    from sandroid.tui.controllers import quit_controller as qc
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        cleaned: list[int] = []
+        monkeypatch.setattr(
+            app._quit_controller, "force_exit", lambda: cleaned.append(1)
+        )
+        monkeypatch.setattr(qc.QuitController, "_quit_notes", staticmethod(list))
+        await pilot.press("q")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        await pilot.press("y")
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if app._exit:
+                break
+        assert cleaned == [1]
+        assert app._exit
+        assert app.return_code == 0
+
+
+async def test_exit_does_not_wait_for_a_hung_cleanup(monkeypatch) -> None:
+    """H1: a friTap agent that cannot unload must not hold the quit up."""
+    import threading
+
+    app = _app()
+    release = threading.Event()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        monkeypatch.setattr(type(app), "QUIT_CLEANUP_BUDGET", 0.3)
+        monkeypatch.setattr(
+            app._quit_controller, "force_exit", lambda: release.wait(10)
+        )
+        app.exit()
+        for _ in range(40):
+            await pilot.pause(0.05)
+            if app._exit:
+                break
+        assert app._exit  # posted although the cleanup still "runs"
+        app.exit()  # a second request while cleaning up: harmless
+    release.set()
+
+
+def test_exit_watchdog_tears_down_and_exits_when_the_quit_hangs(monkeypatch):
+    """H1: with the UI loop stuck, the watchdog still stops mitmweb, clears
+    the device proxy and ends the process -- only when the launcher enabled it.
+    """
+    import threading
+
+    from sandroid.tui.controllers import quit_controller as qc
+
+    exits: list[tuple[int, str]] = []
+    fired = threading.Event()
+
+    def _fake_exit(code: int, why: str) -> None:
+        exits.append((code, why))
+        fired.set()
+
+    monkeypatch.setattr(qc, "_force_process_exit", _fake_exit)
+    monkeypatch.setattr(qc, "EXIT_DEADLINE", 0.1)
+    try:
+        qc.enable_hard_exit(False)
+        assert not qc.arm_exit_watchdog()  # tests / embedders: never armed
+        qc.enable_hard_exit(True)
+        assert qc.arm_exit_watchdog(exit_code=3)
+        assert qc.arm_exit_watchdog()  # idempotent
+        assert fired.wait(5)
+        assert exits[0][0] == 0  # the second arm kept the code (default 0)
+        assert "did not finish" in exits[0][1]
+    finally:
+        qc.enable_hard_exit(False)
+
+
+def test_force_exit_stops_mitmweb_first_and_bounds_hung_steps(monkeypatch):
+    """Every quit path tears down mitmweb + the device proxy first.
+
+    A stuck task stop (friTap agent that cannot unload) is left behind after
+    a timeout.
+    """
+    import threading
+    import time as _time
+
+    from sandroid.services import mitmproxy_service as ms
+    from sandroid.tui.controllers import quit_controller as qc
+
+    order: list[str] = []
+
+    class _Svc:
+        def shutdown(self, timeout=2.0):
+            order.append("mitm")
+
+    monkeypatch.setattr(ms, "_INSTANCE", _Svc())
+    blocker = threading.Event()
+
+    class _Tasks:
+        def stop_all(self):
+            order.append("tasks")
+            blocker.wait(10)
+
+    from sandroid import services
+
+    monkeypatch.setattr(services, "get_task_service", lambda: _Tasks())
+    real_bounded = qc.run_bounded
+    monkeypatch.setattr(
+        qc, "run_bounded", lambda name, fn, timeout: real_bounded(name, fn, 0.2)
+    )
+    started = _time.monotonic()
+    qc.QuitController().force_exit()
+    blocker.set()
+    assert order[:2] == ["mitm", "tasks"]
+    assert _time.monotonic() - started < 5
+
+
+def test_quit_dialog_says_what_quitting_tears_down(monkeypatch):
+    """L15: the dialog did not mention mitmweb or the device proxy."""
+    from types import SimpleNamespace
+
+    from sandroid.services import mitmproxy_service as ms
+    from sandroid.tui.controllers.quit_controller import QuitController
+
+    monkeypatch.setattr(
+        ms,
+        "_INSTANCE",
+        SimpleNamespace(is_running=lambda: True, owned_device_proxy="10.0.2.2:8090"),
+    )
+    notes = QuitController._quit_notes()
+    assert notes[:2] == ["stops mitmweb", "clears the device proxy"]
+
+
+def test_ui_dispatcher_runs_in_the_ui_context_and_reports_once(caplog):
+    import asyncio
+    import contextvars
+    import logging
+    import threading
+
+    from sandroid.tui.utils.ui_thread import UiDispatcher
+
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker")
+    seen: list[str] = []
+
+    def boom() -> None:
+        raise ValueError("x")
+
+    async def main() -> None:
+        marker.set("ui")
+        ui = UiDispatcher.capture()
+        assert ui.bound
+
+        def worker() -> None:
+            ui.post(lambda: seen.append(marker.get("none")))
+            for _ in range(3):
+                ui.post(boom)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.DEBUG, logger="sandroid.tui.utils.ui_thread"):
+        asyncio.run(main())
+    assert seen == ["ui"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert not UiDispatcher().post(lambda: None)  # unbound: nothing scheduled
+
+
+async def test_ticker_shows_human_lines_not_adb_commands() -> None:
+    """M7/M2: the ticker showed raw adb command lines and traceback tails."""
+    from sandroid.tui.widgets import ActivityLog
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        log = ms.query_one("#activity-log", ActivityLog)
+        ticker = ms.query_one("#log-ticker")
+        raw = (
+            "ADB command warning (-s emulator-5554 shell '{ printf "
+            "'\"'\"'GET http://mitm.it/ HTTP/1.1'\"'\"'; sleep 2; }' | toybox nc "
+            "-w 4 10.0.2.2 8090'): nc: connect: Network is unreachable"
+        )
+        log.log_warning(raw)
+        await _settle(pilot)
+        assert "adb: nc: connect: Network is unreachable" in ticker.last_line
+        assert "printf" not in ticker.last_line
+        assert "printf" in "\n".join(log._plain_lines)  # full line in the drawer
+        log.log_error(
+            "Task exception was never retrieved\nTraceback (most recent call "
+            "last):\n  File x\nLookupError: <ContextVar name='active_app'>"
+        )
+        await _settle(pilot)
+        assert "Task exception was never retrieved" in ticker.last_line
+
+
+async def test_recurring_errors_are_folded(monkeypatch) -> None:
+    """M2: one error per network flow drowned the drawer and the ticker."""
+    from sandroid.tui.widgets import ActivityLog
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        log = app.screen.query_one("#activity-log", ActivityLog)
+        before = len(log._plain_lines)
+        for i in range(6):
+            log.log_error(
+                f"Task exception was never retrieved\nfuture: <Task "
+                f"name='set_timer#{i}' at 0x{i:x}ff>\nLookupError: active_app"
+            )
+        assert len(log._plain_lines) == before + 1
+        log.log_error("a different problem")
+        assert len(log._plain_lines) == before + 2
+        monkeypatch.setattr(ActivityLog, "REPEAT_WINDOW", 0.0)
+        log.log_error("Task exception was never retrieved\nLookupError: active_app")
+        assert "+5 more like this" in log._plain_lines[-1]
+
+
+async def test_drawer_focus_offers_no_inspect_and_has_no_hscroll() -> None:
+    """L: a focused log drawer showed "⏎ Inspect"; a stray scrollbar thumb."""
+    from sandroid.tui.widgets import ActivityLog
+
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        await pilot.press("2")  # a lens with an Inspector
+        await _settle(pilot)
+        assert ms.check_action("inspect", ()) is True
+        ms.toggle_log_drawer()
+        await _settle(pilot)
+        log = ms.query_one("#activity-log", ActivityLog)
+        log.focus()
+        await _settle(pilot)
+        assert ms.check_action("inspect", ()) is False
+        assert log.styles.overflow_x == "hidden"
+        log.log_info("x" * 300)
+        await _settle(pilot)
+        assert log.max_scroll_x == 0

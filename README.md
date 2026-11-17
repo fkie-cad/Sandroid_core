@@ -60,7 +60,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 | Key | Lens | What it shows |
 |---|---|---|
 | `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
-| `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters, `T` shows the spotlight (target) app only, `N` shows OS noise (hidden by default). Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
+| `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters (host, path, app or status; `Esc` clears it), `T` shows the spotlight (target) app only, `N` shows OS noise (hidden by default; the caption says how many flows it hides). `Home`/`End` jump to the first/last flow. Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
 | `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. `N` shows the hidden noise (caches, temp files, OS paths), as in the Network lens. |
 | `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |
 
@@ -68,7 +68,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 
 **Snapshots** are a picker, not a tab: `S` (or `0`) lists the AVD's snapshots — create (`c`), load (`Enter`/`l`, confirmed), delete (`d`), assign to a slot (`a`), load slot `1`–`8` (confirmed), and `s` then a digit saves the current state into a slot (8 slots per AVD). `Ctrl+1`–`Ctrl+8` save into a slot directly, but `Ctrl`+digit only reaches Sandroid in terminals with the kitty keyboard protocol (kitty, WezTerm, foot, Ghostty, recent iTerm2).
 
-`?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `D` switches devices and `q` quits. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
+`?` opens the **help & keybinding editor** (every action grouped by category; rebind any key with live conflict detection, persisted to `tui.keybindings`), `Ctrl+Shift+P` opens the **command palette**, `D` switches devices and `q` (or `Ctrl+C` / `Ctrl+Q`) quits after a confirmation; quitting stops mitmweb and friTap and clears the device proxy Sandroid set, and never hangs on a tool that does not stop. Common operations are a single keypress (e.g. `y` proxy settings, `w` network capture, `o` file monitor, `f` frida-server, `s` screenshot, `n` install APK, `Ctrl+P` toggle SSL unpinning).
 
 > The 2.0 "views" (Forensic / Malware / Security, switched with `TAB`) are gone — all actions live in one flat catalog. Fully non-interactive runs are available via `--headless`.
 
@@ -157,7 +157,7 @@ Sandroid can route a target app's traffic through an embedded **mitmproxy** inst
 | `Ctrl+N` | install the mitmproxy CA into the device's **system** trust store |
 | `y` | **Proxy Settings** modal: Device Proxy, **App Proxies** and CA in one place |
 | `Ctrl+R` | restart `mitmweb` and re-apply device + app proxies |
-| `Ctrl+O` / `Ctrl+A` | open the web UI / manage addons |
+| `Ctrl+O` / `Ctrl+A` | open the web UI (already logged in with its access token) / manage addons |
 | `I` | Capture status page (mitmproxy and friTap state, keys, recent messages); mitmproxy's messages also go to the log drawer (`` ` ``) |
 
 Requires `mitmweb` on `PATH` (`pip install mitmproxy`).

@@ -41,7 +41,6 @@ deadlock a publisher on a background thread).
 
 from __future__ import annotations
 
-import contextvars
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +52,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Static
+
+from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from .lens_shell import InspectorContent, is_shown
 from .monitor_view import OPS, FileActivity, PathActivity, app_relative, smart_truncate
@@ -321,6 +322,7 @@ class FilesPanel(Widget):
         self._resume_config: Any = None
         self._event_handlers: list = []
         self._main_loop = None
+        self._ui = UiDispatcher()
 
     # -- compose / mount -----------------------------------------------------
 
@@ -435,29 +437,16 @@ class FilesPanel(Widget):
 
     def _subscribe_events(self) -> None:
         try:
-            import asyncio
-
             from sandroid.core.events import EventBus, EventType
 
-            try:
-                self._main_loop = asyncio.get_running_loop()
-                # Loop callbacks run in the *scheduling* thread's contextvars
-                # context, which lacks Textual's active_app: a set_timer made in
-                # one then failed with LookupError. Run them in the UI context.
-                self._ui_ctx = contextvars.copy_context()
-            except RuntimeError:
-                self._main_loop = None
+            # Thread -> UI hand-off in the UI's contextvars context (see
+            # sandroid.tui.utils.ui_thread: a bare loop callback lacks
+            # Textual's active_app and its timers raised LookupError).
+            self._ui = UiDispatcher.capture()
+            self._main_loop = self._ui.loop
             bus = EventBus.get()
 
-            def _schedule(fn, *args) -> None:
-                loop = self._main_loop
-                try:
-                    if loop is not None and not loop.is_closed():
-                        loop.call_soon_threadsafe(
-                            fn, *args, context=getattr(self, "_ui_ctx", None)
-                        )
-                except RuntimeError:
-                    pass
+            _schedule = self._ui.post
 
             def _output_cb(event) -> None:
                 _schedule(self._on_task_output, event)

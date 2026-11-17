@@ -65,6 +65,70 @@ _REGISTER_WAIT = 5.0
 _INJECTED_PIDS: dict[str, set[int]] = {}
 _INJECTED_LOCK = threading.Lock()
 
+# -- lifecycle ---------------------------------------------------------------
+#
+# The task registry only knows "registered or not": friTap registers after
+# its (slow) attach and unregisters after its (slow) agent unload, so the UI
+# said "stopped" for ~50 s while friTap was starting and "running" for ~20 s
+# after a stop. The phase below follows the real lifecycle; the Network lens
+# shows it and listens for its STATE_CHANGED events (source "fritap").
+
+#: starting -> running (-> hung) -> stopping -> stopped, or -> failed
+FRITAP_PHASES = ("stopped", "starting", "running", "hung", "stopping", "failed")
+_LIFECYCLE = {"phase": "stopped", "detail": ""}
+_LIFECYCLE_LOCK = threading.Lock()
+
+#: Seconds between "is the target app frozen?" checks while friTap runs.
+_ANR_POLL_SECONDS = 8.0
+
+
+def lifecycle() -> tuple[str, str]:
+    """``(phase, detail)`` of friTap, see :data:`FRITAP_PHASES`."""
+    with _LIFECYCLE_LOCK:
+        return _LIFECYCLE["phase"], _LIFECYCLE["detail"]
+
+
+def set_lifecycle(phase: str, detail: str = "") -> None:
+    """Record friTap's phase and tell the UI (STATE_CHANGED, source fritap)."""
+    with _LIFECYCLE_LOCK:
+        if _LIFECYCLE["phase"] == phase and _LIFECYCLE["detail"] == detail:
+            return
+        _LIFECYCLE["phase"] = phase
+        _LIFECYCLE["detail"] = detail
+    try:
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={"component": "fritap", "phase": phase, "detail": detail},
+                source="fritap",
+            )
+        )
+    except Exception as e:
+        logger.debug(f"friTap lifecycle event failed: {e}")
+
+
+def app_not_responding(package: str | None) -> bool | None:
+    """True while Android shows an "isn't responding" dialog for ``package``.
+
+    Reads the window list (``dumpsys window windows``): the ANR dialog is a
+    window titled ``Application Not Responding: <package>``. None when the
+    device could not be asked.
+    """
+    if not package:
+        return None
+    try:
+        from sandroid.core.adb import Adb
+        from sandroid.core.adb_utils import quiet_adb_warnings
+
+        with quiet_adb_warnings():
+            out, _ = Adb.send_adb_command("shell dumpsys window windows", timeout=10)
+    except Exception as e:
+        logger.debug(f"ANR check failed: {e}")
+        return None
+    if not out:
+        return None
+    return f"Application Not Responding: {package}" in out
+
 
 class FriTapTargetError(RuntimeError):
     """The target can't take friTap right now (user-actionable, no traceback)."""
@@ -651,6 +715,7 @@ class FriTap(DataGatherBase):
         summary = _crash_summary(crash)
         self.target_gone = reason
         what = "crashed" if crash else "is gone"
+        set_lifecycle("stopping", f"{package} {what}")
         msg = (
             f"Target {package} (PID {pid}) {what} ({reason}"
             + (f": {summary}" if summary else "")
@@ -713,10 +778,12 @@ class FriTap(DataGatherBase):
         network_started = False
         toolbox = self._get_toolbox()
 
+        self.cancelled = False
         if interactive:
             config = self._interactive_configuration()
             if config is None:
                 logger.info("FriTap configuration cancelled")
+                self.cancelled = True
                 return False
 
             # Log the configured options for diagnostics
@@ -732,6 +799,7 @@ class FriTap(DataGatherBase):
             logger.debug(f"  output_keylog: {config.get('output_keylog', True)}")
             logger.debug(f"  output_json: {config.get('output_json', True)}")
 
+        set_lifecycle("starting", self.app_package or "")
         try:
             # Set up session FIRST (before starting network) to fail fast
             logger.debug("=== FriTap Session Setup Starting ===")
@@ -901,9 +969,12 @@ class FriTap(DataGatherBase):
                     "FriTap sent test message to EventBus for activity log verification"
                 )
 
+            set_lifecycle("running", self.app_package or "")
+            self._start_anr_watch()
             return True
 
         except Exception as e:
+            set_lifecycle("failed", str(e)[:200])
             logger.error(f"Failed to start FriTap: {e}")
             # Shown in the friTap panel, too (it only tails friTap events).
             try:
@@ -963,6 +1034,56 @@ class FriTap(DataGatherBase):
             time.sleep(1)  # let Java.perform settle (same as AFM/JobManager)
         except Exception as e:  # e.g. already running
             logger.debug(f"Resume of {self.process_id} skipped: {e}")
+
+    def _start_anr_watch(self) -> None:
+        """Watch the target for an "isn't responding" freeze while friTap runs.
+
+        friTap's hooks can park an app thread (seen with Wikipedia) and the
+        app then shows an ANR dialog; nothing told the user that friTap was
+        the likely cause until they pressed ``h``. Polls the window list every
+        ``_ANR_POLL_SECONDS`` and, on a freeze, says so once (log + friTap
+        events) and marks the lifecycle ``hung``; it recovers to ``running``
+        when the dialog is gone. It does not stop friTap on its own: stopping
+        unloads the agent, which can itself take the app down.
+        """
+        package = getattr(self, "app_package", None)
+        if not package:
+            return
+
+        def _watch() -> None:
+            frozen = False
+            while not (
+                getattr(self, "_stopping", False) or getattr(self, "_stopped", False)
+            ):
+                time.sleep(_ANR_POLL_SECONDS)
+                if getattr(self, "_stopping", False) or getattr(
+                    self, "_stopped", False
+                ):
+                    return
+                state = app_not_responding(package)
+                if state is None or state == frozen:
+                    continue
+                frozen = state
+                if frozen:
+                    msg = (
+                        f"{package} is not responding while friTap is attached: "
+                        "friTap's hooks may be blocking it. Press h to stop "
+                        "friTap; if the app stays frozen, restart it (App lens "
+                        f"Shift+R) or run: adb shell am force-stop {package}"
+                    )
+                    logger.warning(msg)
+                    try:
+                        _publish_fritap_event(
+                            EventBus.get(), f"[warning]{msg}[/warning]"
+                        )
+                    except Exception:
+                        pass
+                    set_lifecycle("hung", f"{package} is not responding")
+                else:
+                    logger.info(f"{package} responds again")
+                    set_lifecycle("running", package)
+
+        threading.Thread(target=_watch, name="fritap-anr-watch", daemon=True).start()
 
     def target_problem(self) -> str | None:
         """Why the friTap job is not actually capturing, or None if it is.
@@ -1036,10 +1157,13 @@ class FriTap(DataGatherBase):
             if self._stopped or self._stopping:
                 return
             self._stopping = True
+        set_lifecycle("stopping", getattr(self, "app_package", None) or "")
         try:
             self._stop()
         finally:
             self._stopped = True
+            if lifecycle()[0] == "stopping":
+                set_lifecycle("stopped", getattr(self, "_stop_note", "") or "")
 
     def _lock_for_stop(self):
         # Instances built with __new__ (tests) have no lock yet.
@@ -1097,6 +1221,7 @@ class FriTap(DataGatherBase):
                     f"FriTap stopped for {self.app_package} (agent unload "
                     "continues in the background)"
                 )
+                self._stop_note = "agent still unloading"
                 self._watch_hung_unload(
                     getattr(self.job_manager, "_sandroid_pending_teardown", None)
                 )
@@ -1177,6 +1302,7 @@ class FriTap(DataGatherBase):
                 f"{cause} If it does not respond, restart it (Spotlight "
                 f"Shift+R) or run: adb shell am force-stop {package}"
             )
+        set_lifecycle("failed", f"agent stuck in {package}: app frozen")
         logger.warning(msg)
         try:
             _publish_fritap_event(EventBus.get(), f"[warning]{msg}[/warning]")

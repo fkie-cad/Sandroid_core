@@ -503,6 +503,39 @@ def _crash_summary(crash) -> str:
     return str(crash).splitlines()[0][:200] if str(crash) else ""
 
 
+def daemonize_afm_job_threads() -> bool:
+    """Run AndroidFridaManager's per-job threads as daemon threads.
+
+    ``Job.run_job_as_thread`` starts ``invoke_handle_hooking`` as a plain
+    (non-daemon) thread that blocks in ``script.load()`` or its keep-alive
+    loop. When the agent cannot unload (an app thread parked in a hooked
+    SSL call, live with friTap on Wikipedia) that thread never ends, and a
+    non-daemon thread keeps the interpreter from exiting: quitting Sandroid
+    hung. The thread only waits for Frida messages, so a daemon thread loses
+    nothing. Idempotent; returns False if AFM's Job has no such method.
+    """
+    try:
+        from AndroidFridaManager.job import Job
+    except Exception:
+        return False
+    if getattr(Job, "_sandroid_daemon_threads", False):
+        return True
+    if not hasattr(Job, "invoke_handle_hooking"):
+        return False
+
+    def run_job_as_thread(self) -> None:
+        self.thread = threading.Thread(
+            target=self.invoke_handle_hooking,
+            name=f"frida-job-{str(getattr(self, 'job_id', ''))[:8]}",
+            daemon=True,
+        )
+        self.thread.start()
+
+    Job.run_job_as_thread = run_job_as_thread
+    Job._sandroid_daemon_threads = True
+    return True
+
+
 def install_stale_detach_guard(job_manager) -> bool:
     """Make the JobManager ignore ``detached`` signals of its *previous* sessions.
 

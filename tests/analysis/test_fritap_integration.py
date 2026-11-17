@@ -637,3 +637,133 @@ def test_restarted_app_is_not_force_stopped(monkeypatch):
 
     assert adb_calls == ["shell pidof org.wikipedia"]
     assert "Shift+R" in published[0]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (live Network-lens test): lifecycle, freeze watch, quit hang
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _lifecycle_events(monkeypatch):
+    """Capture friTap STATE_CHANGED events; reset the phase afterwards."""
+    from sandroid.core.events import EventBus, EventType
+
+    seen: list[tuple[str, str]] = []
+
+    def _cb(event) -> None:
+        if event.source == "fritap":
+            seen.append((event.data["phase"], event.data["detail"]))
+
+    bus = EventBus.get()
+    bus.subscribe(EventType.STATE_CHANGED, _cb)
+    fritap_mod.set_lifecycle("stopped", "")
+    seen.clear()
+    yield seen
+    bus.unsubscribe(EventType.STATE_CHANGED, _cb)
+    fritap_mod.set_lifecycle("stopped", "")
+
+
+def test_stop_reports_stopping_then_stopped(monkeypatch, _lifecycle_events):
+    """M3: the tab said "running" for ~20 s after h (the unload wait)."""
+    adb_calls, _published = _hung_stop(monkeypatch, mode="attach")
+    phases = [phase for phase, _detail in _lifecycle_events]
+    assert phases[:2] == ["stopping", "stopped"]
+    assert _lifecycle_events[1][1] == "agent still unloading"
+    # ...and the unload that never finished marks the app as frozen.
+    assert fritap_mod.lifecycle()[0] == "failed"
+    assert "app frozen" in fritap_mod.lifecycle()[1]
+
+
+def test_lifecycle_events_only_on_change(_lifecycle_events):
+    fritap_mod.set_lifecycle("starting", "org.wikipedia")
+    fritap_mod.set_lifecycle("starting", "org.wikipedia")
+    fritap_mod.set_lifecycle("running", "org.wikipedia")
+    assert _lifecycle_events == [
+        ("starting", "org.wikipedia"),
+        ("running", "org.wikipedia"),
+    ]
+
+
+def test_app_not_responding_reads_the_anr_window(monkeypatch):
+    from sandroid.core.adb import Adb
+
+    out = {"text": "  Window #5 Window{a u0 Application Not Responding: org.wikipedia}"}
+    monkeypatch.setattr(Adb, "send_adb_command", lambda cmd, *a, **k: (out["text"], ""))
+    assert fritap_mod.app_not_responding("org.wikipedia") is True
+    assert fritap_mod.app_not_responding("com.other") is False
+    out["text"] = ""
+    assert fritap_mod.app_not_responding("org.wikipedia") is None
+    assert fritap_mod.app_not_responding(None) is None
+
+
+def test_freeze_watch_warns_once_and_recovers(monkeypatch, _lifecycle_events):
+    """M3: friTap froze Wikipedia and nothing said so until the stop."""
+    import threading
+    import time as _time
+
+    states = iter([True, True, False])
+    monkeypatch.setattr(fritap_mod, "_ANR_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(
+        fritap_mod, "app_not_responding", lambda pkg: next(states, False)
+    )
+    published = []
+    monkeypatch.setattr(
+        fritap_mod, "_publish_fritap_event", lambda bus, msg: published.append(msg)
+    )
+    ft = fritap_mod.FriTap.__new__(fritap_mod.FriTap)
+    ft.app_package = "org.wikipedia"
+    ft._stopping = ft._stopped = False
+    ft._start_anr_watch()
+    deadline = _time.monotonic() + 3
+    while _time.monotonic() < deadline and ("running", "org.wikipedia") not in (
+        _lifecycle_events
+    ):
+        _time.sleep(0.02)
+    ft._stopped = True
+    for thread in threading.enumerate():
+        if thread.name == "fritap-anr-watch":
+            thread.join(2)
+    assert len(published) == 1
+    assert "not responding while friTap is attached" in published[0]
+    assert "Press h to stop friTap" in published[0]
+    assert [p for p, _ in _lifecycle_events] == ["hung", "running"]
+
+
+def test_cancelled_config_is_not_a_failure(monkeypatch):
+    """L11: Esc in the friTap config logged "Command 'h' failed"."""
+    from sandroid.commands.base import CommandContext
+    from sandroid.commands.network_commands import FriTapCommand
+
+    monkeypatch.setattr(
+        fritap_mod.FriTap, "__init__", lambda self, **kw: setattr(self, "_x", 1)
+    )
+
+    def _start(self, interactive=True):
+        self.cancelled = True
+        return False
+
+    monkeypatch.setattr(fritap_mod.FriTap, "start", _start)
+    ctx = CommandContext(toolbox=object())
+    result = FriTapCommand()._start_fritap(ctx)
+    assert not result.success
+    assert result.error == "cancelled"
+    assert "cancelled" in result.message
+
+
+def test_afm_job_threads_are_daemon_threads():
+    """H1: a non-daemon "invoke_handle_hooking" thread kept the process alive."""
+    import threading
+
+    from AndroidFridaManager.job import Job
+
+    from sandroid.core.frida_manager import daemonize_afm_job_threads
+
+    assert daemonize_afm_job_threads()
+    assert daemonize_afm_job_threads()  # idempotent
+    done = threading.Event()
+    fake = types.SimpleNamespace(job_id="abcdef123456", invoke_handle_hooking=done.set)
+    Job.run_job_as_thread(fake)
+    fake.thread.join(2)
+    assert done.is_set()
+    assert fake.thread.daemon
