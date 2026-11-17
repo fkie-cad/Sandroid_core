@@ -66,12 +66,16 @@ class ProgressUpdate:
         total_runs: Total number of runs configured for the analysis.
         label: Short label for the current phase/step.
         message: Optional human-readable detail message.
+        phase: Short phase name for a status indicator (``"loading
+            snapshot"``, ``"replay 1/2"``, ``"settle"``, ``"collecting"``,
+            ``"dry run"``, ``"analysing"``); empty for plain run boundaries.
     """
 
     run_number: int
     total_runs: int
     label: str
     message: str = ""
+    phase: str = ""
 
 
 @dataclass
@@ -388,6 +392,11 @@ class RunResult:
         pretty_text: Concatenated ``pretty_print`` text from the gatherers.
         per_step_errors: Non-fatal per-step errors captured during the run.
         error: Fatal error message if the run aborted with a partial result.
+        phases: Wall-clock windows of the run's phases, oldest first:
+            ``{"kind": "replay" | "dry_run", "run": n, "start": epoch,
+            "end": epoch}``. A replay window covers the input replay plus its
+            settle time; the dry run window is its noise capture. Used to tag
+            network flows by phase (REVIEW scope).
     """
 
     device_name: str
@@ -404,6 +413,7 @@ class RunResult:
     pretty_text: str = ""
     per_step_errors: list[StepError] = field(default_factory=list)
     error: str | None = None
+    phases: list[dict[str, Any]] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         """Reproduce the exact legacy ``ActionQ.get_data()`` key set.
@@ -514,4 +524,5 @@ class RunResult:
                 "new": len(self.new_files),
                 "deleted": len(self.deleted_files),
             },
+            phases=[dict(p) for p in self.phases],
         )

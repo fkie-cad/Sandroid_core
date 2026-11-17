@@ -916,3 +916,168 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     assert any(
         "SSL unpin" in label and "off" in value for label, value in mitm.status_rows()
     )
+
+
+# --------------------------------------------------------------------------
+# REVIEW: flows stored in the run bundle, tagged by phase (H-6, H-7, M-27)
+# --------------------------------------------------------------------------
+
+
+def _phased_run(tmp_path, base: float, label: str = "Run C") -> Path:
+    """A run whose replay 1 covers flows 3-4 and whose dry run covers 6-7."""
+    run = write_run(tmp_path / "runs" / "20261117_184630_e8fb29", base - 1, base + 70)
+    doc = json.loads((run / "run.json").read_text())
+    doc["label"] = label
+    doc["phases"] = [
+        {"kind": "replay", "run": 1, "start": base + 15, "end": base + 35},
+        {"kind": "dry_run", "run": 2, "start": base + 45, "end": base + 65},
+    ]
+    (run / "run.json").write_text(json.dumps(doc))
+    return run
+
+
+def test_export_run_flows_tags_phases_and_copies_details(tmp_path):
+    from sandroid.core import run_history
+    from sandroid.services.mitmproxy_flow_log import export_run_flows, read_run_flows
+
+    base = time.time() - 1000
+    session = tmp_path / "session" / "mitm_flows"
+    write_flows(session, base)
+    write_flows(session, base + 5000, specs=_SPECS[:1], start_seq=99)  # later
+    run = _phased_run(tmp_path, base)
+    phases = run_history.resolve_scope(str(run)).phases
+    meta = export_run_flows(
+        session, run / "network", base - 1, base + 70, phases, mitm_running=True
+    )
+    assert meta["count"] == len(_SPECS)  # the later flow is not in the window
+    assert meta["per_phase"] == {"setup": 3, "replay 1": 2, "dry run": 2}
+    assert meta["mitm_running"] is True
+    records, stored_meta = read_run_flows(run / "network")
+    assert [r["phase"] for r in records] == [
+        "setup",
+        "setup",
+        "replay 1",
+        "replay 1",
+        "setup",
+        "dry run",
+        "dry run",
+    ]
+    assert stored_meta["count"] == len(_SPECS)
+    # details travel with the rows (headers + capped bodies)
+    assert (run / "network" / "details" / "flow-2.json").is_file()
+
+
+def test_export_run_flows_is_bounded(tmp_path):
+    from sandroid.services.mitmproxy_flow_log import export_run_flows
+
+    base = time.time() - 1000
+    session = tmp_path / "mitm_flows"
+    write_flows(session, base)
+    dest = tmp_path / "run" / "network"
+    meta = export_run_flows(
+        session, dest, base - 1, base + 70, max_flows=3, max_detail_bytes=0
+    )
+    assert meta["count"] == 3
+    assert meta["truncated"] is True
+    assert meta["details_skipped"] == 3
+    assert not (dest / "details").exists()
+    # no flow log at all: still a definitive (empty) record
+    meta = export_run_flows(None, tmp_path / "r2" / "network", 0, 1)
+    assert meta["count"] == 0
+    assert meta["flow_log_present"] is False
+
+
+async def test_review_reads_the_bundle_and_hides_dry_run_flows(flow_dir, tmp_path):
+    """H-6 + H-7: a run reviewed from a *later* session (empty session log)
+    shows its replay flows from the bundle; dry-run and setup flows are
+    hidden and counted, A shows them marked.
+    """
+    from sandroid.core import run_history
+    from sandroid.services.mitmproxy_flow_log import export_run_flows
+
+    base = time.time() - 1000
+    old_session = tmp_path / "old_session" / "mitm_flows"
+    write_flows(old_session, base)
+    run = _phased_run(tmp_path, base)
+    export_run_flows(
+        old_session,
+        run / "network",
+        base - 1,
+        base + 70,
+        run_history.resolve_scope(str(run)).phases,
+    )
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await _boot(app, pilot)
+        await pilot.press("2")
+        await _settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        assert not (flow_dir / "flows.jsonl").exists()  # new session: no flows
+        ms.set_scope(str(run), label="#3 Run C")
+        await _wait(pilot, lambda: not panel._review_loading)
+        await _settle(pilot)
+        assert len(panel._review) == len(_SPECS)
+        assert panel._review_data.source == "bundle"
+        # replay 1 only: api.fittrack.de + app-measurement.com
+        assert panel.table.row_count == 2
+        title, info = ms._lens_captions["network"]
+        assert "flows of the replays" in title
+        assert "A: 2 dry run · 3 setup hidden" in info
+        assert panel.check_action("toggle_phases", ()) is True
+
+        await pilot.press("A")
+        await _settle(pilot)
+        # all phases, OS noise (connectivitycheck, play.googleapis) still hidden
+        assert panel.table.row_count == len(_SPECS) - 2
+        cells = [str(panel.table.get_row_at(i)[2]) for i in range(5)]
+        assert sum(c.startswith("dry ") for c in cells) == 2
+        assert sum(c.startswith("setup ") for c in cells) == 1
+        title, info = ms._lens_captions["network"]
+        assert "all phases" in title
+        # the Inspector names the phase of a dry-run flow
+        panel.table.move_cursor(row=4, animate=False)
+        content = panel.inspect_selected()
+        assert content is not None
+        grid = content.tabs[0][1][0][1]
+        assert "dry run" in [str(c) for c in grid.columns[1]._cells]
+
+
+async def test_review_without_mitm_points_to_the_pcap(flow_dir, tmp_path):
+    """M-27: no flows, but a pcap -- say why and where the traffic is."""
+    from sandroid.services.mitmproxy_flow_log import export_run_flows
+
+    run = write_run(tmp_path / "runs" / "20261117_182433_c52ae2", 100, 200, "Run 1")
+    raw = run / "raw"
+    raw.mkdir()
+    (raw / "network_2.pcap").write_bytes(b"\0" * (1024 * 1100))
+    export_run_flows(flow_dir, run / "network", 100, 200, mitm_running=False)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await _boot(app, pilot)
+        await pilot.press("2")
+        await _settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        ms.set_scope(str(run))
+        await _wait(pilot, lambda: not panel._review_loading)
+        await _settle(pilot)
+        head = str(panel.query_one("#net-empty-head").render())
+        hint = str(panel.query_one("#net-empty-hint").render())
+        assert "mitmproxy was not running during Run 1" in head
+        assert "raw/network_2.pcap" in hint
+        assert "1.1 MB" in hint
+
+
+async def test_review_of_an_old_run_says_where_it_looked(flow_dir, tmp_path):
+    """A run from before in-bundle flows: honest about the session fallback."""
+    run = write_run(tmp_path / "runs" / "r_old", 100, 200, label="Run 1")
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms = await _boot(app, pilot)
+        await pilot.press("2")
+        await _settle(pilot)
+        panel = ms.query_one("#network-panel", NetworkPanel)
+        ms.set_scope(str(run))
+        await _wait(pilot, lambda: not panel._review_loading)
+        await _settle(pilot)
+        hint = str(panel.query_one("#net-empty-hint").render())
+        assert "predates flows stored in its bundle" in hint

@@ -4,6 +4,7 @@ import os
 import threading
 
 from rich.console import RenderableType
+from rich.markup import escape
 from rich.text import Text
 from textual.widgets import Static
 
@@ -78,6 +79,8 @@ class StatusBar(Static):
         # boundary, so render() checks each on its own.
         self.recording_active = False
         self.replay_active = False
+        # Phase of the running Play ("replay 1/2", "dry run", ...), or None.
+        self.replay_phase: str | None = None
         # Glance-band datums (cheap, in-process reads — no ADB):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
@@ -304,7 +307,8 @@ class StatusBar(Static):
         if self.recording_active:
             segs.append(f"[{stop} bold]● RECORDING[/]")
         elif self.replay_active:
-            segs.append(f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING[/]")
+            phase = f" · {escape(self.replay_phase)}" if self.replay_phase else ""
+            segs.append(f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING{phase}[/]")
 
         if self.show_theme_indicator:
             segs.append(f"[{muted}]Theme[/] [{primary}]{self.current_theme}[/]")

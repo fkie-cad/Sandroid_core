@@ -106,6 +106,9 @@ class EngineContext:
         self.action_window_service = action_window_service
         self.run_number: int = 0
         self.screenshot: Any = None
+        #: Optional ``callable(phase: str)`` the engine sets to report a phase
+        #: change from inside a step (e.g. the replay's settle wait).
+        self.on_phase: Any = None
 
 
 class Step:
@@ -301,6 +304,8 @@ class ActionStep(Step):
         settle = _replay_settle_seconds(ctx.config)
         if settle <= 0:
             return
+        if callable(getattr(ctx, "on_phase", None)):
+            ctx.on_phase(f"settle {settle}s")
         logger.info(
             "Replay done, letting the app settle for %ds "
             "(analysis.replay_settle_seconds)",
@@ -813,6 +818,7 @@ class AnalysisEngine:
         """
         self.config = config
         self._progress = progress
+        self._last_phase = ""
         self._forensic_arg = forensic_service
         self._action_window_arg = action_window_service
         self._toolbox_arg = toolbox
@@ -1042,7 +1048,9 @@ class AnalysisEngine:
 
     # ---- progress + events -------------------------------------------------
 
-    def _emit_progress(self, run_number: int, label: str, message: str = "") -> None:
+    def _emit_progress(
+        self, run_number: int, label: str, message: str = "", phase: str = ""
+    ) -> None:
         """Invoke the progress callback if one was supplied."""
         if self._progress is None:
             return
@@ -1053,6 +1061,7 @@ class AnalysisEngine:
                     total_runs=self.config.number_of_runs,
                     label=label,
                     message=message,
+                    phase=phase,
                 )
             )
         except Exception as exc:
@@ -1119,6 +1128,7 @@ class AnalysisEngine:
             plan = AnalysisPlan.build(self.config, self.gatherers)
             self._execute_plan(plan, ctx, result)
 
+            self._emit_phase(self.config.number_of_runs + 2, "analysing")
             self._materialize(result)
             self._finalize(result)
 
@@ -1139,16 +1149,57 @@ class AnalysisEngine:
         except Exception as exc:
             logger.warning("Could not set whitelist path: %s", exc)
 
+    #: Status-indicator phase per step kind (see :meth:`_phase_for`).
+    _PHASES: ClassVar[dict[str, str]] = {
+        "load_snapshot": "loading snapshot",
+        "baseline": "baseline scan",
+        "gather": "collecting results",
+        "pull": "collecting results",
+        "dry_run_begin": "dry run",
+        "dry_run_sleep": "dry run",
+    }
+
+    def _phase_for(self, step: Step) -> str | None:
+        """Short phase name shown while ``step`` runs (None: keep the last)."""
+        if step.kind == "action":
+            total = self.config.number_of_runs
+            return f"replay {step.run_number}/{total}"
+        return self._PHASES.get(step.kind)
+
+    def _emit_phase(self, run_number: int, phase: str) -> None:
+        """Report a phase change once (``ProgressUpdate.phase``)."""
+        if not phase or phase == self._last_phase:
+            return
+        self._last_phase = phase
+        self._emit_progress(run_number, phase, phase=phase)
+
     def _execute_plan(
         self, plan: list[Step], ctx: EngineContext, result: RunResult
     ) -> None:
-        """Run the plan with per-step error isolation + run-boundary events."""
+        """Run the plan with per-step error isolation + run-boundary events.
+
+        Also records the wall-clock window of every replay (action step,
+        settle included) and of the dry run's capture in ``result.phases``,
+        so captured network flows can be attributed to a phase later.
+        """
         last_run: int | None = None
+        self._last_phase = ""
+        ctx.on_phase = lambda phase: self._emit_phase(ctx.run_number, phase)
         for step in plan:
             if step.run_number != last_run:
                 self._run_boundary(step.run_number)
                 last_run = step.run_number
             ctx.run_number = step.run_number
+            phase = self._phase_for(step)
+            if phase:
+                self._emit_phase(step.run_number, phase)
+            window_kind = None
+            if step.kind == "action":
+                action = getattr(step, "action", None)
+                window_kind = "replay" if action is not None else "capture"
+            elif step.kind == "dry_run_sleep":
+                window_kind = "dry_run"
+            started = time.time()
             try:
                 if step.path_sensitive:
                     self._guard_device()
@@ -1166,6 +1217,16 @@ class AnalysisEngine:
                     )
                 )
                 logger.warning("Step %s failed: %s", step.label, exc)
+            finally:
+                if window_kind is not None:
+                    result.phases.append(
+                        {
+                            "kind": window_kind,
+                            "run": step.run_number,
+                            "start": round(started, 3),
+                            "end": round(time.time(), 3),
+                        }
+                    )
 
     # ---- result materialization -------------------------------------------
 

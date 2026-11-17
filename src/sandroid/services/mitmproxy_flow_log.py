@@ -462,11 +462,178 @@ def clear_flows(flow_dir: Path) -> int:
     return cleared_count
 
 
+# --------------------------------------------------------------------------
+# Run bundles: a run's own copy of its flows
+# --------------------------------------------------------------------------
+
+#: Name of the summary written next to a run's exported ``flows.jsonl``.
+RUN_FLOWS_META = "meta.json"
+#: At most this many flows are copied into one run bundle.
+EXPORT_MAX_FLOWS = 5000
+#: At most this many bytes of ``details/*.json`` are copied into one bundle
+#: (each detail is already body-capped by the addon,
+#: ``mitmproxy.max_captured_body_bytes``); later flows keep their row only.
+EXPORT_MAX_DETAIL_BYTES = 64 * 1024 * 1024
+
+
+def _record_time(rec: dict[str, Any], key: str) -> float | None:
+    value = rec.get(key)
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def export_run_flows(
+    flow_dir: Path | None,
+    dest_dir: Path,
+    start: float,
+    end: float,
+    phases: Any = (),
+    *,
+    mitm_running: bool | None = None,
+    margin: float = 2.0,
+    max_flows: int = EXPORT_MAX_FLOWS,
+    max_detail_bytes: int = EXPORT_MAX_DETAIL_BYTES,
+) -> dict[str, Any]:
+    """Copy the flows of one run into its bundle (``<bundle>/network/``).
+
+    The session's flow log (``<raw_results>/mitm_flows``) is per session; a
+    run reviewed from a later session could not see its flows, and they were
+    not covered by the run's ``SHA256SUMS``. At run finalisation (before the
+    hash manifest is written) the records whose ``ts_end`` lies in
+    ``[start - margin, end + margin]`` are written to
+    ``dest_dir/flows.jsonl`` -- each tagged with the ``"phase"`` its
+    ``ts_start`` falls in (``run_history.phase_of``: ``"replay N"``,
+    ``"dry run"``, ``"setup"``) -- together with their ``details/<id>.json``
+    (headers + already capped bodies). TLS failure records (``kind: "tls"``)
+    are copied as well. ``meta.json`` summarises the export, also when no
+    flow was captured, so REVIEW can say so instead of guessing.
+
+    Bounded: at most ``max_flows`` rows and ``max_detail_bytes`` of detail
+    files (``meta.json`` notes any truncation).
+
+    Args:
+        flow_dir: The session's ``mitm_flows`` directory (None: no flow log).
+        dest_dir: Target folder inside the run bundle.
+        start: Run start (epoch seconds).
+        end: Run end (epoch seconds).
+        phases: The run's phase windows (``RunRecord.phases``).
+        mitm_running: Whether mitmproxy ran during the run (None: unknown).
+        margin: Seconds added on both sides of the window.
+        max_flows: Row cap.
+        max_detail_bytes: Byte cap for copied detail files.
+
+    Returns:
+        The ``meta.json`` content.
+    """
+    import shutil
+
+    from sandroid.core.run_history import phase_of
+
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    lo, hi = start - margin, end + margin
+    records: list[dict[str, Any]] = []
+    log_present = False
+    if flow_dir is not None and _log_path(flow_dir).is_file():
+        log_present = True
+        all_records, _ = _read_records(_log_path(flow_dir), 0)
+        for rec in all_records:
+            ts = _record_time(rec, "ts_end")
+            if ts is None:
+                ts = _record_time(rec, "ts_start")
+            if ts is not None and lo <= ts <= hi:
+                records.append(rec)
+    truncated = len(records) > max_flows
+    records = records[:max_flows]
+
+    per_phase: dict[str, int] = {}
+    detail_bytes = 0
+    details_skipped = 0
+    details_src = _details_dir(flow_dir).resolve() if flow_dir is not None else None
+    details_dst = dest_dir / "details"
+    with open(_log_path(dest_dir), "w", encoding="utf-8") as out:
+        for rec in records:
+            ts = _record_time(rec, "ts_start") or _record_time(rec, "ts_end")
+            phase = phase_of(ts, phases)
+            row = {**rec, "phase": phase} if phase else dict(rec)
+            per_phase[phase or "unknown"] = per_phase.get(phase or "unknown", 0) + 1
+            out.write(json.dumps(row, default=str) + "\n")
+            flow_id = rec.get("id")
+            if (
+                details_src is None
+                or rec.get("kind") == "tls"
+                or not isinstance(flow_id, str)
+                or not flow_id
+                or Path(flow_id).name != flow_id
+            ):
+                continue
+            src = (details_src / f"{flow_id}.json").resolve()
+            if not src.is_relative_to(details_src) or not src.is_file():
+                continue
+            try:
+                size = src.stat().st_size
+            except OSError:
+                continue
+            if detail_bytes + size > max_detail_bytes:
+                details_skipped += 1
+                continue
+            details_dst.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(src, details_dst / src.name)
+                detail_bytes += size
+            except OSError:
+                details_skipped += 1
+
+    meta = {
+        "schema": "sandroid-run-flows/1",
+        "source": str(flow_dir) if flow_dir is not None else None,
+        "flow_log_present": log_present,
+        "mitm_running": mitm_running,
+        "window": [lo, hi],
+        "count": len(records),
+        "truncated": truncated,
+        "per_phase": per_phase,
+        "details_bytes": detail_bytes,
+        "details_skipped": details_skipped,
+    }
+    with open(dest_dir / RUN_FLOWS_META, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    return meta
+
+
+def read_run_flows(
+    bundle_network_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    """``(records, meta)`` stored in a run bundle, or None (none stored).
+
+    ``records`` are capped at :data:`HARD_LIMIT_CAP` (newest kept), like any
+    other query.
+    """
+    meta_path = Path(bundle_network_dir) / RUN_FLOWS_META
+    if not meta_path.is_file():
+        return None
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    records, _ = _read_records(_log_path(Path(bundle_network_dir)), 0)
+    return records[-HARD_LIMIT_CAP:], meta
+
+
 __all__ = [
+    "EXPORT_MAX_FLOWS",
     "HARD_LIMIT_CAP",
+    "RUN_FLOWS_META",
     "clear_flows",
+    "export_run_flows",
     "query_flows",
     "read_flow_detail",
     "read_meta",
+    "read_run_flows",
     "resolve_flow_dir",
 ]

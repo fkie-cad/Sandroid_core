@@ -39,10 +39,16 @@ their state in the caption (``mitm ● :<port> · device ✓ · CA ✓ · friTap
 and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
 
-REVIEW scope: ``on_scope_changed`` loads the run's flows -- run bundles do
-not store flows, so the session log is filtered to the run's time window
-(``run_history.resolve_scope``: Play press -> end of analysis), which the
-caption says. ``L`` (MainScreen) returns to LIVE.
+REVIEW scope: ``on_scope_changed`` loads the run's flows from its bundle
+(``<run>/network/flows.jsonl``, written at run finalisation and covered by the
+run's ``SHA256SUMS``; each record carries the ``phase`` it happened in). Runs
+from before in-bundle flows fall back to the session's flow log filtered by
+the run's time window (only works in the session that ran it), which the
+caption says. Flows of the replays are shown; the dry run (noise baseline) and
+setup phases (snapshot loads, baseline scan, collecting results) are hidden
+and counted, ``A`` shows them marked ``dry``/``setup``. With no flows the
+empty state says why (mitmproxy off, none captured, pre-bundle run) and
+points to the run's pcap. ``L`` (MainScreen) returns to LIVE.
 """
 
 from __future__ import annotations
@@ -369,6 +375,9 @@ class FlowRow:
     reason: str = ""
     #: A flow-log TLS row already matched with its mitmweb stdout line.
     paired: bool = False
+    #: Phase of the reviewed run the flow belongs to ("replay 1", "dry run",
+    #: "setup"); "" when unknown (live rows, runs without phase data).
+    phase: str = ""
 
     @classmethod
     def from_record(cls, rec: dict[str, Any], flow_dir: Path | None) -> FlowRow:
@@ -386,6 +395,7 @@ class FlowRow:
                 seq=seq,
                 kind="tls",
                 reason=str(rec.get("tls_reason") or "tls"),
+                phase=str(rec.get("phase") or ""),
             )
         return cls(
             key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
@@ -405,6 +415,7 @@ class FlowRow:
             seq=seq,
             flow_id=rec.get("id"),
             flow_dir=flow_dir,
+            phase=str(rec.get("phase") or ""),
         )
 
     @property
@@ -446,6 +457,46 @@ def _run_window(scope: str) -> tuple[str, float | None, float | None] | None:
     if start is not None and end is not None:
         end = max(start, end)
     return run.label, start, end
+
+
+#: Phases of a reviewed run hidden by default (``A`` shows them).
+HIDDEN_PHASES = ("dry run", "setup")
+
+
+def _phase_tag(phase: str) -> str:
+    """Short marker in the Request cell for a hidden-by-default phase."""
+    return {"dry run": "dry", "setup": "setup"}.get(phase, "")
+
+
+def run_pcaps(run_dir: Path | None) -> list[tuple[str, int]]:
+    """``[(path relative to the run folder, bytes)]`` of the run's pcaps."""
+    if run_dir is None:
+        return []
+    out: list[tuple[str, int]] = []
+    try:
+        for path in sorted(Path(run_dir).rglob("*.pcap*")):
+            if path.is_file():
+                out.append((path.relative_to(run_dir).as_posix(), path.stat().st_size))
+    except OSError:
+        pass
+    return out
+
+
+@dataclass
+class ReviewData:
+    """What ``NetworkPanel.load_run_flows`` found for a reviewed run."""
+
+    rows: list[FlowRow]
+    #: "bundle" (the run's own flows), "window" (session log, old run) or a
+    #: reason the run could not be read.
+    source: str
+    window: tuple[float, float] | None
+    label: str | None
+    #: The bundle's ``network/meta.json`` (None: no flows stored in it).
+    meta: dict[str, Any] | None = None
+    pcaps: list[tuple[str, int]] | None = None
+    run_dir: Path | None = None
+    phases_known: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -609,6 +660,7 @@ class NetworkPanel(Widget):
         Binding("ctrl+v", "mitm('toggle_verbose')", "Verbose plumbing", show=False),
         Binding("ctrl+l", "clear_view", "Clear view", show=False),
         Binding("ctrl+f", "fritap_output", "friTap output", show=False),
+        Binding("A", "toggle_phases", "Review: show dry-run/setup flows", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -702,6 +754,11 @@ class NetworkPanel(Widget):
         self._review_note = ""
         self._review_window: tuple[float, float] | None = None
         self._review_loading = False
+        self._review_data: ReviewData | None = None
+        #: Show the reviewed run's dry-run / setup flows too (``A``).
+        self._show_all_phases = False
+        #: Rows hidden only because of their phase (caption counts them).
+        self._phase_hidden: dict[str, int] = {}
         # view state
         self._filter = ""
         self._app_only = False
@@ -986,6 +1043,8 @@ class NetworkPanel(Widget):
 
     def _passes(self, row: FlowRow, *, noise: bool = True) -> bool:
         """Whether ``row`` is shown (``noise=False``: ignore the noise filter)."""
+        if self.in_review and not self._show_all_phases and row.phase in HIDDEN_PHASES:
+            return False
         if self._app_only and self._focus_app and row.app != self._focus_app:
             return False
         if (
@@ -1015,6 +1074,16 @@ class NetworkPanel(Widget):
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
         return hay.lower()
+
+    def _count_phase_hidden(self) -> dict[str, int]:
+        """``{phase: n}`` of reviewed rows hidden only by the phase filter."""
+        if not self.in_review or self._show_all_phases:
+            return {}
+        out: dict[str, int] = {}
+        for row in self._review:
+            if row.phase in HIDDEN_PHASES:
+                out[row.phase] = out.get(row.phase, 0) + 1
+        return out
 
     def _count_noise(self, rows: list[FlowRow]) -> int:
         """How many of ``rows`` the noise filter alone hides."""
@@ -1062,7 +1131,15 @@ class NetworkPanel(Widget):
             status = Text("✗ TLS", style="bold #fb7185")
             size = Text("")
         else:
-            req = smart_request(row.method, row.host, row.path, req_w)
+            tag = _phase_tag(row.phase) if self.in_review else ""
+            if tag:
+                req = Text(no_wrap=True, overflow="ellipsis")
+                req.append(f"{tag} ", style="#fbbf24")
+                req.append_text(
+                    smart_request(row.method, row.host, row.path, req_w - len(tag) - 1)
+                )
+            else:
+                req = smart_request(row.method, row.host, row.path, req_w)
             if row.error:
                 status = Text(f"✗ {_short_error(row.error)}", style="#fb7185")
             elif row.status is None:
@@ -1115,6 +1192,7 @@ class NetworkPanel(Widget):
         layout = self._columns(table)
         rows = [r for r in self._model() if self._passes(r)]
         self._noise_hidden = self._count_noise(self._model())
+        self._phase_hidden = self._count_phase_hidden()
         for row in rows:
             table.add_row(*self._cells(row, layout), key=row.key)
         self._shown = len(rows)
@@ -1247,21 +1325,55 @@ class NetworkPanel(Widget):
             if self._review_loading:
                 return f"Loading the flows of {label}…", ""
             if self._review_window is not None:
-                a, b = self._review_window
-                span = (
-                    time.strftime("%H:%M:%S", time.localtime(a))
-                    + "–"
-                    + time.strftime("%H:%M:%S", time.localtime(b))
-                )
-                return (
-                    f"No flows were captured during {label}",
-                    f"looked for flows between {span} · L back to LIVE",
-                )
+                return self._review_empty_text(label)
             return f"No flow data for {label}", self._review_note
         mitm = self.mitm
         if mitm is None:
             return "No flows yet", ""
         return mitm.empty_hint()
+
+    def _review_empty_text(self, label: str) -> tuple[str, str]:
+        """Why a reviewed run shows no flows, and where its network data is."""
+        data = self._review_data
+        meta = (data.meta if data is not None else None) or {}
+        pcaps = (data.pcaps if data is not None else None) or []
+        hints: list[str] = []
+        if pcaps:
+            rel, size = max(pcaps, key=lambda p: p[1])
+            more = f" (+{len(pcaps) - 1} more)" if len(pcaps) > 1 else ""
+            hints.append(
+                f"its packet capture: {escape(rel)} · {human_size(size)}{more} "
+                "(Runs ⏎ → Report shows the folder; open it in Wireshark)"
+            )
+        hints.append("L back to LIVE")
+        if self._phase_hidden and not self._show_all_phases:
+            n = sum(self._phase_hidden.values())
+            return (
+                f"No flows during the replays of {label}",
+                f"A shows {n} dry-run / setup flow"
+                + ("s" if n != 1 else "")
+                + " · "
+                + " · ".join(hints),
+            )
+        if data is not None and data.source == "bundle":
+            if meta.get("mitm_running") is False:
+                head = f"mitmproxy was not running during {label}"
+            else:
+                head = f"No flows were captured during {label}"
+        else:
+            a, b = self._review_window or (0.0, 0.0)
+            span = (
+                time.strftime("%H:%M:%S", time.localtime(a))
+                + "–"
+                + time.strftime("%H:%M:%S", time.localtime(b))
+            )
+            head = f"No flows were captured during {label}"
+            hints.insert(
+                0,
+                f"this run predates flows stored in its bundle; this session's "
+                f"flow log has none between {span}",
+            )
+        return head, " · ".join(hints)
 
     # -- status / caption ----------------------------------------------------
 
@@ -1299,9 +1411,14 @@ class NetworkPanel(Widget):
         return title
 
     def _review_note_short(self) -> str:
-        if self._review_window is not None:
-            return "flows in the run's time window"
-        return ""
+        if self._review_window is None:
+            return ""
+        data = self._review_data
+        if data is not None and data.source == "bundle":
+            if not data.phases_known:
+                return "flows stored with the run"
+            return "all phases" if self._show_all_phases else "flows of the replays"
+        return "flows in the run's time window (session log)"
 
     def _caption_info(self) -> str:
         total = len(self._model())
@@ -1318,6 +1435,13 @@ class NetworkPanel(Widget):
             parts.append("+ OS noise")
         elif self._noise_hidden:
             parts.append(f"N: {self._noise_hidden} OS noise hidden")
+        if self.in_review and self._phase_hidden:
+            hidden = " · ".join(
+                f"{n} {phase}" for phase, n in sorted(self._phase_hidden.items())
+            )
+            parts.append(f"A: {hidden} hidden")
+        elif self.in_review and self._show_all_phases:
+            parts.append("+ dry run/setup")
         if self._filter:
             parts.append(f"“{escape(self._filter)}”")
         if self._shown:
@@ -1367,6 +1491,8 @@ class NetworkPanel(Widget):
         self._review = []
         self._review_window = None
         self._review_note = ""
+        self._review_data = None
+        self._show_all_phases = False
         if run_id is None:
             self._review_loading = False
             self._rebuild()
@@ -1390,30 +1516,59 @@ class NetworkPanel(Widget):
             result = self.load_run_flows(run_id)
         except Exception:
             logger.debug("network review load failed", exc_info=True)
-            result = ([], "", None, None)
+            result = ReviewData([], "", None, None)
         try:
             self.app.call_from_thread(self._apply_review, run_id, result)
         except Exception:
             pass
 
-    def load_run_flows(
-        self, run_id: str
-    ) -> tuple[list[FlowRow], str, tuple[float, float] | None, str | None]:
-        """``(rows, source, window, label)`` of a run (any thread).
+    def load_run_flows(self, run_id: str) -> ReviewData:
+        """The flows of a reviewed run (any thread).
 
-        Run bundles do not store flows, so the session's ``flows.jsonl`` is
-        filtered by the run's time window (Play press -> end of analysis,
-        from ``run_history.resolve_scope``); ``source`` is ``"window"`` then,
-        or a short reason when the run or its times are unknown.
+        The run bundle's own copy (``<run>/network/``, phase-tagged) wins;
+        older runs fall back to the session's ``flows.jsonl`` filtered by the
+        run's time window (Play press -> end of analysis, from
+        ``run_history.resolve_scope``), tagged with the run's phases when it
+        has them. The run's pcap files are listed for the empty state.
         """
-        from sandroid.services.mitmproxy_flow_log import HARD_LIMIT_CAP, query_flows
+        from sandroid.core import run_history
+        from sandroid.services.mitmproxy_flow_log import (
+            HARD_LIMIT_CAP,
+            query_flows,
+            read_run_flows,
+        )
 
-        window = _run_window(run_id)
-        if window is None:
-            return [], "this run's record could not be read", None, None
-        label, start, end = window
+        run = run_history.resolve_scope(run_id)
+        if run is None:
+            return ReviewData([], "this run's record could not be read", None, None)
+        label = run.label
+        start = run.started_at.timestamp() if run.started_at else None
+        end = run.ended_at.timestamp() if run.ended_at else start
+        pcaps = run_pcaps(run.run_dir)
+        phases = list(run.phases)
+        net_dir = run.run_dir / run_history.NETWORK_DIR_NAME
+        stored = read_run_flows(net_dir)
+        if stored is not None:
+            records, meta = stored
+            rows = [FlowRow.from_record(r, net_dir) for r in records]
+            window = meta.get("window")
+            if not (isinstance(window, list) and len(window) == 2):
+                window = [start or 0.0, end or start or 0.0]
+            return ReviewData(
+                rows,
+                "bundle",
+                (float(window[0]), float(window[1])),
+                label,
+                meta=meta,
+                pcaps=pcaps,
+                run_dir=run.run_dir,
+                phases_known=bool(phases),
+            )
         if start is None or end is None:
-            return [], "no start/end time recorded for this run", None, label
+            return ReviewData(
+                [], "no start/end time recorded for this run", None, label, pcaps=pcaps
+            )
+        end = max(start, end)
         start -= 2.0
         end += 2.0
         flow_dir = _flow_dir()
@@ -1426,13 +1581,28 @@ class NetworkPanel(Widget):
                 limit=HARD_LIMIT_CAP,
             )
             rows = [FlowRow.from_record(r, flow_dir) for r in res["flows"]]
-        return rows, "window", (start, end), label
+        for row in rows:
+            row.phase = run_history.phase_of(row.ts_start or row.ts, phases)
+        return ReviewData(
+            rows,
+            "window",
+            (start, end),
+            label,
+            pcaps=pcaps,
+            run_dir=run.run_dir,
+            phases_known=bool(phases),
+        )
 
-    def _apply_review(self, run_id: str, result) -> None:
+    def _apply_review(self, run_id: str, result: ReviewData) -> None:
         if run_id != self._scope:
             return  # the scope moved on while loading
-        rows, source, window, label = result
-        if window is not None:
+        rows, source, window, label = (
+            result.rows,
+            result.source,
+            result.window,
+            result.label,
+        )
+        if window is not None and source == "window":
             a, b = window
             # stdout-only TLS rows (not in the flow log: older mitmweb addon)
             rows = rows + [
@@ -1446,6 +1616,7 @@ class NetworkPanel(Widget):
         self._review = rows[-self.MAX_ROWS :]
         self._review_note = source
         self._review_window = window
+        self._review_data = result
         self._review_loading = False
         self._rebuild(to_top=True)
         self._do_refresh_status()
@@ -1516,6 +1687,14 @@ class NetworkPanel(Widget):
         if row.app:
             grid.add_row("app", Text(row.app))
         grid.add_row("time", when)
+        if row.phase and self.in_review:
+            grid.add_row(
+                "phase",
+                Text(
+                    row.phase,
+                    style="#fbbf24" if row.phase in HIDDEN_PHASES else "",
+                ),
+            )
         if row.error:
             grid.add_row("result", Text(f"✗ {row.error}", style="#fb7185"))
         elif row.status is not None:
@@ -1622,6 +1801,8 @@ class NetworkPanel(Widget):
         if action == "start_stop":
             # Only while nothing is captured; with rows Enter inspects.
             return not self.in_review and not self._model()
+        if action == "toggle_phases":
+            return self.in_review
         if action in ("filter", "toggle_app_only"):
             # Nothing to filter yet: hidden, so the footer shows ^D instead.
             return bool(self._model())
@@ -1673,6 +1854,14 @@ class NetworkPanel(Widget):
             )
             return
         self._app_only = not self._app_only
+        self._rebuild()
+        self._do_refresh_status()
+
+    def action_toggle_phases(self) -> None:
+        """REVIEW: show / hide the run's dry-run and setup flows."""
+        if not self.in_review:
+            return
+        self._show_all_phases = not self._show_all_phases
         self._rebuild()
         self._do_refresh_status()
 

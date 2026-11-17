@@ -112,6 +112,10 @@ class RunRecord:
     new_files: list[str] = field(default_factory=list)
     deleted_files: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    #: Wall-clock phase windows (``RunResult.phases``): ``{"kind": "replay" |
+    #: "dry_run", "run": n, "start": epoch, "end": epoch}``. Empty for runs
+    #: recorded before phases were stored.
+    phases: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -507,6 +511,12 @@ def is_run_count_high(device_name: str | None = None) -> bool:
 #: Results JSON written into every run bundle by ``run_report.finalize_run``.
 RESULTS_JSON_NAME = "sandroid.json"
 
+#: Folder inside a run bundle holding the run's own copy of its mitmproxy
+#: flows (``flows.jsonl`` + ``details/`` + ``meta.json``), written at run
+#: finalisation (``mitmproxy_flow_log.export_run_flows``) and covered by the
+#: bundle's ``SHA256SUMS``.
+NETWORK_DIR_NAME = "network"
+
 
 @dataclass(frozen=True)
 class FileDiffRow:
@@ -532,6 +542,8 @@ class ScopedRun:
     started_at: datetime | None
     ended_at: datetime | None
     error: str | None = None
+    #: Phase windows (see :attr:`RunRecord.phases`); empty for older runs.
+    phases: tuple[dict[str, Any], ...] = ()
 
 
 def scope_for_run(run_id: str) -> str:
@@ -633,6 +645,7 @@ def resolve_scope(scope: str | os.PathLike[str] | None) -> ScopedRun | None:
         started_at=started,
         ended_at=ended,
         error=record.error,
+        phases=tuple(p for p in record.phases or [] if isinstance(p, dict)),
     )
 
 
@@ -644,6 +657,51 @@ def run_time_window(
     if run is None:
         return None, None
     return run.started_at, run.ended_at
+
+
+def phase_of(ts: float | None, phases: Any) -> str:
+    """Name the phase a wall-clock time (epoch) falls in.
+
+    Returns ``"replay N"`` / ``"dry run"`` / ``"capture"`` for a time inside a
+    phase window (see :attr:`RunRecord.phases`), ``"setup"`` for anything
+    outside them (snapshot loads, network resets, baseline scan, collecting
+    results, analysis), or ``""`` when no phases are known.
+    """
+    windows = [p for p in phases or () if isinstance(p, dict)]
+    if not windows:
+        return ""
+    if ts is None:
+        return "setup"
+    for p in windows:
+        try:
+            start, end = float(p["start"]), float(p["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start <= ts <= end:
+            kind = str(p.get("kind") or "")
+            if kind == "replay":
+                return f"replay {p.get('run') or '?'}"
+            if kind == "dry_run":
+                return "dry run"
+            return kind or "setup"
+    return "setup"
+
+
+def recording_digest(run_dir: str | os.PathLike[str] | None) -> str | None:
+    """SHA-256 of the run's recording (``recording.txt``), or ``None``.
+
+    Runs with the same digest replayed the same recording, so their results
+    should agree (see the Runs lens's replay-consistency signal).
+    """
+    if not run_dir:
+        return None
+    import hashlib
+
+    path = Path(run_dir) / "recording.txt"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def file_diff_rows(
@@ -679,6 +737,7 @@ def file_diff_rows(
 
 
 __all__ = [
+    "NETWORK_DIR_NAME",
     "RESULTS_JSON_NAME",
     "RUN_COUNT_WARNING_THRESHOLD",
     "SCHEMA_VERSION",
@@ -694,7 +753,9 @@ __all__ = [
     "load_run",
     "load_run_dir",
     "new_run_id",
+    "phase_of",
     "read_results_doc",
+    "recording_digest",
     "resolve_scope",
     "run_count",
     "run_dir_for_scope",
