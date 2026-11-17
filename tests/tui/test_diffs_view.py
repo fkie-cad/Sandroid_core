@@ -572,3 +572,26 @@ async def test_new_run_after_play_lands_in_runs_lens_and_is_selected() -> None:
         await _wait_for(pilot, lambda: view._selected_run_id == new_id)
         assert view._cursor_run_id() == new_id
         assert view.query_one("#runs-table").row_count == 2
+
+
+@pytest.mark.asyncio
+async def test_table_refresh_keeps_a_pending_cursor_move() -> None:
+    """Facts arriving between a cursor move and its RowHighlighted event must
+    not snap the cursor back to the previous selection.
+    """
+    _save("20260101_000000_aaaaaa", label="Run A")
+    _save("20260101_000001_bbbbbb", label="Run B")
+
+    app = _DiffsHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffsView)
+        table = view.query_one("#runs-table", DataTable)
+        await _wait_for(pilot, lambda: view._detail_record is not None)
+        assert view._selected_run_id == "20260101_000001_bbbbbb"
+        # Move the cursor and refresh before the highlight event is handled.
+        table.move_cursor(row=1, animate=False)
+        view._apply_facts({})
+        assert view._cursor_run_id() == "20260101_000000_aaaaaa"
+        await _wait_for(
+            pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa"
+        )

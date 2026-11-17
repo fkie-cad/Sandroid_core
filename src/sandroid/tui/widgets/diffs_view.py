@@ -168,6 +168,7 @@ class DiffsView(FilesSubViewBase):
         self._scope_run_id: str | None = None
         #: Width of the label column (padded so the table spans the lens).
         self._width = 0
+        self._cursor_synced_to: str | None = None
         self._compact = False
 
     # -- compose / mount ---------------------------------------------------
@@ -561,13 +562,20 @@ class DiffsView(FilesSubViewBase):
                     table.update_cell(
                         s.get("run_id", ""), column, cell, update_width=True
                     )
+            # Leave the cursor alone unless the selection changed: a refresh
+            # (facts loaded, resize, scope) must not undo a cursor move whose
+            # RowHighlighted event is still queued.
+            sync_cursor = self._selected_run_id != self._cursor_synced_to
         else:
             table.clear()
             for s in self._summaries:
                 table.add_row(*self._row_cells(s, width), key=s.get("run_id", ""))
+            sync_cursor = True
         self._width = width
         idx = self._index_of(self._selected_run_id)
-        if idx is not None and table.cursor_row != idx:
+        if sync_cursor:
+            self._cursor_synced_to = self._selected_run_id
+        if sync_cursor and idx is not None and table.cursor_row != idx:
             try:
                 table.move_cursor(row=idx, animate=False)
             except Exception:
