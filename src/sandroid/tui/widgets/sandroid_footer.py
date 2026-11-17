@@ -15,7 +15,10 @@ class SandroidFooter(Widget):
     """Footer bar showing active key bindings."""
 
     #: Actions always shown first (see ``_rebuild_keys``).
-    PINNED_ACTIONS = frozenset({"record", "play", "app.record", "app.play"})
+    #: ``back_to_live`` (MainScreen ``L``) only shows while in REVIEW scope.
+    PINNED_ACTIONS = frozenset(
+        {"record", "play", "app.record", "app.play", "back_to_live"}
+    )
 
     #: The footer never shows more than this many keys (calm; ``?`` has all).
     MAX_KEYS = 7

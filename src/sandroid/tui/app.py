@@ -1918,6 +1918,8 @@ class SandroidTUI(App):
             bar.recording_active = recording
         if replaying is not None:
             bar.replay_active = replaying
+        if recording or replaying:
+            ms.set_scope(None)  # a new capture is always LIVE, never REVIEW
         self._widget_refresh_controller.refresh_status_bar()
 
     def _suppress_device_disconnect_detection(self, active: bool) -> None:

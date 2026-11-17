@@ -94,6 +94,28 @@ Scope (LIVE / REVIEW)
 * ``MainScreen.scope_run`` -- reactive (watchable) current run id or None;
   ``MainScreen.scope`` is the plain getter.
 * ``ScopeChanged(run_id, label)`` is posted to every lens widget on change.
+* **Scope id** (the ``run_id`` above): the run's bundle folder as an
+  *absolute path string* -- ``str(<results_path>/runs/<run id>)``, made by
+  ``run_history.scope_for_run(run id)``. The Runs lens sets it (``v`` on a
+  run); ``L`` (``MainScreen.action_back_to_live``, footer-pinned while in
+  REVIEW), ``v`` again on the same run, deleting that run, and the start of
+  a recording or replay all go back to LIVE (``set_scope(None)``).
+* Resolve it with ``sandroid.core.run_history`` (folder reads only, safe off
+  the UI thread; nothing there needs the app):
+
+  - ``run_dir_for_scope(scope) -> Path | None`` -- the run folder (holds
+    ``run.json``, ``sandroid.json``, ``raw/``, ``manifest.json``...).
+  - ``resolve_scope(scope) -> ScopedRun | None`` -- ``run_id``, ``run_dir``,
+    ``label``, ``device_name``, ``started_at``, ``ended_at``, ``error``.
+  - ``run_time_window(scope) -> (started_at, ended_at)`` -- tz-aware
+    datetimes (stored naive values are local time), ``(None, None)`` if
+    unknown: Play start → end of its analysis. Network: filter flows by it.
+  - ``file_diff_rows(scope | RunRecord) -> list[FileDiffRow]`` -- the run's
+    files as ``FileDiffRow(kind, path, diff)``, ``kind`` in
+    ``"changed"/"new"/"deleted"``, ``diff`` = diff lines (Rich markup) or
+    None. Same loader the Runs lens uses (``load_run_dir`` → ``run.json``).
+  - ``read_results_doc(run_dir) -> dict | None`` -- the full results JSON
+    (``"Run Metadata"``, ``"Run Errors"``, ``"Network"`` ...); can be large.
 
 Log
 ---

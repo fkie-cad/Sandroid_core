@@ -504,3 +504,21 @@ ChatPanel > #chat-mascot {
     background: #FAFAFA;
     color: #1976D2;
 }
+
+/* runs lens */
+/* Runs lens (DiffsView, #runs-panel): run table cursor, header, empty state. */
+#runs-table > .datatable--cursor {
+    background: #BBDEFB;
+    color: #000000;
+    text-style: none;
+}
+
+#runs-table > .datatable--header {
+    background: transparent;
+    color: #757575;
+}
+
+#runs-empty {
+    color: #757575;
+}
+/* end runs lens */

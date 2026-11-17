@@ -316,8 +316,11 @@ async def test_option_selected_in_active_lens_opens_inspector(monkeypatch) -> No
         ms = app.screen
         await pilot.press("4")
         await _settle(pilot)
-        runs = ms.query_one("#runs-panel").query(OptionList).first()
-        runs.add_option("a row")
+        # The Runs lens is a DataTable now; mount a stand-in OptionList so the
+        # OptionList.OptionSelected path stays covered.
+        runs = OptionList("a row")
+        await ms.query_one("#runs-panel").mount(runs)
+        await _settle(pilot)
         index = runs.option_count - 1
         runs.post_message(
             OptionList.OptionSelected(runs, runs.get_option_at_index(index), index)

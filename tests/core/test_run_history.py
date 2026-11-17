@@ -21,6 +21,7 @@ fixture points a *fake config* at a pytest ``tmp_path`` (and sets
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -410,3 +411,77 @@ class TestFromDictForwardCompat:
 
         rebuilt = run_history.RunRecord.from_dict(raw)
         assert rebuilt == record
+
+
+class TestReviewScopeHelpers:
+    """The scope id the Runs lens passes to ``MainScreen.set_scope`` and the
+    helpers the Files / Network lenses resolve it with.
+    """
+
+    def test_scope_for_run_is_the_absolute_bundle_dir(self, tmp_path):
+        record = _make_record("20261117_101500_abcdef")
+        run_history.save_run(record)
+        scope = run_history.scope_for_run(record.run_id)
+        run_dir = (tmp_path / "runs" / record.run_id).resolve()
+        assert scope == str(run_dir)
+        assert run_history.run_dir_for_scope(scope) == run_dir
+        # A bare run id resolves too; LIVE / unknown runs do not.
+        assert run_history.run_dir_for_scope(record.run_id) == run_dir
+        assert run_history.run_dir_for_scope(None) is None
+        assert run_history.run_dir_for_scope(str(tmp_path / "nope")) is None
+
+    def test_resolve_scope_gives_label_and_tz_aware_window(self):
+        record = _make_record("20261117_101500_abcdef", label="Consent · refuse")
+        run_history.save_run(record)
+        run_history.update_label(record.run_id, "Refuse v2")
+        run = run_history.resolve_scope(run_history.scope_for_run(record.run_id))
+        assert run is not None
+        assert run.label == "Refuse v2"
+        assert run.run_id == record.run_id
+        assert run.started_at is not None
+        assert run.started_at.tzinfo is not None
+        assert run.ended_at - run.started_at == timedelta(minutes=5)
+        start, end = run_history.run_time_window(run.run_dir)
+        assert (start, end) == (run.started_at, run.ended_at)
+        assert run_history.run_time_window(None) == (None, None)
+
+    def test_window_falls_back_to_run_metadata(self, tmp_path):
+        record = _make_record("20261117_101500_abcdef")
+        record.recorded_at = ""
+        record.completed_at = ""
+        run_history.save_run(record)
+        run_dir = tmp_path / "runs" / record.run_id
+        (run_dir / run_history.RESULTS_JSON_NAME).write_text(
+            json.dumps(
+                {
+                    "Run Metadata": {
+                        "started_at": "2026-11-17T10:15:00+01:00",
+                        "ended_at": "2026-11-17T10:17:30+01:00",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        start, end = run_history.run_time_window(str(run_dir))
+        assert (end - start).total_seconds() == 150
+        assert run_history.read_results_doc(run_dir)["Run Metadata"]
+        assert run_history.read_results_doc(tmp_path) is None
+
+    def test_file_diff_rows_flatten_changed_new_deleted(self):
+        record = _make_record("20261117_101500_abcdef")
+        run_history.save_run(record)
+        rows = run_history.file_diff_rows(run_history.scope_for_run(record.run_id))
+        assert [(r.kind, r.path) for r in rows] == [
+            ("changed", "/data/data/app/db.sqlite"),
+            ("changed", "/data/plain.bin"),
+            ("new", "/data/new_file.txt"),
+            ("deleted", "/data/gone.txt"),
+        ]
+        assert rows[0].diff == ["- old", "+ new"]
+        assert rows[1].diff is None
+        assert run_history.file_diff_rows(record) == rows
+        assert run_history.file_diff_rows(None) == []
+
+    def test_load_run_dir_raises_for_missing_run(self, tmp_path):
+        with pytest.raises(run_history.RunHistoryError):
+            run_history.load_run_dir(tmp_path / "missing")
