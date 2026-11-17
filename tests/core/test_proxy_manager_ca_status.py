@@ -64,13 +64,13 @@ def device(monkeypatch):
         if "su -c id" in cmd:
             return "", "su: not found"
         if "nsenter" in cmd and " cat " in cmd:
-            path = cmd.split(" cat ", 1)[1].strip(" '")
+            path = cmd.split(" cat ", 1)[1].strip(" '").removesuffix(" 2>/dev/null")
             return state["ns_files"].get(path, ""), ""
-        if cmd.startswith("shell cat "):
-            path = cmd[len("shell cat ") :]
-            if path in state["files"]:
-                return state["files"][path], ""
-            return "", f"cat: {path}: No such file or directory"
+        if cmd.startswith("shell 'cat "):
+            # The probe silences the device-side "No such file" itself (N8).
+            assert cmd.endswith(" 2>/dev/null'"), cmd
+            path = cmd[len("shell 'cat ") : -len(" 2>/dev/null'")]
+            return state["files"].get(path, ""), ""
         if "[ -d" in cmd:
             return ("EXISTS" if state["api"] >= 34 else ""), ""
         return "", ""

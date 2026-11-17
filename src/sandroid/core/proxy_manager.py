@@ -1189,10 +1189,12 @@ class CAManager:
         Without ``ns_pid`` this needs no root (cacerts are world-readable).
         Returns None when the file is missing or unreadable.
         """
+        # A missing file is the normal "CA not installed yet" answer: drop the
+        # device-side stderr so it isn't logged as an ADB WARNING.
         if ns_pid is None:
-            cmd = f"shell cat {path}"
+            cmd = f"shell {quote_host_arg(f'cat {path} 2>/dev/null')}"
         else:
-            inner = f"nsenter --mount=/proc/{ns_pid}/ns/mnt -- cat {path}"
+            inner = f"nsenter --mount=/proc/{ns_pid}/ns/mnt -- cat {path} 2>/dev/null"
             cmd = f"shell {self._root_cmd(inner)}"
         try:
             stdout, _ = Adb.send_adb_command(cmd)
@@ -1289,6 +1291,11 @@ class CAManager:
                 f"{cert_name} in the trust store is a different CA (same "
                 "subject, other key — another mitmproxy install?); re-inject"
             )
+        else:
+            global _CA_NOT_INSTALLED_LOGGED
+            log = logger.debug if _CA_NOT_INSTALLED_LOGGED else logger.info
+            _CA_NOT_INSTALLED_LOGGED = True
+            log(f"mitmproxy CA ({cert_name}) not installed on the device yet")
         return ZygoteStatus(
             injected=False,
             cert_hash=cert_hash,
@@ -1462,6 +1469,9 @@ class CAManager:
             logger.error(f"Error injecting CA: {e}")
             return InjectionResult(success=False, message=f"Error injecting CA: {e}")
 
+
+#: The "CA not installed yet" probe result is logged at INFO once, then DEBUG.
+_CA_NOT_INSTALLED_LOGGED = False
 
 #: Sentinel: "the serial adb currently targets" (``None`` is a real value).
 _CURRENT_SERIAL = object()
