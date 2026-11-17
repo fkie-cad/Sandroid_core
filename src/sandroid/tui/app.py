@@ -1777,7 +1777,7 @@ class SandroidTUI(App):
         if ms is None:
             return
         try:
-            view = ms.query_one("#files-monitor")
+            view = ms.query_one("#files-panel")
         except Exception:
             return
         if hasattr(view, "notify_monitor_stopped_for_playback"):
@@ -1803,7 +1803,7 @@ class SandroidTUI(App):
         if ms is None:
             return
         try:
-            view = ms.query_one("#files-monitor")
+            view = ms.query_one("#files-panel")
         except Exception:
             return
         if hasattr(view, "notify_pid_mode_fallback"):
@@ -1828,7 +1828,7 @@ class SandroidTUI(App):
         if ms is None:
             return
         try:
-            view = ms.query_one("#files-monitor")
+            view = ms.query_one("#files-panel")
         except Exception:
             return
         if hasattr(view, "notify_backend_fallback"):
@@ -1849,7 +1849,7 @@ class SandroidTUI(App):
         if ms is None:
             return
         try:
-            view = ms.query_one("#files-monitor")
+            view = ms.query_one("#files-panel")
         except Exception:
             return
         if hasattr(view, "offer_resume"):

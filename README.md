@@ -61,7 +61,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 |---|---|---|
 | `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
 | `2` | **Network** | Two sub-tabs: **Mitmproxy** (embedded `mitmweb`, device/app proxies, CA injection — see below) and **friTap** (TLS key extraction status + live log tail). |
-| `3` | **Files** | Two sub-tabs: **Monitor** (live filesystem events) and **Watchlist** (Spotlight Files: pull/diff selected files). |
+| `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. |
 | `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |
 
 `Shift+←/→` also cycles the lenses (`Shift+↓` then `Shift+←/→` switches a lens's own sub-tabs). `Enter` on a row opens the **Inspector** on the right where a lens supports it; `Esc` closes it. `Ctrl+Y` opens the **AI Chat** in the same right-hand slot. `` ` `` (backtick) opens the **log drawer** with the full activity log.

@@ -1,4 +1,8 @@
-"""Headless Textual Pilot smoke tests for the Watchlist sub-tab (WatchlistView).
+"""Headless Textual Pilot tests for the watchlist engine (WatchlistView).
+
+``WatchlistView`` is the non-visual watchlist behind the Files lens (the
+table/keys live in ``files_panel.py``, tested in test_files_lens.py); these
+tests drive its public API directly.
 
 No physical device needed: pulls are exercised by monkeypatching
 FileExtractionService.pull_file (class-level, so the real
@@ -20,7 +24,6 @@ from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Input, OptionList
 
 from sandroid.core import watchlist_store
 from sandroid.services import get_forensic_service
@@ -75,7 +78,7 @@ def _fake_pull_file(content_by_remote_path: dict[str, str]):
 
 
 class _WatchlistHarness(App):
-    """Minimal single-widget host app for WatchlistView."""
+    """Minimal single-widget host app for the watchlist engine."""
 
     def compose(self) -> ComposeResult:
         yield WatchlistView(id="files-watchlist")
@@ -106,9 +109,8 @@ async def test_empty_state_glance_and_list() -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
 
-        assert view.glance_fragment() == "Watchlist — no paths"
-        option_list = view.query_one("#watchlist-list", OptionList)
-        assert option_list.option_count == 1  # the "no paths yet" placeholder
+        assert view.summary() == ""
+        assert view.rows == {}
 
 
 @pytest.mark.asyncio
@@ -120,9 +122,8 @@ async def test_mount_lists_existing_spotlight_files() -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
 
-        assert view.glance_fragment() == "Watchlist — 1 path(s)"
-        option_list = view.query_one("#watchlist-list", OptionList)
-        assert option_list.option_count == 1
+        assert view.summary() == "1 watched"
+        assert list(view.rows) == [PATH_A]
         assert view._rows[PATH_A].state == RowState.NEVER_PULLED
 
 
@@ -180,9 +181,9 @@ async def test_mount_restores_full_row_state_from_a_persisted_index() -> None:
         assert row.detail == "diffed against baseline"
         assert row.last_seen == (1700000000, 42)
         assert row.last_pulled == (1699999999, 41)
-        # The glance strip must reflect the restored state, not a fresh
+        # The lens caption must reflect the restored state, not a fresh
         # "never pulled" placeholder.
-        assert "1 changed" in view.glance_fragment()
+        assert "1 changed" in view.summary()
 
 
 @pytest.mark.asyncio
@@ -227,10 +228,7 @@ async def test_pull_persists_row_state_for_a_later_restart(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(
             pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED
         )
@@ -241,7 +239,7 @@ async def test_pull_persists_row_state_for_a_later_restart(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_glance_fragment_does_not_pluralize_changed() -> None:
+async def test_summary_does_not_pluralize_changed() -> None:
     """'changed' is a past-participle/adjective, not a countable noun -- it
     must never grow an 's' regardless of how many rows are CHANGED (a naive
     f"{n} {word}s" pattern previously produced "2 changeds").
@@ -257,78 +255,40 @@ async def test_glance_fragment_does_not_pluralize_changed() -> None:
         for row in view._rows.values():
             row.state = RowState.CHANGED
 
-        fragment = view.glance_fragment()
+        fragment = view.summary()
         assert "2 changed" in fragment
         assert "changeds" not in fragment
 
 
 @pytest.mark.asyncio
-async def test_add_path_via_input_persists_and_updates_list() -> None:
+async def test_add_path_persists_and_updates_rows() -> None:
     app = _WatchlistHarness()
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
 
-        add_input = view.query_one("#watchlist-add-input", Input)
-        add_input.focus()
-        add_input.value = PATH_A
-        await pilot.pause()
-        await pilot.press("enter")
+        assert view.add_path(PATH_A) is True
         await pilot.pause()
 
         assert PATH_A in get_forensic_service().get_spotlight_files()
         assert watchlist_store.load_membership() == [PATH_A]
-        assert add_input.value == ""
-        option_list = view.query_one("#watchlist-list", OptionList)
-        assert option_list.option_count == 1
-        # Phase 5 N6: focus returns to the list, so the next "n" is a command.
-        assert app.focused is option_list
+        assert list(view.rows) == [PATH_A]
+        assert view.is_watched(PATH_A)
 
 
 @pytest.mark.asyncio
-async def test_failed_add_keeps_focus_and_text_in_the_input() -> None:
+async def test_adding_a_watched_path_again_is_rejected() -> None:
     get_forensic_service().add_spotlight_file(PATH_A)
 
     app = _WatchlistHarness()
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-
-        add_input = view.query_one("#watchlist-add-input", Input)
-        add_input.focus()
-        add_input.value = PATH_A  # already watched -> rejected
-        await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.focused is add_input
-        assert add_input.value == PATH_A
+        assert view.add_path(PATH_A) is False
 
 
 @pytest.mark.asyncio
-async def test_escape_in_add_input_clears_and_returns_focus_to_list() -> None:
-    get_forensic_service().add_spotlight_file(PATH_A)
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-
-        add_input = view.query_one("#watchlist-add-input", Input)
-        add_input.focus()
-        add_input.value = "/some/typed/path"
-        await pilot.pause()
-
-        await pilot.press("escape")
-        await pilot.pause()
-
-        assert add_input.value == ""
-        option_list = view.query_one("#watchlist-list", OptionList)
-        assert app.focused is option_list
-
-
-@pytest.mark.asyncio
-async def test_remove_selected_removes_from_service_and_list() -> None:
+async def test_unwatch_removes_from_service_and_rows() -> None:
     get_forensic_service().add_spotlight_file(PATH_A)
     get_forensic_service().add_spotlight_file("/data/data/com.app/other")
 
@@ -337,17 +297,69 @@ async def test_remove_selected_removes_from_service_and_list() -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
 
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-        removed_path = view._current_path()
-        assert removed_path is not None
-
-        view.action_remove_selected()
+        assert view.unwatch(PATH_A) is True
         await pilot.pause()
 
-        assert removed_path not in get_forensic_service().get_spotlight_files()
-        assert removed_path not in watchlist_store.load_membership()
-        assert option_list.option_count == 1
+        assert PATH_A not in get_forensic_service().get_spotlight_files()
+        assert PATH_A not in watchlist_store.load_membership()
+        assert list(view.rows) == ["/data/data/com.app/other"]
+
+
+@pytest.mark.asyncio
+async def test_pattern_watch_matches_paths_and_unwatch_drops_its_matches() -> None:
+    class _Adb:
+        @staticmethod
+        def send_adb_command(_cmd):
+            return "/data/data/com.app/db/a.db\n/data/data/com.app/db/b.db\n", ""
+
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        view._adb = lambda: _Adb
+        await pilot.pause()
+
+        assert view.add_path("/data/data/com.app/db/*") is True
+        assert set(view.rows) == {
+            "/data/data/com.app/db/a.db",
+            "/data/data/com.app/db/b.db",
+        }
+        assert view.patterns == ["/data/data/com.app/db/*"]
+        assert view.watched_by("/data/data/com.app/db/new.db") == (
+            "/data/data/com.app/db/*"
+        )
+        assert watchlist_store.load_patterns() == ["/data/data/com.app/db/*"]
+
+        assert view.unwatch("/data/data/com.app/db/*") is True
+        assert view.rows == {}
+        assert view.patterns == []
+
+
+@pytest.mark.asyncio
+async def test_pull_facts_are_persisted_and_restored(monkeypatch) -> None:
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull_file({PATH_A: "abc\n"})
+    )
+    get_forensic_service().add_spotlight_file(PATH_A)
+
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        view.pull([PATH_A])
+        await _wait_for(pilot, lambda: view.rows[PATH_A].pulled_at is not None)
+        row = view.rows[PATH_A]
+        assert row.size == 4
+        assert row.sha256 == (
+            "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb"
+        )
+
+    get_forensic_service()._spotlight_files.clear()
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        assert view.rows[PATH_A].size == 4
+        assert view.rows[PATH_A].pulled_at == row.pulled_at
 
 
 @pytest.mark.asyncio
@@ -361,10 +373,7 @@ async def test_first_pull_captures_baseline_not_a_diff(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(
             pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED
         )
@@ -384,17 +393,14 @@ async def test_second_pull_with_changed_content_shows_diff(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(
             pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY
         )
 
         # Device-side content changes before the next pull.
         content[PATH_A] = "line one\nline two\n"
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.CHANGED)
 
         info = view._rows[PATH_A]
@@ -418,15 +424,12 @@ async def test_second_pull_with_unchanged_content_reports_unchanged(
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(
             pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY
         )
 
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.UNCHANGED)
 
         assert "No changes" in view._rows[PATH_A].detail
@@ -441,18 +444,13 @@ async def test_pull_failure_marks_row_as_error(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        option_list = view.query_one("#watchlist-list", OptionList)
-        option_list.highlighted = 0
-
-        view.action_pull_selected()
+        view.pull([PATH_A])
         await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.ERROR)
 
 
 @pytest.mark.asyncio
-async def test_files_panel_mounts_real_watchlist_view_not_stub() -> None:
-    """FilesPanel's inner ContentSwitcher must host the real WatchlistView
-    (not the old placeholder stub) as a real sub-tab.
-    """
+async def test_files_panel_hosts_the_watchlist_engine() -> None:
+    """The Files lens owns one (hidden) watchlist engine."""
 
     class _FilesHarness(App):
         def compose(self) -> ComposeResult:
@@ -463,9 +461,10 @@ async def test_files_panel_mounts_real_watchlist_view_not_stub() -> None:
         panel = app.query_one(FilesPanel)
         await pilot.pause()
 
-        watchlist = panel.query_one("#files-watchlist")
+        watchlist = panel.watchlist
         assert isinstance(watchlist, WatchlistView)
-        assert watchlist.glance_fragment() == "Watchlist — no paths"
+        assert watchlist.display is False
+        assert watchlist.summary() == ""
 
 
 class TestComputeDiffDispatch:

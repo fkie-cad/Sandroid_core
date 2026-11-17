@@ -142,13 +142,26 @@ emulator.
 Files (3)
 ~~~~~~~~~
 
-- **Monitor** -- live filesystem events (``o`` / ``Enter`` start/stop). The
-  default ``kprobe`` backend uses kernel tracefs kprobes (per-process and
-  child-tree attribution, path-scoped capture, nothing pushed to the device)
-  and falls back to ``fsmon`` automatically (``tui.monitor_backend``).
-  Per-category visibility is configurable in the Monitor settings.
-- **Watchlist** -- Spotlight Files: add device files to watch (``n``), pull
-  and diff them (``u`` one, Shift+``U`` all; ``l`` opens the list).
+One table of what the app writes, one row per file (★, path, ops
+``C``/``M``/``R``/``D``/``A``, count, last time). ``o`` starts/stops the
+file monitor: the default ``kprobe`` backend uses kernel tracefs kprobes
+(per-process and child-tree attribution, path-scoped capture, nothing pushed
+to the device) and falls back to ``fsmon`` automatically
+(``tui.monitor_backend``). Caches, temp files, OS paths and OPEN/CLOSE are
+hidden until ``v``; per-category visibility is configurable in the Monitor
+settings.
+
+- ``w`` watches/unwatches the row (Spotlight Files); watched files are
+  pinned on top with ★, also before any activity; ``n`` watches any path or
+  ``*`` pattern; ``l`` jumps here.
+- ``u`` pulls the row and diffs it against the previous pull, Shift+``U``
+  pulls every watched file, ``a`` auto-pulls changed files while the lens
+  is shown.
+- ``Enter`` opens the Inspector: Summary (full path, ops, processes, last
+  pull), Diff (``z`` zooms) and Events. ``/`` filters, ``.`` shows full
+  paths.
+- While a run is under review (``◆ REVIEW``), the table lists that run's
+  changed, new and deleted files and ``Enter`` shows the file's diff.
 
 Runs (4)
 ~~~~~~~~

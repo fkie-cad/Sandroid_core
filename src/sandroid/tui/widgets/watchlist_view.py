@@ -1,71 +1,27 @@
-"""Watchlist sub-tab: the Spotlight-Files CRUD/pull/diff replacement for
-``SpotlightFilesModal``.
+"""The Spotlight-Files watchlist behind the Files lens (non-visual).
 
-Lists ``ForensicService``'s spotlight-file watchlist in an ``OptionList``,
-with an always-visible inline ``Input`` (never a modal) for adding new
-paths/wildcard patterns, row actions to remove/pull, and — new behavior the
-old modal never had — every pull now diffs the fresh copy against whatever
-was pulled last time for that path, rendered inline via the shared
-:class:`~sandroid.tui.widgets.diff_view.DiffView`.
+``WatchlistView`` is a hidden child widget of the Files lens
+(:class:`~sandroid.tui.widgets.files_panel.FilesPanel`): it owns the
+``ForensicService`` spotlight-file watchlist -- add/remove (paths and
+wildcard patterns), pull one/all, auto-pull mode, persistence -- and every
+pull diffs the fresh copy against the previous pull (``core/file_diff.py``,
+the same engine behind :class:`~sandroid.tui.widgets.diff_view.DiffView`).
+It draws nothing: whenever its rows change it posts
+:class:`WatchlistView.Changed`, and the lens re-renders its table (watched
+files carry ★ and are pinned on top) and the Inspector. It is a widget only
+so it can own timers and thread workers.
 
 **Naming note** (also in ``spotlight_controller.py``): "Spotlight" is
-overloaded in this codebase. This view is about the *forensic* Spotlight
-Files watchlist (``ForensicService._spotlight_files``, this module) — it is
-unrelated to the *Frida* spotlight app-under-test
-(``spotlight_panel.py``/``SpotlightService``, keys ``c``/``Shift+C``).
-
-**Inline "add path" Input and Escape** (the one real gotcha in this view):
-Textual's App-level ``escape`` binding (``priority=True``, wired to
-``QuitController.maybe_quit``) is checked *before* any descendant's own
-bindings, and ``QuitController.maybe_quit`` shows the quit-confirmation
-unconditionally whenever the current screen is ``MainScreen`` (see
-``quit_controller.py``'s ``_is_main_screen()`` check) — it does not look at
-what's focused. A plain ``Input`` living directly on ``MainScreen`` (as this
-one does; it's not inside a modal) would therefore have Escape hijacked by
-the quit-confirmation instead of blurring the input, exactly the opposite
-of what the plan asks for ("Escape closes/cancels the input and returns
-focus to the list").
-
-The fix (verified empirically against Textual's actual dispatch order, not
-assumed — see ``_AddPathInput`` below): a widget that overrides
-``check_consume_key`` to also claim ``"escape"`` (Input's default only
-claims printable characters) gets that key filtered out of *every*
-ancestor's binding map for that keypress, including the App's — this is the
-exact same mechanism that already lets a focused Input "eat" a bound letter
-key so typing doesn't also trigger some ancestor's shortcut. Once the
-priority phase finds nothing, the key is forwarded to the focused widget's
-own (non-priority) ``BINDINGS``, which are never filtered from the widget's
-*own* map. So ``_AddPathInput`` declares its own non-priority ``escape``
-binding and handles it itself — cleanly intercepting Escape while it has
-focus, without touching any global app code. This is independent of plain
-Tab, which is unclaimed at the ``FilesPanel`` level (sub-tab cycling is
-driven externally via Shift+Left/Right, not Tab — see ``FilesPanel``'s class
-docstring) and would blur this Input via normal focus traversal regardless;
-Escape is needed here specifically for the App-level priority-escape hijack
-described above, not as a substitute for Tab.
-
-Key scoping note (same non-priority-binding-on-a-focused-ancestor mechanism
-``SnapshotsPanel``/``DiffsView`` already use elsewhere in this app): ``d``
-(remove) shadows the GLOBAL ``d``=Dump Memory binding only while this view has
-focus — SnapshotsPanel already shadows ``d`` for its own delete action, so
-this isn't a new precedent. Pull one/all is ``u``/``U`` (not ``p``/``P``) so
-the global ``p``=Play keeps working while Watchlist has focus.
-``n`` (focus the add-input) shadows the global ``n``=Install APK binding,
-the same precedent DiffsView already uses for its own (differently-meaning)
-``n``=rename. ``a`` (toggle auto-mode, see below) shadows the global
-``a``=Analyze (``app.py``'s ``static_analysis`` binding,
-``Binding("a", ..., id="static_analysis")``) the same way — Analyze is
-irrelevant while Watchlist has focus, so this is the same already-
-established, previously-verified-safe kind of shadow as ``d``/``n``
-above, not a new one.
+overloaded in this codebase. This module is about the *forensic* Spotlight
+Files watchlist (``ForensicService._spotlight_files``) -- it is unrelated to
+the *Frida* spotlight app-under-test (``spotlight_panel.py``/
+``SpotlightService``, keys ``c``/``Shift+C``).
 
 **Auto mode** (``a`` key, off by default; header badge ``auto ○ off`` /
 ``auto ● on · every Ns``): a visibility-gated ``set_interval`` poll mirrors
 ``SnapshotsPanel``'s ``_is_on_screen()``/``_refresh_if_visible()`` pattern,
-extended one ``ContentSwitcher`` level deeper for the Files tab's own inner
-switcher (see ``_is_watchlist_visible``) — it only does real work while the
-Files tab is the active outer tab AND Watchlist is the active inner
-sub-view. Each tick issues one batched
+(see ``_is_watchlist_visible``) — it only does real work while the Files
+lens is on screen. Each tick issues one batched
 ``adb shell "stat -c '%n %Y %s' <path>..."`` call (see ``_stat_command``)
 covering every watched path, keyed back to the right row by the ``%n``
 (filename) field so one bad path's stderr text can't misalign the batch.
@@ -75,7 +31,7 @@ Two signatures per path — ``last_seen`` (updated every tick) vs
 signature must be unchanged across two consecutive ticks) and rate-limits
 (a per-file minimum interval) before triggering the real pull, which reuses
 the exact same ``_start_pull``/``_pull_worker``/``_apply_pull_result`` path
-the manual ``p``/``P`` actions already use — no separate pull-and-diff
+the manual ``u``/``U`` pulls use — no separate pull-and-diff
 implementation. Adaptive backoff (5s -> 10s -> 20s -> 30s after consecutive
 no-change ticks, reset to 5s the instant any path changes) avoids hammering
 a quiet device. Wildcard entries (containing ``*``) are re-expanded on a
@@ -93,36 +49,28 @@ from __future__ import annotations
 
 import fnmatch
 import functools
+import hashlib
 import logging
 import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import ContentSwitcher, Input, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.message import Message
+from textual.widget import Widget
 
 from sandroid.core import file_diff, watchlist_store
 from sandroid.core.adb_utils import device_shell_arg
 from sandroid.services import get_file_extraction_service, get_forensic_service
 from sandroid.services.file_extraction_service import is_sqlite_file
 
-from .diff_view import DiffView
-from .files_panel import FilesSubViewBase
-
 if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-#: id used for the OptionList's single disabled placeholder row when the
-#: watchlist is empty -- never a real path, so selection handlers can
-#: cheaply ignore it (mirrors DiffsView's ``_EMPTY_OPTION_ID``).
-_EMPTY_OPTION_ID = "__no_paths__"
 
 #: Auto-mode's adaptive backoff ladder (seconds). Resets to index 0 the
 #: instant any watched path shows a metadata change; otherwise advances one
@@ -214,6 +162,22 @@ class _RowInfo:
     # just the cheap (mtime, size) metadata signal driving *when* to pull.
     last_seen: tuple[int, int] | None = None  #: updated on every auto-tick
     last_pulled: tuple[int, int] | None = None  #: updated only after a real pull
+    # -- last successful pull (shown in the Inspector; persisted) ---------
+    pulled_at: str | None = None  #: ISO timestamp
+    size: int | None = None  #: bytes of the main file
+    sha256: str | None = None  #: of the main file
+
+
+def _file_facts(path: Path) -> tuple[int | None, str | None]:
+    """``(size, sha256)`` of a pulled file, ``(None, None)`` if unreadable."""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(chunk)
+        return path.stat().st_size, digest.hexdigest()
+    except OSError:
+        return None, None
 
 
 def _compute_diff(previous_main: Path, current_main: Path) -> tuple[str, bool]:
@@ -244,113 +208,36 @@ def _compute_diff(previous_main: Path, current_main: Path) -> tuple[str, bool]:
     return file_diff.diff_files(previous_main, current_main, is_sqlite_file)
 
 
-class _AddPathInput(Input):
-    """Inline "add a watched path" input -- see module docstring for why
-    Escape needs special handling here instead of a WatchlistView-level
-    binding.
+class WatchlistView(Widget):
+    """Non-visual watchlist engine of the Files lens (see module docstring).
+
+    Public API used by the lens: ``rows``/``patterns``/``is_watched`` (state),
+    ``add_path``/``remove_path``/``unwatch``/``pull``/``pull_all``/
+    ``toggle_auto`` (mutations), ``summary``/``auto_badge`` (text). Every
+    state change posts :class:`WatchlistView.Changed`.
     """
 
-    BINDINGS = [
-        Binding("escape", "cancel_input", "Cancel", show=False),
-        # Input binds Shift+Left/Right to text selection, which used to trap
-        # the Shift+Arrow tab navigation inside the Files tab. With nothing
-        # typed there is nothing to select, so hand them to the tool panel.
-        Binding("shift+left", "nav_or_select(-1)", show=False),
-        Binding("shift+right", "nav_or_select(1)", show=False),
-    ]
-
-    def check_consume_key(self, key: str, character: str | None) -> bool:
-        if key == "escape":
-            return True
-        return super().check_consume_key(key, character)
-
-    def action_nav_or_select(self, delta: int) -> None:
-        if self.value:
-            if delta < 0:
-                self.action_cursor_left(select=True)
-            else:
-                self.action_cursor_right(select=True)
-            return
-        cycle = getattr(self.screen, "cycle_active_level", None)
-        if cycle is not None:
-            cycle(delta)
-
-    def action_cancel_input(self) -> None:
-        self.value = ""
-        try:
-            self.screen.query_one("#watchlist-list", OptionList).focus()
-        except Exception:
-            pass
-
-
-class WatchlistView(FilesSubViewBase):
-    """Files tab sub-view: Spotlight-Files watchlist CRUD + pull/diff.
-
-    Bindings (when the list has focus):
-        d: remove the selected path (shadows global ``d``=Dump Memory --
-           see module docstring; SnapshotsPanel already shadows this key).
-        u: pull the selected path and diff it against its stored baseline
-           (``u``, not ``p``: the global ``p``=Play must keep working here).
-        U: pull every watched path (Shift+U).
-        n: focus the inline add-path input (shadows global ``n``=Install
-           APK, the same precedent DiffsView already uses for ``n``=rename).
-        a: toggle auto-mode (shadows global ``a``=Analyze while this view
-           has focus -- see module docstring's Auto mode section).
-    """
-
-    _LABEL = "Watchlist"
-
-    can_focus = True
-
-    BINDINGS = [
-        ("d", "remove_selected", "Remove"),
-        ("u", "pull_selected", "Pull"),
-        ("U", "pull_all", "Pull all"),
-        ("n", "focus_add", "Add path"),
-        ("a", "toggle_auto", "Auto mode"),
-    ]
+    can_focus = False
 
     DEFAULT_CSS = """
     WatchlistView {
-        layout: vertical;
-        padding: 0;
-    }
-    WatchlistView #watchlist-header {
-        height: 1;
-        color: #93a4c3;
-        padding: 0 1;
-    }
-    WatchlistView #watchlist-list {
-        height: 10;
-        background: #050811;
-        border-bottom: solid #1f2937;
-    }
-    WatchlistView #watchlist-scroll {
-        height: 1fr;
-        padding: 0 1;
-    }
-    WatchlistView #watchlist-add-row {
-        height: 3;
-        border-top: solid #1f2937;
-        padding: 0 1;
-    }
-    WatchlistView #watchlist-add-label {
-        width: 6;
-        padding: 1 1 0 0;
-        color: #8f9bb3;
-    }
-    WatchlistView #watchlist-add-input {
-        width: 1fr;
+        display: none;
     }
     """
 
+    class Changed(Message):
+        """The watchlist rows changed (bubbles to the Files lens)."""
+
+        def __init__(self, paths: frozenset[str] | None = None) -> None:
+            super().__init__()
+            #: The paths whose row changed, or None for "anything".
+            self.paths = paths
+
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.can_focus = True
         #: path -> _RowInfo, keyed the same way ForensicService keys them
         #: (the literal device path/already-expanded wildcard match).
         self._rows: dict[str, _RowInfo] = {}
-        self._selected_path: str | None = None
 
         # -- auto-mode state (see module docstring's Auto mode section) ----
         self._auto_enabled: bool = False
@@ -363,18 +250,17 @@ class WatchlistView(FilesSubViewBase):
         self._auto_timer = None  # Textual Timer handle for the stat poll
         self._auto_tick_inflight: bool = False
         #: path -> monotonic time of the last AUTO-triggered pull (manual
-        #: pulls via p/P don't touch this -- only auto-mode is rate-limited).
+        #: pulls via u/U don't touch this -- only auto-mode is rate-limited).
         self._last_auto_pull_at: dict[str, float] = {}
         #: paths with an auto-triggered pull currently in flight, so a
         #: still-settling path already mid-pull isn't re-triggered.
         self._auto_pull_inflight: set[str] = set()
 
-        # -- wildcard re-expansion state (slower, decoupled timer) --------
-        #: Patterns (containing "*") the user has added via the inline
-        #: input. ForensicService only keeps the already-expanded literal
-        #: matches (see _add_spotlight_files_by_pattern) -- the pattern
-        #: string itself is otherwise discarded after the first expansion,
-        #: so this view has to remember it to re-run expansion later.
+        # -- wildcard patterns (persisted; re-expanded on a slower timer) --
+        #: Patterns (containing "*") the user added. ForensicService only
+        #: keeps the already-expanded literal matches, so the pattern itself
+        #: is remembered (and persisted) here -- the lens pins it as a row
+        #: and auto-mode re-expands it to catch newly created files.
         self._watched_patterns: set[str] = set()
         self._wildcard_timer = None
         self._wildcard_tick_inflight: bool = False
@@ -382,19 +268,8 @@ class WatchlistView(FilesSubViewBase):
         # -- device-reconnect subscription (auto-resume after offline) ----
         self._device_change_subscribed: bool = False
 
-    # -- compose / mount ---------------------------------------------------
-
     def compose(self):
-        yield Static(self._render_header(), id="watchlist-header")
-        yield OptionList(id="watchlist-list")
-        with VerticalScroll(id="watchlist-scroll"):
-            yield Static("[dim]No path selected.[/dim]", id="watchlist-empty")
-        with Horizontal(id="watchlist-add-row"):
-            yield Static("Add:", id="watchlist-add-label")
-            yield _AddPathInput(
-                placeholder="/data/data/<pkg>/databases/*  (Enter=add · Esc=back to list)",
-                id="watchlist-add-input",
-            )
+        return ()
 
     def on_mount(self) -> None:
         try:
@@ -403,57 +278,64 @@ class WatchlistView(FilesSubViewBase):
             logger.debug(
                 "Watchlist: failed to load persisted membership", exc_info=True
             )
+        try:
+            self._watched_patterns = set(watchlist_store.load_patterns())
+        except Exception:
+            logger.debug("Watchlist: failed to load patterns", exc_info=True)
         self._restore_persisted_rows()
         self._reload_rows()
 
     def on_unmount(self) -> None:
         # Auto mode is off by default and only starts timers when the user
-        # toggles it on (see _start_auto_mode) -- this is defensive cleanup
-        # mirroring SnapshotsPanel/FilesPanel's on_unmount, not undoing work
-        # that unconditionally happened on mount.
+        # toggles it on (see _start_auto_mode) -- this is defensive cleanup.
         self._cancel_auto_timer()
         self._cancel_wildcard_timer()
 
-    # -- focus forwarding ----------------------------------------------------
+    # -- public state ---------------------------------------------------------
 
-    def focus(self, scroll_visible: bool = True):
-        """Delegate focus to the list (``n`` jumps into the add-path input).
+    @property
+    def rows(self) -> dict[str, _RowInfo]:
+        """Row state per watched path (do not mutate)."""
+        return self._rows
 
-        Always the list, even when empty: auto-focusing the Input made it
-        swallow every letter key (global r/p/...) and Shift+Left/Right the
-        moment Watchlist was cycled past, which stranded keyboard users.
-        """
-        try:
-            self.query_one("#watchlist-list", OptionList).focus(scroll_visible)
-            return self
-        except Exception:
-            pass
-        return super().focus(scroll_visible)
+    @property
+    def patterns(self) -> list[str]:
+        return sorted(self._watched_patterns)
 
-    # -- FilesPanel hooks ----------------------------------------------------
+    @property
+    def auto_enabled(self) -> bool:
+        return self._auto_enabled
 
-    def on_activated(self) -> None:
-        """Called by ``FilesPanel._select_subtab`` when Watchlist becomes active."""
-        self._reload_rows()
+    def watched_by(self, path: str) -> str | None:
+        """The literal path or pattern that watches ``path``, else None."""
+        if path in self._rows:
+            return path
+        for pattern in sorted(self._watched_patterns):
+            if self._pattern_matches(pattern, path):
+                return pattern
+        return None
 
-    def glance_fragment(self) -> str:
-        total = len(self._rows)
+    def is_watched(self, path: str) -> bool:
+        return self.watched_by(path) is not None
+
+    def summary(self) -> str:
+        """``"3 watched · 1 changed"`` (empty when nothing is watched)."""
+        total = len(self._rows) + len(self._watched_patterns)
         if total == 0:
-            base = "Watchlist — no paths"
-        else:
-            changed = sum(1 for r in self._rows.values() if r.state is RowState.CHANGED)
-            if changed:
-                # "changed" is a past-participle/adjective here (as many rows
-                # ARE changed), not a countable noun -- it never takes an "s"
-                # regardless of count (matches _render_header's phrasing).
-                base = f"Watchlist — {total} path(s) · {changed} changed"
-            else:
-                base = f"Watchlist — {total} path(s)"
-        if self._auto_enabled:
-            if self._auto_paused_reason:
-                return f"{base} · auto paused ({self._auto_paused_reason})"
-            return f"{base} · auto on"
-        return base
+            return ""
+        text = f"{total} watched"
+        # "changed" is an adjective here -- it never takes an "s".
+        changed = sum(1 for r in self._rows.values() if r.state is RowState.CHANGED)
+        if changed:
+            text += f" · {changed} changed"
+        return text
+
+    def auto_badge(self) -> str:
+        return self._auto_badge()
+
+    def reload(self) -> None:
+        """Resync with ForensicService (paths may be watched elsewhere)."""
+        self._reload_rows()
 
     # -- services (lazy) ------------------------------------------------------
 
@@ -508,12 +390,16 @@ class WatchlistView(FilesSubViewBase):
                 state = RowState.NEVER_PULLED
             last_seen = payload.get("last_seen")
             last_pulled = payload.get("last_pulled")
+            pull = payload.get("pull") or {}
             self._rows[path] = _RowInfo(
                 path=path,
                 state=state,
                 detail=payload.get("detail") or "",
                 last_seen=tuple(last_seen) if last_seen else None,
                 last_pulled=tuple(last_pulled) if last_pulled else None,
+                pulled_at=pull.get("at"),
+                size=pull.get("size"),
+                sha256=pull.get("sha256"),
             )
         if auto_enabled:
             self._start_auto_mode()
@@ -530,6 +416,11 @@ class WatchlistView(FilesSubViewBase):
                 "detail": info.detail,
                 "last_seen": list(info.last_seen) if info.last_seen else None,
                 "last_pulled": list(info.last_pulled) if info.last_pulled else None,
+                "pull": (
+                    {"at": info.pulled_at, "size": info.size, "sha256": info.sha256}
+                    if info.pulled_at
+                    else None
+                ),
             }
         return payload
 
@@ -544,7 +435,9 @@ class WatchlistView(FilesSubViewBase):
         their own try/except.
         """
         get_forensic_service().save_watchlist_index(
-            row_states=self._row_states_payload(), auto_enabled=self._auto_enabled
+            row_states=self._row_states_payload(),
+            auto_enabled=self._auto_enabled,
+            patterns=sorted(self._watched_patterns),
         )
 
     def _reload_rows(self) -> None:
@@ -571,74 +464,20 @@ class WatchlistView(FilesSubViewBase):
                 del self._rows[path]
         self._rebuild_list()
 
-    def _current_path(self) -> str | None:
+    def _changed(self, paths=None) -> None:
+        """Tell the lens the rows changed (``paths``: which ones, or all)."""
         try:
-            option_list = self.query_one("#watchlist-list", OptionList)
-            idx = option_list.highlighted
-            if idx is None:
-                return None
-            option = option_list.get_option_at_index(idx)
-            if option is None or option.id == _EMPTY_OPTION_ID:
-                return None
-            return option.id
-        except Exception:
-            return None
-
-    # -- rail/list rendering --------------------------------------------------
-
-    def _row_label(self, path: str) -> str:
-        info = self._rows.get(path)
-        state = info.state if info else RowState.NEVER_PULLED
-        glyph, color = _GLYPH[state]
-        display = path
-        if len(display) > 62:
-            display = "…" + display[-61:]
-        detail = info.detail if info else ""
-        suffix = f"  [dim]{detail}[/dim]" if detail else ""
-        return f"[{color}]{glyph}[/{color}] {display}{suffix}"
-
-    def _rebuild_list(self) -> None:
-        try:
-            option_list = self.query_one("#watchlist-list", OptionList)
-        except Exception:
-            return
-        previously_selected = self._selected_path
-        option_list.clear_options()
-        paths = sorted(self._rows)
-        if not paths:
-            option_list.add_option(
-                Option(
-                    "[dim]No paths watched yet — add one below[/dim]",
-                    id=_EMPTY_OPTION_ID,
-                )
+            self.post_message(
+                self.Changed(frozenset(paths) if paths is not None else None)
             )
-        else:
-            for path in paths:
-                option_list.add_option(Option(self._row_label(path), id=path))
-        if previously_selected in self._rows:
-            try:
-                option_list.highlighted = paths.index(previously_selected)
-            except Exception:
-                pass
-        self._update_header()
-
-    def _update_header(self) -> None:
-        try:
-            self.query_one("#watchlist-header", Static).update(self._render_header())
         except Exception:
             pass
 
-    def _render_header(self) -> str:
-        hint = "[dim]u=pull  ⇧U=pull all  d=remove  n=add path  a=auto[/dim]"
-        badge = self._auto_badge()
-        total = len(self._rows)
-        if total == 0:
-            return f"No paths watched yet.   {badge}   {hint}"
-        summary = f"{total} path(s) watched"
-        changed = sum(1 for r in self._rows.values() if r.state is RowState.CHANGED)
-        if changed:
-            summary += f"  ·  [#facc15]{changed} changed[/]"
-        return f"{summary}   {badge}   {hint}"
+    # Old names, kept for the many call sites below.
+    def _rebuild_list(self) -> None:
+        self._changed()
+
+    _update_header = _rebuild_list
 
     def _auto_badge(self) -> str:
         """Auto-mode status badge shown in the header (see module docstring)."""
@@ -648,125 +487,83 @@ class WatchlistView(FilesSubViewBase):
             return f"[#fb7185]auto ● on ({self._auto_paused_reason})[/]"
         return f"[#4ade80]auto ● on[/] · every {int(self._auto_interval)}s"
 
-    # -- detail rendering --------------------------------------------------
-
-    def _render_detail(self, path: str | None) -> None:
-        try:
-            scroll = self.query_one("#watchlist-scroll", VerticalScroll)
-        except Exception:
-            return
-        scroll.remove_children()
-        if path is None:
-            scroll.mount(Static("[dim]No path selected.[/dim]"))
-            return
-        info = self._rows.get(path)
-        if info is None or info.state == RowState.NEVER_PULLED:
-            scroll.mount(
-                Static(f"[b]{path}[/b]\n[dim]Never pulled — press u to pull.[/dim]")
-            )
-            return
-        if info.state == RowState.CHANGED and info.diff_text is not None:
-            scroll.mount(Static(f"[b]{path}[/b]"))
-            scroll.mount(DiffView(diff=info.diff_text, title=path, start_expanded=True))
-            return
-        scroll.mount(Static(f"[b]{path}[/b]\n{info.detail}"))
-
-    # -- OptionList events ----------------------------------------------------
-
-    def on_option_list_option_highlighted(
-        self, event: OptionList.OptionHighlighted
-    ) -> None:
-        if event.option_list.id != "watchlist-list":
-            return
-        path = event.option_id
-        if not path or path == _EMPTY_OPTION_ID:
-            self._selected_path = None
-            self._render_detail(None)
-            return
-        self._selected_path = path
-        self._render_detail(path)
-
-    # -- Input events ----------------------------------------------------------
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "watchlist-add-input":
-            return
-        path = event.value.strip()
-        if not path:
-            return
-        if self._add_path(path):
-            event.input.value = ""
-            # Back to the list so the next n/a/p is a command again, not
-            # typed into the field (phase 5: "n/data/..." got watched).
-            try:
-                self.query_one("#watchlist-list", OptionList).focus()
-            except Exception:
-                pass
-
     # -- add / remove -----------------------------------------------------
+
+    @staticmethod
+    def _pattern_matches(pattern: str, path: str) -> bool:
+        if pattern.endswith("/*") and path.startswith(pattern[:-1]):
+            return True  # "dir/*" expands recursively (find -type f)
+        return fnmatch.fnmatchcase(path, pattern)
+
+    def add_path(self, path: str) -> bool:
+        """Watch a path or wildcard pattern; False (with a toast) if rejected."""
+        return self._add_path(path)
 
     def _add_path(self, path: str) -> bool:
         forensic = get_forensic_service()
-        # add_spotlight_file() itself branches on "*" to expand wildcards
-        # (_add_spotlight_files_by_pattern) -- reused as-is; passing an adb
-        # instance is harmless for the plain, non-wildcard path too, since
-        # that branch never touches it.
-        added = forensic.add_spotlight_file(path, adb=self._adb())
-        if not added:
-            self._notify(f"Already watching, invalid, or no matches: {path}", "warning")
+        if "*" in path and path in self._watched_patterns:
+            self._notify(f"Already watching: {path}", "warning")
             return False
+        # add_spotlight_file() itself branches on "*" to expand wildcards
+        # (_add_spotlight_files_by_pattern) -- passing an adb instance is
+        # harmless for the plain path, since that branch never touches it.
+        added = forensic.add_spotlight_file(path, adb=self._adb())
         if "*" in path:
-            # ForensicService only keeps the already-expanded literal matches
-            # (see _add_spotlight_files_by_pattern) -- the pattern string
-            # itself would otherwise be lost, so remember it here for
-            # auto-mode's wildcard re-expansion timer (see module docstring).
+            # Remember (and persist) the pattern even when it matches nothing
+            # yet: the lens pins it, auto-mode re-expands it.
             self._watched_patterns.add(path)
+        elif not added:
+            self._notify(f"Already watching or invalid: {path}", "warning")
+            return False
         self._persist_index()
         self._reload_rows()
-        self._notify(f"Added to watchlist: {path}")
+        self._notify(f"Watching {path}")
         return True
 
-    def action_remove_selected(self) -> None:
-        path = self._current_path()
-        if not path:
-            self._notify("No path selected to remove.", "warning")
-            return
+    def remove_path(self, path: str) -> bool:
+        """Unwatch a literal path (its pulled baseline stays on disk)."""
         forensic = get_forensic_service()
         if not forensic.remove_spotlight_file(path):
-            return
+            return False
         self._persist_index()
         self._rows.pop(path, None)
-        # Best-effort cleanup of auto-mode's per-path bookkeeping -- not
-        # load-bearing (an unknown path in these dicts is harmless), just
-        # avoids unbounded growth across many add/remove cycles in one
-        # long-lived session.
+        # Best-effort cleanup of auto-mode's per-path bookkeeping.
         self._last_auto_pull_at.pop(path, None)
         self._auto_pull_inflight.discard(path)
-        if self._selected_path == path:
-            self._selected_path = None
         self._reload_rows()
-        self._render_detail(self._selected_path)
-        self._notify(f"Removed from watchlist: {path}")
+        return True
 
-    def action_focus_add(self) -> None:
-        try:
-            self.query_one("#watchlist-add-input", Input).focus()
-        except Exception:
-            pass
+    def unwatch(self, path: str) -> bool:
+        """Unwatch a literal path, or a pattern together with its matches."""
+        if path in self._watched_patterns:
+            self._watched_patterns.discard(path)
+            for match in [p for p in self._rows if self._pattern_matches(path, p)]:
+                if not self._from_watched_pattern(match):
+                    get_forensic_service().remove_spotlight_file(match)
+                    self._rows.pop(match, None)
+            self._persist_index()
+            self._reload_rows()
+            self._notify(f"Stopped watching {path}")
+            return True
+        if self.remove_path(path):
+            self._notify(f"Stopped watching {path}")
+            return True
+        return False
 
     # -- pull / diff --------------------------------------------------------
 
-    def action_pull_selected(self) -> None:
-        path = self._current_path()
-        if not path:
-            self._notify("No path selected to pull.", "warning")
+    def pull(self, paths: list[str]) -> None:
+        """Pull (and diff) these watched paths on a worker thread."""
+        paths = [p for p in paths if p in self._rows]
+        if not paths:
+            self._notify("Nothing watched to pull.", "warning")
             return
-        self._start_pull([path])
+        self._start_pull(paths)
 
-    def action_pull_all(self) -> None:
+    def pull_all(self) -> None:
         paths = sorted(self._rows)
         if not paths:
-            self._notify("No paths to pull.", "warning")
+            self._notify("No watched files to pull.", "warning")
             return
         self._start_pull(paths)
 
@@ -817,11 +614,17 @@ class WatchlistView(FilesSubViewBase):
             for suffix in ("-wal", "-journal"):
                 fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
 
+        facts = _file_facts(current_main)
         if not had_previous:
             detail = self._baseline_message(current)
             watchlist_store.promote(path)
             self._post(
-                self._apply_pull_result, path, RowState.BASELINE_ONLY, detail, None
+                self._apply_pull_result,
+                path,
+                RowState.BASELINE_ONLY,
+                detail,
+                None,
+                facts,
             )
             return
 
@@ -829,7 +632,14 @@ class WatchlistView(FilesSubViewBase):
         diff_text, changed = _compute_diff(previous_main, current_main)
         watchlist_store.promote(path)
         if changed:
-            self._post(self._apply_pull_result, path, RowState.CHANGED, None, diff_text)
+            self._post(
+                self._apply_pull_result,
+                path,
+                RowState.CHANGED,
+                None,
+                diff_text,
+                facts,
+            )
         else:
             self._post(
                 self._apply_pull_result,
@@ -837,6 +647,7 @@ class WatchlistView(FilesSubViewBase):
                 RowState.UNCHANGED,
                 "No changes since last pull.",
                 None,
+                facts,
             )
 
     @staticmethod
@@ -852,6 +663,7 @@ class WatchlistView(FilesSubViewBase):
         state: RowState,
         detail: str | None,
         diff_text: str | None,
+        facts: tuple[int | None, str | None] | None = None,
     ) -> None:
         """Main-thread callback (via ``_post``) applying one pull's outcome.
 
@@ -878,10 +690,11 @@ class WatchlistView(FilesSubViewBase):
             # forward. If auto-mode never ticked this path yet, last_seen is
             # still None here; the next tick reconciles it instead.
             info.last_pulled = info.last_seen
+            info.pulled_at = datetime.now().isoformat(timespec="seconds")
+            if facts is not None:
+                info.size, info.sha256 = facts
         self._persist_index()
-        self._rebuild_list()
-        if path == self._selected_path:
-            self._render_detail(path)
+        self._changed([path])
 
     # -- auto mode: visibility, toggle, timer lifecycle ---------------------
     #
@@ -890,12 +703,16 @@ class WatchlistView(FilesSubViewBase):
     # `a`=Analyze binding, the same established precedent as d/p/n above).
 
     def _is_watchlist_visible(self) -> bool:
-        """True only while the Files lens is active AND Watchlist is its
-        active inner sub-view (``lens_shell.is_shown``: no ancestor hidden).
+        """True only while the Files lens is on screen (this widget itself is
+        always ``display: none``, so ask about its parent).
         """
         from .lens_shell import is_shown
 
-        return is_shown(self)
+        parent = self.parent
+        return parent is not None and is_shown(parent)
+
+    def toggle_auto(self) -> None:
+        self.action_toggle_auto()
 
     def action_toggle_auto(self) -> None:
         if self._auto_enabled:
@@ -1102,17 +919,10 @@ class WatchlistView(FilesSubViewBase):
             # persisted separately by _apply_pull_result.
             self._persist_index()
         self._rebuild_list()
-        if self._selected_path:
-            self._render_detail(self._selected_path)
 
     def _from_watched_pattern(self, path: str) -> bool:
         """Whether ``path`` is covered by one of the watched wildcard patterns."""
-        for pattern in self._watched_patterns:
-            if pattern.endswith("/*") and path.startswith(pattern[:-1]):
-                return True  # "dir/*" expands recursively (find -type f)
-            if fnmatch.fnmatchcase(path, pattern):
-                return True
-        return False
+        return any(self._pattern_matches(p, path) for p in self._watched_patterns)
 
     def _vanished_expansion(self, path: str, stderr: str) -> bool:
         """A wildcard-expanded path whose stat says it no longer exists."""
@@ -1129,8 +939,6 @@ class WatchlistView(FilesSubViewBase):
         self._rows.pop(path, None)
         self._last_auto_pull_at.pop(path, None)
         self._auto_pull_inflight.discard(path)
-        if self._selected_path == path:
-            self._selected_path = None
         logger.debug("Watchlist: %s vanished; dropped (wildcard expansion)", path)
 
     def _evaluate_auto_pull(
@@ -1324,11 +1132,10 @@ class WatchlistView(FilesSubViewBase):
         """Run ``fn(*args)`` on the Textual main thread.
 
         Deliberately ``call_from_thread`` (blocking), not the
-        ``loop.call_soon_threadsafe`` idiom ``FilesPanel``/``MonitorView``
-        use for their EventBus callbacks -- ``fn`` here mounts brand-new
-        widgets (``DiffView``), which needs Textual's ``active_app``
-        contextvar set. See ``DiffsView._post``'s docstring for the full
-        reasoning; this is the identical pattern for the identical reason.
+        ``loop.call_soon_threadsafe`` idiom the Files lens uses for its
+        EventBus callbacks -- ``fn`` here posts messages and starts timers,
+        which needs Textual's ``active_app`` contextvar set (the same
+        pattern as ``DiffsView._post``).
         """
         if threading.current_thread() is threading.main_thread():
             fn(*args)

@@ -116,7 +116,7 @@ async def test_legacy_navigation_helpers_redirect() -> None:
         ms.open_files_tab("files-watchlist")
         await _settle(pilot)
         assert ms.active_lens == "files"
-        assert ms.query_one("#files-body").current == "files-watchlist"
+        assert ms.lens_widget() in app.focused.ancestors_with_self
         ms.open_fritap_tab()
         await _settle(pilot)
         assert ms.active_lens == "network"
@@ -366,7 +366,7 @@ async def test_esc_in_watchlist_input_still_leaves_the_input() -> None:
         await _settle(pilot)
         ms.open_inspector(_content())
         await _settle(pilot)
-        ms.query_one("#watchlist-add-input", Input).focus()
+        ms.lens_widget("files").open_input("add")
         await _settle(pilot)
         await pilot.press("escape")
         await _settle(pilot)

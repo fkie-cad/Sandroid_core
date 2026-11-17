@@ -240,11 +240,9 @@ async def test_shift_arrow_moves_focus_into_each_panel() -> None:
         assert seen[-1] == "spotlight-panel"
 
 
-async def test_files_subtabs_cycle_past_watchlist() -> None:
-    """Shift+Right must not get stuck in the Watchlist add-path Input.
-
-    The Input used to grab focus and swallow Shift+Right (text selection),
-    trapping the user in the Files tab.
+async def test_files_lens_has_no_subtabs_to_get_stuck_in() -> None:
+    """The Files lens is one table: Shift+Down is a no-op and Shift+Right
+    moves on to the next lens, never into the lens's inline input.
     """
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
@@ -252,13 +250,10 @@ async def test_files_subtabs_cycle_past_watchlist() -> None:
         app.screen.open_files_tab()
         await _settle(pilot)
         await pilot.press("shift+down")
-        visited = []
-        for _ in range(3):
-            await pilot.press("shift+right")
-            await _settle(pilot)
-            visited.append(app.screen.query_one("#files-body").current)
-            assert type(app.focused).__name__ != "_AddPathInput"
-        assert set(visited) == {"files-monitor", "files-watchlist"}
+        await pilot.press("shift+right")
+        await _settle(pilot)
+        assert app.screen.active_lens == "runs"
+        assert type(app.focused).__name__ != "_LensInput"
 
 
 # --------------------------------------------------------------------------
@@ -692,36 +687,33 @@ async def test_picker_s_then_digit_saves_slot(monkeypatch) -> None:
 
 
 async def test_view_switch_never_leaves_focus_in_text_input(monkeypatch) -> None:
-    """Shift+Right into Watchlist must not land in the "Add path" Input.
+    """Switching to the Files lens must not land in its inline input.
 
-    Simulates focus being re-homed into the Input during the switch (what
+    Simulates focus being re-homed into the input during the switch (what
     the phase-4 demo hit); a following ``P`` would be typed into the field.
     """
     from textual.widgets import Input
 
-    from sandroid.tui.widgets.watchlist_view import WatchlistView
+    from sandroid.tui.widgets.files_panel import FilesPanel
 
     def _focus_input(self, scroll_visible=True):
-        self.query_one("#watchlist-add-input", Input).focus(scroll_visible)
+        field = self.query_one("#files-input", Input)
+        field.set_class(True, "-shown")
+        field.focus(scroll_visible)
         return self
 
-    monkeypatch.setattr(WatchlistView, "focus", _focus_input)
+    monkeypatch.setattr(FilesPanel, "focus", _focus_input)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await _boot(app, pilot)
         app.screen.open_files_tab()
         await _settle(pilot)
-        await pilot.press("shift+down")
-        await pilot.press("shift+right")  # Monitor -> Watchlist
-        await _settle(pilot)
-        assert app.screen.query_one("#files-body").current == "files-watchlist"
+        assert app.screen.active_lens == "files"
         assert not isinstance(app.focused, Input)
-        assert app.screen.query_one("#files-watchlist") in (
-            app.focused.ancestors_with_self
-        )
+        assert app.screen.query_one("#files-panel") in (app.focused.ancestors_with_self)
         await pilot.press("P")
         await _settle(pilot)
-        assert app.screen.query_one("#watchlist-add-input", Input).value == ""
+        assert app.screen.query_one("#files-input", Input).value == ""
 
 
 async def test_shift_arrows_work_with_nothing_focused() -> None:

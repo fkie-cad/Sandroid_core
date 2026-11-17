@@ -184,6 +184,7 @@ def save_membership(
     paths: list[str],
     row_states: dict[str, dict] | None = None,
     auto_enabled: bool = False,
+    patterns: list[str] | None = None,
 ) -> None:
     """Persist the watched-path list AND (as of schema v2) each path's
     last-known pull/auto state to ``index.json``.
@@ -199,6 +200,8 @@ def save_membership(
             are written -- a stale row for an already-removed path is
             silently dropped rather than resurrected on the next load.
         auto_enabled: whether Watchlist's auto-mode was on at save time.
+        patterns: watched wildcard patterns (the Files lens pins them and
+            auto-mode re-expands them); see :func:`load_patterns`.
     """
     rows_payload: dict[str, dict] = {}
     for path in paths:
@@ -211,15 +214,19 @@ def save_membership(
             "last_seen": info.get("last_seen"),
             "last_pulled": info.get("last_pulled"),
         }
-    _atomic_write_json(
-        _index_path(),
-        {
-            "schema_version": SCHEMA_VERSION,
-            "paths": list(paths),
-            "auto_enabled": bool(auto_enabled),
-            "rows": rows_payload,
-        },
-    )
+        if info.get("pull"):
+            # Last successful pull: {"at", "size", "sha256"} (optional key).
+            rows_payload[path]["pull"] = info["pull"]
+    data = {
+        "schema_version": SCHEMA_VERSION,
+        "paths": list(paths),
+        "auto_enabled": bool(auto_enabled),
+        "rows": rows_payload,
+    }
+    kept_patterns = [p for p in (patterns or []) if isinstance(p, str)]
+    if kept_patterns:
+        data["patterns"] = kept_patterns  # optional key, see load_patterns()
+    _atomic_write_json(_index_path(), data)
 
 
 def load_membership() -> list[str]:
@@ -261,6 +268,14 @@ def load_row_states() -> dict[str, dict]:
     }
 
 
+def load_patterns() -> list[str]:
+    """The watched wildcard patterns (``[]`` for a missing/older index)."""
+    patterns = _load_index_data().get("patterns")
+    if not isinstance(patterns, list):
+        return []
+    return [p for p in patterns if isinstance(p, str)]
+
+
 def load_auto_enabled() -> bool:
     """Whether Watchlist's auto-mode was on the last time the index was saved.
 
@@ -275,6 +290,7 @@ __all__ = [
     "has_baseline",
     "load_auto_enabled",
     "load_membership",
+    "load_patterns",
     "load_row_states",
     "previous_dir",
     "promote",
