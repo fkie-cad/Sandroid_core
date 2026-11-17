@@ -1,3 +1,4 @@
+import difflib
 import os
 import os.path
 import shutil
@@ -887,7 +888,7 @@ def txt_diff(txt_file):
 def txt_diff_paths(old_path, new_path):
     """Calculates the differences between two text files given explicit paths.
 
-    Same line-set diff algorithm as :func:`txt_diff`, but takes the two file
+    Same hunk-wise line diff as :func:`txt_diff`, but takes the two file
     paths directly instead of assuming the ``RAW_RESULTS_PATH``/
     ``first_pull``/``second_pull`` convention baked into that function's
     signature. Added for callers with their own baseline-cache layout (e.g.
@@ -931,19 +932,33 @@ def txt_diff_paths(old_path, new_path):
         logger.debug(f"'{new_path}' is not valid UTF-8 text: {e}")
         return f"\tError: {new_path} is not a text file"
 
-    # Use sets for efficient membership testing
-    old_set = set(old_text)
-    new_set = set(new_text)
+    return _line_diff(old_text, new_text)
 
-    parts = []
-    for line in old_text:
-        if line not in new_set:
-            parts.append(f"\t[LINE DELETED] {line}")
 
-    for line in new_text:
-        if line not in old_set:
-            parts.append(f"\t[LINE ADDED] {line}")
+def _line_diff(old_text: list[str], new_text: list[str]) -> str:
+    """Hunk-wise line diff: each change at its place, old/new interleaved.
 
+    Every hunk starts with ``@@ line N @@`` (N = line in the new file); a
+    changed line reads ``[LINE DELETED] old`` directly followed by
+    ``[LINE ADDED] new`` instead of all deletions first and all additions
+    after them.
+    """
+
+    def _nl(line: str) -> str:
+        return line if line.endswith("\n") else line + "\n"
+
+    parts: list[str] = []
+    matcher = difflib.SequenceMatcher(None, old_text, new_text)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        parts.append(f"\t@@ line {j1 + 1} @@\n")
+        old_chunk, new_chunk = old_text[i1:i2], new_text[j1:j2]
+        for k in range(max(len(old_chunk), len(new_chunk))):
+            if k < len(old_chunk):
+                parts.append(f"\t[LINE DELETED] {_nl(old_chunk[k])}")
+            if k < len(new_chunk):
+                parts.append(f"\t[LINE ADDED] {_nl(new_chunk[k])}")
     return "".join(parts)
 
 

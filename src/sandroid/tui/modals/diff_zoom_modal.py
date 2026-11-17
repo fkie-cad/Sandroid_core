@@ -157,7 +157,9 @@ class DiffZoomModal(ForensicModal[None]):
                 id="zoom-log",
                 markup=True,
                 highlight=False,
-                wrap=False,
+                # Wrapped: a long "old → new" value must be readable in full
+                # (this view is the place to read what the preview cut off).
+                wrap=True,
                 auto_scroll=False,
             )
             yield Input(placeholder="search diff…", id="zoom-search-input")

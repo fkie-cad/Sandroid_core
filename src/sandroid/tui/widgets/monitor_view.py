@@ -14,7 +14,12 @@ live in the old Monitor sub-tab's ``MonitorView`` except the drawing:
   full on-device path when the monitor provides it) with the ops seen, the
   event count, first/last time, the processes and a short event history.
   SQLite ``-wal``/``-journal`` writes fold onto their database (that is what
-  the watchlist pulls, companions included);
+  the watchlist pulls, companions included). Keys are canonical
+  (``adb_utils.canonical_device_path``): ``/data/user/0/<pkg>`` and
+  ``/data/data/<pkg>`` are one row, ``databases/`` is ``databases``. A
+  rename marks its source row "→ new name"; a deleted directory marks its
+  known files deleted (``rm -r`` unlinks them by relative name, which the
+  probes don't match);
 * **visibility** -- ``tui.monitor_event_visibility`` (always/verbose/never per
   category, OPEN/CLOSE "noise" is verbose by default) plus path-based noise
   (caches, tmp files, OS paths). ``show_all`` (key ``N`` in the lens) reveals
@@ -32,6 +37,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
+
+from sandroid.core.adb_utils import canonical_device_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -51,8 +58,12 @@ OPS: dict[str, tuple[str, str]] = {
 #: Events kept per path for the Inspector's Events tab.
 EVENTS_PER_PATH = 30
 
-#: App-private data roots; stripped for the app-relative display path.
-_APP_ROOT_RE = re.compile(r"^/data/(?:data|user/\d+|user_de/\d+)/[^/]+/")
+#: App-private data roots; stripped for the app-relative display path. The
+#: device-encrypted (``user_de``) and external (``Android/data``) roots are
+#: different directories, so they keep a short marker (``@de/``, ``@ext/``)
+#: and never read like the main data directory's ``files/x``.
+_APP_ROOT_RE = re.compile(r"^/data/(?:data|user/\d+)/[^/]+/")
+_DE_APP_ROOT_RE = re.compile(r"^/data/user_de/\d+/[^/]+/")
 _EXT_APP_ROOT_RE = re.compile(r"^/(?:sdcard|storage/emulated/\d+)/Android/data/[^/]+/")
 
 #: Path segments that mark a file as noise (caches and temp files).
@@ -77,12 +88,33 @@ _OS_PREFIXES = (
 _NOISE_SUFFIXES = (".tmp", ".bak", ".lck", ".lock", ".flock", "-shm")
 
 
+_PKG_OF_RE = re.compile(
+    r"^/(?:data/(?:data|user/\d+|user_de/\d+)|"
+    r"(?:sdcard|storage/emulated/\d+)/Android/data)/([^/]+)/"
+)
+
+
+def app_package(path: str) -> str | None:
+    """The package whose data directory holds ``path`` (``None`` otherwise)."""
+    match = _PKG_OF_RE.match(path)
+    return match.group(1) if match else None
+
+
 def app_relative(path: str) -> str:
-    """``/data/data/<pkg>/shared_prefs/x.xml`` -> ``shared_prefs/x.xml``."""
-    for regex in (_APP_ROOT_RE, _EXT_APP_ROOT_RE):
+    """``/data/data/<pkg>/shared_prefs/x.xml`` -> ``shared_prefs/x.xml``.
+
+    ``/data/user_de/0/<pkg>/x`` -> ``@de/x`` and
+    ``/sdcard/Android/data/<pkg>/x`` -> ``@ext/x`` (other directories).
+    """
+    for regex, marker in (
+        (_APP_ROOT_RE, ""),
+        (_DE_APP_ROOT_RE, "@de/"),
+        (_EXT_APP_ROOT_RE, "@ext/"),
+    ):
         match = regex.match(path)
         if match:
-            return path[match.end() :] or path
+            rest = path[match.end() :]
+            return marker + rest if rest else path
     return path
 
 
@@ -138,6 +170,18 @@ class FileEvent:
     process: str = ""
     other: str | None = None  # rename: the other side of the rename
     via: str = ""  # "-wal"/"-journal" when folded onto the database
+    #: How it was seen when not by a probe: "stat" (periodic re-stat of a
+    #: file opened before the monitor started), "scan" (rescan after a stop),
+    #: "parent" (its directory was deleted), "renamed" (moved away).
+    source: str = ""
+
+
+#: Readable form of :attr:`FileEvent.source` for the Inspector.
+SOURCE_TEXT = {
+    "stat": "seen by re-stat",
+    "scan": "found by the stop rescan",
+    "parent": "directory deleted",
+}
 
 
 @dataclass
@@ -153,6 +197,11 @@ class PathActivity:
     events: deque[FileEvent] = field(
         default_factory=lambda: deque(maxlen=EVENTS_PER_PATH)
     )
+    #: Where the file went when it was renamed away (cleared by any later
+    #: event on this path, e.g. a re-create).
+    moved_to: str | None = None
+    #: A directory (mkdir seen, or files below it).
+    is_dir: bool = False
 
     @property
     def rel(self) -> str:
@@ -161,6 +210,14 @@ class PathActivity:
     @property
     def last_category(self) -> str | None:
         return self.events[-1].category if self.events else None
+
+    @property
+    def deleted(self) -> bool:
+        """The last real (non-noise) event deleted it."""
+        for event in reversed(self.events):
+            if event.category != "noise":
+                return event.category == "delete"
+        return False
 
     def op_letters(self) -> list[tuple[str, str]]:
         """``[(letter, colour)]`` in display order (``C M R D A o``)."""
@@ -172,9 +229,15 @@ class PathActivity:
         self.ops[cat] = self.ops.get(cat, 0) + 1
         if self.first is None:
             self.first = event.when
-        self.last = event.when
+        # OPEN/CLOSE noise never re-dates a row that has real activity.
+        if cat != "noise" or self.last is None or set(self.ops) == {"noise"}:
+            self.last = event.when
         if event.process:
             self.processes[event.process] = self.processes.get(event.process, 0) + 1
+        if event.source != "renamed" and cat != "noise":
+            self.moved_to = None
+        if event.label == "CREATE DIR":
+            self.is_dir = True
         self.events.append(event)
 
 
@@ -264,26 +327,89 @@ class FileActivity:
             new = getattr(item, "new_path", None)
             if new is None and getattr(item, "new_filename", None) is not None:
                 new = _join(item.new_directory, item.new_filename)
+            old = canonical_device_path(old) if old else old
+            new = canonical_device_path(new) if new else new
             key, other = (new, old) if new else (old, None)
             if not key:
                 continue
+            if category == "attrs" and "/" not in key:
+                continue  # an unresolved dentry basename: no orphan rows
+            source = getattr(item, "source", "") or ""
+            source = source if source in ("stat", "scan") else ""
             key, via = split_companion(key)
             row = self.paths.get(key)
+            if source == "scan" and category == "delete" and row is not None:
+                if row.deleted:
+                    continue  # already known (e.g. via its deleted directory)
             if row is None:
                 row = self.paths[key] = PathActivity(key=key)
-            row.add(
-                FileEvent(
-                    when=now,
-                    label=getattr(item, "label", "") or "",
-                    category=category,
-                    color=getattr(item, "color", None),
-                    process=getattr(item, "process", "") or "",
-                    other=other,
-                    via=via,
-                )
+                parent = self.paths.get(key.rsplit("/", 1)[0])
+                if parent is not None:
+                    parent.is_dir = True
+            event = FileEvent(
+                when=now,
+                label=getattr(item, "label", "") or "",
+                category=category,
+                color=getattr(item, "color", None),
+                process=getattr(item, "process", "") or "",
+                other=other,
+                via=via,
+                source=source,
             )
+            row.add(event)
             touched.add(key)
+            if other and category == "rename":
+                touched |= self._mark_moved(split_companion(other)[0], key, event)
+            if category == "delete":
+                touched |= self._mark_descendants_deleted(row, event)
         self._evict()
+        return touched
+
+    def _mark_moved(self, old: str, new: str, event: FileEvent) -> set[str]:
+        """The source row of a rename says where the file went."""
+        row = self.paths.get(old)
+        if row is None or old == new:
+            return set()
+        row.add(
+            FileEvent(
+                when=event.when,
+                label="RENAMED",
+                category="rename",
+                color=event.color,
+                process=event.process,
+                other=new,
+                source="renamed",
+            )
+        )
+        row.moved_to = new
+        return {old}
+
+    def _mark_descendants_deleted(
+        self, row: PathActivity, event: FileEvent
+    ) -> set[str]:
+        """A deleted directory takes its known files with it.
+
+        ``rm -r`` unlinks the children with relative names, which the
+        path-filtered probes don't match; only the directory itself shows up.
+        """
+        prefix = row.key.rstrip("/") + "/"
+        touched: set[str] = set()
+        for key, child in self.paths.items():
+            if key.startswith(prefix) and not child.deleted:
+                child.add(
+                    FileEvent(
+                        when=event.when,
+                        label="DELETE",
+                        category="delete",
+                        color=event.color,
+                        process=event.process,
+                        other=row.key,
+                        source="parent",
+                    )
+                )
+                touched.add(key)
+        if touched:
+            row.is_dir = True
         return touched
 
     def _evict(self) -> None:
@@ -325,9 +451,11 @@ class FileActivity:
 
 __all__ = [
     "OPS",
+    "SOURCE_TEXT",
     "FileActivity",
     "FileEvent",
     "PathActivity",
+    "app_package",
     "app_relative",
     "is_noise_path",
     "smart_truncate",

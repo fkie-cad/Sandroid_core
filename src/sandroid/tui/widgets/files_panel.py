@@ -17,13 +17,16 @@ watchlist owned by the hidden
 ★ and are pinned on top, also before they saw any activity (wildcard
 patterns included). Details live in the Inspector only (Enter): Summary
 (full path, ops with times, processes, watch + last pull), Diff (the last
-pull against the one before it) and Events.
+pull against the one before it), History (every kept pull with its diff,
+see ``watchlist_store``) and Events. The Inspector forwards the lens keys it
+advertises while it has focus (``lens_shell.Inspector.on_key``).
 
 Keys (on this lens): ``w`` watch/unwatch · ``u`` pull the row · ``U`` pull
 all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
 the table · ``a`` auto-pull · ``N`` show noise (as in the Network lens) ·
-``.`` full paths · ``z`` zoom the diff · ``Ctrl+L`` clear. Only ``w``/``u``
-are shown in the footer (the rest are in ``?``).
+``.`` full paths · ``z`` zoom the diff · ``O`` sort (recent / name /
+count) · ``Home``/``End`` first/last row · ``Ctrl+L`` clear. Only
+``w``/``u`` are shown in the footer (the rest are in ``?``).
 
 REVIEW scope (``MainScreen.set_scope(run_dir)``): the same table lists the
 run's changed/new/deleted files (from the run's ``RunRecord``, the data the
@@ -43,6 +46,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,9 +58,20 @@ from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Static
 
+from sandroid.core.adb_utils import watch_path_problem
+
 from .lens_shell import InspectorContent, is_shown
-from .monitor_view import OPS, FileActivity, PathActivity, app_relative, smart_truncate
+from .monitor_view import (
+    OPS,
+    SOURCE_TEXT,
+    FileActivity,
+    PathActivity,
+    app_package,
+    app_relative,
+    smart_truncate,
+)
 from .watchlist_view import RowState, WatchlistView
+from .watchlist_view import is_database_path as _is_database
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -114,13 +129,54 @@ def render_diff(diff: str | list[str] | None) -> Text:
         line = line.replace("\t", "  ")  # file_diff indents with tabs
         if i:
             out.append("\n")
-        try:
-            out.append_text(Text.from_markup(line))
-        except Exception:
-            out.append(line)
+        out.append_text(diff_line_text(line))
     if len(shown) < len(lines):
         out.append(f"\n… {len(lines)} lines — z for the full diff", style=_DIM)
     return out
+
+
+#: Style tags the diff producers really use (SQLite diffs, run records). A
+#: line without one is plain text: XML paths such as ``string[@name="k"]``
+#: and file content must not be parsed as Rich markup (``[@...]`` is a tag
+#: to Rich, so the key name of a changed preference used to vanish).
+_MARKUP_HINT = re.compile(
+    r"\[/?(?:success|warning|error|green|red|yellow|cyan|blue|magenta|bold|dim|"
+    r"italic|#[0-9a-fA-F]{3})"
+)
+_LINE_STYLES = (
+    (("[ADDED]", "[LINE ADDED]", "[INSERT]", "+"), "#4ade80"),
+    (("[DELETED]", "[LINE DELETED]", "[DELETE]", "-"), "#fb7185"),
+    (("[UPDATED]", "[UPDATE]"), "#facc15"),
+    (("@@",), _DIM),
+)
+
+
+def diff_line_text(line: str) -> Text:
+    """One diff line as ``Text``: Rich markup when it carries style tags,
+    otherwise literal text coloured by its ``[ADDED]``/``[DELETED]``/... tag.
+    """
+    if _MARKUP_HINT.search(line):
+        try:
+            return Text.from_markup(line)
+        except Exception:
+            pass
+    text = Text(line)
+    head = line.lstrip()
+    for prefixes, style in _LINE_STYLES:
+        if head.startswith(prefixes):
+            text.stylize(style)
+            break
+    return text
+
+
+def diff_markup(diff: str | list[str]) -> str:
+    """A diff as safe Rich markup (plain lines escaped) for the zoom view."""
+    from rich.markup import escape
+
+    lines = diff.splitlines() if isinstance(diff, str) else list(diff)
+    return "\n".join(
+        line if _MARKUP_HINT.search(line) else escape(line) for line in lines
+    )
 
 
 def _fmt_time(when: datetime | None) -> str:
@@ -183,6 +239,33 @@ class FilesSubViewBase(Widget):
         return f"{self._LABEL} —"
 
 
+class _FilesTable(DataTable):
+    """The lens table: ``Home``/``End`` move the row cursor.
+
+    DataTable binds them to *horizontal* scrolling (its ``ctrl+home`` is the
+    row jump); this table never scrolls sideways, so Home/End jump rows.
+    """
+
+    def action_scroll_home(self) -> None:
+        self.action_scroll_top()
+
+    def action_scroll_end(self) -> None:
+        self.action_scroll_bottom()
+
+
+def _natural_key(text: str) -> list:
+    """``f_2`` before ``f_10`` (digits compare as numbers)."""
+    return [
+        int(part) if part.isdigit() else part.lower() for part in _DIGITS.split(text)
+    ]
+
+
+_DIGITS = re.compile(r"(\d+)")
+
+#: ``O`` cycles the order of the unpinned rows.
+SORT_MODES = ("recent", "name", "count")
+
+
 class _LensInput(Input):
     """The lens's one inline input: ``/`` filter or ``n`` add-a-path.
 
@@ -236,6 +319,7 @@ class FilesPanel(Widget):
         Binding("N", "toggle_noise", "Show noise", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
         Binding("z", "zoom", "Zoom diff", show=False),
+        Binding("O", "cycle_sort", "Sort: recent / name / count", show=False),
         Binding("ctrl+l", "clear", "Clear activity", show=False),
     ]
 
@@ -309,6 +393,7 @@ class FilesPanel(Widget):
         )
         self._filter = ""
         self._full_paths = False
+        self._sort = "recent"
         self._scope: str | None = None
         self._scope_label: str | None = None
         self._review_rows: list[_Row] = []
@@ -328,12 +413,14 @@ class FilesPanel(Widget):
         with Horizontal(id="files-notice"):
             yield Static("", id="files-notice-text")
             yield Button("Resume monitoring", id="files-resume-btn")
-        table: DataTable = DataTable(
+        table: DataTable = _FilesTable(
             id="files-table", cursor_type="row", show_header=False, zebra_stripes=False
         )
         yield table
         yield Static("", id="files-empty")
-        yield _LensInput(id="files-input")
+        # No select-all on focus: the `n` prefill (the app's data directory)
+        # is meant to be extended, not replaced by the first key typed.
+        yield _LensInput(id="files-input", select_on_focus=False)
         yield WatchlistView(id="files-watchlist")
 
     def on_mount(self) -> None:
@@ -607,6 +694,15 @@ class FilesPanel(Widget):
                 pinned[pattern] = _Row(key=pattern, watched=pattern, pattern=True)
         for key, act in self.activity.paths.items():
             watched = wl.watched_by(key) if wl is not None else None
+            if (
+                watched is not None
+                and watched != key
+                and key not in wl.rows
+                and (act.deleted or act.is_dir or act.moved_to)
+            ):
+                # A wildcard pattern watches files that exist: not a deleted
+                # path or a directory it happens to match.
+                watched = None
             if watched is not None:
                 row = pinned.setdefault(key, _Row(key=key, watched=watched))
                 row.activity = act
@@ -617,7 +713,15 @@ class FilesPanel(Widget):
             last = row.activity.last if row.activity else None
             return (last is None, -(last.timestamp() if last else 0), row.key)
 
-        rows = sorted(pinned.values(), key=recency) + sorted(rest, key=recency)
+        def order(row: _Row):
+            if self._sort == "name":
+                return _natural_key(app_relative(row.key))
+            if self._sort == "count":
+                count = row.activity.count if row.activity else 0
+                return (-count, *recency(row))
+            return recency(row)
+
+        rows = sorted(pinned.values(), key=order) + sorted(rest, key=order)
         return [r for r in rows if self._matches(r)]
 
     def _matches(self, row: _Row) -> bool:
@@ -716,36 +820,87 @@ class FilesPanel(Widget):
     def _ensure_columns(self, table: DataTable) -> None:
         """Fit the columns to the table width.
 
-        The "last" column goes first when it gets narrow (e.g. beside the
-        Inspector at 100 columns).
+        When it gets narrow (beside the Inspector at 100 columns) the count
+        goes first -- the time of the last change is the more useful of the
+        two -- then the time too.
         """
         width = table.size.width or self.size.width or 100
-        fixed = _W_MARK + _W_OPS + _W_COUNT + 2 * 4 + 1  # + cell padding, scrollbar
-        path_width = width - fixed
-        with_last = path_width - (_W_LAST + 2) >= 28
-        if with_last:
+        base = _W_MARK + _W_OPS + 2 * 3 + 1  # + cell padding, scrollbar
+        path_width = width - base
+        columns = ["mark", "path", "ops"]
+        if path_width - (_W_COUNT + 2) - (_W_LAST + 2) >= 20:
+            columns += ["count", "last"]
+            path_width -= _W_COUNT + 2 + _W_LAST + 2
+        elif path_width - (_W_LAST + 2) >= 16:
+            columns += ["last"]
             path_width -= _W_LAST + 2
+        elif path_width - (_W_COUNT + 2) >= 16:
+            columns += ["count"]
+            path_width -= _W_COUNT + 2
         path_width = max(8, path_width)
-        if path_width == self._path_width and len(table.columns) == 4 + with_last:
+        current = [str(c.value) for c in table.columns]
+        if path_width == self._path_width and current == columns:
             return
         self._path_width = path_width
         table.clear(columns=True)
-        table.add_column("", width=_W_MARK, key="mark")
-        table.add_column("path", width=path_width, key="path")
-        table.add_column("ops", width=_W_OPS, key="ops")
-        table.add_column("count", width=_W_COUNT, key="count")
-        if with_last:
-            table.add_column("last", width=_W_LAST, key="last")
+        widths = {
+            "mark": _W_MARK,
+            "path": path_width,
+            "ops": _W_OPS,
+            "count": _W_COUNT,
+            "last": _W_LAST,
+        }
+        for key in columns:
+            label = "" if key == "mark" else key
+            table.add_column(label, width=widths[key], key=key)
+
+    def _foreign_package(self, row: _Row) -> str | None:
+        """The package to show in front of a short path, or None.
+
+        In REVIEW every app path names its package (a run diffs the whole
+        device); live, only paths outside the monitored app do.
+        """
+        package = app_package(row.key)
+        if package is None:
+            return None
+        if row.review_kind is not None:
+            return package
+        root = self._app_root()
+        own = app_package(root) if root else None
+        return package if own and package != own else None
 
     def _path_cell(self, row: _Row) -> Text:
+        act = row.activity
+        moved = act.moved_to if act is not None else None
+        # "old.txt → new.txt": the renamed-away row says where the file went.
+        suffix = f" → {moved.rsplit('/', 1)[-1]}" if moved else ""
         shown = row.key if self._full_paths else app_relative(row.key)
+        # Short paths drop /data/data/<pkg>/: name the package whenever it
+        # is not the monitored app's -- always in REVIEW, where a run lists
+        # files of several apps (bugle_db must not read as Wikipedia's).
+        owner = None if self._full_paths else self._foreign_package(row)
         if not self._full_paths:
-            shown = smart_truncate(shown, self._path_width)
+            width = self._path_width - len(suffix)
+            if suffix and width < 12:
+                suffix = " →"
+                width = self._path_width - 2
+            if owner:
+                owner = smart_truncate(owner, max(6, min(len(owner), width // 2)))
+                width -= len(owner) + 2
+            shown = smart_truncate(shown, max(4, width))
         head, sep, name = shown.rpartition("/")
         text = Text(no_wrap=True, overflow="ellipsis")
+        if owner:
+            text.append(f"{owner}: ", style="#7dd3fc")
         if sep:
             text.append(head + sep, style=_DIM)
-        text.append(name, style="italic" if row.pattern else "")
+        gone = act is not None and (act.deleted or bool(moved))
+        style = "italic" if row.pattern else ""
+        if gone:
+            style = "strike #8f9bb3"  # deleted / renamed away: no longer there
+        text.append(name, style=style)
+        if suffix:
+            text.append(suffix, style="#facc15")
         return text
 
     def _mark_cell(self, row: _Row) -> Text:
@@ -801,9 +956,11 @@ class FilesPanel(Widget):
         self._rows = rows
         with self.app.batch_update():
             table.clear()
-            n_cols = len(table.columns)
+            order = ("mark", "path", "ops", "count", "last")
+            picks = [order.index(str(c.value)) for c in table.columns]
             for row in rows:
-                table.add_row(*self._cells(row)[:n_cols], key=row.key)
+                cells = self._cells(row)
+                table.add_row(*(cells[i] for i in picks), key=row.key)
             if rows:
                 index = keep_index
                 if keep is not None:
@@ -850,7 +1007,7 @@ class FilesPanel(Widget):
         target = getattr(config, "app_name", None) or getattr(
             config, "target_path", None
         )
-        hidden = self.activity.hidden_count()
+        hidden = self._hidden_count()
         tail = f" · {hidden} noisy paths hidden (N)" if hidden else ""
         where = f" in {target}" if target else ""
         return Text(f"Watching for file activity{where} — nothing yet{tail}")
@@ -865,12 +1022,18 @@ class FilesPanel(Widget):
             title = "LIVE"
             wl = self._watchlist_or_none()
             n_paths = sum(1 for r in rows if not r.pattern)
-            parts = [f"{n_paths} path{'s' if n_paths != 1 else ''}"]
+            n_patterns = len(rows) - n_paths
+            count = f"{n_paths} path{'s' if n_paths != 1 else ''}"
+            if n_patterns:
+                count += f" + {n_patterns} pattern{'s' if n_patterns != 1 else ''}"
+            parts = [count]
             if wl is not None and wl.summary():
                 parts.append(wl.summary())
-            hidden = self.activity.hidden_count()
+            hidden = self._hidden_count()
             if hidden:
                 parts.append(f"{hidden} hidden")
+            if self._sort != "recent":
+                parts.append(f"by {self._sort}")
             if wl is not None and wl.auto_enabled:
                 parts.append("auto-pull")
             running, _task = self._monitor_task()
@@ -881,6 +1044,20 @@ class FilesPanel(Widget):
         if not rows and not self._filter:
             parts = []
         return title, " · ".join(parts)
+
+    def _hidden_count(self) -> int:
+        """Noise rows actually hidden: matching the filter and not pinned."""
+        if self.activity.show_all:
+            return 0
+        shown = {r.key for r in self._rows}
+        needle = self._filter.lower()
+        return sum(
+            1
+            for key, act in self.activity.paths.items()
+            if key not in shown
+            and self.activity.is_quiet(act)
+            and (not needle or needle in key.lower())
+        )
 
     def _update_caption(self) -> None:
         ms = self._main_screen()
@@ -960,11 +1137,62 @@ class FilesPanel(Widget):
             tabs=[
                 ("Summary", self._live_summary(row)),
                 ("Diff", [("", self._live_diff(row))]),
+                ("History", [("", self._history_text(row))]),
                 ("Events", [("", self._events_text(row))]),
             ],
             footer="w watch  u pull  z zoom",
             key=key,
         )
+
+    def _history_text(self, row: _Row) -> Text:
+        """Every kept pull of the file, newest first, each with its diff
+        against the pull before it (stored on disk, so it survives the next
+        pull and a restart).
+        """
+        from sandroid.core import watchlist_store
+
+        wl = self._watchlist_or_none()
+        if wl is None or row.key not in wl.rows:
+            return Text("Pulls of watched files are kept here (u pulls).", style=_DIM)
+        try:
+            versions = watchlist_store.version_dirs(row.key)
+        except Exception:
+            versions = []
+        if not versions:
+            return Text("Not pulled yet — u pulls a first version.", style=_DIM)
+        out = Text()
+        total = len(versions)
+        for n, version in enumerate(reversed(versions)):
+            if n:
+                out.append("\n\n")
+            when = watchlist_store.version_time(version)
+            stamp = when.strftime("%Y-%m-%d %H:%M:%S") if when else version.name
+            files = [
+                f for f in version.iterdir() if f.is_file() and f.name != "diff.txt"
+            ]
+            size = sum(f.stat().st_size for f in files)
+            out.append(f"#{total - n}  {stamp}", style="bold")
+            out.append(f"  {_fmt_size(size)}", style=_DIM)
+            diff = watchlist_store.version_diff(version)
+            if n == total - 1:
+                out.append("\n  first pull", style=_DIM)
+            elif diff is None:
+                out.append("\n  (no diff stored)", style=_DIM)
+            elif not diff.strip():
+                out.append("\n  no change since the pull before", style=_DIM)
+            else:
+                lines = diff.splitlines()
+                for line in lines[:12]:
+                    out.append("\n")
+                    out.append_text(diff_line_text(line.replace("\t", "  ")))
+                if len(lines) > 12:
+                    out.append(f"\n  … {len(lines)} lines", style=_DIM)
+        out.append(
+            f"\n\n{total} pull{'s' if total != 1 else ''} kept; older ones beyond "
+            "tui.watchlist_max_versions are deleted.",
+            style=_DIM,
+        )
+        return out
 
     @staticmethod
     def _grid() -> Table:
@@ -1007,9 +1235,30 @@ class FilesPanel(Widget):
             if act.processes:
                 top = sorted(act.processes.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
+            if act.moved_to:
+                grid.add_row("now", Text(f"renamed → {app_relative(act.moved_to)}"))
+            elif act.deleted:
+                grid.add_row("now", Text("deleted", style=OPS["delete"][1]))
         else:
             grid.add_row("activity", Text("none seen yet", style=_DIM))
         sections: list = [("", grid)]
+        if not row.pattern and _is_database(row.key):
+            # H2: the probes attribute writes by the file opened under the
+            # monitor; a database the app opened before the start is only
+            # caught by the periodic re-stat (and the stop rescan).
+            sections.append(
+                (
+                    "Note",
+                    Text(
+                        "Databases are usually opened when the app starts. If "
+                        "that was before the monitor, their writes are found by "
+                        "a re-stat every few seconds (events marked “re-stat”), "
+                        "not as they happen. Start the monitor before the app "
+                        "(spawn) to see every write.",
+                        style=_DIM,
+                    ),
+                )
+            )
         wl = self._watchlist_or_none()
         info = wl.rows.get(row.key) if wl is not None else None
         if info is not None:
@@ -1072,8 +1321,14 @@ class FilesPanel(Widget):
             extra = []
             if ev.via:
                 extra.append(ev.via)
-            if ev.other:
+            if ev.source == "renamed" and ev.other:
+                extra.append(f"to {app_relative(ev.other)}")
+            elif ev.source == "parent" and ev.other:
+                extra.append(f"directory {app_relative(ev.other)} deleted")
+            elif ev.other:
                 extra.append(f"from {app_relative(ev.other)}")
+            if ev.source in SOURCE_TEXT and ev.source != "parent":
+                extra.append(SOURCE_TEXT[ev.source])
             if ev.process:
                 extra.append(ev.process)
             if extra:
@@ -1154,6 +1409,17 @@ class FilesPanel(Widget):
         if row.key in wl.rows:
             wl.pull([row.key])
             return
+        act = row.activity
+        if act is not None and (act.deleted or act.moved_to or act.is_dir):
+            what = (
+                "a directory"
+                if act.is_dir
+                else "renamed away"
+                if act.moved_to
+                else "deleted on the device"
+            )
+            self.app.notify(f"Nothing to pull: {what}.", severity="warning")
+            return
         if row.watched is None:
             path = self._absolute(row.key)
             if path is not None and wl.add_path(path) and path in wl.rows:
@@ -1178,6 +1444,12 @@ class FilesPanel(Widget):
         self._full_paths = not self._full_paths
         self.refresh_rows()
 
+    def action_cycle_sort(self) -> None:
+        """``O``: order the rows by recency, name (natural) or event count."""
+        self._sort = SORT_MODES[(SORT_MODES.index(self._sort) + 1) % len(SORT_MODES)]
+        self.app.notify(f"Sorted by {self._sort}.")
+        self.refresh_rows()
+
     def action_clear(self) -> None:
         self.activity.reset()
         self.refresh_rows()
@@ -1196,8 +1468,7 @@ class FilesPanel(Widget):
             return
         from sandroid.tui.modals.diff_zoom_modal import DiffZoomModal
 
-        text = diff if isinstance(diff, str) else "\n".join(diff)
-        self.app.push_screen(DiffZoomModal(diff_text=text, title=row.key))
+        self.app.push_screen(DiffZoomModal(diff_text=diff_markup(diff), title=row.key))
 
     # -- inline input (/ filter, n add path) ---------------------------------------
 
@@ -1248,6 +1519,12 @@ class FilesPanel(Widget):
         path = event.value.strip()
         if not path or (path.endswith("/") and "*" not in path):
             self.app.notify("Type a file path or a pattern with *.", severity="warning")
+            return
+        # Absolute device paths only, no shell metacharacters (quoting is
+        # safe either way; such input is a typo or a smuggled command).
+        problem = watch_path_problem(path)
+        if problem is not None:
+            self.app.notify(problem, severity="warning")
             return
         if self.watchlist.add_path(path):
             self.close_input()

@@ -182,17 +182,60 @@ hidden until ``N`` (the same "show noise" key as in the Network lens);
 per-category visibility is configurable in the Monitor
 settings.
 
+What the ops mean: ``C`` a file or directory that did not exist before
+(an ``O_CREAT`` open of an existing file -- SQLite reopening its database,
+a ``>>`` append -- is an ``OPEN W``, shown with the noise; ``mkdir -p`` on
+an existing directory is nothing), ``M`` written or truncated, ``R``
+renamed (the old name shows ``old → new`` struck through), ``D`` deleted
+(deleting a directory also marks its known files), ``A`` attributes.
+Sandroid's own pulls (adb's ``sync svc``) never count as activity.
+
 - ``w`` watches/unwatches the row (Spotlight Files); watched files are
-  pinned on top with ★, also before any activity; ``n`` watches any path or
-  ``*`` pattern; ``l`` jumps here.
+  pinned on top with ★, also before any activity; ``n`` watches any
+  absolute path or ``*`` pattern (relative paths and shell metacharacters
+  are refused; the prefill is extended, not replaced); ``l`` jumps here. A
+  pattern stars files only, not directories or deleted paths. Watches are
+  kept per device in ``~/.config/sandroid/watchlists/<device>/`` (or
+  ``$XDG_CONFIG_HOME/sandroid/...``) and come back after a restart.
 - ``u`` pulls the row and diffs it against the previous pull, Shift+``U``
   pulls every watched file, ``a`` auto-pulls changed files while the lens
-  is shown.
+  is shown (a database counts as changed when its ``-wal``/``-journal``
+  changes). Every pull is kept as a version with its diff (the newest
+  ``tui.watchlist_max_versions``, default 10), next to the watchlist.
 - ``Enter`` opens the Inspector: Summary (full path, ops, processes, last
-  pull), Diff (``z`` zooms) and Events. ``/`` filters, ``.`` shows full
-  paths.
+  pull), Diff (the last pull against the one before; ``z`` zooms, long
+  lines wrap), History (every kept pull with its diff) and Events. The keys
+  in its footer work while the Inspector has focus too. ``/`` filters,
+  ``.`` shows full paths, Shift+``O`` sorts by recency / name / count,
+  ``Home``/``End`` jump to the first/last row.
 - While a run is under review (``◆ REVIEW``), the table lists that run's
-  changed, new and deleted files and ``Enter`` shows the file's diff.
+  changed, new and deleted files and ``Enter`` shows the file's diff. Their
+  short paths name the owning app (``com.google.android.apps.messaging:
+  databases/bugle_db``), as do live rows of apps other than the monitored
+  one.
+
+What the kprobe monitor can and cannot see:
+
+- The probes match the path *string* a process uses. Apps reach their data
+  as ``/data/user/0/<pkg>`` (what ``getFilesDir()`` returns) as well as
+  ``/data/data/<pkg>``, so a target is watched under all its names
+  (``/data/data/<pkg>`` also covers ``/data/user/0/<pkg>`` and the
+  device-encrypted ``/data/user_de/0/<pkg>``) and both show as one row,
+  ``/data/data/...``; ``@de/`` and ``@ext/`` mark the device-encrypted and
+  external (``Android/data``) directories in short paths.
+- Writes go through files the process opened. A file opened *before* the
+  monitor started -- typically the app's SQLite database and its ``-wal``
+  when you attach to a running app -- can't be attributed by the probes.
+  The monitor therefore scans the targets when it starts, re-``stat``\ s
+  the database files every ``tui.monitor_stat_interval`` seconds (default
+  10; such events are marked "seen by re-stat") and rescans once when you
+  stop it with ``o`` ("found by the stop rescan"). To see every write as it
+  happens, start the monitor first and then spawn the app.
+- Relative names (``cd dir && echo > f``, toybox ``rm -r``) don't match the
+  path filter; a deleted directory marks its known files deleted and the
+  stop rescan reports the rest. Attribute changes (``A``) are reported by
+  file name only and resolved to a known full path (unknown names are
+  dropped); in pure path mode they are not captured at all.
 
 Runs (4)
 ~~~~~~~~

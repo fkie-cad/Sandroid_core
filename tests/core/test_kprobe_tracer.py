@@ -34,10 +34,12 @@ def _clean_kprobe_state():
     KprobeTracer._kprobe_cache.clear()
     KprobeTracer._tracefs = None
     KprobeTracer._orig_buffer_kb = None
+    KprobeTracer._orig_cmdlines = None
     yield
     KprobeTracer._kprobe_cache.clear()
     KprobeTracer._tracefs = None
     KprobeTracer._orig_buffer_kb = None
+    KprobeTracer._orig_cmdlines = None
 
 
 @pytest.fixture(autouse=True)
@@ -641,25 +643,25 @@ def test_run_by_pid_with_path_also_applies_path_glob(monkeypatch):
 
 
 def test_run_by_path_single_path_has_no_or(monkeypatch):
-    """A single path must produce a plain single-glob filter (no ``||``) --
-    byte-identical to the pre-multi-path behaviour.
+    """A single path without aliases produces a plain single-glob filter (no
+    ``||``) -- byte-identical to the pre-multi-path behaviour.
     """
     monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
     fake, captured, _ = _capture_run(monkeypatch)
 
-    KprobeTracer.run_by_path("/data/data/com.example.app")
+    KprobeTracer.run_by_path("/data/local/tmp/work")
 
     filter_cmds = [c for c in fake.commands if "/filter" in c]
     assert filter_cmds
     for cmd in filter_cmds:
         assert "||" not in cmd
-        assert "/data/data/com.example.app/*" in cmd
+        assert "/data/local/tmp/work/*" in cmd
 
 
 def test_run_by_path_multi_path_ors_globs_per_field(monkeypatch):
     """A list of paths is OR'd (ftrace ``||``) into ONE filter per scoped field,
     each field name repeated once per glob (e.g. ``fname ~ "a/*" || fname ~
-    "b/*"``).
+    "b/*"``); every alias of each path gets its own glob.
     """
     monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
     fake, captured, _ = _capture_run(monkeypatch)
@@ -673,7 +675,69 @@ def test_run_by_path_multi_path_ors_globs_per_field(monkeypatch):
         assert "/data/data/com.x/*" in cmd
         assert "/sdcard/Download/*" in cmd
         assert " || " in cmd
-        assert cmd.count(f"{field} ~ ") == 2
+        # data/data + user/0 + user_de/0; sdcard + storage/emulated/0 +
+        # storage/self/primary.
+        assert cmd.count(f"{field} ~ ") == 6
+
+
+def test_app_data_root_also_watches_user0_and_user_de_aliases(monkeypatch):
+    """H1: apps write via /data/user/0/<pkg> (getFilesDir()), and the probes
+    match the path string, so the default /data/data/<pkg> target must also
+    filter on /data/user/0/<pkg> (+ the app's /data/user_de/0/<pkg>).
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, _ = _capture_run(monkeypatch)
+
+    KprobeTracer.run_by_pid(1234, "/data/data/org.wikipedia")
+
+    for name in KprobeTracer._PATH_FILTER_FIELDS:
+        cmd = next(c for c in fake.commands if f"/events/kprobes/{name}/filter" in c)
+        assert "/data/data/org.wikipedia/*" in cmd
+        assert "/data/user/0/org.wikipedia/*" in cmd
+        assert "/data/user_de/0/org.wikipedia/*" in cmd
+
+
+def test_session_raises_and_restores_saved_cmdlines(monkeypatch):
+    """M8: the comm cache is enlarged for the session (no ``<...>`` actors)
+    and put back on teardown.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+
+    def _cmdlines_read(cmd):
+        return "cat " in cmd and "saved_cmdlines_size" in cmd
+
+    fake, captured, _ = _capture_run(
+        monkeypatch, extra_rules=[(_cmdlines_read, ("128", ""))]
+    )
+    KprobeTracer.run_by_path("/data/data/com.x")
+    assert any(
+        "saved_cmdlines_size" in c and f"echo {KprobeTracer._CMDLINES_SIZE}" in c
+        for c in fake.commands
+    )
+    KprobeTracer.teardown()
+    assert any("saved_cmdlines_size" in c and "echo 128 " in c for c in fake.commands)
+
+
+def test_scan_tree_parses_stat_output_and_canonicalises(monkeypatch):
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    out = (
+        "1700000000 4096 directory|/data/data/com.x/\n"
+        "1700000001 12 regular file|/data/data/com.x//files/a b.txt\n"
+        "1700000002 0 regular empty file|/data/data/com.x/databases/x.db-wal\n"
+        "garbage line\n"
+    )
+    fake = _FakeShell([(lambda cmd: "find " in cmd, (out, ""))])
+    monkeypatch.setattr(Adb, "send_adb_command", fake)
+    tree = KprobeTracer.scan_tree(["/data/user/0/com.x"])
+    # Only the canonical root is scanned (user/0 is the same directory).
+    find_cmd = next(c for c in fake.commands if "find " in c)
+    assert "/data/data/com.x/" in find_cmd
+    assert "/data/user/0/com.x" not in find_cmd
+    assert tree == {
+        "/data/data/com.x": (1700000000, -1),
+        "/data/data/com.x/files/a b.txt": (1700000001, 12),
+        "/data/data/com.x/databases/x.db-wal": (1700000002, 0),
+    }
 
 
 def test_run_capture_all_has_no_pid_or_path_filter(monkeypatch):
@@ -822,3 +886,35 @@ def test_wrapper_kills_popen_before_teardown(monkeypatch):
     # Idempotent: a second stop / natural-exit teardown does not re-run it.
     wrapper.run_teardown()
     assert events.count("teardown") == 1
+
+
+def test_device_path_helpers():
+    """H1/H3/M5/M8 helpers in adb_utils."""
+    from sandroid.core.adb_utils import (
+        canonical_device_path,
+        expand_monitor_paths,
+        watch_path_problem,
+    )
+
+    assert canonical_device_path("/data/user/0/org.w/files//a/") == (
+        "/data/data/org.w/files/a"
+    )
+    assert canonical_device_path("/storage/emulated/0/Download/x") == (
+        "/sdcard/Download/x"
+    )
+    assert canonical_device_path("databases/") == "databases"
+    assert canonical_device_path("/data/user/10/org.w/x") == "/data/user/10/org.w/x"
+    assert expand_monitor_paths(["/data/user/0/org.w", "/data/data/org.w"]) == [
+        "/data/data/org.w",
+        "/data/user/0/org.w",
+        "/data/user_de/0/org.w",
+    ]
+    assert expand_monitor_paths("/data/data/org.w/files") == [
+        "/data/data/org.w/files",
+        "/data/user/0/org.w/files",
+    ]
+    assert watch_path_problem("/data/data/org.w/my file.txt") is None
+    assert watch_path_problem("/data/data/org.w/*.db") is None
+    assert "absolute" in watch_path_problem("shared_prefs/x.xml")
+    for bad in ("/x;touch y", "/x`id`", "/x$(id)", "/x|y", "/x&y"):
+        assert "metacharacters" in watch_path_problem(bad)

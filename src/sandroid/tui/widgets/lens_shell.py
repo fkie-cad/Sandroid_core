@@ -562,6 +562,44 @@ class Inspector(Vertical):
         self.tab_index = index % len(self.content.tabs)
         self._show_content()
 
+    async def on_key(self, event) -> None:
+        """Keys of the owning lens work while the Inspector has focus.
+
+        The Inspector's footer advertises the lens's keys (``u pull``,
+        ``z zoom`` ...), but with focus in the Inspector (Tab, or a click to
+        scroll) the lens is not in the focus chain, so its bindings never
+        fired. A key the focused Inspector widgets don't bind themselves is
+        run as the active lens's binding instead.
+        """
+        lens = self._owner_lens()
+        if lens is None:
+            return
+        focused = self.app.focused
+        node = focused
+        while node is not None and node is not self.parent:
+            if event.key in node._bindings.key_to_bindings:
+                return  # the Inspector (or its scroller) uses this key itself
+            node = node.parent
+        for binding in lens._bindings.key_to_bindings.get(event.key, ()):
+            action_name = binding.action.split("(", 1)[0]
+            if lens.check_action(action_name, ()) is False:
+                continue
+            event.stop()
+            event.prevent_default()
+            await self.app.run_action(binding.action, lens)
+            return
+
+    def _owner_lens(self):
+        """The lens whose row the Inspector shows (the active lens)."""
+        screen = self.screen
+        getter = getattr(screen, "lens_widget", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
     def action_tab(self, delta: int) -> None:
         self.select_tab(self.tab_index + delta)
 

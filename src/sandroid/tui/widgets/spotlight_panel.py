@@ -309,7 +309,13 @@ class SpotlightPanel(Widget):
             tasks = self._tasks().get_running_tasks()
         except Exception:
             return []
-        return [t for t in tasks if getattr(t, "app_name", None) == package]
+        # The file monitor registers with the app's name too; not a hook.
+        return [
+            t
+            for t in tasks
+            if getattr(t, "app_name", None) == package
+            and getattr(t, "name", None) != "monitor"
+        ]
 
     def _render_header(self) -> str:
         package = self._current_package()

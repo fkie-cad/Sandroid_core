@@ -532,7 +532,15 @@ class FileExtractionService:
 
         err = detect_adb_pull_error(combined_output, "")
         if err:
-            self._logger.warning(f"ADB pull error for {remote_path}: {err}")
+            # A missing SQLite companion is normal (WAL mode has no -journal,
+            # a checkpointed db no -wal): pulled best-effort, never a warning.
+            companion = remote_path.endswith(("-wal", "-journal", "-shm"))
+            log = (
+                self._logger.debug
+                if companion and "not found" in err.lower()
+                else self._logger.warning
+            )
+            log(f"ADB pull error for {remote_path}: {err}")
         return err
 
     # =========================================================================

@@ -915,6 +915,289 @@ def test_translator_never_raises_on_garbage():
     assert t.feed("") == []
 
 
+# -- fix round 3 (Files lens live test): paths, ops, actors ----------------
+
+
+def test_translator_canonicalises_user0_paths_and_trailing_slash():
+    """H3/M8: /data/user/0/<pkg> is /data/data/<pkg> (one row per file) and
+    ``databases/`` is ``databases``.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    t.feed(_kp("dfo", 7, 'path="/data/user/0/org.w/shared_prefs/p.xml"'))
+    t.feed(_kp("dfor", 7, "file=0xaaa"))
+    write = t.feed(_kp("vw", 7, "file=0xaaa count=0x10"))
+    mkdir = t.feed(_kp("mkdir", 7, 'name="/data/user/0/org.w/databases/"'))
+    assert write[0].path == "/data/data/org.w/shared_prefs/p.xml"
+    assert mkdir[0].path == "/data/data/org.w/databases"
+
+
+def test_translator_o_creat_on_an_existing_file_is_not_a_create():
+    """M1: SQLite reopening its db and every ">>" append pass O_CREAT. Only a
+    path not known to exist (baseline scan / earlier in the session) is C.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    t.seed_existing(["/data/data/org.w/databases/w.db"])
+    reopen = t.feed(
+        _kp("openat2", 5, 'fname="/data/data/org.w/databases/w.db" flags=0x80042')
+    )
+    first = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x441'))
+    append = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x441'))
+    trunc = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x241'))
+    assert (reopen[0].label, reopen[0].category) == ("OPEN W", "noise")
+    assert first[0].category == "create"
+    assert (append[0].label, append[0].category) == ("OPEN W", "noise")
+    assert trunc[0].category == "modify"  # O_TRUNC on an existing file
+
+
+def test_translator_mkdir_p_on_an_existing_directory_is_dropped():
+    """M1: do_mkdirat fires before the outcome; EEXIST is not a creation."""
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    t.seed_existing(["/data/data/org.w/files"])
+    assert t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files"')) == []
+    new = t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    again = t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    assert new[0].label == "CREATE DIR"
+    assert again == []
+    # Deleted, then created again: a real creation again.
+    t.feed(_kp("rmdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    assert t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+
+
+def test_translator_ignores_sandroids_own_adb_pulls():
+    """M1: adbd's "sync svc" threads are Sandroid's pulls, not app activity."""
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    line = "  sync svc 27-4242  [001] ...1 12345.6: openat2: (s+0x0/0x1) "
+    assert t.feed(line + 'fname="/data/data/org.w/databases/w.db" flags=0x0') == []
+    t.feed(line.replace("openat2", "dfo") + 'path="/data/data/org.w/x"')
+    t.feed(line.replace("openat2", "dfor") + "file=0xccc")
+    assert t.feed(line.replace("openat2", "vw") + "file=0xccc count=0x1") == []
+
+
+def test_translator_resolves_attr_basenames_and_unknown_comms():
+    """M8: notify_change only names the dentry; it is resolved to the full path
+    seen with that name (unknown basenames are dropped, not orphan rows).
+    ``<...>`` actors become the tid's earlier comm, or the app in PID mode.
+    """
+    t = KprobeStreamTranslator()
+    t.reset(MonitorConfig(mode="pid", target_pid=3676, app_name="org.w"))
+    t.seed_existing(["/data/data/org.w/databases/w.db"])
+    attr = t.feed(_kp("nc", 5, 'dentry="w.db" ia_valid=0x1'))
+    assert attr[0].path == "/data/data/org.w/databases/w.db"
+    assert t.feed(_kp("nc", 5, 'dentry="nobody.tmp" ia_valid=0x1')) == []
+    t.feed(
+        '   <...>-91  [000] ...1 1.0: openat2: (s+0x0/0x1) fname="/data/data/org.w/a" flags=0x0'
+    )
+    assert (
+        t.feed(
+            '   <...>-91  [000] ...1 1.0: openat2: (s+0x0/0x1) fname="/data/data/org.w/a" flags=0x0'
+        )[0].process
+        == "org.w"
+    )
+    t.feed(
+        '   RxIo-92  [000] ...1 1.0: openat2: (s+0x0/0x1) fname="/data/data/org.w/b" flags=0x0'
+    )
+    later = t.feed(
+        '   <...>-92  [000] ...1 1.0: openat2: (s+0x0/0x1) fname="/data/data/org.w/b" flags=0x0'
+    )
+    assert later[0].process == "RxIo"
+
+
+def test_translator_records_probe_changes_for_the_scan_fallback():
+    t = KprobeStreamTranslator()
+    t.reset(None)
+    t.feed(_kp("unlink", 5, 'name="/data/data/org.w/files/a"'))
+    assert "/data/data/org.w/files/a" in t.last_change
+
+
+def test_kprobe_setup_mode_desc_counts_the_extra_paths(monkeypatch):
+    """L1: two paths read "(+1 path)" -- the primary path is already named."""
+    monkeypatch.setattr(
+        KprobeTracer, "run_by_path", classmethod(lambda cls, path: object())
+    )
+    controller = _make_controller()
+    config = MonitorConfig(
+        mode="path", target_path="/data/a", target_paths=["/data/a", "/data/b"]
+    )
+    _process, _translator, desc = controller._kprobe_setup(config)
+    assert desc.endswith("(+1 path)")
+
+
+def test_kprobe_setup_scans_before_tracing_and_seeds_the_translator(monkeypatch):
+    """H2/M1: the baseline scan runs BEFORE tracing (find opens directories)
+    and tells the translator which files already exist.
+    """
+    order: list[str] = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_pid",
+        classmethod(lambda cls, pid, path=None: order.append("trace") or object()),
+    )
+    controller = _make_controller()
+    monkeypatch.setattr(
+        controller,
+        "_baseline_scan",
+        lambda paths: order.append("scan")
+        or {"/data/data/org.w/databases/w.db": (1, 10)},
+    )
+    config = MonitorConfig(
+        mode="pid", target_pid=42, target_path="/data/data/org.w", app_name="org.w"
+    )
+    _process, translator, _desc = controller._kprobe_setup(config)
+    assert order == ["scan", "trace"]
+    assert translator.baseline == {"/data/data/org.w/databases/w.db": (1, 10)}
+    item = translator.feed(
+        _kp("openat2", 1, 'fname="/data/user/0/org.w/databases/w.db" flags=0x42')
+    )
+    assert item[0].label == "OPEN W"
+
+
+class _ScanWrapper:
+    """Minimal MonitorProcessWrapper stand-in for the scan watcher."""
+
+    def __init__(self) -> None:
+        self.running = True
+        self.final_scan = False
+        self._torn_down = False
+        self.events: list[dict] = []
+
+    @property
+    def is_running(self) -> bool:
+        return self.running
+
+    def record_event(self, event: dict) -> None:
+        self.events.append(event)
+
+
+def test_scan_watcher_restat_reports_writes_through_preopened_files(monkeypatch):
+    """H2a: the db/-wal opened before the monitor started are re-stat-ed; a
+    change the probes did not report shows up as MODIFY via stat. A path the
+    probes did report is not reported twice.
+    """
+    import time as _time
+
+    published: list = []
+    monkeypatch.setattr(
+        "sandroid.tui.controllers.monitor_controller._publish_monitor_batch",
+        lambda items: published.extend(items),
+    )
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0.01)
+    db = "/data/data/org.w/databases/w.db"
+    wal = db + "-wal"
+    prefs = "/data/data/org.w/shared_prefs/p.xml"
+    stats = iter([{db: (1, 10), wal: (5, 99)}] * 1000)
+    monkeypatch.setattr(controller, "_restat", lambda paths: next(stats))
+    translator = KprobeStreamTranslator()
+    translator.reset(None)
+    translator.baseline = {db: (1, 10), wal: (1, 0), prefs: (1, 5)}
+    wrapper = _ScanWrapper()
+    threads: list = []
+    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
+    controller._start_scan_watcher(wrapper, translator)
+    loop = threads[0]
+
+    import threading
+
+    worker = threading.Thread(target=loop)
+    worker.start()
+    deadline = _time.monotonic() + 3
+    while not published and _time.monotonic() < deadline:
+        _time.sleep(0.02)
+    wrapper.running = False
+    worker.join(2)
+    assert [(i.path, i.label, i.source) for i in published] == [(wal, "MODIFY", "stat")]
+    assert wrapper.events
+    assert wrapper.events[0]["path"] == wal
+
+
+def test_scan_watcher_stop_rescan_fills_the_gaps(monkeypatch):
+    """H2: after a user stop, one rescan reports what the probes missed
+    (relative-path writes, rm -r children, files created by adb shell).
+    """
+    published: list = []
+    monkeypatch.setattr(
+        "sandroid.tui.controllers.monitor_controller._publish_monitor_batch",
+        lambda items: published.extend(items),
+    )
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0)
+    root = "/data/data/org.w"
+    seen = f"{root}/files/seen.txt"
+    monkeypatch.setattr(
+        controller,
+        "_rescan",
+        lambda paths: {
+            root: (9, -1),
+            f"{root}/files/changed.txt": (9, 2),
+            f"{root}/files/new.txt": (9, 1),
+            seen: (9, 9),
+        },
+    )
+    translator = KprobeStreamTranslator()
+    translator.reset(None)
+    translator.scan_paths = [root]
+    translator.baseline = {
+        root: (1, -1),
+        f"{root}/files/changed.txt": (1, 1),
+        f"{root}/files/gone.txt": (1, 1),
+        seen: (1, 1),
+    }
+    wrapper = _ScanWrapper()
+    threads: list = []
+    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
+    controller._start_scan_watcher(wrapper, translator)
+    # The probes saw this one rewritten during the session: not repeated.
+    translator.feed(_kp("openat2", 1, f'fname="{seen}" flags=0x241'))
+    wrapper.running = False
+    wrapper.final_scan = True
+    wrapper._torn_down = True
+    threads[0]()
+    got = {(i.path.rsplit("/", 1)[-1], i.label, i.source) for i in published}
+    assert got == {
+        ("changed.txt", "MODIFY", "scan"),
+        ("new.txt", "CREATE", "scan"),
+        ("gone.txt", "DELETE", "scan"),
+    }
+
+
+def test_scan_watcher_skips_the_rescan_without_a_user_stop(monkeypatch):
+    """Play's safety stop (a snapshot revert follows) must not rescan."""
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0)
+    calls: list = []
+    monkeypatch.setattr(controller, "_rescan", lambda paths: calls.append(paths))
+    translator = KprobeStreamTranslator()
+    translator.reset(None)
+    translator.scan_paths = ["/data/data/org.w"]
+    translator.baseline = {"/data/data/org.w": (1, -1)}
+    wrapper = _ScanWrapper()
+    threads: list = []
+    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
+    controller._start_scan_watcher(wrapper, translator)
+    wrapper.running = False
+    wrapper._torn_down = True
+    threads[0]()
+    assert calls == []
+
+
+def test_user_stop_flags_the_rescan(monkeypatch):
+    controller = _make_controller()
+    wrapper = _ScanWrapper()
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=lambda: None,
+        app_name="org.w",
+    )
+    assert controller.stop() is True
+    assert wrapper.final_scan is True
+
+
 # =============================================================================
 # _start_monitor -- backend selection (kprobe / auto / fallback)
 # =============================================================================
@@ -1094,7 +1377,8 @@ def test_kprobe_setup_path_mode_forwards_target_paths_list(monkeypatch):
     # The forwarded argument is the LIST, not a single str.
     assert by_path == [["/data/a", "/data/b"]]
     assert descs
-    assert "+2 paths" in descs[0]
+    # L1: the primary path is already named; the suffix counts the others.
+    assert "(+1 path)" in descs[0]
 
 
 def test_kprobe_setup_pid_mode_forwards_target_paths_list(monkeypatch):
@@ -1293,6 +1577,36 @@ def test_start_monitor_kprobe_reader_routes_through_translator(monkeypatch):
         assert modifies[0].source == "kprobe"
     finally:
         EventBus.get().unsubscribe(EventType.TASK_OUTPUT, received.append)
+
+
+@pytest.mark.parametrize(("requested", "warned"), [(True, False), (False, True)])
+def test_reader_logs_a_requested_stop_as_normal_not_unexpected(requested, warned):
+    """M7: our own stop terminates the reader with SIGTERM (-15); that is a
+    normal stop. Only an exit nobody asked for is "unexpected".
+    """
+    import time
+
+    class _DeadProc:
+        stdout = iter([])
+
+        def poll(self):
+            return -15
+
+    warnings: list[str] = []
+    ended: list[bool] = []
+    controller = _make_controller(log_warning=warnings.append)
+    controller._monitor_ended = lambda: ended.append(True)
+    wrapper = type(
+        "W",
+        (),
+        {"process": _DeadProc(), "translator": None, "stop_requested": requested},
+    )()
+    controller._start_output_reader(wrapper)
+    deadline = time.monotonic() + 2
+    while not ended and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ended
+    assert any("unexpectedly" in w for w in warnings) is warned
 
 
 # =============================================================================

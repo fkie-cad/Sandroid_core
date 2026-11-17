@@ -56,6 +56,12 @@ class MonitorProcessWrapper:
         self._teardown = teardown
         self._stopped = False
         self._torn_down = False
+        #: Set by :meth:`stop` BEFORE the process is terminated, so the reader
+        #: thread logs the resulting SIGTERM exit (-15) as a normal stop.
+        self.stop_requested = False
+        #: Set by ``MonitorController.stop`` (a user stop): the scan watcher
+        #: rescans the targets once after teardown (see the controller).
+        self.final_scan = False
         # Genuinely NEW, separately-maintained, append-only event history --
         # NOT a rename/promotion of MonitorController._start_output_reader's
         # `item_buffer`/`line_buffer` closures, which are transient per-flush
@@ -126,6 +132,7 @@ class MonitorProcessWrapper:
             self.run_teardown()
             return
 
+        self.stop_requested = True
         self._stopped = True
 
         try:
