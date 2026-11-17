@@ -101,11 +101,21 @@ lens focused:
 Network (2)
 ~~~~~~~~~~~
 
-Two sub-tabs:
+Who is the app talking to, and what did it send? One flow table
+(time, recipient, request, status, size) read from the embedded
+``mitmweb``'s flow log; ``Enter`` on a row opens Summary / Request /
+Response in the Inspector. TLS failures and errored flows show as ✗ rows
+(a ``⚑N`` badge on the lens counts TLS failures you have not seen yet).
+``/`` filters by host, path or app, ``v`` shows only the spotlight app's
+flows, ``N`` shows OS background traffic (connectivity checks, Play
+services), hidden by default. In REVIEW scope the table shows the reviewed
+run's flows (those captured between its start and end). Proxy state is in
+the frame caption (``mitm ● :8080 · device ✓ · CA ✓``); ``I`` opens the
+Capture status page with mitmproxy and friTap tabs.
 
-**Mitmproxy** -- embedded ``mitmweb`` (requires ``pip install mitmproxy``):
+Proxy keys (embedded ``mitmweb`` requires ``pip install mitmproxy``):
 
-- ``Enter`` start/stop mitmweb (proxy ``127.0.0.1:8080``, web UI
+- ``Enter`` (while nothing is captured) or ``M`` start/stop mitmweb (proxy ``127.0.0.1:8080``, web UI
   ``http://127.0.0.1:8081/``). Start does not touch the device unless
   ``mitmproxy.auto_device_proxy = true``; stop (and quitting Sandroid) clears
   the Device Proxy Sandroid set
@@ -116,10 +126,12 @@ Two sub-tabs:
   rules + on-device ``gost`` redirector, to Sandroid's mitmproxy or an
   external proxy such as Burp/ZAP; QUIC blocked by default) and CA
 - ``Ctrl+R`` restart and re-apply proxies, ``Ctrl+O`` open the web UI,
-  ``Ctrl+A`` manage custom mitmproxy addons, ``Ctrl+L`` clear the log
+  ``Ctrl+A`` manage custom mitmproxy addons, ``Ctrl+L`` clear the view
+  (on screen only), ``Ctrl+V`` verbose mitmweb output in the log drawer
 
-**friTap** -- status header and live log tail of friTap TLS key extraction
-(``h`` starts friTap for the spotlight app).
+**friTap** -- ``h`` starts friTap for the spotlight app and shows its status
+(the friTap tab of the Capture status page); ``Ctrl+F`` opens its output
+folder. friTap's output goes to the log drawer.
 
 Snapshot picker (S)
 ~~~~~~~~~~~~~~~~~~~

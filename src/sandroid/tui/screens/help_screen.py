@@ -77,8 +77,7 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("Inspector", "sandroid.tui.widgets.lens_shell", "Inspector"),
     ("App lens", "sandroid.tui.widgets.spotlight_panel", "SpotlightPanel"),
     ("App lens › b bypass", "sandroid.tui.widgets.spotlight_panel", "BypassChordModal"),
-    ("Network › mitmproxy", "sandroid.tui.widgets.mitmproxy_panel", "MitmproxyPanel"),
-    ("Network › friTap", "sandroid.tui.widgets.fritap_panel", "FriTapPanel"),
+    ("Network lens", "sandroid.tui.widgets.network_panel", "NetworkPanel"),
     ("Files › Watchlist", "sandroid.tui.widgets.watchlist_view", "WatchlistView"),
     ("Runs lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
     (

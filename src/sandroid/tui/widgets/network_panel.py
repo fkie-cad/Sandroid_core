@@ -1,257 +1,1579 @@
-"""TUI panel for the "Network" tab — consolidating the existing Mitmproxy and
-friTap tool tabs under one home.
+"""Network lens: who is the app talking to, and what did it send?
 
-Purely organizational, the same way :class:`~sandroid.tui.widgets.files_panel.
-FilesPanel` already groups three mechanistically unrelated sub-tabs (a live
-log tail, a list, a diff viewer) under one tab just because they're all "file
-activity" from a user's point of view. This groups the existing
-``MitmproxyPanel`` (hosts an actual ``mitmweb`` subprocess) and ``FriTapPanel``
-(no subprocess — Frida-based in-process TLS hooking) as "traffic-interception
-tools" without requiring any shared plumbing between them; both are wrapped
-**verbatim**, unchanged — they already use depth-agnostic ``self.query_one``/
-``self.screen.query_one`` and self-scoped CSS selectors, so reparenting them
-one level deeper needs zero internal changes.
+One full-width flow table (``#net-flows``, five columns: time · recipient ·
+request · status · size) fed from the structured flow log the embedded
+mitmweb addon writes (``<raw_results>/mitm_flows/flows.jsonl``, read through
+:mod:`sandroid.services.mitmproxy_flow_log`). Details live only in the
+Inspector (Enter on a row): Summary / Request / Response.
 
-Mirrors ``FilesPanel``'s two-level outer-tab/inner-sub-tab-bar structure
-(module-level ``_SUBTAB_TO_PANEL``/``_SUBTAB_ORDER``, an inner tab bar +
-``ContentSwitcher``, ``on_click``/``_select_subtab``/``select_subtab``/
-``focus()`` delegation, ``cycle_subtab``, ``set_subtab_bar_active``) — see
-that module's docstring, and ``_ToolPanel``'s class docstring
-(``tui/screens/main_screen.py``), for the shared Shift+Arrow level-navigation
-scheme this panel participates in (``MainScreen.shift_nav_level``/
-``cycle_active_level``).
+Data flow
+---------
+* A 1 s timer kicks an off-thread poll while the lens is visible. The poll is
+  cursor-based (``query_flows(since_cursor=...)``) and skips the read entirely
+  when ``flows.jsonl`` has not changed (size + mtime), so an idle lens costs
+  one ``stat``. A ``[FLOW]`` line from mitmweb's stdout triggers an early
+  poll so new rows show up promptly.
+* The in-memory model is bounded (``MAX_ROWS``); the table appends new rows
+  at the bottom and only follows them while the cursor sits on the last row
+  and no flow is open in the Inspector -- a user who scrolled or selected a
+  row is never yanked.
+* ``[TLS_FAIL]`` lines (no HTTP flow exists for those, so they are not in
+  ``flows.jsonl``) become ✗ rows; while the lens is not in view they count
+  into the lens-bar badge (``⚑N``) until the lens is activated again.
+  Errored flows come from ``flows.jsonl`` (their ``error`` field) as ✗ rows.
+
+Filters: ``/`` text (host, path, app, recipient), ``v`` spotlight app only,
+``N`` show OS noise (connectivity checks, Play services background traffic;
+hidden by default). The frame caption carries the counts ("38 of 412").
+
+Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
+mounted hidden inside this lens as controllers; this lens binds their keys
+(``Ctrl+D`` device proxy, ``Ctrl+N`` CA, ``Ctrl+P`` unpin, ...) and shows
+their state in the caption (``mitm ● :8080 · device ✓ · CA ✓ · friTap ●``)
+and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
+tab). Their log lines go to the ActivityLog drawer (`` ` ``).
+
+REVIEW scope: ``on_scope_changed`` loads the run's flows -- a
+``<run dir>/mitm_flows/`` log when the run folder carries one, otherwise the
+session log filtered to the run's start/end window (``run.json``
+``recorded_at``/``completed_at``), which the caption says.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
-from typing import TYPE_CHECKING
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qsl
 
-from textual.containers import Horizontal
+from rich.markup import escape
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
+from textual.binding import Binding
+from textual.containers import Vertical
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Static
+from textual.widgets import DataTable, Input, Static
 
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
+from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
 
 if TYPE_CHECKING:
+    from rich.console import RenderableType
     from textual.app import ComposeResult
 
 logger = logging.getLogger(__name__)
 
-# Inner sub-tab clickable id -> inner ContentSwitcher child id. Routed from
-# NetworkPanel.on_click (mirrors FilesPanel's own inner-tab click routing).
-_SUBTAB_TO_PANEL = {
-    "network-tab-mitm": "mitm-panel",
-    "network-tab-fritap": "fritap-panel",
+LENS_ID = "network"
+
+#: Inspector key of the "Capture status" page (mitmproxy + friTap tabs).
+STATUS_KEY = "network:capture-status"
+
+# --------------------------------------------------------------------------
+# recipients + OS noise
+# --------------------------------------------------------------------------
+
+#: (domain suffix, recipient label), most specific first.
+_RECIPIENTS: tuple[tuple[str, str], ...] = (
+    ("app-measurement.com", "Google Analytics"),
+    ("google-analytics.com", "Google Analytics"),
+    ("firebaselogging-pa.googleapis.com", "Google Analytics"),
+    ("firebaselogging.googleapis.com", "Google Analytics"),
+    ("crashlytics.com", "Crashlytics"),
+    ("firebaseinstallations.googleapis.com", "Firebase"),
+    ("firebaseremoteconfig.googleapis.com", "Firebase"),
+    ("firebaseio.com", "Firebase"),
+    ("fcm.googleapis.com", "Firebase"),
+    ("doubleclick.net", "Google Ads"),
+    ("googleadservices.com", "Google Ads"),
+    ("googlesyndication.com", "Google Ads"),
+    ("admob.com", "Google Ads"),
+    ("googleapis.com", "Google"),
+    ("gstatic.com", "Google"),
+    ("google.com", "Google"),
+    ("facebook.com", "Meta"),
+    ("facebook.net", "Meta"),
+    ("fbcdn.net", "Meta"),
+    ("instagram.com", "Meta"),
+    ("appsflyer.com", "AppsFlyer"),
+    ("appsflyersdk.com", "AppsFlyer"),
+    ("adjust.com", "Adjust"),
+    ("adjust.io", "Adjust"),
+    ("branch.io", "Branch"),
+    ("amplitude.com", "Amplitude"),
+    ("mixpanel.com", "Mixpanel"),
+    ("segment.io", "Segment"),
+    ("segment.com", "Segment"),
+    ("sentry.io", "Sentry"),
+    ("onesignal.com", "OneSignal"),
+    ("braze.com", "Braze"),
+    ("appboy.com", "Braze"),
+    ("usercentrics.eu", "Usercentrics"),
+    ("onetrust.com", "OneTrust"),
+    ("cookielaw.org", "OneTrust"),
+    ("applovin.com", "AppLovin"),
+    ("unity3d.com", "Unity Ads"),
+    ("tiktokv.com", "TikTok"),
+    ("bytedance.com", "TikTok"),
+    ("hotjar.com", "Hotjar"),
+    ("newrelic.com", "New Relic"),
+    ("nr-data.net", "New Relic"),
+    ("datadoghq.com", "Datadog"),
+    ("bugsnag.com", "Bugsnag"),
+)
+
+#: Hosts the OS talks to on its own (connectivity checks, Play services).
+_NOISE_SUFFIXES: tuple[str, ...] = (
+    "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com",
+    "play.googleapis.com",
+    "play-fe.googleapis.com",
+    "android.clients.google.com",
+    "android.googleapis.com",
+    "android.apis.google.com",
+    "mtalk.google.com",
+    "gvt1.com",
+    "gvt2.com",
+    "gvt3.com",
+    "time.android.com",
+    "ota.googlezip.net",
+    "update.googleapis.com",
+    "digitalassetlinks.googleapis.com",
+    "instantmessaging-pa.googleapis.com",
+    "people-pa.googleapis.com",
+    "semanticlocation-pa.googleapis.com",
+    "cryptauthenrollment.googleapis.com",
+    "cryptauthdevicesync.googleapis.com",
+    "mobilenetworkscoring-pa.googleapis.com",
+    "growth-pa.googleapis.com",
+    "notifications-pa.googleapis.com",
+    "youtubei.googleapis.com",
+    "lamssettings-pa.googleapis.com",
+)
+_NOISE_HOST_PREFIXES = ("clients1.", "clients2.", "clients3.", "clients4.")
+_NOISE_APPS = frozenset(
+    {"com.google.android.gms", "com.android.vending", "com.google.android.gsf"}
+)
+_NOISE_PATHS = ("/generate_204", "/gen_204")
+
+_TWO_PART_TLDS = ("co.uk", "com.au", "co.jp", "com.br", "co.in", "co.kr")
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith("." + suffix)
+
+
+def registrable_domain(host: str) -> str:
+    """``api.fittrack.de`` -> ``fittrack.de`` (good enough for a label)."""
+    host = (host or "").lower().rstrip(".")
+    parts = host.split(".")
+    if len(parts) <= 2 or host.replace(".", "").isdigit():
+        return host
+    keep = 3 if ".".join(parts[-2:]) in _TWO_PART_TLDS else 2
+    return ".".join(parts[-keep:])
+
+
+def recipient_of(host: str) -> tuple[str, bool]:
+    """``(label, known)``: a known tracker/vendor name, else the domain."""
+    h = (host or "").lower()
+    for suffix, label in _RECIPIENTS:
+        if _host_matches(h, suffix):
+            return label, True
+    return registrable_domain(h) or "?", False
+
+
+def is_noise(host: str, path: str, app: str, focus_app: str | None = None) -> bool:
+    """True for background OS traffic the lens hides by default.
+
+    A flow attributed to the spotlight app is never noise.
+    """
+    if focus_app and app == focus_app:
+        return False
+    if app in _NOISE_APPS:
+        return True
+    h = (host or "").lower()
+    if any(_host_matches(h, s) for s in _NOISE_SUFFIXES):
+        return True
+    if h.startswith(_NOISE_HOST_PREFIXES) and h.endswith(".google.com"):
+        return True
+    p = (path or "").split("?", 1)[0]
+    return p.endswith(_NOISE_PATHS)
+
+
+# --------------------------------------------------------------------------
+# formatting helpers
+# --------------------------------------------------------------------------
+
+
+def human_size(n: int | None) -> str:
+    if n is None:
+        return "–"
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / (1024 * 1024):.1f} MB"
+
+
+def _ellipsize(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    return text[: max(0, width - 1)] + "…"
+
+
+def smart_request(method: str, host: str, path: str, width: int) -> Text:
+    """``POST api.example.com/v2/…/summary`` fitted into ``width`` cells.
+
+    Drops the query string first, then elides middle path segments (keeping
+    the first and the last), then cuts the end.
+    """
+    method = (method or "?").upper()
+    path = path or "/"
+    base = path.split("?", 1)[0]
+    candidates = [path]
+    if base != path:
+        candidates.append(base + "?…")
+    segs = [s for s in base.split("/") if s]
+    if len(segs) > 2:
+        candidates.append(f"/{segs[0]}/…/{segs[-1]}")
+    if len(segs) > 1:
+        candidates.append(f"/…/{segs[-1]}")
+    room = width - len(method) - 1 - len(host)
+    chosen = None
+    for cand in candidates:
+        if len(cand) <= room:
+            chosen = cand
+            break
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(method, style="#8f9bb3")
+    text.append(" ")
+    if chosen is None:
+        rest = _ellipsize(host + candidates[-1], max(1, width - len(method) - 1))
+        hlen = min(len(host), len(rest))
+        text.append(rest[:hlen], style="#e5e9f0")
+        text.append(rest[hlen:], style="#8f9bb3")
+        return text
+    text.append(host, style="#e5e9f0")
+    text.append(chosen, style="#8f9bb3")
+    return text
+
+
+def _short_error(error: str) -> str:
+    e = (error or "").lower()
+    for needle, word in (
+        ("reset", "reset"),
+        ("timed out", "timeout"),
+        ("timeout", "timeout"),
+        ("refused", "refused"),
+        ("name or service", "dns"),
+        ("dns", "dns"),
+        ("killed", "killed"),
+        ("disconnect", "closed"),
+        ("closed", "closed"),
+        ("certificate", "cert"),
+        ("tls", "TLS"),
+    ):
+        if needle in e:
+            return word
+    return "error"
+
+
+_TLS_REASONS = {
+    "cert": (
+        "The app rejected mitmproxy's certificate — likely certificate "
+        "pinning, or the CA is not trusted yet."
+    ),
+    "ver": "TLS version mismatch between the app and mitmproxy.",
+    "tls": "The TLS handshake with mitmproxy failed.",
 }
 
-# Cycling order for Shift+Left/Right while the inner level is active.
-_SUBTAB_ORDER = ["mitm-panel", "fritap-panel"]
+
+# --------------------------------------------------------------------------
+# model
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class FlowRow:
+    """One row of the lens: a captured flow, or a TLS failure (``kind``)."""
+
+    key: str
+    ts: float
+    method: str = "?"
+    host: str = "?"
+    path: str = "/"
+    status: int | None = None
+    error: str | None = None
+    app: str = ""
+    req_bytes: int = 0
+    resp_bytes: int | None = None
+    req_type: str | None = None
+    resp_type: str | None = None
+    protocol: str = ""
+    ts_start: float | None = None
+    seq: int | None = None
+    flow_id: str | None = None
+    flow_dir: Path | None = None
+    kind: str = "flow"  # "flow" | "tls"
+    reason: str = ""
+
+    @classmethod
+    def from_record(cls, rec: dict[str, Any], flow_dir: Path | None) -> FlowRow:
+        seq = rec.get("seq")
+        ts_end = rec.get("ts_end") or rec.get("ts_start") or 0.0
+        return cls(
+            key=f"f{seq}" if seq is not None else f"f{rec.get('id')}",
+            ts=float(ts_end or 0.0),
+            method=str(rec.get("method") or "?"),
+            host=str(rec.get("host") or "?"),
+            path=str(rec.get("path") or "/"),
+            status=rec.get("status_code"),
+            error=rec.get("error"),
+            app=str(rec.get("app") or ""),
+            req_bytes=int(rec.get("request_bytes") or 0),
+            resp_bytes=rec.get("response_bytes"),
+            req_type=rec.get("request_content_type"),
+            resp_type=rec.get("response_content_type"),
+            protocol=str(rec.get("protocol") or ""),
+            ts_start=rec.get("ts_start"),
+            seq=seq,
+            flow_id=rec.get("id"),
+            flow_dir=flow_dir,
+        )
+
+    @property
+    def failed(self) -> bool:
+        return self.kind == "tls" or bool(self.error)
+
+    @property
+    def recipient(self) -> tuple[str, bool]:
+        return recipient_of(self.host)
+
+    def url(self) -> str:
+        scheme = "https" if "HTTPS" in self.protocol.upper() else "http"
+        if self.protocol.upper().startswith("WS"):
+            scheme = "wss" if self.protocol.upper() == "WSS" else "ws"
+        return f"{scheme}://{self.host}{self.path}"
+
+
+def _flow_dir() -> Path:
+    """The live session's ``mitm_flows`` directory (patched in tests)."""
+    from sandroid.services.mitmproxy_flow_log import resolve_flow_dir
+
+    return resolve_flow_dir()
+
+
+def _run_window(run_id: str) -> tuple[Path | None, float, float] | None:
+    """``(run dir, start epoch, end epoch)`` of a run, or None if unknown.
+
+    ``run_id`` is the run directory as an absolute path (the scope
+    convention); a bare run id is resolved through ``run_history``. Kept as
+    one small function so it can be swapped for a shared run-history helper.
+    """
+    run_dir: Path | None = Path(run_id) if run_id else None
+    data: dict[str, Any] = {}
+    if run_dir is not None and (run_dir / "run.json").is_file():
+        try:
+            data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+    if not data:
+        try:
+            from sandroid.core import run_history
+
+            record = run_history.load_run(Path(run_id).name)
+            data = record.to_dict()
+            run_dir = Path(record.bundle_dir) if record.bundle_dir else run_dir
+        except Exception:
+            return None
+    try:
+        start = datetime.fromisoformat(str(data["recorded_at"])).timestamp()
+    except (KeyError, ValueError, TypeError):
+        return None
+    end = None
+    try:
+        if data.get("completed_at"):
+            end = datetime.fromisoformat(str(data["completed_at"])).timestamp()
+    except (ValueError, TypeError):
+        end = None
+    if end is None:
+        end = start + float(data.get("duration") or 0)
+    return run_dir, start, max(start, end)
+
+
+# --------------------------------------------------------------------------
+# inspector rendering
+# --------------------------------------------------------------------------
+
+#: Body text shown in the Inspector at most (the capture itself is capped
+#: by the addon; this keeps a huge JSON from stalling the render).
+BODY_DISPLAY_CAP = 16 * 1024
+
+
+def _grid() -> Table:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="#8f9bb3", no_wrap=True)
+    grid.add_column(overflow="fold")
+    return grid
+
+
+def _headers_renderable(headers: Any) -> RenderableType:
+    if not headers:
+        return Text("none", style="#5b6479")
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(style="#8f9bb3", no_wrap=True)
+    grid.add_column(overflow="fold")
+    for i, pair in enumerate(headers):
+        if i >= 60:
+            grid.add_row("…", Text(f"{len(headers) - 60} more", style="#5b6479"))
+            break
+        try:
+            name, value = pair[0], pair[1]
+        except (IndexError, TypeError, KeyError):
+            continue
+        value = str(value)
+        if len(value) > 300:
+            value = value[:299] + "…"
+        grid.add_row(Text(str(name)), Text(value))
+    return grid
+
+
+def _hex_preview(raw: bytes, limit: int = 64) -> Text:
+    out = Text(style="#8f9bb3")
+    chunk = raw[:limit]
+    for off in range(0, len(chunk), 16):
+        line = chunk[off : off + 16]
+        hexpart = " ".join(f"{b:02x}" for b in line)
+        asc = "".join(chr(b) if 32 <= b < 127 else "·" for b in line)
+        out.append(f"{off:04x}  {hexpart:<47}  {asc}\n")
+    return out
+
+
+def body_renderable(body: Any, content_type: str | None) -> RenderableType:
+    """Decoded, capped body: pretty JSON, form fields, text, or a hex note."""
+    if not isinstance(body, dict) or not body.get("size_bytes"):
+        return Text("empty", style="#5b6479")
+    size = int(body.get("size_bytes") or 0)
+    note = ""
+    if body.get("truncated"):
+        note = f"captured {human_size(body.get('bytes_read'))} of {human_size(size)}"
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    content = body.get("content") or ""
+    parts: list[RenderableType] = []
+    if body.get("encoding") == "base64":
+        try:
+            raw = base64.b64decode(content)
+        except (ValueError, TypeError):
+            raw = b""
+        label = f"binary · {human_size(size)}" + (f" · {ctype}" if ctype else "")
+        parts.append(Text(label, style="#8f9bb3"))
+        if raw:
+            parts.append(_hex_preview(raw))
+    else:
+        text = content[:BODY_DISPLAY_CAP]
+        if len(content) > BODY_DISPLAY_CAP:
+            note = (
+                note or f"showing {human_size(BODY_DISPLAY_CAP)} of {human_size(size)}"
+            )
+        stripped = text.lstrip()
+        rendered: RenderableType | None = None
+        if "json" in ctype or stripped.startswith(("{", "[")):
+            try:
+                pretty = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+                rendered = Syntax(
+                    pretty,
+                    "json",
+                    theme="ansi_dark",
+                    word_wrap=True,
+                    background_color="default",
+                )
+            except ValueError:
+                rendered = None
+        if rendered is None and "x-www-form-urlencoded" in ctype:
+            pairs = parse_qsl(text, keep_blank_values=True)
+            if pairs:
+                rendered = _headers_renderable(pairs)
+        if rendered is None:
+            rendered = Text(text)
+        parts.append(rendered)
+    if note:
+        parts.append(Text(note, style="#5b6479"))
+    from rich.console import Group
+
+    return Group(*parts)
+
+
+# --------------------------------------------------------------------------
+# the lens
+# --------------------------------------------------------------------------
 
 
 class NetworkPanel(Widget):
-    """Outer "Network" tab: inner Mitmproxy/friTap switcher.
-
-    Owns no bindings of its own — sub-tab cycling and the active-level
-    highlight are driven externally by ``MainScreen.shift_nav_level``/
-    ``cycle_active_level`` (Shift+Up/Down/Left/Right), through the same
-    duck-typed ``cycle_subtab``/``set_subtab_bar_active`` contract
-    ``FilesPanel`` implements. See ``_ToolPanel``'s class docstring
-    (``tui/screens/main_screen.py``) for the full navigation scheme.
-    """
+    """Network lens (id ``network-panel``): flow table + hidden controllers."""
 
     can_focus = True
+
+    #: Rows kept in memory (live and per reviewed run).
+    MAX_ROWS = 2000
+    POLL_SECONDS = 1.0
+
+    BINDINGS = [
+        # Shown in the footer, which keeps two lens keys: "⏎ start mitm" and
+        # "^D device proxy" while nothing is captured, then "/" and "v".
+        Binding("enter", "start_stop", "Start/stop mitm"),
+        Binding("slash", "filter", "Filter"),
+        Binding("v", "toggle_app_only", "App only"),
+        Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
+        Binding("N", "toggle_noise", "Show OS noise", show=False),
+        Binding("I", "status", "Capture status", show=False),
+        Binding("M", "mitm('toggle_running')", "Start/stop mitm", show=False),
+        Binding("ctrl+n", "mitm('inject_ca')", "Install CA", show=False),
+        Binding("ctrl+p", "mitm('toggle_ssl_unpin')", "SSL unpin", show=False),
+        Binding("ctrl+r", "mitm('restart')", "Restart mitm", show=False),
+        Binding("ctrl+a", "mitm('manage_addons')", "Addons", show=False),
+        Binding("ctrl+o", "mitm('open_browser')", "Open mitmweb", show=False),
+        Binding("ctrl+v", "mitm('toggle_verbose')", "Verbose plumbing", show=False),
+        Binding("ctrl+l", "clear_view", "Clear view", show=False),
+        Binding("ctrl+f", "fritap_output", "friTap output", show=False),
+    ]
 
     DEFAULT_CSS = """
     NetworkPanel {
         layout: vertical;
         height: 1fr;
-        background: #080c18;
+        background: #050811;
     }
-    NetworkPanel > #network-tabbar {
+    NetworkPanel > #net-filter {
+        display: none;
         height: 1;
-        background: #0a1124;
-        padding: 0 0 0 1;
-        /* Always reserve the left-border column (colored to match the
-           background, so it's invisible) -- switching only the color
-           in -level-active below avoids any width shift on toggle. */
-        border-left: heavy #0a1124;
+        border: none;
+        padding: 0 1;
+        background: #0b1628;
+        color: #e5e9f0;
     }
-    NetworkPanel > #network-tabbar.-level-active {
-        border-left: heavy #38bdf8;
+    NetworkPanel > #net-filter.-open {
+        display: block;
     }
-    NetworkPanel .network-subtab {
-        width: auto;
-        padding: 0 2;
-        margin: 0 1 0 0;
-        color: #8f9bb3;
+    NetworkPanel > #net-filter:focus {
+        border: none;
         background: #11203a;
     }
-    NetworkPanel .network-subtab:hover {
-        color: #cbd5e1;
-        background: #1f2937;
-    }
-    NetworkPanel .network-subtab.-active {
-        color: #06121f;
-        text-style: bold;
-        background: #38bdf8;
-    }
-    NetworkPanel > #network-body {
+    NetworkPanel > #net-flows {
         height: 1fr;
+        background: #050811;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 0;
+    }
+    NetworkPanel > #net-flows.-empty {
+        display: none;
+    }
+    NetworkPanel > #net-flows.-filtered-empty {
+        height: 2;
+    }
+    NetworkPanel > #net-flows > .datatable--header {
+        background: #050811;
+        color: #5b6479;
+        text-style: none;
+    }
+    NetworkPanel > #net-flows > .datatable--cursor {
+        background: #11203a;
+        text-style: none;
+    }
+    NetworkPanel > #net-flows:focus > .datatable--cursor {
+        background: #1d3557;
+    }
+    NetworkPanel > #net-flows > .datatable--hover {
+        background: #0b1628;
+    }
+    NetworkPanel > #net-empty {
+        display: none;
+        height: 1fr;
+        align: center middle;
+    }
+    NetworkPanel > #net-empty.-shown {
+        display: block;
+    }
+    NetworkPanel #net-empty-head {
+        width: 100%;
+        content-align: center middle;
+        text-align: center;
+        color: #cbd5e1;
+    }
+    NetworkPanel #net-empty-hint {
+        width: 100%;
+        margin: 1 0 0 0;
+        text-align: center;
+        color: #5b6479;
     }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.can_focus = True
+        # live model
+        self._live: list[FlowRow] = []
+        self._cursor: int | None = None
+        self._live_dir: Path | None = None
+        self._stat: tuple[int, int] | None = None
+        self._poll_busy = False
+        self._poll_again = False
+        self._tls_n = 0
+        self._unseen_tls = 0
+        self._floor_seq = 0
+        # review model
+        self._scope: str | None = None
+        self._scope_label: str | None = None
+        self._review: list[FlowRow] = []
+        self._review_note = ""
+        self._review_window: tuple[float, float] | None = None
+        self._review_loading = False
+        # view state
+        self._filter = ""
+        self._app_only = False
+        self._show_noise = False
+        self._focus_app: str | None = None
+        self._shown = 0
+        self._width = -1
+        self._net_layout: list[tuple[str, str, int]] = []
+        self._status_pending = False
+        self._filter_timer = None
 
-    # -- compose ------------------------------------------------------------
+    # -- compose / mount -------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="network-tabbar"):
-            yield Static(
-                "Mitmproxy",
-                id="network-tab-mitm",
-                classes="network-subtab -active",
-            )
-            yield Static("friTap", id="network-tab-fritap", classes="network-subtab")
-        with ContentSwitcher(initial="mitm-panel", id="network-body"):
-            yield MitmproxyPanel(id="mitm-panel")
-            yield FriTapPanel(id="fritap-panel")
+        yield Input(placeholder="filter: host · path · app", id="net-filter")
+        table: DataTable = DataTable(
+            id="net-flows",
+            cursor_type="row",
+            zebra_stripes=False,
+            classes="-empty",
+        )
+        table.cell_padding = 1
+        yield table
+        with Vertical(id="net-empty", classes="-shown"):
+            yield Static("", id="net-empty-head")
+            yield Static("", id="net-empty-hint")
+        yield MitmproxyPanel(id="mitm-panel")
+        yield FriTapPanel(id="fritap-panel")
 
-    # -- focus forwarding -----------------------------------------------------
+    def on_mount(self) -> None:
+        self._rebuild()
+        try:
+            self.set_interval(self.POLL_SECONDS, self._tick)
+        except Exception:
+            pass
+        self._do_refresh_status()
+
+    # -- accessors ---------------------------------------------------------
+
+    @property
+    def mitm(self) -> MitmproxyPanel | None:
+        try:
+            return self.query_one("#mitm-panel", MitmproxyPanel)
+        except Exception:
+            return None
+
+    @property
+    def fritap(self) -> FriTapPanel | None:
+        try:
+            return self.query_one("#fritap-panel", FriTapPanel)
+        except Exception:
+            return None
+
+    @property
+    def table(self) -> DataTable:
+        return self.query_one("#net-flows", DataTable)
+
+    @property
+    def in_review(self) -> bool:
+        return self._scope is not None
+
+    def _model(self) -> list[FlowRow]:
+        return self._review if self.in_review else self._live
+
+    def _main_screen(self):
+        screen = getattr(self, "screen", None)
+        return screen if hasattr(screen, "set_lens_caption") else None
+
+    def _lens_active(self) -> bool:
+        ms = self._main_screen()
+        try:
+            return bool(
+                ms is not None and ms.is_lens_active(LENS_ID) and is_shown(self)
+            )
+        except Exception:
+            return False
+
+    # -- focus -------------------------------------------------------------
 
     def focus(self, scroll_visible: bool = True):
-        """Delegate focus to the active inner sub-view.
-
-        ``MainScreen._select_bottom_tab`` focuses ``#network-panel`` (this
-        container); forward to whichever inner sub-view is current so its own
-        key handling (Enter to start/stop, Ctrl+D/N/R/O/A/P/L/V, ...) works
-        immediately. Mirrors ``FilesPanel.focus()``.
-        """
+        """Focus the flow table when it is visible, else the lens itself."""
         try:
-            switcher = self.query_one("#network-body", ContentSwitcher)
-            current = switcher.current
-            if current:
-                self.query_one(f"#{current}").focus(scroll_visible)
+            table = self.table
+            if table.display and not table.has_class("-empty"):
+                table.focus(scroll_visible)
                 return self
         except Exception:
             pass
         return super().focus(scroll_visible)
 
-    # -- inner sub-tab click routing -------------------------------------
+    # -- polling -----------------------------------------------------------
 
-    def on_click(self, event) -> None:
-        """Route clicks on the inner sub-tab bar.
+    def _tick(self) -> None:
+        if is_shown(self):
+            self.poll_now()
 
-        Self-contained; does not need MainScreen's help since it only ever
-        switches this panel's own inner ContentSwitcher. Mirrors
-        ``FilesPanel.on_click``.
-        """
-        wid = getattr(getattr(event, "widget", None), "id", None)
-        if wid in _SUBTAB_TO_PANEL:
-            self._select_subtab(_SUBTAB_TO_PANEL[wid])
+    def flow_hint(self) -> None:
+        """A ``[FLOW]`` line arrived: poll soon if the lens is visible."""
+        if is_shown(self):
+            self.poll_now()
 
-    def _select_subtab(self, panel_id: str) -> None:
+    def poll_now(self) -> None:
+        """Kick one off-thread poll (coalesced while one is in flight)."""
+        if self._poll_busy:
+            self._poll_again = True
+            return
+        self._poll_busy = True
+        cursor, live_dir, stat = self._cursor, self._live_dir, self._stat
         try:
-            self.query_one("#network-body", ContentSwitcher).current = panel_id
+            self.run_worker(
+                lambda: self._poll_job(cursor, live_dir, stat),
+                thread=True,
+                group="network-poll",
+                exit_on_error=False,
+            )
+        except Exception:
+            self._poll_busy = False
+
+    def _poll_job(
+        self,
+        cursor: int | None,
+        live_dir: Path | None,
+        stat: tuple[int, int] | None,
+    ) -> None:
+        result = None
+        try:
+            result = self.fetch_new(cursor, live_dir, stat)
+        except Exception:
+            logger.debug("network lens poll failed", exc_info=True)
+        try:
+            self.app.call_from_thread(self._apply_poll, result)
+        except Exception:
+            self._poll_busy = False
+
+    def fetch_new(
+        self,
+        cursor: int | None,
+        live_dir: Path | None,
+        stat: tuple[int, int] | None,
+    ) -> tuple[Path, list[dict], int | None, tuple[int, int] | None, bool] | None:
+        """Read flows newer than ``cursor`` (any thread; no UI access).
+
+        Returns ``(flow dir, records, new cursor, file stat, reset)`` or None
+        when nothing changed. ``reset`` means the flow directory changed (a
+        device switch) and the live model must start over.
+        """
+        from sandroid.services.mitmproxy_flow_log import HARD_LIMIT_CAP, query_flows
+
+        flow_dir = _flow_dir()
+        reset = live_dir is not None and flow_dir != live_dir
+        if reset:
+            cursor, stat = None, None
+        try:
+            st = (flow_dir / "flows.jsonl").stat()
+            new_stat: tuple[int, int] | None = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            new_stat = None
+        if new_stat is not None and new_stat == stat and not reset:
+            return None
+        if new_stat is None:
+            return (flow_dir, [], cursor, None, reset)
+        records: list[dict] = []
+        if cursor is None:
+            res = query_flows(flow_dir, limit=min(HARD_LIMIT_CAP, self.MAX_ROWS))
+            records = list(res["flows"])
+            cursor = res["next_cursor"] if records else res.get("next_cursor") or 0
+        else:
+            for _ in range(5):
+                res = query_flows(flow_dir, since_cursor=cursor, limit=HARD_LIMIT_CAP)
+                records.extend(res["flows"])
+                cursor = res["next_cursor"]
+                if not res["truncated"] or len(records) >= self.MAX_ROWS:
+                    break
+        return (flow_dir, records[-self.MAX_ROWS :], cursor, new_stat, reset)
+
+    def _apply_poll(self, result) -> None:
+        self._poll_busy = False
+        if result is not None:
+            flow_dir, records, cursor, stat, reset = result
+            if reset:
+                self._live = [r for r in self._live if r.kind == "tls"]
+                self._floor_seq = 0
+            self._live_dir = flow_dir
+            self._cursor = cursor
+            self._stat = stat
+            rows = [
+                FlowRow.from_record(r, flow_dir)
+                for r in records
+                if (r.get("seq") or 0) > self._floor_seq
+            ]
+            if reset:
+                self._rebuild_if_live()
+            if rows:
+                self._add_live(rows)
+        if self._poll_again:
+            self._poll_again = False
+            self.poll_now()
+
+    # -- live rows -------------------------------------------------------
+
+    def add_tls_failure(self, ts: str, host: str, reason: str, app: str) -> None:
+        """A ``[TLS_FAIL]`` line from mitmweb (UI thread)."""
+        self._tls_n += 1
+        row = FlowRow(
+            key=f"t{self._tls_n}",
+            ts=time.time(),
+            host=host or "?",
+            path="",
+            method="TLS",
+            app=app or "",
+            kind="tls",
+            reason=reason or "tls",
+        )
+        self._add_live([row])
+        if not self._lens_active():
+            self._unseen_tls += 1
+            ms = self._main_screen()
+            if ms is not None:
+                ms.set_lens_badge(LENS_ID, f"⚑{self._unseen_tls}")
+
+    def _add_live(self, rows: list[FlowRow]) -> None:
+        self._live.extend(rows)
+        if len(self._live) > self.MAX_ROWS + 200:
+            self._live = self._live[-self.MAX_ROWS :]
+            self._rebuild_if_live()
+        elif not self.in_review:
+            self._append_rows(rows)
+        self._do_refresh_status()
+
+    def _rebuild_if_live(self) -> None:
+        if not self.in_review:
+            self._rebuild()
+
+    # -- filters -----------------------------------------------------------
+
+    def _spotlight_package(self) -> str | None:
+        try:
+            from sandroid.services import get_spotlight_service
+
+            app = get_spotlight_service().get_app_tuple()
+        except Exception:
+            app = None
+        return app[0] if app else None
+
+    def _passes(self, row: FlowRow) -> bool:
+        if self._app_only and self._focus_app and row.app != self._focus_app:
+            return False
+        if not self._show_noise and is_noise(
+            row.host, row.path, row.app, self._focus_app
+        ):
+            return False
+        if self._filter:
+            needle = self._filter.lower()
+            hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]}"
+            if needle not in hay.lower():
+                return False
+        return True
+
+    # -- table -------------------------------------------------------------
+
+    def _layout(self) -> list[tuple[str, str, int]]:
+        """``[(key, label, width)]`` of the visible columns for this width.
+
+        Five columns when there is room; a narrow lens (e.g. 100 columns
+        with the Inspector open) drops Size, then Time, so Request keeps a
+        readable width instead of scrolling sideways.
+        """
+        avail = self.size.width or 120
+        who = 18 if avail >= 110 else 16
+        cols = [("time", "Time", 8), ("who", "Recipient", who)]
+        cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 9)]
+        if avail < 76:
+            cols = [c for c in cols if c[0] != "size"]
+        if avail < 58:
+            cols = [c for c in cols if c[0] != "time"]
+        # 2 cells padding per column + 1 scrollbar column
+        fixed = sum(w for _, _, w in cols) + 2 * len(cols) + 1
+        req = max(12, avail - fixed)
+        return [(k, label, w or req) for k, label, w in cols]
+
+    def _cells(self, row: FlowRow, layout: list[tuple[str, str, int]]) -> list[Text]:
+        widths = {k: w for k, _, w in layout}
+        req_w, who_w = widths["req"], widths["who"]
+        t = Text(time.strftime("%H:%M:%S", time.localtime(row.ts)), style="#5b6479")
+        label, known = row.recipient
+        who = Text(_ellipsize(label, who_w), style="#e5e9f0" if known else "#cbd5e1")
+        if row.kind == "tls":
+            req = Text(no_wrap=True, overflow="ellipsis")
+            req.append("TLS ", style="#8f9bb3")
+            req.append(_ellipsize(row.host, req_w - 4), style="#e5e9f0")
+            status = Text("✗ TLS", style="bold #fb7185")
+            size = Text("")
+        else:
+            req = smart_request(row.method, row.host, row.path, req_w)
+            if row.error:
+                status = Text(f"✗ {_short_error(row.error)}", style="#fb7185")
+            elif row.status is None:
+                status = Text("…", style="#5b6479")
+            else:
+                code = int(row.status)
+                color = "#8f9bb3"
+                if 400 <= code < 500:
+                    color = "#facc15"
+                elif code >= 500:
+                    color = "#fb7185"
+                status = Text(str(code), style=color)
+            if row.req_bytes:
+                size = Text(f"↑ {human_size(row.req_bytes)}", style="#cbd5e1")
+            elif row.resp_bytes:
+                size = Text(f"↓ {human_size(row.resp_bytes)}", style="#5b6479")
+            else:
+                size = Text("–", style="#5b6479")
+        size.justify = "right"
+        cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
+        return [cells[k] for k, _, _ in layout]
+
+    def _columns(self, table: DataTable) -> list[tuple[str, str, int]]:
+        layout = self._layout()
+        table.clear(columns=True)
+        for key, label, width in layout:
+            table.add_column(label, key=key, width=width)
+        self._width = self.size.width
+        self._net_layout = layout
+        return layout
+
+    def _at_tail(self, table: DataTable) -> bool:
+        """True when the cursor sits on the last row (or there is none)."""
+        return table.row_count == 0 or table.cursor_row >= table.row_count - 1
+
+    def _rebuild(self, *, to_top: bool = False) -> None:
+        """Re-render the table from the current model + filters.
+
+        Keeps the cursor on the same flow when the user had moved it off the
+        last row; otherwise lands on the newest row (tail-follow).
+        """
+        try:
+            table = self.table
         except Exception:
             return
-        for tab_id, pid in _SUBTAB_TO_PANEL.items():
+        self._focus_app = self._spotlight_package()
+        keep = None
+        if table.row_count and not self._at_tail(table):
+            keep = self._cursor_key()
+        layout = self._columns(table)
+        rows = [r for r in self._model() if self._passes(r)]
+        for row in rows:
+            table.add_row(*self._cells(row, layout), key=row.key)
+        self._shown = len(rows)
+        target = None
+        if keep is not None and not to_top:
             try:
-                self.query_one(f"#{tab_id}").set_class(pid == panel_id, "-active")
+                target = table.get_row_index(keep)
+            except Exception:
+                target = None
+        if rows:
+            if to_top:
+                table.move_cursor(row=0, animate=False)
+                table.scroll_home(animate=False)
+            elif target is not None:
+                table.move_cursor(row=target, animate=False)
+            else:
+                table.move_cursor(row=len(rows) - 1, animate=False)
+                table.scroll_end(animate=False)
+        self._update_empty()
+
+    def _append_rows(self, rows: list[FlowRow]) -> None:
+        """Append new live rows; follow them only from the tail.
+
+        A user who moved the cursor up, or has a flow open in the Inspector,
+        is never yanked to the newest row.
+        """
+        try:
+            table = self.table
+        except Exception:
+            return
+        if self.size.width != self._width or not self._net_layout:
+            self._rebuild()
+            return
+        follow = self._at_tail(table) and not self._inspecting_flow()
+        added = False
+        for row in rows:
+            if self._passes(row):
+                table.add_row(*self._cells(row, self._net_layout), key=row.key)
+                self._shown += 1
+                added = True
+        if added and follow:
+            table.move_cursor(row=table.row_count - 1, animate=False)
+            table.scroll_end(animate=False)
+        self._update_empty()
+
+    def _cursor_key(self) -> str | None:
+        try:
+            table = self.table
+            if not table.row_count:
+                return None
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            return row_key.value
+        except Exception:
+            return None
+
+    def _row_by_key(self, key: str | None) -> FlowRow | None:
+        if key is None:
+            return None
+        for row in reversed(self._model()):
+            if row.key == key:
+                return row
+        return None
+
+    def on_resize(self, event) -> None:
+        if self.size.width != self._width:
+            self._rebuild()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """↑/↓ while a flow is open in the Inspector: show that row instead."""
+        if not self._inspecting_flow():
+            return
+        ms = self._main_screen()
+        key = event.row_key.value if event.row_key is not None else None
+        current = ms.inspector_content if ms is not None else None
+        if key is None or current is None or current.key == f"network:row:{key}":
+            return
+        row = self._row_by_key(key)
+        if row is not None:
+            ms.update_inspector(self.flow_content(row))
+
+    # -- empty state -------------------------------------------------------
+
+    def _update_empty(self) -> None:
+        try:
+            table = self.table
+            box = self.query_one("#net-empty")
+            head = self.query_one("#net-empty-head", Static)
+            hint = self.query_one("#net-empty-hint", Static)
+        except Exception:
+            return
+        model_empty = not self._model()
+        filtered_empty = not model_empty and self._shown == 0
+        was_hidden = table.has_class("-empty")
+        table.set_class(model_empty, "-empty")
+        table.set_class(filtered_empty, "-filtered-empty")
+        box.set_class(model_empty or filtered_empty, "-shown")
+        if model_empty or filtered_empty:
+            title, sub = self._empty_text(filtered_empty)
+            head.update(Text.from_markup(title))
+            hint.update(Text.from_markup(sub) if sub else "")
+            hint.display = bool(sub)
+        focused = self.screen.focused if self.is_attached else None
+        if model_empty and focused is table:
+            super().focus()
+        elif was_hidden and not model_empty and focused is self:
+            table.focus()
+        if model_empty != was_hidden:
+            try:
+                self.screen.refresh_bindings()
             except Exception:
                 pass
-        view = None
+
+    def _empty_text(self, filtered: bool) -> tuple[str, str]:
+        if filtered:
+            widen = []
+            if self._filter:
+                widen.append("/ edits the filter")
+            if self._app_only:
+                widen.append("v shows all apps")
+            if not self._show_noise:
+                widen.append("N shows OS noise")
+            head = "Nothing matches"
+            if self._app_only and self._focus_app:
+                head = f"No flows attributed to {escape(self._focus_app)}"
+                widen.append("per-app attribution needs an App Proxy (y)")
+            return head, " · ".join(widen)
+        if self.in_review:
+            label = escape(self._scope_label or "this run")
+            if self._review_loading:
+                return f"Loading the flows of {label}…", ""
+            if self._review_window is not None:
+                a, b = self._review_window
+                span = (
+                    time.strftime("%H:%M:%S", time.localtime(a))
+                    + "–"
+                    + time.strftime("%H:%M:%S", time.localtime(b))
+                )
+                return (
+                    f"No flows were captured during {label}",
+                    f"looked for flows between {span}",
+                )
+            return f"No flow data for {label}", self._review_note
+        mitm = self.mitm
+        if mitm is None:
+            return "No flows yet", ""
+        return mitm.empty_hint()
+
+    # -- status / caption ----------------------------------------------------
+
+    def refresh_status(self) -> None:
+        """Controllers changed state: refresh caption, empty state, Inspector."""
+        if self._status_pending:
+            return
+        self._status_pending = True
         try:
-            view = self.query_one(f"#{panel_id}")
-            view.focus()
+            self.set_timer(0.1, self._do_refresh_status)
+        except Exception:
+            self._do_refresh_status()
+
+    def refresh_header(self) -> None:  # MainScreen lens-activation hook
+        self._do_refresh_status()
+
+    def _caption_title(self) -> str:
+        if self.in_review:
+            label = escape(self._scope_label or "run")
+            note = self._review_note_short()
+            return f"[#fbbf24]◆ {label}[/]" + (f" · {note}" if note else "")
+        mitm = self.mitm
+        title = mitm.status_caption() if mitm is not None else ""
+        fritap = self.fritap
+        if fritap is not None and fritap.is_running():
+            title += " · [#4ade80]friTap ●[/]"
+        return title
+
+    def _review_note_short(self) -> str:
+        if self._review_note == "run":
+            return "flows saved with the run"
+        if self._review_window is not None:
+            return "flows in the run's time window"
+        return ""
+
+    def _caption_info(self) -> str:
+        total = len(self._model())
+        if not total:
+            return ""
+        parts = []
+        if self._shown != total:
+            parts.append(f"{self._shown} of {total}")
+        else:
+            parts.append(f"{total} flow" + ("s" if total != 1 else ""))
+        if self._app_only and self._focus_app:
+            parts.append("app only")
+        if self._show_noise:
+            parts.append("+ OS noise")
+        if self._filter:
+            parts.append(f"“{escape(self._filter)}”")
+        if self._shown:
+            parts.append("⏎ inspect")
+        return " · ".join(parts)
+
+    def _do_refresh_status(self) -> None:
+        self._status_pending = False
+        ms = self._main_screen()
+        if ms is not None:
+            try:
+                ms.set_lens_caption(
+                    LENS_ID, title=self._caption_title(), info=self._caption_info()
+                )
+            except Exception:
+                logger.debug("network caption failed", exc_info=True)
+        if not self._model():
+            self._update_empty()
+        if ms is not None:
+            content = ms.inspector_content
+            if (
+                ms.inspector_is_open
+                and content is not None
+                and content.key == STATUS_KEY
+            ):
+                ms.update_inspector(self.status_content())
+
+    # -- lens hooks ------------------------------------------------------
+
+    def on_lens_activated(self) -> None:
+        self._unseen_tls = 0
+        ms = self._main_screen()
+        if ms is not None:
+            ms.set_lens_badge(LENS_ID, None)
+        pkg = self._spotlight_package()
+        if pkg != self._focus_app:
+            self._rebuild()
+        self.poll_now()
+        self._do_refresh_status()
+
+    def on_scope_changed(self, message) -> None:
+        run_id = getattr(message, "run_id", None)
+        self._scope = run_id
+        self._scope_label = getattr(message, "label", None) or (
+            f"Run {Path(run_id).name}" if run_id else None
+        )
+        self._review = []
+        self._review_window = None
+        self._review_note = ""
+        if run_id is None:
+            self._review_loading = False
+            self._rebuild()
+            self._do_refresh_status()
+            return
+        self._review_loading = True
+        self._rebuild()
+        self._do_refresh_status()
+        try:
+            self.run_worker(
+                lambda: self._review_job(run_id),
+                thread=True,
+                group="network-review",
+                exit_on_error=False,
+            )
+        except Exception:
+            self._apply_review(run_id, self.load_run_flows(run_id))
+
+    def _review_job(self, run_id: str) -> None:
+        try:
+            result = self.load_run_flows(run_id)
+        except Exception:
+            logger.debug("network review load failed", exc_info=True)
+            result = ([], "", None)
+        try:
+            self.app.call_from_thread(self._apply_review, run_id, result)
         except Exception:
             pass
-        # Forward to the freshly-activated child directly -- covers the case
-        # where the sub-tab itself just changed, belt-and-suspenders with
-        # NetworkPanel.refresh_header() below (which covers every OTHER
-        # activation path). Mirrors FilesPanel._select_subtab's on_activated()
-        # forwarding, using refresh_header as the relevant hook here since
-        # neither MitmproxyPanel nor FriTapPanel implement on_activated.
-        if view is not None and hasattr(view, "refresh_header"):
+
+    def load_run_flows(
+        self, run_id: str
+    ) -> tuple[list[FlowRow], str, tuple[float, float] | None]:
+        """``(rows, source, window)`` of a run (any thread).
+
+        ``source`` is ``"run"`` when the run folder carries its own
+        ``mitm_flows/`` log, ``"window"`` when the session log was filtered
+        by the run's start/end time, or a short reason when neither works.
+        """
+        from sandroid.services.mitmproxy_flow_log import HARD_LIMIT_CAP, query_flows
+
+        window = _run_window(run_id)
+        run_dir = window[0] if window else Path(run_id)
+        own = run_dir / "mitm_flows" if run_dir is not None else None
+        if own is not None and (own / "flows.jsonl").is_file():
+            res = query_flows(own, limit=HARD_LIMIT_CAP)
+            rows = [FlowRow.from_record(r, own) for r in res["flows"]]
+            span = (window[1], window[2]) if window else None
+            return rows, "run", span
+        if window is None:
+            return [], "no start/end time recorded for this run", None
+        _, start, end = window
+        start -= 2.0
+        end += 2.0
+        flow_dir = _flow_dir()
+        rows: list[FlowRow] = []
+        if (flow_dir / "flows.jsonl").is_file():
+            res = query_flows(
+                flow_dir,
+                start_time=datetime.fromtimestamp(start).isoformat(),
+                end_time=datetime.fromtimestamp(end).isoformat(),
+                limit=HARD_LIMIT_CAP,
+            )
+            rows = [FlowRow.from_record(r, flow_dir) for r in res["flows"]]
+        return rows, "window", (start, end)
+
+    def _apply_review(self, run_id: str, result) -> None:
+        if run_id != self._scope:
+            return  # the scope moved on while loading
+        rows, source, window = result
+        if source == "window" and window is not None:
+            a, b = window
+            rows = rows + [r for r in self._live if r.kind == "tls" and a <= r.ts <= b]
+            rows.sort(key=lambda r: r.ts)
+        self._review = rows[-self.MAX_ROWS :]
+        self._review_note = source
+        self._review_window = window
+        self._review_loading = False
+        self._rebuild(to_top=True)
+        self._do_refresh_status()
+
+    # -- inspector -------------------------------------------------------
+
+    def _inspecting_flow(self) -> bool:
+        ms = self._main_screen()
+        if ms is None or not ms.inspector_is_open:
+            return False
+        content = ms.inspector_content
+        return bool(
+            content is not None
+            and content.lens == LENS_ID
+            and isinstance(content.key, str)
+            and content.key.startswith("network:row:")
+        )
+
+    def inspect_selected(self) -> InspectorContent | None:
+        """Enter on a row: Summary / Request / Response of that flow."""
+        if not self._shown:
+            return None
+        row = self._row_by_key(self._cursor_key())
+        if row is None:
+            return None
+        return self.flow_content(row)
+
+    def flow_content(self, row: FlowRow) -> InspectorContent:
+        key = f"network:row:{row.key}"
+        label, _known = row.recipient
+        when = time.strftime("%H:%M:%S", time.localtime(row.ts))
+        if row.kind == "tls":
+            grid = _grid()
+            grid.add_row("recipient", Text(label))
+            grid.add_row("host", Text(row.host))
+            grid.add_row("time", when)
+            if row.app:
+                grid.add_row("app", Text(row.app))
+            grid.add_row(
+                "result", Text(f"✗ TLS failed ({row.reason})", style="#fb7185")
+            )
+            why = _TLS_REASONS.get(row.reason, _TLS_REASONS["tls"])
+            return InspectorContent(
+                title=f"✗ TLS · {label}",
+                subtitle=escape(row.host),
+                sections=[
+                    ("", grid),
+                    ("Why", why),
+                    (
+                        "Next",
+                        "[b]^P[/b] unpins the spotlight app (exp.) · "
+                        "[b]^N[/b] installs the CA",
+                    ),
+                ],
+                key=key,
+                lens=LENS_ID,
+            )
+        detail = None
+        if row.flow_dir is not None and row.flow_id:
             try:
-                view.refresh_header()
+                from sandroid.services.mitmproxy_flow_log import read_flow_detail
+
+                detail = read_flow_detail(row.flow_dir, row.flow_id)
             except Exception:
-                pass
-        # Clicking a sub-tab directly is "entering" the inner level, not
-        # staying at outer -- mirrors FilesPanel._select_subtab.
-        self.set_subtab_bar_active(True)
+                detail = None
+        grid = _grid()
+        grid.add_row("recipient", Text(label))
+        if row.app:
+            grid.add_row("app", Text(row.app))
+        grid.add_row("time", when)
+        if row.error:
+            grid.add_row("result", Text(f"✗ {row.error}", style="#fb7185"))
+        elif row.status is not None:
+            grid.add_row(
+                "status",
+                f"{row.status}" + (f" · {row.protocol}" if row.protocol else ""),
+            )
+        if row.ts_start:
+            ms_taken = max(0.0, (row.ts - float(row.ts_start)) * 1000)
+            grid.add_row("duration", f"{ms_taken:.0f} ms")
+        grid.add_row(
+            "sent",
+            f"{human_size(row.req_bytes)}"
+            + (f" · {row.req_type}" if row.req_type else ""),
+        )
+        grid.add_row(
+            "received",
+            f"{human_size(row.resp_bytes)}"
+            + (f" · {row.resp_type}" if row.resp_type else ""),
+        )
+        summary = [("", grid), ("URL", Text(row.url(), style="#cbd5e1"))]
+        if detail is None:
+            missing = Text(
+                "details not stored (trimmed by retention or never captured)",
+                style="#5b6479",
+            )
+            request = [("", missing)]
+            response = [("", missing)]
+        else:
+            request = [
+                ("Headers", _headers_renderable(detail.get("request_headers"))),
+                ("Body", body_renderable(detail.get("request_body"), row.req_type)),
+            ]
+            response = [
+                ("Headers", _headers_renderable(detail.get("response_headers"))),
+                ("Body", body_renderable(detail.get("response_body"), row.resp_type)),
+            ]
+            if detail.get("error"):
+                response.insert(
+                    0, ("Error", Text(str(detail["error"]), style="#fb7185"))
+                )
+        return InspectorContent(
+            title=f"{row.method} {label}",
+            subtitle=escape(_ellipsize(row.host + row.path, 300)),
+            tabs=[("Summary", summary), ("Request", request), ("Response", response)],
+            footer="←/→ tab",
+            key=key,
+            lens=LENS_ID,
+        )
+
+    def status_content(self) -> InspectorContent:
+        """The "Capture status" page: mitmproxy and friTap tabs."""
+        mitm, fritap = self.mitm, self.fritap
+        m_grid = _grid()
+        for label, value in mitm.status_rows() if mitm is not None else []:
+            m_grid.add_row(label, Text.from_markup(value))
+        m_keys = (
+            "[b]M[/b] start/stop  [b]^D[/b] device proxy  [b]^N[/b] install CA\n"
+            "[b]^P[/b] SSL unpin  [b]^R[/b] restart  [b]^A[/b] addons\n"
+            "[b]^O[/b] mitmweb UI  [b]^V[/b] verbose  [b]y[/b] proxy settings"
+        )
+        m_recent = list(mitm.recent_lines)[-8:] if mitm is not None else []
+        m_sections: list[tuple[str, Any]] = [("", m_grid), ("Keys", m_keys)]
+        if m_recent:
+            m_sections.append(("Recent", Text("\n".join(m_recent), style="#8f9bb3")))
+        f_grid = _grid()
+        for label, value in fritap.status_rows() if fritap is not None else []:
+            f_grid.add_row(label, Text.from_markup(value))
+        f_recent = list(fritap.recent_lines)[-12:] if fritap is not None else []
+        f_sections: list[tuple[str, Any]] = [
+            ("", f_grid),
+            ("Keys", "[b]h[/b] start/stop friTap  [b]^F[/b] output folder"),
+        ]
+        if f_recent:
+            f_sections.append(("Recent", Text("\n".join(f_recent), style="#8f9bb3")))
+        return InspectorContent(
+            title="Capture status",
+            tabs=[("mitmproxy", m_sections), ("friTap", f_sections)],
+            footer="←/→ tab",
+            key=STATUS_KEY,
+            lens=LENS_ID,
+        )
+
+    def open_status(self, tab: int = 0) -> None:
+        ms = self._main_screen()
+        if ms is None:
+            return
+        ms.open_inspector(self.status_content())
         try:
-            self.screen.set_nav_level_inner()
+            from sandroid.tui.widgets.lens_shell import Inspector
+
+            ms.query_one("#inspector", Inspector).select_tab(tab)
         except Exception:
             pass
 
     def select_subtab(self, panel_id: str) -> None:
-        """Public: switch to a specific inner Network sub-tab from outside.
+        """Legacy hook (``MainScreen.open_fritap_tab``, key ``h``)."""
+        self.open_status(1 if panel_id == "fritap-panel" else 0)
 
-        Used by ``MainScreen.open_fritap_tab()`` — the ``h`` key jumping
-        straight to friTap, mirroring ``FilesPanel.select_subtab``.
-        """
-        self._select_subtab(panel_id)
+    # -- actions ---------------------------------------------------------
 
-    # -- level-aware cycling (Feature A duck-typed contract) -----------------
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action == "start_stop":
+            # Only while nothing is captured; with rows Enter inspects.
+            return not self.in_review and not self._model()
+        if action in ("filter", "toggle_app_only"):
+            # Nothing to filter yet: hidden, so the footer shows ^D instead.
+            return bool(self._model())
+        return True
 
-    def cycle_subtab(self, delta: int) -> None:
-        """Cycle the inner sub-tab by *delta*.
+    def action_start_stop(self) -> None:
+        self.action_mitm("toggle_running")
 
-        Called by ``MainScreen.cycle_active_level`` (Shift+Left/Right) while
-        this panel is the current outer tab and the inner level is active.
-        Mirrors ``FilesPanel.cycle_subtab``.
-        """
+    def action_mitm(self, name: str) -> None:
+        mitm = self.mitm
+        action = getattr(mitm, f"action_{name}", None) if mitm is not None else None
+        if action is not None:
+            action()
+        self._do_refresh_status()
+
+    def action_status(self) -> None:
+        self.open_status(0)
+
+    def action_fritap_output(self) -> None:
+        fritap = self.fritap
+        if fritap is not None:
+            fritap.action_open_output()
+
+    def action_clear_view(self) -> None:
+        """Hide everything captured so far (on screen only; disk untouched)."""
+        if self.in_review:
+            return
+        seqs = [r.seq for r in self._live if r.seq is not None]
+        if seqs:
+            self._floor_seq = max(self._floor_seq, *seqs)
+        self._live = []
+        self._rebuild()
+        self._do_refresh_status()
+
+    def action_filter(self) -> None:
         try:
-            switcher = self.query_one("#network-body", ContentSwitcher)
+            box = self.query_one("#net-filter", Input)
         except Exception:
             return
-        current = switcher.current or _SUBTAB_ORDER[0]
-        try:
-            idx = _SUBTAB_ORDER.index(current)
-        except ValueError:
-            idx = 0
-        self._select_subtab(_SUBTAB_ORDER[(idx + delta) % len(_SUBTAB_ORDER)])
+        box.add_class("-open")
+        box.focus()
 
-    def set_subtab_bar_active(self, active: bool) -> None:
-        """Toggle this panel's own inner tab bar highlight.
+    def action_toggle_app_only(self) -> None:
+        self._focus_app = self._spotlight_package()
+        if not self._app_only and not self._focus_app:
+            self.app.notify(
+                "No spotlight app — pick one in the App lens (c / Shift+C).",
+                timeout=3,
+            )
+            return
+        self._app_only = not self._app_only
+        self._rebuild()
+        self._do_refresh_status()
 
-        Called by ``MainScreen.shift_nav_level`` when moving the active level
-        onto/off this panel's inner bar. Mirrors
-        ``FilesPanel.set_subtab_bar_active``.
-        """
+    def action_toggle_noise(self) -> None:
+        self._show_noise = not self._show_noise
+        self._rebuild()
+        self._do_refresh_status()
+
+    def set_filter(self, text: str) -> None:
+        self._filter = (text or "").strip()
+        self._rebuild()
+        self._do_refresh_status()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "net-filter":
+            return
+        event.stop()
+        if self._filter_timer is not None:
+            try:
+                self._filter_timer.stop()
+            except Exception:
+                pass
+        value = event.value
         try:
-            self.query_one("#network-tabbar").set_class(active, "-level-active")
+            self._filter_timer = self.set_timer(0.15, lambda: self.set_filter(value))
         except Exception:
-            pass
+            self.set_filter(value)
 
-    # -- header staleness fix -------------------------------------------------
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "net-filter":
+            return
+        event.stop()
+        self.set_filter(event.value)
+        if not event.value.strip():
+            event.input.remove_class("-open")
+        self.focus()
 
-    def refresh_header(self) -> None:
-        """Forward to the current inner child's own ``refresh_header``, if any.
+    def on_descendant_blur(self, event) -> None:
+        widget = getattr(event, "widget", None)
+        if getattr(widget, "id", None) != "net-filter":
+            return
+        if not widget.value.strip():
+            widget.remove_class("-open")
+        # Esc left the input with focus nowhere: return to the table.
+        self.call_after_refresh(self._refocus_after_filter)
 
-        Closes a real header-staleness gap found during verification:
-        ``MainScreen._select_bottom_tab``'s generic
-        ``hasattr(panel_widget, "refresh_header")`` hook only finds a method
-        living directly on whatever ``#tool-body`` just switched to. Once
-        friTap is nested inside this panel, that widget is ``NetworkPanel``,
-        not ``FriTapPanel`` — so without this method, any activation path
-        that does NOT go through ``_select_subtab`` (e.g. a bare click
-        directly on the outer "Network" tab label while friTap is already
-        the current inner sub-tab) would leave the friTap header stale
-        exactly the way ``FriTapPanel.refresh_header()`` was built to
-        prevent. ``MitmproxyPanel`` has no public ``refresh_header`` (it
-        keeps its header live via its own event wiring), so the ``hasattr``
-        guard below is a harmless no-op while Mitmproxy is the current
-        sub-tab.
-        """
+    def _refocus_after_filter(self) -> None:
         try:
-            current = self.query_one("#network-body", ContentSwitcher).current
-            view = self.query_one(f"#{current}")
-            if hasattr(view, "refresh_header"):
-                view.refresh_header()
+            if self.screen.focused is None and is_shown(self):
+                self.focus()
         except Exception:
             pass

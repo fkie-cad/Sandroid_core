@@ -445,7 +445,7 @@ mitmproxy (``[mitmproxy]``)
    listen_host = "127.0.0.1"
 
    # Also point the device's global http_proxy at mitmproxy when it is started
-   # with Enter in the Mitmproxy tab (off: start touches nothing on the device;
+   # with Enter in the Network lens (off: start touches nothing on the device;
    # use Ctrl+D). The device proxy Sandroid set is cleared when mitmproxy stops
    # and when Sandroid exits.
    auto_device_proxy = false
