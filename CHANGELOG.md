@@ -39,6 +39,8 @@ persistent run history, and an experimental AI Chat assistant.
 - **Unified Files tab**: fsmon/kprobe monitor stream, Spotlight-Files watchlist and Play diffing in one place, with grouped, de-duplicated event display.
 - **kprobe filesystem monitor** (`tui.monitor_backend = "kprobe"`, default): kernel tracefs kprobes with per-process/child-tree attribution and path-scoped capture, no binary pushed to the device; automatic fallback to `fsmon`.
 - **Replay settle time** (`analysis.replay_settle_seconds`, default 8 s, also in Settings → Analysis): every replay's capture window stays open that much longer so slow network responses and late writes land in the run; the dry run waits the same extra time, so noise subtraction still compares equal windows.
+- **Network reset after snapshot loads** (`analysis.network_reset_after_snapshot`, `"airplane"` (default) | `"svc"` | `"off"`, also in Settings → Analysis): after every snapshot load that precedes a replay or the dry run, the device network is briefly cycled and Sandroid waits for a default network, so connections restored from the snapshot (whose emulator NAT state is gone) fail at once and the app reconnects. Recordings started with the app already open now replay with working network instead of "Cannot connect … timeout". With the reset off, starting a recording in the open spotlight app shows a warning. The mode is recorded in `run_settings`.
+- `mitmproxy.auto_device_proxy` is editable in Settings → Network & Frida.
 
 #### Network interception
 - **mitmproxy integration** (Network → Mitmproxy): start/stop `mitmweb`, live flow and TLS-failure tail, flow log.
@@ -159,6 +161,11 @@ persistent run history, and an experimental AI Chat assistant.
 - Emulator memory guard: the qemu behind a serial is found by its console port socket (emulators started without `-port` get auto-assigned ports), so with two emulators the guard no longer measures or stops the wrong one; ambiguous cases are left alone with a warning.
 - Starting an AVD from the TUI disables guest Vulkan like the CLI; detached emulators log to `~/.cache/sandroid/emulator/<avd>.log` instead of a pipe that stalled them after ~64 KiB of output; "Restart emulator" relaunches the running AVD with the safe flags and only reports success once it has booted.
 - Deleting a snapshot the console rejects (`KO: …`) is reported as a failure.
+- Creating, loading or slot-saving a snapshot that fails (e.g. an invalid name) shows an error toast instead of "Created snapshot …"; invalid names are rejected before any adb call.
+- After the CA install restarts Zygote (and with it system_server), a running frida-server is restarted and cached frida handles are dropped, so the next spawn no longer fails with `DeadSystemException`; at startup a frida-server older than system_server is restarted instead of reported as "already running".
+- TUI replays record `replay_settle_seconds` in `run_settings` (only headless runs did).
+- Watchlist: after adding a path, focus returns to the list (the next `n`/`a` was typed into the field); re-expanding a wildcard no longer logs "already in spotlight files" for every known match or toasts "new file(s)" when nothing is new, and expanded files that disappear are dropped quietly instead of erroring on every auto-mode tick.
+- The startup CA-status probe no longer logs two ADB WARNINGs when the CA is simply not installed yet (one INFO line instead).
 - Headless API network capture starts tcpdump detached on the device (it blocked for 30 s), honours `output_file`, and stops exactly its own tcpdump PID instead of `pkill tcpdump`.
 
 #### Security
