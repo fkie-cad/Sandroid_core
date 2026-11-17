@@ -462,6 +462,21 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
+        # Network reset after each snapshot load (stale snapshot sockets)
+        with Horizontal(classes="setting-row"):
+            yield Label("Network Reset After Load:", classes="setting-label")
+            yield Select(
+                [
+                    ("Airplane mode on/off", "airplane"),
+                    ("svc wifi/data off/on", "svc"),
+                    ("Off", "off"),
+                ],
+                value=config.analysis.network_reset_after_snapshot,
+                id="setting-analysis--network_reset_after_snapshot",
+                allow_blank=False,
+                classes="setting-select",
+            )
+
         # Capture Processes
         with Horizontal(classes="setting-row"):
             yield Label("Capture Processes:", classes="setting-label")
@@ -631,6 +646,14 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             )
 
         yield Static("mitmproxy", classes="section-header")
+
+        # Device proxy on mitmproxy start
+        with Horizontal(classes="setting-row"):
+            yield Label("Set device proxy on start:", classes="setting-label")
+            yield from self._switch_with_state(
+                config.mitmproxy.auto_device_proxy,
+                "setting-mitmproxy--auto_device_proxy",
+            )
 
         # App-proxy lanes (per-app proxy pool size; config key stays focus_lanes).
         with Horizontal(classes="setting-row"):
