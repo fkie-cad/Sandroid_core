@@ -272,3 +272,67 @@ class TestBaselineCacheLifecycle:
 
         assert watchlist_store.has_baseline(path_a) is True
         assert watchlist_store.has_baseline(path_b) is False
+
+
+class TestVersionedPulls:
+    """M3: every pull is kept (bounded) with its diff; nothing is overwritten."""
+
+    PATH = "/data/data/com.app/shared_prefs/p.xml"
+
+    def _pull(self, text, diff=None, keep=10):
+        current = watchlist_store.reset_current(self.PATH)
+        (current / "p.xml").write_text(text, encoding="utf-8")
+        return watchlist_store.promote(self.PATH, diff, keep=keep)
+
+    def test_each_pull_is_a_new_version_with_its_diff(self):
+        v1 = self._pull("one")
+        v2 = self._pull("two", diff="\t[UPDATED] /map text: one → two\n")
+        versions = watchlist_store.version_dirs(self.PATH)
+        assert versions == [v1, v2]
+        assert (v1 / "p.xml").read_text(encoding="utf-8") == "one"
+        assert (v2 / "p.xml").read_text(encoding="utf-8") == "two"
+        assert watchlist_store.version_diff(v1) is None
+        assert "one → two" in watchlist_store.version_diff(v2)
+        assert watchlist_store.version_time(v2) >= watchlist_store.version_time(v1)
+        # The next pull diffs against the newest version.
+        assert watchlist_store.previous_dir(self.PATH) == v2
+
+    def test_versions_are_bounded_oldest_first(self):
+        made = [self._pull(f"v{i}", diff="", keep=3) for i in range(5)]
+        assert watchlist_store.version_dirs(self.PATH) == made[-3:]
+
+    def test_a_legacy_previous_baseline_counts_as_the_oldest_version(self):
+        legacy = watchlist_store.row_dir(self.PATH) / "previous"
+        legacy.mkdir(parents=True)
+        (legacy / "p.xml").write_text("old", encoding="utf-8")
+        assert watchlist_store.has_baseline(self.PATH)
+        newest = self._pull("new")
+        assert watchlist_store.version_dirs(self.PATH) == [legacy, newest]
+
+
+class TestStableLocation:
+    """M4: the watchlist survives a restart (a new session results folder)."""
+
+    def test_default_dir_is_per_user_and_device_not_per_session(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv(watchlist_store.WATCHLIST_DIR_ENV, raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_175331" / "Emu_A"))
+        watchlist_store.save_membership(["/data/data/com.app/a.db"])
+        first = watchlist_store.watchlist_dir()
+        assert first == tmp_path / "cfg" / "sandroid" / "watchlists" / "Emu_A"
+
+        # Restart: a new session folder for the same device.
+        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_181610" / "Emu_A/"))
+        assert watchlist_store.load_membership() == ["/data/data/com.app/a.db"]
+
+        # Another device has its own watchlist.
+        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_181610" / "Emu_B"))
+        assert watchlist_store.load_membership() == []
+
+    def test_override_env_var_is_not_a_sandroid_config_variable(self):
+        """SANDROID_* variables are config overrides (and count as "a config
+        exists" for the CLI); the test/override hook must not be one.
+        """
+        assert not watchlist_store.WATCHLIST_DIR_ENV.startswith("SANDROID_")

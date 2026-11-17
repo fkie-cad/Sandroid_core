@@ -414,6 +414,12 @@ TUI (``[tui]``)
    # kprobe, auto-fall-back to fsmon when the kernel lacks support) or 'fsmon'
    # (the fsmon binary).
    monitor_backend = "kprobe"
+   # kprobe monitor: seconds between re-stats of the app's database files,
+   # whose writes go through files opened before the monitor started
+   # (0 = off; the stop-time rescan still runs)
+   monitor_stat_interval = 10.0
+   # Files lens: pulled versions kept per watched file (2-500)
+   watchlist_max_versions = 10
 
    # Override keys: maps a binding id (the MenuController action name) to a key
    # string, e.g. {'proxy': 'ctrl+y'}. Edited by the in-app ? keybinding editor

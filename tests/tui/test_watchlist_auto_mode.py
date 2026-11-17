@@ -600,3 +600,45 @@ def test_vanished_wildcard_expansion_is_dropped_not_errored(monkeypatch):
     # An explicitly watched path that vanished still shows as an error.
     assert view._rows[explicit].state == RowState.ERROR
     assert view._rows[PATH_B].state != RowState.ERROR
+
+
+# ---------------------------------------------------------------------------
+# M2 (fix round 3): a database and its -wal/-journal are one unit.
+# ---------------------------------------------------------------------------
+
+DB = "/data/data/com.app/databases/app.db"
+
+
+def test_auto_tick_stats_the_database_companions(monkeypatch):
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        WatchlistView,
+        "_stat_command",
+        staticmethod(lambda p: seen.append(p) or ("", "")),
+    )
+    view = WatchlistView()
+    monkeypatch.setattr(view, "_post", lambda fn, *args: None)
+    view._auto_tick_worker([DB, PATH_A])
+    assert seen == [[DB, PATH_A, DB + "-wal", DB + "-journal"]]
+
+
+def test_a_wal_only_change_counts_as_a_change_of_the_database(monkeypatch):
+    """A WAL-mode write touches only -wal until a checkpoint: the db row must
+    still see a new signature (and so get auto-pulled).
+    """
+    view = WatchlistView()
+    monkeypatch.setattr(view, "_reschedule_auto_timer", lambda: None)
+    evaluated: list = []
+    monkeypatch.setattr(
+        view, "_evaluate_auto_pull", lambda row, prev, new: evaluated.append(new)
+    )
+    view._auto_enabled = True
+    view._rows[DB] = wv_module._RowInfo(path=DB)
+    stderr = f"stat: can't stat '{DB}-journal': No such file or directory"
+    first = "\n".join([_stat_line(DB, 100, 4096), _stat_line(DB + "-wal", 100, 0)])
+    second = "\n".join([_stat_line(DB, 100, 4096), _stat_line(DB + "-wal", 107, 8272)])
+    view._apply_auto_tick_result([DB], first, stderr)
+    view._apply_auto_tick_result([DB], second, stderr)
+    assert evaluated[0] != evaluated[1]
+    assert evaluated[1] == (100, 4096, 107, 8272)
+    assert view._rows[DB].state != RowState.ERROR

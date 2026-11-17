@@ -1,8 +1,10 @@
 """Watchlist sub-tab's on-disk state: membership persistence + the local
 pull baseline cache.
 
-Two related but distinct things live under one directory,
-``RESULTS_PATH/spotlight_files/.watchlist/``, because the Watchlist sub-tab
+Two related but distinct things live under one directory -- the stable
+per-device :func:`watchlist_dir` (``~/.config/sandroid/watchlists/<device>/``,
+so watches and pull history survive a restart; it used to be the per-session
+``RESULTS_PATH/spotlight_files/.watchlist/``) -- because the Watchlist sub-tab
 (``tui/widgets/watchlist_view.py``) has neither of the two persistence
 conventions already established elsewhere in this app: Play's ``runs/``
 (``core/run_history.py``) or the ``first_pull``/``second_pull`` snapshot-
@@ -27,14 +29,15 @@ folder pair ``ChangedFiles.return_data()`` uses.
    owner of the ``runs/`` on-disk shape while ``RecordingController``
    decides when to call it.
 
-2. **Per-path baseline cache** (``<sanitized-path>/{previous,current}``):
-   each watched path gets its own ``previous``/``current`` pull directory so
-   a fresh manual pull can be diffed against whatever was pulled last time.
-   ``previous`` holds the last-promoted baseline; ``current`` holds the most
-   recent pull. Callers (``WatchlistView``) are expected to: clear+recreate
-   ``current`` via :func:`reset_current`, pull the fresh copy into it, diff
-   against :func:`previous_dir` if :func:`has_baseline` is True, then call
-   :func:`promote` to make the fresh pull the new baseline for next time.
+2. **Per-path pull history** (``<sanitized-path>/{current,versions/<ts>}``):
+   ``current`` is the staging area of the pull in progress; every pull is
+   then kept as ``versions/<timestamp>/`` together with ``diff.txt`` (its
+   diff against the version before), bounded to the newest N
+   (``tui.watchlist_max_versions``). Callers (``WatchlistView``) are expected
+   to: clear+recreate ``current`` via :func:`reset_current`, pull the fresh
+   copy into it, diff against :func:`previous_dir` (the newest version) if
+   :func:`has_baseline` is True, then call :func:`promote` (with the diff)
+   to keep the pull as a new version.
 
 Sanitized directory naming (:func:`sanitize_path`): device paths contain
 ``/``, which can't be a literal path component, so each watched path's cache
@@ -59,6 +62,7 @@ import logging
 import os
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -95,9 +99,42 @@ def _results_path() -> Path:
     return Path(os.environ.get("RESULTS_PATH", "./results/")).expanduser()
 
 
+#: Overrides the watchlist root (tests point it at a temp directory).
+WATCHLIST_DIR_ENV = "SDROID_WATCHLIST_DIR"
+
+
+def _user_dir() -> Path:
+    """Sandroid's per-user directory (``$XDG_CONFIG_HOME/sandroid`` or
+    ``~/.config/sandroid``) -- where the welcome marker, the AI tool
+    permissions and the keybindings already live.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "sandroid"
+
+
+def device_key() -> str:
+    """The device the watchlist belongs to: the session's device folder name
+    (``RESULTS_PATH`` ends in ``<session>/<device>/``), e.g. the AVD name.
+    """
+    name = _results_path().resolve().name if os.environ.get("RESULTS_PATH") else ""
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in name)
+    return safe.strip("._") or "default"
+
+
 def watchlist_dir() -> Path:
-    """The shared root for both membership (``index.json``) and baselines."""
-    directory = _results_path() / "spotlight_files" / ".watchlist"
+    """The shared root for both membership (``index.json``) and baselines.
+
+    Stable across sessions (M4): ``<user dir>/watchlists/<device>/``, so the
+    watched files, their pull history and auto-pull state survive a restart
+    (the per-session results folder is new on every start). Paths inside are
+    absolute device paths, so one device's file covers all of its apps.
+    """
+    override = os.environ.get(WATCHLIST_DIR_ENV)
+    if override:
+        directory = Path(override).expanduser()
+    else:
+        directory = _user_dir() / "watchlists" / device_key()
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
@@ -113,9 +150,63 @@ def row_dir(path: str) -> Path:
     return directory
 
 
+#: Pulled versions kept per path when the caller passes no limit.
+DEFAULT_MAX_VERSIONS = 10
+
+_STAMP_FORMAT = "%Y%m%dT%H%M%S_%f"
+_DIFF_FILE = "diff.txt"
+
+
+def _versions_root(path: str) -> Path:
+    return row_dir(path) / "versions"
+
+
+def version_dirs(path: str) -> list[Path]:
+    """Every kept pull of *path*, oldest first (``versions/<timestamp>/``).
+
+    A pre-versioning ``previous/`` baseline counts as the oldest version.
+    """
+    root = _versions_root(path)
+    dirs = (
+        sorted(
+            (d for d in root.iterdir() if d.is_dir() and not d.name.startswith(".")),
+            key=lambda d: d.name,
+        )
+        if root.is_dir()
+        else []
+    )
+    legacy = row_dir(path) / "previous"
+    if legacy.is_dir() and any(legacy.iterdir()):
+        dirs.insert(0, legacy)
+    return dirs
+
+
+def version_time(version: Path) -> datetime | None:
+    """When a version was pulled (``None`` for the legacy ``previous/``)."""
+    try:
+        # Local wall-clock stamp, like the ISO "pulled_at" next to it.
+        return datetime.strptime(version.name, _STAMP_FORMAT)  # noqa: DTZ007
+    except ValueError:
+        return None
+
+
+def version_diff(version: Path) -> str | None:
+    """The diff stored with a version (against the version before it)."""
+    try:
+        return (version / _DIFF_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 def previous_dir(path: str) -> Path:
-    """The last-promoted baseline pull for *path* (may not exist yet)."""
-    return row_dir(path) / "previous"
+    """The most recent kept pull of *path* (may not exist yet).
+
+    Before versioning this was the single ``previous/`` baseline; it is now
+    the newest ``versions/<timestamp>/`` directory, so the next pull diffs
+    against it exactly as before.
+    """
+    dirs = version_dirs(path)
+    return dirs[-1] if dirs else row_dir(path) / "previous"
 
 
 def reset_current(path: str) -> Path:
@@ -135,21 +226,46 @@ def reset_current(path: str) -> Path:
 
 def has_baseline(path: str) -> bool:
     """True once a previous pull exists to diff the next one against."""
-    directory = previous_dir(path)
-    return directory.exists() and any(directory.iterdir())
+    return bool(version_dirs(path))
 
 
-def promote(path: str) -> None:
-    """Make the freshly-pulled ``current`` the new ``previous`` baseline.
+def promote(
+    path: str,
+    diff_text: str | None = None,
+    keep: int = DEFAULT_MAX_VERSIONS,
+) -> Path:
+    """Keep the freshly-pulled ``current`` as a new version of *path*.
 
-    Call after diffing (or after the very first pull, which has nothing to
-    diff against yet but still needs to seed a baseline for next time).
+    Every pull becomes ``versions/<timestamp>/`` (the file plus its SQLite
+    companions) with ``diff_text`` -- the diff against the version before
+    it -- stored next to it, so neither old content nor what changed is lost
+    on the next pull or a restart (M3). Only the newest ``keep`` versions
+    are kept. Returns the new version directory.
     """
     current = row_dir(path) / "current"
-    previous = previous_dir(path)
-    if previous.exists():
-        shutil.rmtree(previous)
-    shutil.copytree(current, previous)
+    root = _versions_root(path)
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now()
+    target = root / stamp.strftime(_STAMP_FORMAT)
+    while target.exists():  # two pulls within one microsecond
+        stamp = stamp.replace(microsecond=(stamp.microsecond + 1) % 1_000_000)
+        target = root / stamp.strftime(_STAMP_FORMAT)
+    staging = root / f".{target.name}.partial"
+    if staging.exists():
+        shutil.rmtree(staging)
+    shutil.copytree(current, staging)
+    if diff_text is not None:
+        (staging / _DIFF_FILE).write_text(diff_text, encoding="utf-8")
+    staging.replace(target)
+    prune(path, keep)
+    return target
+
+
+def prune(path: str, keep: int = DEFAULT_MAX_VERSIONS) -> None:
+    """Delete all but the newest ``keep`` (at least 2) versions of *path*."""
+    dirs = version_dirs(path)
+    for old in dirs[: max(0, len(dirs) - max(2, int(keep)))]:
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def _atomic_write_json(path: Path, data) -> None:
@@ -286,7 +402,10 @@ def load_auto_enabled() -> bool:
 
 
 __all__ = [
+    "DEFAULT_MAX_VERSIONS",
     "SCHEMA_VERSION",
+    "WATCHLIST_DIR_ENV",
+    "device_key",
     "has_baseline",
     "load_auto_enabled",
     "load_membership",
@@ -294,9 +413,13 @@ __all__ = [
     "load_row_states",
     "previous_dir",
     "promote",
+    "prune",
     "reset_current",
     "row_dir",
     "sanitize_path",
     "save_membership",
+    "version_diff",
+    "version_dirs",
+    "version_time",
     "watchlist_dir",
 ]

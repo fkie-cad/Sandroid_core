@@ -29,11 +29,21 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         Binding("enter", "start_or_toggle", "Start Monitoring", priority=False),
     ]
 
+    # Open on the mode choice (falls back to the path input when there is no
+    # PID to choose): Enter must not start a PID-mode monitor by accident.
+    AUTO_FOCUS = "#mode-select"
+
+    #: The mode picked last time ("pid"/"path"), for the next open.
+    _last_mode: str | None = None
+
     DEFAULT_CSS = """
     MonitorConfigModal .modal-container {
         width: 75;
         max-width: 90%;
-        max-height: 80%;
+        max-height: 95%;
+        /* scrolls instead of clipping the mode choice / hints on small
+           terminals (100x30, 80x24) */
+        overflow-y: auto;
     }
 
     MonitorConfigModal #monitor-description {
@@ -49,7 +59,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         color: $text-muted;
         background: $panel;
         border: solid $foreground-muted;
-        padding: 1;
+        padding: 0 1;
         margin-bottom: 1;
         height: auto;
     }
@@ -60,6 +70,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
     MonitorConfigModal #mode-section {
         margin-bottom: 1;
+        height: auto;  /* a Vertical is 1fr: squeezed to nothing on 100x30 */
     }
 
     MonitorConfigModal #mode-label {
@@ -101,6 +112,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
     MonitorConfigModal #path-section {
         margin-top: 1;
+        height: auto;
     }
 
     MonitorConfigModal #path-label {
@@ -166,7 +178,19 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
     MonitorConfigModal #path-hint {
         color: $text-muted;
         height: auto;
+        width: 100%;
         padding-top: 1;
+    }
+
+    MonitorConfigModal #pid-mode-hint {
+        height: auto;
+        width: 100%;
+    }
+
+    MonitorConfigModal #caveat-hint {
+        color: $text-muted;
+        height: auto;
+        width: 100%;
     }
 
     MonitorConfigModal #error-label {
@@ -304,6 +328,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             value=value,
             placeholder="/data/data/com.example.app or /sdcard/",
             classes="path-input no-compact",
+            select_on_focus=False,  # extend the prefill, don't replace it
         )
         remove_btn = Button("−", classes="path-remove")
         if not self._effective_kprobe:
@@ -341,15 +366,17 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 yield Label("Monitoring Mode:", id="mode-label")
                 # Only show RadioSet if we have both options available
                 if self._spotlight_pid:
+                    by_path = MonitorConfigModal._last_mode == "path"
                     with RadioSet(id="mode-select", classes="no-compact"):
                         yield RadioButton(
                             f"Monitor by PID ({self._spotlight_pid})",
                             id="mode-pid",
-                            value=True,
+                            value=not by_path,
                         )
                         yield RadioButton(
                             "Monitor by Path",
                             id="mode-path",
+                            value=by_path,
                         )
                     yield Label(
                         "[dim]PID mode falls back to path-mode on devices without fanotify support.[/dim]",
@@ -376,8 +403,18 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                         id="multipath-hint",
                     )
                 yield Label(
-                    "[dim]Path to monitor (directory on device). In PID mode, filters events to this path.[/dim]",
+                    "[dim]Directory on the device; events are matched by path "
+                    "prefix (in PID mode it narrows the app's events). "
+                    "/data/data/<pkg> also covers /data/user/0/<pkg> and "
+                    "/data/user_de/0/<pkg>.[/dim]",
                     id="path-hint",
+                )
+                yield Label(
+                    "[dim]Files the app opened before the start (its databases) "
+                    "are re-checked by stat every few seconds, and the targets "
+                    "are rescanned when you stop. Spawn the app after starting "
+                    "the monitor to see every write live.[/dim]",
+                    id="caveat-hint",
                 )
                 yield Label("", id="error-label", classes="hidden")
 
@@ -453,12 +490,20 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         # Update path hint based on mode
         try:
             path_hint = self.query_one("#path-hint", Label)
+            aliases = (
+                " /data/data/<pkg> also covers /data/user/0/<pkg> and "
+                "/data/user_de/0/<pkg>."
+            )
             if event.pressed.id == "mode-pid":
                 path_hint.update(
-                    "[dim]In PID mode, this path filters monitored events.[/dim]"
+                    "[dim]PID mode: the app's events, narrowed to paths under "
+                    f"this prefix.{aliases}[/dim]"
                 )
             else:
-                path_hint.update("[dim]Path to monitor (directory on device).[/dim]")
+                path_hint.update(
+                    "[dim]Path mode: every process's events under this "
+                    f"directory (path prefix).{aliases}[/dim]"
+                )
         except Exception:
             pass
 
@@ -477,9 +522,20 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         """Mount a new (empty) path-input row into the row list."""
         try:
             rows = self.query_one("#path-rows", Vertical)
-            rows.mount(self._make_path_row(""))
+            row = self._make_path_row("")
+            mounting = rows.mount(row)
         except Exception:
-            pass
+            return
+
+        async def _focus_new_input() -> None:
+            # Focus the new input so the first keys typed land in it.
+            await mounting
+            try:
+                row.query_one(Input).focus()
+            except Exception:
+                pass
+
+        self.call_later(_focus_new_input)
 
     def _remove_path_row(self, button: Button) -> None:
         """Remove the row owning ``button``, but never the last remaining row."""
@@ -616,6 +672,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             paths = self._collect_paths()
 
             mode = self._get_selected_mode()
+            if self._spotlight_pid:
+                MonitorConfigModal._last_mode = mode
 
             config = MonitorConfig(
                 cancelled=False,

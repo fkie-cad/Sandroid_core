@@ -513,6 +513,21 @@ class TUIConfig(BaseModel):
         "kprobes; prefer kprobe, auto-fall-back to fsmon when the kernel lacks "
         "support) or 'fsmon' (the fsmon binary).",
     )
+    monitor_stat_interval: float = Field(
+        default=10.0,
+        ge=0.0,
+        le=300.0,
+        description="kprobe monitor: seconds between re-stats of the app's "
+        "database files (writes through files opened before the monitor "
+        "started escape the probes). 0 = off; the stop-time rescan still runs.",
+    )
+    watchlist_max_versions: int = Field(
+        default=10,
+        ge=2,
+        le=500,
+        description="Files lens: pulled versions kept per watched file "
+        "(oldest are deleted first).",
+    )
     keybindings: dict[str, str] = Field(
         default_factory=dict,
         description=(

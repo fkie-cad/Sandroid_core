@@ -306,7 +306,11 @@ def test_get_file_diff_changed(monkeypatch, tmp_path):
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: True)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
     monkeypatch.setattr(watchlist_store, "previous_dir", lambda path: previous_dir)
-    monkeypatch.setattr(watchlist_store, "promote", promoted.append)
+    monkeypatch.setattr(
+        watchlist_store,
+        "promote",
+        lambda path, diff=None: promoted.append((path, diff)),
+    )
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
@@ -328,7 +332,8 @@ def test_get_file_diff_changed(monkeypatch, tmp_path):
     assert result["diff"] == "some diff text"
     assert captured_diff_args["previous_main"] == previous_dir / "prefs.xml"
     assert captured_diff_args["current_main"] == current_dir / "prefs.xml"
-    assert promoted == ["/data/data/com.example/prefs.xml"]
+    # The pull is kept as a version together with its diff.
+    assert promoted == [("/data/data/com.example/prefs.xml", "some diff text")]
 
 
 def test_get_file_diff_unchanged(monkeypatch, tmp_path):
@@ -342,7 +347,7 @@ def test_get_file_diff_unchanged(monkeypatch, tmp_path):
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: True)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
     monkeypatch.setattr(watchlist_store, "previous_dir", lambda path: previous_dir)
-    monkeypatch.setattr(watchlist_store, "promote", lambda path: None)
+    monkeypatch.setattr(watchlist_store, "promote", lambda path, *_diff: None)
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
@@ -365,7 +370,7 @@ def test_get_file_diff_pulls_sqlite_companions(monkeypatch, tmp_path):
 
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: False)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
-    monkeypatch.setattr(watchlist_store, "promote", lambda path: None)
+    monkeypatch.setattr(watchlist_store, "promote", lambda path, *_diff: None)
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: True)

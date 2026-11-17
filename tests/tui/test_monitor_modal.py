@@ -290,3 +290,53 @@ async def test_validate_rejects_relative_and_empty(monkeypatch) -> None:
         only_input.value = "/data/"
         valid, _ = modal._validate()
         assert valid is True
+
+
+# -- fix round 3: focus, mode memory, hints (L1, H1/H2 caveats) ---------------
+
+
+class _PidSpotlight(_StubSpotlight):
+    def get_app_tuple(self):
+        return ("org.wikipedia", "Wikipedia")
+
+    def get_pid(self):
+        return 3676
+
+
+@pytest.mark.asyncio
+async def test_opens_on_the_mode_choice_and_remembers_the_mode(monkeypatch) -> None:
+    """L1: focus starts on PID/Path (Enter must not start PID mode from the
+    path input by accident); the mode chosen last is preselected next time;
+    "+ Add path" focuses the new row; the hints name the aliases and the
+    files-opened-before-start caveat.
+    """
+    from textual.widgets import Label, RadioSet
+
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _PidSpotlight)
+    monkeypatch.setattr(MonitorConfigModal, "_last_mode", None)
+    _patch_backend(monkeypatch, "kprobe", availability=True)
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(app.focused, RadioSet)
+        assert modal._get_selected_mode() == "pid"
+        hints = str(modal.query_one("#path-hint", Label).render()) + str(
+            modal.query_one("#caveat-hint", Label).render()
+        )
+        assert "/data/user/0/<pkg>" in hints
+        assert "opened before the start" in hints
+        modal.query_one("#path-add", Button).press()
+        await pilot.pause()
+        await pilot.pause()
+        assert app.focused is list(modal.query(".path-input"))[1]
+        modal.query_one("#mode-path").value = True
+        await pilot.pause()
+        modal._dismiss_with_refresh = lambda result: None
+        modal._start()
+    assert MonitorConfigModal._last_mode == "path"
+
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.screen._get_selected_mode() == "path"

@@ -86,3 +86,23 @@ class TestTxtDiffPaths:
 
         assert "[LINE ADDED]" in diff
         assert "b" in diff
+
+
+def test_changed_lines_are_interleaved_per_hunk(tmp_path):
+    """L3: one changed word per line reads old/new pairwise, at its place,
+    instead of all deletions first and all additions after them.
+    """
+    old_path = tmp_path / "old.txt"
+    new_path = tmp_path / "new.txt"
+    _write(old_path, ["keep", "a1", "a2", "keep2", "b1"])
+    _write(new_path, ["keep", "A1", "A2", "keep2", "b1", "c"])
+    lines = file_diff.txt_diff_paths(str(old_path), str(new_path)).splitlines()
+    assert lines == [
+        "\t@@ line 2 @@",
+        "\t[LINE DELETED] a1",
+        "\t[LINE ADDED] A1",
+        "\t[LINE DELETED] a2",
+        "\t[LINE ADDED] A2",
+        "\t@@ line 6 @@",
+        "\t[LINE ADDED] c",
+    ]

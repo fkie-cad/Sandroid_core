@@ -407,7 +407,8 @@ def get_file_diff(path: str) -> dict[str, Any]:
     diff_text, changed = file_diff.diff_files(
         previous_main, current_main, is_sqlite_file
     )
-    watchlist_store.promote(path)
+    # Kept as a new version with its diff, like the Files lens's pulls.
+    watchlist_store.promote(path, diff_text if changed else "")
     return {
         "path": path,
         "baseline": False,

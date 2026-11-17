@@ -116,6 +116,104 @@ def device_shell_command(command: str) -> str:
     return "shell " + quote_host_arg(command)
 
 
+# ---------------------------------------------------------------------------
+# Device path aliases
+#
+# Android reaches the same app data through several path strings:
+# ``/data/user/0`` is a symlink to ``/data/data`` (``Context.getFilesDir()``
+# returns the ``/data/user/0/<pkg>`` form), and shared storage is
+# ``/sdcard`` = ``/storage/emulated/0`` = ``/storage/self/primary``. The
+# kprobe monitor matches the path string a process passes in, so it must
+# watch every alias; the Files lens and the watchlist key rows by ONE
+# canonical form so the aliases never show up as separate rows.
+# ---------------------------------------------------------------------------
+
+#: ``(canonical prefix, aliases)``; a path under an alias maps to the
+#: canonical prefix.
+_PATH_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("/data/data", ("/data/user/0",)),
+    ("/sdcard", ("/storage/emulated/0", "/storage/self/primary")),
+)
+
+#: App-private data root: ``/data/data/<pkg>`` (after canonicalisation).
+APP_ROOT_RE = re.compile(r"^/data/data/([^/]+)$")
+
+#: Characters a watched path may not contain. Paths are always quoted for
+#: both shells, but a path with these is almost certainly a typo or an
+#: attempt to smuggle a command, so it is rejected with a clear message.
+SHELL_METACHARACTERS = (";", "`", "$(", "${", "|", "&", "<", ">", "\n", "\r", "\\")
+
+
+def canonical_device_path(path: str) -> str:
+    """One display/key form for a device path.
+
+    Collapses repeated slashes, drops a trailing slash (``databases/`` ->
+    ``databases``) and maps alias prefixes to their canonical form
+    (``/data/user/0/<pkg>/x`` -> ``/data/data/<pkg>/x``,
+    ``/storage/emulated/0/x`` -> ``/sdcard/x``). Relative paths and
+    basenames pass through (minus the trailing slash).
+    """
+    if not path:
+        return path
+    p = re.sub(r"/{2,}", "/", path)
+    if len(p) > 1:
+        p = p.rstrip("/") or "/"
+    for canonical, aliases in _PATH_ALIASES:
+        for alias in aliases:
+            if p == alias or p.startswith(alias + "/"):
+                return canonical + p[len(alias) :]
+    return p
+
+
+def device_path_aliases(path: str) -> list[str]:
+    """Every path string that reaches ``path`` (canonical form first)."""
+    canonical = canonical_device_path(path)
+    out = [canonical]
+    for prefix, aliases in _PATH_ALIASES:
+        if canonical == prefix or canonical.startswith(prefix + "/"):
+            out.extend(alias + canonical[len(prefix) :] for alias in aliases)
+    return out
+
+
+def expand_monitor_paths(paths: list[str] | str) -> list[str]:
+    """Monitor targets with every alias added (order kept, no duplicates).
+
+    An app data root (``/data/data/<pkg>``, also given as
+    ``/data/user/0/<pkg>``) additionally brings in the app's
+    device-encrypted storage ``/data/user_de/0/<pkg>``.
+    """
+    items = [paths] if isinstance(paths, str) else list(paths or [])
+    out: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        expanded = device_path_aliases(item)
+        match = APP_ROOT_RE.match(expanded[0])
+        if match:
+            expanded.append(f"/data/user_de/0/{match.group(1)}")
+        for p in expanded:
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def watch_path_problem(path: str) -> str | None:
+    """Why ``path`` can't be watched (``None`` if it is fine).
+
+    Watched paths must be absolute device paths without shell
+    metacharacters (``;`` `` ` `` ``$(`` ``|`` ``&`` ``<`` ``>`` ...).
+    """
+    if not path or not path.strip():
+        return "Type a device path."
+    if not path.startswith("/"):
+        return f"Use an absolute device path (starting with /), not '{path}'."
+    bad = [c for c in SHELL_METACHARACTERS if c in path]
+    if bad:
+        shown = " ".join(repr(c)[1:-1] for c in bad)
+        return f"Paths can't contain shell metacharacters ({shown})."
+    return None
+
+
 def is_valid_package_name(name: object) -> bool:
     """True if *name* is a string in Android's package-identifier format."""
     return isinstance(name, str) and bool(PACKAGE_NAME_RE.match(name))

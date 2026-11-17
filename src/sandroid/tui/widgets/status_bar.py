@@ -405,10 +405,14 @@ class StatusBar(Static):
                 package = None
             try:
                 tasks = get_task_service().get_running_tasks()
+                # The file monitor registers with the app's name too, but it
+                # is not a Frida hook.
                 self.hook_count = sum(
                     1
                     for t in tasks
-                    if package and getattr(t, "app_name", None) == package
+                    if package
+                    and getattr(t, "app_name", None) == package
+                    and getattr(t, "name", None) != "monitor"
                 )
             except Exception:
                 self.hook_count = 0

@@ -63,7 +63,11 @@ from textual.message import Message
 from textual.widget import Widget
 
 from sandroid.core import file_diff, watchlist_store
-from sandroid.core.adb_utils import device_shell_arg
+from sandroid.core.adb_utils import (
+    canonical_device_path,
+    device_shell_arg,
+    watch_path_problem,
+)
 from sandroid.services import get_file_extraction_service, get_forensic_service
 from sandroid.services.file_extraction_service import is_sqlite_file
 
@@ -160,12 +164,40 @@ class _RowInfo:
     # mode section). watchlist_store's on-disk previous/current cache is
     # already the durable record of pulled *content* -- these tuples are
     # just the cheap (mtime, size) metadata signal driving *when* to pull.
-    last_seen: tuple[int, int] | None = None  #: updated on every auto-tick
-    last_pulled: tuple[int, int] | None = None  #: updated only after a real pull
+    last_seen: tuple[int, ...] | None = None  #: updated on every auto-tick
+    last_pulled: tuple[int, ...] | None = None  #: updated only after a real pull
     # -- last successful pull (shown in the Inspector; persisted) ---------
     pulled_at: str | None = None  #: ISO timestamp
     size: int | None = None  #: bytes of the main file
     sha256: str | None = None  #: of the main file
+
+
+#: SQLite files that belong to a database: pulled with it, and stat-ed with it
+#: by auto mode (a WAL-mode write only touches ``-wal`` until a checkpoint).
+#: ``-shm`` is left out on purpose: it changes on every read.
+SQLITE_COMPANIONS = ("-wal", "-journal")
+
+_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3")
+
+
+def is_database_path(path: str) -> bool:
+    """A path that is (by name) an SQLite database -- auto mode then stats its
+    ``-wal``/``-journal`` too.
+    """
+    name = path.rsplit("/", 1)[-1].lower()
+    if name.endswith(_DB_SUFFIXES):
+        return True
+    return "/databases/" in path and "." not in name
+
+
+def _max_versions() -> int:
+    """``tui.watchlist_max_versions`` (pulled versions kept per file)."""
+    try:
+        from sandroid.config.loader import ConfigLoader
+
+        return int(ConfigLoader().load().tui.watchlist_max_versions)
+    except Exception:
+        return watchlist_store.DEFAULT_MAX_VERSIONS
 
 
 def _file_facts(path: Path) -> tuple[int | None, str | None]:
@@ -310,6 +342,9 @@ class WatchlistView(Widget):
         """The literal path or pattern that watches ``path``, else None."""
         if path in self._rows:
             return path
+        path = canonical_device_path(path)
+        if path in self._rows:
+            return path
         for pattern in sorted(self._watched_patterns):
             if self._pattern_matches(pattern, path):
                 return pattern
@@ -391,10 +426,21 @@ class WatchlistView(Widget):
             last_seen = payload.get("last_seen")
             last_pulled = payload.get("last_pulled")
             pull = payload.get("pull") or {}
+            diff_text = None
+            if state is RowState.CHANGED:
+                # The diff is stored with the newest version (M3).
+                try:
+                    diff_text = (
+                        watchlist_store.version_diff(watchlist_store.previous_dir(path))
+                        or None
+                    )
+                except Exception:
+                    diff_text = None
             self._rows[path] = _RowInfo(
                 path=path,
                 state=state,
                 detail=payload.get("detail") or "",
+                diff_text=diff_text,
                 last_seen=tuple(last_seen) if last_seen else None,
                 last_pulled=tuple(last_pulled) if last_pulled else None,
                 pulled_at=pull.get("at"),
@@ -501,6 +547,12 @@ class WatchlistView(Widget):
 
     def _add_path(self, path: str) -> bool:
         forensic = get_forensic_service()
+        problem = watch_path_problem(path)
+        if problem is not None:
+            self._notify(problem, "warning")
+            return False
+        # One key per file: /data/user/0/<pkg>/x is /data/data/<pkg>/x.
+        path = canonical_device_path(path)
         if "*" in path and path in self._watched_patterns:
             self._notify(f"Already watching: {path}", "warning")
             return False
@@ -609,15 +661,17 @@ class WatchlistView(Widget):
         # SQLite companions (-wal/-journal), best-effort -- mirrors
         # FileExtractionService._pull_sqlite_companions, but pulled directly
         # here (rather than reaching into that private method) so the
-        # destination stays inside our own current/ cache directory.
+        # destination stays inside our own current/ cache directory. A
+        # missing companion is normal (WAL mode has no -journal).
         if is_sqlite_file(str(current_main)):
-            for suffix in ("-wal", "-journal"):
+            for suffix in SQLITE_COMPANIONS:
                 fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
 
         facts = _file_facts(current_main)
+        keep = _max_versions()
         if not had_previous:
             detail = self._baseline_message(current)
-            watchlist_store.promote(path)
+            watchlist_store.promote(path, keep=keep)
             self._post(
                 self._apply_pull_result,
                 path,
@@ -630,7 +684,9 @@ class WatchlistView(Widget):
 
         previous_main = watchlist_store.previous_dir(path) / basename
         diff_text, changed = _compute_diff(previous_main, current_main)
-        watchlist_store.promote(path)
+        # Every pull is kept as a version with its diff (M3): the evidence of
+        # what changed survives the next pull and a restart.
+        watchlist_store.promote(path, diff_text if changed else "", keep=keep)
         if changed:
             self._post(
                 self._apply_pull_result,
@@ -795,8 +851,14 @@ class WatchlistView(Widget):
 
     def _auto_tick_worker(self, paths: list[str]) -> None:
         """Runs on a worker thread (see ``_run_bg``): the blocking adb call."""
+        # A database and its -wal/-journal are one unit (M2): a WAL-mode write
+        # changes only -wal until the next checkpoint.
+        targets = list(paths)
+        for path in paths:
+            if is_database_path(path):
+                targets.extend(f"{path}{s}" for s in SQLITE_COMPANIONS)
         try:
-            stdout, stderr = self._stat_command(paths)
+            stdout, stderr = self._stat_command(targets)
         except Exception as exc:
             stdout, stderr = "", str(exc)
         self._post(self._apply_auto_tick_result, paths, stdout, stderr)
@@ -904,6 +966,10 @@ class WatchlistView(Widget):
                 row.detail = self._stat_error_detail(path, stderr)
                 continue
             new_sig = parsed[path]
+            if is_database_path(path):
+                # (mtime, size) of the db, then of each companion present.
+                for suffix in SQLITE_COMPANIONS:
+                    new_sig = new_sig + parsed.get(f"{path}{suffix}", ())
             previously_seen = row.last_seen
             row.last_seen = new_sig
             if previously_seen != new_sig:
@@ -944,8 +1010,8 @@ class WatchlistView(Widget):
     def _evaluate_auto_pull(
         self,
         row: _RowInfo,
-        previously_seen: tuple[int, int] | None,
-        new_sig: tuple[int, int],
+        previously_seen: tuple[int, ...] | None,
+        new_sig: tuple[int, ...],
     ) -> None:
         """Debounce + rate-limit gate deciding whether *row* gets auto-pulled.
 

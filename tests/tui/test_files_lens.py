@@ -545,7 +545,12 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
         assert inspected.key == ("files", "live", PREFS)
         assert inspected.title == "consent.xml"
         assert inspected.subtitle == PREFS
-        assert [name for name, _s in inspected.tabs] == ["Summary", "Diff", "Events"]
+        assert [name for name, _s in inspected.tabs] == [
+            "Summary",
+            "Diff",
+            "History",
+            "Events",
+        ]
         summary = _plain(_tab(inspected, "Summary"))
         assert "★ watched" in summary
         assert "M 1×" in summary
@@ -765,3 +770,366 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         await pilot.pause(0.1)
         assert not ms.inspector_is_open
         assert "paths" in ms.query_one("#lens-host").border_subtitle
+
+
+# --------------------------------------------------------------------------
+# fix round 3 (live test of the Files lens)
+# --------------------------------------------------------------------------
+
+USER0 = f"/data/user/0/{PKG}"
+
+
+def test_user0_and_data_data_events_are_one_row() -> None:
+    """H3: /data/user/0/<pkg> is /data/data/<pkg>; trailing slashes too."""
+    model = FileActivity()
+    model.ingest(
+        _items(
+            _fse("FSE_CONTENT_MODIFIED", f"{USER0}/shared_prefs/consent.xml"),
+            _fse("FSE_CONTENT_MODIFIED", PREFS),
+            _fse("FSE_CREATE_DIR", f"{ROOT}/databases/"),
+            _fse("FSE_CREATE_DIR", f"{USER0}/databases"),
+        ),
+        now=T0,
+    )
+    assert set(model.paths) == {PREFS, f"{ROOT}/databases"}
+    assert model.paths[PREFS].count == 2
+
+
+def test_deleting_a_directory_marks_its_known_files_deleted() -> None:
+    """H2b: ``rm -r`` unlinks children by relative name (not matched by the
+    path filter); the directory's D takes its known files with it.
+    """
+    model = FileActivity()
+    bulk = f"{ROOT}/files/bulk"
+    model.ingest(
+        _items(*[_fse("FSE_CREATE_FILE", f"{bulk}/f_{i}") for i in range(3)]),
+        now=T0,
+    )
+    touched = model.ingest(_items(_fse("FSE_DELETE", bulk)), now=T0)
+    assert {f"{bulk}/f_{i}" for i in range(3)} <= touched
+    for i in range(3):
+        row = model.paths[f"{bulk}/f_{i}"]
+        assert row.deleted
+        assert [letter for letter, _c in row.op_letters()] == ["C", "D"]
+        assert row.events[-1].source == "parent"
+    assert model.paths[bulk].is_dir
+
+
+def test_rename_marks_the_source_row_and_attr_basenames_are_dropped() -> None:
+    """M8: the old name says where the file went; basename-only attrs rows
+    (unresolved dentry names) never become orphan rows.
+    """
+    model = FileActivity()
+    old, new = f"{ROOT}/files/b.txt", f"{ROOT}/files/b_renamed.txt"
+    model.ingest(_items(_fse("FSE_CREATE_FILE", old)), now=T0)
+    model.ingest(_items(_fse("FSE_RENAME", old, new)), now=T0)
+    item = build_monitor_item(_fse("FSE_STAT_CHANGED", "wikipedia.db"))
+    model.ingest([item], now=T0)
+    assert model.paths[old].moved_to == new
+    assert model.paths[old].events[-1].label == "RENAMED"
+    assert "wikipedia.db" not in model.paths
+    # Re-creating the old name clears the marker.
+    model.ingest(_items(_fse("FSE_CREATE_FILE", old)), now=T0)
+    assert model.paths[old].moved_to is None
+
+
+def test_open_noise_does_not_redate_a_row() -> None:
+    """M1: an OPEN (e.g. Sandroid's own pull) on a file with real activity
+    keeps its last-change time (U used to re-sort 100+ rows to the top).
+    """
+    model = FileActivity()
+    model.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+    model.ingest(_items(_fse("FSE_OPEN", PREFS)), now=T0 + timedelta(minutes=5))
+    assert model.paths[PREFS].last == T0
+
+
+def test_scan_and_stat_findings_are_marked() -> None:
+    from sandroid.tui.controllers.monitor_controller import scan_item
+
+    model = FileActivity()
+    model.ingest([scan_item("FSE_CONTENT_MODIFIED", DB + "-wal", "stat")], now=T0)
+    event = model.paths[DB].events[-1]
+    assert (event.via, event.source) == ("-wal", "stat")
+    # A stop-rescan D for a file already known deleted is not repeated.
+    model.ingest(_items(_fse("FSE_DELETE", AAID)), now=T0)
+    model.ingest([scan_item("FSE_DELETE", AAID, "scan")], now=T0)
+    assert model.paths[AAID].count == 1
+
+
+@pytest.mark.asyncio
+async def test_short_paths_name_the_package_in_review_and_for_other_apps(
+    tmp_path,
+) -> None:
+    """Tester 4 M9: a run lists files of several apps; ``databases/bugle_db``
+    must not read as the reviewed app's. REVIEW rows always name their
+    package; live rows only when it is not the monitored app.
+    """
+    import json as _json
+
+    bugle = "/data/data/com.google.android.apps.messaging/databases/bugle_db"
+    run_dir = tmp_path / "runs" / "20261117_190000_aa11bb"
+    run_dir.mkdir(parents=True)
+    record = {
+        "schema_version": 2,
+        "run_id": run_dir.name,
+        "label": "msg",
+        "recorded_at": "2026-11-17T19:00:00",
+        "completed_at": "2026-11-17T19:01:00",
+        "device_name": "emu",
+        "recording_path": "",
+        "duration": 5,
+        "changed_files": [{bugle: ["x"]}, {DB: ["y"]}],
+        "new_files": ["/data/system/job/jobs_1000.xml"],
+        "deleted_files": [],
+    }
+    (run_dir / "run.json").write_text(_json.dumps(record), encoding="utf-8")
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_monitor()
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", bugle), _fse("FSE_CREATE_FILE", AAID)),
+            now=T0,
+        )
+        _keys(panel)
+        live = {r.key: panel._path_cell(r).plain for r in panel._rows}
+        assert live[bugle] == "com.google.android.apps.messaging: databases/bugle_db"
+        assert live[AAID] == "files/aaid.txt"  # the monitored app's own
+        panel.post_message(ScopeChanged(str(run_dir), "Run #4"))
+        await _wait_for(pilot, lambda: panel._review_record is not None)
+        cells = {r.key: panel._path_cell(r).plain for r in panel._rows}
+        assert cells[bugle] == "com.google.android.apps.messaging: databases/bugle_db"
+        assert cells[DB] == f"{PKG}: databases/app.db"
+        assert (
+            cells["/data/system/job/jobs_1000.xml"] == "/data/system/job/jobs_1000.xml"
+        )
+
+
+def test_a_running_monitor_is_not_counted_as_a_hook() -> None:
+    """L7: the monitor task carries the app's name but is not a Frida hook."""
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    _register_monitor()
+    assert SpotlightPanel()._hooks_for_app(PKG) == []
+
+
+def test_device_encrypted_and_external_app_paths_stay_distinguishable() -> None:
+    assert app_relative(f"/data/user_de/0/{PKG}/files/x") == "@de/files/x"
+    assert app_relative(f"/sdcard/Android/data/{PKG}/files/x") == "@ext/files/x"
+    assert app_relative(f"{ROOT}/files/x") == "files/x"
+
+
+def test_render_diff_keeps_xml_key_names_and_markup_lines() -> None:
+    """L2: ``string[@name="k"]`` was parsed as a Rich tag and vanished."""
+    xml = '\t[UPDATED] /map/string[@name="cookie"] text: "a" → "b"'
+    assert '[@name="cookie"]' in render_diff(xml).plain
+    db = "\t\\[[success]INSERT[/success]] Table \\[t] row \\[[success]1[/success]]"
+    assert render_diff(db).plain.strip() == "[INSERT] Table [t] row [1]"
+
+
+@pytest.mark.asyncio
+async def test_pattern_does_not_star_deleted_paths_or_directories() -> None:
+    """L6 (and L8: the caption counts files and patterns apart)."""
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.watchlist._watched_patterns.add(f"{ROOT}/files/*")
+        panel.ingest(
+            _items(
+                _fse("FSE_CREATE_FILE", f"{ROOT}/files/live.txt"),
+                _fse("FSE_CREATE_FILE", f"{ROOT}/files/gone.txt"),
+                _fse("FSE_DELETE", f"{ROOT}/files/gone.txt"),
+                _fse("FSE_CREATE_DIR", f"{ROOT}/files/sub"),
+            ),
+            now=T0,
+        )
+        _keys(panel)
+        by_key = {row.key: row for row in panel._rows}
+        assert by_key[f"{ROOT}/files/live.txt"].watched == f"{ROOT}/files/*"
+        assert by_key[f"{ROOT}/files/gone.txt"].watched is None
+        assert by_key[f"{ROOT}/files/sub"].watched is None
+        assert panel.caption()[1].startswith("3 paths + 1 pattern")
+
+
+@pytest.mark.asyncio
+async def test_watch_applies_to_writes_through_the_user0_alias() -> None:
+    """H3: a ★ on /data/data/<pkg>/x also gets the app's /data/user/0 writes."""
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", f"{USER0}/shared_prefs/consent.xml")),
+            now=T0,
+        )
+        assert _keys(panel) == [PREFS]
+        assert panel._rows[0].watched == PREFS
+        assert panel._rows[0].activity.count == 1
+        # Watching via the alias is the same (canonical) watch.
+        assert not panel.watchlist.add_path(f"{USER0}/shared_prefs/consent.xml")
+
+
+@pytest.mark.asyncio
+async def test_renamed_and_deleted_rows_say_so(monkeypatch) -> None:
+    app = _Harness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        old, new = f"{ROOT}/files/b.txt", f"{ROOT}/files/c.txt"
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", old)), now=T0)
+        panel.ingest(_items(_fse("FSE_RENAME", old, new)), now=T0)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.ingest(_items(_fse("FSE_DELETE", AAID)), now=T0)
+        await pilot.pause()
+        _keys(panel)
+        rows = {row.key: row for row in panel._rows}
+        assert panel._path_cell(rows[old]).plain.endswith("b.txt → c.txt")
+        panel._path_width = 10  # narrow (beside the Inspector at 80 columns)
+        assert panel._path_cell(rows[old]).plain.endswith(" →")
+        assert "→" not in panel._path_cell(rows[AAID]).plain
+        panel._path_width = 60
+        summary = _plain(_tab(panel._inspector_for(rows[old]), "Summary"))
+        assert "renamed → files/c.txt" in summary
+        events = _plain(_tab(panel._inspector_for(rows[old]), "Events"))
+        assert "RENAMED" in events
+        assert "to files/c.txt" in events
+        assert "deleted" in _plain(_tab(panel._inspector_for(rows[AAID]), "Summary"))
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
+        panel.table.focus()
+        panel.table.move_cursor(row=_keys(panel).index(AAID))
+        await pilot.press("u")
+        assert notes == ["Nothing to pull: deleted on the device."]
+
+
+@pytest.mark.asyncio
+async def test_n_prefill_is_extended_not_replaced_and_bad_paths_are_rejected(
+    monkeypatch,
+) -> None:
+    """M5: the prefill isn't selected (typing appends); relative paths and
+    shell metacharacters are refused with a message, the input stays open.
+    """
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_monitor()
+        await pilot.pause()
+        panel.focus()
+        await pilot.press("n")
+        await pilot.pause()
+        field = panel.query_one("#files-input", Input)
+        assert field.value == f"{ROOT}/"
+        await pilot.press(*"files")
+        assert field.value == f"{ROOT}/files"
+        notes: list[str] = []
+        monkeypatch.setattr(app, "notify", lambda msg, **kw: notes.append(msg))
+        for bad in ("shared_prefs/x.xml", f"{ROOT}/x;touch y", ROOT + "/$" + "(id)"):
+            field.value = bad
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.focused is field
+        assert "absolute" in notes[0]
+        assert all("metacharacters" in n for n in notes[1:])
+        assert get_forensic_service().get_spotlight_files() == []
+
+
+@pytest.mark.asyncio
+async def test_home_end_move_the_cursor_and_O_sorts_by_name() -> None:
+    """L5: Home/End jump rows; ``O`` cycles recent / name (natural) / count."""
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        for i, n in enumerate((10, 2, 1)):
+            panel.ingest(
+                _items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/f_{n}")),
+                now=T0 + timedelta(seconds=i),
+            )
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.pause()
+        await pilot.press("end")
+        assert panel.table.cursor_row == 2
+        await pilot.press("home")
+        assert panel.table.cursor_row == 0
+        await pilot.press("O")
+        await pilot.pause()
+        assert [k.rsplit("/", 1)[1] for k in _keys(panel)] == ["f_1", "f_2", "f_10"]
+        assert "by name" in panel.caption()[1]
+
+
+@pytest.mark.asyncio
+async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
+    monkeypatch,
+) -> None:
+    """M3/M4: pulls are versions with their diffs on disk; a new app (a
+    restart) loads the watchlist and the last diff again.
+    """
+    content = {PREFS: '<map><string name="k">one</string></map>'}
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull(content))
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        rows = panel.watchlist.rows
+        panel.watchlist.pull([PREFS])
+        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
+        content[PREFS] = '<map><string name="k">two</string></map>'
+        panel.watchlist.pull([PREFS])
+        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
+        panel.refresh_rows()
+        history = _plain(_tab(panel.inspect_selected(), "History"))
+        assert "#2" in history
+        assert "#1" in history
+        assert '[@name="k"]' in history
+        assert "first pull" in history
+
+    get_forensic_service()._spotlight_files.clear()  # a new process
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        assert PREFS in panel.watchlist.rows
+        info = panel.watchlist.rows[PREFS]
+        assert info.state is RowState.CHANGED
+        assert info.diff_text
+        assert "two" in info.diff_text
+        panel.refresh_rows()
+        assert "two" in _plain(_tab(panel.inspect_selected(), "Diff"))
+
+
+async def test_inspector_keys_work_while_the_inspector_has_focus() -> None:
+    """M6: with focus in the Inspector (needed to scroll it), the lens keys it
+    advertises -- w watch, u pull, z zoom -- still act on the lens's row.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        for _ in range(8):
+            await pilot.pause(0.05)
+        if type(app.screen).__name__ != "MainScreen":
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+        ms = app.screen
+        await pilot.press("3")
+        await pilot.pause(0.1)
+        panel = ms.lens_widget("files")
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert ms.inspector_is_open
+        ms.query_one("#inspector-scroll").focus()
+        await pilot.pause()
+        assert panel.table is not app.focused
+        await pilot.press("w")
+        await pilot.pause(0.1)
+        assert AAID in get_forensic_service().get_spotlight_files()
+        # The Inspector's own keys stay its own: ] still switches tabs.
+        await pilot.press("right_square_bracket")
+        await pilot.pause()
+        assert ms.query_one("#inspector").tab_index == 1

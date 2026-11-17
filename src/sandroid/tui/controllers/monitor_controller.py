@@ -37,6 +37,8 @@ from typing import Any
 
 from rich.markup import escape
 
+from sandroid.core.adb_utils import canonical_device_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +120,9 @@ MONITOR_EVENT_INFO: dict[str, MonitorEventMeta] = {
     "FSE_XATTR_MODIFIED": MonitorEventMeta("XATTR", "#7dd3fc", "attrs"),
     "FSE_OPEN": MonitorEventMeta("OPEN", "#5b6479", "noise"),
     "FSE_CLOSE": MonitorEventMeta("CLOSE", "#5b6479", "noise"),
+    # kprobe: an O_CREAT open of a file that already existed (SQLite reopening
+    # its db, a ">>" append) -- not a creation; its writes show as MODIFY.
+    "FSE_OPEN_WRITE": MonitorEventMeta("OPEN W", "#5b6479", "noise"),
 }
 
 
@@ -432,6 +437,8 @@ def build_monitor_item(
             _strip_prefix(event.new_path, prefix_candidates)
         )
 
+    # Rows/watches are keyed by ONE form of each path (/data/user/0/<pkg>
+    # is /data/data/<pkg>; no trailing slash).
     return FileSystemMonitorItem(
         label=label,
         color=color,
@@ -441,8 +448,12 @@ def build_monitor_item(
         new_directory=new_directory,
         new_filename=new_filename,
         process=event.process,
-        path=event.path,
-        new_path=event.new_path,
+        path=canonical_device_path(event.path),
+        new_path=(
+            canonical_device_path(event.new_path)
+            if event.new_path is not None
+            else None
+        ),
     )
 
 
@@ -478,8 +489,43 @@ _KPROBE_HEADER_RE = re.compile(
 # leading ``(symbol+0x../0x..)`` has no ``=`` and is skipped.
 _KPROBE_FIELD_RE = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
 
-# O_CREAT bit in openat2 flags (create vs plain open).
+# O_CREAT bit in openat2 flags (create vs plain open); O_TRUNC truncates an
+# existing file (a content change).
 _O_CREAT = 0x40
+_O_TRUNC = 0x200
+
+#: comm prefixes of Sandroid's own device-side helpers: adbd names its
+#: file-sync threads "sync svc <n>" (every ``adb pull`` of a watched file).
+_SELF_COMMS = ("sync svc",)
+
+#: Files the periodic re-stat watches: SQLite databases and their companions
+#: (opened once at app start, so their writes escape the file* map).
+_DB_LIKE_SUFFIXES = (".db", ".sqlite", ".sqlite3", "-wal", "-journal")
+_STAT_MAX_FILES = 300
+
+
+def _is_db_like(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1].lower()
+    return name.endswith(_DB_LIKE_SUFFIXES) or "/databases/" in path
+
+
+def scan_item(fse_token: str, path: str, source: str) -> FileSystemMonitorItem:
+    """A change found by the re-stat (``source="stat"``) or the stop rescan
+    (``"scan"``) rather than by a probe.
+    """
+    meta = MONITOR_EVENT_INFO[fse_token]
+    directory, filename = _split_dir_filename(path)
+    return FileSystemMonitorItem(
+        label=meta.label,
+        color=meta.color,
+        category=meta.category,
+        source=source,
+        directory=directory,
+        filename=filename,
+        process="",
+        path=path,
+    )
+
 
 # Kernel ERR_PTR range: the top 4 KiB (MAX_ERRNO) of the 64-bit address space.
 # do_filp_open returns an ERR_PTR (e.g. -ENOENT) on a FAILED open, and its
@@ -556,11 +602,86 @@ class KprobeStreamTranslator:
         self._filemap: dict[str, tuple[str, int]] = {}
         self._prefix = _resolve_prefix_candidates(config) if config is not None else ()
         self._comm = ""  # comm of the trace line being translated (see _feed)
+        #: Paths known to exist (baseline scan + creates seen this session):
+        #: an O_CREAT open / mkdir of one of them is NOT a creation.
+        self._existing: set[str] = set()
+        #: basename -> the full path last seen with it (attr probes only
+        #: report a dentry basename; see _resolve_basename).
+        self._by_name: dict[str, str] = {}
+        #: tid -> comm seen on an earlier line (ftrace prints "<...>" once a
+        #: tid falls out of its comm cache).
+        self._tid_comm: dict[int, str] = {}
+        #: In PID scoping every event comes from the app's process tree, so
+        #: an unresolvable comm is attributed to the app.
+        pid_scoped = config is not None and bool(getattr(config, "target_pid", None))
+        self._scoped_app = (getattr(config, "app_name", "") or "") if pid_scoped else ""
+        #: path -> monotonic time of the last C/M/R/D the probes reported
+        #: (read by the stat/scan fallback so it never double-reports).
+        self.last_change: dict[str, float] = {}
+        #: Baseline scan of the targets (set by ``_kprobe_setup``) and the
+        #: roots it covered; the scan watcher compares against them.
+        self.baseline: dict[str, tuple[int, int]] = {}
+        self.scan_paths: list[str] = []
+
+    # -- known-existing bookkeeping (C only for real creations) ---------------
+
+    def seed_existing(self, paths) -> None:
+        """Mark ``paths`` (a baseline scan) as already existing."""
+        for p in paths:
+            c = canonical_device_path(p)
+            self._existing.add(c)
+            self._by_name.setdefault(c.rsplit("/", 1)[-1], c)
+
+    def _note(self, path: str) -> None:
+        if path.startswith("/"):
+            self._by_name[path.rsplit("/", 1)[-1]] = path
+
+    def _forget(self, path: str) -> None:
+        """``path`` (and, for a directory, everything below it) is gone."""
+        self._existing.discard(path)
+        prefix = path.rstrip("/") + "/"
+        stale = [p for p in self._existing if p.startswith(prefix)]
+        for p in stale:
+            self._existing.discard(p)
+
+    def _resolve_basename(self, name: str) -> str | None:
+        """Full path for a dentry basename (attr probes), or None.
+
+        notify_change/vfs_setxattr only expose the dentry name. It is mapped
+        to the most recent full path seen with that basename this session
+        (or in the baseline scan); an unknown basename is dropped rather
+        than shown as an orphan row.
+        """
+        if name.startswith("/"):
+            return name
+        return self._by_name.get(name.rsplit("/", 1)[-1])
+
+    def _process(self, tid: int, comm: str) -> str:
+        if comm and comm != "<...>":
+            self._tid_comm[tid] = comm
+            return comm
+        known = self._tid_comm.get(tid)
+        if known:
+            return known
+        return self._scoped_app or f"tid {tid}"
 
     def _item(
         self, fse_token: str, path: str, new_path: str | None = None
     ) -> FileSystemMonitorItem:
+        path = canonical_device_path(path)
+        if new_path is not None:
+            new_path = canonical_device_path(new_path)
         meta = MONITOR_EVENT_INFO.get(fse_token)
+        if meta is not None and meta.category in (
+            "create",
+            "modify",
+            "delete",
+            "rename",
+        ):
+            now = time.monotonic()
+            self.last_change[path] = now
+            if new_path is not None:
+                self.last_change[new_path] = now
         label = meta.label if meta is not None else fse_token
         color = meta.color if meta is not None else None
         category = meta.category if meta is not None else None
@@ -602,9 +723,16 @@ class KprobeStreamTranslator:
         if m is None:
             return []
         tid = int(m.group("tid"))
-        self._comm = m.group("comm").strip()
+        self._comm = self._process(tid, m.group("comm").strip())
         event = m.group("event")
         fields = _parse_kprobe_fields(m.group("rest"))
+        if self._comm.startswith(_SELF_COMMS) and event not in ("dfor", "fput"):
+            # adbd's file-sync service: Sandroid's own pulls (and stat polls
+            # via adb). Never app activity. dfor/fput still run so the file*
+            # map stays consistent.
+            if event == "dfo":
+                self._pending.pop(tid, None)
+            return []
 
         # --- correlation-only events (never emit a row directly) ---
         if event == "dfo":
@@ -635,10 +763,14 @@ class KprobeStreamTranslator:
                 # Pre-existing fd (opened before the monitor started) or a
                 # dropped control line -> unattributed; skip rather than emit a
                 # pathless row (path mode covers only files we saw opened).
+                # The monitor's periodic re-stat reports such writes.
                 return []
-            return [self._item("FSE_CONTENT_MODIFIED", entry[0])]
+            path = canonical_device_path(entry[0])
+            self._existing.add(path)
+            self._note(path)
+            return [self._item("FSE_CONTENT_MODIFIED", path)]
 
-        # --- openat2: CREATE (O_CREAT) vs plain OPEN (noise) ---
+        # --- openat2: CREATE (O_CREAT on a new file) vs OPEN (noise) ---
         if event == "openat2":
             fname = fields.get("fname")
             if not fname:
@@ -650,15 +782,32 @@ class KprobeStreamTranslator:
                 )
             except ValueError:
                 flags = 0
-            token = "FSE_CREATE_FILE" if flags & _O_CREAT else "FSE_OPEN"
-            return [self._item(token, fname)]
+            path = canonical_device_path(fname)
+            self._note(path)
+            if not flags & _O_CREAT:
+                return [self._item("FSE_OPEN", path)]
+            # O_CREAT means "create if missing": SQLite reopening its db and
+            # every ">>" append pass it too. Only a path not known to exist
+            # (baseline scan, or seen this session) is a creation.
+            if path in self._existing:
+                token = "FSE_CONTENT_MODIFIED" if flags & _O_TRUNC else "FSE_OPEN_WRITE"
+                return [self._item(token, path)]
+            self._existing.add(path)
+            return [self._item("FSE_CREATE_FILE", path)]
 
         # --- rename: old + new path ---
         if event == "rename":
             frm = fields.get("from")
             if not frm:
                 return []
-            return [self._item("FSE_RENAME", frm, new_path=fields.get("to"))]
+            frm = canonical_device_path(frm)
+            to = fields.get("to")
+            self._forget(frm)
+            if to:
+                to = canonical_device_path(to)
+                self._existing.add(to)
+                self._note(to)
+            return [self._item("FSE_RENAME", frm, new_path=to)]
 
         # --- direct metadata / attrs events ---
         token = _KPROBE_EVENT_TO_FSE.get(event)
@@ -667,7 +816,21 @@ class KprobeStreamTranslator:
         value = fields.get("name") or fields.get("dentry")
         if not value:
             return []
-        return [self._item(token, value)]
+        if event in ("nc", "sx"):
+            # Basename only: resolve it to a known full path, else drop it.
+            resolved = self._resolve_basename(value)
+            return [self._item(token, resolved)] if resolved else []
+        path = canonical_device_path(value)
+        if event == "mkdir":
+            # do_mkdirat fires before the outcome: "mkdir -p" on an existing
+            # directory is EEXIST, not a creation.
+            if path in self._existing:
+                return []
+            self._existing.add(path)
+            self._note(path)
+        elif event in ("unlink", "rmdir"):
+            self._forget(path)
+        return [self._item(token, path)]
 
 
 def _publish_monitor_batch(items: list[FileSystemMonitorItem]) -> None:
@@ -760,11 +923,14 @@ def _recent_event_from_item(item: FileSystemMonitorItem) -> dict[str, Any]:
             if item.new_directory
             else item.new_filename
         )
+    # The translator now carries the full canonical path; prefer it.
+    path = item.path or path
+    new_path = item.new_path or new_path
     return {
         "timestamp": time.time(),
         "event_type": item.label,
         "pid": None,
-        "process": None,
+        "process": item.process or None,
         "path": path,
         "new_path": new_path,
         "source": item.source,
@@ -1453,6 +1619,17 @@ class MonitorController:
         # single-path (``_launch_fsmon`` consumes only ``target_path``).
         paths = config.target_paths or config.target_path
 
+        # Baseline scan BEFORE tracing starts (find opens directories, which
+        # path-mode probes would report): it tells real creations from
+        # reopens, and is what the periodic re-stat / stop rescan compare
+        # against for writes the probes can't attribute.
+        baseline: dict[str, tuple[int, int]] = {}
+        if paths:
+            try:
+                baseline = self._baseline_scan(paths)
+            except Exception:
+                logger.debug("monitor baseline scan failed", exc_info=True)
+
         if config.target_pid:
             process = KprobeTracer.run_by_pid(config.target_pid, paths or None)
             if config.mode == "pid":
@@ -1470,8 +1647,9 @@ class MonitorController:
 
         # Surface the extra paths in the mode description (the primary path is
         # already shown above); only when there is genuinely more than one.
-        if len(config.target_paths) > 1:
-            mode_desc += f" (+{len(config.target_paths)} paths)"
+        extra = len(config.target_paths) - 1
+        if extra > 0:
+            mode_desc += f" (+{extra} path{'s' if extra != 1 else ''})"
 
         if process is None:
             return None
@@ -1480,7 +1658,142 @@ class MonitorController:
         # runs it AHEAD of its ring buffer (see _start_output_reader).
         translator = KprobeStreamTranslator()
         translator.reset(config)
+        translator.seed_existing(baseline)
+        translator.baseline = baseline
+        translator.scan_paths = list(
+            config.target_paths or ([config.target_path] if paths else [])
+        )
         return process, translator, mode_desc
+
+    # -- baseline scan / periodic re-stat (writes the probes can't attribute) --
+
+    def _baseline_scan(self, paths) -> dict[str, tuple[int, int]]:
+        """``KprobeTracer.scan_tree`` -- only on a device whose kprobe
+        preflight passed (adb root is on there); a seam for tests.
+        """
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        if KprobeTracer.cached_availability() is not True:
+            return {}
+        return KprobeTracer.scan_tree(paths)
+
+    def _restat(self, paths: list[str]) -> dict[str, tuple[int, int]]:
+        """``KprobeTracer.stat_files`` (a seam for tests)."""
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.stat_files(paths)
+
+    def _rescan(self, paths: list[str]) -> dict[str, tuple[int, int]]:
+        """``KprobeTracer.scan_tree`` after a stop (a seam for tests)."""
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.scan_tree(paths)
+
+    def _get_stat_interval(self) -> float:
+        """``tui.monitor_stat_interval`` (0 = no periodic re-stat)."""
+        try:
+            from sandroid.config.loader import ConfigLoader
+
+            return float(ConfigLoader().load().tui.monitor_stat_interval)
+        except Exception:
+            return 10.0
+
+    def _publish_scan_items(self, wrapper: Any, items: list) -> None:
+        if not items:
+            return
+        for item in items:
+            try:
+                wrapper.record_event(_recent_event_from_item(item))
+            except Exception:
+                logger.debug("Failed to record scan event", exc_info=True)
+        try:
+            self._call_from_thread(_publish_monitor_batch, items)
+        except Exception:
+            logger.debug("Failed to publish scan events", exc_info=True)
+
+    def _start_scan_watcher(self, wrapper: Any, translator: Any) -> None:
+        """Re-stat the baseline's database files while the monitor runs, and
+        rescan everything once after a user stop.
+
+        Covers what the probes can't attribute: writes through files opened
+        before the monitor started (an app's SQLite db/-wal), relative-path
+        operations (``rm -r``), adb shell writes outside the filter. Findings
+        are published like monitor events with ``source`` ``"stat"`` /
+        ``"scan"``; anything the probes already reported is skipped.
+        """
+        baseline: dict = dict(getattr(translator, "baseline", None) or {})
+        if not baseline:
+            return
+        interval = self._get_stat_interval()
+        watch = [p for p, sig in baseline.items() if sig[1] >= 0 and _is_db_like(p)][
+            :_STAT_MAX_FILES
+        ]
+        roots = list(getattr(translator, "scan_paths", None) or [])
+        start = time.monotonic()
+        state = dict(baseline)  # last signature known per path
+        seen_at = dict.fromkeys(baseline, start)
+
+        def probes_saw(path: str, since: float) -> bool:
+            return translator.last_change.get(path, 0.0) >= since
+
+        def periodic() -> None:
+            tick = time.monotonic()
+            now = self._restat(watch)
+            items = []
+            for path in watch:
+                sig = now.get(path)
+                if sig is None or sig == state.get(path):
+                    continue
+                if not probes_saw(path, seen_at.get(path, start)):
+                    items.append(scan_item("FSE_CONTENT_MODIFIED", path, "stat"))
+                state[path], seen_at[path] = sig, tick
+            self._publish_scan_items(wrapper, items)
+
+        def final() -> None:
+            after = self._rescan(roots) if roots else {}
+            if not after:
+                return  # scan failed (device gone?): claim nothing
+            items = []
+            for path, sig in after.items():
+                old = state.get(path)
+                if old is None:
+                    if path not in translator.last_change:
+                        token = "FSE_CREATE_DIR" if sig[1] < 0 else "FSE_CREATE_FILE"
+                        items.append(scan_item(token, path, "scan"))
+                elif sig != old and sig[1] >= 0 and old[1] >= 0:
+                    if not probes_saw(path, seen_at.get(path, start)):
+                        items.append(scan_item("FSE_CONTENT_MODIFIED", path, "scan"))
+            for path in state:
+                if path not in after and not probes_saw(path, start):
+                    items.append(scan_item("FSE_DELETE", path, "scan"))
+            self._publish_scan_items(wrapper, items)
+
+        def loop() -> None:
+            next_tick = time.monotonic() + interval
+            while wrapper.is_running:
+                time.sleep(0.25)
+                if interval > 0 and watch and time.monotonic() >= next_tick:
+                    next_tick = time.monotonic() + interval
+                    try:
+                        periodic()
+                    except Exception:
+                        logger.debug("monitor re-stat failed", exc_info=True)
+            if not getattr(wrapper, "final_scan", False):
+                return
+            deadline = time.monotonic() + 15
+            while not getattr(wrapper, "_torn_down", True):
+                if time.monotonic() > deadline:
+                    return
+                time.sleep(0.1)
+            try:
+                final()
+            except Exception:
+                logger.debug("monitor stop rescan failed", exc_info=True)
+
+        self._run_scan_thread(loop)
+
+    def _run_scan_thread(self, target: Callable[[], None]) -> None:
+        threading.Thread(target=target, daemon=True, name="monitor-scan").start()
 
     def _finish_kprobe_launch(
         self, config: MonitorConfig, setup: tuple[Any, Any, str] | None
@@ -1505,7 +1818,13 @@ class MonitorController:
             teardown=KprobeTracer.teardown,
             translator=translator,
         )
-        return self._register_and_start(config, wrapper, mode_desc)
+        started = self._register_and_start(config, wrapper, mode_desc)
+        if started:
+            try:
+                self._start_scan_watcher(wrapper, translator)
+            except Exception:
+                logger.debug("monitor scan watcher failed to start", exc_info=True)
+        return started
 
     def _launch_kprobe(self, config: MonitorConfig) -> bool:
         """Synchronous kprobe launch: device-heavy setup THEN cheap finalize.
@@ -1654,7 +1973,12 @@ class MonitorController:
             # Log process exit diagnostics
             exit_code = process.poll()
             logger.info("monitor process exited with code %s", exit_code)
-            if exit_code is not None and exit_code != 0:
+            # A stop we asked for (o, Play's safety stop, quit) terminates the
+            # reader with SIGTERM (-15): that is a normal stop, not a crash.
+            intentional = bool(
+                getattr(monitor_process_wrapper, "stop_requested", False)
+            )
+            if exit_code is not None and exit_code != 0 and not intentional:
                 try:
                     self._call_from_thread(
                         self._log_warning,
@@ -1773,6 +2097,18 @@ class MonitorController:
         """
         if not self.is_running():
             return False
+
+        # A user stop rescans the targets once (after the probes are gone) to
+        # report changes the probes could not attribute; Play's safety stop
+        # goes through TaskService directly and skips it (a snapshot revert
+        # follows, which would read as a flood of changes).
+        try:
+            task = self._get_task_service().get_task("monitor")
+            inst = getattr(task, "instance", None)
+            if inst is not None:
+                inst.final_scan = True
+        except Exception:
+            logger.debug("could not flag the stop rescan", exc_info=True)
 
         self._get_task_service().stop("monitor")
         self._log_info("Monitor stopped")

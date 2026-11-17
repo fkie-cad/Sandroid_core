@@ -22,8 +22,20 @@ matched exactly on both.
 
 Documented caveats (not v1 blockers -- diff mode covers global completeness):
 - Files opened BEFORE the monitor starts aren't in the ``file*`` map, so their
-  writes are unattributed in *path* mode (a non-issue when the sandbox starts
-  the monitor before launching the target app).
+  writes are unattributed (both modes; typical for an app's SQLite db and
+  ``-wal``, opened at app start). The monitor therefore records a baseline
+  :meth:`scan_tree` before tracing starts, re-``stat``\\ s the database-like
+  files of that baseline periodically (:meth:`stat_files`) and rescans once
+  more after a stop; changes found that way are shown "via stat" / "via
+  scan" (see ``MonitorController``). Starting the monitor before the app
+  (spawn) avoids the gap.
+- The probes see the path *string* a process passes in. Android reaches app
+  data as ``/data/data/<pkg>`` AND ``/data/user/0/<pkg>`` (what
+  ``getFilesDir()`` returns), so :meth:`_apply_path_filter` watches every
+  alias (``adb_utils.expand_monitor_paths``). Relative names (``openat`` on a
+  directory fd, ``cd dir && echo > f``, toybox ``rm -r``) don't match an
+  absolute path filter: a deleted directory marks its known files deleted and
+  the stop-time rescan reports the rest.
 - On ``/sdcard`` the MediaProvider FUSE daemon co-writes the same paths in its
   own process; PID scoping will attribute those to the daemon, not the app.
 - PID/tree scoping deliberately misses content-provider processes (e.g.
@@ -46,7 +58,11 @@ import subprocess
 import threading
 
 from .adb import Adb
-from .adb_utils import device_shell_command
+from .adb_utils import (
+    canonical_device_path,
+    device_shell_command,
+    expand_monitor_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +197,15 @@ class KprobeTracer:
     # and restore the buffer even when called standalone.
     _tracefs: str | None = None
     _orig_buffer_kb: str | None = None
+    _orig_cmdlines: str | None = None
+
+    #: ftrace's comm cache (``saved_cmdlines_size``, default 128) is global and
+    #: small: a busy app's threads overflow it and lines show ``<...>`` instead
+    #: of the process name. Raised for the session, restored on teardown.
+    _CMDLINES_SIZE = 4096
+
+    #: Upper bound on entries a baseline scan keeps (huge caches stay cheap).
+    _SCAN_MAX_LINES = 20000
 
     # =========================================================================
     # adb plumbing (mirrors FSMon)
@@ -639,7 +664,10 @@ class KprobeTracer:
         so nothing changes for the common single-path case.
         """
         inst = cls._instance_dir(tracefs)
-        path_list = [paths] if isinstance(paths, str) else list(paths)
+        # Every alias of each target (/data/data/<pkg> also as
+        # /data/user/0/<pkg>, plus the app's /data/user_de/0/<pkg>): the
+        # probes match the path STRING a process passes, not the resolved path.
+        path_list = expand_monitor_paths(paths)
         globs = [f"{p.rstrip('/')}/*" for p in path_list]
         for name, field in cls._PATH_FILTER_FIELDS.items():
             expr = " || ".join(f'{field} ~ "{g}"' for g in globs)
@@ -670,6 +698,13 @@ class KprobeTracer:
         # restore it (belt-and-suspenders if the instance rmdir later fails).
         cls._orig_buffer_kb = cls._shell(f"cat {inst}/buffer_size_kb").strip() or None
         cls._shell(f"echo {cls._BUFFER_SIZE_KB} > {inst}/buffer_size_kb")
+        cmdlines = f"{tracefs}/saved_cmdlines_size"
+        if cls._orig_cmdlines is None:
+            first = cls._shell(f"cat {cmdlines} 2>/dev/null").strip().split("\n")[0]
+            cls._orig_cmdlines = first if first.isdigit() else None
+        cls._shell(
+            f"[ -e {cmdlines} ] && echo {cls._CMDLINES_SIZE} > {cmdlines} 2>/dev/null"
+        )
         cls._install_probes(tracefs, probe_names)
 
     @classmethod
@@ -795,10 +830,98 @@ class KprobeTracer:
                 )
             # Instance removal LAST (after the pipe is released + probes gone).
             cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+            if cls._orig_cmdlines:
+                cmdlines = f"{tracefs}/saved_cmdlines_size"
+                cls._shell(
+                    f"[ -e {cmdlines} ] && echo {cls._orig_cmdlines} > {cmdlines}"
+                    " 2>/dev/null"
+                )
         except Exception:
             cls.logger.debug("kprobe teardown swallowed an error", exc_info=True)
         finally:
             cls._orig_buffer_kb = None
+            cls._orig_cmdlines = None
+
+    # =========================================================================
+    # Baseline scan / re-stat (covers writes the probes can't attribute)
+    # =========================================================================
+
+    @staticmethod
+    def scan_roots(paths: str | list[str] | None) -> list[str]:
+        """Canonical, de-duplicated scan roots (no alias is scanned twice).
+
+        ``/data/user/0/<pkg>`` and ``/data/data/<pkg>`` are the same
+        directory, so only the canonical form is scanned;
+        ``/data/user_de/0/<pkg>`` is a different directory and is kept.
+        """
+        roots: list[str] = []
+        for p in expand_monitor_paths(paths or []):
+            c = canonical_device_path(p)
+            if c and c != "/" and c not in roots:
+                roots.append(c)
+        return roots
+
+    @classmethod
+    def scan_tree(cls, paths: str | list[str] | None) -> dict[str, tuple[int, int]]:
+        """``{canonical path: (mtime, size)}`` for every file/dir under ``paths``.
+
+        One ``find ... -exec stat`` over adb (root). Directories get size -1
+        (only their existence matters). Run it BEFORE tracing starts or after
+        it stopped: ``find`` opens directories, which path-mode probes would
+        otherwise report as activity. Never raises; ``{}`` on any failure.
+        """
+        roots = cls.scan_roots(paths)
+        if not roots:
+            return {}
+        # "<root>/" makes find descend into a symlinked root.
+        quoted = " ".join(shlex.quote(r.rstrip("/") + "/") for r in roots)
+        cmd = (
+            f"find {quoted} -exec stat -c '%Y %s %F|%n' {{}} + 2>/dev/null"
+            f" | head -n {cls._SCAN_MAX_LINES}"
+        )
+        try:
+            out = cls._shell(cmd)
+        except Exception:
+            cls.logger.debug("kprobe baseline scan failed", exc_info=True)
+            return {}
+        return parse_scan_output(out)
+
+    @classmethod
+    def stat_files(cls, paths: list[str]) -> dict[str, tuple[int, int]]:
+        """``{path: (mtime, size)}`` for those of ``paths`` that exist.
+
+        ``stat`` opens nothing, so it never shows up as monitored activity.
+        """
+        result: dict[str, tuple[int, int]] = {}
+        for i in range(0, len(paths), 200):
+            chunk = " ".join(shlex.quote(p) for p in paths[i : i + 200])
+            try:
+                out = cls._shell(f"stat -c '%Y %s %F|%n' {chunk} 2>/dev/null")
+            except Exception:
+                cls.logger.debug("kprobe re-stat failed", exc_info=True)
+                return result
+            result.update(parse_scan_output(out))
+        return result
+
+
+def parse_scan_output(out: str) -> dict[str, tuple[int, int]]:
+    """Parse ``stat -c '%Y %s %F|%n'`` lines; directories get size -1."""
+    result: dict[str, tuple[int, int]] = {}
+    for line in (out or "").splitlines():
+        head, sep, name = line.strip().partition("|")
+        if not sep or not name.startswith("/"):
+            continue
+        parts = head.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            mtime, size = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if "directory" in parts[2]:
+            size = -1
+        result[canonical_device_path(name)] = (mtime, size)
+    return result
 
 
 def _extract_field_values(trace: str, field: str) -> list[str]:
