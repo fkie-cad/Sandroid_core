@@ -707,3 +707,97 @@ def test_dry_run_start_and_end_are_logged(monkeypatch, caplog):
     sleep = "Dry run: capturing for 21s, as long as one action run"
     end = "Dry run finished (noise baseline captured)"
     assert messages.index(begin) < messages.index(sleep) < messages.index(end)
+
+
+# ===========================================================================
+# Phase-5 N1: network reset after every snapshot load before a window
+# ===========================================================================
+
+
+def test_plan_resets_network_before_every_replay_and_the_dry_run():
+    from sandroid.analysis.engine import AnalysisPlan, LoadSnapshotStep
+
+    gatherers = {k: object() for k in ("changed_files", "new_files")}
+    for runs, noise, expected in (
+        (2, True, [True, True, True]),  # pre, before run 2, before dry run
+        (2, False, [True, True, False]),  # last load has nothing after it
+        (3, True, [True, True, True, True]),
+        (1, True, [True, True]),  # pre, before dry run
+        (1, False, [True, False]),
+    ):
+        config = RunConfig(number_of_runs=runs, noise_filter=noise, action=FakeAction())
+        loads = [
+            s
+            for s in AnalysisPlan.build(config, gatherers)
+            if isinstance(s, LoadSnapshotStep)
+        ]
+        assert [s.reset_network for s in loads] == expected, (runs, noise)
+
+
+class _ResettingToolbox(FakeToolbox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[str] = []
+        self.modes: list[str] = []
+
+    def load_snapshot(self, name: Any) -> None:
+        super().load_snapshot(name)
+        self.events.append("load")
+
+    def reset_network(self, mode: str = "airplane", sleep: Any = None) -> bool:
+        self.events.append("reset")
+        self.modes.append(mode)
+        return True
+
+
+def _reset_config(monkeypatch, mode: str) -> None:
+    import types
+
+    monkeypatch.setattr(
+        "sandroid.config.get_config",
+        lambda: types.SimpleNamespace(
+            analysis=types.SimpleNamespace(
+                network_reset_after_snapshot=mode, replay_settle_seconds=0
+            )
+        ),
+    )
+
+
+def test_engine_resets_network_after_loads_with_configured_mode(monkeypatch):
+    _reset_config(monkeypatch, "svc")
+    toolbox = _ResettingToolbox()
+    config = RunConfig(number_of_runs=2, noise_filter=True, action=FakeAction())
+    result = _make_engine(config, toolbox=toolbox).run()
+
+    assert result.error is None
+    assert toolbox.events == ["load", "reset"] * 3
+    assert toolbox.modes == ["svc"] * 3
+
+
+def test_engine_network_reset_off_and_failures_are_not_fatal(monkeypatch):
+    _reset_config(monkeypatch, "off")
+    toolbox = _ResettingToolbox()
+    config = RunConfig(number_of_runs=2, noise_filter=True, action=FakeAction())
+    _make_engine(config, toolbox=toolbox).run()
+    assert "reset" not in toolbox.events
+
+    _reset_config(monkeypatch, "airplane")
+
+    class _Broken(_ResettingToolbox):
+        def reset_network(self, mode: str = "airplane", sleep: Any = None) -> bool:
+            raise RuntimeError("adb gone")
+
+    result = _make_engine(config, toolbox=_Broken()).run()
+    assert result.error is None
+
+
+def test_network_reset_default_is_in_schema_and_default_toml():
+    import tomllib
+    from pathlib import Path
+
+    from sandroid.config.schema import AnalysisConfig
+
+    assert AnalysisConfig().network_reset_after_snapshot == "airplane"
+    default = Path(__file__).resolve().parents[2] / "src/sandroid/config/default.toml"
+    data = tomllib.loads(default.read_text())
+    assert data["analysis"]["network_reset_after_snapshot"] == "airplane"

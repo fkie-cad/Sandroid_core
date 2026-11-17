@@ -187,3 +187,143 @@ def list_connections(
             )
 
     return connections
+
+
+# ---------------------------------------------------------------------------
+# Network reset after a snapshot load
+# ---------------------------------------------------------------------------
+
+#: Modes accepted by :func:`reset_network` (``analysis.network_reset_after_snapshot``).
+NETWORK_RESET_MODES = ("airplane", "svc", "off")
+
+_NO_DEFAULT_NETWORK = "none"
+
+
+def default_network(send_command: Callable[[str], tuple[str, str]]) -> str | None:
+    """Return the device's active default network id, ``""`` or ``None``.
+
+    Reads ``Active default network: <netId>|none`` from ``dumpsys
+    connectivity`` (printed by every ConnectivityService since Android 5).
+
+    Returns:
+        The netId string while a default network is up, ``""`` when the
+        device reports none, ``None`` when the line could not be read.
+    """
+    stdout, _stderr = send_command(
+        "shell \"dumpsys connectivity | grep -m1 'Active default network'\""
+    )
+    for line in (stdout or "").splitlines():
+        if "Active default network" in line:
+            value = line.split(":", 1)[-1].strip()
+            return "" if value in ("", _NO_DEFAULT_NETWORK) else value
+    return None
+
+
+def _looks_failed(stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return any(
+        marker in text
+        for marker in ("unknown command", "exception", "error", "not found", "usage:")
+    )
+
+
+def _wait_for(
+    predicate: Callable[[], bool],
+    timeout: float,
+    sleep: Callable[[float], None],
+    step: float = 0.5,
+) -> bool:
+    waited = 0.0
+    while True:
+        if predicate():
+            return True
+        if waited >= timeout:
+            return False
+        sleep(step)
+        waited += step
+
+
+def _switch(
+    send_command: Callable[[str], tuple[str, str]], mode: str, enable_network: bool
+) -> bool:
+    """Turn the radios off/on with ``mode``; ``False`` if the device refused."""
+    if mode == "airplane":
+        state = "disable" if enable_network else "enable"
+        out, err = send_command(f"shell cmd connectivity airplane-mode {state}")
+        return not _looks_failed(out, err)
+    verb = "enable" if enable_network else "disable"
+    ok = True
+    for radio in ("wifi", "data"):
+        out, err = send_command(f"shell svc {radio} {verb}")
+        ok = ok and not _looks_failed(out, err)
+    return ok
+
+
+def reset_network(
+    send_command: Callable[[str], tuple[str, str]],
+    mode: str = "airplane",
+    *,
+    timeout: float = 30.0,
+    sleep: Callable[[float], None] | None = None,
+) -> bool:
+    """Cycle the device's network so sockets restored from a snapshot die fast.
+
+    A snapshot restores the guest's TCP sockets but not the emulator's
+    host-side NAT state, so an app that was open when the snapshot was taken
+    keeps writing to dead pooled connections until its read timeout. Taking
+    the network down removes the interface addresses, the system destroys the
+    sockets bound to them, and the app reconnects as soon as the network is
+    back. Waits (up to ``timeout``) until a default network is up again.
+
+    Args:
+        send_command: ``Adb.send_adb_command``-like callable.
+        mode: ``"airplane"`` (``cmd connectivity airplane-mode``, falls back
+            to ``svc`` if the device rejects it), ``"svc"`` (``svc wifi`` +
+            ``svc data``) or ``"off"``.
+        timeout: Seconds to wait for the default network to come back.
+        sleep: Sleep function (injectable so callers can make it cancellable).
+
+    Returns:
+        ``True`` when the network was cycled and is up again, ``False`` when
+        it was skipped or did not come back within ``timeout``.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    if mode not in NETWORK_RESET_MODES or mode == "off":
+        return False
+    airplane, _ = send_command("shell settings get global airplane_mode_on")
+    if (airplane or "").strip() == "1":
+        logger.info("Network reset skipped: the snapshot has airplane mode on")
+        return False
+    before = default_network(send_command)
+    if not before:
+        logger.info("Network reset skipped: no active network after snapshot load")
+        return False
+
+    logger.info("Resetting the device network after snapshot load (%s)", mode)
+    if not _switch(send_command, mode, enable_network=False):
+        if mode != "airplane":
+            logger.warning("Network reset: 'svc' was rejected by the device")
+            return False
+        logger.info("Network reset: airplane-mode command rejected, using svc")
+        mode = "svc"
+        _switch(send_command, mode, enable_network=False)
+    # Sockets die when the addresses go; don't keep the device offline longer.
+    if not _wait_for(lambda: default_network(send_command) == "", 5.0, sleep):
+        logger.warning(
+            "Network reset (%s): the default network did not go down within 5s; "
+            "stale connections may survive (try network_reset_after_snapshot "
+            "= svc)",
+            mode,
+        )
+    _switch(send_command, mode, enable_network=True)
+    if _wait_for(lambda: bool(default_network(send_command)), timeout, sleep):
+        sleep(1.0)  # let DNS/routes settle before the replay starts
+        logger.info("Network is back after reset")
+        return True
+    logger.warning(
+        "Network did not come back within %ds after the reset; continuing",
+        int(timeout),
+    )
+    return False

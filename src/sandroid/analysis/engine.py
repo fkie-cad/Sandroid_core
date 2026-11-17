@@ -157,6 +157,18 @@ class LoadSnapshotStep(Step):
     kind = "load_snapshot"
     path_sensitive = True
 
+    def __init__(self, run_number: int = 0, *, reset_network: bool = False) -> None:
+        """Initialize the load step.
+
+        Args:
+            run_number: 1-based run index (0 for the pre-analysis load).
+            reset_network: Whether an action run or the dry run follows this
+                load, so the device network is cycled afterwards
+                (``analysis.network_reset_after_snapshot``).
+        """
+        super().__init__(run_number)
+        self.reset_network = reset_network
+
     def run(self, ctx: EngineContext) -> None:
         # ``Toolbox.load_snapshot`` returns the emulator service's success flag
         # (older/fake toolboxes return ``None``, treated as success). A failed
@@ -166,6 +178,50 @@ class LoadSnapshotStep(Step):
             raise FatalStepError(
                 f"Failed to load emulator snapshot {_SNAPSHOT_NAME.decode()!r}"
             )
+        if self.reset_network:
+            _reset_network(ctx)
+
+
+def _network_reset_mode(config: Any) -> str:
+    """``network_reset_after_snapshot`` of the run config, else of ``[analysis]``."""
+    value = getattr(config, "network_reset_after_snapshot", None)
+    if value is None:
+        try:
+            from sandroid.config import get_config
+
+            value = get_config().analysis.network_reset_after_snapshot
+        except Exception:
+            value = "off"
+    return str(value or "off").lower()
+
+
+def _reset_network(ctx: EngineContext) -> None:
+    """Cycle the device network after a snapshot load (best-effort).
+
+    The snapshot restores the guest's open TCP connections but not the
+    emulator's NAT state, so an app that was in the foreground when recording
+    started reuses dead pooled connections and the replay loads nothing.
+    Runs after *every* load that precedes an action run or the dry run, so
+    noise subtraction compares like with like. Never fatal.
+    """
+    mode = _network_reset_mode(ctx.config)
+    if mode == "off":
+        return
+    reset = getattr(ctx.toolbox, "reset_network", None)
+    if reset is None:
+        return
+    from sandroid.features import player as player_module
+
+    def cancellable_sleep(seconds: float) -> None:
+        if player_module._cancel_event.wait(seconds):
+            player_module._raise_cancelled()
+
+    try:
+        reset(mode=mode, sleep=cancellable_sleep)
+    except FatalStepError:
+        raise  # cancelled while waiting for the network
+    except Exception as exc:
+        logger.warning("Network reset after snapshot load failed: %s", exc)
 
 
 class BaselineStep(Step):
@@ -597,7 +653,11 @@ class AnalysisPlan:
         want_deleted = config.show_deleted and df is not None
 
         # ---- Pre-analysis ----
-        steps.append(LoadSnapshotStep(run_number=0))
+        # Every load followed by an action run or the dry run cycles the
+        # device network (stale snapshot sockets, see ``_reset_network``), so
+        # each window starts from the same state and noise subtraction stays
+        # fair; the mode itself is read at run time.
+        steps.append(LoadSnapshotStep(run_number=0, reset_network=True))
         steps.append(BaselineStep(run_number=0))
         if config.screenshot_interval:
             steps.append(StartScreenshotStep(run_number=0))
@@ -615,7 +675,9 @@ class AnalysisPlan:
             if want_deleted:
                 steps.append(GatherStep(df, run_number=rn))
             steps.append(PullStep("second", cf, run_number=rn))
-            steps.append(LoadSnapshotStep(run_number=rn))
+            steps.append(
+                LoadSnapshotStep(run_number=rn, reset_network=bool(config.noise_filter))
+            )
             steps.append(PullStep("first", cf, run_number=rn))
         else:
             # ---- Run 0 (== legacy pull0) ----
@@ -625,7 +687,7 @@ class AnalysisPlan:
             steps.append(GatherStep(nf, run_number=rn))
             if want_deleted:
                 steps.append(GatherStep(df, run_number=rn))
-            steps.append(LoadSnapshotStep(run_number=rn))
+            steps.append(LoadSnapshotStep(run_number=rn, reset_network=True))
             steps.append(PullStep("first", cf, run_number=rn))
 
             # ---- Runs 1..N-1 ----
@@ -640,7 +702,8 @@ class AnalysisPlan:
                     steps.append(GatherStep(df, run_number=rn))
                 if run_index == 1:
                     steps.append(PullStep("second", cf, run_number=rn))
-                steps.append(LoadSnapshotStep(run_number=rn))
+                followed = run_index < total - 1 or bool(config.noise_filter)
+                steps.append(LoadSnapshotStep(run_number=rn, reset_network=followed))
 
         # ---- Dry run (noise measurement) ----
         if config.noise_filter:

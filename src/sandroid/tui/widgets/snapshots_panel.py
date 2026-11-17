@@ -567,11 +567,19 @@ class SnapshotsPanel(Widget):
             if not name:
                 # App code runs normal Python; a runtime timestamp is fine.
                 name = time.strftime("%Y-%m-%d_%H-%M-%S")
+            from sandroid.core.adb_utils import validate_snapshot_name
+
+            try:
+                validate_snapshot_name(name)
+            except ValueError as exc:
+                self._notify(f"Not created: {exc}", "error")
+                return
 
             def _work() -> tuple[bool, str]:
-                # create_snapshot delegates without returning, so completing
-                # without raising is treated as success.
-                self._toolbox().create_snapshot(name)
+                # The service returns False (and logs why) on a rejected save;
+                # ``None`` (older/fake toolboxes) counts as success.
+                if self._toolbox().create_snapshot(name) is False:
+                    return False, f"Could not create snapshot '{name}' (see the log)"
                 return True, f"Created snapshot '{name}'"
 
             self._run_action_bg(_work, "create", refresh_after=True)
@@ -600,7 +608,8 @@ class SnapshotsPanel(Widget):
                 return
 
             def _work() -> tuple[bool, str]:
-                self._toolbox().load_snapshot(tag)
+                if self._toolbox().load_snapshot(tag) is False:
+                    return False, f"Could not load '{tag}' (see the log)"
                 _forget_device_handles()
                 return True, f"Loaded '{tag}'"
 
@@ -701,7 +710,8 @@ class SnapshotsPanel(Widget):
                 return
 
         def _work() -> tuple[bool, str]:
-            self._toolbox().load_snapshot(tag)
+            if self._toolbox().load_snapshot(tag) is False:
+                return False, f"Could not load slot {slot} ('{tag}', see the log)"
             _forget_device_handles()
             return True, f"Loaded slot {slot} ('{tag}')"
 
@@ -757,8 +767,8 @@ class SnapshotsPanel(Widget):
         """Create a snapshot named ``tag`` and point ``slot`` at it (off-thread)."""
 
         def _work() -> tuple[bool, str]:
-            # create_snapshot delegates without returning, so no raise = success.
-            self._toolbox().create_snapshot(tag)
+            if self._toolbox().create_snapshot(tag) is False:
+                return False, f"Could not save slot {slot} ('{tag}', see the log)"
             # Pure config/file write + attr set — safe off the UI thread.
             self._write_slot(slot, tag)
             return True, f"Saved slot {slot} → '{tag}'"

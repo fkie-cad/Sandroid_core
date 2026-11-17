@@ -223,3 +223,92 @@ def test_row_with_non_numeric_uid_is_skipped_without_raising():
     send = _make_send(tcp_body=_tcp(line))
 
     assert list_connections(send) == []
+
+
+# ---------------------------------------------------------------------------
+# Phase-5 N1: network reset after a snapshot load
+# ---------------------------------------------------------------------------
+
+
+class _FakeDevice:
+    """adb stand-in: tracks airplane/svc state and answers dumpsys."""
+
+    def __init__(
+        self,
+        *,
+        airplane_supported: bool = True,
+        comes_back: bool = True,
+        airplane_on: bool = False,
+        online: bool = True,
+    ) -> None:
+        self.airplane_supported = airplane_supported
+        self.comes_back = comes_back
+        self.airplane_on = airplane_on
+        self.online = online
+        self.calls: list[str] = []
+
+    def __call__(self, command: str) -> tuple[str, str]:
+        self.calls.append(command)
+        if "airplane_mode_on" in command:
+            return ("1\n" if self.airplane_on else "0\n"), ""
+        if "dumpsys connectivity" in command:
+            net = "100" if self.online else "none"
+            return f"Active default network: {net}\n", ""
+        if "airplane-mode" in command:
+            if not self.airplane_supported:
+                return "Unknown command: airplane-mode\n", ""
+            self.online = command.endswith("disable") and self.comes_back
+            return "", ""
+        if command.startswith("shell svc "):
+            self.online = command.endswith("enable") and self.comes_back
+            return "", ""
+        return "", ""
+
+
+def test_reset_network_cycles_airplane_mode_and_waits_for_network():
+    from sandroid.core.adb_network import reset_network
+
+    device = _FakeDevice()
+    sleeps: list[float] = []
+    assert reset_network(device, "airplane", sleep=sleeps.append) is True
+    switches = [c for c in device.calls if "airplane-mode" in c]
+    assert switches == [
+        "shell cmd connectivity airplane-mode enable",
+        "shell cmd connectivity airplane-mode disable",
+    ]
+    assert device.online
+
+
+def test_reset_network_falls_back_to_svc_when_airplane_is_rejected():
+    from sandroid.core.adb_network import reset_network
+
+    device = _FakeDevice(airplane_supported=False)
+    assert reset_network(device, "airplane", sleep=lambda s: None) is True
+    svc = [c for c in device.calls if c.startswith("shell svc ")]
+    assert svc == [
+        "shell svc wifi disable",
+        "shell svc data disable",
+        "shell svc wifi enable",
+        "shell svc data enable",
+    ]
+
+
+def test_reset_network_skips_when_off_offline_or_in_airplane_mode():
+    from sandroid.core.adb_network import reset_network
+
+    for device, mode in (
+        (_FakeDevice(), "off"),
+        (_FakeDevice(airplane_on=True), "airplane"),
+        (_FakeDevice(online=False), "airplane"),
+    ):
+        assert reset_network(device, mode, sleep=lambda s: None) is False
+        assert not [c for c in device.calls if "airplane-mode" in c or " svc " in c]
+
+
+def test_reset_network_gives_up_after_timeout():
+    from sandroid.core.adb_network import reset_network
+
+    device = _FakeDevice(comes_back=False)
+    slept: list[float] = []
+    assert reset_network(device, "airplane", timeout=3, sleep=slept.append) is False
+    assert sum(slept) <= 3 + 5 + 1  # going-down wait + timeout, no hang

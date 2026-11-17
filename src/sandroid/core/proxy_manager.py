@@ -911,6 +911,7 @@ class CAManager:
                     Adb.send_adb_command(f"shell {self._root_cmd(f'kill {pid}')}")
                 except Exception:
                     pass
+            self._zygote_restarted = True
 
             # The kill -> init-respawn -> Conscrypt-reload cycle routinely takes
             # well over the old fixed 3s on a busy device. Poll until a deadline
@@ -1188,10 +1189,12 @@ class CAManager:
         Without ``ns_pid`` this needs no root (cacerts are world-readable).
         Returns None when the file is missing or unreadable.
         """
+        # A missing file is the normal "CA not installed yet" answer: drop the
+        # device-side stderr so it isn't logged as an ADB WARNING.
         if ns_pid is None:
-            cmd = f"shell cat {path}"
+            cmd = f"shell {quote_host_arg(f'cat {path} 2>/dev/null')}"
         else:
-            inner = f"nsenter --mount=/proc/{ns_pid}/ns/mnt -- cat {path}"
+            inner = f"nsenter --mount=/proc/{ns_pid}/ns/mnt -- cat {path} 2>/dev/null"
             cmd = f"shell {self._root_cmd(inner)}"
         try:
             stdout, _ = Adb.send_adb_command(cmd)
@@ -1288,6 +1291,11 @@ class CAManager:
                 f"{cert_name} in the trust store is a different CA (same "
                 "subject, other key — another mitmproxy install?); re-inject"
             )
+        else:
+            global _CA_NOT_INSTALLED_LOGGED
+            log = logger.debug if _CA_NOT_INSTALLED_LOGGED else logger.info
+            _CA_NOT_INSTALLED_LOGGED = True
+            log(f"mitmproxy CA ({cert_name}) not installed on the device yet")
         return ZygoteStatus(
             injected=False,
             cert_hash=cert_hash,
@@ -1359,6 +1367,25 @@ class CAManager:
             zygote64_pid=zygote64_pid,
         )
 
+    @staticmethod
+    def _restart_frida_after_zygote(message: str) -> str:
+        """Restart a running frida-server; return ``message`` plus the outcome."""
+        try:
+            from sandroid.core.frida_manager import (
+                restart_frida_server_after_system_restart,
+            )
+
+            restarted, reason = restart_frida_server_after_system_restart()
+        except Exception as e:
+            logger.warning(f"frida-server restart after Zygote restart failed: {e}")
+            return f"{message}; frida-server restart failed: {e}"
+        if restarted:
+            return f"{message}; frida-server restarted"
+        if reason != "frida-server not running":
+            logger.warning(f"frida-server restart after Zygote restart: {reason}")
+            return f"{message}; {reason} (restart frida-server before spawning)"
+        return message
+
     def inject_ca_into_zygote(self, cert_path: Path | None = None) -> InjectionResult:
         """Inject CA certificate into Zygote namespace for system-wide trust.
 
@@ -1419,10 +1446,17 @@ class CAManager:
             logger.info(f"Using {strategy.value} injection (API level: {api_level})")
 
             # 6. Dispatch
+            self._zygote_restarted = False
             if strategy == InjectionStrategy.BIND_MOUNT:
                 success, message = self._inject_bind_mount(cert_name, zygote_pids)
             else:
                 success, message = self._inject_legacy(cert_name, zygote_pids)
+
+            # 7. The Zygote restart also restarted system_server; a running
+            # frida-server still points at the dead one (DeadSystemException
+            # on the next spawn), so restart it too.
+            if getattr(self, "_zygote_restarted", False):
+                message = self._restart_frida_after_zygote(message)
 
             return InjectionResult(
                 success=success,
@@ -1435,6 +1469,9 @@ class CAManager:
             logger.error(f"Error injecting CA: {e}")
             return InjectionResult(success=False, message=f"Error injecting CA: {e}")
 
+
+#: The "CA not installed yet" probe result is logged at INFO once, then DEBUG.
+_CA_NOT_INSTALLED_LOGGED = False
 
 #: Sentinel: "the serial adb currently targets" (``None`` is a real value).
 _CURRENT_SERIAL = object()

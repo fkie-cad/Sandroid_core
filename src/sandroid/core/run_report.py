@@ -500,9 +500,16 @@ def describe_run_settings(run_config: Any) -> dict[str, Any]:
         settings["capture_window"] = window
     whitelist = getattr(run_config, "whitelist", None)
     settings["whitelist_file"] = str(whitelist) if whitelist else None
-    if type(action).__name__ == "Player":
-        from sandroid.analysis.engine import _replay_settle_seconds
+    from sandroid.analysis.engine import _network_reset_mode, _replay_settle_seconds
 
+    settings["network_reset_after_snapshot"] = _network_reset_mode(run_config)
+    # A replay is either an explicit ``Player`` (headless) or, as the TUI
+    # builds it via ``RunConfig.for_playback``, a ``recording_path`` with
+    # ``action=None`` that the engine turns into a ``Player`` itself.
+    is_replay = type(action).__name__ == "Player" or (
+        action is None and bool(getattr(run_config, "recording_path", None))
+    )
+    if is_replay:
         settings["replay_settle_seconds"] = _replay_settle_seconds(run_config)
     return settings
 

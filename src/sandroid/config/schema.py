@@ -252,6 +252,16 @@ class AnalysisConfig(BaseModel):
             "same extra time); 0 = window ends with the replay"
         ),
     )
+    network_reset_after_snapshot: str = Field(
+        default="airplane",
+        pattern=r"^(airplane|svc|off)$",
+        description=(
+            "Cycle the device network after every snapshot load before an "
+            "action run or the dry run, so connections restored from the "
+            "snapshot fail fast and the app reconnects (airplane = airplane "
+            "mode on/off, svc = svc wifi/data off/on, off = keep the network)"
+        ),
+    )
     list_apks: bool = Field(default=False, description="List all APKs and their hashes")
     degrade_network: bool = Field(
         default=False, description="Simulate UMTS/3G connection speeds"

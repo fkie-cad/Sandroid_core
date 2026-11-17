@@ -748,3 +748,108 @@ def test_importing_tui_app_emits_no_terminal_reset(tmp_path) -> None:
     assert proc.returncode == 0, proc.stderr
     assert "\x1b[?1049l" not in proc.stdout
     assert "stty" not in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 N3: a rejected snapshot create/load must not toast success
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_panel(monkeypatch, ok):
+    """Bare SnapshotsPanel whose dialogs answer at once and work runs inline."""
+    from types import SimpleNamespace
+
+    from sandroid.tui.widgets import snapshots_panel as sp
+
+    calls: list[tuple[str, str]] = []
+    toolbox = SimpleNamespace(
+        create_snapshot=lambda name: calls.append(("create", name)) or ok,
+        load_snapshot=lambda name: calls.append(("load", name)) or ok,
+    )
+    answers = {"InputModal": "p5_snap", "ConfirmModal": True}
+    fake_app = SimpleNamespace(
+        push_screen=lambda screen, cb: cb(answers[type(screen).__name__])
+    )
+    results: list[tuple[bool, str]] = []
+    notes: list[tuple[str, str]] = []
+    panel = sp.SnapshotsPanel()
+    monkeypatch.setattr(sp.SnapshotsPanel, "app", property(lambda self: fake_app))
+    monkeypatch.setattr(panel, "_require_emulator", lambda: True)
+    monkeypatch.setattr(panel, "_toolbox", lambda: toolbox)
+    monkeypatch.setattr(panel, "_highlighted_tag", lambda: "p5_snap")
+    monkeypatch.setattr(panel, "_slot_map", lambda: {"3": "slot-3"})
+    monkeypatch.setattr(panel, "_write_slot", lambda slot, tag: None)
+    monkeypatch.setattr(
+        panel, "_notify", lambda m, s="information": notes.append((m, s))
+    )
+    monkeypatch.setattr(
+        panel,
+        "_run_action_bg",
+        lambda work, label, refresh_after=False: results.append(work()),
+    )
+    monkeypatch.setattr(sp, "_forget_device_handles", lambda: None)
+    return panel, answers, calls, results, notes
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_snapshot_create_and_load_report_the_service_result(monkeypatch, ok):
+    panel, _answers, calls, results, _notes = _snapshot_panel(monkeypatch, ok)
+    panel.action_create()
+    panel.action_load()
+    panel.load_slot("3")
+    panel._do_save("slot-3", "3")
+    assert [c[0] for c in calls] == ["create", "load", "load", "create"]
+    assert [r[0] for r in results] == [ok] * 4
+    if not ok:
+        assert results[0][1].startswith("Could not create snapshot 'p5_snap'")
+        assert results[1][1].startswith("Could not load 'p5_snap'")
+
+
+def test_snapshot_create_rejects_an_invalid_name_before_adb(monkeypatch):
+    panel, answers, calls, results, notes = _snapshot_panel(monkeypatch, True)
+    answers["InputModal"] = "bad name;touch /tmp/x"
+    panel.action_create()
+    assert calls == []
+    assert results == []
+    assert notes
+    assert notes[-1][1] == "error"
+    assert "invalid snapshot name" in notes[-1][0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 N1(b): hint when recording starts in the open app without a reset
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "focused", "hinted"),
+    [
+        ("off", "org.wikipedia", True),
+        ("airplane", "org.wikipedia", False),
+        ("off", "com.android.launcher3", False),
+    ],
+)
+def test_foreground_app_hint(monkeypatch, mode, focused, hinted):
+    from types import SimpleNamespace
+
+    from sandroid.tui.modals import recording_modal
+
+    monkeypatch.setattr(
+        "sandroid.config.get_config",
+        lambda: SimpleNamespace(
+            analysis=SimpleNamespace(network_reset_after_snapshot=mode)
+        ),
+    )
+    monkeypatch.setattr(
+        "sandroid.services.get_spotlight_service",
+        lambda: SimpleNamespace(get_package_name=lambda: "org.wikipedia"),
+    )
+    monkeypatch.setattr(
+        recording_modal.Adb,
+        "get_focused_app",
+        classmethod(lambda cls, max_retries=3: (focused, ".Main")),
+    )
+    hint = recording_modal.foreground_app_hint()
+    assert bool(hint) is hinted
+    if hinted:
+        assert "network_reset_after_snapshot" in hint

@@ -49,6 +49,10 @@ show_deleted_files = false
 # Keep capturing N seconds after each replay (and the dry run) so slow
 # network responses still land in the run. 0 = stop with the replay.
 replay_settle_seconds = 8
+# After every snapshot load (before each replay and the dry run) briefly cycle
+# the device network so connections restored from the snapshot fail fast and
+# the app reconnects. "airplane" | "svc" (svc wifi/data) | "off".
+network_reset_after_snapshot = "airplane"
 hash_files = false
 list_apks = false
 degrade_network = false

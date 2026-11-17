@@ -281,6 +281,28 @@ async def test_add_path_via_input_persists_and_updates_list() -> None:
         assert add_input.value == ""
         option_list = view.query_one("#watchlist-list", OptionList)
         assert option_list.option_count == 1
+        # Phase 5 N6: focus returns to the list, so the next "n" is a command.
+        assert app.focused is option_list
+
+
+@pytest.mark.asyncio
+async def test_failed_add_keeps_focus_and_text_in_the_input() -> None:
+    get_forensic_service().add_spotlight_file(PATH_A)
+
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+
+        add_input = view.query_one("#watchlist-add-input", Input)
+        add_input.focus()
+        add_input.value = PATH_A  # already watched -> rejected
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.focused is add_input
+        assert add_input.value == PATH_A
 
 
 @pytest.mark.asyncio

@@ -231,9 +231,153 @@ def auto_start_frida_server(fm=None, force: bool = False) -> tuple[bool, str]:
 _AUTO_START_LOCK = threading.Lock()
 
 
+def _process_start_ticks(fm) -> dict[str, int]:
+    """Start time (clock ticks since boot) of frida-server and system_server.
+
+    Reads ``ps`` and ``/proc/<pid>/stat`` (field 22) through the root shell.
+    Returns only the entries it could read; never raises.
+    """
+    root_shell = getattr(getattr(fm, "adb", None), "root_shell", None)
+    if not callable(root_shell):
+        return {}
+    try:
+        ps = root_shell("ps -A -o PID,NAME", timeout=15).stdout or ""
+        pids: dict[str, str] = {}
+        for line in ps.splitlines():
+            fields = line.split(None, 1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                continue
+            name = fields[1].strip().rsplit("/", 1)[-1]
+            if name == "system_server":
+                pids.setdefault("system_server", fields[0])
+            elif name.startswith("frida-server"):
+                pids.setdefault("frida-server", fields[0])
+        ticks: dict[str, int] = {}
+        for name, pid in pids.items():
+            stat = root_shell(f"cat /proc/{pid}/stat", timeout=15).stdout or ""
+            # comm (field 2) may contain spaces: count from the last ")".
+            rest = stat.rsplit(")", 1)[-1].split()
+            if len(rest) > 19 and rest[19].isdigit():
+                ticks[name] = int(rest[19])
+        return ticks
+    except Exception as e:
+        logger.debug(f"process start-time lookup failed: {e}")
+        return {}
+
+
+def frida_server_is_stale(fm) -> bool:
+    """Whether the running frida-server is older than the running system_server.
+
+    Injecting the mitmproxy CA restarts Zygote and with it system_server; a
+    frida-server started before that keeps talking to the dead system_server
+    and every spawn fails with ``DeadSystemException``. Never raises.
+    """
+    ticks = _process_start_ticks(fm)
+    frida_start = ticks.get("frida-server")
+    system_start = ticks.get("system_server")
+    return (
+        frida_start is not None
+        and system_start is not None
+        and frida_start < system_start
+    )
+
+
+def _wait_for_system_server(timeout: float = 30.0, step: float = 1.0) -> bool:
+    """Poll until ActivityManager is registered again after a Zygote restart."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            stdout, _ = Adb.send_adb_command("shell service check activity")
+            if ": found" in (stdout or ""):
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(step)
+
+
+def reset_frida_handles() -> None:
+    """Drop the job manager's session/device and the cached frida device.
+
+    The handles of a restarted frida-server are dead; everything re-creates
+    them lazily on the next attach/spawn. Never raises.
+    """
+    try:
+        from sandroid.services import get_frida_session_service
+
+        svc = get_frida_session_service()
+        jm = getattr(svc, "_job_manager", None)
+        if jm is not None:
+            try:
+                jm.reset_session(timeout_per_job=1.0, detach_timeout=1.0)
+            except Exception:
+                logger.debug("JobManager reset failed", exc_info=True)
+            jm.device = None
+        svc.invalidate_frida_device_cache()
+    except Exception:
+        logger.debug("Could not reset frida handles", exc_info=True)
+
+
+def _restart_locked(fm) -> bool:
+    restart = getattr(fm, "restart_frida_server_and_wait", None)
+    if callable(restart):
+        ok = bool(restart())
+    else:
+        fm.stop_frida_server()
+        ok = ensure_frida_server_started(fm)
+    reset_frida_handles()
+    return ok
+
+
+def restart_frida_server_after_system_restart(fm=None) -> tuple[bool, str]:
+    """Restart a running frida-server after Zygote/system_server restarted.
+
+    Called after the mitmproxy CA injection (which kills Zygote). Waits for
+    the new system_server, restarts frida-server and drops cached frida
+    handles. Does nothing when no frida-server was running. Never raises.
+
+    Returns:
+        ``(restarted, reason)``.
+    """
+    if fm is None:
+        try:
+            from sandroid.services import get_frida_session_service
+
+            fm = get_frida_session_service().get_frida_manager()
+        except Exception as e:
+            return False, f"Frida manager unavailable: {e}"
+    if fm is None or not _server_running(fm):
+        return False, "frida-server not running"
+    if not _wait_for_system_server():
+        logger.warning("system_server not back after 30s; restarting frida anyway")
+    with _AUTO_START_LOCK:
+        try:
+            ok = _restart_locked(fm)
+        except Exception as e:
+            return False, describe_frida_install_error(e)
+    if ok:
+        logger.info("frida-server restarted after the Zygote restart")
+        return True, "frida-server restarted"
+    return False, "frida-server restart failed (see the log)"
+
+
 def _auto_start_locked(fm, force: bool) -> tuple[bool, str]:
     if _server_running(fm):
-        return True, "frida-server already running"
+        if not frida_server_is_stale(fm):
+            return True, "frida-server already running"
+        logger.info(
+            "frida-server is older than system_server (Zygote restart, e.g. "
+            "after the CA install): restarting it"
+        )
+        try:
+            if _restart_locked(fm):
+                return True, "frida-server restarted (it predated system_server)"
+        except Exception as e:
+            return False, describe_frida_install_error(e)
+        return False, "stale frida-server could not be restarted (see the log)"
     if not (force or frida_server_auto_start_enabled()):
         return False, "frida.server_auto_start is disabled"
     try:

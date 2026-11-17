@@ -712,3 +712,30 @@ async def test_interactive_kprobe_select_with_no_device_skips_checking(
         assert kprobe_btn.disabled is False
         assert "checking" not in str(kprobe_btn.label).lower()
         assert screen._pending["tui.monitor_backend"] == "kprobe"
+
+
+# -- Phase 5: auto_device_proxy + network_reset_after_snapshot are editable ----
+
+
+@pytest.mark.asyncio
+async def test_device_proxy_switch_and_network_reset_select_stage_keys() -> None:
+    config = SandroidConfig()
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, SettingsScreen)
+
+        switch = screen.query_one("#setting-mitmproxy--auto_device_proxy", Switch)
+        assert switch.value is False
+        switch.value = True
+        await pilot.pause()
+        assert screen._pending["mitmproxy.auto_device_proxy"] is True
+
+        select = screen.query_one(
+            "#setting-analysis--network_reset_after_snapshot", Select
+        )
+        assert select.value == "airplane"
+        select.value = "svc"
+        await pilot.pause()
+        assert screen._pending["analysis.network_reset_after_snapshot"] == "svc"
