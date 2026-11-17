@@ -52,8 +52,8 @@ state. Below it, four **lenses** take the full width -- switch with
   ``b`` then ``1``-``5`` toggles the Frida bypasses (SSL, Root, Frida, Debug,
   Integrity; experimental)
 - ``2`` **Network** -- *Mitmproxy* (proxying, CA injection) and *friTap*
-- ``3`` **Files** -- *Monitor* (live file events) and *Watchlist*
-  (Spotlight files)
+- ``3`` **Files** -- what the app writes, one row per file; ``w`` watches
+  a file (★, pinned on top), ``u`` pulls and diffs it
 - ``4`` **Runs** -- Record/Play run history and diffs
 
 ``Enter`` opens details (Inspector) where a lens offers them, ``Esc`` closes

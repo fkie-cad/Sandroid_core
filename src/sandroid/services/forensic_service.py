@@ -395,6 +395,7 @@ class ForensicService:
         self,
         row_states: dict[str, dict] | None = None,
         auto_enabled: bool = False,
+        patterns: list[str] | None = None,
     ) -> None:
         """Persist the current spotlight-file watchlist membership to disk.
 
@@ -412,6 +413,7 @@ class ForensicService:
                 self._spotlight_files,
                 row_states=row_states,
                 auto_enabled=auto_enabled,
+                patterns=patterns,
             )
         except Exception as exc:
             self._logger.warning(f"Failed to persist watchlist membership: {exc}")

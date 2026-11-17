@@ -524,3 +524,22 @@ ChatPanel > #chat-mascot {
     color: #8B8B8B;
 }
 /* end runs lens */
+
+/* files lens */
+#files-panel, #files-panel > #files-table {
+    background: #1A0A2E;
+}
+#files-panel > #files-table > .datatable--cursor {
+    background: #2A1040;
+    color: #FFFFFF;
+}
+#files-panel > #files-empty {
+    color: #8B8B8B;
+}
+#files-panel > #files-input {
+    background: #0D0221;
+}
+#files-panel #files-notice-text {
+    color: #FFE600;
+}
+/* end files lens */

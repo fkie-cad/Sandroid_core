@@ -375,6 +375,13 @@ class FileSystemMonitorItem(MonitorItem):
     filename: str = ""
     new_directory: str | None = None
     new_filename: str | None = None
+    #: The process (fsmon) / kernel ``comm`` (kprobe) behind the event, and
+    #: the full on-device paths before prefix stripping -- the Files lens
+    #: keys rows and the watchlist by them. Excluded from equality so the
+    #: display identity above stays what it was.
+    process: str = field(default="", compare=False)
+    path: str = field(default="", compare=False)
+    new_path: str | None = field(default=None, compare=False)
 
 
 def build_monitor_item(
@@ -433,6 +440,9 @@ def build_monitor_item(
         filename=filename,
         new_directory=new_directory,
         new_filename=new_filename,
+        process=event.process,
+        path=event.path,
+        new_path=event.new_path,
     )
 
 
@@ -545,6 +555,7 @@ class KprobeStreamTranslator:
         self._pending: dict[int, str] = {}
         self._filemap: dict[str, tuple[str, int]] = {}
         self._prefix = _resolve_prefix_candidates(config) if config is not None else ()
+        self._comm = ""  # comm of the trace line being translated (see _feed)
 
     def _item(
         self, fse_token: str, path: str, new_path: str | None = None
@@ -569,6 +580,9 @@ class KprobeStreamTranslator:
             filename=filename,
             new_directory=new_directory,
             new_filename=new_filename,
+            process=self._comm,
+            path=path,
+            new_path=new_path,
         )
 
     def feed(self, line: str) -> list[FileSystemMonitorItem]:
@@ -588,6 +602,7 @@ class KprobeStreamTranslator:
         if m is None:
             return []
         tid = int(m.group("tid"))
+        self._comm = m.group("comm").strip()
         event = m.group("event")
         fields = _parse_kprobe_fields(m.group("rest"))
 
