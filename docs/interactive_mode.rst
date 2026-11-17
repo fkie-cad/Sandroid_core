@@ -48,8 +48,7 @@ Navigation
 Key                         Action
 ==========================  ==================================================
 ``1`` - ``4``               App / Network / Files / Runs lens
-``Shift+Left/Right``        Previous/next lens (or sub-tab after Shift+Down)
-``Shift+Up/Down``           Move between the lens bar and a lens's sub-tabs
+``Shift+Left/Right``        Previous/next lens
 ``Enter`` / ``Esc``         Open the Inspector (where offered) / close it
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
