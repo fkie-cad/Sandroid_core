@@ -210,7 +210,9 @@ def default_network(send_command: Callable[[str], tuple[str, str]]) -> str | Non
         device reports none, ``None`` when the line could not be read.
     """
     stdout, _stderr = send_command(
-        "shell \"dumpsys connectivity | grep -m1 'Active default network'\""
+        # dumpsys gets SIGPIPE once grep -m1 has its line; drop its
+        # "Broken pipe" stderr so every poll doesn't log a warning.
+        "shell \"dumpsys connectivity 2>/dev/null | grep -m1 'Active default network'\""
     )
     for line in (stdout or "").splitlines():
         if "Active default network" in line:

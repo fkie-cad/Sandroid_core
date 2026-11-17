@@ -312,3 +312,17 @@ def test_reset_network_gives_up_after_timeout():
     slept: list[float] = []
     assert reset_network(device, "airplane", timeout=3, sleep=slept.append) is False
     assert sum(slept) <= 3 + 5 + 1  # going-down wait + timeout, no hang
+
+
+def test_default_network_poll_discards_dumpsys_stderr():
+    """The grep -m1 poll makes dumpsys hit SIGPIPE; its stderr must not reach the log."""
+    from sandroid.core.adb_network import default_network
+
+    calls: list[str] = []
+
+    def send(command: str) -> tuple[str, str]:
+        calls.append(command)
+        return "Active default network: 100\n", ""
+
+    assert default_network(send) == "100"
+    assert "dumpsys connectivity 2>/dev/null |" in calls[0]
