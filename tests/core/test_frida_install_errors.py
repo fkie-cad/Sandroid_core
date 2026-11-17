@@ -275,3 +275,127 @@ def test_headless_ensure_frida_server_prints_reason(monkeypatch):
         frida_manager, "auto_start_frida_server", lambda: (True, "frida-server started")
     )
     assert initializer.ensure_frida_server(console) is True
+
+
+# --- Phase 5 N4: frida-server older than system_server (Zygote restart) ---
+
+
+def _stat_line(pid: int, start_ticks: int) -> str:
+    # /proc/<pid>/stat: "pid (comm) state ppid ..." -- field 22 is starttime.
+    rest = ["S"] + ["0"] * 18 + [str(start_ticks)] + ["0"] * 10
+    return f"{pid} (name with space) " + " ".join(rest) + "\n"
+
+
+class _ProcAdb:
+    def __init__(self, frida_start: int, system_start: int):
+        self.cmds = []
+        self.ticks = {"700": frida_start, "500": system_start}
+
+    def root_shell(self, cmd, timeout=5):
+        import types
+
+        self.cmds.append(cmd)
+        if cmd.startswith("ps -A"):
+            out = (
+                "  PID NAME\n"
+                "  500 system_server\n"
+                "  700 frida-server-17.2.0-android-arm64\n"
+            )
+        elif cmd.startswith("cat /proc/"):
+            pid = cmd.split("/")[2]
+            out = _stat_line(int(pid), self.ticks[pid])
+        else:
+            out = "0\n"
+        return types.SimpleNamespace(stdout=out, stderr="")
+
+
+class _RestartableFM(_ServerFM):
+    def __init__(self, frida_start: int, system_start: int):
+        super().__init__(running=True)
+        self.adb = _ProcAdb(frida_start, system_start)
+
+    def restart_frida_server_and_wait(self):
+        self.calls.append("restart")
+        return True
+
+
+def test_stale_frida_server_is_detected_and_restarted_at_startup(monkeypatch):
+    fm_mod = _auto(monkeypatch)
+    resets = []
+    monkeypatch.setattr(fm_mod, "reset_frida_handles", lambda: resets.append(1))
+
+    fresh = _RestartableFM(frida_start=9000, system_start=5000)
+    assert fm_mod.frida_server_is_stale(fresh) is False
+    assert fm_mod.auto_start_frida_server(fresh) == (
+        True,
+        "frida-server already running",
+    )
+    assert fresh.calls == []
+
+    stale = _RestartableFM(frida_start=5000, system_start=9000)
+    assert fm_mod.frida_server_is_stale(stale) is True
+    ok, reason = fm_mod.auto_start_frida_server(stale)
+    assert ok
+    assert "restarted" in reason
+    assert stale.calls == ["restart"]
+    assert resets == [1]
+
+
+def test_restart_after_system_restart_only_when_running(monkeypatch):
+    from sandroid.core import frida_manager as fm_mod
+
+    monkeypatch.setattr(fm_mod, "_wait_for_system_server", lambda: True)
+    monkeypatch.setattr(fm_mod, "reset_frida_handles", lambda: None)
+    fm = _RestartableFM(frida_start=1, system_start=2)
+    assert fm_mod.restart_frida_server_after_system_restart(fm) == (
+        True,
+        "frida-server restarted",
+    )
+    assert fm.calls == ["restart"]
+
+    idle = _ServerFM(running=False)
+    ok, reason = fm_mod.restart_frida_server_after_system_restart(idle)
+    assert not ok
+    assert reason == "frida-server not running"
+    assert idle.calls == []
+
+
+def test_ca_injection_restarts_frida_after_killing_zygote(monkeypatch):
+    from sandroid.core import frida_manager as fm_mod
+    from sandroid.core import proxy_manager as pm
+
+    restarts = []
+    monkeypatch.setattr(
+        fm_mod,
+        "restart_frida_server_after_system_restart",
+        lambda: restarts.append(1) or (True, "frida-server restarted"),
+    )
+    mgr = pm.CAManager()
+    monkeypatch.setattr(mgr, "_check_root_access", lambda: True)
+    monkeypatch.setattr(mgr, "get_zygote_pids", lambda: (None, 812))
+    monkeypatch.setattr(mgr, "_get_cert_hash_from_device", lambda: "c8750f0d")
+    monkeypatch.setattr(
+        mgr,
+        "determine_injection_strategy",
+        lambda: (pm.InjectionStrategy.BIND_MOUNT, 35),
+    )
+    monkeypatch.setattr(
+        pm.Adb,
+        "send_adb_command",
+        staticmethod(lambda cmd, serial=None: (mgr.DEVICE_CERT_PATH, "")),
+    )
+
+    def _inject(cert_name, pids):
+        mgr._zygote_restarted = True  # what the real kill loop sets
+        return True, "Bind-mount: injected"
+
+    monkeypatch.setattr(mgr, "_inject_bind_mount", _inject)
+    result = mgr.inject_ca_into_zygote()
+    assert result.success
+    assert restarts == [1]
+    assert result.message.endswith("; frida-server restarted")
+
+    # No Zygote restart (e.g. failed before the kill) -> frida left alone.
+    monkeypatch.setattr(mgr, "_inject_bind_mount", lambda n, p: (False, "nope"))
+    mgr.inject_ca_into_zygote()
+    assert restarts == [1]

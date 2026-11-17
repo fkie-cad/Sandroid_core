@@ -911,6 +911,7 @@ class CAManager:
                     Adb.send_adb_command(f"shell {self._root_cmd(f'kill {pid}')}")
                 except Exception:
                     pass
+            self._zygote_restarted = True
 
             # The kill -> init-respawn -> Conscrypt-reload cycle routinely takes
             # well over the old fixed 3s on a busy device. Poll until a deadline
@@ -1359,6 +1360,25 @@ class CAManager:
             zygote64_pid=zygote64_pid,
         )
 
+    @staticmethod
+    def _restart_frida_after_zygote(message: str) -> str:
+        """Restart a running frida-server; return ``message`` plus the outcome."""
+        try:
+            from sandroid.core.frida_manager import (
+                restart_frida_server_after_system_restart,
+            )
+
+            restarted, reason = restart_frida_server_after_system_restart()
+        except Exception as e:
+            logger.warning(f"frida-server restart after Zygote restart failed: {e}")
+            return f"{message}; frida-server restart failed: {e}"
+        if restarted:
+            return f"{message}; frida-server restarted"
+        if reason != "frida-server not running":
+            logger.warning(f"frida-server restart after Zygote restart: {reason}")
+            return f"{message}; {reason} (restart frida-server before spawning)"
+        return message
+
     def inject_ca_into_zygote(self, cert_path: Path | None = None) -> InjectionResult:
         """Inject CA certificate into Zygote namespace for system-wide trust.
 
@@ -1419,10 +1439,17 @@ class CAManager:
             logger.info(f"Using {strategy.value} injection (API level: {api_level})")
 
             # 6. Dispatch
+            self._zygote_restarted = False
             if strategy == InjectionStrategy.BIND_MOUNT:
                 success, message = self._inject_bind_mount(cert_name, zygote_pids)
             else:
                 success, message = self._inject_legacy(cert_name, zygote_pids)
+
+            # 7. The Zygote restart also restarted system_server; a running
+            # frida-server still points at the dead one (DeadSystemException
+            # on the next spawn), so restart it too.
+            if getattr(self, "_zygote_restarted", False):
+                message = self._restart_frida_after_zygote(message)
 
             return InjectionResult(
                 success=success,
