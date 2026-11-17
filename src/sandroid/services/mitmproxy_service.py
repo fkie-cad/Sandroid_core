@@ -765,7 +765,7 @@ def _pid_listening(pid: int, port: int, host: str = "127.0.0.1") -> bool:
     except Exception:
         import socket
 
-        target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+        target = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host  # nosec B104
         try:
             with socket.create_connection((target, port), timeout=0.5):
                 return True
