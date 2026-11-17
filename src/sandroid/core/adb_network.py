@@ -314,7 +314,7 @@ def reset_network(
         logger.warning(
             "Network reset (%s): the default network did not go down within 5s; "
             "stale connections may survive (try network_reset_after_snapshot "
-            "= \"svc\")",
+            "= svc)",
             mode,
         )
     _switch(send_command, mode, enable_network=True)
