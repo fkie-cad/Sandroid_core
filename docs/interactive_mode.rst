@@ -42,7 +42,9 @@ everything else out of the way until you ask for it:
 - **Lens bar**: ``1 App  2 Network  3 Files  4 Runs`` (a lens may show an
   alert badge such as ``⚑2``).
 - **Lens** (full width). ``Enter`` on a row opens the **Inspector** on the
-  right where the lens offers details; ``Esc`` closes it.
+  right where the lens offers details; ``[`` / ``]`` (or ``←``/``→`` when the
+  lens does not use them) switch its tabs while focus stays in the lens;
+  ``Esc`` closes it. Switching to another lens closes it too.
 - **Log ticker** (one row): the newest activity-log line. The backtick key
   opens the **log drawer** with the full activity log.
 - **AI Chat** (optional, ``Ctrl+Y``, experimental) opens in the same
@@ -57,6 +59,7 @@ Key                         Action
 ``1`` - ``4``               App / Network / Files / Runs lens
 ``Shift+Left/Right``        Previous/next lens
 ``Enter`` / ``Esc``         Open the Inspector (where offered) / close it
+``[`` / ``]``               Previous/next Inspector tab
 Backtick (grave accent)     Toggle the log drawer
 ``S`` (or ``0``)            Snapshot picker
 ``r`` / ``p``               Record / Play (replay + diff) -- from any lens
@@ -65,6 +68,7 @@ Backtick (grave accent)     Toggle the log drawer
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
 ``Ctrl+Y``                  AI Chat in the right-hand slot
 ``Ctrl+B``                  Focus the active lens (e.g. after the chat)
+``,``                       Settings
 ``D`` (Shift+D)             Switch device
 ``q`` / ``Ctrl+C``          Quit
 ==========================  ==================================================
@@ -94,9 +98,10 @@ lens focused:
   tear down hooks, Shift+``X`` clear the selection
 - ``b`` then ``1``-``5`` toggles/arms the Frida bypass categories **SSL**,
   **Root**, **Frida**, **Debug** and **Integrity**
-  (PairIP/licensing/attestation); ``b`` then ``o`` opens the Objection shell
-  (elsewhere ``b`` opens it directly). ``Ctrl+P`` toggles SSL unpinning
-  globally.
+  (PairIP/licensing/attestation); ``b`` then ``o`` (or ``b`` again) opens
+  the Objection shell (elsewhere ``b`` opens it directly). Its launch dialog
+  uses the same digits (``1`` SSL, ``2`` Root, ``3`` Frida, ``4`` Debug) plus
+  ``e`` for emulator detection. ``Ctrl+P`` toggles SSL unpinning globally.
 
 .. warning::
 
@@ -150,8 +155,12 @@ snapshots: ``c`` create, ``Enter``/``l`` load, ``d`` delete (both confirmed),
 ``a`` assign the highlighted snapshot to a slot, ``Ctrl+R`` refresh. ``1``-``8``
 load that slot after a confirm; ``s`` then ``1``-``8`` saves the current state
 into a slot (8 slots per AVD). ``Ctrl+1``-``Ctrl+8`` save into a slot from
-anywhere. The header shows the last loaded snapshot. Snapshots require an
-emulator.
+anywhere. The highlighted row stays on its snapshot while the list refreshes,
+and the confirm names the snapshot (with date and size). Deleting a snapshot
+clears the slots that pointed at it. After a load Sandroid sets SELinux back to
+Permissive (a snapshot restores the mode it was saved with) and restarts
+frida-server when ``frida.server_auto_start`` is on. The header shows the last
+loaded snapshot. Snapshots require an emulator.
 
 .. note::
 
@@ -277,8 +286,9 @@ Tips
 ----
 
 1. **Start with Frida**: install/start frida-server (``f``) before dynamic analysis.
-2. **Use snapshots**: save a clean state into a slot (``Ctrl+1``, or ``S`` ``1``) before
-   each experiment and reload it (``1``) afterwards.
+2. **Use snapshots**: save a clean state into a slot (``Ctrl+1``, or ``S``
+   then ``s`` ``1``) before each experiment and reload it (``S`` then ``1``)
+   afterwards.
 3. **Focus on one app**: set a spotlight app; App Proxies and the kprobe
    monitor can be scoped to it.
 4. **Combine tools**: App Proxy + CA injection + SSL bypass for HTTPS

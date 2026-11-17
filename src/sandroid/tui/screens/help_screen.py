@@ -7,6 +7,7 @@ applied LIVE via :meth:`textual.app.App.set_keymap`.
 """
 
 import logging
+import re
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -74,7 +75,7 @@ _CATEGORY_ORDER: list[ActionCategory] = [
 _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("Lens navigation", "sandroid.tui.screens.main_screen", "_LensHost"),
     ("Main screen", "sandroid.tui.screens.main_screen", "MainScreen"),
-    ("Inspector", "sandroid.tui.widgets.lens_shell", "Inspector"),
+    ("Inspector (while open)", "sandroid.tui.widgets.lens_shell", "Inspector"),
     ("App lens", "sandroid.tui.widgets.spotlight_panel", "SpotlightPanel"),
     ("App lens › b bypass", "sandroid.tui.widgets.spotlight_panel", "BypassChordModal"),
     ("Network lens", "sandroid.tui.widgets.network_panel", "NetworkPanel"),
@@ -85,7 +86,21 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
         "sandroid.tui.modals.snapshot_save_choice_modal",
         "SnapshotPickerModal",
     ),
-    ("Snapshot list", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
+    ("Snapshot picker (S)", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
+]
+
+#: App-wide keys that no MenuController action describes (they are plain App
+#: bindings without a rebindable id). Listed first, under "General".
+_GENERAL_KEYS: list[tuple[str, str]] = [
+    ("question_mark", "This help"),
+    ("escape", "Close Inspector / chat / log drawer, then dialogs"),
+    ("ctrl+y", "AI chat (side panel; Ctrl+Y again closes it)"),
+    ("ctrl+b", "Focus the lens (back from the chat or Inspector)"),
+    ("comma", "Settings"),
+    ("0", "Snapshot picker (same as S)"),
+    ("ctrl+p", "SSL unpinning on/off"),
+    ("Y", "Copy the log"),
+    ("ctrl+c", "Quit (asks first, like q)"),
 ]
 
 #: Binding ids from earlier releases that may linger in a user's
@@ -103,30 +118,55 @@ _PANEL_PREFIX = "panel:"
 
 
 def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
-    """``[(key, description)]`` of a panel class's own BINDINGS (best effort)."""
+    """``[(key display, description)]`` of a panel class's own BINDINGS.
+
+    Keys with the same description are merged into one row (``o / b``,
+    ``Del / Backspace``), and ``<desc> 1`` .. ``<desc> N`` bound to the digit
+    keys collapse to one ``<desc> 1-N`` row. Best effort: ``[]`` on errors.
+    """
     import importlib
 
     try:
         cls = getattr(importlib.import_module(module), cls_name)
     except Exception:
         return []
-    rows: list[tuple[str, str]] = []
+    merged: dict[str, list[str]] = {}
     for entry in cls.__dict__.get("BINDINGS", []):
         if isinstance(entry, Binding):
             key, desc = entry.key, entry.description
+            shown = entry.key_display or _format_key_display(key)
         else:
             key, desc = entry[0], (entry[2] if len(entry) > 2 else "")
-        if desc:
-            rows.append((key, desc))
+            shown = _format_key_display(key)
+        if not desc:
+            continue
+        digit = re.fullmatch(r"(.*\S) (\d)", desc)
+        if digit and key == digit.group(2):
+            desc, shown = f"{digit.group(1)} #", key
+        keys = merged.setdefault(desc, [])
+        if shown not in keys:
+            keys.append(shown)
+    rows: list[tuple[str, str]] = []
+    for desc, keys in merged.items():
+        if desc.endswith(" #"):
+            span = f"{keys[0]}-{keys[-1]}" if len(keys) > 1 else keys[0]
+            rows.append((span, f"{desc[:-2]} {span}"))
+        else:
+            rows.append((" / ".join(keys), desc))
     return rows
 
 
-# Column widths for the aligned row layout (command / description / key).
-# Sized for the wide modal so rows rarely truncate; the detail pane below the
-# list always shows the highlighted row's full, untruncated text regardless.
+# Column widths for the aligned row layout (command / description / key) on
+# a wide terminal. ``HelpScreen._fit_columns`` shrinks them to the screen
+# (the description column goes first); the detail pane below the list shows
+# the highlighted row's full, untruncated text regardless.
 _NAME_W = 32
 _DESC_W = 50
-_KEY_W = 14
+_KEY_W = 18
+
+#: Below this many rows (or 100 columns) the help drops its margins and the
+#: detail pane, so the list keeps most of an 80x24 terminal.
+_COMPACT_HEIGHT = 32
 
 
 def _format_key_display(key: str) -> str:
@@ -155,7 +195,8 @@ class HelpScreen(ModalScreen):
     }
 
     #kb-container {
-        width: 110;
+        width: 112;
+        max-width: 100%;
         height: 90%;
         max-height: 48;
         background: #0d1117;
@@ -196,6 +237,19 @@ class HelpScreen(ModalScreen):
         margin-top: 1;
         width: 100%;
     }
+
+    HelpScreen.-compact #kb-container {
+        height: 100%;
+        max-height: 100%;
+        padding: 0 1;
+    }
+    HelpScreen.-compact #kb-title,
+    HelpScreen.-compact #kb-footer {
+        margin: 0;
+    }
+    HelpScreen.-compact #kb-detail {
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -235,6 +289,8 @@ class HelpScreen(ModalScreen):
         self._capture_id: str | None = None
         # Pending conflict confirmation: (action_id, key) awaiting a re-press.
         self._pending_candidate: tuple[str, str] | None = None
+        # Column widths fitted to the terminal (see _fit_columns).
+        self._widths: tuple[int, int, int] = (_NAME_W, _DESC_W, _KEY_W)
 
     # -- Data helpers ---------------------------------------------------------
 
@@ -291,7 +347,58 @@ class HelpScreen(ModalScreen):
             }
         else:
             self._pending = {}
+        self._fit_columns()
         self._rebuild_list()
+        # The list's real width is known after the first layout.
+        self.call_after_refresh(self._refit)
+
+    def on_resize(self, event) -> None:
+        """Re-fit the columns (and compact mode) to a resized terminal."""
+        try:
+            width, height = self.app.size.width, self.app.size.height
+            self.set_class(height < _COMPACT_HEIGHT or width < 100, "-compact")
+        except Exception:
+            pass
+        self.call_after_refresh(self._refit)
+
+    def _refit(self) -> None:
+        if self._fit_columns():
+            self._rebuild_list()
+
+    def _fit_columns(self) -> bool:
+        """Size the row columns to the list's width; True if anything changed.
+
+        Uses the list's laid-out content width (before the first layout: an
+        estimate from the terminal size). The key column keeps its width, the
+        name column shrinks to 16, and the description column takes the rest
+        (it is dropped below 12 cells -- the detail pane has the full text).
+        Also switches the compact layout (no margins, no detail pane) on
+        terminals under 32 rows or 100 columns.
+        """
+        try:
+            width, height = self.app.size.width, self.app.size.height
+        except Exception:
+            return False
+        compact = height < _COMPACT_HEIGHT or width < 100
+        inner = 0
+        try:
+            inner = self.query_one(
+                "#kb-list", OptionList
+            ).scrollable_content_region.width
+        except Exception:
+            inner = 0
+        if inner <= 0:
+            inner = min(112, width) - (8 if compact else 12)
+        name_w = max(16, min(_NAME_W, inner - _KEY_W - 2 - 24))
+        desc_w = inner - name_w - 2 - _KEY_W
+        if desc_w < 12:
+            desc_w = 0
+            name_w = max(12, inner - _KEY_W)
+        widths = (name_w, min(desc_w, _DESC_W), _KEY_W)
+        changed = widths != self._widths or compact != self.has_class("-compact")
+        self._widths = widths
+        self.set_class(compact, "-compact")
+        return changed
 
     @staticmethod
     def _footer_text() -> str:
@@ -308,26 +415,31 @@ class HelpScreen(ModalScreen):
             return "save current state"
         return action.description or action.display_name
 
-    @staticmethod
-    def _columns(name: str, desc: str, key_display: str, *, colored: bool) -> str:
+    def _columns(self, name: str, desc: str, key_display: str, *, colored: bool) -> str:
         """Lay out a row as aligned columns; pad on plain text, colour the key.
 
         Rich markup has no visible width, so the command/description columns are
         padded as plain text and only the (right-aligned) key gets colour.
+        Widths come from :meth:`_fit_columns`; a zero description width drops
+        that column.
         """
-        if len(name) > _NAME_W:
-            name = name[: _NAME_W - 1] + "…"
-        if len(desc) > _DESC_W:
-            desc = desc[: _DESC_W - 1] + "…"
+        name_w, desc_w, key_w = self._widths
+        if not desc and desc_w:
+            # No description (panel keys): the name uses both columns.
+            name_w, desc_w = name_w + 2 + desc_w, 0
+        if len(name) > name_w:
+            name = name[: name_w - 1] + "…"
+        if len(desc) > desc_w:
+            desc = (desc[: desc_w - 1] + "…") if desc_w else ""
         bracket = f"[{key_display}]"  # plain, for width
-        pad = max(1, _KEY_W - len(bracket))
-        name_field = name.ljust(_NAME_W)
-        desc_field = desc.ljust(_DESC_W)
+        pad = max(1, key_w - len(bracket))
+        name_field = name.ljust(name_w)
+        desc_field = f"  {desc.ljust(desc_w)}" if desc_w else ""
         if colored:
             key_field = (" " * pad) + f"[bold #ff79c6]\\[{key_display}][/]"
         else:
             key_field = (" " * pad) + f"\\[{key_display}]"
-        return f"{name_field}  {desc_field}{key_field}"
+        return f"{name_field}{desc_field}{key_field}"
 
     def _rebuild_list(self) -> None:
         """Rebuild the OptionList rows from the current effective keys."""
@@ -367,6 +479,17 @@ class HelpScreen(ModalScreen):
 
         first_enabled: int | None = None
         index = 0
+        option_list.add_option(Option("[dim]── General ──[/]", disabled=True))
+        index += 1
+        for key, desc in _GENERAL_KEYS:
+            label = self._columns(desc, "", _format_key_display(key), colored=False)
+            option_list.add_option(
+                Option(
+                    f"[#8b949e]{label}[/]",
+                    id=f"{_PANEL_PREFIX}General|{_format_key_display(key)}",
+                )
+            )
+            index += 1
         for category in _CATEGORY_ORDER:
             actions = by_category.get(category)
             if not actions:
@@ -375,12 +498,15 @@ class HelpScreen(ModalScreen):
             option_list.add_option(Option(f"[dim]{header}[/]", disabled=True))
             index += 1
 
-            # The demo/main flow (Record, Play) leads; the rest alphabetical.
+            # The demo/main flow (Record, Play) leads, digit keys (the lenses
+            # 1-4) follow in key order; the rest alphabetical.
             for action in sorted(
                 actions,
                 key=lambda a: (
                     a.name not in ("record", "play"),
                     a.name != "record",
+                    not str(a.key or "").isdigit(),
+                    str(a.key) if str(a.key or "").isdigit() else "",
                     a.display_name.lower(),
                 ),
             ):
@@ -399,23 +525,23 @@ class HelpScreen(ModalScreen):
                     label = self._columns(
                         action.display_name, desc, key_display, colored=False
                     )
-                    option_list.add_option(
-                        Option(f"[dim]{label}  (fixed)[/]", disabled=True)
-                    )
+                    # Not rebindable: dim (the detail pane says "fixed").
+                    option_list.add_option(Option(f"[dim]{label}[/]", disabled=True))
                 index += 1
 
+        shown_headings: set[str] = set()
         for heading, module, cls_name in _PANEL_SECTIONS:
             rows = _panel_bindings(module, cls_name)
             if not rows:
                 continue
-            option_list.add_option(
-                Option(f"[dim]── {heading} (when focused) ──[/]", disabled=True)
-            )
-            index += 1
-            for key, desc in rows:
-                label = self._columns(
-                    desc, heading, _format_key_display(key), colored=False
+            if heading not in shown_headings:
+                shown_headings.add(heading)
+                option_list.add_option(
+                    Option(f"[dim]── {heading} ──[/]", disabled=True)
                 )
+                index += 1
+            for key, desc in rows:
+                label = self._columns(desc, "", key, colored=False)
                 # Enabled (so the list can scroll down to it from the
                 # keyboard) but not rebindable: no id in self._defaults.
                 option_list.add_option(
@@ -464,12 +590,18 @@ class HelpScreen(ModalScreen):
     def _detail_markup(self, action_id: str) -> str:
         """Full, untruncated detail for one action: name · category, description, key."""
         if action_id.startswith(_PANEL_PREFIX):
+            # The id carries the key as displayed (merged rows: "o / b").
             heading, _, key = action_id[len(_PANEL_PREFIX) :].partition("|")
+            where = (
+                "Works everywhere on the main screen."
+                if heading == "General"
+                else "Works only while this lens / view has focus "
+                "(1-4 or Shift+←/→ switch lenses)."
+            )
             return (
                 f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
-                "[#c9d1d9]Works only while this lens / view has focus "
-                "(1-4 or Shift+←/→ switch lenses).[/]\n\n"
-                f"[dim]Key[/]  [#8b949e]\\[{_format_key_display(key)}][/]"
+                f"[#c9d1d9]{where}[/]\n\n"
+                f"[dim]Key[/]  [#8b949e]\\[{key}][/]"
                 "   [dim](fixed — cannot be rebound)[/]"
             )
         action = self._controller.get_action_by_name(action_id)

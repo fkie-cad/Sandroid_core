@@ -342,8 +342,8 @@ async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
         assert "Record an action" in rows[first + 1]
         assert "Play loaded action" in rows[first + 2]
         # Panel-scoped keys are listed (read from the panels' BINDINGS).
-        assert "App lens (when focused)" in text
-        assert "Snapshot picker (S) (when focused)" in text
+        assert "── App lens ──" in text
+        assert "── Snapshot picker (S) ──" in text
         assert "PDF report" in text
         await pilot.press("escape")
 

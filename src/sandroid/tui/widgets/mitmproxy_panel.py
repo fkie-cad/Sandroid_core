@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import concurrent.futures
+import contextvars
 import logging
 import os
 import subprocess
@@ -144,6 +145,10 @@ class MitmproxyPanel(Widget):
     def on_mount(self) -> None:
         try:
             self._main_loop = asyncio.get_running_loop()
+            # Loop callbacks run in the *scheduling* thread's contextvars
+            # context, which lacks Textual's active_app: a set_timer made in
+            # one then failed with LookupError. Run them in the UI context.
+            self._ui_ctx = contextvars.copy_context()
         except RuntimeError:
             self._main_loop = None
         self._service.add_listener(self._on_service_line)
@@ -176,7 +181,11 @@ class MitmproxyPanel(Widget):
         loop = self._main_loop
         try:
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(self._handle_device_change, device)
+                loop.call_soon_threadsafe(
+                    self._handle_device_change,
+                    device,
+                    context=getattr(self, "_ui_ctx", None),
+                )
         except RuntimeError:
             pass
 
@@ -282,7 +291,9 @@ class MitmproxyPanel(Widget):
         loop = self._main_loop
         try:
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(self._append_line, line)
+                loop.call_soon_threadsafe(
+                    self._append_line, line, context=getattr(self, "_ui_ctx", None)
+                )
         except RuntimeError:
             pass
 
@@ -1573,7 +1584,9 @@ class MitmproxyPanel(Widget):
         loop = self._main_loop
         try:
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(self._append_line, line)
+                loop.call_soon_threadsafe(
+                    self._append_line, line, context=getattr(self, "_ui_ctx", None)
+                )
         except RuntimeError:
             pass
 

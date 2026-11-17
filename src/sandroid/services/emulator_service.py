@@ -599,6 +599,11 @@ class EmulatorService:
             # replays), skewing file timestamps / the timeline against the
             # host. Re-sync it to the host clock.
             self._resync_guest_clock(adb, serial)
+            # The snapshot also restores the kernel's SELinux mode. One saved
+            # before startup's ``setenforce 0`` comes back Enforcing, and then
+            # root binder calls (settings, dumpsys, screencap, frida) fail with
+            # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it.
+            self._restore_selinux_permissive(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -634,6 +639,47 @@ class EmulatorService:
         self._logger.warning(
             "Could not resync the guest clock after snapshot load "
             "(needs root); device timestamps may lag the host"
+        )
+        return False
+
+    def _restore_selinux_permissive(self, adb: AdbProtocol, serial: str | None) -> bool:
+        """Best-effort: put SELinux back to Permissive after a snapshot load.
+
+        Mirrors the startup preparation (``setup_checks.check_and_set_selinux``):
+        only acts when ``getenforce`` says Enforcing; tries ``setenforce 0``,
+        then via ``su``, then after ``adb root``. Never raises; returns whether
+        the device ends up (or already was) Permissive.
+        """
+
+        def mode() -> str:
+            try:
+                stdout, _stderr = adb.send_adb_command(
+                    "shell getenforce", serial=serial
+                )
+            except Exception:
+                return ""
+            return str(stdout or "").strip().lower()
+
+        if mode() != "enforcing":
+            return True
+        attempts = (
+            ("shell setenforce 0",),
+            ("shell su 0 setenforce 0",),
+            ("root", "wait-for-device", "shell setenforce 0"),
+        )
+        for commands in attempts:
+            for command in commands:
+                try:
+                    adb.send_adb_command(command, serial=serial)
+                except Exception as exc:
+                    self._logger.debug(f"{command!r} after snapshot load failed: {exc}")
+                    break
+            if mode() == "permissive":
+                self._logger.info("SELinux set back to Permissive after snapshot load")
+                return True
+        self._logger.warning(
+            "SELinux is Enforcing after the snapshot load and could not be set "
+            "to Permissive (needs root): adb/frida tooling may fail"
         )
         return False
 

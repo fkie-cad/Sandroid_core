@@ -41,6 +41,7 @@ deadlock a publisher on a background thread).
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -440,6 +441,10 @@ class FilesPanel(Widget):
 
             try:
                 self._main_loop = asyncio.get_running_loop()
+                # Loop callbacks run in the *scheduling* thread's contextvars
+                # context, which lacks Textual's active_app: a set_timer made in
+                # one then failed with LookupError. Run them in the UI context.
+                self._ui_ctx = contextvars.copy_context()
             except RuntimeError:
                 self._main_loop = None
             bus = EventBus.get()
@@ -448,7 +453,9 @@ class FilesPanel(Widget):
                 loop = self._main_loop
                 try:
                     if loop is not None and not loop.is_closed():
-                        loop.call_soon_threadsafe(fn, *args)
+                        loop.call_soon_threadsafe(
+                            fn, *args, context=getattr(self, "_ui_ctx", None)
+                        )
                 except RuntimeError:
                     pass
 

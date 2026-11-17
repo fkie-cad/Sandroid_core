@@ -71,8 +71,9 @@ shows: ``title``, optional ``subtitle``, ordered ``sections`` of
 ``(heading, renderable)`` (a ``str`` is Rich markup; any Rich renderable --
 ``Table.grid()``, ``Syntax``, ``Text`` -- works), optional ``footer`` key
 hints (shown on the frame's bottom edge), optional ``tabs`` (a sequence of
-``(tab name, sections)``; when given, ``sections`` is ignored and ←/→ or a
-click switches tabs), and an optional ``key`` identifying the inspected row.
+``(tab name, sections)``; when given, ``sections`` is ignored and ``[``/``]``
+-- or ←/→ unless the focused lens widget uses them -- or a click switches
+tabs), and an optional ``key`` identifying the inspected row.
 
 * ``MainScreen.open_inspector(content)`` -- opens the side slot (closing the
   AI chat if it was there) or replaces the content in place.
@@ -81,6 +82,8 @@ click switches tabs), and an optional ``key`` identifying the inspected row.
   ``MainScreen.inspector_content.key`` to know whether the open Inspector
   still shows your row. The active tab is kept when the tab names match.
 * ``MainScreen.close_inspector()`` / ``MainScreen.inspector_is_open``.
+* Switching to another lens closes the Inspector (its content and key hints
+  belong to the lens that opened it).
 * Focus stays in the lens when the Inspector opens, so ↑/↓ + Enter keep
   working; Tab or a click moves focus into the Inspector to scroll it.
 * Esc closes the side slot (Inspector or chat) before anything else on the
@@ -480,8 +483,10 @@ class Inspector(Vertical):
         # Display-only: Esc is an App priority binding that reaches
         # MainScreen.handle_escape first, which closes the slot.
         Binding("escape", "close", "Close"),
-        Binding("left", "tab(-1)", "Prev tab", show=False),
-        Binding("right", "tab(1)", "Next tab", show=False),
+        # No description: the help lists MainScreen's [ ] / ←/→ instead,
+        # which reach the Inspector wherever focus is.
+        Binding("left", "tab(-1)", "", show=False),
+        Binding("right", "tab(1)", "", show=False),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -513,8 +518,11 @@ class Inspector(Vertical):
         if content is None:
             return
         self.border_title = f"Inspector · {content.title}"
-        hints = f"{content.footer}   esc close" if content.footer else "esc close"
-        self.border_subtitle = hints
+        hints = [content.footer] if content.footer else []
+        if content.tabs:
+            hints.append(r"\[ ] tabs")
+        hints.append("esc close")
+        self.border_subtitle = "   ".join(hints)
         try:
             sub = self.query_one("#inspector-subtitle", Static)
             sub.update(_as_text(content.subtitle) if content.subtitle else "")

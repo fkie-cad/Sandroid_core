@@ -310,19 +310,8 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-select",
             )
 
-        # Default View
-        with Horizontal(classes="setting-row"):
-            yield Label("Default View:", classes="setting-label")
-            yield Select(
-                [
-                    ("forensic", "forensic"),
-                    ("malware", "malware"),
-                    ("security", "security"),
-                ],
-                value=config.analysis.default_view,
-                id="setting-analysis--default_view",
-                classes="setting-select",
-            )
+        # (No "Default View" row: the TUI has no views since 2.1, and
+        # ``analysis.default_view`` only matters to the legacy CLI.)
 
         # Emulator Device Name
         with Horizontal(classes="setting-row"):

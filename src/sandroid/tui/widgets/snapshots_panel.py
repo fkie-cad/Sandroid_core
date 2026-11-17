@@ -19,6 +19,7 @@ back to the Textual main thread.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import logging
 import threading
 import time
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING
 from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from sandroid.tui.widgets.lens_shell import is_shown
 
@@ -148,6 +150,9 @@ class SnapshotsPanel(Widget):
         self._refresh_inflight = False
         # Newest-first list of snapshot dicts ({id,tag,size,date,clock}).
         self._snapshots: list[dict] = []
+        # The (label, tag) rows the OptionList shows: a rebuild with the same
+        # rows is skipped so the highlight and scroll position stay put.
+        self._shown_rows: list[tuple[str, str | None]] | None = None
 
     # -- services (lazy) --------------------------------------------------
 
@@ -233,6 +238,10 @@ class SnapshotsPanel(Widget):
 
             try:
                 self._main_loop = asyncio.get_running_loop()
+                # Loop callbacks run in the *scheduling* thread's contextvars
+                # context, which lacks Textual's active_app: a set_timer made in
+                # one then failed with LookupError. Run them in the UI context.
+                self._ui_ctx = contextvars.copy_context()
             except RuntimeError:
                 self._main_loop = None
 
@@ -247,7 +256,10 @@ class SnapshotsPanel(Widget):
                         if loop is not None and not loop.is_closed():
                             # Visibility-gated: a state change must not fire the
                             # slow telnet ``list`` while the tab is hidden.
-                            loop.call_soon_threadsafe(self._refresh_if_visible)
+                            loop.call_soon_threadsafe(
+                                self._refresh_if_visible,
+                                context=getattr(self, "_ui_ctx", None),
+                            )
                     except RuntimeError:
                         pass
 
@@ -289,7 +301,9 @@ class SnapshotsPanel(Widget):
         loop = self._main_loop
         try:
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(fn, *args)
+                loop.call_soon_threadsafe(
+                    fn, *args, context=getattr(self, "_ui_ctx", None)
+                )
         except RuntimeError:
             pass
 
@@ -326,10 +340,19 @@ class SnapshotsPanel(Widget):
         if not self._emulator_available():
             return ""
         slot_map = self._slot_map()
+        known = self._known_tags() if self._snapshots else None
         cells: list[tuple[str, str]] = []  # (plain, markup) per slot
         for i in range(1, 9):
             tag = slot_map.get(str(i))
-            if tag:
+            if tag and known is not None and tag not in known:
+                disp = tag if len(tag) <= 12 else tag[:11] + "…"
+                cells.append(
+                    (
+                        f"[{i}] {disp} (gone)",
+                        f"[#5b6479]\\[{i}] [s]{disp}[/s] (gone)[/]",
+                    )
+                )
+            elif tag:
                 disp = tag if len(tag) <= 18 else tag[:17] + "…"
                 cells.append((f"[{i}] {disp}", f"[b #fbbf24]\\[{i}][/] {disp}"))
             else:
@@ -353,7 +376,13 @@ class SnapshotsPanel(Widget):
         return f"{prefix}{date}  ·  {size}  ·  [b]{tag}[/]"
 
     def _rebuild_list(self) -> None:
-        """Rebuild the OptionList + header + slot memory on the main thread."""
+        """Rebuild the OptionList + header + slot memory on the main thread.
+
+        The highlighted snapshot is kept **by tag**: the slow poll rebuilds
+        the list every few seconds, and resetting the highlight to row 0 made
+        Enter / ``d`` act on whatever snapshot happened to be newest. When
+        the rows did not change at all, the options are left alone.
+        """
         try:
             header = self.query_one("#snapshots-header", Static)
             header.update(self._render_header())
@@ -367,41 +396,74 @@ class SnapshotsPanel(Widget):
             option_list = self.query_one("#snapshots-list", OptionList)
         except Exception:
             return
+        # (label, tag) per row; the tag doubles as the option id, so the
+        # highlighted row always names its own snapshot -- even while a
+        # worker has already swapped ``_snapshots`` for a newer list.
+        if not self._emulator_available():
+            rows = [
+                ("[#5b6479]start an emulator (D) to save and load snapshots[/]", None)
+            ]
+        elif not self._snapshots:
+            rows = [("[#5b6479]no snapshots — press c to create[/]", None)]
+        else:
+            rows = []
+            for snap in self._snapshots:
+                tag = self._tag_of(snap)
+                if tag is not None and all(tag != t for _l, t in rows):
+                    rows.append((self._option_label(snap), tag))
+        if rows == self._shown_rows and option_list.option_count == len(rows):
+            return  # unchanged: keep the user's highlight and scroll position
+        previous_tag = self._highlighted_tag()
+        previous_index = option_list.highlighted
         try:
             option_list.clear_options()
-            if not self._emulator_available():
-                option_list.add_option(
-                    "[#5b6479]start an emulator (D) to save and load snapshots[/]"
-                )
+            option_list.add_options([Option(label, id=tag) for label, tag in rows])
+            self._shown_rows = rows
+            tags = [tag for _label, tag in rows if tag is not None]
+            if not tags:
                 return
-            if not self._snapshots:
-                option_list.add_option("[#5b6479]no snapshots — press c to create[/]")
-                return
-            for snap in self._snapshots:
-                option_list.add_option(self._option_label(snap))
-            # Pre-select the newest row: OptionList leaves ``highlighted`` None
-            # until the user navigates, which would make Load/Delete report "no
-            # selection" on a freshly-opened tab. Default to the first (newest).
-            try:
-                option_list.highlighted = 0
-            except Exception:
-                pass
+            if previous_tag in tags:
+                index = tags.index(previous_tag)
+            elif previous_index is not None:
+                # The highlighted snapshot is gone (deleted): stay on the same
+                # row position rather than jumping to the top.
+                index = min(previous_index, len(tags) - 1)
+            else:
+                # Fresh list: OptionList leaves ``highlighted`` None until the
+                # user navigates, which would make Load/Delete report "no
+                # selection". Default to the first (newest) row.
+                index = 0
+            option_list.highlighted = index
         except Exception as exc:
             logger.debug(f"SnapshotsPanel rebuild failed: {exc}")
 
+    @staticmethod
+    def _tag_of(snap: dict) -> str | None:
+        return snap.get("tag") or snap.get("id") or None
+
+    def snapshot_summary(self, tag: str) -> str:
+        """``'tag' (date · size)`` for confirm dialogs, so they name the row."""
+        for snap in self._snapshots:
+            if self._tag_of(snap) == tag:
+                bits = [b for b in (snap.get("date"), snap.get("size")) if b]
+                if bits:
+                    return f"'{tag}' ({' · '.join(str(b) for b in bits)})"
+        return f"'{tag}'"
+
     def _highlighted_tag(self) -> str | None:
-        """Tag of the currently highlighted snapshot, or None."""
-        if not self._snapshots:
-            return None
+        """Tag of the currently highlighted snapshot row, or None.
+
+        Read from the highlighted option's id (= its tag), not by indexing
+        ``_snapshots``: that list can already hold a newer fetch whose rows
+        are not on screen yet.
+        """
         try:
-            option_list = self.query_one("#snapshots-list", OptionList)
-            idx = option_list.highlighted
+            option = self.query_one("#snapshots-list", OptionList).highlighted_option
         except Exception:
             return None
-        if idx is None or idx < 0 or idx >= len(self._snapshots):
+        if option is None:
             return None
-        snap = self._snapshots[idx]
-        return snap.get("tag") or snap.get("id") or None
+        return option.id or None
 
     # -- slot memory (per-AVD; persisted in tui.snapshot_slots) ------------
 
@@ -540,6 +602,11 @@ class SnapshotsPanel(Widget):
             return
         if not self._is_on_screen():
             return
+        try:
+            if self.app.screen is not self.screen:
+                return  # a confirm/input dialog is open on top of the picker
+        except Exception:
+            return
         self.refresh_snapshots()
 
     # -- actions (main-thread entry points) -------------------------------
@@ -607,6 +674,7 @@ class SnapshotsPanel(Widget):
                 if self._toolbox().load_snapshot(tag) is False:
                     return False, f"Could not load '{tag}' (see the log)"
                 _forget_device_handles()
+                self._restart_frida_after_load()
                 self._post(self._note_loaded, tag, None)
                 return True, f"Loaded '{tag}'"
 
@@ -615,7 +683,10 @@ class SnapshotsPanel(Widget):
         self.app.push_screen(
             ConfirmModal(
                 title="Load snapshot",
-                message=f"Load '{tag}'? Current state will be lost.",
+                message=(
+                    f"Load snapshot {self.snapshot_summary(tag)}? "
+                    "Current state will be lost."
+                ),
             ),
             on_result,
         )
@@ -639,6 +710,10 @@ class SnapshotsPanel(Widget):
                 # rejected `avd snapshot del` surfaces as a real failure.
                 ok = self._toolbox().delete_snapshot(tag)
                 if ok:
+                    # A slot must not outlive its snapshot.
+                    for slot, slot_tag in self._slot_map().items():
+                        if slot_tag == tag:
+                            self._write_slot(slot, None)
                     return True, f"Deleted '{tag}'"
                 return False, f"Could not delete '{tag}' (emulator rejected it)"
 
@@ -647,7 +722,10 @@ class SnapshotsPanel(Widget):
         self.app.push_screen(
             ConfirmModal(
                 title="Delete snapshot",
-                message=f"Delete '{tag}'? This cannot be undone.",
+                message=(
+                    f"Delete snapshot {self.snapshot_summary(tag)}? "
+                    "This cannot be undone."
+                ),
             ),
             on_result,
         )
@@ -673,9 +751,15 @@ class SnapshotsPanel(Widget):
         try:
             if not self._emulator_available():
                 return None
-            return self._slot_map().get(str(slot)) or None
+            tag = self._slot_map().get(str(slot)) or None
+            if tag and self._snapshots and tag not in self._known_tags():
+                return None  # load_slot explains that it no longer exists
+            return tag
         except Exception:
             return None
+
+    def _known_tags(self) -> set[str]:
+        return {t for t in (self._tag_of(s) for s in self._snapshots) if t}
 
     def load_slot(self, slot: int | str) -> None:
         """Load the snapshot assigned to ``slot`` (no confirm here).
@@ -695,8 +779,7 @@ class SnapshotsPanel(Widget):
             return
         # If we have a fresh list, catch a slot that points at a deleted tag.
         if self._snapshots:
-            known = {s.get("tag") or s.get("id") for s in self._snapshots}
-            if tag not in known:
+            if tag not in self._known_tags():
                 self._notify(
                     f"Slot {slot} points to '{tag}', which no longer exists.",
                     "warning",
@@ -707,6 +790,7 @@ class SnapshotsPanel(Widget):
             if self._toolbox().load_snapshot(tag) is False:
                 return False, f"Could not load slot {slot} ('{tag}', see the log)"
             _forget_device_handles()
+            self._restart_frida_after_load()
             self._post(self._note_loaded, tag, slot)
             return True, f"Loaded slot {slot} ('{tag}')"
 
@@ -812,6 +896,22 @@ class SnapshotsPanel(Widget):
         if wid in _ACTION_CELLS:
             event.stop()
             self.dispatch_action_cell(wid)
+
+    def _restart_frida_after_load(self) -> None:
+        """Honour ``frida.server_auto_start`` again after a snapshot load.
+
+        The load reverts the device's processes to the snapshot, so a
+        frida-server started this session is gone (Frida showed "○ off").
+        Runs the app's startup auto-start on its own daemon thread, so the
+        "Loaded" toast does not wait for frida-server. Safe off the UI thread.
+        """
+        app = getattr(self, "_app_ref", None)
+        start = getattr(app, "_auto_start_frida_server", None)
+        if start is None:
+            return
+        threading.Thread(
+            target=start, name="sandroid-frida-after-load", daemon=True
+        ).start()
 
     def _note_loaded(self, tag: str, slot: str | None) -> None:
         """Tell the main screen which snapshot is loaded (header indicator)."""

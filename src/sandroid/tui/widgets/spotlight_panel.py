@@ -18,6 +18,7 @@ threads; UI updates are always marshalled back to the Textual main thread.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import functools
 import logging
 import threading
@@ -30,6 +31,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from sandroid.tui.modals.base import FridaModal as _FridaModalBase
+from sandroid.tui.modals.objection_modal import BYPASS_KEYS
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -37,15 +39,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # (chord digit, category, label) for the immediate bypass toggles: ``b`` then
-# the digit (BypassChordModal). All bypass tiers are experimental, hence the
-# "(exp.)" tag.
-_BYPASS_TOGGLES = [
-    ("1", "ssl", "SSL (exp.)"),
-    ("2", "root", "Root (exp.)"),
-    ("3", "frida", "Frida (exp.)"),
-    ("4", "debug", "Debug (exp.)"),
-    ("5", "integrity", "Integ (exp.)"),
-]
+# the digit (BypassChordModal). Built from the one digit table the Objection
+# modal uses too (``BYPASS_KEYS``). All bypass tiers are experimental, hence
+# the "(exp.)" tag.
+_BYPASS_TOGGLES = [(key, cat, f"{label} (exp.)") for key, cat, label in BYPASS_KEYS]
 
 # Clickable action-cell id -> panel action method. Routed from
 # MainScreen.on_click (same dispatch as the bottom tab bar / arrow).
@@ -211,6 +208,10 @@ class SpotlightPanel(Widget):
 
             try:
                 self._main_loop = asyncio.get_running_loop()
+                # Loop callbacks run in the *scheduling* thread's contextvars
+                # context, which lacks Textual's active_app: a set_timer made in
+                # one then failed with LookupError. Run them in the UI context.
+                self._ui_ctx = contextvars.copy_context()
             except RuntimeError:
                 self._main_loop = None
 
@@ -223,7 +224,10 @@ class SpotlightPanel(Widget):
                     loop = self._main_loop
                     try:
                         if loop is not None and not loop.is_closed():
-                            loop.call_soon_threadsafe(self.refresh_panel)
+                            loop.call_soon_threadsafe(
+                                self.refresh_panel,
+                                context=getattr(self, "_ui_ctx", None),
+                            )
                     except RuntimeError:
                         pass
 
@@ -265,7 +269,9 @@ class SpotlightPanel(Widget):
         loop = self._main_loop
         try:
             if loop is not None and not loop.is_closed():
-                loop.call_soon_threadsafe(fn, *args)
+                loop.call_soon_threadsafe(
+                    fn, *args, context=getattr(self, "_ui_ctx", None)
+                )
         except RuntimeError:
             pass
 

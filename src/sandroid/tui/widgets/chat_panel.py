@@ -551,7 +551,7 @@ class ChatPanel(Widget):
         # when its owner is in the focused widget's ancestor chain, so it
         # does not hijack ctrl+x elsewhere in the app.
         Binding("ctrl+x", "stop_turn", "Stop", priority=True),
-        ("ctrl+l", "clear_log", "Clear log"),
+        ("ctrl+l", "clear_log", "Clear chat"),
         # Bare up/down are unbound app-level (only shift+up/down are used, see
         # app.py/main_screen.py) and a single-line Input never consumes them,
         # so they bubble from the focused Input up to this panel. They drive
@@ -687,6 +687,9 @@ class ChatPanel(Widget):
         yield _ChatLog(
             markup=True,
             wrap=True,
+            # RichLog never wraps narrower than ``min_width`` (default 78):
+            # the side slot is ~60 cells, so every banner line was cut off.
+            min_width=20,
             auto_scroll=True,
             id="chat-log",
         )
@@ -738,6 +741,21 @@ class ChatPanel(Widget):
         # continuously). Mirrors status_bar.py's cheap change-detected poll.
         self._refresh_subtask_bar()
         self.set_interval(1.0, self._refresh_subtask_bar)
+
+    def on_resize(self, event) -> None:
+        """Re-wrap the transcript for the new width (and re-gate the mascot).
+
+        ``RichLog`` wraps a line once, when it is written, at the log's width
+        at that moment -- and the banner is written on mount while the side
+        slot is still hidden. Shown later (or resized), those lines kept the
+        old wrap width and were cut off at the panel edge, which hid most of
+        the data-egress / privacy warning. A redraw re-wraps everything.
+        """
+        width = event.size.width
+        if width and width != getattr(self, "_wrapped_width", None):
+            self._wrapped_width = width
+            self.call_after_refresh(self._redraw)
+        self._update_mascot()
 
     def on_unmount(self) -> None:
         self._stop_mascot_timer()
@@ -1346,6 +1364,7 @@ class ChatPanel(Widget):
             )
         if self._live_text:
             log.write(f"[{theme.assistant_reply_color}]{escape(self._live_text)}[/]")
+        self._update_mascot()
 
     # -- header -----------------------------------------------------------
 
@@ -1409,7 +1428,9 @@ class ChatPanel(Widget):
         # track the mascot's per-theme colour (a brittle invariant across all
         # 8 themes), just hide the decorative mascot whenever the functional
         # subtask bar has something to show.
-        if not self._mascot_enabled() or self._subtask_bar_shown:
+        # Also off when the transcript reaches the mascot's corner: it is
+        # opaque and was drawn over the privacy banner at 80x24.
+        if not self._mascot_enabled() or self._subtask_bar_shown or self._log_full():
             mascot.display = False
             self._stop_mascot_timer()
             return
@@ -1426,6 +1447,17 @@ class ChatPanel(Widget):
         else:
             self._stop_mascot_timer()
             mascot.update("\n".join(_MASCOT_IDLE_FRAME))
+
+    def _log_full(self) -> bool:
+        """True when the transcript's text reaches the mascot's rows."""
+        try:
+            log = self.query_one("#chat-log", RichLog)
+        except Exception:
+            return False
+        height = log.size.height
+        if not height:
+            return False
+        return log.virtual_size.height > height - (len(_MASCOT_IDLE_FRAME) + 1)
 
     def _tick_mascot(self) -> None:
         """Timer callback: advance to the next blink/bounce/tilt frame."""

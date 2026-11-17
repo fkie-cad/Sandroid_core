@@ -77,11 +77,11 @@ class _LensHost(Vertical):
     them; Textual binds no Shift+arrow there, so they bubble up to here.
     """
 
+    # Shift+Up/Down (nav level) have no binding any more: no lens has an
+    # inner sub-tab bar, so they did nothing but show up in the ? help.
     BINDINGS = [
-        Binding("shift+up", "nav_level_up", "Level up", show=False),
-        Binding("shift+down", "nav_level_down", "Level down", show=False),
-        Binding("shift+left", "cycle_prev", "Prev", show=False),
-        Binding("shift+right", "cycle_next", "Next", show=False),
+        Binding("shift+left", "cycle_prev", "Previous lens", show=False),
+        Binding("shift+right", "cycle_next", "Next lens", show=False),
     ]
 
     def action_nav_level_up(self) -> None:
@@ -110,11 +110,27 @@ class MainScreen(Screen):
     """
 
     BINDINGS = [
-        Binding("shift+up", "unfocused_nav('level', -1)", show=False),
-        Binding("shift+down", "unfocused_nav('level', 1)", show=False),
         Binding("shift+left", "unfocused_nav('cycle', -1)", show=False),
         Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
         Binding("enter", "inspect", "Inspect"),
+        # Inspector tabs while it is open, whatever has focus: [ / ] always;
+        # plain ←/→ only when the focused widget does not use them itself (an
+        # Input moves its caret; a DataTable keeps them while it can scroll
+        # sideways -- Textual skips its scroll binding otherwise).
+        Binding(
+            "left_square_bracket",
+            "inspector_tab(-1)",
+            "Inspector: prev tab",
+            show=False,
+        ),
+        Binding(
+            "right_square_bracket",
+            "inspector_tab(1)",
+            "Inspector: next tab",
+            show=False,
+        ),
+        Binding("left", "inspector_tab(-1)", "Inspector: prev tab", show=False),
+        Binding("right", "inspector_tab(1)", "Inspector: next tab", show=False),
         # Back to LIVE from REVIEW scope (shown only while reviewing a run).
         Binding("L", "back_to_live", "Live"),
     ]
@@ -130,7 +146,17 @@ class MainScreen(Screen):
             return hasattr(self.lens_widget(), "inspect_selected")
         if action == "back_to_live":
             return self.scope_run is not None
+        if action == "inspector_tab":
+            content = self.inspector_content
+            return self.inspector_is_open and bool(content and content.tabs)
         return True
+
+    def action_inspector_tab(self, delta: int) -> None:
+        """``[`` / ``]`` (or ←/→ when unused): switch the open Inspector's tab."""
+        try:
+            self.query_one("#inspector", Inspector).action_tab(delta)
+        except Exception:
+            pass
 
     def action_back_to_live(self) -> None:
         """``L`` -- leave REVIEW scope (no-op in LIVE)."""
@@ -399,6 +425,15 @@ class MainScreen(Screen):
             self.query_one("#lens-body", ContentSwitcher).current = panel_id
         except Exception:
             return
+        # The Inspector shows a row of the lens that opened it; on another
+        # lens its content is stale and its key hints (e.g. "w watch") name
+        # keys that mean something else there. Close it.
+        content = self.inspector_content
+        spec = LENS_BY_WIDGET.get(panel_id)
+        if self.inspector_is_open and (
+            content is None or spec is None or content.lens != spec.id
+        ):
+            self.close_inspector()
         self._update_lens_frame()
         try:
             self.query_one(f"#{panel_id}").focus()

@@ -118,7 +118,7 @@ class MenuController:
             ActionCategory.RECORDING,
             ["forensic", "malware"],
             description=(
-                "Record device input (any panel). Esc/Enter in the recording "
+                "Record device input (any lens). Esc/Enter in the recording "
                 "window stops & saves, then it replays automatically"
             ),
             inline_text="[r]ecord an action",
