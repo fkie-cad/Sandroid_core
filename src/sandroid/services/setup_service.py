@@ -104,6 +104,10 @@ class SetupResult:
         objection_available: Whether objection binary is available
         frida_available: Whether frida is available
         device_serial: Connected device serial if available
+        missing_serial: The explicitly requested serial (``--serial``) that
+            adb could not find, if that is why setup failed
+        available_devices: ``"serial (state)"`` of the devices adb lists,
+            filled when the requested serial was not found
         android_version: Android version if detected
         api_level: Android API level if detected
         errors: List of error messages (critical failures)
@@ -122,6 +126,8 @@ class SetupResult:
     objection_available: bool = False
     frida_available: bool = False
     device_serial: str | None = None
+    missing_serial: str | None = None
+    available_devices: list[str] = field(default_factory=list)
     android_version: str | None = None
     api_level: int | None = None
     errors: list[str] = field(default_factory=list)
@@ -507,6 +513,39 @@ class SetupService:
             and device_check.details.get("needs_root")
         )
         result.device_connected = device_connected
+
+        if not device_connected and "missing_serial" in device_check.details:
+            # A pinned serial (--serial / ANDROID_SERIAL / emulator.serial)
+            # that adb does not know: say so, and list what is there instead.
+            from sandroid.services.setup_checks import list_adb_devices
+
+            missing = device_check.details["missing_serial"]
+            if not missing:
+                try:
+                    from sandroid.core.device_manager import DeviceManager
+
+                    missing = DeviceManager.preferred_serial() or ""
+                except Exception:
+                    missing = ""
+            available = [
+                f"{serial} ({state})" if state != "device" else serial
+                for serial, state in list_adb_devices(adb)
+            ]
+            device_check.details["available_devices"] = available
+            result.success = False
+            result.missing_serial = missing
+            result.available_devices = available
+            result.message = (
+                f"Device '{missing}' not found"
+                if missing
+                else "Requested device not found"
+            )
+            result.add_error(
+                "Available devices: " + ", ".join(available)
+                if available
+                else "No devices are connected"
+            )
+            return False
 
         if not device_connected:
             if auto_start_emulator:

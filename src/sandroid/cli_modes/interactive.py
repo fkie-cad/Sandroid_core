@@ -71,13 +71,13 @@ def _stop_capture_children() -> None:
         pass
 
 
-def _exit_without_lingering_threads(grace: float = 3.0) -> None:
+def _exit_without_lingering_threads(grace: float = 3.0, exit_code: int = 0) -> None:
     """Make sure the process actually exits after the TUI is closed.
 
     Background helpers (friTap, tcpdump readers, Frida/MCP clients, ...) can
     leave non-daemon threads behind; the interpreter then waits for them
     forever after "Session Complete" is printed. Give them ``grace`` seconds
-    to finish, then log what is still alive and hard-exit.
+    to finish, then log what is still alive and hard-exit with ``exit_code``.
     """
     import os
     import threading
@@ -115,7 +115,35 @@ def _exit_without_lingering_threads(grace: float = 3.0) -> None:
         sys.stderr.flush()
         logging.shutdown()
     finally:
-        os._exit(0)
+        os._exit(exit_code)
+
+
+def _end_failed_startup(exit_code: int) -> None:
+    """The TUI quit from its startup screen (start failed or was aborted).
+
+    Nothing was analysed: no exit summary. After a failed start
+    (``EXIT_STARTUP_FAILED``) the error is repeated on the terminal and this
+    run's session folder is removed if it holds nothing but its own logs.
+    Exits the process with ``exit_code``.
+    """
+    from sandroid.tui.screens.startup_screen import (
+        EXIT_STARTUP_FAILED,
+        startup_failure,
+    )
+
+    get_task_service().stop_all()
+    if exit_code == EXIT_STARTUP_FAILED:
+        error = startup_failure()
+        if error:
+            print(f"Sandroid did not start: {error}", file=sys.stderr)
+        try:
+            from sandroid.services import get_initialization_service
+
+            get_initialization_service().discard_unused_session()
+        except Exception as e:
+            logger.debug(f"Could not discard the unused session folder: {e}")
+    _exit_without_lingering_threads(exit_code=exit_code)
+    sys.exit(exit_code)
 
 
 def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
@@ -137,11 +165,18 @@ def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
 
         # Run the TUI directly (no fork -- fork corrupts Frida's GLib context)
         # Pass config for deferred initialization in StartupScreen
-        run_tui(
+        exit_code = run_tui(
             action_queue=action_q,
             initial_theme=tui_theme,
             startup_config=config,
         )
+        from sandroid.tui.screens.startup_screen import (
+            EXIT_STARTUP_ABORTED,
+            EXIT_STARTUP_FAILED,
+        )
+
+        if exit_code in (EXIT_STARTUP_FAILED, EXIT_STARTUP_ABORTED):
+            _end_failed_startup(exit_code)
 
         # After TUI exits, stop background tasks and print summary
         get_task_service().stop_all()
@@ -166,7 +201,9 @@ def _start_tui_mode(config: SandroidConfig, Toolbox, ActionQ) -> None:
 
         logger.info("Analysis completed successfully")
         get_ui_service().print_exit_summary(Toolbox.get_tools_used())
-        _exit_without_lingering_threads()
+        _exit_without_lingering_threads(exit_code=exit_code or 0)
+        if exit_code:
+            sys.exit(exit_code)
 
     except ImportError as e:
         logger.critical(f"Textual TUI is not available: {e}")

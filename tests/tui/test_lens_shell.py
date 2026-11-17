@@ -558,3 +558,37 @@ async def test_layout_degrades_gracefully(width) -> None:
         await _settle(pilot)
         assert ms.query_one("#lens-host").size.width >= 40
         assert ms.query_one("#side-slot").size.width >= 56 or width >= 140
+
+
+def test_filter_keys_are_consistent_across_lenses() -> None:
+    """``N`` = show hidden noise (Network + Files), ``v`` = review (Runs only).
+
+    The Network lens's app-only filter has a key no other lens and no global
+    binding uses.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.screens.main_screen import MainScreen
+    from sandroid.tui.widgets.diffs_view import DiffsView
+    from sandroid.tui.widgets.files_panel import FilesPanel
+    from sandroid.tui.widgets.network_panel import NetworkPanel
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    def keys(cls) -> dict[str, str]:
+        return {b.key: b.action for b in cls.BINDINGS if hasattr(b, "key")}
+
+    lenses = {
+        "app": keys(SpotlightPanel),
+        "network": keys(NetworkPanel),
+        "files": keys(FilesPanel),
+        "runs": keys(DiffsView),
+    }
+    assert lenses["network"]["N"] == lenses["files"]["N"] == "toggle_noise"
+    assert [lens for lens, bound in lenses.items() if "v" in bound] == ["runs"]
+    assert lenses["runs"]["v"] == "review_run"
+    app_only = [k for k, a in lenses["network"].items() if a == "toggle_app_only"]
+    assert app_only == ["T"]
+    others = set(keys(SandroidTUI)) | set(keys(MainScreen))
+    for lens, bound in lenses.items():
+        if lens != "network":
+            others |= set(bound)
+    assert "T" not in others

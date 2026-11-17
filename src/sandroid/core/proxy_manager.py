@@ -365,8 +365,19 @@ class ProxyManager:
 
     @classmethod
     def get_default_config(cls) -> ProxyConfig:
-        """Get a default proxy configuration using host IP and port 8080."""
-        return ProxyConfig(ip=cls.get_host_ip(), port=8080)
+        """Default proxy: the host IP and the configured mitmproxy port.
+
+        The port is ``mitmproxy.proxy_port`` (8080 only if the config cannot
+        be read), so the suggestion points at Sandroid's own mitmproxy.
+        """
+        port = 8080
+        try:
+            from sandroid.config import get_config
+
+            port = int(get_config().mitmproxy.proxy_port)
+        except Exception:
+            pass
+        return ProxyConfig(ip=cls.get_host_ip(), port=port)
 
 
 class CAManager:

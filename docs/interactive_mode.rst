@@ -14,6 +14,13 @@ Starting the TUI
    sandroid --config my-analysis.toml    # explicit config
    sandroid --network --screenshot 5     # pre-configure analysis options
    sandroid --log                        # also print log messages to the terminal
+   sandroid -s emulator-5556             # use this device (adb serial)
+
+The startup screen checks adb, the device, root and SELinux. If that fails it
+says why (e.g. ``Device 'emulator-5556' not found`` with the devices adb does
+list) and only these keys work: ``r`` retries, ``d`` opens the device
+selector (the device you pick is used for this session), ``q`` quits with exit
+status 2.
 
 .. note::
 
@@ -106,17 +113,19 @@ Who is the app talking to, and what did it send? One flow table
 ``mitmweb``'s flow log; ``Enter`` on a row opens Summary / Request /
 Response in the Inspector. TLS failures and errored flows show as ✗ rows
 (a ``⚑N`` badge on the lens counts TLS failures you have not seen yet).
-``/`` filters by host, path or app, ``v`` shows only the spotlight app's
+``/`` filters by host, path or app, ``T`` shows only the spotlight (target) app's
 flows, ``N`` shows OS background traffic (connectivity checks, Play
 services), hidden by default. In REVIEW scope the table shows the reviewed
 run's flows (those captured between its start and end). Proxy state is in
-the frame caption (``mitm ● :8080 · device ✓ · CA ✓``); ``I`` opens the
+the frame caption (``mitm ● :<port> · device ✓ · CA ✓``, ``<port>`` being
+``mitmproxy.proxy_port``); ``I`` opens the
 Capture status page with mitmproxy and friTap tabs.
 
 Proxy keys (embedded ``mitmweb`` requires ``pip install mitmproxy``):
 
-- ``Enter`` (while nothing is captured) or ``M`` start/stop mitmweb (proxy ``127.0.0.1:8080``, web UI
-  ``http://127.0.0.1:8081/``). Start does not touch the device unless
+- ``Enter`` (while nothing is captured) or ``M`` start/stop mitmweb (proxy on
+  ``mitmproxy.proxy_port``, web UI on ``mitmproxy.web_port``; defaults
+  ``127.0.0.1:8080`` and ``http://127.0.0.1:8081/``). Start does not touch the device unless
   ``mitmproxy.auto_device_proxy = true``; stop (and quitting Sandroid) clears
   the Device Proxy Sandroid set
 - ``Ctrl+D`` toggle the Device Proxy (global ``http_proxy``)
@@ -160,7 +169,8 @@ file monitor: the default ``kprobe`` backend uses kernel tracefs kprobes
 (per-process and child-tree attribution, path-scoped capture, nothing pushed
 to the device) and falls back to ``fsmon`` automatically
 (``tui.monitor_backend``). Caches, temp files, OS paths and OPEN/CLOSE are
-hidden until ``v``; per-category visibility is configurable in the Monitor
+hidden until ``N`` (the same "show noise" key as in the Network lens);
+per-category visibility is configurable in the Monitor
 settings.
 
 - ``w`` watches/unwatches the row (Spotlight Files); watched files are

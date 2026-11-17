@@ -385,7 +385,8 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_v_toggles_noise_and_the_caption_counts_it() -> None:
+async def test_N_toggles_noise_and_the_caption_counts_it() -> None:
+    """``N`` = "show hidden noise", the same key as in the Network lens."""
     app = _Harness()
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
@@ -399,11 +400,14 @@ async def test_v_toggles_noise_and_the_caption_counts_it() -> None:
         assert _keys(panel) == [PREFS]
         assert "1 hidden" in panel.caption()[1]
         panel.table.focus()
-        await pilot.press("v")
+        await pilot.press("v")  # v is only "review" (Runs lens) now
+        await pilot.pause()
+        assert _keys(panel) == [PREFS]
+        await pilot.press("N")
         await pilot.pause()
         assert set(_keys(panel)) == {PREFS, CACHE}
         assert "hidden" not in panel.caption()[1]
-        await pilot.press("v")
+        await pilot.press("N")
         await pilot.pause()
         assert _keys(panel) == [PREFS]
 

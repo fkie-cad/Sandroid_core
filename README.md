@@ -60,8 +60,8 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 | Key | Lens | What it shows |
 |---|---|---|
 | `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
-| `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters, `v` shows the spotlight app only, `N` shows OS noise (hidden by default). Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
-| `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. |
+| `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters, `T` shows the spotlight (target) app only, `N` shows OS noise (hidden by default). Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
+| `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. `N` shows the hidden noise (caches, temp files, OS paths), as in the Network lens. |
 | `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |
 
 `Shift+←/→` also cycles the lenses. `Enter` on a row opens the **Inspector** on the right where a lens supports it; `Esc` closes it. `Ctrl+Y` opens the **AI Chat** in the same right-hand slot. `` ` `` (backtick) opens the **log drawer** with the full activity log.
@@ -152,7 +152,7 @@ Sandroid can route a target app's traffic through an embedded **mitmproxy** inst
 
 | Key | Action |
 |---|---|
-| `Enter` (while nothing is captured) / `M` | start / stop `mitmweb` (proxy on `127.0.0.1:8080`, web UI on `http://127.0.0.1:8081/`); start does **not** touch the device unless `mitmproxy.auto_device_proxy = true` |
+| `Enter` (while nothing is captured) / `M` | start / stop `mitmweb` (proxy on `mitmproxy.proxy_port`, web UI on `mitmproxy.web_port`; defaults `127.0.0.1:8080` and `http://127.0.0.1:8081/`); start does **not** touch the device unless `mitmproxy.auto_device_proxy = true` |
 | `Ctrl+D` | toggle the **Device Proxy** (global `http_proxy` setting → our mitmproxy) |
 | `Ctrl+N` | install the mitmproxy CA into the device's **system** trust store |
 | `y` | **Proxy Settings** modal: Device Proxy, **App Proxies** and CA in one place |

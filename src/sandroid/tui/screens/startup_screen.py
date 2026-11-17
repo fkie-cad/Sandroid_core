@@ -3,12 +3,19 @@
 Displays the Sandroid logo with a loading indicator and live status
 updates while blocking initialization (ADB checks, root, SELinux)
 runs in a background thread.
+
+While it is up the screen owns the keyboard: ``SandroidTUI.check_action``
+refuses every app-level action (Record, Play, lenses, ...), so only the keys
+below work. On a failed start: ``r`` retries, ``d`` picks another device
+(the device selector, e.g. after ``--serial`` named a missing one), ``q``
+quits with :data:`EXIT_STARTUP_FAILED`. Upper-case works too.
 """
 
 import logging
 from typing import TYPE_CHECKING
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Center, Middle
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -25,6 +32,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Process exit code after quitting from the startup error screen.
+EXIT_STARTUP_FAILED = 2
+#: Process exit code after aborting (Ctrl+C) while startup is still running.
+EXIT_STARTUP_ABORTED = 130
+
+#: The error shown when the user quit from the error screen (for the CLI to
+#: repeat on the terminal once the TUI is gone); None otherwise.
+_startup_failure: str | None = None
+
+
+def startup_failure() -> str | None:
+    """The startup error the user quit on, or None (see ``EXIT_STARTUP_FAILED``)."""
+    return _startup_failure
+
 
 class StartupScreen(Screen):
     """Branded startup screen with background initialization.
@@ -35,6 +56,21 @@ class StartupScreen(Screen):
 
     class InitComplete(Message):
         """Posted when initialization succeeds."""
+
+    # Screen bindings come before the App's in the binding chain, so these
+    # keys never reach the global ones (r = Record, ...); every other
+    # app-level action is refused by ``SandroidTUI.check_action`` while this
+    # screen is in the stack.
+    BINDINGS = [
+        Binding("r", "retry", "Retry", show=False),
+        Binding("R", "retry", "Retry", show=False),
+        Binding("d", "pick_device", "Pick device", show=False),
+        Binding("D", "pick_device", "Pick device", show=False),
+        Binding("q", "quit_startup", "Quit", show=False),
+        Binding("Q", "quit_startup", "Quit", show=False),
+        Binding("ctrl+c", "abort", "Quit", show=False),
+        Binding("ctrl+q", "abort", "Quit", show=False),
+    ]
 
     DEFAULT_CSS = """
     StartupScreen {
@@ -49,6 +85,7 @@ class StartupScreen(Screen):
     }
 
     #startup-version {
+        width: 100%;
         text-align: center;
         color: $text-muted;
         margin-bottom: 1;
@@ -81,6 +118,7 @@ class StartupScreen(Screen):
     }
 
     #startup-hint {
+        width: 100%;
         text-align: center;
         color: $text-muted;
         display: none;
@@ -94,6 +132,7 @@ class StartupScreen(Screen):
         super().__init__(**kwargs)
         self._config = config
         self._init_worker: Worker | None = None
+        self._picker_loading = False
 
     @property
     def has_error(self) -> bool:
@@ -165,7 +204,12 @@ class StartupScreen(Screen):
                 if details:
                     error_msg = f"{error_msg}\n{details}"
                 logger.error(f"[STARTUP] Setup failed: {error_msg}")
-                self.app.call_from_thread(self._show_error, error_msg)
+                # adb works but the device does not: offer the device picker.
+                device_problem = bool(
+                    getattr(result, "adb_available", False)
+                    and not getattr(result, "device_connected", False)
+                )
+                self.app.call_from_thread(self._show_error, error_msg, device_problem)
         except Exception as e:
             logger.exception(f"[STARTUP] Initialization failed: {e}")
             try:
@@ -193,21 +237,23 @@ class StartupScreen(Screen):
         self.post_message(self.InitComplete())
         logger.debug("[STARTUP] _post_init_complete: InitComplete posted")
 
-    def _show_error(self, error_msg: str) -> None:
-        """Show error state with retry/quit hints."""
+    def _show_error(self, error_msg: str, device_problem: bool = False) -> None:
+        """Show error state with retry/quit (and device picker) hints."""
         self.status_text = "Initialization failed"
         self.error_text = error_msg
         try:
             hint = self.query_one("#startup-hint", Label)
-            hint.update(
-                "Press [bold]R[/bold] to retry  |  Press [bold]Q[/bold] to quit"
-            )
+            keys = ["[bold]r[/bold] retry"]
+            if device_problem:
+                keys.append("[bold]d[/bold] pick a device")
+            keys.append("[bold]q[/bold] quit")
+            hint.update("Press " + "  ·  ".join(keys))
             hint.display = True
         except NoMatches:
             pass
 
-    def key_r(self) -> None:
-        """Retry initialization."""
+    def action_retry(self) -> None:
+        """Retry initialization (``r`` / ``R``)."""
         if not self.has_error:
             return
         self.error_text = ""
@@ -220,10 +266,89 @@ class StartupScreen(Screen):
         self.status_text = "Retrying..."
         self._start_init_worker()
 
-    def key_q(self) -> None:
-        """Quit on error."""
+    def action_quit_startup(self) -> None:
+        """Quit after a failed start (``q`` / ``Q``) with a non-zero exit code."""
         if self.has_error:
-            self.app.exit()
+            self._exit(EXIT_STARTUP_FAILED)
+
+    def action_abort(self) -> None:
+        """Ctrl+C / Ctrl+Q: quit now, also while initialization still runs."""
+        self._exit(EXIT_STARTUP_FAILED if self.has_error else EXIT_STARTUP_ABORTED)
+
+    def _exit(self, return_code: int) -> None:
+        global _startup_failure
+        _startup_failure = self.error_text or None
+        self.app.exit(return_code=return_code)
+
+    # -- device picker (d) ---------------------------------------------------
+
+    def action_pick_device(self) -> None:
+        """Open the device selector after a failed start (``d`` / ``D``).
+
+        Lists the devices adb sees (off the UI thread); picking one pins it
+        for this session (like ``--serial``) and retries. Starting an AVD from
+        the selector works as on the main screen: pick it once it has booted.
+        """
+        if not self.has_error or self._picker_loading:
+            return
+        self._picker_loading = True
+        self.run_worker(self._load_devices, thread=True, group="startup-picker")
+
+    def _load_devices(self) -> None:
+        devices: list = []
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.device_manager import DeviceManager
+
+            # Untargeted ("" = no -s): the pinned serial is the missing one,
+            # and adb would fail the listing with "device ... not found".
+            with Adb.targeting(""):
+                devices = DeviceManager.get().refresh_devices(auto_select=False)
+        except Exception as e:
+            logger.debug(f"[STARTUP] Could not list devices: {e}")
+        try:
+            self.app.call_from_thread(self._show_device_picker, devices)
+        except Exception:
+            self._picker_loading = False
+
+    def _show_device_picker(self, devices: list) -> None:
+        from sandroid.tui.modals import DeviceSelectionModal
+
+        self._picker_loading = False
+        if not self.is_attached or not self.has_error:
+            return
+        self.app.push_screen(
+            DeviceSelectionModal(devices=devices, current_serial=None),
+            self._on_device_picked,
+        )
+
+    def _on_device_picked(self, serial: str | None) -> None:
+        if not serial:
+            return
+        if serial.startswith("__"):
+            # "Start AVD" / "Restart emulator": the app's usual handler; the
+            # new emulator is picked with d once it has booted.
+            handler = getattr(self.app, "handle_device_launch_choice", None)
+            if handler is not None and handler(serial):
+                self.app.notify(
+                    "Press d to pick the emulator once it has booted.", timeout=6
+                )
+            return
+        self.use_device(serial)
+
+    def use_device(self, serial: str) -> None:
+        """Pin ``serial`` for this session (like ``--serial``) and retry."""
+        from sandroid.core.initializer import apply_serial_selection
+
+        emulator_cfg = getattr(self._config, "emulator", None)
+        if emulator_cfg is not None:
+            try:
+                emulator_cfg.serial = serial  # retry re-applies the config serial
+            except Exception:
+                logger.debug("[STARTUP] could not set emulator.serial", exc_info=True)
+        apply_serial_selection(serial)
+        self.app.notify(f"Using device {serial}", timeout=3)
+        self.action_retry()
 
     def on_unmount(self) -> None:
         """Cancel background worker when screen is removed."""

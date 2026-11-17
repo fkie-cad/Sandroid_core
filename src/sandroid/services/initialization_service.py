@@ -55,6 +55,8 @@ class SessionPaths:
         log_file: Path to the session log file
         error_log_file: Path to the error-only log file
         timestamp: Session creation timestamp
+        created: Whether this process created ``session_path`` (False when
+            the folder already existed)
     """
 
     session_path: Path
@@ -63,6 +65,7 @@ class SessionPaths:
     log_file: Path | None = None
     error_log_file: Path | None = None
     timestamp: str = ""
+    created: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -211,6 +214,7 @@ class InitializationService:
             if not self._explicit_base_path:
                 self._base_path = self._configured_results_root()
             session_path = self._base_path / timestamp
+            existed = session_path.exists()
             session_path.mkdir(parents=True, exist_ok=True)
 
             # Create session paths object
@@ -221,6 +225,7 @@ class InitializationService:
                 log_file=log_file,
                 error_log_file=error_log_file,
                 timestamp=timestamp,
+                created=not existed,
             )
 
             # Update environment variables for backwards compatibility
@@ -517,6 +522,41 @@ class InitializationService:
 
             self._current_session = None
             self._logger.debug("Initialization service reset")
+
+    def discard_unused_session(self) -> bool:
+        """Remove this run's session folder if the run never used it.
+
+        For a start that never got going (the TUI quit from its startup error
+        screen): the folder is removed only if this process created it and it
+        holds nothing but the session's own ``sandroid.log`` /
+        ``sandroid_error.log`` -- no device folder, no results, nothing else.
+        The file log handlers are closed first. Anything else is left alone.
+
+        Returns:
+            True if the folder was removed.
+        """
+        with self._lock:
+            paths = self._current_session
+            if paths is None or not paths.created:
+                return False
+            folder = paths.session_path
+            own_logs = {p.name for p in (paths.log_file, paths.error_log_file) if p}
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                return False
+            for entry in entries:
+                if entry.name not in own_logs or not entry.is_file():
+                    return False
+            self.reset()  # closes and detaches the file log handlers
+            try:
+                for entry in entries:
+                    entry.unlink(missing_ok=True)
+                folder.rmdir()
+            except OSError as e:
+                logger.debug(f"Could not remove unused session folder {folder}: {e}")
+                return False
+            return True
 
     def cleanup(self) -> None:
         """Clean up resources.

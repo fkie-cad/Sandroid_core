@@ -21,9 +21,9 @@ pull against the one before it) and Events.
 
 Keys (on this lens): ``w`` watch/unwatch · ``u`` pull the row · ``U`` pull
 all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
-the table · ``a`` auto-pull · ``v`` show noise · ``.`` full paths · ``z``
-zoom the diff · ``Ctrl+L`` clear. Only ``w``/``u`` are shown in the footer
-(the rest are in ``?``).
+the table · ``a`` auto-pull · ``N`` show noise (as in the Network lens) ·
+``.`` full paths · ``z`` zoom the diff · ``Ctrl+L`` clear. Only ``w``/``u``
+are shown in the footer (the rest are in ``?``).
 
 REVIEW scope (``MainScreen.set_scope(run_dir)``): the same table lists the
 run's changed/new/deleted files (from the run's ``RunRecord``, the data the
@@ -232,7 +232,7 @@ class FilesPanel(Widget):
         Binding("slash", "filter", "Filter", show=False),
         Binding("n", "add_path", "Watch a path…", show=False),
         Binding("a", "toggle_auto", "Auto-pull watched", show=False),
-        Binding("v", "toggle_noise", "Show noise", show=False),
+        Binding("N", "toggle_noise", "Show noise", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
         Binding("z", "zoom", "Zoom diff", show=False),
         Binding("ctrl+l", "clear", "Clear activity", show=False),
@@ -844,7 +844,7 @@ class FilesPanel(Widget):
             config, "target_path", None
         )
         hidden = self.activity.hidden_count()
-        tail = f" · {hidden} noisy paths hidden (v)" if hidden else ""
+        tail = f" · {hidden} noisy paths hidden (N)" if hidden else ""
         where = f" in {target}" if target else ""
         return Text(f"Watching for file activity{where} — nothing yet{tail}")
 

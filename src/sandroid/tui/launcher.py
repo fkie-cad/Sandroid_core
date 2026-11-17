@@ -58,7 +58,8 @@ def run_tui(
             When provided, the TUI shows a StartupScreen and runs init in background.
 
     Returns:
-        The exit code from the TUI application.
+        The exit code from the TUI application (``App.return_code``; 0 on a
+        normal quit, non-zero e.g. after quitting a failed startup).
     """
     from sandroid.services import get_network_capture_service, get_task_service
     from sandroid.tui.app import SandroidTUI
@@ -115,7 +116,8 @@ def run_tui(
 
     try:
         logger.debug("starting TUI app.run()")
-        return app.run()
+        app.run()
+        return app.return_code or 0
     finally:
         reset_terminal()
         _shutdown_services(get_task_service, get_network_capture_service)

@@ -1,8 +1,8 @@
 """Non-visual controller that hosts and observes a mitmweb subprocess.
 
 The Network lens (:class:`~sandroid.tui.widgets.network_panel.NetworkPanel`)
-owns everything on screen: the flow table, the caption (``mitm ● :8080 ·
-CA ✓``), the empty-state hint and the "Capture status" Inspector page. This
+owns everything on screen: the flow table, the caption (``mitm ● :<port> ·
+CA ✓``, the configured ``mitmproxy.proxy_port``), the empty-state hint and the "Capture status" Inspector page. This
 widget is mounted *hidden* inside the lens and keeps all of the proxy
 plumbing it always had -- start/stop, Device Proxy, CA injection, SSL unpin,
 addons, reachability probes, focus-lane cleanup -- so none of that logic
@@ -551,7 +551,11 @@ class MitmproxyPanel(Widget):
     # -- compact status for the lens -----------------------------------------
 
     def status_caption(self) -> str:
-        """One calm caption fragment, e.g. ``mitm ● :8080 · device ✓ · CA ✓``."""
+        """One calm caption fragment, e.g. ``mitm ● :8090 · device ✓ · CA ✓``.
+
+        The port is the live process's, else the configured
+        ``mitmproxy.proxy_port`` -- never a hard-coded default.
+        """
         st = self._service.state
         if not self._service.is_running():
             return "[#5b6479]mitm ○ off[/]"
@@ -580,7 +584,7 @@ class MitmproxyPanel(Widget):
         st = self._service.state
         if not self._service.is_running():
             return (
-                "No flows yet — ⏎ starts mitmproxy",
+                f"No flows yet — ⏎ starts mitmproxy on :{st.proxy_port}",
                 "then ^D routes the device · ^N installs the CA · y proxy settings",
             )
         if self._proxy_state == "ours" and self._reach_state == "unreachable":

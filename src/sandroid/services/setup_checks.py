@@ -15,6 +15,7 @@ Usage:
 """
 
 import logging
+import re
 import shutil
 import time
 from typing import Any
@@ -72,8 +73,86 @@ def make_skipped_check(name: str, display_name: str) -> SetupCheckResult:
     )
 
 
+#: adb's "no such device" errors: ``adb: device 'emulator-5999' not found``
+#: (newer adb) and ``error: device 'X' not found`` / ``error: device not
+#: found`` (older adb). Group 1 is the serial when adb names one.
+_DEVICE_NOT_FOUND_RE = re.compile(
+    r"device\s+'([^']*)'\s+not\s+found|\bdevice\s+not\s+found", re.IGNORECASE
+)
+
+#: What a shell / the OS prints when the adb *binary* cannot be run. Only
+#: these mean "adb is missing" -- a bare "not found" in adb's own stderr is
+#: usually about a device (see ``_DEVICE_NOT_FOUND_RE``).
+_ADB_MISSING_MARKERS = (
+    "command not found",
+    "no such file or directory",
+    "is not recognized as an internal or external command",
+    "oserror:",
+)
+
+
+def missing_device_serial(stderr: str | None) -> str | None:
+    """The serial adb could not find, if ``stderr`` is a "device not found" error.
+
+    Returns:
+        The serial named by adb (``""`` when adb did not name one), or None
+        when ``stderr`` is not a device-not-found error.
+    """
+    match = _DEVICE_NOT_FOUND_RE.search(stderr or "")
+    if match is None:
+        return None
+    return match.group(1) or ""
+
+
+def adb_binary_missing(stderr: str | None) -> bool:
+    """True if ``stderr`` says the adb executable itself could not be run.
+
+    Device errors (``adb: device 'X' not found``) are never reported as a
+    missing binary.
+    """
+    text = (stderr or "").lower()
+    if not text or missing_device_serial(text) is not None:
+        return False
+    return any(marker in text for marker in _ADB_MISSING_MARKERS)
+
+
+def _send_untargeted(adb: Any, command: str) -> tuple[str, str]:
+    """Run a host-side adb command without the ``-s <serial>`` target.
+
+    ``adb version`` / ``adb devices`` do not need a device; with a pinned
+    serial that does not exist, adb would otherwise fail them with
+    "device '<serial>' not found". Falls back to a plain call for adb
+    doubles whose ``send_adb_command`` takes no ``serial`` argument.
+    """
+    try:
+        return adb.send_adb_command(command, serial="")
+    except TypeError:
+        return adb.send_adb_command(command)
+
+
+def list_adb_devices(adb: Any) -> list[tuple[str, str]]:
+    """``[(serial, state)]`` from ``adb devices`` (empty on any failure)."""
+    try:
+        stdout, _stderr = _send_untargeted(adb, "devices")
+    except Exception:
+        return []
+    devices: list[tuple[str, str]] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith(("list of devices", "*")):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            devices.append((parts[0], parts[1]))
+    return devices
+
+
 def check_adb_availability(adb: Any) -> SetupCheckResult:
     """Check if ADB is available in PATH.
+
+    Runs ``adb version`` without the device target, so a pinned serial that
+    is not connected (``-s emulator-5999``) is not mistaken for a missing adb
+    binary; the device stage reports that one.
 
     Args:
         adb: ADB interface with send_adb_command method
@@ -84,11 +163,12 @@ def check_adb_availability(adb: Any) -> SetupCheckResult:
     check = _make_check(name="adb", display_name="ADB Availability")
 
     try:
-        stdout, stderr = adb.send_adb_command("version")
+        stdout, stderr = _send_untargeted(adb, "version")
 
-        if "not found" in stderr.lower():
+        if adb_binary_missing(stderr):
             check.status = SetupCheckStatus.FAILED
             check.message = "ADB command not found in PATH"
+            check.details["stderr"] = (stderr or "").strip()
             return check
 
         check.status = SetupCheckStatus.PASSED
@@ -113,7 +193,9 @@ def check_device_connection(adb: Any) -> SetupCheckResult:
         adb: ADB interface with send_adb_command method
 
     Returns:
-        SetupCheckResult with check status
+        SetupCheckResult with check status. When the targeted serial does not
+        exist, ``details["missing_serial"]`` holds it (``""`` if adb did not
+        name it).
     """
     check = _make_check(name="device", display_name="Device Connection")
 
@@ -123,6 +205,15 @@ def check_device_connection(adb: Any) -> SetupCheckResult:
         if "no devices/emulators found" in stderr.lower():
             check.status = SetupCheckStatus.FAILED
             check.message = "No devices or emulators connected"
+            return check
+
+        missing = missing_device_serial(stderr)
+        if missing is not None:
+            check.status = SetupCheckStatus.FAILED
+            check.message = (
+                f"Device '{missing}' not found" if missing else "Device not found"
+            )
+            check.details["missing_serial"] = missing
             return check
 
         if "device offline" in stderr.lower():
@@ -321,6 +412,7 @@ def check_frida() -> SetupCheckResult:
 
 
 __all__ = [
+    "adb_binary_missing",
     "check_adb_availability",
     "check_and_enable_root",
     "check_and_set_selinux",
@@ -328,5 +420,7 @@ __all__ = [
     "check_frida",
     "check_objection",
     "check_sqldiff",
+    "list_adb_devices",
     "make_skipped_check",
+    "missing_device_serial",
 ]

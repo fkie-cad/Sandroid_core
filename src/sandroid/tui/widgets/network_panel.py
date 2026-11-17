@@ -22,14 +22,17 @@ Data flow
   into the lens-bar badge (``⚑N``) until the lens is activated again.
   Errored flows come from ``flows.jsonl`` (their ``error`` field) as ✗ rows.
 
-Filters: ``/`` text (host, path, app, recipient), ``v`` spotlight app only,
-``N`` show OS noise (connectivity checks, Play services background traffic;
-hidden by default). The frame caption carries the counts ("38 of 412").
+Filters: ``/`` text (host, path, app, recipient), ``T`` (target) spotlight
+app only, ``N`` show OS noise (connectivity checks, Play services background
+traffic; hidden by default). ``N`` is "show hidden noise" in the Files lens
+too, and ``v`` is only the Runs lens's "review". The frame caption carries the
+counts ("38 of 412").
 
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
 mounted hidden inside this lens as controllers; this lens binds their keys
 (``Ctrl+D`` device proxy, ``Ctrl+N`` CA, ``Ctrl+P`` unpin, ...) and shows
-their state in the caption (``mitm ● :8080 · device ✓ · CA ✓ · friTap ●``)
+their state in the caption (``mitm ● :<port> · device ✓ · CA ✓ · friTap ●``,
+``<port>`` = the configured ``mitmproxy.proxy_port``)
 and on the "Capture status" Inspector page (``I``; ``h`` opens its friTap
 tab). Their log lines go to the ActivityLog drawer (`` ` ``).
 
@@ -508,10 +511,10 @@ class NetworkPanel(Widget):
 
     BINDINGS = [
         # Shown in the footer, which keeps two lens keys: "⏎ start mitm" and
-        # "^D device proxy" while nothing is captured, then "/" and "v".
+        # "^D device proxy" while nothing is captured, then "/" and "T".
         Binding("enter", "start_stop", "Start/stop mitm"),
         Binding("slash", "filter", "Filter"),
-        Binding("v", "toggle_app_only", "App only"),
+        Binding("T", "toggle_app_only", "App only"),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
         Binding("N", "toggle_noise", "Show OS noise", show=False),
         Binding("I", "status", "Capture status", show=False),
@@ -1080,7 +1083,7 @@ class NetworkPanel(Widget):
             if self._filter:
                 widen.append("/ edits the filter")
             if self._app_only:
-                widen.append("v shows all apps")
+                widen.append("T shows all apps")
             if not self._show_noise:
                 widen.append("N shows OS noise")
             head = "Nothing matches"

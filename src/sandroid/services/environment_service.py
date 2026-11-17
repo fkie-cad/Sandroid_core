@@ -179,11 +179,27 @@ class EnvironmentService:
         # Check ADB connection
         stdout, stderr = adb.send_adb_command("shell ls /data")
 
-        if "not found" in stderr:
+        from sandroid.services.setup_checks import (
+            adb_binary_missing,
+            missing_device_serial,
+        )
+
+        if adb_binary_missing(stderr):
             result.success = False
             result.adb_available = False
             result.message = "ADB not found in PATH"
             result.errors.append("Could not find adb command")
+            self._last_result = result
+            return result
+
+        missing = missing_device_serial(stderr)
+        if missing is not None:
+            # adb runs, but the targeted serial (-s) is not connected.
+            result.success = False
+            result.adb_available = True
+            result.message = (
+                f"Device '{missing}' not found" if missing else "Device not found"
+            )
             self._last_result = result
             return result
 

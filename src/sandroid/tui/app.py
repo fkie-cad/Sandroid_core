@@ -528,6 +528,29 @@ class SandroidTUI(App):
             # Already initialized (e.g. tests or Rich-mode fallback)
             self._push_main_screen()
 
+    def _startup_screen_up(self) -> bool:
+        """True while the StartupScreen is in the screen stack."""
+        from sandroid.tui.screens.startup_screen import StartupScreen
+
+        try:
+            stack = self.screen_stack
+        except Exception:
+            return False
+        return any(isinstance(screen, StartupScreen) for screen in stack)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Refuse every app-level action while the StartupScreen is up.
+
+        The startup screen (and a device picker opened from it) owns the
+        keyboard: without this, ``r`` (retry) would also fire Record, and
+        ``p``/``1``-``4``/``D``/... would act on a session that does not
+        exist yet. A refused priority binding falls through to the screen's
+        own bindings (``r``/``d``/``q``/``Ctrl+C``, see StartupScreen).
+        """
+        if self._startup_screen_up():
+            return False
+        return True
+
     def on_startup_screen_init_complete(self, message) -> None:
         """Handle successful initialization from StartupScreen."""
         logger.debug(
@@ -1284,36 +1307,11 @@ class SandroidTUI(App):
         dm = Toolbox.get_device_manager()
         devices = dm.refresh_devices()
         current_serial = dm.active_device.serial if dm.active_device else None
-        worker_kw = {
-            "run_worker": self.run_worker,
-            "call_from_thread": self.call_from_thread,
-            "notify": self.notify,
-        }
-
-        def _parse_encoded_serial(serial: str):
-            """Parse ``__start_avd__`` / ``__restart_emulator__`` encoded serial."""
-            parts = serial.split("__")
-            if len(parts) >= 4:
-                snapshot = parts[4] if len(parts) > 4 and parts[4] else None
-                return parts[2], parts[3], snapshot
-            return None, None, None
 
         def on_device_selected(serial: str | None) -> None:
             if serial is None:
                 return
-            if serial.startswith("__start_avd__"):
-                name, mode, snap = _parse_encoded_serial(serial)
-                if name:
-                    self._device_controller.start_avd_with_boot_mode(
-                        name, mode, snap, **worker_kw
-                    )
-                return
-            if serial.startswith("__restart_emulator__"):
-                emu, mode, snap = _parse_encoded_serial(serial)
-                if emu:
-                    self._device_controller.restart_emulator_with_boot_mode(
-                        emu, mode, snap, **worker_kw
-                    )
+            if self.handle_device_launch_choice(serial):
                 return
             if serial != current_serial:
                 if self._has_active_session():
@@ -1329,6 +1327,38 @@ class SandroidTUI(App):
             DeviceSelectionModal(devices=devices, current_serial=current_serial),
             on_device_selected,
         )
+
+    def handle_device_launch_choice(self, serial: str) -> bool:
+        """Act on a DeviceSelectionModal "start AVD" / "restart emulator" pick.
+
+        The modal encodes those as ``__start_avd__<name>__<mode>__<snapshot>``
+        / ``__restart_emulator__<serial>__<mode>__<snapshot>``.
+
+        Returns:
+            True if ``serial`` was such an encoded choice (handled here), False
+            for a plain device serial.
+        """
+        if not serial.startswith(("__start_avd__", "__restart_emulator__")):
+            return False
+        parts = serial.split("__")
+        if len(parts) < 4 or not parts[2]:
+            return True
+        target, mode = parts[2], parts[3]
+        snapshot = parts[4] if len(parts) > 4 and parts[4] else None
+        worker_kw = {
+            "run_worker": self.run_worker,
+            "call_from_thread": self.call_from_thread,
+            "notify": self.notify,
+        }
+        if serial.startswith("__start_avd__"):
+            self._device_controller.start_avd_with_boot_mode(
+                target, mode, snapshot, **worker_kw
+            )
+        else:
+            self._device_controller.restart_emulator_with_boot_mode(
+                target, mode, snapshot, **worker_kw
+            )
+        return True
 
     def _has_active_session(self) -> bool:
         """True if background tasks or spotlight app are active."""

@@ -402,7 +402,10 @@ async def test_filter_and_app_only(flow_dir):
         panel.set_filter("")
         await _settle(pilot)
         await pilot.press("N")  # show everything, then narrow to the app
-        await pilot.press("v")
+        await pilot.press("v")  # v is only "review" (Runs lens) now: no-op
+        await _settle(pilot)
+        assert "app only" not in ms._lens_captions["network"][1]
+        await pilot.press("T")
         await _settle(pilot)
         apps = {
             panel._row_by_key(
@@ -559,3 +562,34 @@ def test_flow_row_from_record_and_url():
     assert row.key == "f7"
     assert row.url() == "https://a.io/p?q=1"
     assert not row.failed
+
+
+def test_mitm_port_shown_is_the_configured_one(monkeypatch):
+    """Caption, empty hint, status page and proxy default: never a fixed 8080."""
+    import sandroid.config as config_mod
+    from sandroid.config import SandroidConfig
+    from sandroid.core.proxy_manager import ProxyManager
+    from sandroid.services.mitmproxy_service import MitmproxyService
+    from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
+
+    cfg = SandroidConfig()
+    cfg.mitmproxy.proxy_port = 8090
+    monkeypatch.setattr(config_mod, "_config_instance", cfg)
+    service = MitmproxyService()
+    panel = MitmproxyPanel()
+    panel._service = service
+
+    head, _hint = panel.empty_hint()
+    assert ":8090" in head
+    assert any("8090" in markup for _label, markup in panel.status_rows())
+
+    monkeypatch.setattr(service, "is_running", lambda: True)
+    monkeypatch.setattr(service, "ssl_unpin_is_active", lambda: False)
+    caption = panel.status_caption()
+    assert ":8090" in caption
+    assert "8080" not in caption
+
+    monkeypatch.setattr(
+        ProxyManager, "get_host_ip", classmethod(lambda cls: "10.0.2.2")
+    )
+    assert ProxyManager.get_default_config().port == 8090

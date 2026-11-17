@@ -17,7 +17,7 @@ live in the old Monitor sub-tab's ``MonitorView`` except the drawing:
   the watchlist pulls, companions included);
 * **visibility** -- ``tui.monitor_event_visibility`` (always/verbose/never per
   category, OPEN/CLOSE "noise" is verbose by default) plus path-based noise
-  (caches, tmp files, OS paths). ``show_all`` (key ``v`` in the lens) reveals
+  (caches, tmp files, OS paths). ``show_all`` (key ``N`` in the lens) reveals
   verbose categories and noisy paths; "never" stays hidden;
 * **cap** -- ``tui.monitor_max_lines`` (default 500) bounds the number of
   tracked paths (least-recently touched paths are dropped first).

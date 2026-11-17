@@ -47,15 +47,15 @@ logger = logging.getLogger(__name__)
 
 #: Task sources whose TASK_OUTPUT events must NOT reach Background Activity
 #: because they already have their own dedicated display surface (monitor's
-#: output lives in the Files lens's Monitor sub-tab -- see
-#: ``tui/widgets/monitor_view.py``). A frozenset (not a bare equality check)
+#: output is folded into the Files lens table -- see ``tui/widgets/files_panel.py``
+#: and ``tui/widgets/monitor_view.py``). A frozenset (not a bare equality check)
 #: makes this rule explicit and extensible to future dedicated-tab tools.
 #: Lifecycle notices (TASK_STARTED/TASK_STOPPED) are NOT filtered -- only
 #: TASK_OUTPUT, so monitor's start/stop still appears in Background Activity.
 _ACTIVITY_LOG_EXCLUDED_SOURCES = frozenset({"monitor"})
 
 #: Legacy ``open_files_tab(sub_tab=...)`` targets that now live in their own
-#: lens (the Diffs sub-tab became the Runs lens).
+#: lens (the former Files → Diffs sub-tab is the Runs lens).
 _SUBTAB_TO_LENS = {"files-diffs": "runs"}
 
 
@@ -66,10 +66,11 @@ class _LensHost(Vertical):
     only fire while focus is inside the lens area -- never stolen from the
     log drawer or the side slot.
 
-    Shift+Up/Down move the active "nav level" between the lens bar and the
-    current lens's own inner sub-tab bar (Network: mitmproxy/friTap, Files:
-    Monitor/Watchlist; a no-op where a lens has none). Shift+Left/Right cycle
-    whichever level is active: the lenses, or the lens's own sub-tabs. All
+    Shift+Up/Down move the active "nav level" between the lens bar and an
+    inner tab bar of the current lens -- only for a lens that implements the
+    ``set_subtab_bar_active``/``cycle_subtab`` hooks; none of the four lenses
+    has sub-tabs any more, so today this is a no-op. Shift+Left/Right cycle
+    whichever level is active: the lenses, or such a lens's inner tabs. All
     four delegate to ``MainScreen`` (``shift_nav_level``/
     ``cycle_active_level``). Shift-arrows are used because the lenses hand
     focus to OptionLists/RichLogs whose plain-arrow bindings would swallow
@@ -422,8 +423,7 @@ class MainScreen(Screen):
             pass
         self.call_after_refresh(self._ensure_view_focus)
         # Whenever the lens changes -- by any means -- the active nav level
-        # goes back to "outer" and stale inner highlights are cleared. A
-        # following select_subtab() (open_fritap_tab) re-enters "inner".
+        # goes back to "outer" and stale inner highlights are cleared.
         self._reset_nav_level_to_outer()
         self.refresh_bindings()
 
@@ -493,12 +493,13 @@ class MainScreen(Screen):
     def _ensure_view_focus(self) -> None:
         """After a view switch, never leave the caret in a text input.
 
-        Switching lenses/sub-tabs focuses the new view's list/log. If focus
-        nevertheless ends up in a text field (Watchlist's "Add path" input,
-        e.g. via Textual re-homing focus away from a widget the switch just
-        hid), the next shortcut -- ``P`` for the PDF report -- would be typed
-        into it. Move focus to the first non-input focusable widget of the
-        active lens instead (or to nothing, which keeps global keys live).
+        Switching lenses focuses the new view's table/list. If focus
+        nevertheless ends up in a text field (a lens's inline filter or the
+        Files lens's "watch a path" input, e.g. via Textual re-homing focus
+        away from a widget the switch just hid), the next shortcut -- ``P``
+        for the PDF report -- would be typed into it. Move focus to the first
+        non-input focusable widget of the active lens instead (or to nothing,
+        which keeps global keys live).
         """
         from textual.widgets import Input, TextArea
 
@@ -559,7 +560,11 @@ class MainScreen(Screen):
             pass
 
     def open_fritap_tab(self) -> None:
-        """Switch to the Network lens and its friTap sub-tab (key h)."""
+        """Switch to the Network lens and show friTap's state (key ``h``).
+
+        The Network lens has no sub-tabs any more: its ``select_subtab`` hook
+        opens the "Capture status" Inspector page on its friTap tab.
+        """
         self.switch_lens("network")
         try:
             panel = self.query_one("#network-panel")
@@ -569,12 +574,13 @@ class MainScreen(Screen):
             pass
 
     def open_files_tab(self, sub_tab: str | None = None) -> None:
-        """Switch to the Files lens, optionally landing on an inner sub-tab.
+        """Switch to the Files lens (legacy ``sub_tab`` ids still accepted).
 
-        ``sub_tab`` is the Files inner ContentSwitcher child id
-        (``"files-monitor"``/``"files-watchlist"``). The former
-        ``"files-diffs"`` sub-tab is now the Runs lens and is redirected there
-        (Play lands on it on every press).
+        The Files lens is one table now; ``sub_tab`` is a pre-lens id that
+        callers still pass: ``"files-watchlist"`` (key ``l``) puts the cursor
+        on the first, watched row, ``"files-monitor"`` just shows the table.
+        ``"files-diffs"`` is redirected to the Runs lens (Play lands on it on
+        every press).
         """
         if sub_tab in _SUBTAB_TO_LENS:
             self.switch_lens(_SUBTAB_TO_LENS[sub_tab])
