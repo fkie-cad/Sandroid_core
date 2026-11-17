@@ -291,6 +291,24 @@ class TestMetadata:
         plain = SimpleNamespace(action=None, replay_settle_seconds=12)
         assert "replay_settle_seconds" not in run_report.describe_run_settings(plain)
 
+    def test_run_settings_tui_playback_records_settle(self):
+        """TUI playback (recording_path, action=None) records the settle too."""
+        from sandroid.analysis.run_config import RunConfig
+
+        cfg = RunConfig(recording_path="/tmp/rec/recording.txt")
+        assert cfg.action is None
+        used = run_report.describe_run_settings(cfg)
+        assert isinstance(used["replay_settle_seconds"], int)
+        forensic = run_report.describe_run_settings(RunConfig())
+        assert "replay_settle_seconds" not in forensic
+
+    def test_run_settings_record_network_reset_mode(self):
+        from types import SimpleNamespace
+
+        used = SimpleNamespace(action=None, network_reset_after_snapshot="svc")
+        settings = run_report.describe_run_settings(used)
+        assert settings["network_reset_after_snapshot"] == "svc"
+
     def test_host_metadata(self):
         from sandroid._version import __version__
 
