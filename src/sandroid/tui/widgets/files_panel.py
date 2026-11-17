@@ -41,7 +41,6 @@ deadlock a publisher on a background thread).
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,22 +84,15 @@ _STATE_STAR = {
 def _load_run_record(scope: str):
     """The ``RunRecord`` of the run under review (``scope`` = run directory).
 
-    Uses the loader the Runs lens uses (``run_history.load_run``) by the
-    directory's name, falling back to the directory's own ``run.json`` (a run
-    outside the configured results path). Kept as one small function so the
-    shared run-history helper can replace it.
+    Same loader as the Runs lens (``run_history.run_dir_for_scope`` +
+    ``load_run_dir``); raises ``RunHistoryError`` for an unknown run.
     """
     from sandroid.core import run_history
 
-    run_dir = Path(scope)
-    try:
-        return run_history.load_run(run_dir.name)
-    except run_history.RunHistoryError:
-        manifest = run_dir / "run.json"
-        if not manifest.is_file():
-            raise
-        with open(manifest, encoding="utf-8") as handle:
-            return run_history.RunRecord.from_dict(json.load(handle))
+    run_dir = run_history.run_dir_for_scope(scope)
+    if run_dir is None:
+        raise run_history.RunHistoryError(f"No run in '{scope}'")
+    return run_history.load_run_dir(run_dir)
 
 
 def render_diff(diff: str | list[str] | None) -> Text:
@@ -665,17 +657,11 @@ class FilesPanel(Widget):
         rows: list[_Row] = []
         wl = self._watchlist_or_none()
         if record is not None:
-            for entry in record.changed_files or []:
-                if isinstance(entry, dict):
-                    for path, lines in entry.items():
-                        rows.append(
-                            _Row(key=path, review_kind="changed", review_diff=lines)
-                        )
-                else:
-                    rows.append(_Row(key=str(entry), review_kind="changed"))
-            rows += [_Row(key=p, review_kind="new") for p in record.new_files or []]
-            rows += [
-                _Row(key=p, review_kind="deleted") for p in record.deleted_files or []
+            from sandroid.core import run_history
+
+            rows = [
+                _Row(key=r.path, review_kind=r.kind, review_diff=r.diff)
+                for r in run_history.file_diff_rows(record)
             ]
         unique: dict[str, _Row] = {}
         for row in rows:  # a path listed twice keeps its first (changed) entry
