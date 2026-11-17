@@ -91,6 +91,7 @@ row ``RowState.ERROR`` and never pauses the whole mechanism.
 
 from __future__ import annotations
 
+import fnmatch
 import functools
 import logging
 import os
@@ -693,12 +694,18 @@ class WatchlistView(FilesSubViewBase):
         path = event.value.strip()
         if not path:
             return
-        self._add_path(path)
-        event.input.value = ""
+        if self._add_path(path):
+            event.input.value = ""
+            # Back to the list so the next n/a/p is a command again, not
+            # typed into the field (phase 5: "n/data/..." got watched).
+            try:
+                self.query_one("#watchlist-list", OptionList).focus()
+            except Exception:
+                pass
 
     # -- add / remove -----------------------------------------------------
 
-    def _add_path(self, path: str) -> None:
+    def _add_path(self, path: str) -> bool:
         forensic = get_forensic_service()
         # add_spotlight_file() itself branches on "*" to expand wildcards
         # (_add_spotlight_files_by_pattern) -- reused as-is; passing an adb
@@ -707,7 +714,7 @@ class WatchlistView(FilesSubViewBase):
         added = forensic.add_spotlight_file(path, adb=self._adb())
         if not added:
             self._notify(f"Already watching, invalid, or no matches: {path}", "warning")
-            return
+            return False
         if "*" in path:
             # ForensicService only keeps the already-expanded literal matches
             # (see _add_spotlight_files_by_pattern) -- the pattern string
@@ -717,6 +724,7 @@ class WatchlistView(FilesSubViewBase):
         self._persist_index()
         self._reload_rows()
         self._notify(f"Added to watchlist: {path}")
+        return True
 
     def action_remove_selected(self) -> None:
         path = self._current_path()
@@ -1071,10 +1079,19 @@ class WatchlistView(FilesSubViewBase):
             return
 
         any_change = False
+        dropped = False
         for path in requested:
             row = self._rows.get(path)
             if row is None:
                 continue  # removed from the watchlist while the batch was in flight
+            if path not in parsed and self._vanished_expansion(path, stderr):
+                # A transient file a watched wildcard once matched (e.g. an
+                # app's offline cache) is gone: drop it quietly instead of
+                # stat-erroring on it every tick. Re-expansion re-adds it if
+                # it comes back.
+                self._drop_row(path)
+                dropped = True
+                continue
             if path not in parsed:
                 # Isolated per-path failure (permission denied, gone, etc.)
                 # -- mark just this row and keep polling the rest.
@@ -1089,7 +1106,7 @@ class WatchlistView(FilesSubViewBase):
             self._evaluate_auto_pull(row, previously_seen, new_sig)
 
         self._advance_backoff(any_change)
-        if any_change:
+        if any_change or dropped:
             # Persist the freshly-observed last_seen signatures -- gated on
             # any_change (rather than every idle tick) to avoid a disk write
             # every 5-30s while nothing on-device is actually happening.
@@ -1099,6 +1116,34 @@ class WatchlistView(FilesSubViewBase):
         self._rebuild_list()
         if self._selected_path:
             self._render_detail(self._selected_path)
+
+    def _from_watched_pattern(self, path: str) -> bool:
+        """Whether ``path`` is covered by one of the watched wildcard patterns."""
+        for pattern in self._watched_patterns:
+            if pattern.endswith("/*") and path.startswith(pattern[:-1]):
+                return True  # "dir/*" expands recursively (find -type f)
+            if fnmatch.fnmatchcase(path, pattern):
+                return True
+        return False
+
+    def _vanished_expansion(self, path: str, stderr: str) -> bool:
+        """A wildcard-expanded path whose stat says it no longer exists."""
+        if not self._from_watched_pattern(path):
+            return False
+        return "no such file" in self._stat_error_detail(path, stderr).lower()
+
+    def _drop_row(self, path: str) -> None:
+        """Forget a vanished wildcard expansion (logged once, at DEBUG)."""
+        try:
+            get_forensic_service().remove_spotlight_file(path)
+        except Exception:
+            logger.debug("Watchlist: could not unwatch %s", path, exc_info=True)
+        self._rows.pop(path, None)
+        self._last_auto_pull_at.pop(path, None)
+        self._auto_pull_inflight.discard(path)
+        if self._selected_path == path:
+            self._selected_path = None
+        logger.debug("Watchlist: %s vanished; dropped (wildcard expansion)", path)
 
     def _evaluate_auto_pull(
         self,

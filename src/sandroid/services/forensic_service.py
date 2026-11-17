@@ -298,19 +298,31 @@ class ForensicService:
             if is_recursive and matched_file.endswith("/"):
                 continue
 
-            self._add_single_spotlight_file(matched_file.strip())
-            added_count += 1
+            # Re-expansion (Watchlist auto mode) sees every known match again:
+            # only count -- and log -- files that are actually new.
+            if self._add_single_spotlight_file(
+                matched_file.strip(), quiet_duplicate=True
+            ):
+                added_count += 1
 
-        self._logger.info(
-            f"Added {added_count} files matching pattern '{file_path}' to spotlight files"
-        )
+        if added_count:
+            self._logger.info(
+                f"Added {added_count} files matching pattern '{file_path}' "
+                "to spotlight files"
+            )
+        else:
+            self._logger.debug(f"No new files match pattern '{file_path}'")
         return added_count > 0
 
-    def _add_single_spotlight_file(self, file_path: str) -> bool:
+    def _add_single_spotlight_file(
+        self, file_path: str, quiet_duplicate: bool = False
+    ) -> bool:
         """Add a single file to spotlight files.
 
         Args:
             file_path: Path to the file to add.
+            quiet_duplicate: Log an already-watched file at DEBUG (wildcard
+                expansion) instead of INFO (an explicit add).
 
         Returns:
             True if the file was added, False otherwise.
@@ -320,7 +332,8 @@ class ForensicService:
             return False
 
         if file_path in self._spotlight_files:
-            self._logger.info(f"File '{file_path}' is already in spotlight files")
+            log = self._logger.debug if quiet_duplicate else self._logger.info
+            log(f"File '{file_path}' is already in spotlight files")
             return False
 
         self._spotlight_files.append(file_path)

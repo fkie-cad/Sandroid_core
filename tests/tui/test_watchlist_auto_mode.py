@@ -550,3 +550,53 @@ async def test_wildcard_tick_noop_without_patterns(monkeypatch):
         await pilot.pause()
 
         assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 N7: transient wildcard expansions
+# ---------------------------------------------------------------------------
+
+
+def test_reexpansion_of_known_matches_adds_nothing_and_logs_quietly(caplog):
+    """Re-expanding a pattern whose matches are all watched is a quiet no-op
+    (no INFO "already in spotlight files" spam, no "new file(s)" toast).
+    """
+    import logging
+
+    svc = get_forensic_service()
+    adb = _FakeExpandAdb(["/data/data/com.app/files/a", "/data/data/com.app/files/b"])
+    assert svc.add_spotlight_file("/data/data/com.app/files/*", adb=adb) is True
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        assert svc.add_spotlight_file("/data/data/com.app/files/*", adb=adb) is False
+    assert not [r for r in caplog.records if "already in spotlight" in r.message]
+    adb.matches.append("/data/data/com.app/files/c")
+    assert svc.add_spotlight_file("/data/data/com.app/files/*", adb=adb) is True
+    assert len(svc.get_spotlight_files()) == 3
+
+
+def test_vanished_wildcard_expansion_is_dropped_not_errored(monkeypatch):
+    view = WatchlistView()
+    monkeypatch.setattr(view, "_reschedule_auto_timer", lambda: None)
+    monkeypatch.setattr(view, "_evaluate_auto_pull", lambda *a, **k: None)
+    view._auto_enabled = True
+    gone = "/data/data/com.app/files/offline_files/x1"
+    explicit = "/data/data/com.other/explicit.db"
+    view._watched_patterns.add("/data/data/com.app/files/*")
+    for path in (gone, explicit, PATH_B):
+        get_forensic_service().add_spotlight_file(path)
+        view._rows[path] = wv_module._RowInfo(path=path)
+
+    stderr = (
+        f"stat: can't stat '{gone}': No such file or directory\n"
+        f"stat: can't stat '{explicit}': No such file or directory"
+    )
+    view._apply_auto_tick_result(
+        [gone, explicit, PATH_B], _stat_line(PATH_B, 100, 10), stderr
+    )
+
+    assert gone not in view._rows
+    assert gone not in get_forensic_service().get_spotlight_files()
+    # An explicitly watched path that vanished still shows as an error.
+    assert view._rows[explicit].state == RowState.ERROR
+    assert view._rows[PATH_B].state != RowState.ERROR
