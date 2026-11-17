@@ -203,8 +203,9 @@ async def test_new_run_cursor_stays_on_older_run_row() -> None:
         )
         _save("20260101_000002_cccccc", label="Run C")
         view.on_new_run("20260101_000002_cccccc")
-        await pilot.pause(0.1)
-        assert table.row_count == 3
+        # The reload runs on a worker: wait for the new row, not a fixed time.
+        await _wait_for(pilot, lambda: table.row_count == 3)
+        await pilot.pause(0.05)
         assert view._cursor_run_id() == "20260101_000000_aaaaaa"
         assert "●" in str(table.get_row_at(0)[1])
 
