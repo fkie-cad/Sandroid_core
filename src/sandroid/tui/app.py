@@ -335,6 +335,7 @@ class SandroidTUI(App):
             # at call time -- which a bound method already does (only its
             # body runs later, not the attribute lookup inside it).
             suppress_disconnect_guard=self._suppress_device_disconnect_detection,
+            set_replay_phase=self._set_replay_phase,
         )
         # Publish the singleton instance so the AI chat's recording_control
         # tools can reach it without importing app.py/MainScreen directly
@@ -1811,14 +1812,61 @@ class SandroidTUI(App):
                 severity="warning",
             )
             return False
-        # Tab-switch on Play-*press* always happens, regardless of what run
-        # history looks like (the other, gated half of the unified focus
-        # rule — whether the completed run also steals the rail's current
-        # *selection* — lives in DiffsView.on_new_run via _notify_diffs_new_run).
-        ms = self._get_main_screen()
-        if ms is not None:
-            ms.open_runs_lens()
-        return rc.start_playback()
+        self._confirm_play()
+        return True
+
+    def _confirm_play(self) -> None:
+        """Ask before ``p`` reverts the device (M-35).
+
+        Play loads the snapshot taken when the recording started, which
+        throws away whatever happened on the device since, and then runs for
+        several minutes. The dialog says which recording it plays, how many
+        replays, and roughly how long it takes.
+        """
+        from rich.markup import escape
+
+        from sandroid.tui.modals import ConfirmModal
+
+        rc = self._recording_controller
+        try:
+            plan = rc.play_plan()
+        except Exception:
+            plan = {}
+        label = plan.get("recording") or "the last recording"
+        runs = int(plan.get("number_of_runs") or 1)
+        what = f"{runs} replay{'s' if runs != 1 else ''}"
+        if plan.get("noise_filter"):
+            what += " + a dry run"
+        lines = [
+            f"Replay '{escape(label)}' ({what})?",
+            "This reverts the device to the snapshot taken when the recording "
+            "started ('tmp'); changes made on the device since are lost.",
+        ]
+        estimate = plan.get("estimate")
+        if estimate:
+            minutes = max(1, round(float(estimate) / 60))
+            seconds = plan.get("seconds") or 0
+            lines.append(
+                f"Takes about {minutes} min (recording {round(seconds)} s); "
+                "the header shows the phase."
+            )
+
+        def on_result(yes: bool | None) -> None:
+            if not yes:
+                return
+            # Tab-switch on Play start always happens, regardless of what run
+            # history looks like (the other, gated half of the unified focus
+            # rule — whether the completed run also steals the rail's current
+            # *selection* — lives in DiffsView.on_new_run).
+            ms = self._get_main_screen()
+            if ms is not None:
+                ms.open_runs_lens()
+            rc.start_playback()
+
+        self.push_screen(
+            ConfirmModal(title="Play (replay)", message="\n".join(lines)),
+            on_result,
+        )
 
     def _confirm_stop_replay(self) -> None:
         """Ask before stopping the running replay (``p`` while replaying)."""
@@ -2001,11 +2049,17 @@ class SandroidTUI(App):
         precedent as ``StatusBar.set_device_proxy``), then reuses the
         existing refresh plumbing so the repaint also picks up anything else
         that changed meanwhile.
+
+        The MainScreen is looked up in the screen *stack*, not as the active
+        screen: recording starts while the Record dialog is on top, so the
+        old active-screen lookup dropped every REC transition and the pill
+        never showed ``● REC`` (M-25). The pill is updated right here, so it
+        follows each transition (no stale ``● REPLAY`` after the run, M-26).
         """
+        ms = self._main_screen_in_stack()
+        if ms is None:
+            return
         try:
-            ms = self._get_main_screen()
-            if not ms:
-                return
             bar = ms.query_one("#status-bar")
         except Exception:
             return
@@ -2013,9 +2067,38 @@ class SandroidTUI(App):
             bar.recording_active = recording
         if replaying is not None:
             bar.replay_active = replaying
+            if not replaying:
+                bar.replay_phase = None
         if recording or replaying:
             ms.set_scope(None)  # a new capture is always LIVE, never REVIEW
+        ms.refresh_scope_pill()
         self._widget_refresh_controller.refresh_status_bar()
+
+    def _set_replay_phase(self, phase: str | None) -> None:
+        """The running Play's phase (pill + status strip); None when over."""
+        ms = self._main_screen_in_stack()
+        if ms is None:
+            return
+        try:
+            bar = ms.query_one("#status-bar")
+        except Exception:
+            return
+        bar.replay_phase = phase or None
+        ms.refresh_scope_pill()
+        try:
+            runs = ms.lens_widget("runs")
+            if runs is not None and hasattr(runs, "set_play_phase"):
+                runs.set_play_phase(phase or None)
+        except Exception:
+            logger.debug("Runs lens phase update failed", exc_info=True)
+        self._widget_refresh_controller.refresh_status_bar()
+
+    def _main_screen_in_stack(self) -> MainScreen | None:
+        """The MainScreen even while a modal (e.g. the Record dialog) is on top."""
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, MainScreen):
+                return screen
+        return None
 
     def _suppress_device_disconnect_detection(self, active: bool) -> None:
         """Toggle ``DeviceController``'s disconnect-poll suppression.

@@ -93,7 +93,11 @@ Scope (LIVE / REVIEW)
 ---------------------
 * ``MainScreen.set_scope(run_id | None, label=None)`` -- ``None`` = live.
   The header pill shows ``● LIVE`` or ``◆ REVIEW <label or "Run <id>">``
-  (``● REC`` / ``● REPLAY`` while recording/replaying in live scope).
+  (the Runs lens passes ``"#<n> <label>"``), ``● REC`` while recording and
+  ``● REPLAY · <phase>`` while a Play runs. The app pushes every
+  recorder/player transition and phase change through
+  ``MainScreen.refresh_scope_pill()`` (state on the StatusBar:
+  ``recording_active``, ``replay_active``, ``replay_phase``).
 * ``MainScreen.scope_run`` -- reactive (watchable) current run id or None;
   ``MainScreen.scope`` is the plain getter.
 * ``ScopeChanged(run_id, label)`` is posted to every lens widget on change.
@@ -109,10 +113,16 @@ Scope (LIVE / REVIEW)
   - ``run_dir_for_scope(scope) -> Path | None`` -- the run folder (holds
     ``run.json``, ``sandroid.json``, ``raw/``, ``manifest.json``...).
   - ``resolve_scope(scope) -> ScopedRun | None`` -- ``run_id``, ``run_dir``,
-    ``label``, ``device_name``, ``started_at``, ``ended_at``, ``error``.
+    ``label``, ``device_name``, ``started_at``, ``ended_at``, ``error``,
+    ``phases`` (replay / dry-run windows; empty for older runs).
   - ``run_time_window(scope) -> (started_at, ended_at)`` -- tz-aware
     datetimes (stored naive values are local time), ``(None, None)`` if
-    unknown: Play start → end of its analysis. Network: filter flows by it.
+    unknown: Play start → end of its analysis (includes the dry run).
+  - ``phase_of(epoch, phases)`` -- ``"replay N"`` / ``"dry run"`` /
+    ``"setup"`` (``""`` without phase data).
+  - ``<run_dir>/NETWORK_DIR_NAME`` (``network/``) -- the run's own flows
+    (``mitmproxy_flow_log.read_run_flows``), phase-tagged; covered by the
+    run's ``SHA256SUMS``. Prefer it over the session's flow log.
   - ``file_diff_rows(scope | RunRecord) -> list[FileDiffRow]`` -- the run's
     files as ``FileDiffRow(kind, path, diff)``, ``kind`` in
     ``"changed"/"new"/"deleted"``, ``diff`` = diff lines (Rich markup) or
@@ -339,7 +349,7 @@ class ShellHeader(Header):
             pill = self.query_one("#scope-pill", Static)
         except Exception:
             return
-        pill.update(text)
+        pill.update(Text(text))  # a label may contain "[", never markup
         pill.set_class(kind == "", "-live")
         pill.set_class(kind == "review", "-review")
         pill.set_class(kind == "rec", "-rec")

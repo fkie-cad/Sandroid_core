@@ -33,6 +33,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ class RecordingController:
         set_recording_indicator: Callable[[bool], None] | None = None,
         set_replay_indicator: Callable[[bool], None] | None = None,
         suppress_disconnect_guard: Callable[[bool], None] | None = None,
+        set_replay_phase: Callable[[str | None], None] | None = None,
     ):
         """Initialize RecordingController with UI callbacks.
 
@@ -235,6 +237,13 @@ class RecordingController:
                 the transient ADB-transport blip a snapshot save/load causes
                 from tripping a false "Device disconnected" toast. Safe to
                 leave unset.
+            set_replay_phase: Callback invoked (via call_from_thread) with
+                the running Play's phase (``"loading snapshot"``,
+                ``"replay 1/2"``, ``"settle 8s"``, ``"collecting results"``,
+                ``"dry run"``, ``"analysing"``, ``"saving"``) and with
+                ``None`` once the Play is over (success, error or cancel), so
+                the header pill / status strip can show where a 5-10 minute
+                Play is. Safe to leave unset.
         """
         self._log_info = log_info or self._default_log
         self._log_warning = log_warning or self._default_log
@@ -251,6 +260,15 @@ class RecordingController:
         self._set_recording_indicator = set_recording_indicator
         self._set_replay_indicator = set_replay_indicator
         self._suppress_disconnect_guard = suppress_disconnect_guard
+        self._set_replay_phase = set_replay_phase
+        # Label of the run the current Play will save: the recording's label
+        # for the Play that auto-chains after a Record, None (= a fresh
+        # "Run N · HH:MM") for a manual ``p`` / AI replay -- a manual Play
+        # used to copy the previous run's label (M-31).
+        self._play_label: str | None = None
+        # Whether mitmproxy ran when the current Play started (recorded with
+        # the run's flows).
+        self._mitm_at_start: bool | None = None
         # Recording-session bookkeeping for the settings-seed flow (see
         # start_recording()): a monotonic counter for the "Run N" default
         # name, the label seed, and the replay-count/dry-run settings that
@@ -398,6 +416,12 @@ class RecordingController:
             self._log_error("Cannot show recording modal - push_modal not configured")
             return False
 
+        previous = (
+            self._recording_seq,
+            self._current_recording_label,
+            self._current_number_of_runs,
+            self._current_noise_filter,
+        )
         self._recording_seq += 1
         default_label = f"Run {self._recording_seq} · {time.strftime('%H:%M')}"
         # Seed sane fallbacks immediately, in case the live callback below
@@ -416,6 +440,14 @@ class RecordingController:
 
         def on_recording_result(result: RecordingResult) -> None:
             if result is None or result.cancelled:
+                # The earlier recording (if any) is still the one ``p``
+                # replays: keep its seeds instead of the cancelled dialog's.
+                (
+                    self._recording_seq,
+                    self._current_recording_label,
+                    self._current_number_of_runs,
+                    self._current_noise_filter,
+                ) = previous
                 self._log_info("Recording cancelled")
                 return
 
@@ -435,8 +467,9 @@ class RecordingController:
                 )
                 # Auto-chain (idea B): Record → interact → Stop flows straight
                 # into playback with the chosen settings, landing the user on
-                # the Diff panel with results.
-                self.start_playback()
+                # the Diff panel with results. This Play's run carries the
+                # label chosen in the Record dialog.
+                self.start_playback(label=self._current_recording_label)
 
         self._log_info("Opening recording modal...")
         self._push_modal(
@@ -593,11 +626,17 @@ class RecordingController:
         raw_results_path = os.getenv("RAW_RESULTS_PATH", "./")
         return os.path.join(raw_results_path, "recording.txt")
 
-    def start_playback(self) -> bool:
+    def start_playback(self, label: str | None = None) -> bool:
         """Start playback and analysis.
 
         Replays recorded input events and analyzes file system changes.
         Shows progress in activity log and summary modal at end.
+
+        Args:
+            label: Label of the run this Play saves. ``None`` (manual ``p``,
+                AI replay) gives the run a fresh default label
+                (``"Run N · HH:MM"``); the auto-chained Play after a Record
+                passes the label chosen in the Record dialog.
 
         Returns:
             True if playback was started successfully
@@ -626,6 +665,7 @@ class RecordingController:
             )
 
         self._log_info("Starting playback analysis...")
+        self._play_label = label or None
 
         # A previous Stop/quit left the process-wide cancel flag set.
         from sandroid.features.player import Player
@@ -645,6 +685,51 @@ class RecordingController:
             self._run_playback_analysis()
 
         return True
+
+    @staticmethod
+    def recording_seconds(path: str) -> float | None:
+        """Length of a recording (first to last input event), or None.
+
+        The recording is ``<epoch ms> <device> <type> <code> <value>`` lines.
+        """
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                stamps = [
+                    int(line.split(None, 1)[0])
+                    for line in f
+                    if line.strip() and line.split(None, 1)[0].isdigit()
+                ]
+        except OSError:
+            return None
+        if len(stamps) < 2:
+            return None
+        return max(0.0, (stamps[-1] - stamps[0]) / 1000.0)
+
+    def play_plan(self) -> dict[str, Any]:
+        """What ``p`` is about to do, for its confirm dialog.
+
+        ``{"recording": label, "number_of_runs", "noise_filter", "seconds":
+        recording length or None, "estimate": rough total seconds or None}``.
+        The estimate is (replays + dry run) x (recording + settle + ~35 s of
+        snapshot load, network reset and result collection) + ~15 s.
+        """
+        seconds = self.recording_seconds(self.get_recording_path())
+        windows = self._current_number_of_runs + (
+            1 if self._current_noise_filter else 0
+        )
+        estimate = None
+        if seconds is not None:
+            from sandroid.analysis.engine import _replay_settle_seconds
+
+            settle = _replay_settle_seconds(None)
+            estimate = windows * (seconds + settle + 35) + 15
+        return {
+            "recording": self._current_recording_label,
+            "number_of_runs": self._current_number_of_runs,
+            "noise_filter": self._current_noise_filter,
+            "seconds": seconds,
+            "estimate": estimate,
+        }
 
     def stop_playback(self) -> bool:
         """Stop the running replay (Play) as soon as possible.
@@ -790,8 +875,6 @@ class RecordingController:
         """Host directory of ``avd_name`` (honours ANDROID_AVD_HOME and the
         ``path=`` redirect in ``<avd>.ini``), or None if not found.
         """
-        from pathlib import Path
-
         try:
             from sandroid.config.android_env import find_existing_avd_home
 
@@ -970,6 +1053,7 @@ class RecordingController:
         monitor_config_for_resume: Any = None
 
         self._is_replaying = True
+        self._mitm_at_start = self._mitm_running()
         try:
             try:
                 # Safety net (see _stop_monitor_before_revert's docstring): monitor
@@ -1007,6 +1091,7 @@ class RecordingController:
                 try:
                     if self._set_replay_indicator:
                         self._ui(self._set_replay_indicator, True)
+                    self._report_phase("starting")
                     if self._suppress_disconnect_guard:
                         self._guarded(self._suppress_disconnect_guard, True)
                     result = AnalysisEngine(
@@ -1042,6 +1127,8 @@ class RecordingController:
         # Every UI touch goes through _ui(), which never raises, so a dead or
         # broken UI can no longer skip this step (P2-H1).
         self._ui(self._log_info, "Saving results...")
+        if self._set_replay_phase:
+            self._ui(self._set_replay_phase, "saving")
         try:
             saved_run_id = self._persist_run(
                 run_id=run_id,
@@ -1056,6 +1143,10 @@ class RecordingController:
             logger.exception("Persisting run %s failed", run_id)
             self._ui(self._log_error, f"Could not save run {run_id}: {e}")
             saved_run_id = None
+        finally:
+            self._play_label = None
+            if self._set_replay_phase:
+                self._ui(self._set_replay_phase, None)
 
         if error == "Replay cancelled":
             self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
@@ -1087,12 +1178,92 @@ class RecordingController:
         Invoked on the playback worker thread, so the log write is marshaled to
         the UI thread via ``call_from_thread``.
         """
+        phase = getattr(update, "phase", "") or ""
+        if phase:
+            self._report_phase(phase)
+            return
         label = getattr(update, "label", "") or ""
         message = getattr(update, "message", "") or ""
         line = f"{label}: {message}" if message else label
         if not line:
             return
         self._ui(self._log_info, line)
+
+    def _report_phase(self, phase: str | None) -> None:
+        """Tell the UI which phase the Play is in (None: the Play is over)."""
+        if phase:
+            self._ui(self._log_info, f"Play · {phase}")
+        if self._set_replay_phase:
+            self._ui(self._set_replay_phase, phase)
+
+    @staticmethod
+    def _mitm_running() -> bool | None:
+        """Whether the embedded mitmproxy runs (None: unknown)."""
+        try:
+            from sandroid.services.mitmproxy_service import peek_mitmproxy_service
+
+            service = peek_mitmproxy_service()
+            return bool(service is not None and service.is_running())
+        except Exception:
+            return None
+
+    def _fresh_run_label(self, device_name: str | None) -> str:
+        """``"Run N · HH:MM"`` for a manual Play (N = this device's next run)."""
+        from sandroid.core import run_history
+
+        try:
+            n = len(run_history.load_index(device_name)) + 1
+        except Exception:
+            n = 1
+        return f"Run {n} · {time.strftime('%H:%M')}"
+
+    def _export_run_flows(
+        self,
+        *,
+        bundle_dir: str,
+        recorded_at: str,
+        completed_at: str,
+        phases: Any,
+    ) -> None:
+        """Copy the run's mitmproxy flows into ``<bundle>/network/``.
+
+        Runs before the bundle's hash manifest is written, so the flows are
+        covered by ``SHA256SUMS`` and a later session can review them (the
+        session's flow log is per session). Never raises.
+        """
+        try:
+            from sandroid.core import run_history
+            from sandroid.services import mitmproxy_flow_log
+
+            start = datetime.fromisoformat(recorded_at).timestamp()
+            end = datetime.fromisoformat(completed_at).timestamp()
+            try:
+                flow_dir = mitmproxy_flow_log.resolve_flow_dir()
+            except Exception:
+                flow_dir = None
+            running = self._mitm_running()
+            if self._mitm_at_start or running:
+                mitm = True
+            elif self._mitm_at_start is None and running is None:
+                mitm = None
+            else:
+                mitm = False
+            meta = mitmproxy_flow_log.export_run_flows(
+                flow_dir,
+                Path(bundle_dir) / run_history.NETWORK_DIR_NAME,
+                start,
+                end,
+                phases,
+                mitm_running=mitm,
+            )
+            if meta.get("count"):
+                logger.info(
+                    "Stored %d mitmproxy flow(s) in the run bundle", meta["count"]
+                )
+        except Exception:
+            logger.warning(
+                "Could not store the run's flows in its bundle", exc_info=True
+            )
 
     def _persist_run(
         self,
@@ -1122,7 +1293,7 @@ class RecordingController:
 
         completed_at = datetime.now().isoformat()
         label = _unique_run_label(
-            self._current_recording_label or f"Run · {time.strftime('%H:%M')}",
+            self._play_label or self._fresh_run_label(device_name),
             device_name,
         )
 
@@ -1172,8 +1343,15 @@ class RecordingController:
 
         # Full results JSON (+ run metadata), optional PDF and the evidence
         # hash manifest, written into the run bundle -- the same finalisation
-        # the CLI and headless API use.
+        # the CLI and headless API use. The run's mitmproxy flows go into the
+        # bundle first, so the manifest covers them.
         if result is not None:
+            self._export_run_flows(
+                bundle_dir=bundle_dir,
+                recorded_at=recorded_at,
+                completed_at=completed_at,
+                phases=record.phases,
+            )
             self._finalize_run_bundle(
                 run_id=run_id,
                 result=result,

@@ -47,7 +47,7 @@ def _controller_with_captured_result_cb() -> tuple[RecordingController, dict, li
     )
     # Spy on start_playback (instance attr shadows the bound method, so the
     # auto-chain's ``self.start_playback()`` resolves to this).
-    controller.start_playback = lambda: (play_calls.append(True), True)[1]
+    controller.start_playback = lambda label=None: (play_calls.append(label), True)[1]
 
     assert controller.start_recording() is True
     return controller, captured, play_calls
@@ -68,7 +68,7 @@ def test_completed_recording_auto_starts_playback_with_settings() -> None:
         )
     )
 
-    assert play_calls == [True]
+    assert play_calls == ["My run"]  # the auto-chained run keeps its label
     # The chosen settings seed every subsequent Play of this recording.
     assert controller._current_recording_label == "My run"
     assert controller._current_number_of_runs == 4

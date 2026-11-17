@@ -805,3 +805,153 @@ def test_replay_of_a_recording_gets_a_distinct_run_label(monkeypatch) -> None:
         "Run 1 · 22:58 · play 3",
         "Run 1 · 22:58",  # another device has its own rail
     ]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3c: labels, phases, flows stored in the run bundle
+# ---------------------------------------------------------------------------
+
+
+def test_manual_play_gets_a_fresh_label_not_the_previous_runs(monkeypatch, tmp_path):
+    """M-31: a ``p`` run copied the previous Play's label ("Run 2 · 18:34")."""
+    controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    controller._current_recording_label = "Run 2 · 18:34"  # stale seed
+    controller._play_label = None  # manual p
+    controller._run_playback_analysis()
+    controller._play_label = None
+    controller._run_playback_analysis()
+    labels = sorted(e["label"] for e in run_history.load_index())
+    assert all("18:34" not in label for label in labels)
+    assert [label.split(" · ")[0] for label in labels] == ["Run 1", "Run 2"]
+
+    # The Play that auto-chains after a Record keeps the Record dialog's label.
+    controller._play_label = "Bookmark article"
+    controller._run_playback_analysis()
+    assert "Bookmark article" in {e["label"] for e in run_history.load_index()}
+    assert controller._play_label is None  # used once
+
+
+def test_cancelled_record_dialog_keeps_the_previous_recordings_seed(
+    monkeypatch, tmp_path
+):
+    """M-31's cause: Esc in a second Record dialog replaced the seed label of
+    the recording that ``p`` still replays.
+    """
+    from sandroid.tui.modals.recording_modal import RecordingResult
+
+    pushed: list = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, push_modal=lambda modal, cb: pushed.append(cb)
+    )
+    monkeypatch.setattr(controller, "start_playback", lambda label=None: True)
+    controller.start_recording()
+    pushed[-1](
+        RecordingResult(
+            cancelled=False,
+            completed=True,
+            label="Run 1 · 18:22",
+            number_of_runs=3,
+            noise_filter=True,
+        )
+    )
+    controller.start_recording()
+    pushed[-1](RecordingResult(cancelled=True))
+    assert controller._current_recording_label == "Run 1 · 18:22"
+    assert controller._current_number_of_runs == 3
+    assert controller._recording_seq == 1
+
+
+def test_play_reports_phases_and_clears_them_at_the_end(monkeypatch, tmp_path):
+    """M-35: the pill/strip get the Play's phase, and None when it is over."""
+    phases: list = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, set_replay_phase=phases.append
+    )
+    controller._current_number_of_runs = 2
+    controller._run_playback_analysis()
+    assert phases[0] == "starting"
+    for expected in (
+        "loading snapshot",
+        "baseline scan",
+        "replay 1/2",
+        "replay 2/2",
+        "dry run",
+        "analysing",
+        "saving",
+    ):
+        assert expected in phases
+    assert phases[-1] is None
+    # The run records its phase windows (replays + dry run).
+    record = run_history.load_run(run_history.load_index()[0]["run_id"])
+    assert [(p["kind"], p["run"]) for p in record.phases] == [
+        ("replay", 1),
+        ("replay", 2),
+        ("dry_run", 3),
+    ]
+    assert all(p["start"] <= p["end"] for p in record.phases)
+
+
+def test_play_phase_cleared_even_when_the_engine_fails(monkeypatch, tmp_path):
+    from sandroid.analysis import engine as engine_mod
+
+    phases: list = []
+    replay: list = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch,
+        tmp_path,
+        set_replay_phase=phases.append,
+        set_replay_indicator=replay.append,
+    )
+
+    def boom(self):
+        raise RuntimeError("adb went away")
+
+    monkeypatch.setattr(engine_mod.AnalysisEngine, "run", boom)
+    controller._run_playback_analysis()
+    assert replay == [True, False]
+    assert phases[-1] is None
+
+
+def test_play_stores_the_runs_flows_in_its_bundle_under_the_manifest(
+    monkeypatch, tmp_path
+):
+    """H-7: the flows go into <bundle>/network/ before SHA256SUMS is written."""
+    import json
+    import time as _time
+
+    from sandroid.services import mitmproxy_flow_log
+
+    session = tmp_path / "session" / "mitm_flows"
+    session.mkdir(parents=True)
+    now = _time.time()
+    with open(session / "flows.jsonl", "w", encoding="utf-8") as f:
+        for seq, ts in ((1, now + 0.5), (2, now - 3600)):  # in / out of the run
+            f.write(
+                json.dumps({"seq": seq, "id": f"f{seq}", "ts_start": ts, "ts_end": ts})
+                + "\n"
+            )
+    monkeypatch.setattr(mitmproxy_flow_log, "resolve_flow_dir", lambda: session)
+    controller, _toolbox, _forensic = _playback_controller(monkeypatch, tmp_path)
+    controller._run_playback_analysis()
+
+    bundle = next((tmp_path / "runs").glob("*/run.json")).parent
+    rows = (bundle / "network" / "flows.jsonl").read_text().splitlines()
+    assert [json.loads(r)["seq"] for r in rows] == [1]
+    meta = json.loads((bundle / "network" / "meta.json").read_text())
+    assert meta["count"] == 1
+    sums = (bundle / "SHA256SUMS").read_text()
+    assert "network/flows.jsonl" in sums
+    assert "network/meta.json" in sums
+
+
+def test_recording_seconds_reads_the_event_stamps(tmp_path):
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    rec = tmp_path / "recording.txt"
+    rec.write_text(
+        "1794936192074 /dev/input/event1 0 0 0\n"
+        "1794936201188 /dev/input/event1 3 57 7\n"
+        "1794936277074 /dev/input/event1 0 0 0\n"
+    )
+    assert RecordingController.recording_seconds(str(rec)) == 85.0
+    assert RecordingController.recording_seconds(str(tmp_path / "none")) is None

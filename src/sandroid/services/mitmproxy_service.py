@@ -2068,6 +2068,79 @@ class MitmproxyService:
             logger.debug("Releasing device proxy %s failed: %s", addr, exc)
         return cleared
 
+    def reapply_device_proxy(self, serial: str | None = None) -> str:
+        """Put the device proxy back after a snapshot load reset it.
+
+        A snapshot restores the device's settings, so loading one taken
+        without the proxy (e.g. Play's ``tmp``) silently set ``http_proxy``
+        back to ``:0`` and mitmproxy saw none of the replays (M-29). Called
+        by ``EmulatorService.load_snapshot`` after every load. Blocking
+        (ADB), never raises.
+
+        Args:
+            serial: The device the snapshot was loaded on (None: current).
+
+        Returns:
+            ``"none"`` (no device proxy of ours), ``"kept"`` (still set),
+            ``"restored"`` (re-applied), ``"stopped"`` (lost, but mitmproxy
+            no longer runs: forgotten) or ``"failed"`` (lost, could not be
+            re-applied; logged as an error).
+        """
+        addr = self._owned_device_proxy
+        owner = self._owned_device_proxy_serial
+        if not addr:
+            return "none"
+        if serial is not None and owner is not None and owner != serial:
+            return "none"
+        try:
+            from sandroid.core.adb import Adb
+            from sandroid.core.proxy_manager import (
+                ProxyConfig,
+                ProxyManager,
+                ProxyStatus,
+                _reverse_registered,
+            )
+
+            with Adb.targeting(owner or serial):
+                pm = ProxyManager()
+                status, cfg = pm.get_proxy_settings()
+                if (
+                    status == ProxyStatus.SET
+                    and cfg is not None
+                    and cfg.address == addr
+                ):
+                    return "kept"
+                if not self.is_running():
+                    self.note_device_proxy(None)
+                    logger.warning(
+                        "The snapshot load reset the device proxy (was %s); "
+                        "mitmproxy is not running, so it was not re-applied",
+                        addr,
+                    )
+                    return "stopped"
+                ok, _msg = pm.set_proxy(ProxyConfig.from_string(addr))
+                if ok and addr.startswith("127.0.0.1:"):
+                    port = int(addr.rsplit(":", 1)[1])
+                    if not _reverse_registered(port):
+                        Adb.reverse(f"tcp:{port}", f"tcp:{port}")
+        except Exception as exc:
+            logger.debug("Re-applying device proxy %s failed: %s", addr, exc)
+            ok = False
+        if ok:
+            logger.warning(
+                "The snapshot load reset the device proxy; re-applied %s so "
+                "mitmproxy keeps capturing",
+                addr,
+            )
+            return "restored"
+        logger.error(
+            "The snapshot load reset the device proxy (was %s) and it could not "
+            "be re-applied: mitmproxy will NOT see the device's traffic "
+            "(Ctrl+D in the Network lens sets it again)",
+            addr,
+        )
+        return "failed"
+
     def _atexit_cleanup(self) -> None:
         # Never leave the device pointed at a mitmproxy that is about to die.
         self.shutdown(timeout=1.0)
@@ -2104,4 +2177,13 @@ def get_mitmproxy_service() -> MitmproxyService:
         with _INSTANCE_LOCK:
             if _INSTANCE is None:
                 _INSTANCE = MitmproxyService()
+    return _INSTANCE
+
+
+def peek_mitmproxy_service() -> MitmproxyService | None:
+    """The singleton if it was created already, else None (never creates it).
+
+    For hooks on hot paths (every snapshot load, every Play) that only care
+    about a mitmproxy the user started.
+    """
     return _INSTANCE

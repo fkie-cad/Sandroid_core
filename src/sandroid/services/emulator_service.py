@@ -604,6 +604,10 @@ class EmulatorService:
             # root binder calls (settings, dumpsys, screencap, frida) fail with
             # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it.
             self._restore_selinux_permissive(adb, serial)
+            # ...and the device settings, including ``http_proxy``: a
+            # snapshot saved without the proxy drops mitmproxy's device
+            # proxy, so the replays were never intercepted. Re-apply it.
+            self._restore_device_proxy(serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -641,6 +645,24 @@ class EmulatorService:
             "(needs root); device timestamps may lag the host"
         )
         return False
+
+    def _restore_device_proxy(self, serial: str | None) -> str:
+        """Best-effort: re-apply mitmproxy's device proxy after a load.
+
+        Only acts when Sandroid itself set the device proxy (see
+        ``MitmproxyService.reapply_device_proxy``); costs no adb call
+        otherwise. Never raises.
+        """
+        try:
+            from sandroid.services.mitmproxy_service import peek_mitmproxy_service
+
+            service = peek_mitmproxy_service()
+            if service is None:
+                return "none"
+            return service.reapply_device_proxy(serial)
+        except Exception as exc:
+            self._logger.debug(f"Device proxy check after snapshot load failed: {exc}")
+            return "failed"
 
     def _restore_selinux_permissive(self, adb: AdbProtocol, serial: str | None) -> bool:
         """Best-effort: put SELinux back to Permissive after a snapshot load.

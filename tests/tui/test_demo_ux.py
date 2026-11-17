@@ -160,7 +160,32 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         monkeypatch.setattr(rc, "has_recording", lambda: True)
         started = []
         monkeypatch.setattr(rc, "start_playback", lambda: started.append(1) or True)
+        monkeypatch.setattr(
+            rc,
+            "play_plan",
+            lambda: {
+                "recording": "Run 1 · 18:22",
+                "number_of_runs": 2,
+                "noise_filter": True,
+                "seconds": 85.0,
+                "estimate": 399.0,
+            },
+        )
         await pilot.press("p")
+        await _settle(pilot)
+        # p reverts the device: it asks first, naming the recording and time.
+        assert started == []
+        assert type(app.screen).__name__ == "ConfirmModal"
+        message = str(app.screen.message_text)
+        assert "Run 1 · 18:22" in message
+        assert "2 replays + a dry run" in message
+        assert "about 7 min" in message
+        await pilot.press("n")
+        await _settle(pilot)
+        assert started == []
+        await pilot.press("p")
+        await _settle(pilot)
+        await pilot.press("y")
         await _settle(pilot)
         assert started == [1]
         assert app.screen.query_one("#lens-body").current == "runs-panel"

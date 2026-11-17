@@ -58,8 +58,14 @@ def record_session_bundle(path: str | Path) -> None:
 
 
 def session_bundles() -> list[str]:
-    """Return the run bundles produced in this process, oldest first."""
-    return list(_SESSION_BUNDLES)
+    """Return the run bundles produced in this process, oldest first.
+
+    Bundles deleted since (Runs lens ``Del``) are left out, so the exit
+    summary does not list a run that no longer exists.
+    """
+    from pathlib import Path
+
+    return [p for p in _SESSION_BUNDLES if Path(p).is_dir()]
 
 
 def bundle_dir(run_id: str) -> Path:

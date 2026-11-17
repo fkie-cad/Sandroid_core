@@ -27,9 +27,14 @@ unbound globally. Record ``r`` / Play ``p`` are global app keys.
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
+import os
+import re
 import threading
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.table import Table
@@ -70,6 +75,83 @@ _COLUMNS = (
 #: Below this lens width (e.g. Inspector open on a small terminal) the table
 #: drops Took/Changes -- the Inspector shows them.
 _COMPACT_BELOW = 80
+
+#: Two runs of the same recording "diverge" when their file counts differ by
+#: at least this many files *and* by at least this factor (hosts: below).
+_DIVERGE_FILES = (10, 2.0)
+_DIVERGE_HOSTS = (5, 2.0)
+#: A non-forced evidence re-check (cursor moves, refreshes) stats the bundle
+#: at most this often per run.
+_EVIDENCE_RECHECK_S = 5.0
+
+_HOST_SUFFIX = re.compile(r"\s*\(.*\)\s*$")
+
+
+def host_key(host: str) -> str:
+    """Normalise a host entry for comparisons.
+
+    The results list hosts as ``"api.example.com. (also seen in background:
+    2 queries)"``; the suffix depends on the run's noise counts, so the same
+    host appeared as both ``+`` and ``-`` in ``=`` compare (M-32).
+    """
+    return _HOST_SUFFIX.sub("", str(host)).strip().rstrip(".").lower()
+
+
+def _diverges(a: int, b: int, limits: tuple[int, float]) -> bool:
+    least, factor = limits
+    lo, hi = sorted((int(a), int(b)))
+    return hi - lo >= least and hi >= factor * max(lo, 1)
+
+
+def replay_divergence(
+    files_a: int, files_b: int, hosts_a: int | None = None, hosts_b: int | None = None
+) -> list[str]:
+    """Why two runs of the same recording disagree (empty: they agree).
+
+    Large gaps mean at least one replay did not do what the recording did
+    (a tap that did not take, a slow app); the results cannot both be right.
+    """
+    out = []
+    if _diverges(files_a, files_b, _DIVERGE_FILES):
+        out.append(f"{files_a} vs {files_b} files")
+    if (
+        hosts_a is not None
+        and hosts_b is not None
+        and _diverges(hosts_a, hosts_b, _DIVERGE_HOSTS)
+    ):
+        out.append(f"{hosts_a} vs {hosts_b} hosts")
+    return out
+
+
+def bundle_fingerprint(run_dir) -> str:
+    """Cheap fingerprint (paths, sizes, mtimes) of every file in a bundle.
+
+    Lets the evidence check skip a full re-hash while nothing changed, and
+    re-verify as soon as any file's size or mtime differs (M-34).
+    """
+    digest = hashlib.sha256()
+    try:
+        for dirpath, dirnames, filenames in os.walk(run_dir):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = Path(dirpath) / name
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                digest.update(f"{path}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+    except OSError:
+        pass
+    return digest.hexdigest()
+
+
+class RunsTable(DataTable):
+    """The runs table: Home / End move the cursor to the newest / oldest run."""
+
+    BINDINGS = [
+        Binding("home", "scroll_top", "Newest run", show=False),
+        Binding("end", "scroll_bottom", "Oldest run", show=False),
+    ]
 
 
 class DiffsView(FilesSubViewBase):
@@ -164,6 +246,13 @@ class DiffsView(FilesSubViewBase):
         self._facts_pending: set[str] = set()
         #: run_id -> evidence state ("checking" / "verified" / ... ).
         self._evidence: dict[str, str] = {}
+        #: run_id -> bundle fingerprint the evidence state was computed for.
+        self._evidence_fp: dict[str, str] = {}
+        #: run_id -> monotonic time of the last evidence (re-)check start.
+        self._evidence_at: dict[str, float] = {}
+        self._evidence_busy: set[str] = set()
+        #: Phase of a running Play (shown while there is no run yet).
+        self._play_phase: str | None = None
         #: run id of the run under review (REVIEW scope), if any.
         self._scope_run_id: str | None = None
         #: Width of the label column (padded so the table spans the lens).
@@ -174,17 +263,8 @@ class DiffsView(FilesSubViewBase):
     # -- compose / mount ---------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            Text.assemble(
-                ("No runs yet\n\n", "bold #8f9bb3"),
-                ("r", "bold"),
-                (" record a flow  ·  ", _DIM),
-                ("p", "bold"),
-                (" replay it", _DIM),
-            ),
-            id="runs-empty",
-        )
-        table: DataTable = DataTable(
+        yield Static(self._empty_text(), id="runs-empty")
+        table: DataTable = RunsTable(
             id="runs-table", cursor_type="row", zebra_stripes=False
         )
         yield table
@@ -230,6 +310,35 @@ class DiffsView(FilesSubViewBase):
         """Called when the Runs lens becomes active."""
         self._reload_index()
 
+    def set_play_phase(self, phase: str | None) -> None:
+        """A Play's phase (app.py); shown in the caption and the empty state."""
+        self._play_phase = phase
+        self._update_caption()
+        try:
+            empty = self.query_one("#runs-empty", Static)
+        except Exception:
+            return
+        if phase:
+            empty.update(
+                Text.assemble(
+                    ("Play running · ", "bold #fb7185"),
+                    (f"{phase}\n\n", "bold #8f9bb3"),
+                    ("the run appears here when its analysis is done", _DIM),
+                )
+            )
+        else:
+            empty.update(self._empty_text())
+
+    @staticmethod
+    def _empty_text() -> Text:
+        return Text.assemble(
+            ("No runs yet\n\n", "bold #8f9bb3"),
+            ("r", "bold"),
+            (" record a flow  ·  ", _DIM),
+            ("p", "bold"),
+            (" replay it", _DIM),
+        )
+
     def glance_fragment(self) -> str:
         total = len(self._summaries)
         unread = len(self._unread_run_ids)
@@ -256,8 +365,9 @@ class DiffsView(FilesSubViewBase):
         info = None
         if total:
             info = f"{total} run{'s' if total != 1 else ''} · ⏎ details"
+        title = f"● Play running · {self._play_phase}" if self._play_phase else None
         try:
-            ms.set_lens_caption("runs", None, info)
+            ms.set_lens_caption("runs", title, info)
             unread = len(self._unread_run_ids)
             ms.set_lens_badge("runs", f"●{unread}" if unread else None)
         except Exception:
@@ -453,6 +563,22 @@ class DiffsView(FilesSubViewBase):
             facts["pdfs"] = sorted(p.name for p in run_dir.glob("*.pdf"))
         except OSError:
             facts["pdfs"] = []
+        facts["recording"] = run_history.recording_digest(run_dir)
+        try:
+            facts["pcaps"] = sorted(
+                (p.relative_to(run_dir).as_posix(), p.stat().st_size)
+                for p in run_dir.rglob("*.pcap*")
+                if p.is_file()
+            )
+        except OSError:
+            facts["pcaps"] = []
+        try:
+            import json as _json
+
+            net_meta = run_dir / run_history.NETWORK_DIR_NAME / "meta.json"
+            facts["flows"] = _json.loads(net_meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            facts["flows"] = None
         return facts
 
     def _apply_facts(self, facts: dict[str, dict[str, Any]]) -> None:
@@ -463,21 +589,48 @@ class DiffsView(FilesSubViewBase):
 
     # -- evidence verification (worker thread) ------------------------------
 
-    def _check_evidence(self, run_id: str) -> None:
-        if run_id in self._evidence:
+    def _check_evidence(self, run_id: str, force: bool = False) -> None:
+        """(Re-)verify a run's bundle against its ``SHA256SUMS`` off-thread.
+
+        The result used to be cached for the whole session, so a file
+        changed after the first check still showed "✓ verified" (M-34).
+        Now ``force`` (Enter on a run, ``v``) always re-hashes; other calls
+        (cursor moves, refreshes) re-hash only when the bundle's
+        fingerprint (sizes + mtimes) changed, at most every few seconds.
+        """
+        if run_id in self._evidence_busy:
             return
-        self._evidence[run_id] = "checking"
+        now = time.monotonic()
+        if (
+            not force
+            and run_id in self._evidence
+            and now - self._evidence_at.get(run_id, 0.0) < _EVIDENCE_RECHECK_S
+        ):
+            return
+        self._evidence_at[run_id] = now
+        self._evidence_busy.add(run_id)
+        self._evidence.setdefault(run_id, "checking")
         self._run_bg(
-            functools.partial(self._evidence_worker, run_id), f"diffs_verify_{run_id}"
+            functools.partial(
+                self._evidence_worker, run_id, force, self._evidence_fp.get(run_id)
+            ),
+            f"diffs_verify_{run_id}",
         )
 
-    def _evidence_worker(self, run_id: str) -> None:
+    def _evidence_worker(
+        self, run_id: str, force: bool = True, known_fp: str | None = None
+    ) -> None:
         from sandroid.core import run_report
 
         run_dir = run_history.run_dir_for_scope(run_id)
+        fp = ""
         if run_dir is None:
             state = "missing"
         else:
+            fp = bundle_fingerprint(run_dir)
+            if not force and known_fp is not None and fp == known_fp:
+                self._post(self._apply_evidence, run_id, None, fp)
+                return
             try:
                 check = run_report.verify_hash_manifest(run_dir)
                 if not check.present:
@@ -485,15 +638,18 @@ class DiffsView(FilesSubViewBase):
                 elif check.ok:
                     state = "verified"
                 else:
-                    bad = len(check.mismatched) + len(check.missing)
-                    state = f"modified:{bad}"
+                    bad = check.mismatched + check.missing
+                    state = f"modified:{len(bad)}:" + ",".join(bad[:3])
             except Exception as exc:
                 logger.debug("verify %s failed: %s", run_id, exc)
                 state = "error"
-        self._post(self._apply_evidence, run_id, state)
+        self._post(self._apply_evidence, run_id, state, fp)
 
-    def _apply_evidence(self, run_id: str, state: str) -> None:
-        self._evidence[run_id] = state
+    def _apply_evidence(self, run_id: str, state: str | None, fp: str = "") -> None:
+        self._evidence_busy.discard(run_id)
+        if state is not None:
+            self._evidence[run_id] = state
+            self._evidence_fp[run_id] = fp
         self._follow_in_inspector()
 
     # -- DataTable events ------------------------------------------------------
@@ -601,7 +757,7 @@ class DiffsView(FilesSubViewBase):
             self._format_when(s.get("recorded_at"), short=self._compact),
             style=_MUTED,
         )
-        took = Text(self._format_duration(s.get("duration")), style=_MUTED)
+        took = Text(self._format_duration(self._run_seconds(s)), style=_MUTED)
         replays = self._replays(run_id)
         if replays > 1:
             took.append(f"  ×{replays}", style=_DIM)
@@ -626,6 +782,62 @@ class DiffsView(FilesSubViewBase):
             self._compact = compact
             self._setup_columns()
         self._rebuild_table()
+
+    @classmethod
+    def _run_seconds(cls, s: dict[str, Any]) -> int:
+        """Play press → end of analysis (the run's own wall time).
+
+        "Took" used to show the recording length (``duration``), so a 7
+        minute Play read "1m 33s" (L4); the recording length is in the
+        Inspector.
+        """
+        start = cls._parse(s.get("recorded_at"))
+        end = cls._parse(s.get("completed_at"))
+        if start is None or end is None:
+            return int(s.get("duration") or 0)
+        try:
+            return max(0, int((end - start).total_seconds()))
+        except (TypeError, ValueError):
+            return int(s.get("duration") or 0)
+
+    def _file_count(self, run_id: str) -> int:
+        counts = (self._summary(run_id) or {}).get("counts") or {}
+        return sum(int(counts.get(k, 0) or 0) for k in ("changed", "new", "deleted"))
+
+    def _host_count(self, run_id: str) -> int | None:
+        hosts = (self._facts.get(run_id) or {}).get("hosts")
+        if hosts is None:
+            return None
+        return len({host_key(h) for h in hosts})
+
+    def same_recording_runs(self, run_id: str) -> list[str]:
+        """Other listed runs that replayed the same recording (by its SHA-256)."""
+        digest = (self._facts.get(run_id) or {}).get("recording")
+        if not digest:
+            return []
+        return [
+            other
+            for other, facts in self._facts.items()
+            if other != run_id
+            and (facts or {}).get("recording") == digest
+            and self._summary(other) is not None
+        ]
+
+    def divergence(self, run_id: str) -> list[tuple[str, list[str]]]:
+        """``[(other run id, reasons)]`` for runs of the same recording that
+        disagree with ``run_id`` (replay-consistency signal, M-28).
+        """
+        out = []
+        for other in self.same_recording_runs(run_id):
+            reasons = replay_divergence(
+                self._file_count(run_id),
+                self._file_count(other),
+                self._host_count(run_id),
+                self._host_count(other),
+            )
+            if reasons:
+                out.append((other, reasons))
+        return out
 
     def _replays(self, run_id: str) -> int:
         settings = (self._facts.get(run_id) or {}).get("settings") or {}
@@ -656,6 +868,11 @@ class DiffsView(FilesSubViewBase):
             text, style = problem
             cell.append("   ")
             cell.append(text, style=style)
+        diverged = self.divergence(s.get("run_id", ""))
+        if diverged:
+            others = ",".join(f"#{self._run_number(o)}" for o, _ in diverged[:3])
+            cell.append("   ")
+            cell.append(f"≠ {others}", style=_WARN)
         return cell
 
     def _problem(self, s: dict[str, Any]) -> tuple[str, str] | None:
@@ -737,7 +954,7 @@ class DiffsView(FilesSubViewBase):
             return None
         if run_id != self._selected_run_id:
             self._select_run(run_id)
-        self._check_evidence(run_id)
+        self._check_evidence(run_id, force=True)
         return self._run_content(run_id)
 
     def _inspector_shows_run(self) -> bool:
@@ -805,12 +1022,30 @@ class DiffsView(FilesSubViewBase):
         when = self._format_when(s.get("recorded_at"))
         if start is not None and end is not None:
             when = f"{start.strftime('%a %d %b %Y · %H:%M')} → {end.strftime('%H:%M')}"
+        grid.add_row("Run", Text(f"#{self._run_number(run_id)} · {run_id}"))
         grid.add_row("When", when)
-        took = self._format_duration(s.get("duration"))
+        grid.add_row("Took", self._format_duration(self._run_seconds(s)))
+        recording = self._format_duration(s.get("duration"))
         replays = self._replays(run_id)
         if replays > 1:
-            took += f"  ·  {replays} replays"
-        grid.add_row("Took", took)
+            recording += f"  ·  {replays} replays"
+        grid.add_row("Recording", recording)
+        same = self.same_recording_runs(run_id)
+        if same:
+            diverged = dict(self.divergence(run_id))
+            text = Text("same recording as ")
+            text.append(", ".join(f"#{self._run_number(o)}" for o in same))
+            if diverged:
+                for other, reasons in diverged.items():
+                    text.append(
+                        f"\n⚠ diverges from #{self._run_number(other)}: "
+                        f"{', '.join(reasons)} -- a replay may not have done "
+                        "what the recording did",
+                        style=_WARN,
+                    )
+            else:
+                text.append("  ✓ consistent", style=_GOOD)
+            grid.add_row("Replays", text)
         grid.add_row("Device", Text(str(s.get("device_name") or "unknown")))
         if facts.get("app"):
             grid.add_row("App", Text(str(facts["app"])))
@@ -889,8 +1124,11 @@ class DiffsView(FilesSubViewBase):
         if state == "verified":
             return Text("✓ verified (SHA256SUMS)", style=_GOOD)
         if state.startswith("modified:"):
-            n = state.split(":", 1)[1]
-            return Text(f"✕ {n} file(s) changed since sealing", style=_BAD)
+            _, n, names = (state.split(":", 2) + ["", ""])[:3]
+            text = Text(f"✕ {n} file(s) changed since sealing", style=_BAD)
+            if names:
+                text.append(f": {names.replace(',', ', ')}", style=_BAD)
+            return text
         if state == "unsealed":
             return Text("not sealed (no SHA256SUMS)", style=_DIM)
         if state == "missing":
@@ -969,6 +1207,25 @@ class DiffsView(FilesSubViewBase):
             grid.add_row("PDF", Text("none yet", style=_DIM))
         if facts.get("has_results"):
             grid.add_row("Results", run_history.RESULTS_JSON_NAME)
+        flows = facts.get("flows")
+        if isinstance(flows, dict):
+            n = int(flows.get("count") or 0)
+            grid.add_row(
+                "Flows",
+                f"{n} mitmproxy flow{'s' if n != 1 else ''} in "
+                f"{run_history.NETWORK_DIR_NAME}/flows.jsonl"
+                if n
+                else Text("no mitmproxy flows in this run", style=_DIM),
+            )
+        pcaps = facts.get("pcaps") or []
+        if pcaps:
+            body = Text()
+            for rel, size in pcaps:
+                if body:
+                    body.append("\n")
+                body.append(rel)
+                body.append(f"  {size / 1024 / 1024:.1f} MB", style=_DIM)
+            grid.add_row("Pcap", body)
         grid.add_row("Evidence", self._evidence_text(run_id))
         return [
             ("", grid),
@@ -990,8 +1247,13 @@ class DiffsView(FilesSubViewBase):
         if run_id == self._scope_run_id:
             ms.set_scope(None)
             return
-        ms.set_scope(run_history.scope_for_run(run_id), self._current_label(run_id))
-        self._notify(f"Reviewing '{self._current_label(run_id)}' · L back to live")
+        ms.set_scope(run_history.scope_for_run(run_id), self._scope_label(run_id))
+        self._check_evidence(run_id, force=True)
+        self._notify(f"Reviewing {self._scope_label(run_id)} · L back to live")
+
+    def _scope_label(self, run_id: str) -> str:
+        """``"#3 Label"``: the pill and dialogs identify runs by number too."""
+        return f"#{self._run_number(run_id)} {self._current_label(run_id)}"
 
     def on_scope_changed(self, message) -> None:
         """MainScreen's ``ScopeChanged``: mark the reviewed row with ◆."""
@@ -1045,9 +1307,11 @@ class DiffsView(FilesSubViewBase):
 
         self.app.push_screen(
             InputModal(
-                title=f"Rename run '{current}'",
+                title=f"Rename run #{self._run_number(run_id)}",
+                message=f"{run_id} · typing replaces it",
                 default=current,
                 placeholder="run label",
+                select_all=True,
             ),
             on_result,
         )
@@ -1072,7 +1336,8 @@ class DiffsView(FilesSubViewBase):
             self._reload_index()
             ms = self._main_screen()
             if ms is not None and run_id == self._scope_run_id:
-                ms.set_scope(ms.scope, label)  # the pill shows the new name
+                # the pill shows the new name
+                ms.set_scope(ms.scope, self._scope_label(run_id))
             self._follow_in_inspector()
         self._notify(msg, "information" if ok else "error")
 
@@ -1138,8 +1403,9 @@ class DiffsView(FilesSubViewBase):
         self.app.push_screen(
             ConfirmModal(
                 title="Delete run",
-                message=f"Delete run '{label}'? This removes its saved "
-                "diff data and cannot be undone.",
+                message=f"Delete run #{self._run_number(run_id)} '{label}' "
+                f"({run_id})? This removes its whole bundle (recording, pulled "
+                "files, pcaps, flows, reports) and cannot be undone.",
             ),
             on_result,
         )
@@ -1290,8 +1556,28 @@ class DiffsView(FilesSubViewBase):
                 body.append(f"\n… {len(items) - _LIST_LIMIT} more", style=_DIM)
             sections.append((title, body))
         facts = facts or {}
-        hosts_a = set((facts.get(rec_a.run_id) or {}).get("hosts") or [])
-        hosts_b = set((facts.get(rec_b.run_id) or {}).get("hosts") or [])
+        fa = facts.get(rec_a.run_id) or {}
+        fb = facts.get(rec_b.run_id) or {}
+        if fa.get("recording") and fa.get("recording") == fb.get("recording"):
+            reasons = replay_divergence(
+                len(a),
+                len(b),
+                len({host_key(h) for h in fa.get("hosts") or []}),
+                len({host_key(h) for h in fb.get("hosts") or []}),
+            )
+            if reasons:
+                note = Text(
+                    f"⚠ Same recording, but the replays diverged: "
+                    f"{', '.join(reasons)}. At least one replay did not do what "
+                    "the recording did (a tap that did not take, a slow app); "
+                    "check its screenshots before trusting either run.",
+                    style=_WARN,
+                )
+            else:
+                note = Text("✓ Same recording; the runs agree in size.", style=_GOOD)
+            sections.insert(1, ("Replay consistency", note))
+        hosts_a = {host_key(h) for h in fa.get("hosts") or [] if host_key(h)}
+        hosts_b = {host_key(h) for h in fb.get("hosts") or [] if host_key(h)}
         if hosts_a or hosts_b:
             body = Text()
             for sign, items, style in (

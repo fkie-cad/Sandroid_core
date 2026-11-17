@@ -714,6 +714,12 @@ def test_tui_play_finalizes_run_bundle(tmp_path, monkeypatch):
 
     run_bundle.record_session_bundle(str(tmp_path))
     assert str(tmp_path) in run_bundle.session_bundles()
+    # L12: a bundle deleted in the Runs lens is not listed at exit.
+    gone = tmp_path / "deleted_run"
+    gone.mkdir()
+    run_bundle.record_session_bundle(str(gone))
+    gone.rmdir()
+    assert str(gone) not in run_bundle.session_bundles()
 
 
 def test_headless_runner_finalizes_into_session_dir(tmp_path, monkeypatch):

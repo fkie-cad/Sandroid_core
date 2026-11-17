@@ -913,26 +913,38 @@ class MainScreen(Screen):
         if widget is not None:
             widget.post_message(ScopeChanged(self.scope_run, self._scope_label))
 
+    def refresh_scope_pill(self) -> None:
+        """Re-render the scope pill from the recorder/player state now.
+
+        Called by the app on every record/replay transition and phase change
+        (``SandroidTUI._set_status_bar_mode`` / ``_set_replay_phase``).
+        """
+        self._update_scope_pill()
+
     def _update_scope_pill(self) -> None:
         try:
             header = self.query_one("#shell-header", ShellHeader)
         except Exception:
             return
-        if self.scope_run is not None:
-            label = self._scope_label or f"Run {self.scope_run}"
-            header.set_pill(f"◆ REVIEW {label}", "review")
-            return
         recording = replaying = False
+        phase = None
         try:
             bar = self.query_one("#status-bar", StatusBar)
             recording = bool(getattr(bar, "recording_active", False))
             replaying = bool(getattr(bar, "replay_active", False))
+            phase = getattr(bar, "replay_phase", None)
         except Exception:
             pass
+        if self.scope_run is not None:
+            label = self._scope_label or f"Run {self.scope_run}"
+            # ``v`` during a Play: say that the Play goes on (L10).
+            busy = " · ● REC" if recording else (" · ● REPLAY" if replaying else "")
+            header.set_pill(f"◆ REVIEW {label}{busy}", "review")
+            return
         if recording:
             header.set_pill("● REC", "rec")
         elif replaying:
-            header.set_pill("● REPLAY", "rec")
+            header.set_pill(f"● REPLAY · {phase}" if phase else "● REPLAY", "rec")
         else:
             header.set_pill("● LIVE", "")
 

@@ -35,8 +35,10 @@ Sandroid shows one **lens** (a full-width analysis view) at a time and keeps
 everything else out of the way until you ask for it:
 
 - **Header** (one row): ``Sandroid ▸ device ▸ app``, the last loaded snapshot,
-  the scope pill (``● LIVE``; ``● REC`` while recording; ``◆ REVIEW Run …``
-  while reviewing a run) and the clock.
+  the scope pill (``● LIVE``; ``● REC`` while recording; ``● REPLAY ·
+  <phase>`` while a Play runs -- ``loading snapshot``, ``replay 1/2``,
+  ``settle 8s``, ``dry run``, ``analysing``; ``◆ REVIEW #<n> <label>`` while
+  reviewing a run) and the clock.
 - **Status strip** (one or two rows): app state and pid, frida-server, active
   hooks and bypasses, mitmproxy / Device Proxy / App Proxies, capture.
 - **Lens bar**: ``1 App  2 Network  3 Files  4 Runs`` (a lens may show an
@@ -131,7 +133,19 @@ says how many flows it hides (``N: 163 OS noise hidden``). ``Home`` /
 deflate, zstd) are shown decoded; the Inspector notes the encoding. TLS
 failures are kept in the flow log too, so a later session or a reviewed run
 still shows them. In REVIEW scope the table shows the reviewed
-run's flows (those captured between its start and end). Proxy state is in
+run's flows from its bundle (``<run>/network/flows.jsonl``, stored when the
+run finishes and covered by its ``SHA256SUMS``, so they are there in any
+later session). Only the flows of the **replays** are shown by default; the
+dry run (the noise measurement) and the setup phases (snapshot loads, network
+reset, baseline scan, collecting results) are hidden and counted in the
+caption (``A: 29 dry run · 3 setup hidden``); ``A`` shows them, marked
+``dry`` / ``setup``. A run without flows says why (mitmproxy was not running,
+or captured nothing) and names the run's packet capture (pcap, with its size).
+Runs from before this version have no flows in their bundle: they are looked
+up in the current session's flow log by time, which only works in the session
+that ran them, and the empty state says so. Snapshot loads (Play, the
+snapshot picker) put mitmproxy's device proxy back when they reset it
+(the snapshot restores the device's ``http_proxy``). Proxy state is in
 the frame caption (``mitm ● :<port> · device ✓ · CA ✓``, ``<port>`` being
 ``mitmproxy.proxy_port``); ``I`` opens the
 Capture status page with mitmproxy and friTap tabs.
@@ -270,31 +284,50 @@ Record/Play results and the run history (``r``/``p`` work from every lens;
 2. Interact with the device, then stop: ``Esc``/``Enter`` (or *Stop*) stop
    and save, and the replay starts automatically; *Discard* throws the
    recording away.
-3. ``p`` **Play** (again): the emulator is reverted to the snapshot, the recording
+3. ``p`` **Play** (again): asks first -- it names the recording, the number
+   of replays and roughly how long it takes -- because the emulator is
+   reverted to the snapshot taken when recording started. Then the recording
    is replayed, background noise is measured with a dry run, and changed /
    new / deleted files (with inline diffs), processes, sockets and network
-   activity are shown.
+   activity are shown. The header pill and the status strip show the phase
+   (``● REPLAY · replay 1/2``, ``dry run``, ``analysing``). A Play takes
+   about (replays + 1) x (recording length + settle time + ~35 s) -- a 90 s
+   recording with 2 replays runs ~7 minutes.
+
+   The Play that starts right after a recording keeps the name chosen in the
+   Record dialog; a later ``p`` gets a fresh name (``Run <n> · <time>``).
 
 Every Play is saved as a run bundle under ``<results_path>/runs/<run_id>/``
 and listed in the Runs lens (per device, newest first): ``#``, label, when,
-how long (``×3`` for a run with three replays) and what changed
-(files · hosts, ``⚠`` step errors, ``✕`` aborted). ``x`` / ``i`` export /
-import a recording.
+how long the Play took (``×3`` for a run with three replays) and what changed
+(files · hosts, ``⚠`` step errors, ``✕`` aborted, ``≠ #2`` when it disagrees
+strongly with another run of the *same* recording -- e.g. 0 vs 74 new files:
+at least one replay did not do what the recording did). ``Home`` / ``End``
+jump to the newest / oldest run. ``x`` / ``i`` export / import a recording.
 
 ==================  =========================================================
 Key (Runs lens)     Action
 ==================  =========================================================
-``Enter``           Inspector: *Summary* (time, device, status, evidence
-                    check, errors, settings used), *Changes* (files, hosts),
-                    *Report* (PDF files, folder)
+``Enter``           Inspector: *Summary* (run number and id, time, recording
+                    length, other runs of the same recording and whether
+                    they agree, device, status, evidence check, errors,
+                    settings used), *Changes* (files, hosts), *Report* (PDF,
+                    stored flows, pcaps, folder). The evidence check is
+                    re-run on every ``Enter`` (and when a file's size or
+                    time changes) and names the changed files.
 ``v``               **Review** this run: the header shows ``◆ REVIEW <label>``
                     and the Files / Network lenses show this run instead of
                     the live session; ``v`` again or ``L`` (any lens) goes
                     back to LIVE. Recording or replaying always goes LIVE.
-``=``               Compare with the run under review (or the previous run)
+``=``               Compare with the run under review (or the previous run);
+                    hosts are compared without the "(also seen in
+                    background …)" note, and two runs of the same recording
+                    get a *Replay consistency* verdict
 ``z``               The run's full file diff (search / export)
 Shift+``P``         Write a PDF report for the run
-``n`` / ``Del``     Rename / delete the run (each asks first)
+``n`` / ``Del``     Rename (the old label is selected, typing replaces it) /
+                    delete the run (each asks first; dialogs name the run by
+                    ``#`` and id)
 ==================  =========================================================
 
 Other Actions

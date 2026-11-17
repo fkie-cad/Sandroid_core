@@ -16,6 +16,14 @@ class InputModal(ForensicModal[str]):
     - Cancel with Escape or button
     - Returns input value or None if cancelled
     - Centered with transparent background
+    - ``select_all=True``: the default value starts selected, so typing
+      replaces it (rename); otherwise the cursor sits at its end, so typing
+      appends (e.g. completing a path)
+
+    The input is a full-height bordered field (``no-compact``): the modal
+    sweep made it compact (1 row) while the theme kept its border, which
+    left a 2-row box with no visible text row -- the prefilled value was
+    invisible and typing silently appended to it (M-30).
     """
 
     AUTO_FOCUS = "#input-field"
@@ -29,6 +37,11 @@ class InputModal(ForensicModal[str]):
     InputModal .modal-message {
         padding-top: 1;
     }
+
+    InputModal #input-field {
+        width: 100%;
+        height: 3;
+    }
     """
 
     def __init__(
@@ -40,6 +53,7 @@ class InputModal(ForensicModal[str]):
         name: str = None,
         id: str = None,
         classes: str = None,
+        select_all: bool = False,
     ):
         """Initialize the input modal.
 
@@ -51,12 +65,14 @@ class InputModal(ForensicModal[str]):
             name: Widget name
             id: Widget ID
             classes: CSS classes
+            select_all: Select the default value so typing replaces it.
         """
         super().__init__(name=name, id=id, classes=classes)
         self.title_text = title
         self.message_text = message
         self.default = default
         self.placeholder = placeholder or "Enter value..."
+        self.select_all = select_all
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -68,6 +84,8 @@ class InputModal(ForensicModal[str]):
                 value=self.default,
                 placeholder=self.placeholder,
                 id="input-field",
+                classes="no-compact",
+                select_on_focus=self.select_all,
             )
             with Horizontal(classes="button-row"):
                 yield Button("Submit", id="submit", classes="-primary")
@@ -75,12 +93,15 @@ class InputModal(ForensicModal[str]):
             yield KeyHintFooter()
 
     def on_mount(self) -> None:
-        """Focus the input field and position cursor."""
+        """Focus the input field; select or place the cursor after the value."""
         super().on_mount()
-        # Select all text if there's a default value
         if self.default:
             input_field = self.query_one("#input-field", Input)
-            input_field.cursor_position = len(self.default)
+            if self.select_all:
+                # After the focus handling, which may move the cursor.
+                self.call_after_refresh(input_field.select_all)
+            else:
+                input_field.cursor_position = len(self.default)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle Enter key in input field."""

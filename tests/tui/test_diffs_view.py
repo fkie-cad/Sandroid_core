@@ -494,7 +494,7 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         await pilot.press("v")
         await _settle(pilot)
         assert ms.scope == run_history.scope_for_run(ids[0])
-        assert ms.query_one("#shell-header").pill_text == "◆ REVIEW Consent · accept"
+        assert ms.query_one("#shell-header").pill_text == "◆ REVIEW #1 Consent · accept"
         assert view._scope_run_id == ids[0]
         assert "◆" in str(view.query_one("#runs-table").get_row_at(1)[1])
         assert ms.check_action("back_to_live", ()) is True
@@ -595,3 +595,251 @@ async def test_table_refresh_keeps_a_pending_cursor_move() -> None:
         await _wait_for(
             pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa"
         )
+
+
+# --------------------------------------------------------------------------
+# Fix round 3c (tester 4): rename input, evidence re-check, compare, identity
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rename_input_shows_the_old_label_selected_so_typing_replaces() -> None:
+    """M-30: the collapsed input hid the prefill and typing appended to it."""
+    from sandroid.tui.modals import InputModal
+
+    run_id = "20260101_000000_aaaaaa"
+    _save(run_id, label="Run 2 · 18:34")
+    app = _DiffsHarness()
+    async with app.run_test(size=(120, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await _wait_for(pilot, lambda: view._detail_record is not None)
+        view.focus()
+        await pilot.pause()
+        await pilot.press("n")
+        await _wait_for(pilot, lambda: isinstance(app.screen, InputModal))
+        await pilot.pause(0.1)
+        field = app.screen.query_one("#input-field", Input)
+        assert field.region.height == 3  # a real text row between the borders
+        assert field.value == "Run 2 · 18:34"
+        assert "#1" in app.screen.title_text
+        for ch in "B replay":
+            await pilot.press("space" if ch == " " else ch)
+        assert field.value == "B replay"
+
+
+@pytest.mark.asyncio
+async def test_input_modal_without_select_all_appends() -> None:
+    """The other InputModal users keep the cursor at the end (complete a path)."""
+    from sandroid.tui.modals import InputModal
+
+    class _Host(App):
+        def on_mount(self) -> None:
+            self.push_screen(InputModal(title="Path", default="/data/data/"))
+
+    app = _Host()
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause(0.1)
+        field = app.screen.query_one("#input-field", Input)
+        await pilot.press("x")
+        assert field.value == "/data/data/x"
+        assert field.region.height == 3
+
+
+@pytest.mark.asyncio
+async def test_evidence_is_rechecked_when_a_sealed_file_changes() -> None:
+    """M-34: the evidence check was cached per session; a tampered file kept
+    showing "✓ verified".
+    """
+    from sandroid.core import run_report
+
+    run_id = "20260101_000000_aaaaaa"
+    _save(run_id, label="Run A")
+    run_dir = run_history.run_dir_for_scope(run_id)
+    (run_dir / "recording.txt").write_text("1 /dev/input/event1 0 0 0\n")
+    run_report.write_hash_manifest(run_dir)
+
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await _wait_for(pilot, lambda: view._detail_record is not None)
+        view.inspect_selected()
+        await _wait_for(pilot, lambda: view._evidence.get(run_id) == "verified")
+
+        with open(run_dir / "recording.txt", "a", encoding="utf-8") as f:
+            f.write("x")  # one byte appended after sealing
+        view.inspect_selected()  # Enter again: always re-verified
+        await _wait_for(
+            pilot, lambda: view._evidence.get(run_id, "").startswith("modified:")
+        )
+        text = str(view._evidence_text(run_id))
+        assert "1 file(s) changed since sealing" in text
+        assert "recording.txt" in text
+
+        # restored (same bytes): verified again on the next look
+        (run_dir / "recording.txt").write_text("1 /dev/input/event1 0 0 0\n")
+        view.inspect_selected()
+        await _wait_for(pilot, lambda: view._evidence.get(run_id) == "verified")
+
+
+def test_bundle_fingerprint_changes_with_size_or_mtime(tmp_path) -> None:
+    from sandroid.tui.widgets.diffs_view import bundle_fingerprint
+
+    (tmp_path / "a").write_text("1")
+    fp = bundle_fingerprint(tmp_path)
+    assert bundle_fingerprint(tmp_path) == fp
+    (tmp_path / "a").write_text("12")
+    assert bundle_fingerprint(tmp_path) != fp
+
+
+def test_compare_treats_background_suffixes_as_the_same_host() -> None:
+    """M-32: "youtubei.googleapis.com. (also seen in background: 2 queries)"
+    and "youtubei.googleapis.com." showed up as both + and -.
+    """
+    from sandroid.tui.widgets.diffs_view import host_key
+
+    assert host_key(
+        "youtubei.googleapis.com. (also seen in background: 2 queries)"
+    ) == ("youtubei.googleapis.com")
+    a = _make_record("20260101_000000_aaaaaa")
+    b = _make_record("20260101_000001_bbbbbb")
+    facts = {
+        a.run_id: {"hosts": ["youtubei.googleapis.com.", "a.example."]},
+        b.run_id: {
+            "hosts": [
+                "youtubei.googleapis.com. (also seen in background: 2 queries)",
+                "b.example.",
+            ]
+        },
+    }
+    sections = DiffsView.compare_sections(a, b, facts, numbers=(1, 2))
+    hosts = str(dict(sections)["Hosts"])
+    assert "youtubei" not in hosts
+    assert "+ b.example" in hosts
+    assert "− a.example" in hosts
+
+
+def test_replay_divergence_thresholds() -> None:
+    from sandroid.tui.widgets.diffs_view import replay_divergence
+
+    assert replay_divergence(22, 107) == ["22 vs 107 files"]
+    assert replay_divergence(0, 74) == ["0 vs 74 files"]
+    assert replay_divergence(22, 30) == []  # within normal jitter
+    assert replay_divergence(3, 9) == []  # too few files to call it
+    assert replay_divergence(10, 10, 4, 15) == ["4 vs 15 hosts"]
+
+
+@pytest.mark.asyncio
+async def test_runs_of_the_same_recording_that_diverge_are_flagged() -> None:
+    """M-28: A (0 new files) and B (74) replayed the same recording; nothing
+    said so. The table, the Inspector and = compare flag it now.
+    """
+    many = [f"/data/data/org.wikipedia/files/{i}" for i in range(40)]
+    _save("20260101_000000_aaaaaa", label="A", new_files=[], counts={"changed": 2})
+    _save(
+        "20260101_000001_bbbbbb",
+        label="B",
+        new_files=many,
+        counts={"changed": 2, "new": len(many)},
+    )
+    _save("20260101_000002_cccccc", label="other recording", counts={"new": 60})
+    for run_id, rec in (
+        ("20260101_000000_aaaaaa", "same"),
+        ("20260101_000001_bbbbbb", "same"),
+        ("20260101_000002_cccccc", "different"),
+    ):
+        path = run_history.run_dir_for_scope(run_id) / "recording.txt"
+        path.write_text(f"1 /dev/input/event1 0 0 0 {rec}\n")
+
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 20)) as pilot:
+        view = app.query_one(DiffsView)
+        table = view.query_one("#runs-table", DataTable)
+        await _wait_for(pilot, lambda: len(view._facts) == 3)
+        await pilot.pause()
+        rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
+        assert "≠ #1" in rows[1][4]  # B (#2) diverges from A (#1)
+        assert "≠ #2" in rows[2][4]
+        assert "≠" not in rows[0][4]  # another recording: not compared
+        summary = view._summary_sections(
+            view._summary("20260101_000000_aaaaaa"),
+            view._facts["20260101_000000_aaaaaa"],
+        )
+        from rich.console import Console
+
+        console = Console(width=200, record=True)
+        for _heading, body in summary:
+            console.print(body)
+        out = console.export_text()
+        assert "same recording as #2" in out
+        assert "diverges from #2" in out
+
+    a = run_history.load_run("20260101_000000_aaaaaa")
+    b = run_history.load_run("20260101_000001_bbbbbb")
+    facts = {r: DiffsView._read_facts(r) for r in (a.run_id, b.run_id)}
+    sections = dict(DiffsView.compare_sections(a, b, facts, numbers=(1, 2)))
+    assert "replays diverged" in str(sections["Replay consistency"])
+
+
+@pytest.mark.asyncio
+async def test_took_is_the_run_time_and_dialogs_name_the_run_number() -> None:
+    """L4: "Took" showed the recording length; L11/M-31: the delete dialog
+    identified the run only by its label and undersold what it removes.
+    """
+    from sandroid.tui.modals import ConfirmModal
+
+    run_id = "20260101_000000_aaaaaa"
+    _save(run_id, label="Run A", duration=93)  # 10:00 -> 10:05 (5 min run)
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 20)) as pilot:
+        view = app.query_one(DiffsView)
+        table = view.query_one("#runs-table", DataTable)
+        await _wait_for(pilot, lambda: view._detail_record is not None)
+        assert str(table.get_row_at(0)[3]).startswith("5m 00s")
+        view.focus()
+        await pilot.press("delete")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        message = app.screen.message_text
+        assert "#1 'Run A'" in message
+        assert run_id in message
+        assert "whole bundle" in message
+        await pilot.press("n")
+
+
+@pytest.mark.asyncio
+async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
+    """M-25: REC never showed (the Record dialog was the active screen, so the
+    update was dropped). M-26: REPLAY stayed after the run ended.
+    """
+    from sandroid.tui.modals import ConfirmModal
+
+    app = _sandroid_app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        await _settle(pilot, 8)
+        if type(app.screen).__name__ != "MainScreen":
+            await pilot.press("enter")
+            await _settle(pilot, 4)
+        ms = app.screen
+        header = ms.query_one("#shell-header")
+        assert header.pill_text == "● LIVE"
+
+        app.push_screen(ConfirmModal(title="stand-in for the Record dialog"))
+        await _settle(pilot)
+        app._set_status_bar_mode(recording=True)  # capture started
+        assert header.pill_text == "● REC"
+        app._set_status_bar_mode(recording=False)  # stopped / cancelled
+        assert header.pill_text == "● LIVE"
+        app.pop_screen()
+        await _settle(pilot)
+
+        app._set_status_bar_mode(replaying=True)
+        assert header.pill_text == "● REPLAY"
+        app._set_replay_phase("replay 1/2")
+        assert header.pill_text == "● REPLAY · replay 1/2"
+        app._set_replay_phase("dry run")
+        assert header.pill_text == "● REPLAY · dry run"
+        assert "dry run" in str(
+            ms.query_one("#runs-panel").query_one("#runs-empty").render()
+        )
+        app._set_status_bar_mode(replaying=False)  # done, failed or stopped
+        app._set_replay_phase(None)
+        assert header.pill_text == "● LIVE"

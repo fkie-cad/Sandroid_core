@@ -645,3 +645,118 @@ def test_probe_adb_failures_stay_out_of_the_ticker(caplog):
         log_adb_result("shell ls", "", "error: closed")
     levels = [r.levelno for r in caplog.records if "ADB command" in r.getMessage()]
     assert levels == [logging.DEBUG, logging.WARNING]
+
+
+# ── snapshot loads reset the device proxy (M-29) ─────────────────────────
+
+
+class _SettablePM(_FakePM):
+    def __init__(self, current, accept=True):
+        super().__init__(current)
+        self.accept = accept
+        self.set_calls: list[str] = []
+
+    def set_proxy(self, config):
+        self.set_calls.append(config.address)
+        if self.accept:
+            self.current = config.address
+            return True, "ok"
+        return False, "Proxy was not set correctly"
+
+
+@pytest.fixture
+def settable_pm(monkeypatch):
+    pm = _SettablePM("")
+    monkeypatch.setattr(proxy_manager, "ProxyManager", lambda: pm)
+    monkeypatch.setattr(proxy_manager, "_reverse_registered", lambda port: False)
+    return pm
+
+
+def test_snapshot_load_reapplies_our_device_proxy_while_mitm_runs(
+    make_service, settable_pm, caplog
+):
+    svc, _ = make_service()
+    svc._proc = _FakeProc()  # mitmweb running
+    svc.note_device_proxy("10.0.2.2:8090")
+    settable_pm.current = ""  # the snapshot came back with http_proxy :0
+    with caplog.at_level("WARNING"):
+        assert svc.reapply_device_proxy() == "restored"
+    assert settable_pm.current == "10.0.2.2:8090"
+    assert svc.owned_device_proxy == "10.0.2.2:8090"
+    assert "re-applied 10.0.2.2:8090" in caplog.text
+
+
+def test_snapshot_load_keeps_a_proxy_that_survived(make_service, settable_pm):
+    svc, _ = make_service()
+    svc._proc = _FakeProc()
+    svc.note_device_proxy("10.0.2.2:8090")
+    settable_pm.current = "10.0.2.2:8090"
+    assert svc.reapply_device_proxy() == "kept"
+    assert settable_pm.set_calls == []
+
+
+def test_snapshot_load_without_our_proxy_costs_no_adb(make_service, monkeypatch):
+    svc, _ = make_service()
+
+    def boom():
+        raise AssertionError("no adb/ProxyManager without an owned proxy")
+
+    monkeypatch.setattr(proxy_manager, "ProxyManager", boom)
+    assert svc.reapply_device_proxy() == "none"
+
+
+def test_snapshot_load_proxy_lost_after_mitm_stopped_is_forgotten(
+    make_service, settable_pm
+):
+    svc, _ = make_service()
+    svc.note_device_proxy("10.0.2.2:8090")  # mitmweb no longer runs
+    assert svc.reapply_device_proxy() == "stopped"
+    assert settable_pm.set_calls == []
+    assert svc.owned_device_proxy is None
+
+
+def test_snapshot_load_proxy_reapply_failure_is_loud(make_service, settable_pm, caplog):
+    svc, _ = make_service()
+    svc._proc = _FakeProc()
+    svc.note_device_proxy("10.0.2.2:8090")
+    settable_pm.accept = False
+    with caplog.at_level("ERROR"):
+        assert svc.reapply_device_proxy() == "failed"
+    assert "will NOT see" in caplog.text
+
+
+def test_emulator_load_snapshot_restores_the_device_proxy(monkeypatch):
+    """Every snapshot load (Play's replays, picker, slots) re-checks it."""
+    import time as _time
+
+    from sandroid.services.emulator_service import EmulatorService
+
+    class FakeAdb:
+        def send_telnet_command(self, command, serial=None):
+            return "OK", ""
+
+        def send_adb_command(self, command, serial=None):
+            if command == "get-state":
+                return "device", ""
+            if command == "shell getenforce":
+                return "Permissive\n", ""
+            if command == "shell date +%s":
+                return str(int(_time.time())), ""
+            return "", ""
+
+    calls = []
+
+    class _Svc:
+        def reapply_device_proxy(self, serial=None):
+            calls.append(serial)
+            return "restored"
+
+    svc = EmulatorService()
+    svc._get_adb = lambda: FakeAdb()
+    monkeypatch.setattr(ms, "_INSTANCE", _Svc())
+    assert svc.load_snapshot("tmp", serial="emulator-5554") is True
+    assert calls == ["emulator-5554"]
+    # mitmproxy never started this session: nothing to check, no service made
+    monkeypatch.setattr(ms, "_INSTANCE", None)
+    assert svc.load_snapshot("tmp") is True
+    assert ms._INSTANCE is None
