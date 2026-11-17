@@ -500,6 +500,13 @@ class Toolbox(metaclass=_ToolboxMeta):
         )
 
     @classmethod
+    def reset_network(cls, mode="airplane", timeout=30.0, sleep=None) -> bool:
+        """Cycle the device network after a snapshot load (see ``adb_network``)."""
+        from .adb_network import reset_network
+
+        return reset_network(Adb.send_adb_command, mode, timeout=timeout, sleep=sleep)
+
+    @classmethod
     def delete_snapshot(cls, name) -> bool:
         """Delegates to EmulatorService.delete_snapshot().
 

@@ -249,6 +249,9 @@ Analysis (``[analysis]``)
    # Seconds to keep capturing after each replay (see below)
    replay_settle_seconds = 8
 
+   # Cycle the network after each snapshot load: airplane | svc | off (see below)
+   network_reset_after_snapshot = "airplane"
+
    # List all APKs and their hashes
    list_apks = false
 
@@ -293,6 +296,39 @@ captures keep running and files written in that time count as changed. The
 dry run waits the same extra time, so noise subtraction still compares
 windows of equal length. Each analysis gets ``(runs + 1) x`` that much
 longer; set it to 0 to end the window with the replay.
+
+Network reset after snapshot load
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Every run starts by loading the ``tmp`` snapshot taken when the recording
+started. The snapshot restores the app's open TCP connections, but not the
+emulator's host-side NAT state. An app that was already open when you pressed
+record therefore keeps sending requests over dead pooled connections (for
+example an HTTP/2 connection to its API). The replay then shows "Cannot
+connect ... timeout" and the run comes out empty.
+
+``network_reset_after_snapshot`` (default ``"airplane"``) briefly takes the
+device network down after every snapshot load that is followed by a replay
+or by the dry run, and waits (up to 30 s) until a default network is back:
+
+* ``"airplane"``: ``cmd connectivity airplane-mode enable``/``disable``
+  (Android 11+; falls back to ``svc`` if the device rejects it);
+* ``"svc"``: ``svc wifi``/``svc data`` ``disable``/``enable``;
+* ``"off"``: leave the network alone (2.0 behaviour).
+
+Removing the interface addresses makes Android destroy the sockets bound to
+them, so the app sees an error at once and reconnects instead of waiting for
+its read timeout. The UI state of the snapshot is kept: taps are still
+replayed against the screen as it was when recording started. The reset
+runs before the capture window opens and is done identically before every
+action run and the dry run, so its own traffic and file writes are
+subtracted as noise. Each reset adds about 5-10 s per run. It is skipped when
+the snapshot has airplane mode on or no active network.
+
+If an app reacts badly to briefly losing the network (for example it shows
+an offline screen that changes the layout the replay taps on), either set
+this to ``"off"`` and start recordings from the launcher with the app
+force-stopped, or keep it on and record from a cold start anyway.
 
 Network noise (dry run)
 ^^^^^^^^^^^^^^^^^^^^^^^

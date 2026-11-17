@@ -4,6 +4,7 @@ Provides a modal interface for recording Android input events
 with real-time status display and optional live event viewing.
 """
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,10 +16,45 @@ from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Button, Checkbox, Input, Label, Static
 
+from sandroid.core.adb import Adb
 from sandroid.core.toolbox import Toolbox
 from sandroid.services import get_task_service
 from sandroid.tui.modals.base import ExtractionModal, ForensicModal, KeyHintFooter
 from sandroid.tui.utils.recording_wrapper import RecordingWrapper
+
+logger = logging.getLogger(__name__)
+
+
+def foreground_app_hint() -> str | None:
+    """Warn when recording starts in the open spotlight app without a reset.
+
+    A snapshot taken while the app is open restores its pooled connections,
+    whose emulator NAT state is gone after a load. With
+    ``analysis.network_reset_after_snapshot`` on, the engine cycles the
+    network after each load and the app reconnects; with it ``"off"`` the
+    replays can come out empty, so say so before the snapshot is taken.
+    """
+    try:
+        from sandroid.config import get_config
+        from sandroid.services import get_spotlight_service
+
+        if get_config().analysis.network_reset_after_snapshot != "off":
+            return None
+        package = get_spotlight_service().get_package_name()
+        if not package:
+            return None
+        focused, _activity = Adb.get_focused_app(max_retries=1)
+    except Exception:
+        return None
+    if focused != package:
+        return None
+    return (
+        f"{package} is open while recording starts and "
+        "analysis.network_reset_after_snapshot is off: replays may reuse "
+        "dead connections from the snapshot. Start from the launcher with "
+        "the app force-stopped, or turn the reset on."
+    )
+
 
 if TYPE_CHECKING:
     from textual.timer import Timer
@@ -689,6 +725,12 @@ class RecordingModal(ExtractionModal[RecordingResult]):
         Runs off the UI thread (see ``_start_recording``); hands the result
         back to :meth:`_on_snapshot_ready` via ``call_from_thread``.
         """
+        hint = foreground_app_hint()
+        if hint:
+            logger.warning(hint)
+            self.app.call_from_thread(
+                self.app.notify, hint, severity="warning", timeout=10
+            )
         if self._suppress_disconnect_guard:
             self._suppress_disconnect_guard(True)
         error: str | None = None

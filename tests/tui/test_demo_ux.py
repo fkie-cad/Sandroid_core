@@ -814,3 +814,42 @@ def test_snapshot_create_rejects_an_invalid_name_before_adb(monkeypatch):
     assert notes
     assert notes[-1][1] == "error"
     assert "invalid snapshot name" in notes[-1][0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 N1(b): hint when recording starts in the open app without a reset
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "focused", "hinted"),
+    [
+        ("off", "org.wikipedia", True),
+        ("airplane", "org.wikipedia", False),
+        ("off", "com.android.launcher3", False),
+    ],
+)
+def test_foreground_app_hint(monkeypatch, mode, focused, hinted):
+    from types import SimpleNamespace
+
+    from sandroid.tui.modals import recording_modal
+
+    monkeypatch.setattr(
+        "sandroid.config.get_config",
+        lambda: SimpleNamespace(
+            analysis=SimpleNamespace(network_reset_after_snapshot=mode)
+        ),
+    )
+    monkeypatch.setattr(
+        "sandroid.services.get_spotlight_service",
+        lambda: SimpleNamespace(get_package_name=lambda: "org.wikipedia"),
+    )
+    monkeypatch.setattr(
+        recording_modal.Adb,
+        "get_focused_app",
+        classmethod(lambda cls, max_retries=3: (focused, ".Main")),
+    )
+    hint = recording_modal.foreground_app_hint()
+    assert bool(hint) is hinted
+    if hinted:
+        assert "network_reset_after_snapshot" in hint
