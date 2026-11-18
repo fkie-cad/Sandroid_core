@@ -350,6 +350,27 @@ def has_baseline(path: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_PULL_LOCKS: dict[str, threading.Lock] = {}
+_PULL_LOCKS_GUARD = threading.Lock()
+
+
+def pull_lock(path: str) -> threading.Lock:
+    """The lock every pull of ``path`` holds, from its look at the newest
+    version through :func:`reset_current` to :func:`keep_version`.
+
+    Two pulls of one file at once (``u`` on an unwatched row started the
+    watch's first-version pull and a manual one; an auto-pull and the AI
+    tool can meet the same way) shared the one staging folder: one cleared
+    ``.current/`` while the other moved it to ``v001``. With the lock the
+    second pull runs after the first and sees its version.
+    """
+    with _PULL_LOCKS_GUARD:
+        lock = _PULL_LOCKS.get(path)
+        if lock is None:
+            lock = _PULL_LOCKS[path] = threading.Lock()
+        return lock
+
+
 def reset_current(path: str) -> Path:
     """Clear and recreate the staging folder (``.current/``) for a pull."""
     directory = row_dir(path) / _STAGING
@@ -784,6 +805,7 @@ __all__ = [
     "package_of",
     "previous_dir",
     "promote",
+    "pull_lock",
     "read_jsonl",
     "record_set",
     "reset_current",

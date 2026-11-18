@@ -553,6 +553,10 @@ class WatchlistView(Widget):
 
     # -- pull / diff --------------------------------------------------------
 
+    def is_pulling(self, path: str) -> bool:
+        """A pull of ``path`` was started and has not reported back yet."""
+        return path in self._pulling
+
     def pull(self, paths: list[str]) -> None:
         """Pull (and diff) these watched paths on a worker thread."""
         paths = [p for p in paths if p in self._rows]
@@ -590,7 +594,9 @@ class WatchlistView(Widget):
     ) -> None:
         for path in paths:
             try:
-                self._pull_and_diff_one(path, trigger, event_time)
+                # One pull of a file at a time (see watchlist_store.pull_lock).
+                with watchlist_store.pull_lock(path):
+                    self._pull_and_diff_one(path, trigger, event_time)
             except Exception as exc:
                 logger.warning(f"Watchlist pull failed for {path}: {exc}")
                 self._post(

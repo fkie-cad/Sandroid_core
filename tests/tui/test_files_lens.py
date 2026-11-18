@@ -275,7 +275,8 @@ async def test_empty_state_is_one_calm_line() -> None:
         assert panel.has_class("-empty")
         empty = str(panel.query_one("#files-empty").render())
         assert empty == "Monitor off — press o to watch file activity"
-        assert panel.caption() == ("LIVE", "")
+        # L8 (round 2): no "LIVE" title while the monitor is off.
+        assert panel.caption() == ("monitor off", "")
 
 
 @pytest.mark.asyncio
@@ -393,7 +394,14 @@ async def test_u_pulls_the_row_and_U_pulls_all(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
-    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull({AAID: "x"}))
+    pulled: list[str] = []
+    fake = _fake_pull({AAID: "x"})
+
+    def _pull(self, remote_path, local_path, compute_hash=False):
+        pulled.append(remote_path)
+        return fake(self, remote_path, local_path, compute_hash)
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", _pull)
     app = _Harness()
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
@@ -405,8 +413,11 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
         await _wait_for(
             pilot,
             lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY,
-            timeout=8.0,  # watch + baseline pull run on a worker; slow under load
         )
+        # Watching pulls the first version; u adds no second pull of the
+        # file on top of it (the two used to race on the staging folder).
+        assert not panel.watchlist.is_pulling(AAID)
+        assert pulled.count(AAID) == 1
 
 
 @pytest.mark.asyncio
@@ -735,7 +746,7 @@ async def test_review_scope_shows_the_runs_files_and_live_comes_back(
         panel.post_message(ScopeChanged(None))
         await pilot.pause()
         assert [r.key for r in panel._rows] == [f"{ROOT}/files/live"]
-        assert panel.caption()[0] == "LIVE"
+        assert panel.caption()[0] == "monitor off"  # back to live, monitor off
 
 
 @pytest.mark.asyncio
@@ -771,7 +782,7 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         await pilot.pause(0.1)
         panel = ms.lens_widget("files")
         assert isinstance(panel, FilesPanel)
-        assert ms.query_one("#lens-host").border_title == "Files · LIVE"
+        assert ms.query_one("#lens-host").border_title == "Files · monitor off"
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.ingest(_items(_fse("FSE_CREATE_FILE", PREFS)), now=T0)
         panel.refresh_rows()
@@ -1198,7 +1209,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         await pilot.pause()
         assert set(_keys(panel)) == {DB, new, PREFS, AAID}
         assert _row(panel, PREFS).stats.count == 2
-        assert panel.caption()[0] == "LIVE"
+        assert panel.caption()[0] == "monitor off"
         await pilot.press("A")
         await pilot.pause()
         assert panel.segment == 1
@@ -1984,8 +1995,8 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
             _fse("FSE_CONTENT_MODIFIED", DB), _fse("FSE_CONTENT_MODIFIED", DB)
         )
         items = [
-            replace(items[0], process="main · mozStorage #1"),
-            replace(items[1], process="tab_17 · DOM Worker"),
+            replace(items[0], process="main · mozStorage #1", pid=4665),
+            replace(items[1], process="tab_17 · DOM Worker", pid=5395),
         ]
         panel.ingest(items[:1], now=T0)
         text = f"{PKG} restarted 10:40:05 · new PID 25983 · gap ≈0.3 s"
@@ -2016,4 +2027,174 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
         assert "tab_17 · DOM Worker" in events[idx - 1]
         assert "main · mozStorage #1" in events[idx + 1]
         summary = _plain(_tab(inspected, "Summary"))
-        assert "main, tab_17" in summary or "tab_17, main" in summary
+        assert (
+            "main (4665), tab_17 (5395)" in summary
+            or "tab_17 (5395), main (4665)" in summary
+        )
+
+
+# --------------------------------------------------------------------------
+# E2E round 2: companion delete (M5), separators (L1), OPEN-only idle (L3),
+# no LIVE while off / stopping (L8, M8), tid in the timeline (M4)
+# --------------------------------------------------------------------------
+
+
+def test_a_journal_delete_does_not_mark_its_database_deleted() -> None:
+    """M5: SQLite deletes ``-journal`` after every transaction; the
+    database stays (the Summary said "now deleted" for live DBs).
+    """
+    activity = FileActivity()
+    activity.ingest(
+        _items(
+            _fse("FSE_CONTENT_MODIFIED", DB),
+            _fse("FSE_CREATE_FILE", DB + "-journal"),
+            _fse("FSE_DELETE", DB + "-journal"),
+        ),
+        now=T0,
+    )
+    row = activity.paths[DB]
+    assert row.ops.get("delete") == 1  # still shown, as a -journal event
+    assert row.events[-1].via == "-journal"
+    assert not row.deleted
+    activity.ingest(_items(_fse("FSE_DELETE", DB)), now=T0 + timedelta(seconds=1))
+    assert row.deleted  # the database's own delete does
+
+
+@pytest.mark.asyncio
+async def test_a_live_database_with_a_deleted_journal_is_not_now_deleted() -> None:
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        writes: list = []
+        panel.watchlist.note_write = lambda key, when: writes.append(key)
+        panel.ingest(
+            _items(
+                _fse("FSE_CONTENT_MODIFIED", DB),
+                _fse("FSE_DELETE", DB + "-journal"),
+            ),
+            now=T0,
+        )
+        assert writes == [DB]  # the write still auto-pulls
+        panel.refresh_rows()
+        summary = _plain(panel._live_summary(_row(panel, DB)))
+        assert "deleted" not in summary
+        assert "strike" not in str(panel._path_cell(_row(panel, DB)).spans)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_before_a_files_first_event_shows_in_its_events() -> None:
+    """L1: ``places.sqlite-shm`` first touched after a restart showed the
+    mark before it but not the restart line.
+    """
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.drop_mark("search", T0)
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+        old = f"{PKG} restarted 10:39:00 · new PID 7000 · gap ≈2.0 s"
+        panel.add_monitor_note(old, T0 - timedelta(seconds=60), "warning")
+        text = f"{PKG} restarted 10:40:05 · new PID 7592 · gap ≈2.6 s"
+        panel.add_monitor_note(f"{PKG} exited · PID 4665", T0 + timedelta(seconds=4))
+        panel.add_monitor_note(text, T0 + timedelta(seconds=5), "warning")
+        panel.add_monitor_note(
+            "+ tab_3 (PID 7700) followed", T0 + timedelta(seconds=6), "info"
+        )
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=9)
+        )
+        panel.refresh_rows()
+        lines = panel._events_text(_row(panel, DB)).plain.splitlines()
+        assert lines[0].startswith("10:40:09")
+        assert lines[1:] == [
+            f"── {text} ──",
+            f"── {PKG} exited · PID 4665 ──",
+            "── mark 1 'search' · 10:40:00 ──",
+        ]  # the follow note (info) and the restart before the mark are not
+
+
+@pytest.mark.asyncio
+async def test_watched_rows_with_only_open_events_stay_in_the_idle_fold() -> None:
+    """L3: OPEN-only (hidden) activity took a ★ row out of the fold and
+    showed an empty ops column with a count ("2x").
+    """
+    from sandroid.tui.widgets.files_panel import IDLE_FOLD
+
+    prefs = [f"{ROOT}/shared_prefs/p{i}.xml" for i in range(5)]
+    for path in prefs:
+        get_forensic_service().add_spotlight_file(path)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.drop_mark("restart", T0)
+        panel.ingest(
+            _items(
+                _fse("FSE_OPEN", prefs[0]),
+                _fse("FSE_OPEN", prefs[0]),
+                _fse("FSE_OPEN", prefs[1]),
+                _fse("FSE_CONTENT_MODIFIED", prefs[2]),
+            ),
+            now=T0 + timedelta(seconds=1),
+        )
+        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        assert len(_row(panel, IDLE_FOLD).members) == 4
+        panel.table.focus()
+        await pilot.press("A")  # everything: still 4 idle -> still folded
+        await pilot.pause()
+        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        # Unfolded, an OPEN-only row shows no ops and no count.
+        panel._expanded.add(IDLE_FOLD)
+        panel.refresh_rows()
+        member = _row(panel, prefs[0])
+        _mark, _path, ops, count, last = panel._cells(member)
+        assert (ops.plain, count.plain, last.plain) == ("", "", "")
+        # N (raw view) shows them as activity again.
+        panel.activity.show_all = True
+        assert prefs[0] in _keys(panel)[:3]
+
+
+@pytest.mark.asyncio
+async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
+    from sandroid.core.kprobe_tracer import AppProcess
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        assert panel.caption()[0] == "monitor off"
+        device = _Device({10: AppProcess(10, 10100, PKG)})
+        watch = _register_watched_monitor(device, mode="pid", follow=True)
+        watch.seed({10: [10]}, watch.initial_processes())
+        panel.refresh_rows()
+        assert panel.caption()[0] == "LIVE"
+        watch.stopping = True  # o pressed: at once, before the device work
+        panel.refresh_rows()
+        title, info = panel.caption()
+        assert title == "monitor stopping…"
+        assert "o stops" not in info
+
+
+def test_timeline_rows_carry_the_thread_next_to_the_process() -> None:
+    from types import SimpleNamespace
+
+    from sandroid.core import watchlist_store
+
+    item = SimpleNamespace(
+        label="MODIFY",
+        category="modify",
+        path=DB,
+        new_path=None,
+        process="main · Classifier Upda",
+        source="kprobe",
+        pid=4665,
+        tid=5656,
+    )
+    fsmon = SimpleNamespace(label="MODIFY", category="modify", path=DB, pid=42)
+    FilesPanel._export_events(SimpleNamespace(_marks=[]), [item, fsmon], T0)
+    first, second = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+    assert (first["pid"], first["tid"]) == (4665, 5656)
+    assert first["process"] == "main · Classifier Upda"
+    assert (second["pid"], second["tid"]) == (42, None)
