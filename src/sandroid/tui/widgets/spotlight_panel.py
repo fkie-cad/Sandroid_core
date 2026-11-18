@@ -464,7 +464,10 @@ class SpotlightPanel(Widget):
             # Narrow lens (e.g. 100x30 with the Inspector open): one line.
             names = [c for _k, c, _l in _BYPASS_TOGGLES if c in on]
             state = f"[#4ade80]{','.join(names)}[/]" if names else "[#5b6479]none[/]"
-            lines.append(f"[#7dd3fc bold]b bypass:[/] {state} [#5b6479](b then 1-5)[/]")
+            lines.append(
+                f"[#7dd3fc bold]b bypass:[/] {state} "
+                f"[#5b6479](b then 1-{len(_BYPASS_TOGGLES)})[/]"
+            )
             return "\n".join(lines)
         lines.append(
             "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-6 · armed applies on Start)[/]"
