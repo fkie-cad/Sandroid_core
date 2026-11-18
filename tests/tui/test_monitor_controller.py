@@ -2298,7 +2298,7 @@ def test_a_new_process_waits_for_its_name_before_it_is_announced():
     assert watch.label_for_tid(24500) == "pid 24500"
     device.table = _procs(main=24310, tab_17=24500)
     watch.poll_once()
-    assert notes == [("info", "+ tab_17 (PID 24500) followed · gap ≈0.0 s")]
+    assert notes == [("follow", "+ tab_17 (PID 24500) followed · gap ≈0.0 s")]
     assert watch.label_for_tid(24501) == "tab_17"
     assert device.adds == [[24500]]  # added once
 
@@ -2876,3 +2876,211 @@ def test_natural_exit_leaves_a_requested_stops_teardown_to_the_stopper():
     controller._monitor_ended()
     assert calls == []
     assert not controller.is_running()
+
+
+# =============================================================================
+# E2E round 3: new threads' first events (M4), exit order (L2), ⇧R (N8),
+# follow-note bursts (N9) -- recorded line shapes from the Firefox session
+# =============================================================================
+
+from datetime import timedelta as _td
+
+from sandroid.tui.widgets.files_panel import collapse_follow_notes
+
+#: The bookmark write (E2E round 3, seq 13842): PlacesStorageWr 20381 of
+#: Firefox 19219 wrote places.sqlite-wal before the kernel's pid->tgid map
+#: knew the new thread ("(-------)"), and was recorded with pid = 20381.
+_R3_NEW_WAL = _REC_WAL.replace(
+    " PlacesStorageWr-12262   [003]", " PlacesStorageWr-20381   (-------) [003]"
+)
+#: The creating thread's ``task:task_newtask`` line (bionic pthread_create:
+#: CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|
+#: CHILD_CLEARTID = 0x3d0f00), recorded before the new thread runs.
+_R3_NEWTASK = (
+    " Gecko_IOThread-19250   (  19219) [002] ..... 16650.020001: task_newtask: "
+    "pid=20381 comm=Gecko_IOThread clone_flags=3d0f00 oom_score_adj=0"
+)
+
+
+def test_a_new_threads_first_event_gets_its_process_from_task_newtask():
+    """M4 residual: each new thread's FIRST events had pid = TID."""
+    device = _FakeDevice(_procs(main=19219))
+    watch = _watch(device)
+    watch.seed({19219: [19219, 19250]}, watch.initial_processes())
+    translator = _tgid_translator(watch)
+    assert translator.feed(_R3_NEWTASK) == []  # correlation only, no row
+    (item,) = translator.feed(_R3_NEW_WAL)
+    assert (item.pid, item.tid) == (19219, 20381)
+    assert item.process == "main · PlacesStorageWr"
+    # A creator whose own TGID column is not known yet: an earlier line
+    # (or the follow table) still names its process.
+    unknown_creator = _R3_NEWTASK.replace("(  19219)", "(-------)").replace(
+        "pid=20381", "pid=20390"
+    )
+    assert translator.feed(unknown_creator) == []
+    (second,) = translator.feed(_R3_NEW_WAL.replace("-20381", "-20390"))
+    assert (second.pid, second.tid) == (19219, 20390)
+
+
+def test_a_forked_child_is_its_own_process_not_its_parents():
+    device = _FakeDevice(_procs(main=19219))
+    watch = _watch(device)
+    watch.seed({19219: [19219]}, watch.initial_processes())
+    translator = _tgid_translator(watch)
+    fork = _R3_NEWTASK.replace("pid=20381", "pid=20500").replace(
+        "clone_flags=3d0f00", "clone_flags=1200011"
+    )
+    assert translator.feed(fork) == []
+    (item,) = translator.feed(_R3_NEW_WAL.replace("-20381", "-20500"))
+    assert (item.pid, item.tid) == (20500, 20500)
+
+
+def _clocked_watch(device, notes):
+    clock = {"now": _T}
+    watch = MonitorWatch(
+        MonitorConfig(
+            mode="pid", app_name=_PKG, target_path=f"/data/data/{_PKG}", follow=True
+        ),
+        "kprobe",
+        device=device,
+        on_note=lambda text, level, when: notes.append((when, level, text)),
+        now=lambda: clock["now"],
+    )
+    return watch, clock
+
+
+def _exit_line(pid: int) -> str:
+    # Firefox renames its main thread: the exit line carries "AndroidUI".
+    return (
+        f"       AndroidUI-{pid}   [001] d..2. 9876.6: sched_process_exit: "
+        f"comm=AndroidUI pid={pid} prio=120"
+    )
+
+
+def test_an_exit_seen_by_its_trace_line_is_dated_by_it_and_precedes_the_restart():
+    """L2: Android restarted Firefox fast; "exited · noticed 18:47:18" came
+    after "restarted 18:47:14 · new PID 21418".
+    """
+    device = _FakeDevice(_procs(main=21118))
+    notes: list = []
+    watch, clock = _clocked_watch(device, notes)
+    watch.seed({21118: [21118]}, watch.initial_processes())
+    t_exit = _T + _td(seconds=1)
+    clock["now"] = t_exit
+    watch.on_rename_line(_exit_line(21118))
+    assert watch._wake.is_set()
+    # The poll runs late (adb busy): the new process is already there and
+    # its start estimate (uptime - starttime) falls before the exit line.
+    clock["now"] = _T + _td(seconds=5)
+    device.table = _procs(main=21418)
+    device.started = {21418: device.uptime - 4.5}
+    watch.poll_once()
+    (exit_when, _lvl, exit_text), (restart_when, _l2, restart_text) = notes
+    assert exit_text == f"{_PKG} exited · PID 21118 · noticed 12:47:04"
+    assert exit_when == t_exit
+    assert restart_text.startswith(f"{_PKG} restarted 12:47:03 · new PID 21418")
+    assert restart_when > exit_when  # logged and shown in this order
+
+
+def test_an_exit_before_a_later_polls_restart_stays_before_it():
+    device = _FakeDevice(_procs(main=21118))
+    notes: list = []
+    watch, clock = _clocked_watch(device, notes)
+    watch.seed({21118: [21118]}, watch.initial_processes())
+    clock["now"] = _T + _td(seconds=1)
+    watch.on_rename_line(_exit_line(21118))
+    clock["now"] = _T + _td(seconds=1.3)
+    device.table = {}
+    watch.poll_once()
+    assert [t for _w, _l, t in notes] == [
+        f"{_PKG} exited · PID 21118 · noticed 12:47:04"
+    ]
+    clock["now"] = _T + _td(seconds=3)
+    device.table = _procs(main=21418)
+    device.started = {21418: device.uptime - 2.5}  # estimate: before the exit
+    watch.poll_once()
+    assert notes[1][2].startswith(f"{_PKG} restarted")
+    assert notes[1][0] > notes[0][0]
+
+
+def test_an_exited_main_still_listed_as_a_zombie_is_dropped_not_readopted():
+    device = _FakeDevice(_procs(main=24310))
+    notes: list = []
+    watch, _clock = _clocked_watch(device, notes)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    watch.on_rename_line(_exit_line(24310))
+    watch.poll_once()  # ps still lists it (not reaped yet)
+    assert 24310 not in watch.procs
+    assert device.adds == []  # never "restarted" as itself
+    watch.poll_once()
+    assert device.adds == []
+    assert [t for _w, _l, t in notes] == [
+        f"{_PKG} exited · PID 24310 · noticed 12:47:03"
+    ]
+    device.table = {}
+    watch.poll_once()
+    assert watch._gone == set()
+
+
+def test_a_restart_during_sandroids_own_restart_says_so():
+    """N8: "Frida hooks are gone (⇧R re-applies)" right after ⇧R."""
+    from sandroid.services import get_spotlight_service
+
+    device = _FakeDevice(_procs(main=24310))
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    spotlight = get_spotlight_service()
+    spotlight.begin_restart(_PKG)
+    try:
+        device.table = _procs(main=25983)
+        watch.poll_once()
+    finally:
+        spotlight.end_restart()
+    restart = next(t for _l, t in notes if "restarted" in t)
+    assert restart.endswith("· restarted by ⇧R")
+    assert "hooks are gone" not in restart
+    # Outside a ⇧R the hint stays.
+    device.table = _procs(main=26000)
+    watch.poll_once()
+    assert next(t for _l, t in reversed(notes) if "restarted" in t).endswith(
+        "Frida hooks are gone (⇧R re-applies)"
+    )
+
+
+def test_a_spawn_the_poll_found_first_is_still_sandroids_spawn():
+    device = _FakeDevice(_procs(main=24310))
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    device.table = _procs(fresh=25983)  # paused spawn, still "zygote64"
+    watch.poll_once()
+    watch.on_spawned(25983, _PKG)
+    device.table = _procs(main=25983)
+    watch.poll_once()
+    restart = next(t for _l, t in notes if "restarted" in t)
+    assert "spawned paused · no gap" in restart
+    assert "hooks are gone" not in restart
+
+
+def test_follow_notes_of_one_burst_are_one_events_line():
+    """N9: 4-5 "+ tab_… followed" lines per restart in every file."""
+    t0 = _T
+    notes = [
+        (t0, f"{_PKG} restarted 12:47:03 · new PID 7592 · gap ≈2.6 s", "warning"),
+        (t0 + _td(seconds=1), "+ tab_3 (PID 7700) followed · gap ≈0.4 s", "follow"),
+        (
+            t0 + _td(seconds=2),
+            "+ gpu_process (PID 7701) followed · gap ≈1.9 s",
+            "follow",
+        ),
+        (t0 + _td(seconds=3), "+ tab_4 (PID 7702) followed · gap ≈0.2 s", "follow"),
+        (t0 + _td(seconds=60), "+ tab_5 (PID 7800) followed · gap ≈0.1 s", "follow"),
+    ]
+    out = collapse_follow_notes(notes)
+    assert [text for _w, text, _l in out] == [
+        notes[0][1],
+        "+ 3 app processes followed · tab_3, gpu_process, tab_4 · gap ≤1.9 s",
+        "+ tab_5 (PID 7800) followed · gap ≈0.1 s",
+    ]
+    assert out[1][0] == t0 + _td(seconds=1)

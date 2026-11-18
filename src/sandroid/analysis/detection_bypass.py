@@ -3527,8 +3527,10 @@ class BypassService:
                 package,
             )
 
-        # 2. Surface the PID immediately.
-        spotlight.set_pid(pid)
+        # 2. Surface the PID immediately -- publishing, so the header shows it
+        #    now, not when the whole spawn (hooks, resume, splash check) ends.
+        if not spotlight.announce_pid(pid, package):
+            spotlight.set_pid(pid)
 
         # 3. Load every bypass as ONE merged script while paused (#218-safe).
         ok, msg = self.set_active(cats, paused=True, on_message=on_message)

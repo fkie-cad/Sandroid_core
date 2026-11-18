@@ -522,6 +522,9 @@ class FriTap(DataGatherBase):
         # gets its own files: a later session must never overwrite the keys
         # of an earlier one (phase 3 lost cycle 1's 20-key keylog).
         fritap_dir = f"{_get_device_results_path()}fritap/"
+        # Created here, not with the session (no empty folders); the log
+        # handler of an earlier device does not create this one.
+        os.makedirs(fritap_dir, exist_ok=True)
         self.session_stamp = _session_stamp(fritap_dir)
         if output_keylog and not self.keylog_path:
             self.keylog_path = f"{fritap_dir}fritap_keylog_{self.session_stamp}.log"

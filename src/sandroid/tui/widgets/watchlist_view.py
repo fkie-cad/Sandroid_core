@@ -23,7 +23,12 @@ pruned. A pull whose on-device hashes equal the newest version's keeps no
 copy: it is one line in ``checks.jsonl`` (shown as "checked, no change").
 
 **Baseline**: ``w``/``n`` pull a first version of every newly watched file
-right away (``trigger: "watch"``), so the first change can be diffed.
+right away (``trigger: "watch"``), so the first change can be diffed. Watches
+persist across sessions but versions do not: when the file monitor starts,
+every watched file of the monitored app is pulled once per session
+(``trigger: "session-start"``, at most ``SESSION_BASELINE_CAP``). Every
+acquisition record and check carries the ``device_clock`` sample of its pull
+(``core/device_clock.py``).
 
 **Auto-pull on change** (``tui.auto_pull_on_change``, default on): there is
 ONE change detector, the file monitor. The lens hands every write it sees
@@ -77,6 +82,8 @@ logger = logging.getLogger(__name__)
 
 #: Seconds without a new write before a ★ file is auto-pulled.
 AUTO_PULL_QUIET = 1.5
+#: At most this many watched files get a ``session-start`` pull.
+SESSION_BASELINE_CAP = 50
 
 
 class RowState(Enum):
@@ -108,6 +115,8 @@ class _RowInfo:
     sha256: str | None = None
     version: str | None = None  #: name of the version folder
     checked_at: str | None = None  #: last "checked, no change" (ISO)
+    #: ``device_clock`` sample of the last pull / check (``off_wall`` etc.)
+    device_clock: dict | None = None
 
 
 #: SQLite files that belong to a database: pulled with it (a WAL-mode write
@@ -266,6 +275,8 @@ class WatchlistView(Widget):
         self._auto_timers: dict[str, tuple[object, datetime]] = {}
         #: Paths with a pull in flight (a write meanwhile re-arms the timer).
         self._pulling: set[str] = set()
+        #: Paths that got their ``session-start`` pull in this session.
+        self._session_baselined: set[str] = set()
         #: The session's marks (``lens_shell.Mark``), kept current by the
         #: Files lens: each kept version records the mark it was pulled in.
         self.marks: list = []
@@ -441,6 +452,40 @@ class WatchlistView(Widget):
         todo = [p for p in paths if not watchlist_store.has_baseline(p)]
         if todo:
             self._start_pull(todo, trigger="watch")
+        return len(todo)
+
+    def pull_session_baselines(self, package: str | None = None) -> int:
+        """Pull every watched file once per session (``trigger:
+        "session-start"``), so the first change after a restart has a
+        version to diff against (watches persist across sessions, pulled
+        versions do not).
+
+        Called when the file monitor starts. ``package``: only that app's
+        files (the monitored app); ``None``: all. Files already pulled for
+        this reason, or with a pull in flight, are skipped; a file whose
+        on-device hashes equal its newest version this session only gets a
+        ``checks.jsonl`` line (the usual no-change path). At most
+        :data:`SESSION_BASELINE_CAP` files; the rest are named in a log
+        warning. Runs on the pull worker. Returns how many were started.
+        """
+        todo = [
+            p
+            for p in sorted(self._rows)
+            if p not in self._session_baselined
+            and p not in self._pulling
+            and (package is None or watchlist_store.package_of(p) == package)
+        ]
+        if len(todo) > SESSION_BASELINE_CAP:
+            rest = todo[SESSION_BASELINE_CAP:]
+            todo = todo[:SESSION_BASELINE_CAP]
+            logger.warning(
+                f"Watchlist: session-start baseline limited to "
+                f"{SESSION_BASELINE_CAP} files; not pulled: {', '.join(rest)}"
+            )
+        if todo:
+            self._session_baselined.update(todo)
+            logger.info(f"Watchlist: pulling session baselines of {len(todo)} files")
+            self._start_pull(todo, trigger="session-start")
         return len(todo)
 
     def remove_path(self, path: str) -> bool:
@@ -629,6 +674,20 @@ class WatchlistView(Widget):
             return {}
         return parse_device_facts(stdout if isinstance(stdout, str) else "")
 
+    @staticmethod
+    def _device_clock() -> dict | None:
+        """The device clock sample recorded with a pull (``device_clock``:
+        ``off_wall``, ``off_mono``, ``rtt_ms``, ...; a sample younger than
+        10 s is reused, see :func:`sandroid.core.device_clock.current`).
+        """
+        try:
+            from sandroid.core import device_clock
+
+            return device_clock.current()
+        except Exception:
+            logger.debug("Watchlist: device clock sample failed", exc_info=True)
+            return None
+
     def _pull_and_diff_one(
         self,
         path: str,
@@ -650,6 +709,7 @@ class WatchlistView(Widget):
         basename = os.path.basename(path.rstrip("/")) or "pulled_file"
         companions = [f"{path}{s}" for s in SQLITE_COMPANIONS]
         device = self._device_facts([path, *companions])
+        clock = self._device_clock()
         mark = self._active_mark(event_time or datetime.now())
         dirs = watchlist_store.version_dirs(path)
         latest = dirs[-1] if dirs else None
@@ -660,8 +720,9 @@ class WatchlistView(Widget):
             )
             if known == device_set:
                 self._record_check(
-                    path, latest, trigger, event_time, device_set, mark, "no change"
-                )
+                    path, latest, trigger, event_time, device_set, mark,
+                    "no change", clock,
+                )  # fmt: skip
                 return
 
         current = watchlist_store.reset_current(path)
@@ -691,7 +752,7 @@ class WatchlistView(Widget):
         pulled_at = datetime.now()
         record = self._acquisition_record(
             path, current, basename, device, pulled_companions, pulled_at,
-            trigger, event_time, mark,
+            trigger, event_time, mark, clock,
         )  # fmt: skip
         file_set = record["set"]
         facts = (file_set["size"], file_set["local_sha256"])
@@ -704,7 +765,7 @@ class WatchlistView(Widget):
                 watchlist_store.discard_current(path)
                 self._record_check(
                     path, latest, trigger, event_time, device_set or {}, mark,
-                    "no change (the pulled copy is identical)",
+                    "no change (the pulled copy is identical)", clock,
                 )  # fmt: skip
                 return
 
@@ -718,6 +779,7 @@ class WatchlistView(Widget):
                 None,
                 facts,
                 kept.dir.name,
+                clock,
             )
             return
         changed = kept.changed
@@ -731,6 +793,7 @@ class WatchlistView(Widget):
             kept.text if changed else None,
             facts,
             kept.dir.name,
+            clock,
         )
 
     def _record_check(
@@ -742,6 +805,7 @@ class WatchlistView(Widget):
         device_set: dict[str, str],
         mark: dict | None,
         note: str,
+        clock: dict | None = None,
     ) -> None:
         """A pull found no change: one ``checks.jsonl`` line, no version."""
         same_as = latest.name.split("_", 1)[0]
@@ -755,6 +819,7 @@ class WatchlistView(Widget):
                 "same_as": same_as,
                 "note": note,
                 "mark": mark,
+                "device_clock": clock,
             },
         )
         self._post(self._apply_check_result, path, latest.name, entry)
@@ -781,6 +846,7 @@ class WatchlistView(Widget):
         trigger: str,
         event_time: datetime | None,
         mark: dict | None = None,
+        clock: dict | None = None,
     ) -> dict:
         """The ``acquisition.json`` of one pull (see ``watchlist_store``).
 
@@ -790,7 +856,9 @@ class WatchlistView(Widget):
         side (:func:`watchlist_store.set_sha256`), which members differ, the
         total size and the newest device mtime -- the WAL is often the only
         member that changed. ``sha256_match`` is the verdict for the whole
-        set.
+        set. ``device_clock`` is the device clock sample of the pull (host -
+        device offsets, see :mod:`sandroid.core.device_clock`): device times
+        here (``mtime``) are on the device clock.
         """
 
         def _device_entry(device_path: str) -> dict:
@@ -842,6 +910,7 @@ class WatchlistView(Widget):
                 watchlist_store.iso_tz(event_time) if event_time else None
             ),
             "mark": mark,
+            "device_clock": clock,
             "note": (
                 None
                 if main_device["sha256"]
@@ -871,6 +940,7 @@ class WatchlistView(Widget):
             RowState.SETTLING if path in self._auto_timers else RowState.UNCHANGED
         )
         info.checked_at = at
+        info.device_clock = entry.get("device_clock") or info.device_clock
         info.diff_text = None
         info.version = version
         clock = at[11:19] if len(at) >= 19 else at
@@ -894,6 +964,7 @@ class WatchlistView(Widget):
         diff_text: str | None,
         facts: tuple[int | None, str | None] | None = None,
         version: str | None = None,
+        clock: dict | None = None,
     ) -> None:
         """Main-thread callback (via ``_post``) applying one pull's outcome."""
         self._pulling.discard(path)
@@ -913,6 +984,7 @@ class WatchlistView(Widget):
             if facts is not None:
                 info.size, info.sha256 = facts
             info.version = version or info.version
+            info.device_clock = clock or info.device_clock
             # A path watched elsewhere (``l``, the AI tools) is remembered too.
             self._persist_index()
         self._changed([path])
@@ -951,4 +1023,10 @@ class WatchlistView(Widget):
             pass
 
 
-__all__ = ["AUTO_PULL_QUIET", "RowState", "WatchlistView", "parse_device_facts"]
+__all__ = [
+    "AUTO_PULL_QUIET",
+    "SESSION_BASELINE_CAP",
+    "RowState",
+    "WatchlistView",
+    "parse_device_facts",
+]

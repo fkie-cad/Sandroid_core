@@ -43,6 +43,7 @@ from sandroid.core.kprobe_tracer import (
     WriteScope,
     chain_names,
     guess_write_scope,
+    parse_task_newtask,
     resolve_chain,
 )
 
@@ -821,6 +822,19 @@ class KprobeStreamTranslator:
         self._pid = self._resolve_tgid(tid, m.group("tgid"))
         self._comm = self._process(tid, m.group("comm").strip())
         event = m.group("event")
+        if event == "task_newtask":
+            # The creator's line names the new task before it runs: a thread
+            # (CLONE_THREAD) belongs to the creator's process, anything else
+            # is a process of its own. The new thread's first lines print
+            # "(-------)" (the kernel's pid->tgid map has it only after its
+            # first context switch) and were recorded as pid = TID.
+            new = parse_task_newtask(m.group("rest"))
+            if new is not None:
+                child, is_thread = new
+                owner = self._pid if is_thread else child
+                if owner:
+                    self._tgid[child] = owner
+            return []
         fields = _parse_kprobe_fields(m.group("rest"))
         if self._comm.startswith(_SELF_COMMS) and event not in ("dfor", "fput"):
             # adbd's file-sync service: Sandroid's own pulls (and stat polls
@@ -1197,6 +1211,15 @@ class MonitorWatch:
         #: Main pids that exited / the main's (re)start, within one poll.
         self._exited: list[int] = []
         self._restart_at: datetime | None = None
+        #: pid -> when its exit line arrived (sched_process_exit, see
+        #: on_rename_line); the poll drops it and dates the exit by it.
+        self._exit_seen: dict[int, datetime] = {}
+        #: Exited pids still listed (a zombie until reaped): never re-added.
+        self._gone: set[int] = set()
+        #: The latest main exit noted (a later restart is ordered after it).
+        self._last_exit_at: datetime | None = None
+        #: Notes of the running poll, emitted in time order at its end.
+        self._pending_notes: list[tuple[str, str, datetime]] | None = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -1358,6 +1381,9 @@ class MonitorWatch:
         exited = parse_process_exit(line)
         if exited is not None:
             if exited in self.procs:
+                # Dated now (not when a poll gets to it), without the lock: a
+                # poll in flight must not delay the time the exit is known.
+                self._exit_seen.setdefault(exited, self._now())
                 self._burst_until = time.monotonic() + self.BURST_FOR
                 self._wake.set()
             return
@@ -1372,7 +1398,12 @@ class MonitorWatch:
         if not self.follow or package != self.package or self._stopped:
             return
         with self._lock:
-            if pid in self.procs:
+            proc = self.procs.get(pid)
+            if proc is not None:
+                # The poll found it first (still paused): it is Sandroid's
+                # own spawn all the same -- no gap, hooks loading.
+                if not proc.announced:
+                    proc.via, proc.gap = "spawn", 0.0
                 return
             self._adopt([pid], {}, via="spawn")
             self._update_state()
@@ -1387,41 +1418,71 @@ class MonitorWatch:
                 self.app_uid = listing.app_uid
             self._exited = []
             self._restart_at = None
-            for pid in list(self.procs):
-                if pid not in listing.processes:
-                    self._drop(pid)
-                    continue
-                proc = self.procs[pid]
-                tids = listing.tasks.get(pid)
-                if tids:
-                    self._set_tids(proc, tids)
-                name = listing.processes[pid].name
-                # A spawned (paused) process may still show the zygote's
-                # name: never trade a real name for that.
-                if name != proc.name and name not in _UNNAMED:
-                    proc.name = name
-                    proc.label = ""
-                    self._label(proc)
-                self._announce(proc)
-            new = [p for p in listing.processes if p not in self.procs]
-            if self.follow:
-                self.unfollowed = set()
-                if new:
-                    self._adopt(new, listing.processes, via="poll")
-            else:
-                self.unfollowed = set(new)
-            noticed = self._now()
-            for pid in self._exited:
-                when = noticed
-                if self._restart_at is not None and self._restart_at <= noticed:
-                    when = self._restart_at - timedelta(microseconds=1)
-                self._note(
-                    f"{self.package} exited · PID {pid} · noticed {noticed:%H:%M:%S}",
-                    "warning",
-                    when,
-                )
-            self._exited = []
+            self._gone &= set(listing.processes)
+            self._pending_notes = []
+            try:
+                self._poll_table(listing)
+            finally:
+                notes, self._pending_notes = self._pending_notes, None
+                # In time order: an exit is never logged after the restart
+                # that followed it.
+                for text, level, when in sorted(notes, key=lambda n: n[2]):
+                    self._note(text, level, when)
             self._update_state()
+
+    def _poll_table(self, listing: Any) -> None:
+        """:meth:`poll_once` with the listing read (lock held)."""
+        for pid in list(self.procs):
+            if pid not in listing.processes or pid in self._exit_seen:
+                if pid in listing.processes:
+                    self._gone.add(pid)  # exited, not reaped yet
+                self._drop(pid)
+                continue
+            proc = self.procs[pid]
+            tids = listing.tasks.get(pid)
+            if tids:
+                self._set_tids(proc, tids)
+            name = listing.processes[pid].name
+            # A spawned (paused) process may still show the zygote's
+            # name: never trade a real name for that.
+            if name != proc.name and name not in _UNNAMED:
+                proc.name = name
+                proc.label = ""
+                self._label(proc)
+            self._announce(proc)
+        noticed = self._now()
+        # An exit seen by its trace line is dated by it (exact); one found
+        # by this poll only is dated by the poll (it happened before).
+        exits = []
+        for pid in self._exited:
+            seen = self._exit_seen.pop(pid, None)
+            exits.append((pid, seen or noticed, seen is not None))
+            if seen is not None and (
+                self._last_exit_at is None or seen > self._last_exit_at
+            ):
+                self._last_exit_at = seen
+        self._exited = []
+        new = [
+            p for p in listing.processes if p not in self.procs and p not in self._gone
+        ]
+        if self.follow:
+            self.unfollowed = set()
+            if new:
+                self._adopt(new, listing.processes, via="poll")
+        else:
+            self.unfollowed = set(new)
+        for pid, when, exact in exits:
+            stamp = when
+            if not exact and self._restart_at is not None and self._restart_at <= when:
+                # Found together with the restart: it exited before that.
+                when = self._restart_at - timedelta(microseconds=1)
+            if self._last_exit_at is None or when > self._last_exit_at:
+                self._last_exit_at = when
+            self._note(
+                f"{self.package} exited · PID {pid} · noticed {stamp:%H:%M:%S}",
+                "warning",
+                when,
+            )
 
     def check_lost(self) -> int:
         """Read the ring buffer's overrun counters; note any new loss."""
@@ -1478,6 +1539,8 @@ class MonitorWatch:
             # Noted at the end of the poll: a restart found in the same poll
             # dates it (the old process was gone before the new one started).
             self._exited.append(pid)
+        else:
+            self._exit_seen.pop(pid, None)
 
     def _adopt(self, pids: list[int], known: dict, via: str) -> None:
         """Add ``pids`` (all TIDs) to the trace scope and the table."""
@@ -1519,13 +1582,31 @@ class MonitorWatch:
             text = (
                 f"{self.package} {what} {started:%H:%M:%S} · {new} {proc.pid} · {gap}"
             )
-            if restarted and proc.via != "spawn":
+            if restarted and self._sandroid_restarting():
+                text += " · restarted by ⇧R"
+            elif restarted and proc.via != "spawn":
                 text += " · Frida hooks are gone (⇧R re-applies)"
-            self._note(text, "warning" if restarted else "info", started)
+            when = started
+            last_exit = self._last_exit_at
+            if restarted and last_exit is not None and when <= last_exit:
+                # The start is estimated from its gap; the exit before it was
+                # seen: keep them in that order.
+                when = last_exit + timedelta(microseconds=1)
+            self._note(text, "warning" if restarted else "info", when)
         else:
+            # "follow": one line per burst in a file's Events (FilesPanel).
             self._note(
-                f"+ {proc.label} (PID {proc.pid}) followed · {gap}", "info", started
+                f"+ {proc.label} (PID {proc.pid}) followed · {gap}", "follow", started
             )
+
+    def _sandroid_restarting(self) -> bool:
+        """Sandroid's own ⇧R is restarting this package right now."""
+        try:
+            from sandroid.services import get_spotlight_service
+
+            return bool(get_spotlight_service().is_restarting(self.package))
+        except Exception:
+            return False
 
     def _set_blind(self, reason: str) -> None:
         if self.blind_since is None:
@@ -1558,6 +1639,9 @@ class MonitorWatch:
                 logger.debug("monitor watch on_change failed", exc_info=True)
 
     def _note(self, text: str, level: str, when: datetime | None = None) -> None:
+        if self._pending_notes is not None:
+            self._pending_notes.append((text, level, when or self._now()))
+            return
         if self.on_note is not None:
             try:
                 self.on_note(text, level, when or self._now())
@@ -2332,10 +2416,10 @@ class MonitorController:
     def _kprobe_setup(self, config: MonitorConfig) -> tuple[Any, Any, str] | None:
         """DEVICE-HEAVY kprobe session setup -- MUST run OFF the UI thread.
 
-        Every ``KprobeTracer.run_by_*`` issues ~40-60 synchronous ``adb shell``
-        round-trips (self-clean + probe install + enable + buffer + filters),
-        each with a 30s timeout, so this would freeze Textual for seconds (or
-        minutes if adb is wedged) on the main thread. The cheap finalization is
+        Every ``KprobeTracer.run_by_*`` issues several synchronous (batched)
+        ``adb shell`` round-trips (self-clean + probe install + enable +
+        buffer + filters), each with a 30s timeout, so this would freeze
+        Textual for seconds (or minutes if adb is wedged) on the main thread. The cheap finalization is
         split out into :meth:`_finish_kprobe_launch`.
 
         Returns ``(process, translator, mode_desc)`` on success, or ``None`` if

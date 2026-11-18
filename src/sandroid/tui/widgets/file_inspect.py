@@ -51,6 +51,7 @@ from textual.binding import Binding
 from textual.containers import ScrollableContainer, Vertical
 from textual.widgets import Label, Static
 
+from sandroid.core import device_clock
 from sandroid.core import file_inspect as fi
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
 
@@ -1335,6 +1336,11 @@ class RecordLines:
             newest = max(stamped, key=lambda m: m["mtime"])
             where = f" ({newest['role']})" if n > 1 else ""
             self.second.append(f"changed {_stamp(newest['mtime'])}{where}")
+            # The mtimes are on the device clock: say so when it was off.
+            clock = record.get("device_clock")
+            if isinstance(clock, dict) and device_clock.notable(clock):
+                offset = device_clock.device_minus_host(clock)
+                self.second.append(f"device clock {device_clock.format_offset(offset)}")
         missing = file_set.get("missing_locally") or []
         if missing:
             self.second.append(f"not pulled: {', '.join(map(str, missing))}")

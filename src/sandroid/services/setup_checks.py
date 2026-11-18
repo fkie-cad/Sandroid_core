@@ -285,27 +285,111 @@ SELINUX_PERMISSIVE_REASON = (
 )
 
 
+#: Per device serial ("" = the default target): the SELinux mode Sandroid
+#: found before its first change, and whether it changed it since. Read by
+#: ``restore_selinux_on_quit``; a snapshot load that brought Enforcing back
+#: in between does not overwrite the mode found first.
+_selinux_found: dict[str, str] = {}
+_selinux_changed: set[str] = set()
+
+
+def _selinux_key(serial: str | None) -> str:
+    if serial:
+        return serial
+    try:
+        from sandroid.core.adb import Adb
+
+        return Adb.get_target_device() or ""
+    except Exception:
+        return ""
+
+
 def log_selinux_change(
-    before: str | None, after: str | None, when: str, serial: str | None = None
+    before: str | None,
+    after: str | None,
+    when: str,
+    serial: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Log, at INFO, an SELinux mode change Sandroid made, with the reason.
 
     Nothing is logged when the mode did not change. ``before`` may be None
     when it was not read; ``when`` names the occasion (e.g. "startup").
+    ``reason`` defaults to why Sandroid sets Permissive; such a change (and
+    the mode found before it) is remembered for ``restore_selinux_on_quit``.
     """
     old = (before or "").strip().capitalize()
     new = (after or "").strip().capitalize()
+    if reason is None:
+        key = _selinux_key(serial)
+        if old in ("Enforcing", "Permissive"):
+            _selinux_found.setdefault(key, old)
+        if new and old != new:
+            _selinux_changed.add(key)
     if not new or old == new:
         return
     device = f" on {serial}" if serial else ""
     logger.info(
-        "SELinux mode changed%s: %s -> %s (setenforce 0, %s; reason: %s)",
+        "SELinux mode changed%s: %s -> %s (setenforce %s, %s; reason: %s)",
         device,
         old or "unknown",
         new,
+        "1" if new == "Enforcing" else "0",
         when,
-        SELINUX_PERMISSIVE_REASON,
+        reason or SELINUX_PERMISSIVE_REASON,
     )
+
+
+def restore_selinux_on_quit(adb: Any = None) -> list[str]:
+    """Put SELinux back to the mode Sandroid found, where it changed it.
+
+    Called on a clean quit. Per device: only when Sandroid changed the mode
+    and the mode found first is known; a device that is gone (or answers
+    nothing) is skipped quietly. Never raises. Returns the restored serials.
+    """
+    if adb is None:
+        from sandroid.core.adb import Adb as adb
+    restored: list[str] = []
+    for key in sorted(_selinux_changed):
+        found = _selinux_found.get(key)
+        _selinux_changed.discard(key)
+        if not found:
+            continue
+        serial = key or None
+
+        def mode(serial: str | None = serial) -> str:
+            try:
+                stdout, _stderr = adb.send_adb_command(
+                    "shell getenforce", serial=serial
+                )
+            except Exception:
+                return ""
+            out = str(stdout or "").strip().capitalize()
+            return out if out in ("Enforcing", "Permissive") else ""
+
+        current = mode()
+        if not current:
+            logger.debug(f"SELinux restore skipped: device {key or '(default)'} gone")
+            continue
+        if current == found:
+            continue
+        value = "1" if found == "Enforcing" else "0"
+        for command in (f"shell setenforce {value}", f"shell su 0 setenforce {value}"):
+            try:
+                adb.send_adb_command(command, serial=serial)
+            except Exception as exc:
+                logger.debug(f"{command!r} on quit failed: {exc}")
+                break
+            after = mode()
+            if after == found:
+                log_selinux_change(
+                    current, after, "quit", serial, reason="restore on quit"
+                )
+                restored.append(key)
+                break
+        else:
+            logger.warning(f"Could not restore SELinux to {found} on {key or 'device'}")
+    return restored
 
 
 def check_and_set_selinux(adb: Any) -> SetupCheckResult:
@@ -456,4 +540,5 @@ __all__ = [
     "log_selinux_change",
     "make_skipped_check",
     "missing_device_serial",
+    "restore_selinux_on_quit",
 ]

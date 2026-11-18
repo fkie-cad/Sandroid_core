@@ -33,7 +33,10 @@ Two different lifetimes, two places:
                    acquisition.json           device path; per member (db, -wal,
                                               -journal) device mtime/size/sha256 and
                                               local sha256; the combined set hash;
-                                              pull time, trigger, active mark
+                                              pull time, trigger, active mark,
+                                              device_clock (host - device
+                                              clock offsets, see
+                                              core/device_clock.py)
 
    A version is kept only for a real change: when the on-device sha256 of
    the file *and* its ``-wal``/``-journal`` equals the newest version's, the

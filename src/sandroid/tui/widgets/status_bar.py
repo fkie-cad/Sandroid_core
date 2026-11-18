@@ -84,6 +84,11 @@ class StatusBar(Static):
         # Glance-band datums (cheap, in-process reads — no ADB):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
+        #: Sandroid is restarting the app (⇧R): the old PID is gone.
+        self.spotlight_restarting = False
+        #: Why the Frida session was lost (frida-server gone), until it runs
+        #: again; see _on_frida_detached.
+        self._frida_lost: str | None = None
         self.hook_count = 0  # running hook tasks for the spotlight app
         # Armed/active bypass categories, in BypassService display order.
         self.bypass_categories: list[str] = []
@@ -127,8 +132,50 @@ class StatusBar(Static):
                 EventType.TOOL_AVAILABILITY_UPDATED,
                 self._on_tool_availability_updated,
             )
+            EventBus.get().subscribe(EventType.STATE_CHANGED, self._on_state_changed)
         except ImportError:
             pass  # Events module not available
+
+    def on_unmount(self) -> None:
+        try:
+            from sandroid.core.events import EventBus, EventType
+
+            EventBus.get().unsubscribe(EventType.STATE_CHANGED, self._on_state_changed)
+        except Exception:
+            pass
+
+    def _on_state_changed(self, event) -> None:
+        """A Frida session detached because frida-server went away (any
+        thread): say so in the Frida pill at once, not at the next refresh.
+        """
+        data = getattr(event, "data", None) or {}
+        if data.get("change_type") != "frida_detached" or not data.get("server_lost"):
+            return
+        reason = str(data.get("reason") or "lost")
+        try:
+            self.app.call_from_thread(self._on_frida_detached, reason)
+        except RuntimeError:  # already on the UI thread
+            self._on_frida_detached(reason)
+        except Exception:
+            pass  # app shutting down
+
+    def _on_frida_detached(self, reason: str) -> None:
+        """Mark the session lost, re-check the server, tell the user once."""
+        first = self._frida_lost is None
+        self._frida_lost = reason
+        self.frida_status = "Not running"
+        self._frida_version_mismatch = None
+        self.refresh()
+        self._schedule_frida_check()
+        if first:
+            try:
+                self.app.notify(
+                    f"Frida: connection to frida-server lost ({reason}) — "
+                    "hooks are gone. ⇧R restarts the app and frida-server.",
+                    severity="warning",
+                )
+            except Exception:
+                pass
 
     def _on_tool_availability_updated(self, event) -> None:
         """Handle tool availability update from deferred setup checks.
@@ -240,6 +287,8 @@ class StatusBar(Static):
                 state = f"[#fbbf24]◐ paused[/] [{muted}]pid {self.spotlight_pid}[/]"
             elif self.spotlight_pid:
                 state = f"[{run}]● running[/] [{muted}]pid {self.spotlight_pid}[/]"
+            elif self.spotlight_restarting:
+                state = "[#fbbf24]◌ restarting…[/]"
             else:
                 state = f"[{stop}]○ not running[/]"
             segs.append(f"[{muted}]App[/] {state} [{muted}]· {mode}[/]")
@@ -247,7 +296,9 @@ class StatusBar(Static):
             segs.append(f"[{muted}]App ○ none[/]")
 
         # Frida.
-        if self.frida_status == "Running":
+        if self.frida_status != "Running" and self._frida_lost:
+            frida = f"[{stop}]✕ connection lost[/] [{muted}]· ⇧R restarts[/]"
+        elif self.frida_status == "Running":
             if self._frida_version_mismatch:
                 frida = "[#facc15]● running ⚠ version mismatch[/]"
             else:
@@ -399,6 +450,10 @@ class StatusBar(Static):
                 self.spotlight_paused = bool(spotlight.is_app_paused())
             except Exception:
                 self.spotlight_paused = False
+            try:
+                self.spotlight_restarting = bool(spotlight.is_restarting())
+            except Exception:
+                self.spotlight_restarting = False
 
             # Hook count: running hook tasks bound to the spotlight package.
             # Mirrors SpotlightPanel._hooks_for_app — this is the HOOK count,
@@ -668,6 +723,8 @@ class StatusBar(Static):
         prev_status = self._frida_last_status
         self._frida_last_status = status
         self.frida_status = status
+        if status == "Running":
+            self._frida_lost = None  # the server is back (⇧R / auto-start)
 
         # Check version mismatch only on transition to Running
         if status == "Running" and prev_status != "Running":

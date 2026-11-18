@@ -84,9 +84,9 @@ class FolderStructure:
     """Configuration for folder structure creation.
 
     Attributes:
-        raw_folders: Folders to create under raw/
-        result_folders: Folders to create at device level
-        tool_folders: Tool-specific folders
+        raw_folders: Folders under raw/ (created by their writers)
+        result_folders: Folders at device level (created by their writers)
+        tool_folders: Tool-specific folders (created by their writers)
     """
 
     raw_folders: list[str] = field(
@@ -359,24 +359,17 @@ class InitializationService:
             device_path = self._current_session.session_path / safe_name
             raw_path = device_path / "raw"
 
-            # Create raw subfolders
-            for folder in self._folder_structure.raw_folders:
-                folder_path = raw_path / folder
-                if clean_existing and folder_path.is_dir():
-                    shutil.rmtree(folder_path)
-                folder_path.mkdir(parents=True, exist_ok=True)
-
-            # Create result subfolders
-            for folder in self._folder_structure.result_folders:
-                folder_path = device_path / folder
-                if clean_existing and folder_path.is_dir():
-                    shutil.rmtree(folder_path)
-                folder_path.mkdir(parents=True, exist_ok=True)
-
-            # Create tool-specific folders (don't clean these)
-            for folder in self._folder_structure.tool_folders:
-                folder_path = device_path / folder
-                folder_path.mkdir(parents=True, exist_ok=True)
+            # Only the device and raw folders: the subfolders are created by
+            # whatever writes into them (no empty folders in every session).
+            raw_path.mkdir(parents=True, exist_ok=True)
+            if clean_existing:
+                for parent, folders in (
+                    (raw_path, self._folder_structure.raw_folders),
+                    (device_path, self._folder_structure.result_folders),
+                ):
+                    for folder in folders:
+                        if (parent / folder).is_dir():
+                            shutil.rmtree(parent / folder)
 
             # Update session paths
             self._current_session.device_path = device_path

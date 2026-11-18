@@ -268,6 +268,33 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   event: sequence number, time, operation, path, package, process, source,
   mark) are written as they happen, with millisecond times. All timestamps
   carry their UTC offset; readers ignore fields they do not know.
+- **Device clock** (``clock.jsonl`` in the session results folder, next to
+  ``marks.jsonl``): the device clocks drift from the host's, and a snapshot
+  load restores the clock the snapshot was saved with (75 min behind in one
+  test). Sandroid samples the device's wall clock and its CLOCK_MONOTONIC
+  (getevent, Frida, ``logcat -v monotonic`` and kprobe times use it)
+  against the host over one persistent ``adb shell`` -- the best of several
+  queries, good to about ``err_ms`` -- and writes one JSON line per sample:
+  ``reason`` (``device-connect``, ``monitor-start``, ``periodic`` every
+  60 s, ``pull``, ``snapshot-load``, ``sync``), ``off_wall`` (host − device
+  wall clock, s), ``off_mono`` (host epoch = device monotonic +
+  ``off_mono``), ``rtt_ms`` / ``err_ms``, ``host_at`` / ``device_at`` and
+  ``jump``. ``jump`` is true after every snapshot load and clock sync and
+  whenever either offset moved by more than 2 s (``jump_wall_s`` /
+  ``jump_mono_s``), so every clock change of the session is visible.
+  ``off_mono`` is null without root (``mono_note`` says why). With
+  ``emulator.sync_clock_after_snapshot`` on (default) the device wall clock
+  is set to host time after a load and a ``sync`` line records
+  ``before_off_wall`` / ``after_off_wall`` / ``ok``. Each
+  ``acquisition.json`` and ``checks.jsonl`` line carries the
+  ``device_clock`` sample of its pull; when the device clock is more than
+  1 s off, the Inspector (Summary, Versions) and the header (``device
+  17:16:02 −75 min ⚠``, amber) show it.
+- **Session-start baselines**: watches persist across sessions, pulled
+  versions do not. When the file monitor starts, each watched file of the
+  monitored app is pulled once (``trigger: session-start``; at most 50, the
+  rest named in the log), so the first change has a version to diff
+  against; an unchanged file only gets a ``checks.jsonl`` line.
 - **Marks**: ``B`` drops a mark (optional name; ⏎ on an empty name keeps
   it unnamed, Esc drops none). The table then shows only the activity
   since that mark (★ rows with activity in it stay on top; the idle ★ rows

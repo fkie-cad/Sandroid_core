@@ -504,6 +504,11 @@ class QuitController:
         run_bounded("frida sessions", self._stop_frida_sessions, 6.0)
         self._cleanup_rest()
 
+        # Last: hand SELinux back in the mode Sandroid found (if it changed it).
+        from sandroid.services.setup_checks import restore_selinux_on_quit
+
+        run_bounded("SELinux restore", restore_selinux_on_quit, 5.0)
+
     @staticmethod
     def _stop_frida_sessions() -> None:
         """Stop Frida jobs not registered with the TaskService, then detach."""

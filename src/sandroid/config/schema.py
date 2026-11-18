@@ -80,6 +80,15 @@ class EmulatorConfig(BaseModel):
         default="kill",
         description="What to do when max_host_memory_gb is exceeded: kill or warn",
     )
+    sync_clock_after_snapshot: bool = Field(
+        default=True,
+        description=(
+            "After every snapshot load, set the device wall clock to host "
+            "time (root `date`) when it is more than 1 s off. The offset "
+            "before and after is recorded in clock.jsonl either way; off "
+            "keeps the snapshot's frozen clock."
+        ),
+    )
 
     @validator("android_emulator_path", "sdk_path", "adb_path", "avd_home", pre=True)
     def expand_user_path(cls, v):

@@ -89,7 +89,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -240,6 +240,58 @@ def diff_markup(diff: str | list[str]) -> str:
 
 def _fmt_time(when: datetime | None) -> str:
     return when.strftime("%H:%M:%S") if when else ""
+
+
+#: Follow notes this close to the first of a run are one Events line.
+FOLLOW_BURST = timedelta(seconds=10)
+_FOLLOW_NOTE_RE = re.compile(
+    r"^\+ (?P<label>.+?) \(PID \d+\) followed(?: · (?P<gap>.*))?$"
+)
+_GAP_RE = re.compile(r"gap ≈(\d+(?:\.\d+)?) s")
+
+
+def collapse_follow_notes(
+    notes: list[tuple[datetime, str, str]],
+) -> list[tuple[datetime, str, str]]:
+    """One line per burst of ``follow`` notes (sub-processes joining).
+
+    A restart brings 4-5 "+ tab_… (PID n) followed" lines; in a file's
+    Events they pushed the file's own events down. Consecutive follow notes
+    within :data:`FOLLOW_BURST` of the first become "+ N app processes
+    followed · tab_17, gpu, … · gap ≤X s" (each process stays in the log).
+    """
+    out: list[tuple[datetime, str, str]] = []
+    run: list[tuple[datetime, str, str]] = []
+
+    def flush() -> None:
+        if len(run) == 1:
+            out.append(run[0])
+        elif run:
+            labels, gaps = [], []
+            for _when, text, _level in run:
+                m = _FOLLOW_NOTE_RE.match(text)
+                labels.append(m.group("label") if m else text)
+                g = _GAP_RE.search(text)
+                if g:
+                    gaps.append(float(g.group(1)))
+            shown = ", ".join(labels[:4]) + (", …" if len(labels) > 4 else "")
+            text = f"+ {len(run)} app processes followed · {shown}"
+            if gaps:
+                text += f" · gap ≤{max(gaps):.1f} s"
+            out.append((run[0][0], text, "follow"))
+        run.clear()
+
+    for note in sorted(notes, key=lambda n: n[0]):
+        if note[2] == "follow" and (not run or note[0] - run[0][0] <= FOLLOW_BURST):
+            run.append(note)
+            continue
+        flush()
+        if note[2] == "follow":
+            run.append(note)
+        else:
+            out.append(note)
+    flush()
+    return out
 
 
 def _fmt_size(size: int | None) -> str:
@@ -815,10 +867,28 @@ class FilesPanel(Widget):
             self.clear_resume_offer()
             if self._notice_kind == "playback":
                 self._set_notice(None)
+            self._on_monitor_started()
         elif self._notice_kind == "backend":
             self._set_notice(None)
         self._dirty = True
         self.refresh_rows()
+
+    def _on_monitor_started(self) -> None:
+        """A device clock sample (``monitor-start``) and the session-start
+        pulls of the monitored app's watched files, both in the background.
+        """
+        try:
+            from sandroid.core import device_clock
+
+            device_clock.record_async("monitor-start")
+        except Exception:
+            logger.debug("Files lens: device clock sample failed", exc_info=True)
+        wl = self._watchlist_or_none()
+        if wl is None:
+            return
+        root = self._app_root()
+        package = root.strip("/").rsplit("/", 1)[-1] if root else None
+        wl.pull_session_baselines(package)
 
     # -- notices (backend fallbacks, Play safety net, resume offer) -------------
 
@@ -1892,10 +1962,25 @@ class FilesPanel(Widget):
                 if info.sha256:
                     # The set hash: the file with its -wal / -journal.
                     pull.add_row("set sha256", info.sha256[:16] + "…")
+            clock = self._clock_text(info.device_clock)
+            if clock is not None:
+                pull.add_row("device clock", clock)
             if info.detail and info.state is not RowState.CHANGED:
                 pull.add_row("", Text(info.detail, style=_DIM))
             sections.append(("Last pull", pull))
         return sections
+
+    @staticmethod
+    def _clock_text(sample: dict | None) -> Text | None:
+        """``-75 min vs host`` (amber) when the device clock of the last pull
+        was more than 1 s off; device times (mtimes, DB values) are on it.
+        """
+        from sandroid.core import device_clock
+
+        if not device_clock.notable(sample):
+            return None
+        offset = device_clock.format_offset(device_clock.device_minus_host(sample))
+        return Text(f"{offset} vs host (device times are on it)", style="#fbbf24")
 
     @staticmethod
     def _state_text(state: RowState) -> Text:
@@ -1926,7 +2011,7 @@ class FilesPanel(Widget):
                 f"── {text} ──",
                 _NOTE_WARNING if level == "warning" else "#a3873f",
             )
-            for when, text, level in self._notes()
+            for when, text, level in collapse_follow_notes(self._notes())
         ]
         # Separators newer than an event are printed above it (newest
         # first). The newest mark before the oldest event closes the list;

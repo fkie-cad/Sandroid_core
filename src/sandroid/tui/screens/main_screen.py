@@ -1066,6 +1066,9 @@ class MainScreen(Screen):
             return False
         self._typing_until = now + self.TYPING_GUARD_SECONDS
         self._typed_ignored += event.character or ""
+        notice = getattr(self.lens_widget(), "stray_key_swallowed", None)
+        if notice is not None:
+            notice(event.key)  # App lens: "Restart not run"
         return True
 
     def _lens_binding_for(self, key: str):

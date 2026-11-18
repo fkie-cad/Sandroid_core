@@ -361,6 +361,9 @@ def test_snapshot_console_ko_reply_is_a_failure(verb):
 _STDIN_ALLOWED = {
     # ``stty sane`` acts on the terminal on its stdin: it needs the tty.
     ("tui/terminal_reset.py", "_run_stty_sane"),
+    # (core/device_clock.py ``Shell.__init__`` keeps one ``adb shell`` open
+    # and feeds it clock queries: it passes ``stdin=subprocess.PIPE`` -- a
+    # pipe, never the terminal -- so it needs no entry here.)
 }
 
 

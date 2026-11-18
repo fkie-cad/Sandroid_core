@@ -589,27 +589,29 @@ def test_art_profiles_are_structural_noise() -> None:
     assert kept == ["/data/data/de.fkie.ground_truth/databases/GroundTruth.db"]
 
 
-def test_snapshot_load_resyncs_guest_clock(monkeypatch) -> None:
-    """After a revert the guest clock is set back to the host's epoch."""
-    from sandroid.services import emulator_service as es_module
+def test_snapshot_load_records_and_syncs_the_device_clock(monkeypatch) -> None:
+    """After a revert the device clock is recorded (and, if configured,
+    synced) through ``device_clock.after_snapshot_load`` -- the details are
+    in tests/core/test_device_clock.py.
+    """
+    from sandroid.core import device_clock
     from sandroid.services.emulator_service import EmulatorService
 
-    monkeypatch.setattr(es_module.time, "time", lambda: 1_800_000_000.0)
     adb = MagicMock()
     adb.send_telnet_command.return_value = ("OK\n", "")
-    calls: list[str] = []
+    adb.send_adb_command.side_effect = lambda command, serial=None: (
+        ("device\n", "") if command == "get-state" else ("", "")
+    )
+    seen: list[tuple] = []
 
-    def send(command: str, serial: str | None = None) -> tuple[str, str]:
-        calls.append(command)
-        if command == "get-state":
-            return "device\n", ""
-        if command == "shell date +%s":
-            return "1800000000\n", ""
-        return "", ""
+    def after_load(name, serial=None, send=None):
+        seen.append((name, serial))
+        send("shell true")  # the service's own adb runs the date commands
 
-    adb.send_adb_command.side_effect = send
-    assert EmulatorService(adb=adb).load_snapshot("tmp") is True
-    assert "shell date -u @1800000000" in calls
+    monkeypatch.setattr(device_clock, "after_snapshot_load", after_load)
+    assert EmulatorService(adb=adb).load_snapshot("tmp", serial="emu-1") is True
+    assert seen == [("tmp", "emu-1")]
+    adb.send_adb_command.assert_any_call("shell true", serial="emu-1")
 
 
 def test_xml_beautify_handles_three_arg_update_text() -> None:
