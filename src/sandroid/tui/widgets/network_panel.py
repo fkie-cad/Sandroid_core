@@ -92,7 +92,10 @@ STATUS_KEY = "network:capture-status"
 # recipients + OS noise
 # --------------------------------------------------------------------------
 
-#: (domain suffix, recipient label), most specific first.
+#: (domain suffix, recipient label), most specific first. Fallback only:
+#: :func:`recipient_of` asks Dexray Insight's tracker database
+#: (``label_for_domain``) first and uses this table when that import fails
+#: (Insight older than 2.0).
 _RECIPIENTS: tuple[tuple[str, str], ...] = (
     ("app-measurement.com", "Google Analytics"),
     ("google-analytics.com", "Google Analytics"),
@@ -215,9 +218,39 @@ def registrable_domain(host: str) -> str:
     return ".".join(parts[-keep:])
 
 
+_INSIGHT_LABELLER: Any = None
+
+
+def _insight_labeller() -> Any:
+    """Dexray Insight's ``label_for_domain`` or ``False`` (imported once)."""
+    global _INSIGHT_LABELLER
+    if _INSIGHT_LABELLER is None:
+        try:
+            from dexray_insight.modules.tracker_analysis import label_for_domain
+
+            _INSIGHT_LABELLER = label_for_domain
+        except Exception:
+            _INSIGHT_LABELLER = False
+    return _INSIGHT_LABELLER
+
+
 def recipient_of(host: str) -> tuple[str, bool]:
-    """``(label, known)``: a known tracker/vendor name, else the domain."""
+    """``(label, known)``: a known tracker/vendor name, else the domain.
+
+    The name comes from Dexray Insight's tracker database (one source for
+    the App lens's SDK list and these labels); without Insight 2.x the
+    built-in ``_RECIPIENTS`` table is used.
+    """
     h = (host or "").lower()
+    labeller = _insight_labeller()
+    if labeller:
+        try:
+            match = labeller(h)
+        except Exception:
+            match = None
+        if match:
+            return str(match[0]), True
+        return registrable_domain(h) or "?", False
     for suffix, label in _RECIPIENTS:
         if _host_matches(h, suffix):
             return label, True
@@ -643,9 +676,10 @@ class NetworkPanel(Widget):
     POLL_SECONDS = 1.0
 
     BINDINGS = [
-        # Shown in the footer, which keeps two lens keys: "⏎ start mitm" and
+        # Shown in the footer, which keeps two lens keys: "␣ start mitm" and
         # "^D device proxy" while nothing is captured, then "/" and "T".
-        Binding("enter", "start_stop", "Start/stop mitm"),
+        # Space, not Enter: Enter means "inspect" in every lens (MainScreen).
+        Binding("space", "start_stop", "Start/stop mitm", key_display="␣"),
         Binding("slash", "filter", "Filter"),
         Binding("T", "toggle_app_only", "App only"),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
@@ -794,6 +828,9 @@ class NetworkPanel(Widget):
         yield FriTapPanel(id="fritap-panel")
 
     def on_mount(self) -> None:
+        # Recipient labels come from Dexray Insight; its first import takes
+        # ~0.2 s (androguard), so warm it off the UI thread.
+        self.run_worker(_insight_labeller, thread=True, name="net-insight-labels")
         self._rebuild()
         try:
             self.set_interval(self.POLL_SECONDS, self._tick)
@@ -1802,7 +1839,7 @@ class NetworkPanel(Widget):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "start_stop":
-            # Only while nothing is captured; with rows Enter inspects.
+            # Only while nothing is captured (footer room); M works always.
             return not self.in_review and not self._model()
         if action == "toggle_phases":
             return self.in_review

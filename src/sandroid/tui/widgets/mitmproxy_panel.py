@@ -60,7 +60,7 @@ class MitmproxyPanel(Widget):
     lens (see ``NetworkPanel.BINDINGS``) and call the ``action_*`` methods
     below:
 
-        Enter / M: start / stop mitmweb (bare — touches nothing on the device)
+        Space / M: start / stop mitmweb (bare — touches nothing on the device)
         Ctrl+D: toggle the Device Proxy on/off (our mitmproxy)
         Ctrl+N: install the mitmproxy CA into the system trust store
         Ctrl+R: restart mitmweb and re-apply device + app proxies
@@ -624,7 +624,7 @@ class MitmproxyPanel(Widget):
         st = self._service.state
         if not self._service.is_running():
             return (
-                f"No flows yet — ⏎ starts mitmproxy on :{st.proxy_port}",
+                f"No flows yet — space starts mitmproxy on :{st.proxy_port}",
                 "then ^D routes the device · ^N installs the CA · y proxy settings",
             )
         if self._proxy_state == "ours" and self._reach_state == "unreachable":
