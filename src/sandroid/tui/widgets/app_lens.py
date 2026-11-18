@@ -84,6 +84,10 @@ RUNTIME_KINDS = ("permissions", "appops", "services", "footprint", "details")
 #: Runtime kinds refreshed on STATE_CHANGED / lens activation (cheap ones).
 EVENT_KINDS = ("permissions", "appops", "services")
 
+#: Keys of the "+N more" / "hide" toggle rows (``SectionData.hidden_rows``).
+MORE_KEY = "_more"
+LESS_KEY = "_less"
+
 #: (section id, title) in display order.
 SECTIONS: tuple[tuple[str, str], ...] = (
     ("identity", "IDENTITY"),
@@ -192,6 +196,9 @@ class SectionData:
     rows: list[Row]
     summary: str = ""
     show_header: bool = True
+    #: Rows shown only on request (z / ⏎ on the "+N" row) or while filtering.
+    hidden_rows: list[Row] = field(default_factory=list)
+    hidden_label: str = "more"
 
 
 def _t(text: Any, style: str = "") -> Text:
@@ -685,7 +692,11 @@ def build_permissions(f: AppFacts) -> SectionData:
             )
         )
     # Ops without a (requested) permission: READ_CLIPBOARD, *_AUDIO_FOCUS...
+    # Most are the platform's own uid-level bookkeeping ("ignore" for every
+    # runtime-permission op the app did not get): only notable ones get a
+    # row, the rest collapse into one "+N other ops" row (z / ⏎ / filter).
     extra = [o for o in ops if not o.permission or o.permission not in names]
+    hidden: list[Row] = []
     for op in sorted(
         extra,
         key=lambda o: (o.last_access_ago_s is None, o.last_access_ago_s or 0, o.op),
@@ -695,8 +706,15 @@ def build_permissions(f: AppFacts) -> SectionData:
         )
         if used:
             recent += 1
-        note = "op only" + (", used recently" if used else "")
-        rows.append(
+        never = not op.running and not op.last_access
+        if never:
+            unused += 1
+        # The protection column already says "op".
+        parts = ["used recently"] if used else []
+        parts += ["no recorded use"] if never else []
+        parts += ["rejected"] if op.last_reject else []
+        note = ", ".join(parts) or "op only"
+        (rows if op_is_notable(op) else hidden).append(
             Row(
                 key=f"op:{op.op}",
                 cells=(
@@ -704,7 +722,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                     _t("op", _DIM),
                     _t("—", _DIM),
                     _op_cell([op]),
-                    _t(note, _WARN if used else _DIM),
+                    _t(_cut(note, 22), _WARN if used else _DIM),
                 ),
                 title=op.op,
                 subtitle="AppOps op without a requested permission",
@@ -728,7 +746,28 @@ def build_permissions(f: AppFacts) -> SectionData:
         f"{requested} requested · {dangerous} dangerous ({granted_dangerous} "
         f"granted) · {recent} used recently · {unused} no recorded use"
     )
-    return SectionData(cols, rows, summary)
+    return SectionData(
+        cols,
+        rows,
+        summary,
+        hidden_rows=hidden,
+        hidden_label="other ops (no recorded use)",
+    )
+
+
+def op_is_notable(op: Any) -> bool:
+    """An op-only AppOps entry worth its own row.
+
+    Recorded access or rejection, running, or a mode the platform does not
+    set on its own: ``deny`` / ``foreground`` / ``errored`` or an explicit
+    package-level mode. A bare uid-level ``ignore`` (every runtime-permission
+    op the app was not granted) or ``default`` is bookkeeping.
+    """
+    if op.running or op.last_access or op.last_reject:
+        return True
+    if op.mode in ("deny", "foreground", "errored"):
+        return True
+    return op.package_mode not in (None, "default", op.uid_mode)
 
 
 # -- EXPOSURE --------------------------------------------------------------
@@ -1457,7 +1496,28 @@ class LensSection(DataTable):
         self._shape: tuple | None = None
         self._column_keys: list[Any] = []
         self._summary = ""
+        self._filter_text = ""
+        #: The section's hidden rows (``SectionData.hidden_rows``) are shown.
+        self.expanded = False
         self.cell_padding = 1
+
+    def toggle_expanded(self) -> None:
+        """Show / hide the section's hidden rows (the "+N" row).
+
+        The cursor goes to the first revealed row, or back to the "+N" row.
+        """
+        data = self.data
+        self.expanded = not self.expanded
+        if data is None:
+            return
+        self.show(data, self._filter_text)
+        target = (
+            data.hidden_rows[0].key if self.expanded and data.hidden_rows else MORE_KEY
+        )
+        for index, row in enumerate(self.rows_shown):
+            if row.key == target:
+                self.move_cursor(row=index, animate=False)
+                break
 
     def set_folded(self, folded: bool) -> None:
         self.folded = folded
@@ -1470,26 +1530,47 @@ class LensSection(DataTable):
         summary = f" · {self._summary}" if self._summary else ""
         self.border_title = Text(f"{arrow} {title}{summary}")
 
-    def show(self, data: SectionData, filter_text: str = "") -> None:
-        """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
-        self.data = data
+    def _visible_rows(self, data: SectionData, filter_text: str) -> list[Row]:
+        """Rows to show: matching ones while filtering (hidden rows too),
+        else the rows plus a "+N" (or "hide") row for the hidden ones.
+        """
         needle = filter_text.lower()
-        rows = [
-            r
-            for r in data.rows
-            if not needle or not r.inspectable or needle in r.text.lower()
-        ]
+        hidden = data.hidden_rows
         if needle:
-            rows = [r for r in rows if r.inspectable] or [
+            rows = [
+                r
+                for r in [*data.rows, *hidden]
+                if r.inspectable and needle in r.text.lower()
+            ] or [
                 _placeholder(
                     "nomatch", f"no rows match “{filter_text}”", len(data.columns)
                 )
             ]
-            total = sum(1 for r in data.rows if r.inspectable)
+            total = sum(1 for r in [*data.rows, *hidden] if r.inspectable)
             shown = sum(1 for r in rows if r.inspectable)
             self._summary = f"{shown} of {total} · {data.summary}"
-        else:
-            self._summary = data.summary
+            return rows
+        self._summary = data.summary
+        if not hidden:
+            return list(data.rows)
+        width = len(data.columns)
+        if self.expanded:
+            toggle = _placeholder(
+                LESS_KEY[1:], f"− hide the {len(hidden)} {data.hidden_label} (z)", width
+            )
+            return [*data.rows, *hidden, toggle]
+        toggle = _placeholder(
+            MORE_KEY[1:],
+            f"+{len(hidden)} {data.hidden_label} — z shows them, / filters",
+            width,
+        )
+        return [*data.rows, toggle]
+
+    def show(self, data: SectionData, filter_text: str = "") -> None:
+        """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
+        self.data = data
+        self._filter_text = filter_text
+        rows = self._visible_rows(data, filter_text)
         self._update_title()
         signature = (
             data.columns,
@@ -1564,7 +1645,7 @@ class LensSection(DataTable):
         data = self.data
         if data is None:
             return None
-        return next((r for r in data.rows if r.key == key), None)
+        return next((r for r in [*data.rows, *data.hidden_rows] if r.key == key), None)
 
 
 class AppLensSections(Vertical):
@@ -2071,6 +2152,9 @@ class AppLensSections(Vertical):
             widget = sections[0] if sections else None
         if widget is None:
             return None
+        if not widget.folded and widget.cursor_key() in (MORE_KEY, LESS_KEY):
+            widget.toggle_expanded()  # z on "+N other ops": show / hide them
+            return widget
         widget.set_folded(not widget.folded)
         if widget.folded:
             self._folded.add(widget.section_id)
@@ -2083,6 +2167,9 @@ class AppLensSections(Vertical):
         if widget is None:
             return None
         row = widget.cursor_item()
+        if row is not None and row.key in (MORE_KEY, LESS_KEY):
+            widget.toggle_expanded()  # ⏎ on "+N other ops" shows them
+            return None
         if row is None or not row.inspectable:
             return None
         return row_content(widget.section_id, row)

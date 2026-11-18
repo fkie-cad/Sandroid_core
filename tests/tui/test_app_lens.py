@@ -200,6 +200,7 @@ class FakeService:
     no_insight: set[str] = set()
     fail: set[tuple[str, str]] = set()
     footprint_dirs: list[str | None] = []
+    extra_ops: list[AppOpEntry] = []
     gates: dict[tuple[str, str], threading.Event] = {}
     version: dict[str, str] = {PKG: "4.2.0", OTHER: "9.9"}
 
@@ -263,7 +264,9 @@ class FakeService:
 
     def appops(self, package):
         self._note("appops", package)
-        return _appops()
+        state = _appops()
+        state.ops.extend(FakeService.extra_ops)
+        return state
 
     def services(self, package):
         self._note("services", package)
@@ -300,6 +303,7 @@ def fake(monkeypatch):
     FakeService.no_insight = set()
     FakeService.fail = set()
     FakeService.footprint_dirs = []
+    FakeService.extra_ops = []
     FakeService.gates = {}
     state = {"pkg": PKG}
     monkeypatch.setattr(app_lens, "make_service", FakeService)
@@ -990,3 +994,74 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         ms.close_inspector()
         await _settle(pilot)
         assert "⇧K kill" in _screen_text(app)
+
+
+def _bookkeeping_ops() -> list[AppOpEntry]:
+    """What API 35 printed for org.wikipedia: uid ``ignore`` per ungranted op."""
+    ops = [
+        AppOpEntry(name, mode="ignore", uid_mode="ignore", permission=perm)
+        for name, perm in (
+            ("READ_SMS", "android.permission.READ_SMS"),
+            ("READ_CALENDAR", "android.permission.READ_CALENDAR"),
+            ("ACCEPT_HANDOVER", None),
+        )
+    ]
+    ops.append(
+        AppOpEntry("ACCESS_RESTRICTED_SETTINGS", mode="default", package_mode="default")
+    )
+    ops.append(AppOpEntry("SYSTEM_ALERT_WINDOW", mode="deny", package_mode="deny"))
+    return ops
+
+
+def test_bookkeeping_ops_collapse_and_are_counted() -> None:
+    ops = _appops()
+    ops.ops.extend(_bookkeeping_ops())
+    data = build_permissions(AppFacts(package=PKG, permissions=_grants(), appops=ops))
+    keys = [r.key for r in data.rows]
+    assert "op:SYSTEM_ALERT_WINDOW" in keys  # deny: a mode worth a row
+    assert "op:READ_CLIPBOARD" in keys  # recorded access
+    assert {r.key for r in data.hidden_rows} == {
+        "op:READ_SMS",
+        "op:READ_CALENDAR",
+        "op:ACCEPT_HANDOVER",
+        "op:ACCESS_RESTRICTED_SETTINGS",
+    }
+    # FINE_LOCATION (granted, no access) + 5 never-used op-only rows
+    assert data.summary.endswith("2 used recently · 6 no recorded use")
+    noted = [r for r in [*data.rows, *data.hidden_rows] if "no recorded use" in r.text]
+    assert len(noted) == 6
+
+
+async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
+    FakeService.extra_ops = _bookkeeping_ops()
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        await _settle(pilot)
+        perms = sections.section("permissions")
+        keys = [r.key for r in perms.rows_shown]
+        assert keys[-1] == app_lens.MORE_KEY
+        assert "op:READ_SMS" not in keys
+        assert "+4 other ops (no recorded use)" in perms.rows_shown[-1].text
+        perms.focus()
+        perms.move_cursor(row=len(keys) - 1)
+        await _settle(pilot)
+        await pilot.press("z")
+        await _settle(pilot)
+        assert perms.expanded
+        assert not perms.folded
+        assert "op:READ_SMS" in [r.key for r in perms.rows_shown]
+        assert perms.cursor_key() == perms.data.hidden_rows[0].key
+        perms.move_cursor(row=len(perms.rows_shown) - 1)
+        await _settle(pilot)
+        assert perms.cursor_key() == app_lens.LESS_KEY
+        await pilot.press("enter")  # Enter on "hide" collapses, no Inspector
+        await _settle(pilot)
+        assert not perms.expanded
+        assert not ms.inspector_is_open
+        # a filter searches the hidden rows too
+        sections.set_filter("read_sms")
+        await _settle(pilot)
+        assert [r.key for r in perms.rows_shown] == ["op:READ_SMS"]
