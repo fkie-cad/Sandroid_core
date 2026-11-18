@@ -261,19 +261,26 @@ What the kprobe monitor can and cannot see:
   device-encrypted ``/data/user_de/0/<pkg>``) and both show as one row,
   ``/data/data/...``; ``@de/`` and ``@ext/`` mark the device-encrypted and
   external (``Android/data``) directories in short paths.
-- Writes go through files the process opened. A file opened *before* the
-  monitor started -- typically the app's SQLite database and its ``-wal``
-  when you attach to a running app -- can't be attributed by the probes.
-  The monitor therefore scans the targets when it starts, re-``stat``\ s
-  the database files every ``tui.monitor_stat_interval`` seconds (default
-  10; such events are marked "seen by re-stat") and rescans once when you
-  stop it with ``o`` ("found by the stop rescan"). To see every write as it
-  happens, start the monitor first and then spawn the app.
+- Every write is named by the kernel at write time: the write probe reads
+  the file's directory chain (up to eight names, e.g. ``places.sqlite-wal``
+  < ``files`` < ``<pkg>`` < ``data``) and its filesystem, and the monitor
+  maps that onto the watched directory. So writes through files the app
+  opened *before* the monitor started -- its SQLite database and ``-wal``
+  when you attach to a running app -- show up live, with their real time;
+  attaching is as good as spawning. Files nested deeper than the chain
+  reaches below the app directory are named only if the app opens them
+  while the monitor runs.
+- ``C`` is the kernel's verdict too (the open created the file /
+  ``mkdir`` succeeded), so nothing is scanned at start or stop.
 - Relative names (``cd dir && echo > f``, toybox ``rm -r``) don't match the
-  path filter; a deleted directory marks its known files deleted and the
-  stop rescan reports the rest. Attribute changes (``A``) are reported by
-  file name only and resolved to a known full path (unknown names are
-  dropped); in pure path mode they are not captured at all.
+  path filter: such creations and deletions are not reported (a deleted
+  directory marks its known files deleted); writes to such files are.
+  Attribute changes (``A``) are named the same way as writes; in pure path
+  mode they are not captured at all.
+- The ``fsmon`` fallback reports writes through already-open files too
+  (inotify/fanotify see every write, whenever the file was opened), but it
+  watches a single path and, on kernels without fanotify, its per-process
+  filter is unreliable.
 
 Runs (4)
 ~~~~~~~~

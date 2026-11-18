@@ -128,9 +128,6 @@ show_theme_indicator = false
 # Filesystem monitor backend: "kprobe" (kernel tracefs kprobes, auto-falls-back
 # to fsmon when unsupported) or "fsmon" (the fsmon binary).
 # monitor_backend = "kprobe"
-# kprobe monitor: seconds between re-stats of the app's database files, whose
-# writes go through files opened before the monitor started (0 = off).
-# monitor_stat_interval = 10.0
 # Files lens: pulled versions kept per watched file (2-500).
 # watchlist_max_versions = 10
 

@@ -410,10 +410,9 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                     id="path-hint",
                 )
                 yield Label(
-                    "[dim]Files the app opened before the start (its databases) "
-                    "are re-checked by stat every few seconds, and the targets "
-                    "are rescanned when you stop. Spawn the app after starting "
-                    "the monitor to see every write live.[/dim]",
+                    "[dim]Writes are seen as they happen, also to files the app "
+                    "opened before the start (its databases), so attaching to a "
+                    "running app is enough.[/dim]",
                     id="caveat-hint",
                 )
                 yield Label("", id="error-label", classes="hidden")
