@@ -233,12 +233,16 @@ class AppSelectionService:
         self,
         user_only: bool = True,
         sort_by_date: bool = True,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """Get list of installed packages from the device.
 
         Args:
             user_only: If True, only return user-installed apps (not system apps)
             sort_by_date: If True, sort packages by install date (newest first)
+            refresh: Re-read the package list from the device instead of
+                trusting the session cache, which goes stale as soon as an
+                app is installed outside Sandroid (``adb install``, Play).
 
         Returns:
             List of package dictionaries with keys:
@@ -246,6 +250,9 @@ class AppSelectionService:
             - install_date: str or None
             - is_user_app: bool
         """
+        if refresh and user_only in self._package_cache:
+            return self._refresh_cached_packages(user_only, sort_by_date)
+
         # Check session-scoped cache
         if user_only in self._package_cache:
             cached = list(self._package_cache[user_only])
@@ -279,6 +286,93 @@ class AppSelectionService:
             self._logger.error(f"Error fetching packages: {e}")
             return []
 
+    def _refresh_cached_packages(
+        self, user_only: bool, sort_by_date: bool
+    ) -> list[dict[str, Any]]:
+        """Re-list packages on the device, reusing cached install dates.
+
+        One ``pm list packages`` call finds installs and removals; only
+        packages new to the cache cost a ``dumpsys`` call for their install
+        date. Falls back to the cached list when the device can't be read.
+        """
+        cached = self._package_cache.get(user_only, [])
+        try:
+            output, error = self._get_adb().send_adb_command(
+                "shell pm list packages -3" if user_only else "shell pm list packages"
+            )
+        except (OSError, RuntimeError, AttributeError, TypeError) as e:
+            self._logger.error(f"Error refreshing packages: {e}")
+            output, error = "", str(e)
+
+        names = [
+            line.split(":", 1)[1].strip()
+            for line in (output or "").splitlines()
+            if line.startswith("package:")
+        ]
+        if error and not names:
+            self._logger.warning(f"Package refresh failed, keeping cache: {error}")
+            packages = list(cached)
+        else:
+            known = {p.get("package_name"): p for p in cached}
+            packages = [
+                known.get(name)
+                or {**self._fetch_package_entry(name), "is_user_app": user_only}
+                for name in names
+            ]
+            self._package_cache[user_only] = list(packages)
+
+        packages = [dict(p) for p in packages]
+        if sort_by_date:
+            packages.sort(key=_package_sort_key, reverse=True)
+        return packages
+
+    def _fetch_package_entry(self, package_name: str) -> dict[str, Any]:
+        """Build a package dict, looking up its first install time."""
+        entry: dict[str, Any] = {"package_name": package_name, "install_date": None}
+        try:
+            output, _ = self._get_adb().send_adb_command(
+                f"shell dumpsys package {package_name} | grep firstInstallTime"
+            )
+            parsed = self._parser.parse(output)
+            if parsed.get("install_date"):
+                entry["install_date"] = parsed["install_date"]
+        except (
+            OSError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            TypeError,
+            IndexError,
+        ) as exc:
+            self._logger.debug(
+                f"Could not fetch install date for {package_name}: {exc}"
+            )
+        return entry
+
+    def get_running_package_names(self) -> set[str]:
+        """Return the packages that currently have a process on the device.
+
+        Process names like ``org.mozilla.firefox:tab3`` count for their
+        package. Returns an empty set when processes can't be listed.
+        """
+        list_processes = getattr(self._get_adb(), "list_processes", None)
+        if list_processes is None:
+            return set()
+        try:
+            return {
+                str(proc.get("name", "")).split(":", 1)[0]
+                for proc in list_processes()
+                if proc.get("name")
+            }
+        except (OSError, RuntimeError, AttributeError, TypeError, ValueError) as e:
+            self._logger.debug(f"Could not list running processes: {e}")
+            return set()
+
+    def mark_running(self, packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return copies of *packages* with a ``running`` flag set on each."""
+        running = self.get_running_package_names()
+        return [{**p, "running": p.get("package_name") in running} for p in packages]
+
     def get_package_names(
         self,
         user_only: bool = True,
@@ -301,6 +395,7 @@ class AppSelectionService:
         prefer_user_only: bool = True,
         sort_by_date: bool = True,
         on_status: Callable[[str], None] | None = None,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """Get installed packages with automatic fallback to all packages.
 
@@ -311,6 +406,7 @@ class AppSelectionService:
             prefer_user_only: If True, try user-only first, then fall back to all.
             sort_by_date: If True, sort packages by install date (newest first).
             on_status: Optional callback for live progress updates.
+            refresh: Re-read the device instead of trusting the session cache.
 
         Returns:
             List of package dictionaries.
@@ -318,7 +414,7 @@ class AppSelectionService:
         if on_status:
             on_status("Enumerating user-installed apps on device...")
         packages = self.get_installed_packages(
-            user_only=prefer_user_only, sort_by_date=sort_by_date
+            user_only=prefer_user_only, sort_by_date=sort_by_date, refresh=refresh
         )
         if packages or not prefer_user_only:
             return packages
@@ -327,11 +423,49 @@ class AppSelectionService:
             on_status("No user apps found. Checking all installed apps...")
         self._logger.info("No user apps found, falling back to all packages")
         all_pkgs = self.get_installed_packages(
-            user_only=False, sort_by_date=sort_by_date
+            user_only=False, sort_by_date=sort_by_date, refresh=refresh
         )
         if not all_pkgs:
             self._logger.warning("No packages found on device (user or system)")
         return all_pkgs
+
+    def picker_loaders(self, show_system: bool = False) -> dict[str, Any]:
+        """Keyword arguments that wire an ``AppSelectionModal`` to this service.
+
+        The modal opens on the session-cached list at once (no ADB call on
+        the caller's thread) and refreshes it from the device in the
+        background, so apps installed outside Sandroid appear; with no cache
+        yet it shows a spinner while loading. Every load marks running apps.
+
+        Args:
+            show_system: Initial state of the "include system apps" toggle.
+
+        Returns:
+            ``packages``, ``package_loader``, ``initial_loader`` and
+            ``include_system_apps`` for the modal's constructor.
+        """
+
+        def load(include_system: bool, on_status=None) -> list[dict[str, Any]]:
+            packages = self.get_installed_packages_with_fallback(
+                prefer_user_only=not include_system,
+                on_status=on_status,
+                refresh=True,
+            )
+            return self.mark_running(packages)
+
+        def initial_loader(on_status=None) -> list[dict[str, Any]]:
+            return load(show_system, on_status)
+
+        cached = self._package_cache.get(not show_system) or []
+        packages = sorted(
+            (dict(p) for p in cached), key=_package_sort_key, reverse=True
+        )
+        return {
+            "packages": packages,
+            "package_loader": load,
+            "initial_loader": initial_loader,
+            "include_system_apps": show_system,
+        }
 
     def flush_package_cache(self) -> None:
         """Clear all cached package data. Called from settings by the user."""
@@ -343,26 +477,7 @@ class AppSelectionService:
 
         Called after APK installation to update cache without full re-fetch.
         """
-        new_entry: dict[str, Any] = {"package_name": package_name, "install_date": None}
-        try:
-            adb = self._get_adb()
-            output, _ = adb.send_adb_command(
-                f"shell dumpsys package {package_name} | grep firstInstallTime"
-            )
-            parsed = self._parser.parse(output)
-            if parsed.get("install_date"):
-                new_entry["install_date"] = parsed["install_date"]
-        except (
-            OSError,
-            ValueError,
-            KeyError,
-            AttributeError,
-            TypeError,
-            IndexError,
-        ) as exc:
-            self._logger.debug(
-                f"Could not fetch install date for {package_name}: {exc}"
-            )
+        new_entry = self._fetch_package_entry(package_name)
 
         for key in list(self._package_cache.keys()):
             existing_names = {p.get("package_name") for p in self._package_cache[key]}
@@ -626,32 +741,16 @@ class AppSelectionService:
             Selected package name or None
         """
         try:
-            from sandroid.core.ui_request_bus import request_modal, show_warning
+            from sandroid.core.ui_request_bus import request_modal
             from sandroid.tui.modals.app_selection_modal import AppSelectionModal
 
-            def load_packages(include_system: bool) -> list:
-                return self.get_installed_packages_with_fallback(
-                    prefer_user_only=not include_system
-                )
-
-            # Build initial loader that resolves packages with fallback logic
-            def initial_loader(on_status=None) -> list:
-                return self.get_installed_packages_with_fallback(
-                    prefer_user_only=not show_system,
-                    on_status=on_status,
-                )
-
-            default_package = recently_installed_package
-
-            # Show modal immediately with empty list; packages load async inside
+            # Show the modal immediately on the cached list (or a spinner on
+            # first use); it refreshes from the device in the background.
             result = request_modal(
                 AppSelectionModal,
                 title=title,
-                packages=[],
-                default_package=default_package,
-                package_loader=load_packages,
-                include_system_apps=show_system,
-                initial_loader=initial_loader,
+                default_package=recently_installed_package,
+                **self.picker_loaders(show_system),
             )
 
             if result is None or result.cancelled:

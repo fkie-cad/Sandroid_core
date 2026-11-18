@@ -95,7 +95,12 @@ class SelectionModal(ForensicModal):
             yield Label(self.title_text, classes="modal-title")
             if self.message_text:
                 yield Label(self.message_text, classes="modal-message")
-            yield Input(placeholder="Type to filter...", id="filter-input")
+            # no-compact: see AppSelectionModal -- the themed bordered field.
+            yield Input(
+                placeholder="Type to filter...",
+                id="filter-input",
+                classes="no-compact",
+            )
             yield OptionList(
                 *[Option(self.display_func(o)) for o in self.filtered_options],
                 id="option-list",

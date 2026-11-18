@@ -312,6 +312,15 @@ ModalScreen {
     border: solid #0D47A1;
 }
 
+/* Compact inputs (the modal sweep's `compact=True`) stay borderless. This
+   app stylesheet outranks every widget DEFAULT_CSS -- even Textual's own
+   `border: none !important` for compact inputs -- so an ID rule above that
+   adds a border (#filter-input) left a 1-row box with no text row: typed
+   text was invisible. */
+Input.-textual-compact {
+    border: none !important;
+}
+
 #option-list {
     height: auto;
     max-height: 15;

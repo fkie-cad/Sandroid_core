@@ -651,25 +651,11 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         except Exception:
             default_package = None
 
-        def load_packages(include_system: bool) -> list:
-            return app_svc.get_installed_packages_with_fallback(
-                prefer_user_only=not include_system
-            )
-
-        def initial_loader(on_status=None) -> list:
-            return app_svc.get_installed_packages_with_fallback(
-                prefer_user_only=True,
-                on_status=on_status,
-            )
-
         self.app.push_screen(
             AppSelectionModal(
                 title="Select App to Proxy",
-                packages=[],
                 default_package=default_package,
-                package_loader=load_packages,
-                include_system_apps=False,
-                initial_loader=initial_loader,
+                **app_svc.picker_loaders(show_system=False),
             ),
             self._on_app_selected,
         )
