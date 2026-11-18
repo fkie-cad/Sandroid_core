@@ -130,6 +130,16 @@ Scope (LIVE / REVIEW)
   - ``read_results_doc(run_dir) -> dict | None`` -- the full results JSON
     (``"Run Metadata"``, ``"Run Errors"``, ``"Network"`` ...); can be large.
 
+Marks
+-----
+* ``MainScreen.marks`` -- the one :class:`SessionMarks` list of the session
+  (timestamped, optionally named points: "tap login").
+* ``MainScreen.add_mark(name="", when=None) -> Mark`` -- appends a mark,
+  writes a separator line to the log (and so the ticker) and posts a
+  (non-bubbling) :class:`MarksChanged` to every lens widget. Any lens can
+  use the marks (segment = mark n up to mark n+1); the Files lens does
+  (``M`` drops one there).
+
 Log
 ---
 ``#activity-log`` is unchanged (``query_one("#activity-log", ActivityLog)``
@@ -143,6 +153,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Group
@@ -229,6 +240,71 @@ class InspectorContent:
     key: Hashable | None = None
     #: Filled in by ``MainScreen.open_inspector`` (the active lens id).
     lens: str | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class Mark:
+    """A timestamped point in the live session ("tap login").
+
+    ``number`` counts from 1 in the order the marks were dropped; ``name``
+    is optional (``""`` = unnamed).
+    """
+
+    number: int
+    when: datetime
+    name: str = ""
+
+    def label(self) -> str:
+        """``mark 3 'tap login'`` (``mark 3`` when unnamed)."""
+        return (
+            f"mark {self.number} '{self.name}'" if self.name else f"mark {self.number}"
+        )
+
+
+class SessionMarks:
+    """The shell's one list of marks (``MainScreen.marks``), shared by lenses.
+
+    Pure Python. ``add`` appends and returns the new :class:`Mark`; every
+    change is announced to the lenses with :class:`MarksChanged` by
+    ``MainScreen.add_mark``. A lens turns the list into segments: segment 0
+    is before the first mark, segment ``n`` is from mark ``n`` up to the next
+    mark (or now).
+    """
+
+    def __init__(self) -> None:
+        self._marks: list[Mark] = []
+
+    def __iter__(self):
+        return iter(self._marks)
+
+    def __len__(self) -> int:
+        return len(self._marks)
+
+    def __getitem__(self, index: int) -> Mark:
+        return self._marks[index]
+
+    @property
+    def marks(self) -> list[Mark]:
+        return list(self._marks)
+
+    def add(self, name: str = "", when: datetime | None = None) -> Mark:
+        mark = Mark(len(self._marks) + 1, when or datetime.now(), name.strip())
+        self._marks.append(mark)
+        return mark
+
+    def clear(self) -> None:
+        self._marks.clear()
+
+
+class MarksChanged(Message):
+    """Posted to every lens widget when a mark is added (or marks cleared)."""
+
+    bubble = False
+
+    def __init__(self, marks: list[Mark], added: Mark | None = None) -> None:
+        super().__init__()
+        self.marks = marks
+        self.added = added
 
 
 class ScopeChanged(Message):

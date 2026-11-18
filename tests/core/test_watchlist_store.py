@@ -1,18 +1,19 @@
-"""Unit tests for core/watchlist_store.py (Watchlist sub-tab's on-disk state).
+"""Unit tests for core/watchlist_store.py (the Files lens watchlist on disk).
 
-Covers the load-bearing guarantees called out in the module docstring:
-sanitized-path directory naming (including the long-path truncation +
-sha256-disambiguation fallback), membership (index.json) save/load
-round-trip and corruption-safety, and the previous/current baseline-cache
-lifecycle (reset -> has_baseline -> promote).
+Covers the module's contract: ★ membership per package in the user config
+directory (readable JSON, corruption-safe), and pulled versions in the
+session results folder (``files/<package>/<app path>/vNNN_HH-MM-SS/`` with
+the copy, ``diff.txt`` and ``acquisition.json``; never pruned), plus the
+storage API the Inspector reads (version_dirs/time/diff/record/file).
 
-Every test gets a fresh RESULTS_PATH pointed at a pytest tmp_path via the
-autouse fixture below, mirroring tests/core/test_run_history.py.
+The autouse conftest fixture points both directories at the test's tmp_path
+(``SDROID_WATCHLIST_DIR``, ``SDROID_FILES_DIR``).
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -21,318 +22,195 @@ from sandroid.core import watchlist_store
 
 @pytest.fixture(autouse=True)
 def _isolated_results_path(tmp_path, monkeypatch):
-    """Point RESULTS_PATH at a throwaway directory for every test."""
     monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
     return tmp_path
 
 
-class TestSanitizePath:
-    def test_short_path_is_percent_encoded_and_reversible_by_inspection(self):
-        encoded = watchlist_store.sanitize_path("/data/data/com.app/databases/app.db")
-        assert "/" not in encoded
-        assert encoded == "%2Fdata%2Fdata%2Fcom.app%2Fdatabases%2Fapp.db"
-
-    def test_different_short_paths_never_collide(self):
-        a = watchlist_store.sanitize_path("/data/data/com.app/a.db")
-        b = watchlist_store.sanitize_path("/data/data/com.app/b.db")
-        assert a != b
-
-    def test_sanitize_path_is_deterministic(self):
-        path = "/data/data/com.app/databases/app.db"
-        assert watchlist_store.sanitize_path(path) == watchlist_store.sanitize_path(
-            path
+class TestLayout:
+    def test_app_paths_keep_their_package_and_relative_path(self):
+        assert watchlist_store.owner_and_relative(
+            "/data/user/0/com.app/databases/app.db"
+        ) == ("com.app", "databases/app.db")
+        assert watchlist_store.owner_and_relative("/data/user_de/0/com.app/x") == (
+            "com.app",
+            "@de/x",
+        )
+        assert watchlist_store.owner_and_relative(
+            "/sdcard/Android/data/com.app/files/a.txt"
+        ) == ("com.app", "@ext/files/a.txt")
+        assert watchlist_store.owner_and_relative("/data/local/tmp/drop.bin") == (
+            "_device",
+            "data/local/tmp/drop.bin",
         )
 
-    def test_long_paths_are_truncated_with_a_disambiguating_suffix(self):
-        # Two paths that share a long common prefix (so their percent-encoded
-        # forms would share the same first 150 characters after truncation)
-        # but differ only near the end -- truncation alone would collide.
-        from urllib.parse import quote
+    def test_row_dir_is_under_files_package_and_app_path(self, tmp_path):
+        directory = watchlist_store.row_dir("/data/data/com.app/databases/app.db")
+        root = watchlist_store.files_root()
+        assert directory == root / "com.app" / "databases" / "app.db"
+        assert directory.is_dir()
+        device = watchlist_store.row_dir("/data/local/tmp/drop.bin")
+        assert device == root / "_device" / "data" / "local" / "tmp" / "drop.bin"
 
-        base = "/data/data/" + ("x" * 200) + "/databases/"
-        long_a = base + "app_one.db"
-        long_b = base + "app_two.db"
+    def test_dot_dot_components_cannot_climb_out(self):
+        directory = watchlist_store.row_dir("/data/data/com.app/files/../../x")
+        root = watchlist_store.files_root()
+        assert root in directory.parents
 
-        # Sanity-check the premise: the *un*-truncated percent-encoded form
-        # really does exceed the threshold, so sanitize_path() below is
-        # actually exercising the truncation path, not just short-circuiting.
-        assert len(quote(long_a, safe="")) > watchlist_store._MAX_ENCODED_NAME
+    def test_files_root_is_the_session_results_folder(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(watchlist_store.FILES_DIR_ENV, raising=False)
+        session = tmp_path / "results" / "20261118_101500" / "Emu_A"
+        monkeypatch.setenv("RESULTS_PATH", str(session))
 
-        encoded_a = watchlist_store.sanitize_path(long_a)
-        encoded_b = watchlist_store.sanitize_path(long_b)
+        class _Init:
+            @staticmethod
+            def get_device_path():
+                return None
 
-        assert "__" in encoded_a  # truncated form carries the hash suffix
-        # The returned name must actually be short (truncated), not the full
-        # 242-ish character percent-encoded string.
-        assert len(encoded_a) < len(quote(long_a, safe=""))
-        assert encoded_a != encoded_b
+        from sandroid import services
 
-    def test_row_dir_uses_sanitized_name_under_watchlist_dir(self, tmp_path):
-        path = "/data/data/com.app/databases/app.db"
-        directory = watchlist_store.row_dir(path)
+        monkeypatch.setattr(services, "get_initialization_service", lambda: _Init)
+        assert watchlist_store.files_root() == session / "files"
 
-        assert directory.parent == watchlist_store.watchlist_dir()
-        assert directory.name == watchlist_store.sanitize_path(path)
-        assert directory.exists()
+        class _Session:
+            @staticmethod
+            def get_device_path():
+                return tmp_path / "session_dev"
+
+        # A Play pins RESULTS_PATH to its bundle; the session folder wins.
+        monkeypatch.setattr(services, "get_initialization_service", lambda: _Session)
+        assert watchlist_store.files_root() == tmp_path / "session_dev" / "files"
 
 
 class TestMembershipPersistence:
     def test_save_then_load_round_trip(self):
         paths = ["/data/data/com.app/a.db", "/data/data/com.app/b.xml"]
         watchlist_store.save_membership(paths)
+        assert watchlist_store.load_membership() == paths
 
-        loaded = watchlist_store.load_membership()
-
-        assert loaded == paths
-
-    def test_load_missing_index_returns_empty_list(self):
-        assert watchlist_store.load_membership() == []
-
-    def test_load_corrupt_index_returns_empty_list_and_warns(self, tmp_path, caplog):
-        index_path = tmp_path / "spotlight_files" / ".watchlist" / "index.json"
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text("{ not valid json", encoding="utf-8")
-
-        with caplog.at_level("WARNING"):
-            loaded = watchlist_store.load_membership()
-
-        assert loaded == []
-        assert any("index.json unreadable" in msg for msg in caplog.messages)
-
-    def test_save_overwrites_previous_membership(self):
-        watchlist_store.save_membership(["/a"])
-        watchlist_store.save_membership(["/b", "/c"])
-
-        assert watchlist_store.load_membership() == ["/b", "/c"]
-
-    def test_index_json_matches_documented_shape(self, tmp_path):
-        watchlist_store.save_membership(["/a"])
-
-        index_path = tmp_path / "spotlight_files" / ".watchlist" / "index.json"
-        with open(index_path, encoding="utf-8") as f:
-            data = json.load(f)
-
-        # A plain membership-only save (no row_states/auto_enabled supplied)
-        # still writes the v2 fields, just empty/default -- readers never
-        # need to distinguish "omitted" from "explicitly empty".
+    def test_one_readable_file_per_package(self):
+        watchlist_store.save_membership(
+            ["/data/data/com.app/a.db", "/data/local/tmp/x"],
+            patterns=["/data/data/com.app/shared_prefs/*"],
+        )
+        data = json.loads(
+            watchlist_store.membership_file("com.app").read_text(encoding="utf-8")
+        )
         assert data == {
             "schema_version": watchlist_store.SCHEMA_VERSION,
-            "paths": ["/a"],
-            "auto_enabled": False,
-            "rows": {},
+            "package": "com.app",
+            "paths": ["/data/data/com.app/a.db"],
+            "patterns": ["/data/data/com.app/shared_prefs/*"],
         }
-
-    def test_no_leftover_temp_files_after_save(self, tmp_path):
-        watchlist_store.save_membership(["/a"])
-
-        watchlist_dir = tmp_path / "spotlight_files" / ".watchlist"
-        leftovers = list(watchlist_dir.glob(".*.tmp-*"))
-        assert leftovers == []
-
-
-class TestRowStatePersistence:
-    """Schema v2: each path's last-known pull/auto state + auto_enabled,
-    alongside plain membership (see module docstring point 1).
-    """
-
-    PATH_A = "/data/data/com.app/a.db"
-    PATH_B = "/data/data/com.app/b.xml"
-
-    def test_save_then_load_round_trip_of_full_row_state(self):
-        row_states = {
-            self.PATH_A: {
-                "state": "changed",
-                "detail": "diffed against baseline",
-                "last_seen": [1700000000, 42],
-                "last_pulled": [1700000000, 42],
-            },
-            self.PATH_B: {
-                "state": "baseline_only",
-                "detail": "Baseline captured — 1 file, 10 bytes.",
-                "last_seen": None,
-                "last_pulled": None,
-            },
-        }
-        watchlist_store.save_membership(
-            [self.PATH_A, self.PATH_B], row_states=row_states, auto_enabled=True
+        device = json.loads(
+            watchlist_store.membership_file("_device").read_text(encoding="utf-8")
         )
+        assert device["paths"] == ["/data/local/tmp/x"]
+        assert watchlist_store.load_patterns() == ["/data/data/com.app/shared_prefs/*"]
 
-        assert watchlist_store.load_membership() == [self.PATH_A, self.PATH_B]
-        assert watchlist_store.load_row_states() == row_states
-        assert watchlist_store.load_auto_enabled() is True
+    def test_load_missing_returns_empty_list(self):
+        assert watchlist_store.load_membership() == []
+        assert watchlist_store.load_patterns() == []
 
-    def test_row_state_for_a_path_no_longer_in_paths_is_dropped(self):
-        """A path removed from the watchlist must not resurrect its stale
-        row state on the next save -- save_membership only ever writes rows
-        for paths still present in the authoritative ``paths`` list.
-        """
-        row_states = {
-            self.PATH_A: {"state": "changed", "last_seen": [1, 2], "last_pulled": None},
-            "/some/removed/path": {
-                "state": "error",
-                "last_seen": None,
-                "last_pulled": None,
-            },
-        }
+    def test_load_corrupt_file_is_skipped_with_a_warning(self, caplog):
+        watchlist_store.save_membership(["/data/data/com.ok/a.db"])
+        bad = watchlist_store.watchlist_dir() / "com.bad.json"
+        bad.write_text("{ not valid json", encoding="utf-8")
+        with caplog.at_level("WARNING"):
+            loaded = watchlist_store.load_membership()
+        assert loaded == ["/data/data/com.ok/a.db"]
+        assert any("com.bad.json unreadable" in msg for msg in caplog.messages)
 
-        watchlist_store.save_membership(
-            [self.PATH_A], row_states=row_states, auto_enabled=False
+    def test_unwatching_the_last_path_of_a_package_empties_its_file(self):
+        watchlist_store.save_membership(["/data/data/com.a/x", "/data/data/com.b/y"])
+        watchlist_store.save_membership(["/data/data/com.b/y"])
+        assert watchlist_store.load_membership() == ["/data/data/com.b/y"]
+        data = json.loads(
+            watchlist_store.membership_file("com.a").read_text(encoding="utf-8")
         )
+        assert data["paths"] == []
 
-        loaded = watchlist_store.load_row_states()
-        assert self.PATH_A in loaded
-        assert "/some/removed/path" not in loaded
+    def test_no_leftover_temp_files_after_save(self):
+        watchlist_store.save_membership(["/data/data/com.app/a"])
+        assert list(watchlist_store.watchlist_dir().glob(".*.tmp-*")) == []
 
-    def test_load_row_states_missing_index_returns_empty_dict(self):
-        assert watchlist_store.load_row_states() == {}
-
-    def test_load_auto_enabled_missing_index_returns_false(self):
-        assert watchlist_store.load_auto_enabled() is False
-
-    def test_load_row_states_and_auto_enabled_on_a_v1_only_index_are_safe(
-        self, tmp_path
-    ):
-        """A pre-existing v1 index.json (just "paths", no "rows"/
-        "auto_enabled") must not error -- both new accessors fall back to
-        their safe empty defaults exactly like a missing file.
-        """
-        index_path = tmp_path / "spotlight_files" / ".watchlist" / "index.json"
-        index_path.parent.mkdir(parents=True, exist_ok=True)
-        index_path.write_text(
-            json.dumps({"schema_version": 1, "paths": [self.PATH_A]}),
-            encoding="utf-8",
+    def test_default_dir_is_per_user_not_per_session(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(watchlist_store.WATCHLIST_DIR_ENV, raising=False)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        watchlist_store.save_membership(["/data/data/com.app/a.db"])
+        assert watchlist_store.watchlist_dir() == tmp_path / "cfg" / "sandroid" / (
+            "watchlists"
         )
+        assert (tmp_path / "cfg" / "sandroid" / "watchlists" / "com.app.json").exists()
+        # A new session (another results folder) loads the same watches.
+        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "other_session"))
+        assert watchlist_store.load_membership() == ["/data/data/com.app/a.db"]
 
-        assert watchlist_store.load_membership() == [self.PATH_A]
-        assert watchlist_store.load_row_states() == {}
-        assert watchlist_store.load_auto_enabled() is False
+    def test_the_old_per_device_store_is_ignored(self, tmp_path):
+        old = watchlist_store.watchlist_dir() / "Emu_A"
+        old.mkdir()
+        (old / "index.json").write_text(
+            json.dumps({"paths": ["/data/data/com.old/x"]}), encoding="utf-8"
+        )
+        assert watchlist_store.load_membership() == []
+        assert (old / "index.json").exists()  # not migrated, not deleted
 
-    def test_no_row_states_supplied_persists_membership_only(self):
-        """Calling save_membership without row_states (the plain membership-
-        only call ForensicService historically made) must not error and
-        must yield an empty (not missing) "rows" mapping.
-        """
-        watchlist_store.save_membership([self.PATH_A])
-
-        assert watchlist_store.load_row_states() == {}
-        assert watchlist_store.load_auto_enabled() is False
+    def test_override_env_vars_are_not_sandroid_config_variables(self):
+        assert not watchlist_store.WATCHLIST_DIR_ENV.startswith("SANDROID_")
+        assert not watchlist_store.FILES_DIR_ENV.startswith("SANDROID_")
 
 
-class TestBaselineCacheLifecycle:
-    PATH = "/data/data/com.app/databases/app.db"
+class TestVersions:
+    PATH = "/data/data/com.app/shared_prefs/p.xml"
+
+    def _pull(self, text, diff=None, record=None, when=None):
+        current = watchlist_store.reset_current(self.PATH)
+        (current / "p.xml").write_text(text, encoding="utf-8")
+        return watchlist_store.promote(self.PATH, diff, record, when=when)
 
     def test_has_baseline_false_before_any_pull(self):
         assert watchlist_store.has_baseline(self.PATH) is False
-
-    def test_reset_current_creates_empty_directory(self):
-        current = watchlist_store.reset_current(self.PATH)
-        assert current.exists()
-        assert list(current.iterdir()) == []
+        assert watchlist_store.version_dirs(self.PATH) == []
 
     def test_reset_current_clears_stale_leftovers(self):
         current = watchlist_store.reset_current(self.PATH)
-        (current / "app.db").write_text("first pull", encoding="utf-8")
-        (current / "app.db-wal").write_text("stale wal", encoding="utf-8")
+        (current / "p.xml").write_text("stale", encoding="utf-8")
+        assert list(watchlist_store.reset_current(self.PATH).iterdir()) == []
 
-        current_again = watchlist_store.reset_current(self.PATH)
-
-        assert list(current_again.iterdir()) == []
-
-    def test_promote_makes_current_the_new_previous(self):
-        current = watchlist_store.reset_current(self.PATH)
-        (current / "app.db").write_text("v1", encoding="utf-8")
-
-        watchlist_store.promote(self.PATH)
-
-        assert watchlist_store.has_baseline(self.PATH) is True
-        previous = watchlist_store.previous_dir(self.PATH)
-        assert (previous / "app.db").read_text(encoding="utf-8") == "v1"
-
-    def test_second_promote_overwrites_first_baseline(self):
-        current = watchlist_store.reset_current(self.PATH)
-        (current / "app.db").write_text("v1", encoding="utf-8")
-        watchlist_store.promote(self.PATH)
-
-        current = watchlist_store.reset_current(self.PATH)
-        (current / "app.db").write_text("v2", encoding="utf-8")
-        watchlist_store.promote(self.PATH)
-
-        previous = watchlist_store.previous_dir(self.PATH)
-        assert (previous / "app.db").read_text(encoding="utf-8") == "v2"
-        # Exactly one file -- v1 must not linger alongside v2.
-        assert [f.name for f in previous.iterdir()] == ["app.db"]
-
-    def test_two_different_paths_have_independent_baselines(self):
-        path_a = "/data/data/com.app/a.db"
-        path_b = "/data/data/com.app/b.db"
-
-        current_a = watchlist_store.reset_current(path_a)
-        (current_a / "a.db").write_text("a", encoding="utf-8")
-        watchlist_store.promote(path_a)
-
-        assert watchlist_store.has_baseline(path_a) is True
-        assert watchlist_store.has_baseline(path_b) is False
-
-
-class TestVersionedPulls:
-    """M3: every pull is kept (bounded) with its diff; nothing is overwritten."""
-
-    PATH = "/data/data/com.app/shared_prefs/p.xml"
-
-    def _pull(self, text, diff=None, keep=10):
-        current = watchlist_store.reset_current(self.PATH)
-        (current / "p.xml").write_text(text, encoding="utf-8")
-        return watchlist_store.promote(self.PATH, diff, keep=keep)
-
-    def test_each_pull_is_a_new_version_with_its_diff(self):
-        v1 = self._pull("one")
+    def test_each_pull_is_a_numbered_version_with_its_diff_and_record(self):
+        t1 = datetime(2026, 11, 18, 10, 42, 7)
+        v1 = self._pull("one", record={"trigger": "manual"}, when=t1)
         v2 = self._pull("two", diff="\t[UPDATED] /map text: one → two\n")
-        versions = watchlist_store.version_dirs(self.PATH)
-        assert versions == [v1, v2]
+        assert v1.name == "v001_10-42-07"
+        assert v2.name.startswith("v002_")
+        assert watchlist_store.version_dirs(self.PATH) == [v1, v2]
         assert (v1 / "p.xml").read_text(encoding="utf-8") == "one"
-        assert (v2 / "p.xml").read_text(encoding="utf-8") == "two"
-        assert watchlist_store.version_diff(v1) is None
+        assert watchlist_store.version_diff(v1) is None  # first: nothing before
         assert "one → two" in watchlist_store.version_diff(v2)
-        assert watchlist_store.version_time(v2) >= watchlist_store.version_time(v1)
-        # The next pull diffs against the newest version.
+        assert watchlist_store.version_record(v1) == {
+            "trigger": "manual",
+            "version": "v001_10-42-07",
+        }
+        assert watchlist_store.version_record(v2) is None
+        assert watchlist_store.version_file(v2, self.PATH) == v2 / "p.xml"
         assert watchlist_store.previous_dir(self.PATH) == v2
+        # The staging folder is gone; only versions remain.
+        assert sorted(d.name for d in v1.parent.iterdir()) == [v1.name, v2.name]
 
-    def test_versions_are_bounded_oldest_first(self):
-        made = [self._pull(f"v{i}", diff="", keep=3) for i in range(5)]
-        assert watchlist_store.version_dirs(self.PATH) == made[-3:]
+    def test_version_time_prefers_the_record(self):
+        v1 = self._pull("one", record={"pulled_at": "2026-11-18T10:42:07"})
+        assert watchlist_store.version_time(v1) == datetime(2026, 11, 18, 10, 42, 7)
+        v2 = self._pull("two", when=datetime(2026, 11, 18, 11, 0, 5))
+        when = watchlist_store.version_time(v2)
+        assert (when.hour, when.minute, when.second) == (11, 0, 5)
 
-    def test_a_legacy_previous_baseline_counts_as_the_oldest_version(self):
-        legacy = watchlist_store.row_dir(self.PATH) / "previous"
-        legacy.mkdir(parents=True)
-        (legacy / "p.xml").write_text("old", encoding="utf-8")
-        assert watchlist_store.has_baseline(self.PATH)
-        newest = self._pull("new")
-        assert watchlist_store.version_dirs(self.PATH) == [legacy, newest]
+    def test_nothing_is_ever_pruned(self):
+        made = [self._pull(f"v{i}", diff="") for i in range(12)]
+        assert watchlist_store.version_dirs(self.PATH) == made
+        assert made[-1].name.startswith("v012_")
 
-
-class TestStableLocation:
-    """M4: the watchlist survives a restart (a new session results folder)."""
-
-    def test_default_dir_is_per_user_and_device_not_per_session(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.delenv(watchlist_store.WATCHLIST_DIR_ENV, raising=False)
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
-        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_175331" / "Emu_A"))
-        watchlist_store.save_membership(["/data/data/com.app/a.db"])
-        first = watchlist_store.watchlist_dir()
-        assert first == tmp_path / "cfg" / "sandroid" / "watchlists" / "Emu_A"
-
-        # Restart: a new session folder for the same device.
-        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_181610" / "Emu_A/"))
-        assert watchlist_store.load_membership() == ["/data/data/com.app/a.db"]
-
-        # Another device has its own watchlist.
-        monkeypatch.setenv("RESULTS_PATH", str(tmp_path / "20261117_181610" / "Emu_B"))
-        assert watchlist_store.load_membership() == []
-
-    def test_override_env_var_is_not_a_sandroid_config_variable(self):
-        """SANDROID_* variables are config overrides (and count as "a config
-        exists" for the CLI); the test/override hook must not be one.
-        """
-        assert not watchlist_store.WATCHLIST_DIR_ENV.startswith("SANDROID_")
+    def test_version_numbers_sort_numerically_past_999(self):
+        root = watchlist_store.row_dir(self.PATH)
+        (root / "v999_10-00-00").mkdir()
+        newer = self._pull("x")
+        assert newer.name.startswith("v1000_")
+        assert watchlist_store.version_dirs(self.PATH)[-1] == newer

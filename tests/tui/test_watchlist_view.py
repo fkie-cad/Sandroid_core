@@ -20,6 +20,7 @@ and after every test to avoid cross-test leakage.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,12 @@ from sandroid.tui.widgets.watchlist_view import RowState, WatchlistView, _comput
 def _isolated_results_path(tmp_path, monkeypatch):
     monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _no_device_hash(monkeypatch):
+    """The pre-pull on-device stat/sha256sum is an adb call: no device here."""
+    monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
 
 
 @pytest.fixture(autouse=True)
@@ -147,81 +154,25 @@ async def test_mount_restores_baseline_only_state_from_a_prior_session() -> None
 
 
 @pytest.mark.asyncio
-async def test_mount_restores_full_row_state_from_a_persisted_index() -> None:
-    """A restart must restore each row's REAL last-known RowState/detail/
-    last_seen/last_pulled from index.json -- not just re-derive BASELINE_ONLY
-    from baseline existence like the (older, membership-only) test above.
-    Simulates a prior session having already persisted a CHANGED row by
-    calling watchlist_store.save_membership directly (bypassing WatchlistView
-    entirely), then mounting a fresh view exactly like a TUI restart would.
+async def test_a_pull_writes_a_readable_acquisition_record(monkeypatch) -> None:
+    """Every version carries acquisition.json: device path, the on-device
+    mtime/size/sha256 taken BEFORE the pull, the local sha256 after it, the
+    host pull time and the trigger.
     """
-    watchlist_store.save_membership(
-        [PATH_A],
-        row_states={
-            PATH_A: {
-                "state": "changed",
-                "detail": "diffed against baseline",
-                "last_seen": [1700000000, 42],
-                "last_pulled": [1699999999, 41],
-            }
-        },
-        auto_enabled=False,
-    )
+    import hashlib
+    import json
 
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-
-        # Membership itself must also have come back (via load_watchlist_index).
-        assert PATH_A in get_forensic_service().get_spotlight_files()
-
-        row = view._rows[PATH_A]
-        assert row.state == RowState.CHANGED
-        assert row.detail == "diffed against baseline"
-        assert row.last_seen == (1700000000, 42)
-        assert row.last_pulled == (1699999999, 41)
-        # The lens caption must reflect the restored state, not a fresh
-        # "never pulled" placeholder.
-        assert "1 changed" in view.summary()
-
-
-@pytest.mark.asyncio
-async def test_mount_restarts_auto_mode_when_persisted_as_enabled(monkeypatch) -> None:
-    """If auto-mode was on when the TUI last exited, a restart must resume
-    it automatically -- not silently reset to off.
-    """
-
-    class _FakeDeviceManager:
-        def on_device_change(self, callback) -> None:
-            pass
-
-    def _fake_device_manager() -> _FakeDeviceManager:
-        return _FakeDeviceManager()
-
-    monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(_fake_device_manager)
-    )
-    watchlist_store.save_membership([PATH_A], auto_enabled=True)
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-
-        assert view._auto_enabled is True
-        assert "on" in view._auto_badge()
-
-
-@pytest.mark.asyncio
-async def test_pull_persists_row_state_for_a_later_restart(monkeypatch) -> None:
-    """A manual pull must actually persist its outcome (state/last_pulled),
-    not just membership -- otherwise a restart right after pulling would
-    still show NEVER_PULLED/BASELINE_ONLY instead of the real last state.
-    """
     monkeypatch.setattr(
         FileExtractionService, "pull_file", _fake_pull_file({PATH_A: "line one\n"})
     )
+    digest = hashlib.sha256(b"line one\n").hexdigest()
+    seen: list[list[str]] = []
+
+    def _facts(paths):
+        seen.append(list(paths))
+        return {PATH_A: {"mtime": 1763458927, "size": 9, "sha256": digest}}
+
+    monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(_facts))
     get_forensic_service().add_spotlight_file(PATH_A)
 
     app = _WatchlistHarness()
@@ -232,10 +183,21 @@ async def test_pull_persists_row_state_for_a_later_restart(monkeypatch) -> None:
         await _wait_for(
             pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED
         )
-
-        persisted = watchlist_store.load_row_states()
-        assert persisted[PATH_A]["state"] == "baseline_only"
-        assert persisted[PATH_A]["last_pulled"] is None  # auto-mode never ticked
+        assert seen == [[PATH_A, f"{PATH_A}-wal", f"{PATH_A}-journal"]]
+        (version,) = watchlist_store.version_dirs(PATH_A)
+        assert version.parent == watchlist_store.files_root() / "com.app" / "config_a"
+        assert version.name.startswith("v001_")
+        record = json.loads((version / "acquisition.json").read_text())
+        assert record["device_path"] == PATH_A
+        assert record["device"]["mtime"] == 1763458927
+        assert record["device"]["size"] == 9
+        assert record["device"]["sha256"] == digest
+        assert record["local"] == {"file": "config_a", "size": 9, "sha256": digest}
+        assert record["sha256_match"] is True
+        assert record["trigger"] == "manual"
+        assert record["version"] == version.name
+        assert datetime.fromisoformat(record["pulled_at"])
+        assert view._rows[PATH_A].version == version.name
 
 
 @pytest.mark.asyncio
@@ -335,7 +297,11 @@ async def test_pattern_watch_matches_paths_and_unwatch_drops_its_matches() -> No
 
 
 @pytest.mark.asyncio
-async def test_pull_facts_are_persisted_and_restored(monkeypatch) -> None:
+async def test_only_membership_survives_a_restart(monkeypatch) -> None:
+    """Pull facts live in the session (versions in the session results
+    folder); a restart restores the ★ membership, and a row whose versions
+    are in this session's folder starts as baseline-only.
+    """
     monkeypatch.setattr(
         FileExtractionService, "pull_file", _fake_pull_file({PATH_A: "abc\n"})
     )
@@ -345,6 +311,7 @@ async def test_pull_facts_are_persisted_and_restored(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
+        view.add_path("/data/data/com.app/other")
         view.pull([PATH_A])
         await _wait_for(pilot, lambda: view.rows[PATH_A].pulled_at is not None)
         row = view.rows[PATH_A]
@@ -358,8 +325,9 @@ async def test_pull_facts_are_persisted_and_restored(monkeypatch) -> None:
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        assert view.rows[PATH_A].size == 4
-        assert view.rows[PATH_A].pulled_at == row.pulled_at
+        assert set(view.rows) == {PATH_A, "/data/data/com.app/other"}
+        assert view.rows[PATH_A].state is RowState.BASELINE_ONLY
+        assert view.rows["/data/data/com.app/other"].state is RowState.NEVER_PULLED
 
 
 @pytest.mark.asyncio
@@ -379,7 +347,7 @@ async def test_first_pull_captures_baseline_not_a_diff(monkeypatch) -> None:
         )
 
         assert view._rows[PATH_A].state == RowState.BASELINE_ONLY
-        assert "Baseline captured" in view._rows[PATH_A].detail
+        assert "First version" in view._rows[PATH_A].detail
         assert watchlist_store.has_baseline(PATH_A) is True
 
 
@@ -407,9 +375,11 @@ async def test_second_pull_with_changed_content_shows_diff(monkeypatch) -> None:
         assert info.diff_text is not None
         assert "line two" in info.diff_text
         assert "[LINE ADDED]" in info.diff_text
-        # The fresh pull must have been promoted to the new baseline.
+        # The fresh pull is the newest version, with its diff next to it.
         previous = watchlist_store.previous_dir(PATH_A)
         assert (previous / "config_a").read_text(encoding="utf-8") == content[PATH_A]
+        assert "line two" in watchlist_store.version_diff(previous)
+        assert len(watchlist_store.version_dirs(PATH_A)) == 2
 
 
 @pytest.mark.asyncio

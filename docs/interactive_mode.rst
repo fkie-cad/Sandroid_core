@@ -232,14 +232,36 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   pinned on top with ★, also before any activity; ``n`` watches any
   absolute path or ``*`` pattern (relative paths and shell metacharacters
   are refused; the prefill is extended, not replaced); ``l`` jumps here. A
-  pattern stars files only, not directories or deleted paths. Watches are
-  kept per device in ``~/.config/sandroid/watchlists/<device>/`` (or
+  pattern stars files only, not directories or deleted paths. Watches (★
+  paths and patterns) are kept per app in
+  ``~/.config/sandroid/watchlists/<package>.json`` (or
   ``$XDG_CONFIG_HOME/sandroid/...``) and come back after a restart.
 - ``u`` pulls the row and diffs it against the previous pull, Shift+``U``
-  pulls every watched file, ``a`` auto-pulls changed files while the lens
-  is shown (a database counts as changed when its ``-wal``/``-journal``
-  changes). Every pull is kept as a version with its diff (the newest
-  ``tui.watchlist_max_versions``, default 10), next to the watchlist.
+  pulls every watched file. With ``tui.auto_pull_on_change`` (default on)
+  a write the monitor reports for a ★ file pulls it ~1.5 s after the last
+  write (a database with its ``-wal``/``-journal`` is one group); nothing
+  polls, so with the monitor off the caption says "monitor off — watched
+  files not tracked · o starts it". Every pull is kept, never pruned, in the
+  session results folder:
+  ``files/<package>/<app path>/v001_HH-MM-SS/`` with the copy (+ database
+  companions), ``diff.txt`` and ``acquisition.json`` (device path, device
+  mtime and size, sha256 computed on the device before the pull, local
+  sha256, pull time, trigger manual/auto); files outside an app directory
+  go under ``files/_device/<path>/``.
+- **Marks**: ``B`` drops a mark (optional name; ⏎ on an empty name keeps
+  it unnamed, Esc drops none). The table then shows only the activity
+  since that mark (★ rows stay, dimmed when untouched); ``A`` toggles
+  everything / since the last mark and ``<``/``>`` step through the
+  segments. The caption names the segment, the log and the Inspector's
+  Events tab show the marks as separator lines.
+- **Hidden and grouped rows**: by default only OS paths (``/proc/``,
+  ``/system/``, ``/data/dalvik-cache/``, ``/data/app/`` ...) and rows with
+  only OPEN/CLOSE are hidden -- never the app's own data, nor
+  ``/data/local/tmp``. ``cache/`` and ``code_cache/`` collapse into one row
+  per folder (⏎ or → opens it, ← folds it). ``N`` shows every path raw.
+  ``R`` opens the rule editor (hide / group by prefix, segment, suffix or
+  glob; add, remove, toggle, reset); changes apply at once and are saved as
+  ``tui.files_noise_rules``. The caption counts hidden rows per rule kind.
 - ``Enter`` opens the Inspector: Summary (full path, ops, processes, last
   pull), Diff (the last pull against the one before; ``z`` zooms, long
   lines wrap), History (every kept pull with its diff) and Events. The keys

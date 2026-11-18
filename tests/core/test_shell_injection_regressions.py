@@ -123,22 +123,28 @@ def test_validate_pid_rejects(pid):
 # ---------------------------------------------------------------------------
 
 
-def test_watchlist_stat_command_does_not_run_device_filenames(fake_adb, monkeypatch):
+def test_watchlist_device_hash_command_does_not_run_device_filenames(
+    fake_adb, monkeypatch
+):
+    """The pre-pull ``stat`` + ``sha256sum`` call quotes every path for the
+    device shell and the whole command once more for the host shell.
+    """
     from sandroid.tui.widgets.watchlist_view import WatchlistView
 
     monkeypatch.setattr(WatchlistView, "_adb", staticmethod(lambda: Adb))
     evil = f"/data/data/com.evil/files/{fake_adb.payload_sub}"
-    WatchlistView._stat_command(["/data/a b.txt", evil])
+    WatchlistView._device_facts(["/data/a b.txt", evil])
 
     assert not fake_adb.marker.exists()
     (argv,) = fake_adb.calls()
-    assert argv[:3] == ["shell", "stat", "-c"]
-    # The device shell re-parses the rest into the literal format + paths.
-    assert [shlex.split(w)[0] for w in argv[3:]] == [
-        "%n %Y %s",
-        "/data/a b.txt",
-        evil,
-    ]
+    assert argv[0] == "shell"
+    assert len(argv) == 2  # one host word: the device command line
+    words = shlex.split(argv[1])
+    assert words[:3] == ["stat", "-c", "%Y %s %n"]
+    # The device shell sees the paths as literal words (twice: stat, sha256sum).
+    assert words.count("/data/a b.txt") == 2
+    assert words.count(evil) == 2
+    assert "sha256sum" in words
 
 
 def test_spotlight_wildcard_listing_is_host_safe(fake_adb):

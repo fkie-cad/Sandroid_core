@@ -384,37 +384,24 @@ class ForensicService:
     # evaporates on every TUI restart. These two methods persist/restore the
     # watched-path list itself (not the pulled baselines, which are a
     # separate concern owned by ``core/watchlist_store.py``'s
-    # previous/current cache). The on-disk shape lives in
+    # versions in the session results folder). The on-disk shape lives in
     # ``core/watchlist_store.py`` (mirrors how ``core/run_history.py`` owns
     # the Diffs sub-tab's on-disk shape); this service only decides *when*
     # to call it. Callers (``WatchlistView``) call ``save_watchlist_index()``
     # after any successful add/remove, and ``load_watchlist_index()`` once on
     # mount / app start to restore membership from a prior session.
 
-    def save_watchlist_index(
-        self,
-        row_states: dict[str, dict] | None = None,
-        auto_enabled: bool = False,
-        patterns: list[str] | None = None,
-    ) -> None:
-        """Persist the current spotlight-file watchlist membership to disk.
+    def save_watchlist_index(self, patterns: list[str] | None = None) -> None:
+        """Persist the ★ watchlist (paths + wildcard ``patterns``) to disk.
 
-        ``row_states``/``auto_enabled`` are optional pass-throughs to
-        ``watchlist_store.save_membership`` -- this service has no notion of
-        per-row pull/auto state itself (that lives client-side in
-        ``WatchlistView._rows``/``_auto_enabled``), so it just forwards
-        whatever the caller supplies, defaulting to "nothing extra to
-        persist" for callers that only care about membership.
+        One file per package in the user config directory (see
+        ``watchlist_store.save_membership``); only membership persists across
+        sessions, never pull state.
         """
         from sandroid.core import watchlist_store
 
         try:
-            watchlist_store.save_membership(
-                self._spotlight_files,
-                row_states=row_states,
-                auto_enabled=auto_enabled,
-                patterns=patterns,
-            )
+            watchlist_store.save_membership(self._spotlight_files, patterns=patterns)
         except Exception as exc:
             self._logger.warning(f"Failed to persist watchlist membership: {exc}")
 

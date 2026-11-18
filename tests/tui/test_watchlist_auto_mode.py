@@ -1,99 +1,64 @@
-"""Headless Textual Pilot tests for Watchlist auto-mode (WatchlistView).
+"""Auto-pull on change, driven by the file monitor (one detector).
 
-No physical device / real adb needed. Two class-level seams get
-monkeypatched exactly like tests/tui/test_watchlist_view.py monkeypatches
-``FileExtractionService.pull_file``:
+``WatchlistView.note_write`` is fed every create/modify/rename-into the
+monitor reports (via the Files lens, ``FileActivity.writes``). For a ★ file
+it (re)arms a per-file timer; once writes are quiet for ``AUTO_PULL_QUIET``
+seconds the file is pulled (``trigger: "auto"``), versioned and diffed. A
+database and its ``-wal``/``-journal`` are one group. The periodic stat-poll
+auto mode (``a``) is gone: nothing polls.
 
-- ``WatchlistView._stat_command`` -- the one method wrapping the batched
-  ``adb shell stat ...`` call, so canned ``(stdout, stderr)`` tuples can
-  drive the debounce/backoff/offline-pause state machine deterministically.
-- ``WatchlistView._device_manager`` -- the one method wrapping
-  ``DeviceService.get_device_manager()``, replaced with a fake exposing
-  ``on_device_change``/``fire`` so a reconnect can be simulated without
-  touching the real (process-wide) DeviceManager singleton.
-
-``WatchlistView._is_watchlist_visible`` is also monkeypatched to ``True`` in
-most tests: the minimal harness below mounts a bare ``WatchlistView`` (no
-surrounding ``FilesPanel``/``MainScreen`` scaffold, matching
-test_watchlist_view.py's own harness), so the real visibility check (which
-looks for ``#tool-body``/``#files-body`` ContentSwitchers) would otherwise
-always report "hidden" and no tick would ever do real work.
+The quiet period is shortened for the tests (``AUTO_PULL_QUIET``); pulls go
+through a class-level ``FileExtractionService.pull_file`` fake and the
+on-device ``stat``/``sha256sum`` through a ``_device_facts`` fake.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
 
+from sandroid.core import watchlist_store
 from sandroid.services import get_forensic_service
 from sandroid.services.file_extraction_service import (
     ExtractionResult,
     FileExtractionService,
 )
-from sandroid.tui.widgets import watchlist_view as wv_module
-from sandroid.tui.widgets.watchlist_view import RowState, WatchlistView
+from sandroid.tui.widgets import watchlist_view
+from sandroid.tui.widgets.watchlist_view import (
+    RowState,
+    WatchlistView,
+    parse_device_facts,
+)
+
+DB = "/data/data/com.app/databases/app.db"
+PREFS = "/data/data/com.app/shared_prefs/p.xml"
+T0 = datetime(2026, 11, 18, 10, 42, 7)
 
 
 @pytest.fixture(autouse=True)
-def _isolated_results_path(tmp_path, monkeypatch):
-    monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
-    return tmp_path
-
-
-@pytest.fixture(autouse=True)
-def _clean_spotlight_files():
-    """Guard the real ForensicService singleton against cross-test leakage."""
+def _clean(monkeypatch):
     svc = get_forensic_service()
     svc._spotlight_files.clear()
+    monkeypatch.setattr(watchlist_view, "AUTO_PULL_QUIET", 0.15)
     yield
     svc._spotlight_files.clear()
 
 
-PATH_A = "/data/data/com.app/config_a"
-PATH_B = "/data/data/com.app/config_b"
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _stat_line(path: str, mtime: int, size: int) -> str:
-    return f"{path} {mtime} {size}"
-
-
-class _FakeDeviceManager:
-    """Records ``on_device_change`` subscribers; ``fire`` invokes them all."""
-
-    def __init__(self) -> None:
-        self.callbacks: list = []
-
-    def on_device_change(self, callback) -> None:
-        self.callbacks.append(callback)
-
-    def fire(self, device) -> None:
-        for cb in list(self.callbacks):
-            cb(device)
-
-
-class _FakeExpandAdb:
-    """Fake AdbProtocol for wildcard pattern expansion (find/ls only)."""
-
-    def __init__(self, matches: list[str]):
-        self.matches = list(matches)
-        self.calls = 0
-
-    def send_adb_command(self, cmd: str) -> tuple[str, str]:
-        self.calls += 1
-        return "\n".join(self.matches), ""
-
-
-def _fake_pull_file(content_by_remote_path: dict[str, str]):
-    """Class-level FileExtractionService.pull_file replacement (mirrors
-    test_watchlist_view.py's helper of the same name).
-    """
-
+def _fake_pull_file(content: dict[str, str], calls: list[str] | None = None):
     def _pull(self, remote_path, local_path, compute_hash=False):
-        from pathlib import Path
-
-        if remote_path not in content_by_remote_path:
+        if calls is not None:
+            calls.append(remote_path)
+        if remote_path not in content:
             return ExtractionResult(
                 source_path=remote_path,
                 local_path=local_path,
@@ -101,9 +66,7 @@ def _fake_pull_file(content_by_remote_path: dict[str, str]):
                 error="no such file on (fake) device",
             )
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(local_path).write_text(
-            content_by_remote_path[remote_path], encoding="utf-8"
-        )
+        Path(local_path).write_text(content[remote_path], encoding="utf-8")
         return ExtractionResult(
             source_path=remote_path, local_path=local_path, success=True
         )
@@ -111,17 +74,27 @@ def _fake_pull_file(content_by_remote_path: dict[str, str]):
     return _pull
 
 
-class _WatchlistHarness(App):
-    """Minimal single-widget host app for WatchlistView (mirrors
-    test_watchlist_view.py's harness of the same name).
-    """
+def _fake_device_facts(content: dict[str, str]):
+    def _facts(paths):
+        return {
+            p: {
+                "mtime": 1763458927,
+                "size": len(content[p]),
+                "sha256": _sha(content[p]),
+            }
+            for p in paths
+            if p in content
+        }
 
+    return staticmethod(_facts)
+
+
+class _Harness(App):
     def compose(self) -> ComposeResult:
         yield WatchlistView(id="files-watchlist")
 
 
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    """Poll ``predicate`` with real pauses until true or timeout elapses."""
+async def _wait_for(pilot, predicate, timeout: float = 4.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -130,438 +103,178 @@ async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
     assert predicate(), "condition was not met within timeout"
 
 
-# ---------------------------------------------------------------------------
-# Pure unit tests: no App/Pilot needed at all.
-# ---------------------------------------------------------------------------
-
-
-class TestParseStatOutput:
-    def test_basic_two_paths(self):
-        stdout = _stat_line(PATH_A, 1700000000, 42) + "\n" + _stat_line(PATH_B, 1, 2)
-        parsed = WatchlistView._parse_stat_output(stdout)
-        assert parsed == {PATH_A: (1700000000, 42), PATH_B: (1, 2)}
-
-    def test_path_containing_spaces_is_not_shredded(self):
-        path = "/sdcard/My Documents/notes.txt"
-        stdout = _stat_line(path, 100, 5)
-        parsed = WatchlistView._parse_stat_output(stdout)
-        assert parsed == {path: (100, 5)}
-
-    def test_blank_and_malformed_lines_are_skipped(self):
-        stdout = "\n".join(
-            [
-                "",
-                "garbage line with only one token",
-                _stat_line(PATH_A, 10, 1),
-                "not-a-number-mtime not-a-number-size extra",
-            ]
-        )
-        parsed = WatchlistView._parse_stat_output(stdout)
-        assert parsed == {PATH_A: (10, 1)}
-
-    def test_empty_stdout_yields_empty_dict(self):
-        assert WatchlistView._parse_stat_output("") == {}
-        assert WatchlistView._parse_stat_output(None) == {}
-
-
-class TestLooksLikeDeviceError:
-    @pytest.mark.parametrize(
-        "stderr",
-        [
-            "error: device offline",
-            "error: no devices/emulators found",
-            "adb: device not found",
-            "Command timed out after 30 seconds",
-            "adb: closed",
-        ],
-    )
-    def test_matches_known_device_error_text(self, stderr):
-        assert WatchlistView._looks_like_device_error(stderr) is True
-
-    def test_plain_per_path_stat_error_does_not_match(self):
-        stderr = f"stat: can't stat '{PATH_A}': No such file or directory"
-        assert WatchlistView._looks_like_device_error(stderr) is False
-
-    def test_empty_stderr_does_not_match(self):
-        assert WatchlistView._looks_like_device_error("") is False
-        assert WatchlistView._looks_like_device_error(None) is False
-
-
-# ---------------------------------------------------------------------------
-# _evaluate_auto_pull: debounce + rate-limit decision logic (bare instance,
-# no mount needed -- _start_pull is monkeypatched to a recording stub so
-# these stay tightly scoped to the decision logic itself).
-# ---------------------------------------------------------------------------
-
-
-class TestEvaluateAutoPull:
-    def _view_with_row(self, monkeypatch, *, last_pulled=None):
-        view = WatchlistView()
-        view._rows[PATH_A] = wv_module._RowInfo(path=PATH_A, last_pulled=last_pulled)
-        calls: list[list[str]] = []
-        monkeypatch.setattr(view, "_start_pull", calls.append)
-        return view, view._rows[PATH_A], calls
-
-    def test_first_ever_tick_marks_settling_without_pulling(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch)
-        view._evaluate_auto_pull(row, None, (100, 10))
-        assert row.state == RowState.SETTLING
-        assert calls == []
-
-    def test_unstable_across_ticks_marks_settling_without_pulling(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch)
-        # previously_seen != new_sig -- still changing, not stable yet.
-        view._evaluate_auto_pull(row, (90, 9), (100, 10))
-        assert row.state == RowState.SETTLING
-        assert calls == []
-
-    def test_stable_but_rate_limited_marks_settling_without_pulling(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch)
-        view._last_auto_pull_at[PATH_A] = time.monotonic()  # "just pulled"
-        view._evaluate_auto_pull(row, (100, 10), (100, 10))
-        assert row.state == RowState.SETTLING
-        assert calls == []
-
-    def test_stable_and_rate_ok_triggers_pull(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch)
-        view._evaluate_auto_pull(row, (100, 10), (100, 10))
-        assert calls == [[PATH_A]]
-        assert PATH_A in view._auto_pull_inflight
-        assert view._last_auto_pull_at[PATH_A] > 0
-
-    def test_matches_last_pulled_is_a_noop(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch, last_pulled=(100, 10))
-        view._evaluate_auto_pull(row, (100, 10), (100, 10))
-        assert calls == []
-        assert row.state == RowState.NEVER_PULLED  # untouched
-
-    def test_already_inflight_does_not_re_trigger(self, monkeypatch):
-        view, row, calls = self._view_with_row(monkeypatch)
-        view._auto_pull_inflight.add(PATH_A)
-        view._evaluate_auto_pull(row, (100, 10), (100, 10))
-        assert calls == []
-
-
-# ---------------------------------------------------------------------------
-# _apply_auto_tick_result: batch outcome application (bare instance; only
-# needs _auto_enabled=True, no timers/mount required since _cancel_* are
-# no-ops when no timer was ever started).
-# ---------------------------------------------------------------------------
-
-
-class TestApplyAutoTickResult:
-    @staticmethod
-    def _bare_view(monkeypatch) -> WatchlistView:
-        """A WatchlistView with no App/mount -- _reschedule_auto_timer is
-        stubbed out since it calls Widget.set_interval, which requires a
-        running asyncio event loop these plain synchronous tests don't have.
-        """
-        view = WatchlistView()
-        monkeypatch.setattr(view, "_reschedule_auto_timer", lambda: None)
-        return view
-
-    def test_per_path_failure_isolated_does_not_pause(self, monkeypatch):
-        view = self._bare_view(monkeypatch)
-        view._auto_enabled = True
-        view._rows[PATH_A] = wv_module._RowInfo(path=PATH_A)
-        view._rows[PATH_B] = wv_module._RowInfo(path=PATH_B)
-        monkeypatch.setattr(view, "_evaluate_auto_pull", lambda *a, **k: None)
-
-        stdout = _stat_line(PATH_B, 100, 10)  # PATH_A missing -> per-path error
-        stderr = f"stat: can't stat '{PATH_A}': No such file or directory"
-        view._apply_auto_tick_result([PATH_A, PATH_B], stdout, stderr)
-
-        assert view._rows[PATH_A].state == RowState.ERROR
-        assert PATH_A in view._rows[PATH_A].detail or view._rows[PATH_A].detail
-        assert view._rows[PATH_B].state != RowState.ERROR
-        assert view._auto_paused_reason is None
-
-    def test_full_batch_device_error_pauses(self, monkeypatch):
-        view = self._bare_view(monkeypatch)
-        view._auto_enabled = True
-        view._rows[PATH_A] = wv_module._RowInfo(path=PATH_A)
-
-        view._apply_auto_tick_result([PATH_A], "", "error: device offline")
-
-        assert view._auto_paused_reason == "device offline"
-
-    def test_full_batch_generic_stat_errors_do_not_pause(self, monkeypatch):
-        """All paths individually erroring (e.g. permission denied on every
-        one) must NOT be misread as a device-offline pause -- only stderr
-        text that actually looks like a dead device does.
-        """
-        view = self._bare_view(monkeypatch)
-        view._auto_enabled = True
-        view._rows[PATH_A] = wv_module._RowInfo(path=PATH_A)
-
-        stderr = f"stat: can't stat '{PATH_A}': Permission denied"
-        view._apply_auto_tick_result([PATH_A], "", stderr)
-
-        assert view._auto_paused_reason is None
-        assert view._rows[PATH_A].state == RowState.ERROR
-
-    def test_toggled_off_mid_flight_is_ignored(self, monkeypatch):
-        view = self._bare_view(monkeypatch)
-        view._auto_enabled = False  # toggled off while the batch was in flight
-        view._auto_tick_inflight = True
-        view._rows[PATH_A] = wv_module._RowInfo(path=PATH_A)
-
-        view._apply_auto_tick_result([PATH_A], _stat_line(PATH_A, 1, 1), "")
-
-        assert view._auto_tick_inflight is False  # still must clear
-        assert view._rows[PATH_A].state == RowState.NEVER_PULLED  # untouched
-
-    def test_advances_backoff_on_no_change_and_resets_on_change(self, monkeypatch):
-        view = WatchlistView()
-        view._auto_enabled = True
-        view._rows[PATH_A] = wv_module._RowInfo(
-            path=PATH_A, last_pulled=(100, 10), last_seen=(100, 10)
-        )
-        reschedules: list[int] = []
-        monkeypatch.setattr(
-            view,
-            "_reschedule_auto_timer",
-            lambda: reschedules.append(view._auto_backoff_idx),
-        )
-
-        # No change -> backoff advances step by step, capped at the last step.
-        for expected_idx in (1, 2, 3, 3):
-            view._apply_auto_tick_result([PATH_A], _stat_line(PATH_A, 100, 10), "")
-            assert view._auto_backoff_idx == expected_idx
-
-        # A real change resets backoff to 0.
-        view._apply_auto_tick_result([PATH_A], _stat_line(PATH_A, 200, 20), "")
-        assert view._auto_backoff_idx == 0
-
-
-# ---------------------------------------------------------------------------
-# Pilot-based tests: toggle, full tick wiring, offline pause + auto-resume,
-# wildcard re-expansion. A real mounted App is needed here because
-# _reschedule_auto_timer/_reschedule_wildcard_timer call Widget.set_interval,
-# which requires a running asyncio event loop.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_toggle_auto_updates_state_and_badge(monkeypatch):
-    fake_manager = _FakeDeviceManager()
-    monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(lambda: fake_manager)
-    )
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-
-        assert view._auto_enabled is False
-        assert "off" in view._auto_badge()
-
-        view.action_toggle_auto()
-        await pilot.pause()
-        assert view._auto_enabled is True
-        assert "on" in view._auto_badge()
-        assert fake_manager.callbacks  # subscribed exactly once
-
-        view.action_toggle_auto()
-        await pilot.pause()
-        assert view._auto_enabled is False
-        assert "off" in view._auto_badge()
-
-        # Toggling on again must NOT grow the subscriber list further.
-        view.action_toggle_auto()
-        await pilot.pause()
-        assert len(fake_manager.callbacks) == 1
-
-
-@pytest.mark.asyncio
-async def test_auto_tick_end_to_end_reaches_baseline_then_unchanged_then_changed(
-    monkeypatch,
-):
-    """Full lifecycle against a path with an existing manual baseline:
-    tick 1 (first-ever observation) settles, tick 2 (stable + rate ok, once
-    the min interval is shrunk for the test) triggers a real pull that
-    matches the existing baseline (-> UNCHANGED), then a genuine on-device
-    content change is detected and, once stable again, pulled and diffed
-    (-> CHANGED).
-    """
-    monkeypatch.setattr(wv_module, "_AUTO_PULL_MIN_INTERVAL", 0.0)
-    fake_manager = _FakeDeviceManager()
-    monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(lambda: fake_manager)
-    )
-
-    content = {PATH_A: "line one\n"}
-    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file(content))
-    get_forensic_service().add_spotlight_file(PATH_A)
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-        monkeypatch.setattr(view, "_is_watchlist_visible", lambda: True)
-
-        # Seed a baseline the way a manual pull would (first pull is always
-        # BASELINE_ONLY, never CHANGED/UNCHANGED).
-        view._start_pull([PATH_A])
-        await _wait_for(
-            pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY
-        )
-
-        stat_calls: list[list[str]] = []
-
-        def fake_stat(paths):
-            stat_calls.append(list(paths))
-            return _stat_line(PATH_A, 100, 10), ""
-
-        monkeypatch.setattr(WatchlistView, "_stat_command", staticmethod(fake_stat))
-
-        view._start_auto_mode()
-
-        # Tick 1: first-ever observation -> settling, no pull yet.
-        view._auto_tick()
-        await _wait_for(pilot, lambda: view._rows[PATH_A].last_seen == (100, 10))
-        assert view._rows[PATH_A].state == RowState.SETTLING
-
-        # Tick 2: stable signature + (shrunk) rate limit satisfied -> pulls,
-        # content still matches the baseline -> UNCHANGED.
-        view._auto_tick()
-        await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.UNCHANGED)
-        assert view._rows[PATH_A].last_pulled == (100, 10)
-
-        # Device-side content changes.
-        content[PATH_A] = "line one\nline two\n"
-
-        def fake_stat_changed(paths):
-            stat_calls.append(list(paths))
-            return _stat_line(PATH_A, 200, 20), ""
-
-        monkeypatch.setattr(
-            WatchlistView, "_stat_command", staticmethod(fake_stat_changed)
-        )
-
-        # Tick 3: new signature differs from the previous tick -> settling.
-        view._auto_tick()
-        await _wait_for(pilot, lambda: view._rows[PATH_A].last_seen == (200, 20))
-        assert view._rows[PATH_A].state == RowState.SETTLING
-
-        # Tick 4: stable again -> triggers the real pull+diff -> CHANGED.
-        view._auto_tick()
-        await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.CHANGED)
-        assert "line two" in (view._rows[PATH_A].diff_text or "")
-
-
-@pytest.mark.asyncio
-async def test_offline_pause_and_device_reconnect_auto_resume(monkeypatch):
-    fake_manager = _FakeDeviceManager()
-    monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(lambda: fake_manager)
-    )
-    get_forensic_service().add_spotlight_file(PATH_A)
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-        monkeypatch.setattr(view, "_is_watchlist_visible", lambda: True)
-
-        def fake_stat_offline(paths):
-            return "", "error: device offline"
-
-        monkeypatch.setattr(
-            WatchlistView, "_stat_command", staticmethod(fake_stat_offline)
-        )
-
-        view._start_auto_mode()
-        view._auto_tick()
-        await _wait_for(pilot, lambda: view._auto_paused_reason == "device offline")
-        assert view._auto_timer is None  # timer torn down while paused
-        assert "device offline" in view._auto_badge()
-
-        # Device comes back -- DeviceManager fires with a real (fake) device.
-        fake_manager.fire(object())
-        await pilot.pause()
-
-        assert view._auto_paused_reason is None
-        assert view._auto_backoff_idx == 0
-        assert view._auto_timer is not None  # resumed
-
-        # A disconnect signal (None) while NOT paused must be a no-op.
-        fake_manager.fire(None)
-        await pilot.pause()
-        assert view._auto_paused_reason is None
-        assert view._auto_enabled is True
-
-
-@pytest.mark.asyncio
-async def test_wildcard_reexpansion_picks_up_new_matches(monkeypatch):
-    pattern = "/data/data/com.app/logs/*"
-    fake_adb = _FakeExpandAdb([f"{pattern[:-2]}/a.log"])
-    monkeypatch.setattr(WatchlistView, "_adb", staticmethod(lambda: fake_adb))
-    fake_manager = _FakeDeviceManager()
-    monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(lambda: fake_manager)
-    )
-
-    app = _WatchlistHarness()
-    async with app.run_test() as pilot:
-        view = app.query_one(WatchlistView)
-        await pilot.pause()
-        monkeypatch.setattr(view, "_is_watchlist_visible", lambda: True)
-
-        view._add_path(pattern)
-        await pilot.pause()
-        assert pattern in view._watched_patterns
-        assert f"{pattern[:-2]}/a.log" in view._rows
-
-        # A new file appears matching the same pattern.
-        fake_adb.matches.append(f"{pattern[:-2]}/b.log")
-
-        view._start_auto_mode()
-        view._wildcard_tick()
-        await _wait_for(pilot, lambda: f"{pattern[:-2]}/b.log" in view._rows)
-
-
-@pytest.mark.asyncio
-async def test_wildcard_tick_noop_without_patterns(monkeypatch):
-    """No watched patterns -> the wildcard tick must not touch adb at all."""
+async def test_a_write_to_a_watched_file_pulls_it_once_quiet(monkeypatch) -> None:
+    content = {PREFS: "<map/>\n"}
     calls: list[str] = []
-
-    class _CountingAdb:
-        def send_adb_command(self, cmd):
-            calls.append(cmd)
-            return "", ""
-
-    monkeypatch.setattr(WatchlistView, "_adb", staticmethod(_CountingAdb))
-    fake_manager = _FakeDeviceManager()
     monkeypatch.setattr(
-        WatchlistView, "_device_manager", staticmethod(lambda: fake_manager)
+        FileExtractionService, "pull_file", _fake_pull_file(content, calls)
     )
-    get_forensic_service().add_spotlight_file(PATH_A)  # a plain, non-pattern path
-
-    app = _WatchlistHarness()
+    monkeypatch.setattr(WatchlistView, "_device_facts", _fake_device_facts(content))
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        monkeypatch.setattr(view, "_is_watchlist_visible", lambda: True)
-
-        view._start_auto_mode()
-        view._wildcard_tick()
-        await pilot.pause()
-
+        # A burst of writes: one pull after the last one.
+        for _ in range(4):
+            assert view.note_write(PREFS, T0)
+            await pilot.pause(0.03)
+        assert view.rows[PREFS].state is RowState.SETTLING
         assert calls == []
+        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
+        assert calls == [PREFS]
+        (version,) = watchlist_store.version_dirs(PREFS)
+        record = watchlist_store.version_record(version)
+        assert record["trigger"] == "auto"
+        assert record["trigger_event_at"] == "2026-11-18T10:42:07"
+        assert record["device"]["sha256"] == _sha("<map/>\n")
+        assert record["local"]["sha256"] == _sha("<map/>\n")
+        assert record["sha256_match"] is True
+        assert record["device_path"] == PREFS
+        assert record["package"] == "com.app"
+        assert view.pending_auto == []
+
+        # The next change is diffed against the first version.
+        content[PREFS] = '<map><string name="k">v</string></map>\n'
+        view.note_write(PREFS, T0)
+        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.CHANGED)
+        newest = watchlist_store.version_dirs(PREFS)[-1]
+        assert newest.name.startswith("v002_")
+        assert "k" in (watchlist_store.version_diff(newest) or "")
 
 
-# ---------------------------------------------------------------------------
-# Phase 5 N7: transient wildcard expansions
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_wal_and_journal_writes_pull_the_database_group(monkeypatch) -> None:
+    content = {DB: "SQLite format 3\x00 fake", f"{DB}-wal": "wal bytes"}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull_file(content, calls)
+    )
+    monkeypatch.setattr(WatchlistView, "_device_facts", _fake_device_facts(content))
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        assert view.note_write(f"{DB}-wal", T0)
+        assert view.note_write(f"{DB}-journal", T0)
+        assert view.pending_auto == [DB]
+        await _wait_for(pilot, lambda: view.rows[DB].state is RowState.BASELINE_ONLY)
+        assert calls == [DB, f"{DB}-wal", f"{DB}-journal"]
+        (version,) = watchlist_store.version_dirs(DB)
+        assert sorted(p.name for p in version.iterdir()) == [
+            "acquisition.json",
+            "app.db",
+            "app.db-wal",
+        ]
+        record = json.loads((version / "acquisition.json").read_text())
+        assert [c["device_path"] for c in record["companions"]] == [f"{DB}-wal"]
+        assert record["companions"][0]["device"]["sha256"] == _sha("wal bytes")
+
+
+@pytest.mark.asyncio
+async def test_unwatched_paths_are_ignored_and_patterns_adopt_new_files(
+    monkeypatch,
+) -> None:
+    new_file = "/data/data/com.app/files/new.json"
+    content = {new_file: "{}"}
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file(content))
+    monkeypatch.setattr(WatchlistView, "_device_facts", _fake_device_facts(content))
+    app = _Harness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        assert view.note_write("/data/data/com.app/files/other", T0) is False
+        view._watched_patterns.add("/data/data/com.app/files/*")
+        assert view.note_write(new_file, T0) is True
+        assert new_file in get_forensic_service().get_spotlight_files()
+        assert watchlist_store.load_membership() == [new_file]
+        await _wait_for(
+            pilot, lambda: view.rows[new_file].state is RowState.BASELINE_ONLY
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_setting_turns_auto_pull_off(monkeypatch) -> None:
+    get_forensic_service().add_spotlight_file(PREFS)
+    monkeypatch.setattr(
+        WatchlistView, "_auto_pull_enabled", staticmethod(lambda: False)
+    )
+    app = _Harness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        assert view.note_write(PREFS, T0) is False
+        assert view.pending_auto == []
+        assert view.rows[PREFS].state is RowState.NEVER_PULLED
+
+
+def test_auto_pull_on_change_defaults_on() -> None:
+    from sandroid.config.schema import TUIConfig
+
+    assert TUIConfig().auto_pull_on_change is True
+    assert "watchlist_max_versions" not in TUIConfig.model_fields
+
+
+@pytest.mark.asyncio
+async def test_a_manual_pull_cancels_the_pending_auto_pull(monkeypatch) -> None:
+    content = {PREFS: "x"}
+    calls: list[str] = []
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull_file(content, calls)
+    )
+    monkeypatch.setattr(WatchlistView, "_device_facts", _fake_device_facts(content))
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        view.note_write(PREFS, T0)
+        view.pull([PREFS])
+        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
+        await pilot.pause(0.3)
+        assert calls == [PREFS]  # no second (auto) pull
+        record = watchlist_store.version_record(watchlist_store.version_dirs(PREFS)[0])
+        assert record["trigger"] == "manual"
+        assert record["trigger_event_at"] is None
+
+
+def test_there_is_no_polling_auto_mode_any_more() -> None:
+    for name in ("toggle_auto", "_auto_tick", "_stat_command", "auto_enabled"):
+        assert not hasattr(WatchlistView, name)
+
+
+def test_parse_device_facts_reads_stat_and_sha256sum() -> None:
+    digest = "a" * 64
+    out = (
+        "1763458927 4096 /data/data/com.app/databases/app.db\n"
+        "1763458930 12 /data/data/com.app/files/a b.txt\n"
+        f"{digest}  /data/data/com.app/databases/app.db\n"
+        "garbage line\n"
+    )
+    facts = parse_device_facts(out)
+    assert facts["/data/data/com.app/databases/app.db"] == {
+        "mtime": 1763458927,
+        "size": 4096,
+        "sha256": digest,
+    }
+    assert facts["/data/data/com.app/files/a b.txt"] == {
+        "mtime": 1763458930,
+        "size": 12,
+    }
 
 
 def test_reexpansion_of_known_matches_adds_nothing_and_logs_quietly(caplog):
-    """Re-expanding a pattern whose matches are all watched is a quiet no-op
-    (no INFO "already in spotlight files" spam, no "new file(s)" toast).
-    """
+    """Re-expanding a pattern whose matches are all watched is a quiet no-op."""
     import logging
+
+    class _FakeExpandAdb:
+        def __init__(self, matches: list[str]):
+            self.matches = list(matches)
+
+        def send_adb_command(self, cmd: str) -> tuple[str, str]:
+            return "\n".join(self.matches), ""
 
     svc = get_forensic_service()
     adb = _FakeExpandAdb(["/data/data/com.app/files/a", "/data/data/com.app/files/b"])
@@ -573,72 +286,3 @@ def test_reexpansion_of_known_matches_adds_nothing_and_logs_quietly(caplog):
     adb.matches.append("/data/data/com.app/files/c")
     assert svc.add_spotlight_file("/data/data/com.app/files/*", adb=adb) is True
     assert len(svc.get_spotlight_files()) == 3
-
-
-def test_vanished_wildcard_expansion_is_dropped_not_errored(monkeypatch):
-    view = WatchlistView()
-    monkeypatch.setattr(view, "_reschedule_auto_timer", lambda: None)
-    monkeypatch.setattr(view, "_evaluate_auto_pull", lambda *a, **k: None)
-    view._auto_enabled = True
-    gone = "/data/data/com.app/files/offline_files/x1"
-    explicit = "/data/data/com.other/explicit.db"
-    view._watched_patterns.add("/data/data/com.app/files/*")
-    for path in (gone, explicit, PATH_B):
-        get_forensic_service().add_spotlight_file(path)
-        view._rows[path] = wv_module._RowInfo(path=path)
-
-    stderr = (
-        f"stat: can't stat '{gone}': No such file or directory\n"
-        f"stat: can't stat '{explicit}': No such file or directory"
-    )
-    view._apply_auto_tick_result(
-        [gone, explicit, PATH_B], _stat_line(PATH_B, 100, 10), stderr
-    )
-
-    assert gone not in view._rows
-    assert gone not in get_forensic_service().get_spotlight_files()
-    # An explicitly watched path that vanished still shows as an error.
-    assert view._rows[explicit].state == RowState.ERROR
-    assert view._rows[PATH_B].state != RowState.ERROR
-
-
-# ---------------------------------------------------------------------------
-# M2 (fix round 3): a database and its -wal/-journal are one unit.
-# ---------------------------------------------------------------------------
-
-DB = "/data/data/com.app/databases/app.db"
-
-
-def test_auto_tick_stats_the_database_companions(monkeypatch):
-    seen: list[list[str]] = []
-    monkeypatch.setattr(
-        WatchlistView,
-        "_stat_command",
-        staticmethod(lambda p: seen.append(p) or ("", "")),
-    )
-    view = WatchlistView()
-    monkeypatch.setattr(view, "_post", lambda fn, *args: None)
-    view._auto_tick_worker([DB, PATH_A])
-    assert seen == [[DB, PATH_A, DB + "-wal", DB + "-journal"]]
-
-
-def test_a_wal_only_change_counts_as_a_change_of_the_database(monkeypatch):
-    """A WAL-mode write touches only -wal until a checkpoint: the db row must
-    still see a new signature (and so get auto-pulled).
-    """
-    view = WatchlistView()
-    monkeypatch.setattr(view, "_reschedule_auto_timer", lambda: None)
-    evaluated: list = []
-    monkeypatch.setattr(
-        view, "_evaluate_auto_pull", lambda row, prev, new: evaluated.append(new)
-    )
-    view._auto_enabled = True
-    view._rows[DB] = wv_module._RowInfo(path=DB)
-    stderr = f"stat: can't stat '{DB}-journal': No such file or directory"
-    first = "\n".join([_stat_line(DB, 100, 4096), _stat_line(DB + "-wal", 100, 0)])
-    second = "\n".join([_stat_line(DB, 100, 4096), _stat_line(DB + "-wal", 107, 8272)])
-    view._apply_auto_tick_result([DB], first, stderr)
-    view._apply_auto_tick_result([DB], second, stderr)
-    assert evaluated[0] != evaluated[1]
-    assert evaluated[1] == (100, 4096, 107, 8272)
-    assert view._rows[DB].state != RowState.ERROR

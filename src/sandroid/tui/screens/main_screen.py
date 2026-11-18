@@ -36,7 +36,10 @@ from sandroid.tui.widgets.lens_shell import (
     LensBar,
     LogDrawer,
     LogTicker,
+    Mark,
+    MarksChanged,
     ScopeChanged,
+    SessionMarks,
     ShellHeader,
 )
 
@@ -925,6 +928,33 @@ class MainScreen(Screen):
         self.refresh_bindings()  # "L Live" shows only in REVIEW
         for spec in LENSES:
             self._post_scope(spec.id)
+
+    # -- marks (shared by every lens) ------------------------------------------
+
+    @property
+    def marks(self) -> SessionMarks:
+        """The session's marks (see ``lens_shell.SessionMarks``)."""
+        marks = getattr(self, "_marks", None)
+        if marks is None:
+            marks = self._marks = SessionMarks()
+        return marks
+
+    def add_mark(self, name: str = "", when=None) -> Mark:
+        """Drop a mark: log separator line + ``MarksChanged`` to every lens."""
+        mark = self.marks.add(name, when)
+        try:
+            from rich.markup import escape
+
+            self.query_one("#activity-log", ActivityLog).write(
+                f"[bold #facc15]── {escape(mark.label())} · {mark.when:%H:%M:%S} ──[/]"
+            )
+        except Exception:
+            pass
+        for spec in LENSES:
+            widget = self.lens_widget(spec.id)
+            if widget is not None:
+                widget.post_message(MarksChanged(self.marks.marks, mark))
+        return mark
 
     def _post_scope(self, lens_id: str) -> None:
         widget = self.lens_widget(lens_id)

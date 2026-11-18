@@ -412,6 +412,18 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
                 classes="setting-input",
             )
 
+        # Files lens: auto-pull ★ files when the monitor sees a write.
+        with Horizontal(classes="setting-row"):
+            yield Label("Auto-pull ★ on change:", classes="setting-label")
+            yield from self._switch_with_state(
+                config.tui.auto_pull_on_change, "setting-tui--auto_pull_on_change"
+            )
+        yield Static(
+            "[dim]Files lens: a watched file is pulled, versioned and diffed "
+            "~1.5 s after the monitor's last write to it (u/U pull by hand).[/dim]",
+            classes="setting-help",
+        )
+
         # Monitor per-category event visibility (Always / Only in verbose / Never)
         for category in _MONITOR_VISIBILITY_CATEGORIES:
             with Horizontal(classes="setting-row"):

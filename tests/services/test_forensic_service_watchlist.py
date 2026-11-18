@@ -47,26 +47,17 @@ class TestSaveWatchlistIndex:
 
         assert watchlist_store.load_membership() == ["/data/data/com.app/b.db"]
 
-    def test_save_forwards_row_states_and_auto_enabled_to_watchlist_store(self):
-        """ForensicService itself has no notion of per-row pull/auto state --
-        it just forwards whatever the caller (WatchlistView) supplies through
-        to watchlist_store unchanged.
-        """
+    def test_save_forwards_patterns_and_writes_one_file_per_package(self):
+        """Only membership persists: paths and patterns, grouped by package."""
         service = ForensicService()
         service.add_spotlight_file("/data/data/com.app/a.db")
-        row_states = {
-            "/data/data/com.app/a.db": {
-                "state": "changed",
-                "detail": "",
-                "last_seen": [1, 2],
-                "last_pulled": [1, 2],
-            }
-        }
+        service.add_spotlight_file("/data/local/tmp/drop.bin")
 
-        service.save_watchlist_index(row_states=row_states, auto_enabled=True)
+        service.save_watchlist_index(patterns=["/data/data/com.other/files/*"])
 
-        assert watchlist_store.load_row_states() == row_states
-        assert watchlist_store.load_auto_enabled() is True
+        assert watchlist_store.load_patterns() == ["/data/data/com.other/files/*"]
+        names = sorted(p.name for p in watchlist_store.watchlist_dir().glob("*.json"))
+        assert names == ["_device.json", "com.app.json", "com.other.json"]
 
 
 class TestLoadWatchlistIndex:

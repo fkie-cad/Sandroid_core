@@ -5,26 +5,51 @@ it?* -- answered by ONE full-width table, collapsed per file::
 
     ★ shared_prefs/consent.xml    M    3x  10:42:07
     ★ databases/app.db            CM  11x  10:42:05
-      cache/okhttp/journal        M   40x  10:41:58   (noise: hidden by default)
+    ▸ cache/ · 340 files          CM 412x  10:41:58   (a cache group, ⏎/→ opens)
       files/aaid.txt              C    1x  10:40:12
 
 Rows come from the file monitor (``o`` starts/stops it): each
 ``TASK_OUTPUT``/``source="monitor"`` batch is folded into
 :class:`~sandroid.tui.widgets.monitor_view.FileActivity` (tally, per-path
-collapse, noise/visibility rules). Watched files -- the Spotlight-Files
+collapse, path rules, mark segments). Watched files -- the Spotlight-Files
 watchlist owned by the hidden
 :class:`~sandroid.tui.widgets.watchlist_view.WatchlistView` engine -- carry
 ★ and are pinned on top, also before they saw any activity (wildcard
 patterns included). Details live in the Inspector only (Enter): Summary
 (full path, ops with times, processes, watch + last pull), Diff (the last
-pull against the one before it), History (every kept pull with its diff,
-see ``watchlist_store``) and Events. The Inspector forwards the lens keys it
-advertises while it has focus (``lens_shell.Inspector.on_key``).
+pull against the one before it), History (every pulled version with its
+diff, see ``watchlist_store``) and Events (with the marks as separator
+lines). The Inspector forwards the lens keys it advertises while it has
+focus (``lens_shell.Inspector.on_key``).
+
+**Marks** (shell-level, ``MainScreen.marks``): ``B`` drops a timestamped
+mark ("bookmark"; the time is taken when the key is pressed) and asks for an
+optional name (⏎ on an empty name = unnamed, Esc = no mark). The table then
+shows only what happened since that mark: counts/ops per segment, rows
+without activity in the segment hidden, ★ rows stay pinned (dimmed when
+untouched). ``A`` toggles everything / since the last mark; ``<``/``>`` step
+through the segments (before mark 1, mark 1 → 2, ...). The caption names
+the segment ("since mark 3 'tap login' · 10:42:07").
+
+**Path rules** (``tui.files_noise_rules``): by default only OS paths
+(``/proc/``, ``/system/``, ``/data/dalvik-cache/``...) and open-only rows are
+hidden -- never the app's own data, nor ``/data/local/tmp``. ``cache/`` and
+``code_cache/`` collapse into one row per folder (⏎ or → expands, ← folds).
+``N`` shows every path raw. ``R`` opens the rule editor (add / remove /
+toggle prefix, segment, suffix and glob rules; applies at once, persists in
+the config, reset to defaults). The caption counts hidden rows by rule kind.
+
+**Auto-pull** (``tui.auto_pull_on_change``, default on): a write the monitor
+reports for a ★ file pulls it once the writes are quiet (~1.5 s), see
+``WatchlistView.note_write``. No polling: with the monitor off and files
+watched the caption says "monitor off — watched files not tracked · o
+starts it".
 
 Keys (on this lens): ``w`` watch/unwatch · ``u`` pull the row · ``U`` pull
 all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
-the table · ``a`` auto-pull · ``N`` show noise (as in the Network lens) ·
-``.`` full paths · ``z`` zoom the diff · ``O`` sort (recent / name /
+the table · ``B`` mark · ``A`` all / since mark · ``<``/``>`` mark
+segments · ``N`` show everything raw (as in the Network lens) · ``R`` path
+rules · ``.`` full paths · ``z`` zoom the diff · ``O`` sort (recent / name /
 count) · ``Home``/``End`` first/last row · ``Ctrl+L`` clear. Only
 ``w``/``u`` are shown in the footer (the rest are in ``?``).
 
@@ -46,7 +71,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -60,12 +86,14 @@ from textual.widgets import Button, DataTable, Input, Static
 from sandroid.core.adb_utils import watch_path_problem
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
-from .lens_shell import InspectorContent, is_shown
+from .lens_shell import InspectorContent, Mark, SessionMarks, is_shown
 from .monitor_view import (
     OPS,
     SOURCE_TEXT,
     FileActivity,
+    NoiseRules,
     PathActivity,
+    SegmentStats,
     app_package,
     app_relative,
     smart_truncate,
@@ -74,11 +102,9 @@ from .watchlist_view import RowState, WatchlistView
 from .watchlist_view import is_database_path as _is_database
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from textual.app import ComposeResult
 
-    from .lens_shell import ScopeChanged
+    from .lens_shell import MarksChanged, ScopeChanged
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +230,15 @@ class _Row:
     pattern: bool = False
     review_kind: str | None = None  # "changed" / "new" / "deleted"
     review_diff: list[str] | None = None
+    #: What the row shows: the whole session, or one mark segment.
+    stats: SegmentStats | None = None
+    #: A ★ row without activity in the viewed segment (drawn dim).
+    dim: bool = False
+    #: A collapsed group row: its folder and member rows.
+    group: str | None = None
+    members: list[_Row] = field(default_factory=list)
+    #: 1 for a member row shown below its expanded group.
+    depth: int = 0
 
 
 class FilesSubViewBase(Widget):
@@ -251,6 +286,24 @@ class _FilesTable(DataTable):
 
     def action_scroll_end(self) -> None:
         self.action_scroll_bottom()
+
+    def _panel(self) -> FilesPanel | None:
+        parent = self.parent
+        return parent if isinstance(parent, FilesPanel) else None
+
+    def action_cursor_right(self) -> None:
+        """→ opens a cache group row (the table never scrolls sideways)."""
+        panel = self._panel()
+        if panel is not None and panel.expand_current(True):
+            return
+        super().action_cursor_right()
+
+    def action_cursor_left(self) -> None:
+        """← folds the group of the row (from the group or one of its files)."""
+        panel = self._panel()
+        if panel is not None and panel.expand_current(False):
+            return
+        super().action_cursor_left()
 
 
 def _natural_key(text: str) -> list:
@@ -315,8 +368,12 @@ class FilesPanel(Widget):
         Binding("U", "pull_all", "Pull all watched", show=False),
         Binding("slash", "filter", "Filter", show=False),
         Binding("n", "add_path", "Watch a path…", show=False),
-        Binding("a", "toggle_auto", "Auto-pull watched", show=False),
-        Binding("N", "toggle_noise", "Show noise", show=False),
+        Binding("B", "add_mark", "Mark (bookmark) now…", show=False),
+        Binding("A", "toggle_since_mark", "All / since the last mark", show=False),
+        Binding("less_than_sign", "step_mark(-1)", "Earlier mark segment", show=False),
+        Binding("greater_than_sign", "step_mark(1)", "Later mark segment", show=False),
+        Binding("N", "toggle_noise", "Show everything (raw)", show=False),
+        Binding("R", "noise_rules", "Hide / group rules…", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
         Binding("z", "zoom", "Zoom diff", show=False),
         Binding("O", "cycle_sort", "Sort: recent / name / count", show=False),
@@ -389,9 +446,24 @@ class FilesPanel(Widget):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.activity = FileActivity(
-            FileActivity.config_visibility(), FileActivity.config_max_paths()
+            FileActivity.config_visibility(),
+            FileActivity.config_max_paths(),
+            rules=NoiseRules.from_config(),
         )
         self._filter = ""
+        #: Marks of the session (a copy of ``MainScreen.marks``; a lens
+        #: outside a MainScreen keeps its own list).
+        self._marks: list[Mark] = []
+        self._local_marks = SessionMarks()
+        #: Viewed segment: None = everything, n = since mark n (0 = before
+        #: the first mark).
+        self._segment: int | None = None
+        #: The time of a mark being named (``B`` pressed, input open).
+        self._pending_mark: datetime | None = None
+        #: Expanded group folders.
+        self._expanded: set[str] = set()
+        #: Hidden rows of the last live redraw, by rule kind / "open-only".
+        self._hidden: dict[str, int] = {}
         self._full_paths = False
         self._sort = "recent"
         self._scope: str | None = None
@@ -427,6 +499,9 @@ class FilesPanel(Widget):
     def on_mount(self) -> None:
         self._subscribe_events()
         self.set_interval(_REFRESH_INTERVAL, self._tick)
+        marks = getattr(self.screen, "marks", None)
+        if isinstance(marks, SessionMarks) and len(marks):
+            self._set_marks(marks.marks)
         self.refresh_rows()
 
     def on_unmount(self) -> None:
@@ -574,6 +649,15 @@ class FilesPanel(Widget):
     def ingest(self, batch, now: datetime | None = None) -> None:
         """Fold a monitor batch in; the table redraws on the next tick."""
         touched = self.activity.ingest(batch, now=now)
+        writes = self.activity.writes
+        if writes:
+            wl = self._watchlist_or_none()
+            if wl is not None and wl.has_watches:
+                for key, when, _category in writes:
+                    act = self.activity.paths.get(key)
+                    if act is not None and (act.deleted or act.moved_to or act.is_dir):
+                        continue  # gone again by the end of the batch
+                    wl.note_write(key, when)
         if touched:
             self._dirty = True
             self._refresh_inspector(touched)
@@ -672,14 +756,25 @@ class FilesPanel(Widget):
     # -- rows ----------------------------------------------------------------------
 
     def _live_rows(self) -> list[_Row]:
+        """Pinned ★ rows, then activity (and cache groups), in sort order.
+
+        In a mark segment only rows with activity in it are listed (★ rows
+        stay, dim when untouched). Rows hidden by a rule are counted per
+        rule kind in ``self._hidden``.
+        """
         wl = self._watchlist_or_none()
+        segment = self._segment
         pinned: dict[str, _Row] = {}
         rest: list[_Row] = []
+        groups: dict[str, list[_Row]] = {}
+        hidden: dict[str, int] = {}
         if wl is not None:
             for path in wl.rows:
-                pinned[path] = _Row(key=path, watched=path)
+                pinned[path] = _Row(key=path, watched=path, dim=segment is not None)
             for pattern in wl.patterns:
-                pinned[pattern] = _Row(key=pattern, watched=pattern, pattern=True)
+                pinned[pattern] = _Row(
+                    key=pattern, watched=pattern, pattern=True, dim=segment is not None
+                )
         for key, act in self.activity.paths.items():
             watched = wl.watched_by(key) if wl is not None else None
             if (
@@ -691,26 +786,73 @@ class FilesPanel(Widget):
                 # A wildcard pattern watches files that exist: not a deleted
                 # path or a directory it happens to match.
                 watched = None
+            stats = act.stats(segment)
             if watched is not None:
                 row = pinned.setdefault(key, _Row(key=key, watched=watched))
                 row.activity = act
-            elif self.activity.is_visible(act):
-                rest.append(_Row(key=key, activity=act))
+                row.stats = stats
+                row.dim = segment is not None and stats is None
+                continue
+            if stats is None:
+                continue  # nothing in the viewed segment
+            row = _Row(key=key, activity=act, stats=stats)
+            if not self._matches(row):
+                continue
+            reason = self.activity.hide_reason(act, segment)
+            if reason is not None:
+                hidden[reason] = hidden.get(reason, 0) + 1
+                continue
+            folder = (
+                None if self.activity.show_all else (self.activity.rules.group_of(key))
+            )
+            if folder is not None:
+                groups.setdefault(folder, []).append(row)
+            else:
+                rest.append(row)
+        self._hidden = hidden
+        for folder, members in groups.items():
+            rest.append(self._group_row(folder, members))
 
         def recency(row: _Row):
-            last = row.activity.last if row.activity else None
+            last = row.stats.last if row.stats else None
             return (last is None, -(last.timestamp() if last else 0), row.key)
 
         def order(row: _Row):
             if self._sort == "name":
-                return _natural_key(app_relative(row.key))
+                return _natural_key(app_relative(row.group or row.key))
             if self._sort == "count":
-                count = row.activity.count if row.activity else 0
+                count = row.stats.count if row.stats else 0
                 return (-count, *recency(row))
             return recency(row)
 
-        rows = sorted(pinned.values(), key=order) + sorted(rest, key=order)
-        return [r for r in rows if self._matches(r)]
+        rows = sorted(
+            (r for r in pinned.values() if self._matches(r)), key=order
+        ) + sorted(rest, key=order)
+        out: list[_Row] = []
+        for row in rows:
+            out.append(row)
+            if row.group is not None and row.group in self._expanded:
+                for member in sorted(row.members, key=order):
+                    member.depth = 1
+                    out.append(member)
+        return out
+
+    @staticmethod
+    def _group_row(folder: str, members: list[_Row]) -> _Row:
+        """One row for a cache folder: summed counts, union of ops."""
+        total = SegmentStats()
+        for member in members:
+            stats = member.stats
+            if stats is None:
+                continue
+            total.count += stats.count
+            for cat, n in stats.ops.items():
+                total.ops[cat] = total.ops.get(cat, 0) + n
+            if stats.first and (total.first is None or stats.first < total.first):
+                total.first = stats.first
+            if stats.last and (total.last is None or stats.last > total.last):
+                total.last = stats.last
+        return _Row(key=folder + "/", stats=total, group=folder, members=members)
 
     def _matches(self, row: _Row) -> bool:
         if not self._filter:
@@ -857,7 +999,34 @@ class FilesPanel(Widget):
         own = app_package(root) if root else None
         return package if own and package != own else None
 
+    def _group_cell(self, row: _Row) -> Text:
+        shown = (row.group or "") if self._full_paths else app_relative(row.group or "")
+        n = len(row.members)
+        tail = f" · {n} file{'s' if n != 1 else ''}"
+        if not self._full_paths:
+            # Keep the folder's own name ("…/Default/Cache/", never "…/"):
+            # on a narrow table the file count gets shorter first.
+            name = shown.rpartition("/")[2]
+            for candidate in (tail, f" · {n}", ""):
+                tail = candidate
+                if len(name) + 1 + len(tail) <= self._path_width:
+                    break
+            shown = smart_truncate(shown, max(4, self._path_width - len(tail) - 1))
+        shown += "/"
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append(shown, style="#c4b5fd")
+        text.append(tail, style=_DIM)
+        return text
+
     def _path_cell(self, row: _Row) -> Text:
+        if row.group is not None:
+            return self._group_cell(row)
+        if row.depth:
+            inner = self._path_cell_inner(row, indent=2)
+            return Text("  ").append_text(inner)
+        return self._path_cell_inner(row)
+
+    def _path_cell_inner(self, row: _Row, indent: int = 0) -> Text:
         act = row.activity
         moved = act.moved_to if act is not None else None
         # "old.txt → new.txt": the renamed-away row says where the file went.
@@ -868,7 +1037,7 @@ class FilesPanel(Widget):
         # files of several apps (bugle_db must not read as Wikipedia's).
         owner = None if self._full_paths else self._foreign_package(row)
         if not self._full_paths:
-            width = self._path_width - len(suffix)
+            width = self._path_width - len(suffix) - indent
             if suffix and width < 12:
                 suffix = " →"
                 width = self._path_width - 2
@@ -886,17 +1055,24 @@ class FilesPanel(Widget):
         style = "italic" if row.pattern else ""
         if gone:
             style = "strike #8f9bb3"  # deleted / renamed away: no longer there
+        if row.dim:
+            style = _DIM  # ★ row untouched in the viewed mark segment
         text.append(name, style=style)
         if suffix:
             text.append(suffix, style="#facc15")
         return text
 
     def _mark_cell(self, row: _Row) -> Text:
+        if row.group is not None:
+            opened = row.group in self._expanded
+            return Text("▾" if opened else "▸", style="#c4b5fd")
         if row.watched is None:
             return Text("")
         wl = self._watchlist_or_none()
         info = wl.rows.get(row.key) if wl is not None else None
         style = _STATE_STAR.get(info.state, _STAR) if info is not None else _STAR
+        if row.dim and (info is None or info.state not in _STATE_STAR):
+            style = _DIM
         return Text("★", style=style)
 
     def _cells(self, row: _Row) -> tuple:
@@ -913,16 +1089,18 @@ class FilesPanel(Widget):
                 Text(""),
                 Text(""),
             )
-        act = row.activity
+        stats = row.stats
+        if stats is None and row.activity is not None and self._segment is None:
+            stats = row.activity.stats(None)
         ops = Text()
-        if act is not None:
-            for letter, color in act.op_letters():
+        if stats is not None:
+            for letter, color in stats.op_letters():
                 if letter != OPS["noise"][0] or self.activity.show_all:
                     ops.append(letter, style=color)
         elif row.pattern:
             ops.append("*", style=_DIM)
-        count = Text(f"{act.count}×" if act else "", style=_DIM, justify="right")
-        last = Text(_fmt_time(act.last) if act else "", style=_DIM)
+        count = Text(f"{stats.count}×" if stats else "", style=_DIM, justify="right")
+        last = Text(_fmt_time(stats.last) if stats else "", style=_DIM)
         return self._mark_cell(row), self._path_cell(row), ops, count, last
 
     def refresh_rows(self) -> None:
@@ -986,6 +1164,12 @@ class FilesPanel(Widget):
             if self._review_record is None:
                 return Text("Loading the run…", style=_DIM)
             return Text("This run changed no files.")
+        if self._segment is not None and self.activity.paths:
+            return Text.assemble(
+                (f"Nothing {self._segment_title()} — ", _DIM),
+                ("A", "bold"),
+                (" shows everything", _DIM),
+            )
         running, task = self._monitor_task()
         if not running:
             return Text.assemble(
@@ -1007,45 +1191,56 @@ class FilesPanel(Widget):
             title = self._review_title()
             parts = [f"{len(rows)} files"] if self._review_record is not None else []
         else:
-            title = "LIVE"
+            title = "LIVE" if self._segment is None else self._segment_title()
             wl = self._watchlist_or_none()
-            n_paths = sum(1 for r in rows if not r.pattern)
-            n_patterns = len(rows) - n_paths
+            n_groups = sum(1 for r in rows if r.group is not None)
+            n_paths = sum(
+                1 for r in rows if not r.pattern and r.group is None and not r.depth
+            )
+            n_patterns = sum(1 for r in rows if r.pattern)
             count = f"{n_paths} path{'s' if n_paths != 1 else ''}"
             if n_patterns:
                 count += f" + {n_patterns} pattern{'s' if n_patterns != 1 else ''}"
+            if n_groups:
+                count += f" + {n_groups} group{'s' if n_groups != 1 else ''}"
             parts = [count]
             if wl is not None and wl.summary():
                 parts.append(wl.summary())
-            hidden = self._hidden_count()
+            hidden = self.hidden_summary()
             if hidden:
-                parts.append(f"{hidden} hidden")
+                parts.append(hidden)
             if self._sort != "recent":
                 parts.append(f"by {self._sort}")
-            if wl is not None and wl.auto_enabled:
-                parts.append("auto-pull")
+            if self._segment is not None:
+                parts.append("A all · </> marks")
             running, _task = self._monitor_task()
-            if not running and rows:
-                parts.append("monitor off")
+            watching = wl is not None and wl.has_watches
+            if not running and watching:
+                parts.append("monitor off — watched files not tracked · o starts it")
+            elif watching and not wl._auto_pull_enabled():
+                parts.append("auto-pull off")
+            if not rows and not self._filter and not (watching and not running):
+                parts = []
         if self._filter:
             parts.insert(0, f"/{self._filter}")
-        if not rows and not self._filter:
-            parts = []
         return title, " · ".join(parts)
 
+    def hidden_summary(self) -> str:
+        """``"14 hidden: prefix 12 · open-only 2"`` (empty when none)."""
+        if self.activity.show_all or not self._hidden:
+            return ""
+        total = sum(self._hidden.values())
+        kinds = " · ".join(
+            f"{kind} {n}"
+            for kind, n in sorted(self._hidden.items(), key=lambda kv: -kv[1])
+        )
+        return f"{total} hidden: {kinds} (N shows)"
+
     def _hidden_count(self) -> int:
-        """Noise rows actually hidden: matching the filter and not pinned."""
+        """Rows hidden by a rule in the last redraw (0 while showing all)."""
         if self.activity.show_all:
             return 0
-        shown = {r.key for r in self._rows}
-        needle = self._filter.lower()
-        return sum(
-            1
-            for key, act in self.activity.paths.items()
-            if key not in shown
-            and self.activity.is_quiet(act)
-            and (not needle or needle in key.lower())
-        )
+        return sum(self._hidden.values())
 
     def _update_caption(self) -> None:
         ms = self._main_screen()
@@ -1057,10 +1252,102 @@ class FilesPanel(Widget):
         except Exception:
             pass
 
+    # -- marks + segments ---------------------------------------------------------
+
+    def _segment_title(self) -> str:
+        """Caption title of the viewed segment."""
+        seg = self._segment
+        marks = self._marks
+        if seg is None or not marks:
+            return "LIVE"
+        if seg == 0:
+            return f"before {marks[0].label()} · until {marks[0].when:%H:%M:%S}"
+        start = marks[seg - 1]
+        if seg >= len(marks):
+            return f"since {start.label()} · {start.when:%H:%M:%S}"
+        end = marks[seg]
+        return (
+            f"{start.label()} → {end.label()} · "
+            f"{start.when:%H:%M:%S}–{end.when:%H:%M:%S}"
+        )
+
+    def _set_marks(self, marks: list[Mark], follow: bool = True) -> None:
+        """Adopt the session's marks; ``follow`` jumps to the newest segment."""
+        self._marks = list(marks)
+        self.activity.set_marks(m.when for m in self._marks)
+        if follow and self._marks:
+            self._segment = len(self._marks)
+        elif not self._marks:
+            self._segment = None
+        self._dirty = True
+
+    def on_marks_changed(self, message: MarksChanged) -> None:
+        self._set_marks(message.marks, follow=message.added is not None)
+        self.refresh_rows()
+        self._refresh_inspector()
+
+    @property
+    def marks(self) -> list[Mark]:
+        return list(self._marks)
+
+    @property
+    def segment(self) -> int | None:
+        return self._segment
+
+    def drop_mark(self, name: str = "", when: datetime | None = None) -> Mark:
+        """Add a mark through the shell (``MainScreen.add_mark``) if there is
+        one, else to this lens's own list.
+        """
+        when = when or datetime.now()
+        screen = self._main_screen()
+        adder = getattr(screen, "add_mark", None)
+        if adder is not None:
+            return adder(name, when)  # posts MarksChanged back to this lens
+        mark = self._local_marks.add(name, when)
+        self._set_marks(self._local_marks.marks)
+        self.refresh_rows()
+        return mark
+
+    # -- groups ----------------------------------------------------------------------
+
+    def expand_current(self, expand: bool) -> bool:
+        """→/⏎ open the cache group under the cursor, ← folds it (also from
+        one of its files). False when the row is not part of a group.
+        """
+        row = self.current_row()
+        if row is None:
+            return False
+        folder = row.group
+        if folder is None and row.depth:
+            folder = next(
+                (r.group for r in self._rows if r.group and row in r.members), None
+            )
+            if folder is None or expand:
+                return False
+        if folder is None:
+            return False
+        if expand == (folder in self._expanded):
+            return row.group is not None  # already so: swallow on the group row
+        if expand:
+            self._expanded.add(folder)
+        else:
+            self._expanded.discard(folder)
+        self.refresh_rows()
+        try:
+            self.table.move_cursor(
+                row=self.table.get_row_index(folder + "/"), animate=False
+            )
+        except Exception:
+            pass
+        return True
+
     # -- inspector -----------------------------------------------------------------
 
     def inspect_selected(self) -> InspectorContent | None:
         row = self.current_row()
+        if row is not None and row.group is not None:
+            self.expand_current(row.group not in self._expanded)
+            return None
         return self._inspector_for(row) if row is not None else None
 
     def _inspector_key(self, path: str) -> tuple:
@@ -1079,7 +1366,7 @@ class FilesPanel(Widget):
         path = key[2]
         if touched is not None and path not in touched:
             return
-        row = next((r for r in self._rows if r.key == path), None)
+        row = next((r for r in self._rows if r.key == path and r.group is None), None)
         if row is None:
             row = self._row_for(path)
         if row is not None:
@@ -1093,6 +1380,13 @@ class FilesPanel(Widget):
             return None
         return _Row(key=path, watched=watched, activity=act)
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """⏎ on a cache group row opens/folds it (no Inspector for a group)."""
+        row = self.current_row()
+        if row is not None and row.group is not None:
+            event.stop()
+            self.expand_current(row.group not in self._expanded)
+
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """While the Inspector shows a Files row, follow the cursor."""
         ms = self._main_screen()
@@ -1102,7 +1396,7 @@ class FilesPanel(Widget):
         if not (isinstance(key, tuple) and key and key[0] == "files"):
             return
         row = self.current_row()
-        if row is not None and key[2] != row.key:
+        if row is not None and row.group is None and key[2] != row.key:
             ms.update_inspector(self._inspector_for(row))
 
     def _inspector_for(self, row: _Row) -> InspectorContent:
@@ -1156,7 +1450,9 @@ class FilesPanel(Widget):
             when = watchlist_store.version_time(version)
             stamp = when.strftime("%Y-%m-%d %H:%M:%S") if when else version.name
             files = [
-                f for f in version.iterdir() if f.is_file() and f.name != "diff.txt"
+                f
+                for f in version.iterdir()
+                if f.is_file() and f.name not in ("diff.txt", "acquisition.json")
             ]
             size = sum(f.stat().st_size for f in files)
             out.append(f"#{total - n}  {stamp}", style="bold")
@@ -1176,8 +1472,8 @@ class FilesPanel(Widget):
                 if len(lines) > 12:
                     out.append(f"\n  … {len(lines)} lines", style=_DIM)
         out.append(
-            f"\n\n{total} pull{'s' if total != 1 else ''} kept; older ones beyond "
-            "tui.watchlist_max_versions are deleted.",
+            f"\n\n{total} version{'s' if total != 1 else ''} in "
+            f"{versions[-1].parent} (nothing is deleted).",
             style=_DIM,
         )
         return out
@@ -1300,8 +1596,21 @@ class FilesPanel(Widget):
         if act is None or not act.events:
             return Text("No events seen.", style=_DIM)
         out = Text()
-        for i, ev in enumerate(reversed(act.events)):
-            if i:
+        # Marks newer than an event are printed above it (newest first).
+        # The newest mark before the oldest event closes the list.
+        pending = sorted(self._marks, key=lambda m: m.when, reverse=True)
+        oldest = act.events[0].when
+        older = [m for m in pending if m.when < oldest]
+        pending = [m for m in pending if m.when >= oldest] + older[:1]
+        for ev in reversed(act.events):
+            while pending and pending[0].when > ev.when:
+                mark = pending.pop(0)
+                if out:
+                    out.append("\n")
+                out.append(
+                    f"── {mark.label()} · {mark.when:%H:%M:%S} ──", style="#facc15"
+                )
+            if out:
                 out.append("\n")
             out.append(_fmt_time(ev.when), style=_DIM)
             out.append("  ")
@@ -1321,6 +1630,9 @@ class FilesPanel(Widget):
                 extra.append(ev.process)
             if extra:
                 out.append("  " + " · ".join(extra), style=_DIM)
+        for mark in pending:
+            out.append("\n")
+            out.append(f"── {mark.label()} · {mark.when:%H:%M:%S} ──", style="#facc15")
         return out
 
     def _review_summary(self, row: _Row) -> list:
@@ -1358,6 +1670,8 @@ class FilesPanel(Widget):
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action in ("pull", "pull_all") and self.review:
+            return False
+        if action in ("toggle_since_mark", "step_mark") and self.review:
             return False
         return True
 
@@ -1418,13 +1732,67 @@ class FilesPanel(Widget):
     def action_pull_all(self) -> None:
         self.watchlist.pull_all()
 
-    def action_toggle_auto(self) -> None:
-        self.watchlist.toggle_auto()
+    def action_add_mark(self) -> None:
+        """``B``: drop a mark now; the input asks for an optional name."""
+        if self.review:
+            self.app.notify("Marks belong to the live session (L).", severity="warning")
+            return
+        self._pending_mark = datetime.now()
+        # Segment the activity from the key press on, before it is named.
+        self.activity.set_marks([*(m.when for m in self._marks), self._pending_mark])
+        self.open_input("mark")
+
+    def action_toggle_since_mark(self) -> None:
+        """``A``: everything ↔ since the last mark."""
+        if not self._marks:
+            self.app.notify("No marks yet — B drops one.", severity="warning")
+            return
+        self._segment = None if self._segment is not None else len(self._marks)
+        self.refresh_rows()
+
+    def action_step_mark(self, delta: int) -> None:
+        """``<``/``>``: the segment before / after the viewed one."""
+        if not self._marks:
+            self.app.notify("No marks yet — B drops one.", severity="warning")
+            return
+        last = len(self._marks)
+        current = last if self._segment is None else self._segment
+        self._segment = max(0, min(last, current + delta))
+        self.refresh_rows()
+
+    def action_noise_rules(self) -> None:
+        """``R``: the live hide / group rule editor."""
+        from sandroid.tui.modals.noise_rules_modal import NoiseRulesModal
+
+        self.app.push_screen(
+            NoiseRulesModal(self.activity.rules.to_list(), self.apply_noise_rules)
+        )
+
+    def apply_noise_rules(self, rules: list[dict], persist: bool = True) -> str | None:
+        """Use ``rules`` now (and save them as ``tui.files_noise_rules``).
+
+        Returns an error text when they could not be saved (they still apply).
+        """
+        self.activity.rules = NoiseRules(rules)
+        self._dirty = True
+        self.refresh_rows()
+        if not persist:
+            return None
+        try:
+            from sandroid.config import update_config
+
+            update_config({"tui.files_noise_rules": self.activity.rules.to_list()})
+        except Exception as exc:
+            logger.warning(f"Could not save the Files rules: {exc}")
+            return str(exc)
+        return None
 
     def action_toggle_noise(self) -> None:
         self.activity.show_all = not self.activity.show_all
         self.app.notify(
-            "Showing all paths." if self.activity.show_all else "Noise hidden."
+            "Showing every path (raw)."
+            if self.activity.show_all
+            else "Hide / group rules on (R edits them)."
         )
         self.refresh_rows()
 
@@ -1472,6 +1840,13 @@ class FilesPanel(Widget):
         if mode == "filter":
             field.placeholder = "filter paths   ⏎ keep · esc clear"
             field.value = self._filter
+        elif mode == "mark":
+            when = self._pending_mark or datetime.now()
+            field.placeholder = (
+                f"name mark {len(self._marks) + 1} ({when:%H:%M:%S}), optional"
+                "   ⏎ mark · esc cancel"
+            )
+            field.value = ""
         else:
             field.placeholder = "/data/data/<pkg>/databases/*   ⏎ watch · esc cancel"
             field.value = self._app_root() or ""
@@ -1484,6 +1859,10 @@ class FilesPanel(Widget):
         if cancel and field.mode == "filter" and self._filter:
             self._filter = ""
             self.refresh_rows()
+        if field.mode == "mark" and self._pending_mark is not None:
+            self._pending_mark = None
+            self.activity.set_marks(m.when for m in self._marks)  # no mark
+        field.mode = "filter"
         field.value = ""
         field.set_class(False, "-shown")
         self.focus()
@@ -1502,6 +1881,12 @@ class FilesPanel(Widget):
         event.stop()
         if event.input.mode == "filter":
             self._filter = event.value.strip()
+            self.close_input()
+            return
+        if event.input.mode == "mark":
+            when = self._pending_mark or datetime.now()
+            self._pending_mark = None
+            self.drop_mark(event.value.strip(), when)
             self.close_input()
             return
         path = event.value.strip()

@@ -21,9 +21,18 @@ live in the old Monitor sub-tab's ``MonitorView`` except the drawing:
   known files deleted (``rm -r`` unlinks them by relative name, which the
   probes don't match);
 * **visibility** -- ``tui.monitor_event_visibility`` (always/verbose/never per
-  category, OPEN/CLOSE "noise" is verbose by default) plus path-based noise
-  (caches, tmp files, OS paths). ``show_all`` (key ``N`` in the lens) reveals
-  verbose categories and noisy paths; "never" stays hidden;
+  category, OPEN/CLOSE "noise" is verbose by default, i.e. open-only rows are
+  hidden) plus the editable path rules ``tui.files_noise_rules``
+  (:class:`NoiseRules`): *hide* rules (by default only OS paths such as
+  ``/proc/`` or ``/data/dalvik-cache/`` -- never the app's own data, and not
+  ``/data/local/tmp``) and *group* rules (``cache/``, ``code_cache/``: one
+  expandable row per folder). ``show_all`` (key ``N`` in the lens) shows every
+  path raw; "never" stays hidden;
+* **segments** -- marks (``set_marks``) split the session into segments;
+  every path keeps per-segment stats (:class:`SegmentStats`) so the lens can
+  show "only what happened since mark N";
+* **writes** -- after each :meth:`FileActivity.ingest`, ``writes`` lists the
+  create/modify/rename-into events of that batch (what auto-pull acts on);
 * **cap** -- ``tui.monitor_max_lines`` (default 500) bounds the number of
   tracked paths (least-recently touched paths are dropped first).
 
@@ -32,12 +41,20 @@ Pure Python, no Textual imports: unit-testable without a Pilot harness.
 
 from __future__ import annotations
 
+import bisect
+import fnmatch
 import re
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from sandroid.config.schema import (
+    FILES_OS_PREFIXES,
+    FILES_RULE_ACTIONS,
+    FILES_RULE_KINDS,
+    default_files_noise_rules,
+)
 from sandroid.core.adb_utils import canonical_device_path
 
 if TYPE_CHECKING:
@@ -66,26 +83,144 @@ _APP_ROOT_RE = re.compile(r"^/data/(?:data|user/\d+)/[^/]+/")
 _DE_APP_ROOT_RE = re.compile(r"^/data/user_de/\d+/[^/]+/")
 _EXT_APP_ROOT_RE = re.compile(r"^/(?:sdcard|storage/emulated/\d+)/Android/data/[^/]+/")
 
-#: Path segments that mark a file as noise (caches and temp files).
-_NOISE_SEGMENTS = frozenset(
-    {"cache", "code_cache", "app_webview", "tmp", "temp", ".tmp", "no_backup"}
-)
-#: Absolute prefixes of OS paths that are never the app's own data.
-_OS_PREFIXES = (
-    "/proc/",
-    "/sys/",
-    "/dev/",
-    "/system/",
-    "/apex/",
-    "/vendor/",
-    "/product/",
-    "/data/dalvik-cache/",
-    "/data/misc/",
-    "/data/system/",
-    "/data/app/",
-    "/data/local/tmp/",
-)
-_NOISE_SUFFIXES = (".tmp", ".bak", ".lck", ".lock", ".flock", "-shm")
+#: The default hide prefixes, rule kinds/actions and rules live with the
+#: config schema (``tui.files_noise_rules``).
+OS_PREFIXES = FILES_OS_PREFIXES
+RULE_KINDS = FILES_RULE_KINDS
+RULE_ACTIONS = FILES_RULE_ACTIONS
+DEFAULT_NOISE_RULES: tuple[dict, ...] = tuple(default_files_noise_rules())
+
+
+@dataclass(frozen=True)
+class NoiseRule:
+    """One path rule of the Files lens.
+
+    ``kind``: ``prefix`` (absolute path starts with it), ``segment`` (a
+    directory of the path is named so, case-insensitive), ``suffix`` (the
+    file name ends with it, case-insensitive) or ``glob`` (``fnmatch`` on the
+    absolute or the app-relative path). ``action``: ``hide`` the row, or
+    ``group`` it into one row per folder.
+    """
+
+    action: str
+    kind: str
+    pattern: str
+    enabled: bool = True
+
+    @classmethod
+    def from_dict(cls, data: dict) -> NoiseRule | None:
+        try:
+            action = str(data.get("action", "hide"))
+            kind = str(data.get("kind", ""))
+            pattern = str(data.get("pattern", ""))
+        except AttributeError:
+            return None
+        if action not in RULE_ACTIONS or kind not in RULE_KINDS or not pattern:
+            return None
+        return cls(action, kind, pattern, bool(data.get("enabled", True)))
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "kind": self.kind,
+            "pattern": self.pattern,
+            "enabled": self.enabled,
+        }
+
+    def folder_for(self, path: str) -> str | None:
+        """The folder this rule matches ``path`` by (``None``: no match).
+
+        ``segment``: the path up to the matching directory; ``prefix``: the
+        prefix itself; ``suffix``/``glob``: the file's own directory.
+        """
+        if not path:
+            return None
+        head, _sep, name = path.rpartition("/")
+        if self.kind == "prefix":
+            prefix = self.pattern
+            if path.startswith(prefix) or path == prefix.rstrip("/"):
+                return prefix.rstrip("/") or "/"
+            return None
+        if self.kind == "segment":
+            wanted = self.pattern.strip("/").lower()
+            parts = path.split("/")
+            for i, part in enumerate(parts[:-1]):
+                if part and part.lower() == wanted:
+                    return "/".join(parts[: i + 1])
+            return None
+        if self.kind == "suffix":
+            return head if name.lower().endswith(self.pattern.lower()) else None
+        if self.kind == "glob":
+            rel = app_relative(path)
+            hit = fnmatch.fnmatchcase(path, self.pattern) or (
+                rel != path and fnmatch.fnmatchcase(rel, self.pattern)
+            )
+            return head if hit else None
+        return None
+
+    def label(self) -> str:
+        return f"{self.kind} {self.pattern}"
+
+
+class NoiseRules:
+    """The ordered rule list; :meth:`classify` answers per path (cached)."""
+
+    def __init__(self, rules: Iterable[NoiseRule | dict] | None = None) -> None:
+        parsed: list[NoiseRule] = []
+        source = DEFAULT_NOISE_RULES if rules is None else rules
+        for rule in source:
+            if isinstance(rule, dict):
+                rule = NoiseRule.from_dict(rule)
+            if isinstance(rule, NoiseRule):
+                parsed.append(rule)
+        self.rules: list[NoiseRule] = parsed
+        self._cache: dict[str, tuple[str, NoiseRule, str] | None] = {}
+
+    @classmethod
+    def from_config(cls) -> NoiseRules:
+        """``tui.files_noise_rules`` of the live config (defaults on error)."""
+        try:
+            from sandroid.config import get_config
+
+            return cls(get_config().tui.files_noise_rules)
+        except Exception:
+            return cls()
+
+    def to_list(self) -> list[dict]:
+        return [rule.to_dict() for rule in self.rules]
+
+    def classify(self, path: str) -> tuple[str, NoiseRule, str] | None:
+        """``("hide", rule, folder)`` / ``("group", rule, folder)`` or None.
+
+        Hide rules win over group rules; within an action the first enabled
+        matching rule wins.
+        """
+        if path in self._cache:
+            return self._cache[path]
+        result = None
+        for action in RULE_ACTIONS:
+            for rule in self.rules:
+                if not rule.enabled or rule.action != action:
+                    continue
+                folder = rule.folder_for(path)
+                if folder is not None:
+                    result = (action, rule, folder)
+                    break
+            if result is not None:
+                break
+        if len(self._cache) > 20000:
+            self._cache.clear()
+        self._cache[path] = result
+        return result
+
+    def hidden_by(self, path: str) -> NoiseRule | None:
+        hit = self.classify(path)
+        return hit[1] if hit is not None and hit[0] == "hide" else None
+
+    def group_of(self, path: str) -> str | None:
+        """The group folder of ``path`` (``None`` if not grouped)."""
+        hit = self.classify(path)
+        return hit[2] if hit is not None and hit[0] == "group" else None
 
 
 _PKG_OF_RE = re.compile(
@@ -118,18 +253,15 @@ def app_relative(path: str) -> str:
     return path
 
 
+_DEFAULT_RULES: NoiseRules | None = None
+
+
 def is_noise_path(path: str) -> bool:
-    """Caches, temp/lock files and OS paths (hidden unless "show all")."""
-    if not path:
-        return False
-    if path.startswith(_OS_PREFIXES):
-        return True
-    rel = app_relative(path)
-    parts = [p for p in rel.split("/") if p]
-    if any(part.lower() in _NOISE_SEGMENTS for part in parts[:-1]):
-        return True
-    name = parts[-1].lower() if parts else ""
-    return name.endswith(_NOISE_SUFFIXES) or name.startswith(".")
+    """A path the *default* hide rules hide (OS paths; never app data)."""
+    global _DEFAULT_RULES
+    if _DEFAULT_RULES is None:
+        _DEFAULT_RULES = NoiseRules()
+    return bool(path) and _DEFAULT_RULES.hidden_by(path) is not None
 
 
 def smart_truncate(path: str, width: int) -> str:
@@ -185,6 +317,28 @@ SOURCE_TEXT = {
 
 
 @dataclass
+class SegmentStats:
+    """What happened to one path within one mark segment."""
+
+    count: int = 0
+    ops: dict[str, int] = field(default_factory=dict)
+    first: datetime | None = None
+    last: datetime | None = None
+
+    def op_letters(self) -> list[tuple[str, str]]:
+        return [OPS[c] for c in OPS if self.ops.get(c)]
+
+    def add(self, event: FileEvent) -> None:
+        self.count += 1
+        cat = event.category or "other"
+        self.ops[cat] = self.ops.get(cat, 0) + 1
+        if self.first is None:
+            self.first = event.when
+        if cat != "noise" or self.last is None or set(self.ops) == {"noise"}:
+            self.last = event.when
+
+
+@dataclass
 class PathActivity:
     """Everything the monitor reported for one file, collapsed."""
 
@@ -202,6 +356,8 @@ class PathActivity:
     moved_to: str | None = None
     #: A directory (mkdir seen, or files below it).
     is_dir: bool = False
+    #: Per mark segment (0 = before the first mark): see ``FileActivity``.
+    segments: dict[int, SegmentStats] = field(default_factory=dict)
 
     @property
     def rel(self) -> str:
@@ -223,7 +379,14 @@ class PathActivity:
         """``[(letter, colour)]`` in display order (``C M R D A o``)."""
         return [OPS[c] for c in OPS if self.ops.get(c)]
 
-    def add(self, event: FileEvent) -> None:
+    def stats(self, segment: int | None) -> SegmentStats | None:
+        """The stats of one segment (``None``: the whole session)."""
+        if segment is None:
+            return SegmentStats(self.count, self.ops, self.first, self.last)
+        return self.segments.get(segment)
+
+    def add(self, event: FileEvent, segment: int = 0) -> None:
+        self.segments.setdefault(segment, SegmentStats()).add(event)
         self.count += 1
         cat = event.category or "other"
         self.ops[cat] = self.ops.get(cat, 0) + 1
@@ -263,15 +426,34 @@ class FileActivity:
 
     _CATEGORIES = ("create", "modify", "delete", "rename", "attrs", "noise")
 
+    #: Categories whose event on a path means its content may have changed.
+    WRITE_CATEGORIES = ("create", "modify", "rename")
+
     def __init__(
-        self, visibility: dict[str, str] | None = None, max_paths: int = 500
+        self,
+        visibility: dict[str, str] | None = None,
+        max_paths: int = 500,
+        rules: NoiseRules | None = None,
     ) -> None:
         self.visibility: dict[str, str] = dict(visibility or {})
         self.max_paths = max(50, int(max_paths or 500))
         self.show_all = False
+        self.rules: NoiseRules = rules if rules is not None else NoiseRules()
         self.paths: dict[str, PathActivity] = {}
         self.counts: dict[str, int] = dict.fromkeys(self._CATEGORIES, 0)
         self.total = 0
+        #: Sorted mark times; an event's segment = marks at or before it.
+        self.mark_times: list[datetime] = []
+        #: ``(key, when, category)`` of the last batch's writes (create,
+        #: modify, rename-into; companions folded onto their database).
+        self.writes: list[tuple[str, datetime, str]] = []
+
+    def set_marks(self, times: Iterable[datetime]) -> None:
+        self.mark_times = sorted(times)
+
+    def segment_of(self, when: datetime) -> int:
+        """0 before the first mark, N after the N-th mark."""
+        return bisect.bisect_right(self.mark_times, when)
 
     # -- config ---------------------------------------------------------------
 
@@ -318,6 +500,8 @@ class FileActivity:
         """
         now = now or datetime.now()
         touched: set[str] = set()
+        self.writes = []
+        segment = self.segment_of(now)
         for item in batch:
             category = getattr(item, "category", None)
             self._tally(category)
@@ -356,16 +540,22 @@ class FileActivity:
                 via=via,
                 source=source,
             )
-            row.add(event)
+            row.add(event, segment)
             touched.add(key)
+            if category in self.WRITE_CATEGORIES and event.label != "CREATE DIR":
+                self.writes.append((key, now, category))
             if other and category == "rename":
-                touched |= self._mark_moved(split_companion(other)[0], key, event)
+                touched |= self._mark_moved(
+                    split_companion(other)[0], key, event, segment
+                )
             if category == "delete":
-                touched |= self._mark_descendants_deleted(row, event)
+                touched |= self._mark_descendants_deleted(row, event, segment)
         self._evict()
         return touched
 
-    def _mark_moved(self, old: str, new: str, event: FileEvent) -> set[str]:
+    def _mark_moved(
+        self, old: str, new: str, event: FileEvent, segment: int = 0
+    ) -> set[str]:
         """The source row of a rename says where the file went."""
         row = self.paths.get(old)
         if row is None or old == new:
@@ -379,13 +569,14 @@ class FileActivity:
                 process=event.process,
                 other=new,
                 source="renamed",
-            )
+            ),
+            segment,
         )
         row.moved_to = new
         return {old}
 
     def _mark_descendants_deleted(
-        self, row: PathActivity, event: FileEvent
+        self, row: PathActivity, event: FileEvent, segment: int = 0
     ) -> set[str]:
         """A deleted directory takes its known files with it.
 
@@ -405,7 +596,8 @@ class FileActivity:
                         process=event.process,
                         other=row.key,
                         source="parent",
-                    )
+                    ),
+                    segment,
                 )
                 touched.add(key)
         if touched:
@@ -430,9 +622,26 @@ class FileActivity:
             return "always"
         return self.visibility.get(category, "always")
 
+    def hide_reason(self, row: PathActivity, segment: int | None = None) -> str | None:
+        """Why ``row`` is hidden by default: a rule kind or ``"open-only"``.
+
+        ``None`` when it is shown (also for every row while ``show_all``).
+        ``segment`` judges "open-only" by that segment's ops.
+        """
+        if self.show_all:
+            return None
+        rule = self.rules.hidden_by(row.key)
+        if rule is not None:
+            return rule.kind
+        stats = row.stats(segment)
+        ops = stats.ops if stats is not None else row.ops
+        if ops and all(self.category_mode(c) == "verbose" for c in ops):
+            return "open-only"
+        return None
+
     def is_quiet(self, row: PathActivity) -> bool:
-        """True if ``row`` is noise: a noisy path or only verbose-tier ops."""
-        if is_noise_path(row.key):
+        """True if ``row`` is hidden by a rule or has only verbose-tier ops."""
+        if self.rules.hidden_by(row.key) is not None:
             return True
         return all(self.category_mode(c) == "verbose" for c in row.ops)
 
@@ -443,18 +652,25 @@ class FileActivity:
         return [r for r in self.paths.values() if self.is_visible(r)]
 
     def hidden_count(self) -> int:
-        """Paths currently hidden as noise (0 while showing all)."""
+        """Paths currently hidden (0 while showing all)."""
         if self.show_all:
             return 0
         return sum(1 for r in self.paths.values() if self.is_quiet(r))
 
 
 __all__ = [
+    "DEFAULT_NOISE_RULES",
     "OPS",
+    "OS_PREFIXES",
+    "RULE_ACTIONS",
+    "RULE_KINDS",
     "SOURCE_TEXT",
     "FileActivity",
     "FileEvent",
+    "NoiseRule",
+    "NoiseRules",
     "PathActivity",
+    "SegmentStats",
     "app_package",
     "app_relative",
     "is_noise_path",
