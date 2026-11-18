@@ -482,7 +482,10 @@ def test_revoked_grant_and_de_storage_are_shown() -> None:
 
 def test_route_text_names_keys_and_marks_missing_digits() -> None:
     assert route_text(["h", "b1", "v"]) == "h friTap · b1 ssl"
-    assert route_text(["b6"]) == "b6 emulator (n/a)"
+    # b6 (emulator) is a real chord key once BypassService has the category.
+    assert route_text(["b6"]) == "b6 emulator"
+    # A digit the chord does not have is still marked instead of dead.
+    assert route_text(["b9"]).endswith("(n/a)")
 
 
 def test_analysing_state_is_visible_in_static_sections() -> None:

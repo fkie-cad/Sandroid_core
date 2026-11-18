@@ -1293,8 +1293,8 @@ def _chord_digits() -> set[str]:
 def route_text(routes: Iterable[str]) -> str:
     """``h friTap · b2 root`` (``v`` verify is not offered yet).
 
-    A ``bN`` the bypass chord does not have (``b6`` emulator today) is
-    marked "n/a" instead of pointing at a dead key.
+    A ``bN`` the bypass chord does not have is marked "n/a" instead of
+    pointing at a dead key.
     """
     digits = _chord_digits()
     parts = []
