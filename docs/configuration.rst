@@ -417,6 +417,9 @@ TUI (``[tui]``)
    # Files lens: pull a watched (★) file when the monitor sees a write to it
    # (debounced ~1.5 s; a database and its -wal/-journal are one group)
    auto_pull_on_change = true
+   # File monitor, App mode: follow the app -- every process, also ones that
+   # start or restart later (kprobe) -- instead of one PID
+   monitor_follow_app = true
    # Files lens hide / group rules (edited live with R in the Files lens):
    # {action = "hide"|"group", kind = "prefix"|"segment"|"suffix"|"glob",
    # pattern, enabled}. Default: hide /proc/ /sys/ /dev/ /system/ /apex/

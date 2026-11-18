@@ -145,10 +145,18 @@ class KprobeTracer:
     # tracefs mount points to try, in order (writable-as-root probe picks one).
     _TRACEFS_CANDIDATES = ("/sys/kernel/tracing", "/sys/kernel/debug/tracing")
 
-    # ~64 MB/CPU ring buffer for the dedicated instance (bumped from the tiny
-    # default so bursty write storms don't overrun trace_pipe before the reader
-    # drains them).
-    _BUFFER_SIZE_KB = 65536
+    # Ring buffer per CPU for the dedicated instance. trace_pipe is streamed
+    # continuously, so the buffer only has to absorb a reader stall (adb
+    # hiccup, host GC), not a whole session. A recorded line is ~230 bytes
+    # (8 dentry names + dev/file/count; the binary entry is about the same
+    # size). PID-scoped Firefox peaks around 2000 lines/s device-wide
+    # (~0.5 MB/s); path mode's unfiltered dfor/fput correlation lines reach
+    # ~10k lines/s (~2.3 MB/s). 4 MB/CPU holds ~18k lines per CPU: several
+    # seconds of stall even if one CPU took the whole burst, 16 MB on a
+    # 4-CPU AVD instead of the old 64 MB/CPU = 256 MB, which squeezed a 2 GB
+    # device into LMK kills. An overrun is reported, not silent:
+    # :meth:`read_lost_events` sums the per-CPU ``overrun`` counters.
+    _BUFFER_SIZE_KB = 4096
 
     # Kernel functions we attach to. If any is absent from /proc/kallsyms the
     # backend is unusable on this device.
@@ -692,6 +700,7 @@ class KprobeTracer:
                 f'grep -q "kprobes/{name} " {events} 2>/dev/null '
                 f"&& echo {cls._dq('-:' + name)} >> {events}"
             )
+        cls._remove_follow_instance(tracefs)
 
     @classmethod
     def _active_probes(cls, mode: str) -> tuple[str, ...]:
@@ -759,6 +768,197 @@ class KprobeTracer:
             tids = [str(pid)]
         cls._shell(f"echo {cls._dq(' '.join(tids))} > {inst}/set_event_pid")
         cls._shell(f"echo 1 > {inst}/options/event-fork")
+
+    #: Placeholder written to ``set_event_pid`` when an app session starts
+    #: with none of the app's processes running: an EMPTY list written with
+    #: ``>`` clears the filter (= record every task), a list holding only the
+    #: idle task (pid 0, which never enters the probed syscalls) keeps the
+    #: filter on and records nothing until the follower adds the app.
+    _NO_PID = 0
+
+    @classmethod
+    def _seed_pids(cls, tracefs: str, pids: list[int]) -> dict[int, list[int]]:
+        """Seed every TID of every ``pid`` + enable event-fork (app scope).
+
+        ONE adb round-trip. With no pid the filter is armed with
+        :attr:`_NO_PID` (see there). Returns ``{pid: [tids]}`` as written.
+        """
+        inst = cls._instance_dir(tracefs)
+        sep = f"{inst}/set_event_pid"
+        if not pids:
+            cls._shell(f"echo {cls._NO_PID} > {sep}")
+            cls._shell(f"echo 1 > {inst}/options/event-fork")
+            return {}
+        listing = "; ".join(
+            f'echo "T {int(p)} $(ls /proc/{int(p)}/task 2>/dev/null | tr "\\n" " ")"'
+            for p in pids
+        )
+        tasks = parse_task_lines(cls._shell(listing))
+        tids: list[int] = []
+        for p in pids:
+            tids.extend(tasks.get(int(p)) or [int(p)])
+        cls._shell(f"echo {cls._dq(' '.join(str(t) for t in tids))} > {sep}")
+        cls._shell(f"echo 1 > {inst}/options/event-fork")
+        return {int(p): tasks.get(int(p)) or [int(p)] for p in pids}
+
+    #: The app's processes seeded by the last :meth:`run_by_app` (pid -> tids).
+    last_seeded: dict[int, list[int]] = {}
+
+    @classmethod
+    def run_by_app(
+        cls, pids: list[int], path: str | list[str] | None = None
+    ) -> subprocess.Popen | None:
+        """Start kprobe tracing scoped to ALL of an app's processes.
+
+        Like :meth:`run_by_pid`, but seeds every process in ``pids`` (all
+        their TIDs; event-fork follows their children). ``pids`` may be empty
+        (the app is not running yet): the follower adds its processes as
+        they start (:meth:`add_pids`). The seeded ``{pid: tids}`` is left in
+        :attr:`last_seeded`.
+        """
+        tracefs = cls._tracefs or cls._resolve_tracefs()
+        if tracefs is None:
+            cls.logger.error("kprobe run_by_app: no writable tracefs")
+            return None
+        cls._tracefs = tracefs
+        probe_names = cls._active_probes("pid")
+        cls._begin_session(tracefs, probe_names)
+        cls.last_seeded = cls._seed_pids(tracefs, list(pids))
+        if path:
+            cls._apply_path_filter(tracefs, path)
+        return cls._finish_session(tracefs, probe_names)
+
+    # =========================================================================
+    # Follow the app: add processes, notice starts, count lost events
+    # =========================================================================
+
+    #: Separate small instance for ``task:task_rename`` (NOT pid-scoped).
+    _FOLLOW_INSTANCE = "sandroid_follow"
+    #: Its ring buffer per CPU: a handful of renames per app start.
+    _FOLLOW_BUFFER_KB = 64
+
+    @classmethod
+    def _follow_dir(cls, tracefs: str) -> str:
+        return f"{tracefs}/instances/{cls._FOLLOW_INSTANCE}"
+
+    @classmethod
+    def _remove_follow_instance(cls, tracefs: str) -> None:
+        """Guarded, idempotent removal of the follow instance."""
+        inst = cls._follow_dir(tracefs)
+        ev = f"{inst}/events/task/task_rename"
+        cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
+        cls._shell(f"[ -e {ev}/enable ] && echo 0 > {ev}/enable")
+        cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+
+    @classmethod
+    def start_rename_watch(cls, package: str) -> subprocess.Popen | None:
+        """Stream ``task:task_rename`` for new app processes (or ``None``).
+
+        A zygote child names itself (``SetThreadName``: "main" -> its nice
+        name) right after it took the app's UID, so a rename is the
+        earliest cheap sign of a new app process. Lives in its own instance
+        (:attr:`_FOLLOW_INSTANCE`), not scoped by ``set_event_pid``, filtered
+        in-kernel by :func:`rename_filter`; a filter the kernel rejects is
+        retried simpler, then dropped (the follower verifies every pid via
+        ``/proc`` anyway). ``None`` when the tracepoint is missing: the
+        follower then relies on its poll alone.
+        """
+        tracefs = cls._tracefs or cls._resolve_tracefs()
+        if tracefs is None:
+            return None
+        cls._tracefs = tracefs
+        inst = cls._follow_dir(tracefs)
+        ev = f"{inst}/events/task/task_rename"
+        cls._remove_follow_instance(tracefs)
+        out = cls._shell(f"mkdir -p {inst} && [ -e {ev}/enable ] && echo OK")
+        if "OK" not in out:
+            cls.logger.info("task_rename tracepoint unavailable: poll-only follow")
+            cls._remove_follow_instance(tracefs)
+            return None
+        cls._shell(f"echo {cls._FOLLOW_BUFFER_KB} > {inst}/buffer_size_kb")
+        for expr in (rename_filter(package), rename_filter(None), None):
+            if expr is None:
+                cls.logger.info("task_rename filter rejected: watching unfiltered")
+                break
+            res = cls._shell(f"echo {cls._dq(expr)} > {ev}/filter && echo OK")
+            if "OK" in res and "rror" not in res and "nvalid" not in res:
+                break
+        cls._shell(f"echo 1 > {ev}/enable && echo 1 > {inst}/tracing_on")
+        return cls._start_process(
+            cls._build_adb_cmd("shell", "cat", f"{inst}/trace_pipe")
+        )
+
+    @classmethod
+    def stop_rename_watch(cls) -> None:
+        """Remove the follow instance (after its ``cat`` was killed)."""
+        tracefs = cls._tracefs or cls._TRACEFS_CANDIDATES[0]
+        try:
+            cls._remove_follow_instance(tracefs)
+        except Exception:
+            cls.logger.debug("follow instance removal failed", exc_info=True)
+
+    @classmethod
+    def list_app_processes(
+        cls, package: str, tracked: list[int] | tuple[int, ...] = ()
+    ) -> AppListing:
+        """The app's UID and process table, plus TIDs of ``tracked`` pids.
+
+        ONE adb round-trip; parsed by :func:`parse_app_listing`.
+        """
+        cmd = (
+            f"echo UID $(stat -c %u /data/data/{shlex.quote(package)} 2>/dev/null); "
+            "ps -A -o PID,UID,NAME 2>/dev/null"
+        )
+        for p in tracked:
+            cmd += (
+                f'; echo "T {int(p)} $(ls /proc/{int(p)}/task 2>/dev/null'
+                ' | tr "\\n" " ")"'
+            )
+        return parse_app_listing(cls._shell(cmd), package)
+
+    @classmethod
+    def add_pids(cls, pids: list[int]) -> AddResult:
+        """Append every TID of each pid to the monitor's ``set_event_pid``.
+
+        ``>>`` appends (``>`` would clear the list first). Each pid's TIDs
+        are listed and appended twice, so a thread spawned between the
+        first listing and the write is caught by the second pass (once a
+        thread is in the list, event-fork adds its children itself). Each
+        pid's ``starttime`` and the uptime right after the writes give the
+        gap between the process start and the moment it was followed.
+        ONE adb round-trip; parsed by :func:`parse_add_output`.
+        """
+        tracefs = cls._tracefs or cls._TRACEFS_CANDIDATES[0]
+        sep = f"{cls._instance_dir(tracefs)}/set_event_pid"
+        parts = []
+        for p in pids:
+            p = int(p)
+            ls = f'$(ls /proc/{p}/task 2>/dev/null | tr "\\n" " ")'
+            parts.append(
+                f't="{ls}"; [ -n "$t" ] && echo $t >> {sep}; '
+                f't="{ls}"; [ -n "$t" ] && echo $t >> {sep}; '
+                f'echo "T {p} $t"; '
+                f"echo \"S {p} $(sed -e 's/^.*) //' /proc/{p}/stat 2>/dev/null"
+                ' | cut -d" " -f20)"'
+            )
+        parts.append('echo "U $(cut -d" " -f1 /proc/uptime)"')
+        return parse_add_output(cls._shell("; ".join(parts)))
+
+    @classmethod
+    def read_lost_events(cls) -> int | None:
+        """Events the monitor instance's ring buffer lost (all CPUs).
+
+        Sums ``overrun`` (oldest entries overwritten while the reader lagged)
+        and ``dropped events`` from ``per_cpu/cpuN/stats``. ``None`` when
+        the stats can't be read.
+        """
+        tracefs = cls._tracefs or cls._TRACEFS_CANDIDATES[0]
+        inst = cls._instance_dir(tracefs)
+        try:
+            out = cls._shell(f"cat {inst}/per_cpu/cpu*/stats 2>/dev/null")
+        except Exception:
+            return None
+        return parse_overruns(out)
 
     @classmethod
     def _begin_session(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
@@ -836,8 +1036,8 @@ class KprobeTracer:
           -return / ``__fput`` correlation lines can't be filtered and fire
           system-wide; under heavy write load the kernel ring buffer can drop
           them (upstream of the Python deque) and corrupt the file* map --
-          writes still carry their own name. The 64 MB/CPU buffer mitigates
-          this. When a target PID is known, prefer ``run_by_pid(pid, path)``
+          writes still carry their own name. Such losses are counted
+          (:meth:`read_lost_events`) and shown. When a target PID is known, prefer ``run_by_pid(pid, path)``
           (PID+path): ``set_event_pid`` is checked before any fetch and bounds
           the firehose to the target's task tree.
         """
@@ -903,6 +1103,8 @@ class KprobeTracer:
                     f"&& echo {cls._dq('-:' + name)} >> {events}"
                 )
             # Instance removal LAST (after the pipe is released + probes gone).
+            # (The follow instance is removed by MonitorWatch.stop before
+            # this runs, and by _self_clean on the next start if it leaked.)
             cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
             if cls._orig_cmdlines:
                 cmdlines = f"{tracefs}/saved_cmdlines_size"
@@ -916,6 +1118,7 @@ class KprobeTracer:
             cls._orig_buffer_kb = None
             cls._orig_cmdlines = None
             cls._write_scope = None
+            cls.last_seeded = {}
 
     # =========================================================================
     # Write scope (names writes from the dentry chain; see module docstring)
@@ -1271,3 +1474,213 @@ def _extract_field_values(trace: str, field: str) -> list[str]:
         values.append(trace[start:end])
         idx = end + 1
     return values
+
+
+# =============================================================================
+# Follow the app: process table, task_rename, set_event_pid adds, overruns
+# (pure, unit-tested; the adb side is in KprobeTracer)
+# =============================================================================
+
+#: First UID of an app (``AID_APP_START``). A UID below it (system 1000,
+#: shell 2000, ...) is shared with system processes and never matched.
+APP_UID_MIN = 10000
+
+#: ``USER_HZ`` of ``/proc/<pid>/stat`` times (100 on Android/arm64).
+CLK_TCK = 100
+
+#: Comm length the kernel keeps (``TASK_COMM_LEN`` - 1).
+COMM_LEN = 15
+
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+
+@dataclass(frozen=True)
+class AppProcess:
+    """One process of the followed app."""
+
+    pid: int
+    uid: int | None
+    name: str
+
+
+@dataclass
+class AppListing:
+    """Result of :meth:`KprobeTracer.list_app_processes`."""
+
+    #: Owner UID of ``/data/data/<pkg>`` (the app's UID), if readable.
+    app_uid: int | None = None
+    #: The app's processes, by pid.
+    processes: dict[int, AppProcess] = dc_field(default_factory=dict)
+    #: ``pid -> tids`` of the pids asked for (missing: the pid is gone).
+    tasks: dict[int, list[int]] = dc_field(default_factory=dict)
+    #: False when the output didn't look like a process table (adb failure):
+    #: never read as "every process exited".
+    ok: bool = False
+
+
+@dataclass
+class AddResult:
+    """Result of :meth:`KprobeTracer.add_pids`."""
+
+    tasks: dict[int, list[int]] = dc_field(default_factory=dict)
+    #: ``pid -> starttime`` in seconds since boot.
+    started: dict[int, float] = dc_field(default_factory=dict)
+    #: Seconds since boot right after the writes.
+    uptime: float | None = None
+    #: The kernel refused a ``set_event_pid`` write (the shell said so).
+    error: bool = False
+
+    def gap(self, pid: int) -> float | None:
+        """Seconds between the process start and the write (None: unknown)."""
+        start = self.started.get(pid)
+        if start is None or self.uptime is None:
+            return None
+        return max(0.0, self.uptime - start)
+
+
+def is_app_process(name: str, uid: int | None, package: str, app_uid: int | None):
+    """True for a process of ``package``: its UID, or its name / ``name:sub``."""
+    if name == package or name.startswith(package + ":"):
+        return True
+    return uid is not None and uid == app_uid and uid >= APP_UID_MIN
+
+
+def parse_task_lines(text: str) -> dict[int, list[int]]:
+    """``T <pid> <tid> <tid> ...`` lines -> ``{pid: [tids]}`` (empty: gone)."""
+    out: dict[int, list[int]] = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[0] != "T" or not parts[1].isdigit():
+            continue
+        tids = [int(t) for t in parts[2:] if t.isdigit()]
+        if tids:
+            out[int(parts[1])] = tids
+    return out
+
+
+def parse_app_listing(text: str, package: str) -> AppListing:
+    """``UID <n>`` + ``ps -A -o PID,UID,NAME`` + ``T`` lines -> AppListing."""
+    listing = AppListing()
+    rows: list[AppProcess] = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "UID" and len(parts) == 2 and parts[1].isdigit():
+            listing.app_uid = int(parts[1])
+            continue
+        if parts[0] == "PID" and "NAME" in parts:
+            listing.ok = True  # the ps header: the table was read
+            continue
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append(AppProcess(int(parts[0]), int(parts[1]), " ".join(parts[2:])))
+    listing.tasks = parse_task_lines(text)
+    app_uid = listing.app_uid
+    if app_uid is None:
+        # Learn it from the main process when /data/data isn't readable.
+        main = next((r for r in rows if r.name == package), None)
+        app_uid = main.uid if main is not None else None
+        listing.app_uid = app_uid
+    for row in rows:
+        if is_app_process(row.name, row.uid, package, app_uid):
+            listing.processes[row.pid] = row
+    return listing
+
+
+def parse_add_output(text: str) -> AddResult:
+    """``T``/``S``/``U`` lines of :meth:`KprobeTracer.add_pids` -> AddResult."""
+    result = AddResult(tasks=parse_task_lines(text))
+    lowered = (text or "").lower()
+    result.error = any(
+        sign in lowered
+        for sign in ("write error", "can't create", "invalid argument", "denied")
+    )
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "S" and parts[1].isdigit():
+            if parts[2].isdigit():
+                result.started[int(parts[1])] = int(parts[2]) / CLK_TCK
+        elif len(parts) == 2 and parts[0] == "U":
+            try:
+                result.uptime = float(parts[1])
+            except ValueError:
+                pass
+    return result
+
+
+_OVERRUN_RE = re.compile(r"^(overrun|dropped events):\s*(\d+)\s*$", re.MULTILINE)
+
+
+def parse_overruns(text: str) -> int | None:
+    """Sum ``overrun:`` + ``dropped events:`` over ``per_cpu/cpuN/stats``.
+
+    ``commit overrun:`` is a different counter (nested writers), not a
+    reader-lag loss, and is not matched. ``None`` when no counter was found.
+    """
+    found = _OVERRUN_RE.findall(text or "")
+    if not found:
+        return None
+    return sum(int(n) for _key, n in found)
+
+
+def android_comm(name: str) -> str:
+    """The comm Android gives a process named ``name`` (zygote rule).
+
+    ``SetThreadName`` keeps the LAST 15 characters of a dotted name without
+    ``@`` (``org.mozilla.firefox`` -> ``mozilla.firefox``), else the first.
+    """
+    if len(name) <= COMM_LEN or "@" in name or "." not in name:
+        return name[:COMM_LEN]
+    return name[-COMM_LEN:]
+
+
+def rename_filter(package: str | None) -> str:
+    """In-kernel filter for ``task:task_rename`` (new app processes).
+
+    A zygote child renames itself from the zygote's comm (``main`` -- ART
+    names the zygote's main thread so -- or ``zygote*``/``usap*``) to
+    its nice name; the package's 15-char comm prefix and Android's actual
+    (last-15) comm catch the main process of an app started any other way.
+    ``package=None``: the zygote clauses only. Every match is only a
+    candidate: the follower checks UID and name before adding it.
+    """
+    clauses = ['oldcomm == "main"', 'oldcomm ~ "zygote*"', 'oldcomm ~ "usap*"']
+    if package and _PACKAGE_RE.match(package):
+        prefix = f'newcomm ~ "{package[:COMM_LEN]}*"'
+        exact = f'newcomm == "{android_comm(package)}"'
+        for clause in (prefix, exact):
+            if clause not in clauses:
+                clauses.append(clause)
+    return " || ".join(clauses)
+
+
+_RENAME_RE = re.compile(
+    r"task_rename:\s+pid=(\d+)\s+oldcomm=(.*?)\s+newcomm=(.*?)"
+    r"(?:\s+oom_score_adj=\S*)?\s*$"
+)
+
+
+def parse_task_rename(line: str) -> tuple[int, str, str] | None:
+    """``(pid, oldcomm, newcomm)`` of a ``task_rename`` trace line."""
+    m = _RENAME_RE.search(line or "")
+    if m is None:
+        return None
+    return int(m.group(1)), m.group(2), m.group(3)
+
+
+def process_label(name: str, package: str) -> str:
+    """Short name of an app process: ``main``, ``tab_17``, ``gpu``...
+
+    ``<pkg>`` is ``main``; ``<pkg>:sandboxed_tab_17`` is ``tab_17`` (the
+    ``sandboxed_`` prefix is dropped); a class-name suffix keeps its last
+    part. Anything else (a process sharing the app's UID) keeps its name.
+    """
+    if name == package:
+        return "main"
+    if name.startswith(package + ":"):
+        sub = name[len(package) + 1 :]
+        sub = re.split(r"[.$]", sub)[-1] or sub
+        if sub.startswith("sandboxed_"):
+            sub = sub[len("sandboxed_") :]
+        return sub or name
+    return name

@@ -739,3 +739,24 @@ async def test_device_proxy_switch_and_network_reset_select_stage_keys() -> None
         select.value = "svc"
         await pilot.pause()
         assert screen._pending["analysis.network_reset_after_snapshot"] == "svc"
+
+
+@pytest.mark.asyncio
+async def test_follow_the_app_switch_defaults_on_and_stages_the_key(
+    monkeypatch,
+) -> None:
+    """``tui.monitor_follow_app`` (default on) has a switch in the Monitor tab."""
+    from textual.widgets import Switch
+
+    monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: True)
+    config = SandroidConfig()
+    assert config.tui.monitor_follow_app is True
+    app = _MonitorSettingsHarness(config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        switch = screen.query_one("#setting-tui--monitor_follow_app", Switch)
+        assert switch.value is True
+        switch.value = False
+        await pilot.pause()
+        assert screen._pending["tui.monitor_follow_app"] is False

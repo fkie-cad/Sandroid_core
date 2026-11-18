@@ -88,6 +88,9 @@ def _default_kprobe_unsupported(monkeypatch):
     monkeypatch.setattr(
         KprobeTracer, "kprobe_supported", classmethod(lambda cls: False)
     )
+    # A kprobe session's teardown reads the ring buffer's overrun counters
+    # (an adb call): no device here.
+    monkeypatch.setattr(KprobeTracer, "read_lost_events", classmethod(lambda c: None))
     yield
     KprobeTracer._kprobe_cache.clear()
 
@@ -2123,3 +2126,585 @@ def test_start_with_config_fsmon_resolves_backend_and_populates_recent_events(
         # leaving a live daemon thread polling a fake process for the rest
         # of the test session.
         controller.stop()
+
+
+# =============================================================================
+# MonitorWatch: follow the app (multi-process seeding, restart via
+# task_rename + poll, spawn hand-off), blind state, lost events
+# =============================================================================
+
+from datetime import datetime as _dt
+
+from sandroid.core.kprobe_tracer import (
+    AddResult,
+    AppListing,
+    AppProcess,
+    build_write_scope,
+    parse_app_listing,
+    parse_mounts,
+    scope_aliases,
+)
+from sandroid.tui.controllers.monitor_controller import MonitorWatch
+
+_PKG = "org.mozilla.firefox"
+_T = _dt(2026, 11, 18, 12, 47, 3)
+_RENAME = (
+    "           <...>-25983   [002] d..2.  9876.543210: task_rename: pid=25983 "
+    "oldcomm=main newcomm=mozilla.firefox oom_score_adj=-1000"
+)
+
+
+def _procs(**named: int) -> dict[int, AppProcess]:
+    names = {
+        "main": _PKG,
+        "tab_17": f"{_PKG}:sandboxed_tab_17",
+        "tab_18": f"{_PKG}:sandboxed_tab_18",
+        "gpu": f"{_PKG}:gpu_process",
+        "crash": f"{_PKG}:crashhelper_service",
+        "fresh": "zygote64",
+    }
+    return {pid: AppProcess(pid, 10219, names[key]) for key, pid in named.items()}
+
+
+class _FakeDevice:
+    """The watch's device side, scripted: a process table that tests edit."""
+
+    def __init__(self, table: dict[int, AppProcess] | None = None) -> None:
+        self.table = dict(table or {})
+        self.adds: list[list[int]] = []
+        self.lost_value: int | None = 0
+        self.ok = True
+        self.add_error = False
+        self.rename = None  # what start_rename returns
+        self.rename_stopped = False
+        #: pid -> starttime (s since boot); uptime at the add.
+        self.started: dict[int, float] = {}
+        self.uptime = 1000.0
+
+    def listing(self, package, tracked):
+        return AppListing(
+            app_uid=10219,
+            processes=dict(self.table) if self.ok else {},
+            tasks={p: [p, p + 1] for p in tracked if p in self.table},
+            ok=self.ok,
+        )
+
+    def add(self, pids):
+        self.adds.append(list(pids))
+        return AddResult(
+            tasks={p: [p, p + 1, p + 2] for p in pids},
+            started={p: self.started.get(p, self.uptime) for p in pids},
+            uptime=self.uptime,
+            error=self.add_error,
+        )
+
+    def start_rename(self, package):
+        return self.rename
+
+    def stop_rename(self):
+        self.rename_stopped = True
+
+    def lost(self):
+        return self.lost_value
+
+
+def _watch(device, *, follow=True, mode="pid", notes=None, changes=None, **cfg):
+    config = MonitorConfig(
+        mode=mode,
+        app_name=_PKG,
+        target_path=f"/data/data/{_PKG}",
+        follow=follow,
+        **cfg,
+    )
+    return MonitorWatch(
+        config,
+        "kprobe",
+        device=device,
+        on_note=(lambda text, level, when: notes.append((level, text)))
+        if notes is not None
+        else None,
+        on_change=(lambda: changes.append(1)) if changes is not None else None,
+        now=lambda: _T,
+    )
+
+
+def test_watch_seeds_every_app_process_with_labels():
+    device = _FakeDevice(
+        _procs(main=24310, tab_17=24398, gpu=24402, tab_18=24455, crash=24470)
+    )
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    listing = watch.initial_processes()
+    watch.seed({p: [p] for p in listing.processes}, listing)
+    assert sorted(watch.procs) == [24310, 24398, 24402, 24455, 24470]
+    assert watch.label_for_tid(24310) == "main"
+    assert watch.label_for_tid(24398) == "tab_17"
+    assert watch.label_for_tid(24402) == "gpu_process"
+    assert watch.label_for_tid(4242) is None
+    assert notes == []  # running at start: no timeline line
+    title, parts = watch.caption()
+    assert title is None
+    assert parts == [f"App {_PKG} · 5 proc · following", "o stops"]
+
+
+def test_restart_noticed_by_task_rename_is_followed_with_its_gap():
+    device = _FakeDevice(_procs(main=24310, gpu=24402))
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    notes_at: list = []
+    watch.on_note = lambda text, level, when: (
+        notes.append((level, text)),
+        notes_at.append((level, text, when)),
+    )
+    watch.seed({24310: [24310], 24402: [24402]}, watch.initial_processes())
+    # LMK kills Firefox, it relaunches as 25983.
+    device.table = _procs(main=25983)
+    device.started = {25983: 999.7}
+    watch.on_rename_line(_RENAME)
+    assert watch._wake.is_set()  # the poll runs now, not in 2 s
+    watch.poll_once()
+    assert device.adds == [[25983]]
+    assert sorted(watch.procs) == [25983]
+    assert watch.blind_since is None
+    # In time order (as the Events tab shows them): the exit is dated just
+    # before the restart, so the timeline reads exit -> restart.
+    texts = [t for _lvl, t, _w in sorted(notes_at, key=lambda n: n[2])]
+    assert texts[0] == f"{_PKG} exited · PID 24310 · noticed 12:47:03"
+    assert texts[1].startswith(
+        f"{_PKG} restarted 12:47:02 · new PID 25983 · gap ≈0.3 s"
+    )
+    assert "⇧R re-applies" in texts[1]
+    assert watch.label_for_tid(25984) == "main"
+
+
+def test_rename_of_a_tracked_pid_or_garbage_does_not_poll():
+    device = _FakeDevice(_procs(main=25983))
+    watch = _watch(device)
+    watch.seed({25983: [25983]}, watch.initial_processes())
+    watch.on_rename_line(_RENAME)
+    watch.on_rename_line("not a trace line")
+    assert not watch._wake.is_set()
+
+
+def test_a_new_process_waits_for_its_name_before_it_is_announced():
+    device = _FakeDevice(_procs(main=24310))
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    device.table = _procs(main=24310, fresh=24500)  # UID match, still zygote64
+    watch.poll_once()
+    assert 24500 in watch.procs  # already recorded (UID verified) ...
+    assert notes == []  # ... but not named yet
+    assert watch.label_for_tid(24500) == "pid 24500"
+    device.table = _procs(main=24310, tab_17=24500)
+    watch.poll_once()
+    assert notes == [("info", "+ tab_17 (PID 24500) followed · gap ≈0.0 s")]
+    assert watch.label_for_tid(24501) == "tab_17"
+    assert device.adds == [[24500]]  # added once
+
+
+def test_poll_only_when_task_rename_is_unavailable():
+    device = _FakeDevice(_procs(main=24310))
+    watch = _watch(device)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    watch.start_rename_watch()
+    assert watch.rename_ok is False
+    device.table = _procs(main=24310, gpu=24402)
+    watch.poll_once()
+    assert sorted(watch.procs) == [24310, 24402]
+    assert "start detection by poll" in watch.caption()[1]
+
+
+def test_an_adb_hiccup_is_never_read_as_every_process_exited():
+    device = _FakeDevice(_procs(main=24310))
+    watch = _watch(device, follow=False)
+    watch.seed({24310: []})
+    device.ok = False
+    watch.poll_once()
+    assert watch.procs
+    assert watch.blind_since is None
+
+
+def test_spawn_hands_the_paused_pid_over_before_resume():
+    """SpotlightService.spawn_app_paused -> notify_spawned -> the running
+    watch adds the PID (synchronously, on the spawning thread).
+    """
+    from sandroid.services.spotlight_service import SpotlightService
+
+    device = _FakeDevice({})
+    notes: list = []
+    watch = _watch(device, notes=notes)
+    watch.seed({}, watch.initial_processes())
+    assert watch.caption()[1][0] == f"App {_PKG} · not running · follows its start"
+    order: list[str] = []
+
+    class _JM:
+        def spawn_paused(self, package):
+            order.append("spawn")
+            return 31000
+
+        def resume_app(self):
+            order.append(f"resume (scope {sorted(watch.procs)})")
+            return True
+
+    svc = SpotlightService(job_manager_factory=lambda: _JM())
+    watch.start()
+    try:
+        _jm, pid = svc.spawn_app_paused(_PKG)
+        svc.notify_spawned(77, "com.other.app")  # another app: ignored
+        svc.resume_paused_app()
+    finally:
+        watch.stop()
+    assert pid == 31000
+    assert device.adds == [[31000]]
+    assert order == ["spawn", "resume (scope [31000])"]
+    assert notes == [
+        ("info", f"{_PKG} started 12:47:03 · PID 31000 · spawned paused · no gap")
+    ]
+    assert watch.on_spawned not in SpotlightService._spawn_listeners
+
+
+def test_follow_off_goes_blind_when_the_target_is_gone():
+    device = _FakeDevice(_procs(main=24310))
+    changes: list = []
+    watch = _watch(device, follow=False, changes=changes, target_pid=24310)
+    watch.seed({24310: []})
+    assert watch.caption() == (
+        None,
+        [f"App {_PKG} · PID 24310 + children", "o stops"],
+    )
+    device.table = _procs(main=25983)
+    watch.poll_once()
+    assert device.adds == []  # not following
+    assert watch.blind_since == _T
+    title, parts = watch.caption()
+    assert title == "monitor blind since 12:47:03 · target gone"
+    assert "o stops · o again re-targets" in parts[1]
+    assert "follow restarts: monitor dialog / Settings" in parts[1]
+    assert changes  # the caption was told
+
+
+def test_follow_off_counts_app_processes_it_does_not_record():
+    device = _FakeDevice(_procs(main=24310, gpu=24402))
+    watch = _watch(device, follow=False, target_pid=24310)
+    watch.seed({24310: []})
+    watch.poll_once()
+    assert "1 app process not followed" in watch.caption()[1]
+
+
+def test_a_refused_add_is_blind_cant_follow():
+    device = _FakeDevice(_procs(main=24310))
+    watch = _watch(device)
+    watch.seed({}, None)
+    device.add_error = True
+    watch.poll_once()
+    assert watch.caption()[0] == "monitor blind since 12:47:03 · can't follow"
+
+
+def test_fsmon_cannot_follow_and_path_mode_has_no_process_table():
+    fs = MonitorWatch(
+        MonitorConfig(mode="pid", app_name=_PKG, follow=True, target_pid=5),
+        "fsmon",
+        device=_FakeDevice(),
+    )
+    assert fs.track
+    assert not fs.follow
+    assert not fs.kprobe
+    path = _watch(_FakeDevice(), mode="path", target_paths=["/sdcard", "/data/x"])
+    assert not path.track
+    assert path.caption() == (None, ["Path /sdcard +1 · every process", "o stops"])
+
+
+def test_lost_events_are_noted_once_and_shown():
+    device = _FakeDevice()
+    notes: list = []
+    watch = _watch(device, mode="path", notes=notes)
+    device.lost_value = 0
+    assert watch.check_lost() == 0
+    device.lost_value = 340
+    watch.check_lost()
+    watch.check_lost()
+    assert len(notes) == 1
+    assert notes[0][1].startswith("340 trace events lost 12:47:03")
+    assert "340 events lost" in watch.caption()[1]
+    device.lost_value = None  # unreadable: keep what we know
+    assert watch.check_lost() == 340
+
+
+def test_stop_kills_the_rename_stream_and_removes_its_instance():
+    class _Proc:
+        stdout = iter(())
+        terminated = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+    device = _FakeDevice()
+    device.rename = _Proc()
+    watch = _watch(device)
+    watch.start_rename_watch()
+    assert watch.rename_ok is True
+    watch.stop()
+    assert device.rename.terminated
+    assert device.rename_stopped
+
+
+def test_translator_names_the_app_process_of_each_write():
+    device = _FakeDevice(_procs(main=12000, tab_17=12262))
+    watch = _watch(device)
+    listing = watch.initial_processes()
+    watch.seed({12000: [12000], 12262: [12262, 12263]}, listing)
+    translator = KprobeStreamTranslator()
+    translator.reset(MonitorConfig(mode="pid", target_pid=12000, target_path=_FF))
+    translator.set_write_scope(
+        build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+    )
+    translator.set_process_labels(watch.label_for_tid)
+    (item,) = translator.feed(_REC_WAL)
+    assert item.process == "tab_17 · PlacesStorageWr"
+
+
+def test_kprobe_setup_follow_seeds_all_processes_then_starts_the_rename_watch(
+    monkeypatch,
+):
+    order: list = []
+    device = _FakeDevice(_procs(main=24310, tab_17=24398, gpu=24402))
+
+    def _run_by_app(cls, pids, path=None):
+        order.append(("trace", list(pids)))
+        cls.last_seeded = {p: [p] for p in pids}
+        return object()
+
+    monkeypatch.setattr(KprobeTracer, "run_by_app", classmethod(_run_by_app))
+    monkeypatch.setattr(KprobeTracer, "last_seeded", {})
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_pid",
+        classmethod(lambda cls, pid, path=None: pytest.fail("one PID only")),
+    )
+    device.start_rename = lambda pkg: order.append("rename") or None
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_watch_device", lambda: device)
+    monkeypatch.setattr(controller, "_write_scope", lambda paths: None)
+    config = MonitorConfig(
+        mode="pid", target_pid=24310, target_path=_FF, app_name=_PKG, follow=True
+    )
+    _process, translator, desc = controller._kprobe_setup(config)
+    assert order == [("trace", [24310, 24398, 24402]), "rename"]
+    assert desc == f"app {_PKG} · 3 processes · following (kprobe)"
+    assert sorted(translator.watch.procs) == [24310, 24398, 24402]
+    assert translator._labels == translator.watch.label_for_tid
+
+
+def test_kprobe_setup_follow_before_the_app_runs(monkeypatch):
+    seeded: list = []
+    monkeypatch.setattr(
+        KprobeTracer,
+        "run_by_app",
+        classmethod(lambda cls, pids, path=None: seeded.append(list(pids)) or object()),
+    )
+    monkeypatch.setattr(KprobeTracer, "last_seeded", {})
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_watch_device", lambda: _FakeDevice({}))
+    monkeypatch.setattr(controller, "_write_scope", lambda paths: None)
+    config = MonitorConfig(mode="pid", target_path=_FF, app_name=_PKG, follow=True)
+    _process, translator, desc = controller._kprobe_setup(config)
+    assert seeded == [[]]
+    assert "not running yet" in desc
+    assert translator.watch.blind_since is None
+
+
+def test_kprobe_launch_teardown_stops_the_watch_and_reads_lost_events(monkeypatch):
+    calls: list = []
+    started: list = []
+    monkeypatch.setattr(
+        KprobeTracer, "teardown", classmethod(lambda cls: calls.append("teardown"))
+    )
+    monkeypatch.setattr(
+        MonitorController,
+        "_start_output_reader",
+        lambda self, wrapper: started.append(wrapper),
+    )
+    device = _FakeDevice()
+    device.lost_value = 12
+    warnings: list = []
+    controller = _make_controller(log_warning=warnings.append)
+    monkeypatch.setattr(controller, "_watch_device", lambda: device)
+    config = MonitorConfig(mode="path", target_path="/sdcard")
+
+    class _P:
+        def poll(self):
+            return 0
+
+    setup = (_P(), KprobeStreamTranslator(), "d")
+    assert controller._finish_kprobe_launch(config, setup)
+    (wrapper,) = started  # (the task may be gone: other tests' readers)
+    assert isinstance(wrapper.watch, MonitorWatch)
+    wrapper.run_teardown()
+    assert calls == ["teardown"]
+    assert any("12 trace events lost" in w for w in warnings)
+
+
+def test_watch_notes_reach_the_log_and_the_files_lens():
+    seen: list = []
+
+    def _cb(event):
+        if event.source == "monitor":
+            seen.append(event.data)
+
+    EventBus.get().subscribe(EventType.TASK_OUTPUT, _cb)
+    warnings: list = []
+    try:
+        controller = _make_controller(log_warning=warnings.append)
+        controller._watch_note("app restarted", "warning", _T)
+        controller._watch_changed()
+    finally:
+        EventBus.get().unsubscribe(EventType.TASK_OUTPUT, _cb)
+    assert warnings == ["app restarted"]
+    assert seen[0]["monitor_note"] == {
+        "text": "app restarted",
+        "level": "warning",
+        "when": _T,
+    }
+    assert seen[1]["monitor_status"] is True
+
+
+def test_resume_after_playback_with_follow_needs_no_pid(monkeypatch):
+    start_calls: list = []
+    monkeypatch.setattr(
+        MonitorController,
+        "_start_monitor",
+        lambda self, cfg: start_calls.append(cfg) or True,
+    )
+    controller = _make_controller()
+    config = MonitorConfig(
+        mode="pid", target_pid=1111, app_name=_PKG, target_path=_FF, follow=True
+    )
+    assert controller.resume_after_playback(config) is True
+    (resolved,) = start_calls
+    assert resolved.follow is True
+    assert resolved.target_pid is None
+    assert resolved.mode == "pid"
+
+
+def test_listing_parser_feeds_the_watch_end_to_end():
+    """parse_app_listing (recorded ps) -> the watch table + labels."""
+    text = (
+        "UID 10219\n  PID   UID NAME\n24310 10219 org.mozilla.firefox\n"
+        "24398 99012 org.mozilla.firefox:sandboxed_tab_17\n"
+    )
+
+    class _Dev(_FakeDevice):
+        def listing(self, package, tracked):
+            return parse_app_listing(text, package)
+
+    watch = _watch(_Dev())
+    listing = watch.initial_processes()
+    watch.seed({p: [p] for p in listing.processes}, listing)
+    assert {p.label for p in watch.procs.values()} == {"main", "tab_17"}
+
+
+# =============================================================================
+# FileSystemMonitorItem.timestamp / .pid (both backends, through the reader)
+# =============================================================================
+
+
+class _LinesProc:
+    """A finished-after-its-lines stream for ``_start_output_reader``."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+        self.stdout = self
+
+    def readline(self):
+        return self._lines.pop(0) if self._lines else ""
+
+    def poll(self):
+        return None if self._lines else 0
+
+    def __iter__(self):
+        return iter([])
+
+
+def _read_items(controller, wrapper) -> list:
+    import threading as _threading
+
+    received: list = []
+    ended = _threading.Event()
+    # The reader ends with its stream; don't let it unregister another
+    # test's monitor task later.
+    controller._monitor_ended = ended.set
+
+    def _cb(event):
+        if event.source == "monitor" and "batch" in event.data:
+            received.extend(event.data["batch"])
+
+    EventBus.get().subscribe(EventType.TASK_OUTPUT, _cb)
+    try:
+        controller._start_output_reader(wrapper)
+        assert ended.wait(2.0), "reader did not finish"
+    finally:
+        EventBus.get().unsubscribe(EventType.TASK_OUTPUT, _cb)
+    return received
+
+
+def test_fsmon_items_carry_capture_time_and_pid(monkeypatch):
+    import time as _time
+
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+    line = 'FSE_CONTENT_MODIFIED\t4242\t"com.x"\t/data/data/com.x/a.db\n'
+    wrapper = MonitorProcessWrapper(
+        _LinesProc([line]), MonitorConfig(mode="path", target_path="/data/data/com.x")
+    )
+    before = _time.time()
+    (item,) = _read_items(controller, wrapper)
+    assert item.pid == 4242
+    assert item.timestamp is not None
+    assert before <= item.timestamp <= _time.time()
+    # The same capture time the AI chat's recent_events history uses.
+    (recent,) = wrapper.recent_events
+    assert recent["timestamp"] == item.timestamp
+    # build_monitor_item callers that pass no time are unaffected.
+    assert build_monitor_item(line.strip()).timestamp is None
+
+
+def test_kprobe_items_carry_capture_time_and_the_app_process_pid(monkeypatch):
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    device = _FakeDevice(_procs(main=12000, tab_17=12262))
+    watch = _watch(device)
+    watch.seed({12000: [12000], 12262: [12262, 12263]}, watch.initial_processes())
+    translator = KprobeStreamTranslator()
+    translator.reset(MonitorConfig(mode="pid", target_pid=12000, target_path=_FF))
+    translator.set_write_scope(
+        build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+    )
+    translator.set_process_labels(watch.label_for_tid, watch.pid_for_tid)
+    other_thread = _REC_WAL.replace("PlacesStorageWr-12262", "PlacesStorageWr-12263")
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+    wrapper = MonitorProcessWrapper(
+        _LinesProc([other_thread + "\n"]),
+        MonitorConfig(mode="pid", target_pid=12000, target_path=_FF),
+        translator=translator,
+    )
+    (item,) = _read_items(controller, wrapper)
+    assert item.pid == 12262  # thread 12263 belongs to tab_17's process
+    assert item.timestamp is not None
+    (recent,) = wrapper.recent_events
+    assert recent["timestamp"] == item.timestamp
+    assert recent["pid"] == 12262
+    # Without an app scope the thread id is all the trace line tells.
+    plain = KprobeStreamTranslator()
+    plain.reset(MonitorConfig(mode="pid", target_pid=12000, target_path=_FF))
+    plain.set_write_scope(
+        build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+    )
+    (bare,) = plain.feed(_REC_WAL)
+    assert bare.pid == 12262

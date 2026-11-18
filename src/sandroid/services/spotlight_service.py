@@ -26,6 +26,7 @@ Usage:
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -519,6 +520,9 @@ class SpotlightService:
             self._spawn_mode = True
             self._auto_resume = False
             self._spawn_package = package_name
+            # Still paused: a running file monitor follows the new process
+            # before its first instruction (gap-free).
+            self.notify_spawned(pid, package_name)
 
             self._logger.info(
                 f"Spawned {package_name} (PID {pid}) in paused state "
@@ -528,6 +532,33 @@ class SpotlightService:
         except Exception as e:
             self._logger.error(f"Failed to spawn {package_name} paused: {e}")
             return None, -1
+
+    # Spawn hand-off: called synchronously on the spawning thread while the
+    # new process is still paused (before any resume), so a listener can
+    # finish its work -- the file monitor adds the PID to its trace scope --
+    # before the app runs its first instruction.
+    _spawn_listeners: list[Callable[[int, str], None]] = []
+
+    @classmethod
+    def add_spawn_listener(cls, listener: Callable[[int, str], None]) -> None:
+        """Call ``listener(pid, package)`` for every paused spawn."""
+        if listener not in cls._spawn_listeners:
+            cls._spawn_listeners.append(listener)
+
+    @classmethod
+    def remove_spawn_listener(cls, listener: Callable[[int, str], None]) -> None:
+        if listener in cls._spawn_listeners:
+            cls._spawn_listeners.remove(listener)
+
+    def notify_spawned(self, pid: Any, package: str | None) -> None:
+        """Hand a freshly spawned, still paused PID to the spawn listeners."""
+        if not isinstance(pid, int) or pid <= 0 or not package:
+            return
+        for listener in list(self._spawn_listeners):
+            try:
+                listener(pid, package)
+            except Exception as e:
+                self._logger.debug(f"Spawn listener failed: {e}")
 
     def resume_paused_app(self) -> bool:
         """Resume a paused app after tools have been loaded.
