@@ -764,3 +764,36 @@ def test_emulator_profile_matches_the_real_api_level(
     assert result["load"]["model"] == model
     assert result["load"]["fp"].startswith(f"google/{device}/{device}:16/")
     assert result["load"]["flavor_prop"][0] == f"{device}-user"
+
+
+def test_refusals_say_how_to_resolve(bypass_service) -> None:
+    mm = _dexray_monitor(bypass_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+    _now_on, msg = bypass_service.toggle("root")
+    assert "stop Dexray Intercept (m)" in msg
+    mm._release_bypass_exclusivity()
+
+    bypass_service.toggle("root")
+    other = _dexray_monitor(bypass_hooks=True)
+    assert other._claim_bypass_exclusivity() is False
+    assert "turn them off with b" in other.last_error
+
+
+def test_claim_of_a_dead_dexray_job_is_dropped(bypass_service) -> None:
+    """The app died without m: its job/session is gone, so is the claim."""
+    import types
+
+    mm = _dexray_monitor(bypass_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+    job = types.SimpleNamespace(state="running")
+    session = {"up": True}
+    mm._job_id = "job-1"
+    mm.job_manager = types.SimpleNamespace(
+        jobs={"job-1": job}, has_active_session=lambda: session["up"]
+    )
+    assert bypass_service.exclusive_conflict(["root"]) is not None
+    job.state = "initialized"  # still loading: alive
+    assert bypass_service.exclusive_conflict(["root"]) is not None
+    session["up"] = False  # the app died
+    assert bypass_service.exclusive_conflict(["root"]) is None
+    assert bypass_service.toggle("root")[0] is True

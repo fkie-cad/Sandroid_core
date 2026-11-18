@@ -1812,6 +1812,7 @@ class _ExclusiveClaim:
     categories: frozenset[str]
     choice: str
     is_alive: Callable[[], bool] | None
+    resolve: str = ""
 
 
 _CATEGORY_DISPLAY = {
@@ -1888,6 +1889,7 @@ class BypassService:
         categories=None,
         choice: str = BYPASS_CONFLICT_CHOICE,
         is_alive: Callable[[], bool] | None = None,
+        resolve: str = "",
     ) -> tuple[str | None, str]:
         """Claim bypass categories for another source (e.g. Dexray's group).
 
@@ -1903,7 +1905,10 @@ class BypassService:
             categories: Categories claimed; None claims every category.
             choice: The "choose one: ..." sentence both refusals end with.
             is_alive: Optional liveness probe; a claim whose probe returns
-                False (or raises) is dropped the next time it is checked.
+                False (or raises) is dropped the next time it is checked
+                (e.g. the owner's job died with the app).
+            resolve: How the user frees the categories, appended to this
+                side's refusal (``"stop Dexray Intercept (m) first"``).
 
         Returns:
             ``(token, message)``: the token releases this claim (and only this
@@ -1926,10 +1931,12 @@ class BypassService:
                 names = ", ".join(self._plain_name(c) for c in on)
                 return None, (
                     f"Not starting {owner} with {what}: Bypass (b) has "
-                    f"{names} on — {choice}."
+                    f"{names} on — {choice}; turn them off with b first."
                 )
             token = uuid.uuid4().hex
-            self._claims[token] = _ExclusiveClaim(owner, what, cats, choice, is_alive)
+            self._claims[token] = _ExclusiveClaim(
+                owner, what, cats, choice, is_alive, resolve
+            )
         return token, f"{owner} holds {', '.join(sorted(cats))}"
 
     def release_exclusive(self, token: str | None) -> None:
@@ -1955,7 +1962,8 @@ class BypassService:
                 if not alive:
                     self.release_exclusive(token)
                     continue
-            return f"{claim.owner} is running with {claim.what} — {claim.choice}."
+            hint = f"; {claim.resolve}" if claim.resolve else ""
+            return f"{claim.owner} is running with {claim.what} — {claim.choice}{hint}."
         return None
 
     # -- category metadata (data holders) ---------------------------------
