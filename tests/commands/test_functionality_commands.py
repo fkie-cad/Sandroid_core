@@ -1,4 +1,4 @@
-"""Tests for the recorder/player/trigdroid command palette entries.
+"""Tests for the recorder/player command palette entries.
 
 These commands used to be permanently message-only (see the NIT this file
 was written to close): the palette dispatches them on a worker thread with a
@@ -6,7 +6,7 @@ was written to close): the palette dispatches them on a worker thread with a
 contexts, has no handle to the running TUI app. When the TUI's live
 worker-thread dispatch path *does* thread an app reference through
 (``ctx.app``), these commands must drive the real ``action_record`` /
-``action_play`` / ``action_trigdroid`` via ``app.call_from_thread`` instead of
+``action_play`` via ``app.call_from_thread`` instead of
 just pointing the user at the panel/key. These tests cover both branches, plus
 the honest-``False``-propagation and restored ``can_execute`` preconditions
 added after review found the original version reported false "success" and
@@ -23,7 +23,6 @@ from sandroid.commands.base import CommandContext
 from sandroid.commands.functionality_commands import (
     PlayerCommand,
     RecorderCommand,
-    TrigdroidCommand,
 )
 
 
@@ -39,7 +38,6 @@ def _fake_app() -> MagicMock:
     [
         (RecorderCommand, "action_record"),
         (PlayerCommand, "action_play"),
-        (TrigdroidCommand, "action_trigdroid"),
     ],
 )
 async def test_no_app_falls_back_to_pointer_message(command_cls, action_name):
@@ -59,7 +57,6 @@ async def test_no_app_falls_back_to_pointer_message(command_cls, action_name):
     [
         (RecorderCommand, "action_record"),
         (PlayerCommand, "action_play"),
-        (TrigdroidCommand, "action_trigdroid"),
     ],
 )
 async def test_reachable_app_drives_the_real_action(command_cls, action_name):
@@ -82,7 +79,6 @@ async def test_reachable_app_drives_the_real_action(command_cls, action_name):
     [
         (RecorderCommand, "action_record"),
         (PlayerCommand, "action_play"),
-        (TrigdroidCommand, "action_trigdroid"),
     ],
 )
 async def test_app_call_failure_falls_back_to_pointer_message(command_cls, action_name):
@@ -106,14 +102,13 @@ async def test_app_call_failure_falls_back_to_pointer_message(command_cls, actio
     [
         (RecorderCommand, "action_record"),
         (PlayerCommand, "action_play"),
-        (TrigdroidCommand, "action_trigdroid"),
     ],
 )
 async def test_declined_action_reports_failure_not_success(command_cls, action_name):
     """A controller-declined action (returns False, doesn't raise) must
     surface as a failed CommandResult, not a misleading success toast --
-    RecordingController/TrigdroidController decline real preconditions
-    (already recording, no recording to play, no target app) this way.
+    RecordingController declines real preconditions (already recording, no
+    recording to play) this way.
     """
     app = _fake_app()
     setattr(app, action_name, MagicMock(return_value=False))
@@ -165,31 +160,7 @@ def test_player_can_execute_allows_with_a_recording():
     assert PlayerCommand().can_execute(ctx) == (True, "")
 
 
-def test_trigdroid_can_execute_blocks_with_no_target_app():
-    app = MagicMock()
-    app._trigdroid_controller.is_running.return_value = False
-    app._trigdroid_controller.has_target_app.return_value = False
-    ctx = CommandContext(app=app)
-
-    can_execute, reason = TrigdroidCommand().can_execute(ctx)
-
-    assert can_execute is False
-    assert "spotlight" in reason.lower()
-
-
-def test_trigdroid_can_execute_allows_when_already_running():
-    """Stopping an already-running TrigDroid has no target-app precondition."""
-    app = MagicMock()
-    app._trigdroid_controller.is_running.return_value = True
-    app._trigdroid_controller.has_target_app.return_value = False
-    ctx = CommandContext(app=app)
-
-    assert TrigdroidCommand().can_execute(ctx) == (True, "")
-
-
-@pytest.mark.parametrize(
-    "command_cls", [RecorderCommand, PlayerCommand, TrigdroidCommand]
-)
+@pytest.mark.parametrize("command_cls", [RecorderCommand, PlayerCommand])
 def test_can_execute_allows_when_no_app_reachable(command_cls):
     """Headless/API/test contexts have no controller to check -- never block."""
     ctx = CommandContext()  # app defaults to None
@@ -203,5 +174,3 @@ def test_registration_views_and_keys_unchanged():
     assert RecorderCommand.views == ["forensic", "malware"]
     assert PlayerCommand.key == "p"
     assert PlayerCommand.views == ["forensic", "malware"]
-    assert TrigdroidCommand.key == "t"
-    assert TrigdroidCommand.views == ["malware"]

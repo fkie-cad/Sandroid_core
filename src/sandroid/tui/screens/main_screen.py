@@ -1582,7 +1582,7 @@ class MainScreen(Screen):
             if action and is_command_key(action.key):
                 # Execute through command system to get result. Pass the app
                 # through so commands that need to drive a real main-thread
-                # ``action_*`` (recorder/player/trigdroid) can do so via
+                # ``action_*`` (recorder/player) can do so via
                 # ``app.call_from_thread`` instead of returning an inert
                 # pointer message -- see functionality_commands.py.
                 result = execute_command_from_actionq(

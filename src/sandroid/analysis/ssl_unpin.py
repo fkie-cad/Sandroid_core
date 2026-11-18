@@ -2,7 +2,6 @@
 
 Single source of truth for SSL/TLS certificate pinning bypass. Used by:
 - MitmproxyPanel (Ctrl+P toggle) via MitmproxyService → BypassService
-- TrigDroidBypass (delegates ssl_unpinning here)
 - Spotlight Panel toggle ``[1] SSL`` via BypassService
 
 Hooks comprehensive Java and native SSL verification methods to accept all

@@ -23,10 +23,12 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
     Available tools:
     - FriTap: SSL/TLS interception and decryption
     - Dexray-Intercept: Runtime monitoring of crypto, network, file operations
-    - TrigDroid Bypass: SSL unpinning, root/frida/emulator/debug detection bypass
+
+    Detection bypasses are not offered here: they come only from
+    BypassService (the App lens's ``b`` chord).
 
     Returns a dict with selected tools, e.g.:
-        {'fritap': True, 'dexray': False, 'trigdroid_bypass': True}
+        {'fritap': True, 'dexray': False}
     Or None if cancelled.
     """
 
@@ -98,7 +100,6 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
         Binding("space", "toggle_current", "Toggle", show=False),
         Binding("1", "toggle_fritap", "FriTap", show=False),
         Binding("2", "toggle_dexray", "Dexray", show=False),
-        Binding("3", "toggle_bypass", "Bypass", show=False),
     ]
 
     AUTO_FOCUS = ".modal-container"
@@ -107,7 +108,6 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
         self,
         multi_select: bool = True,
         title: str = "Select Tools to Load",
-        show_trigdroid_note: bool = True,
         name: str = None,
         id: str = None,
         classes: str = None,
@@ -118,7 +118,6 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
             multi_select: If True, allow multiple selections (checkboxes).
                          If False, single selection only (radio-like).
             title: Modal title
-            show_trigdroid_note: Show note about TrigDroid opening bypass modal
             name: Widget name
             id: Widget ID
             classes: CSS classes
@@ -126,18 +125,15 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
         super().__init__(name=name, id=id, classes=classes)
         self.title_text = title
         self.multi_select = multi_select
-        self.show_trigdroid_note = show_trigdroid_note
 
         self.selections: dict[str, bool] = {
             "fritap": False,
             "dexray": False,
-            "trigdroid_bypass": False,
         }
 
         self._tool_to_option_id: dict[str, str] = {
             "fritap": "option-fritap",
             "dexray": "option-dexray",
-            "trigdroid_bypass": "option-bypass",
         }
         self._option_id_to_tool: dict[str, str] = {
             v: k for k, v in self._tool_to_option_id.items()
@@ -169,21 +165,12 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
                 id="option-dexray",
             )
 
-            # TrigDroid Bypass option
-            bypass_text = "[3] TrigDroid Bypass Hooks\n"
-            bypass_text += (
-                "[dim]    SSL unpinning, root/frida/emulator/debug bypass[/dim]"
-            )
-            if self.show_trigdroid_note:
-                bypass_text += "\n[dim]    -> Opens bypass configuration modal[/dim]"
-            yield Static(bypass_text, classes="tool-option", id="option-bypass")
-
             # Warning if no tools selected
             yield Label("", id="tool-selection-warning")
 
-            hint_text = "[dim]1/2/3=Toggle  Enter=Continue  Esc=Back[/dim]"
+            hint_text = "[dim]1/2=Toggle  Enter=Continue  Esc=Back[/dim]"
             if not self.multi_select:
-                hint_text = "[dim]1/2/3=Select  Enter=Continue  Esc=Back[/dim]"
+                hint_text = "[dim]1/2=Select  Enter=Continue  Esc=Back[/dim]"
             yield KeyHintFooter(hints={"default": hint_text})
 
     def on_mount(self) -> None:
@@ -235,10 +222,6 @@ class ToolSelectionModal(FridaModal[dict[str, bool] | None]):
     def action_toggle_dexray(self) -> None:
         """Toggle Dexray selection."""
         self._toggle_tool("dexray")
-
-    def action_toggle_bypass(self) -> None:
-        """Toggle TrigDroid bypass selection."""
-        self._toggle_tool("trigdroid_bypass")
 
     def action_confirm(self) -> None:
         """Confirm selection and close modal."""

@@ -28,7 +28,7 @@ class Trigdroid(Functionality):
     """Wrapper for the TrigDroid automated malware trigger tool.
 
     Integrates TrigDroid into Sandroid by managing noise-detection rounds,
-    bypass configuration, and result submission.
+    the spawn/resume mode, and result submission.
 
     Attributes:
         did_dummy_round: Whether a noise-detection round has already been performed.
@@ -106,26 +106,22 @@ class Trigdroid(Functionality):
         Toolbox.set_action_time()
         start_time = time.perf_counter()
 
-        bypass_config = Toolbox.trigdroid_bypass_config
+        # Detection bypasses come only from BypassService (the TUI's ``b``
+        # chord), so the trigger run passes TrigDroid no bypass_config.
         spawn_mode = Toolbox.trigdroid_spawn_mode
         auto_resume = Toolbox.trigdroid_auto_resume
-
-        self._log_enabled_bypasses(bypass_config)
 
         try:
             if is_noise_round:
                 quick_test(_NOISE_DETECTION_APP)
                 logger.info("TrigDroid noise detection completed")
             else:
-                self._run_real_analysis(
-                    package_name, bypass_config, spawn_mode, auto_resume
-                )
+                self._run_real_analysis(package_name, spawn_mode, auto_resume)
         except Exception as e:
             logger.error(f"TrigDroid analysis failed: {e}")
         finally:
             elapsed = int(time.perf_counter() - start_time)
             Toolbox.set_action_duration(elapsed)
-            Toolbox.trigdroid_bypass_config = None
 
     def override_package(self, new_name: str) -> None:
         """Override the target package name.
@@ -143,18 +139,9 @@ class Trigdroid(Functionality):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _log_enabled_bypasses(self, bypass_config: dict | None) -> None:
-        """Log which bypass hooks are enabled, if any."""
-        if not bypass_config:
-            return
-        enabled = [name for name, cfg in bypass_config.items() if cfg.get("enabled")]
-        if enabled:
-            logger.info(f"TrigDroid bypass hooks enabled: {', '.join(enabled)}")
-
     def _run_real_analysis(
         self,
         package_name: str,
-        bypass_config: dict | None,
         spawn_mode: bool,
         auto_resume: bool,
     ) -> None:
@@ -162,7 +149,6 @@ class Trigdroid(Functionality):
 
         Args:
             package_name: Target Android package.
-            bypass_config: Optional bypass hook configuration dict.
             spawn_mode: Whether to use spawn mode.
             auto_resume: Whether to auto-resume after instrumentation.
         """
@@ -174,9 +160,6 @@ class Trigdroid(Functionality):
             "spawn_mode": spawn_mode,
             "auto_resume": auto_resume,
         }
-
-        if bypass_config:
-            config_kwargs["bypass_config"] = bypass_config
 
         config = TestConfiguration(**config_kwargs)
 
@@ -195,11 +178,6 @@ class Trigdroid(Functionality):
                         "success": result.success,
                         "triggers_activated": getattr(result, "triggers_activated", 0),
                         "analysis_data": getattr(result, "data", {}),
-                        "bypasses_enabled": [
-                            name
-                            for name, cfg in (bypass_config or {}).items()
-                            if cfg.get("enabled")
-                        ],
                     },
                 )
             else:

@@ -1228,8 +1228,8 @@ class IntegrityBypassManager(BypassManagerBase):
 # Bypass service (singleton owning all managers)
 # ---------------------------------------------------------------------------
 
-# Category keys are the stable identifiers used by the panel, MitmproxyService,
-# and TrigDroid delegation. "ssl" maps to SSLUnpinManager (imported lazily to
+# Category keys are the stable identifiers used by the panel and
+# MitmproxyService. "ssl" maps to SSLUnpinManager (imported lazily to
 # avoid a circular import: ssl_unpin imports this module's base class).
 #: Every bypass category is EXPERIMENTAL: hooks target specific library
 #: versions/obfuscations and can silently miss (or crash) an app. All are OFF

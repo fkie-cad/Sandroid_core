@@ -10,7 +10,7 @@ Key modules:
 - processes: Monitors running processes
 - network: Captures network traffic
 - static_analysis: Performs static APK analysis
-- trigdroid_bypass: Unified bypass hooks for app protections
+- detection_bypass: BypassService, the one source of Frida detection bypasses
 - interfaces: Segregated interfaces following ISP
 
 Base Classes:
@@ -48,7 +48,6 @@ from .interfaces import (
 from .network import Network
 from .newfiles import NewFiles
 from .processes import Processes
-from .trigdroid_bypass import TrigDroidBypass
 
 __all__ = [
     # Protocols for dependency injection
@@ -72,5 +71,4 @@ __all__ = [
     "Network",
     "NewFiles",
     "Processes",
-    "TrigDroidBypass",
 ]

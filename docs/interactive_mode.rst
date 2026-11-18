@@ -107,9 +107,9 @@ lens focused:
 - ``b`` then ``1``-``5`` toggles/arms the Frida bypass categories **SSL**,
   **Root**, **Frida**, **Debug** and **Integrity**
   (PairIP/licensing/attestation); ``b`` then ``o`` (or ``b`` again) opens
-  the Objection shell (elsewhere ``b`` opens it directly). Its launch dialog
-  uses the same digits (``1`` SSL, ``2`` Root, ``3`` Frida, ``4`` Debug) plus
-  ``e`` for emulator detection. ``Ctrl+P`` toggles SSL unpinning globally.
+  the Objection shell (elsewhere ``b`` opens it directly). Objection loads no
+  bypass hooks of its own: the ``b`` categories (BypassService) are the only
+  source of bypasses. ``Ctrl+P`` toggles SSL unpinning globally.
 
 .. warning::
 
@@ -421,7 +421,6 @@ Key                 Action
 ``a``               Static analysis of the spotlight APK (Dexray-Insight)
 ``m``               Dexray-Intercept malware monitor
 ``d``               Dump memory (Fridump)
-``t``               TrigDroid malware triggers
 ``b`` / ``O``       Objection shell / resume objection session
 ``F``               Forensic evidence scan (MVT)
 ``G``               Manage forensic APKs

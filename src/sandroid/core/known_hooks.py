@@ -172,10 +172,6 @@ TRIGDROID_HOOKS = ToolHookInfo(
     categories=[
         HookCategory.SENSORS,
         HookCategory.BUILD_PROPERTIES,
-        HookCategory.ROOT_DETECTION,
-        HookCategory.EMULATOR_DETECTION,
-        HookCategory.FRIDA_DETECTION,
-        HookCategory.DEBUG_DETECTION,
     ],
     native_hooks=[],
     java_hooks=[
@@ -189,17 +185,11 @@ TRIGDROID_HOOKS = ToolHookInfo(
         "android.os.Build.BRAND",
         "android.os.Build.DEVICE",
         "android.os.Build.FINGERPRINT",
-        # Root Detection Bypass (if enabled)
-        "java.io.File.exists",
-        "java.lang.Runtime.exec",
-        "android.app.ApplicationPackageManager.getPackageInfo",
-        # Debug Detection Bypass (if enabled)
-        "android.os.Debug.isDebuggerConnected",
     ],
     description="Automated malware trigger execution and analysis",
     dynamic_hooks=True,
-    notes="TrigDroid has its own API and session management. "
-    "SSL unpinning delegated to SSLUnpinManager (ssl_unpin).",
+    notes="TrigDroid has its own API and session management. Sandroid passes "
+    "it no bypass config: detection bypasses come only from BypassService.",
 )
 
 # ============================================================================
@@ -231,15 +221,15 @@ SSL_UNPIN_TOOL = ToolHookInfo(
     ],
     description="Comprehensive SSL/TLS pinning bypass for mitmproxy interception",
     dynamic_hooks=False,
-    notes="Used by mitmproxy panel (Ctrl+P) and TrigDroid (ssl_unpinning). "
+    notes="Used by mitmproxy panel (Ctrl+P) and the App lens's b chord. "
     "Shares session with other JobManager-based tools.",
 )
 
 # ============================================================================
 # NATIVE DETECTION BYPASSES (Sandroid built-in, BypassService)
 # ============================================================================
-# Self-contained Frida bypasses owned by BypassService — no trigdroid bundle
-# required. Hook scopes are disjoint *among these three* so the AFM runtime
+# Self-contained Frida bypasses owned by BypassService (the only source of
+# bypasses in Sandroid). Hook scopes are disjoint *among these three* so the AFM runtime
 # registry does not flag false intra-set conflicts. Native libc hooks may
 # still stack with Dexray/MalwareMonitor (Frida tolerates that); those
 # overlaps are advisory, not fatal.

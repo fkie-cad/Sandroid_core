@@ -58,7 +58,6 @@ COMMAND_KEYS: set[str] = {
     # Functionality commands
     "r",  # Record
     "p",  # Playback
-    "t",  # TrigDroid
     # Frida commands
     "f",  # Frida server (toggle)
     # App commands

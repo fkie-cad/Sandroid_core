@@ -130,9 +130,10 @@ _GENERAL_KEYS: list[tuple[str, str]] = [
 #: ``tui.keybindings``: never applied (``app.effective_keymap``), shown or
 #: re-saved. ``load_slot_N``: digits are lenses now (slots load from the
 #: snapshot picker); ``pick_save_slot``: ``S`` opens the picker (``s`` inside
-#: it saves to a slot).
+#: it saves to a slot); ``trigdroid``: ``t`` opened TrigDroid's bypass
+#: wrapper, which BypassService (the App lens's ``b`` chord) replaced.
 LEGACY_BINDING_IDS = frozenset(
-    {f"load_slot_{i}" for i in range(1, 9)} | {"pick_save_slot"}
+    {f"load_slot_{i}" for i in range(1, 9)} | {"pick_save_slot", "trigdroid"}
 )
 
 

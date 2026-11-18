@@ -304,18 +304,6 @@ class MenuController:
             mode_indicator="ATTACH",
         )
         self._register(
-            "trigdroid",
-            "Run TrigDroid triggers",
-            "t",
-            ActionCategory.ANALYSIS,
-            ["malware"],
-            description="Execute automatic malware triggers",
-            inline_text="run [t]rigdroid malware triggers",
-            requires_spotlight=True,
-            requires_frida=True,
-            mode_indicator="ATTACH",
-        )
-        self._register(
             "reconfigure_hooks",
             "Reconfigure dexray hooks",
             "k",

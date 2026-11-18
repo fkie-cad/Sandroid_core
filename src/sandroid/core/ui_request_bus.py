@@ -484,7 +484,7 @@ def show_info(title: str, message: str) -> None:
 def request_modal(modal_class: type, **kwargs) -> Any:
     """Request a custom modal to be shown.
 
-    This allows showing custom modal classes (like ObjectionModal, TrigDroidModal)
+    This allows showing custom modal classes (like ObjectionModal)
     through the UI request bus. The modal class will be instantiated with the
     provided kwargs.
 
