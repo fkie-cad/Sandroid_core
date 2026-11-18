@@ -290,8 +290,12 @@ async def test_enter_opens_inspector_via_lens_hook(monkeypatch) -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _boot(app, pilot)
         ms = app.screen
-        # App lens has no hook: Enter stays Start/Resume, no Inspector.
-        assert ms.check_action("inspect", ()) is False
+        # The App lens inspects too (Space is Start/Resume); with no app
+        # selected there is no row, so Enter opens nothing.
+        assert ms.check_action("inspect", ()) is True
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert not ms.inspector_is_open
         await pilot.press("3")
         await _settle(pilot)
         assert ms.check_action("inspect", ()) is True

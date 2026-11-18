@@ -50,9 +50,9 @@ Optional duck-typed hooks a lens widget may implement:
   ``MainScreen`` calls it (a) when Enter reaches the screen unhandled, and
   (b) when an ``OptionList.OptionSelected`` or ``DataTable.RowSelected``
   message bubbles out of the *active* lens (that is what Enter or a click on
-  a row of those widgets posts). Returning ``None`` does nothing. A lens
-  that handles Enter itself (SpotlightPanel's Start/Resume) simply does not
-  implement the hook, or calls ``self.screen.open_inspector(...)`` itself.
+  a row of those widgets posts). Returning ``None`` does nothing. Every
+  lens inspects on Enter now; lens-level "do it" actions live on Space
+  (App: Start/Resume, Network: start/stop mitmproxy).
   Note: the footer shows one binding per key, the focused widget's first;
   a focused OptionList/DataTable owns a hidden Enter binding, so advertise
   "⏎ inspect" in the lens itself (e.g. via ``set_lens_caption`` info).

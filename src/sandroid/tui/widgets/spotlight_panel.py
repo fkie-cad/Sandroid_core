@@ -13,6 +13,12 @@ would orphan running Frida jobs — the services are the single source of truth.
 
 Blocking lifecycle actions (spawn + wait-for-hooks + resume) run on worker
 threads; UI updates are always marshalled back to the Textual main thread.
+
+Below the live state the lens shows what the app is, may do, exposes and
+resists (IDENTITY · PERMISSIONS · EXPOSURE · MANIFEST & NETWORK · TRACKERS &
+SDKs · DATA · SUSPECTED DEFENCES): :class:`~.app_lens.AppLensSections`,
+which owns that data (off-thread loads, generation-tagged results). Enter
+inspects the selected row, Space starts / resumes the app.
 """
 
 from __future__ import annotations
@@ -24,17 +30,21 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 from sandroid.tui.modals.objection_modal import BYPASS_KEYS
 from sandroid.tui.utils.ui_thread import UiDispatcher
+from sandroid.tui.widgets.app_lens import LENS_ID, AppLensSections
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
+
+    from sandroid.tui.widgets.lens_shell import InspectorContent
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +79,11 @@ class SpotlightPanel(Widget):
     Bindings (when focused):
         b then 1-5: toggle/arm SSL / Root / Frida / Debug / Integrity bypass
                  (``b`` then ``o`` launches Objection, the global ``b``)
-        Enter:   primary (Start if stopped · Resume if paused)
+        Space:   primary (Start if stopped · Resume if paused)
+        Enter:   inspect the selected section row (MainScreen → Inspector)
+        /:       filter the rows of all sections (Esc clears)
+        z:       fold / unfold the focused section
+        u:       refresh runtime facts (grants, AppOps, footprint, services)
         R:       restart (force-stop + respawn with armed hooks)
         A:       attach to the live process + apply armed hooks
         P:       start paused (advanced; Enter then resumes)
@@ -77,7 +91,11 @@ class SpotlightPanel(Widget):
         X:       clear the spotlight selection
 
     Lowercase s/r/a/p/x are deliberately NOT bound — they shadow the
-    destructive global shortcuts (Screenshot/Record/Analyze/Play/Export).
+    destructive global shortcuts (Screenshot/Record/Analyze/Play/Export);
+    ``a`` (static analysis) is what the TRACKERS section points to. ``/``,
+    ``z`` and ``u`` are no global keys (``u`` is the Files lens's pull, in
+    that lens only), and the focused section tables (DataTable) bind none of
+    Space / ``/`` / ``z`` / ``u`` / ``b``.
     Digits are the global lens keys, so the bypass toggles are a ``b`` chord
     (shadowing the global ``b`` = Objection only while this lens has focus;
     the chord offers Objection as ``o``).
@@ -96,10 +114,31 @@ class SpotlightPanel(Widget):
         text-style: bold;
         padding: 0 1;
     }
-    SpotlightPanel > #spotlight-body {
+    SpotlightPanel > #spotlight-scroll {
         height: 1fr;
         background: #050811;
         padding: 0 1;
+        scrollbar-size-vertical: 1;
+    }
+    SpotlightPanel #spotlight-body {
+        height: auto;
+        margin: 0 0 1 0;
+        background: #050811;
+    }
+    SpotlightPanel > #app-filter {
+        display: none;
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: #0b1628;
+        color: #e5e9f0;
+    }
+    SpotlightPanel > #app-filter.-open {
+        display: block;
+    }
+    SpotlightPanel > #app-filter:focus {
+        border: none;
+        background: #11203a;
     }
     SpotlightPanel > #spotlight-actions {
         height: 1;
@@ -121,10 +160,15 @@ class SpotlightPanel(Widget):
     # Only Start/Resume goes into the global footer: the bypass toggles and
     # the Shift-letter actions are already shown (and clickable) inside the
     # panel itself, and listing all 11 pushed the global keys (r Record,
-    # p Play, ? Help, ...) off a 200-column footer.
+    # p Play, ? Help, ...) off a 200-column footer. Enter is MainScreen's
+    # "inspect" (a focused section table posts RowSelected); the lens frame
+    # caption advertises ⏎ / z / u.
     BINDINGS = [
-        Binding("enter", "primary", "Start/Resume"),
+        Binding("space", "primary", "Start/Resume", key_display="␣"),
         Binding("b", "bypass_chord", "Bypass…"),
+        Binding("slash", "filter", "Filter rows", show=False),
+        Binding("z", "fold", "Fold/unfold section", show=False),
+        Binding("u", "refresh_facts", "Refresh app facts", show=False),
         Binding("R", "restart_app", "Restart", show=False),
         Binding("A", "attach_app", "Attach", show=False),
         Binding("P", "start_paused", "Start paused", show=False),
@@ -145,6 +189,7 @@ class SpotlightPanel(Widget):
         self._last_running_state: bool | None = None
         # Guard against overlapping blocking actions (spawn/kill/restart).
         self._action_inflight = False
+        self._filter_timer = None
 
     # -- services (lazy) --------------------------------------------------
 
@@ -170,7 +215,12 @@ class SpotlightPanel(Widget):
 
     def compose(self) -> ComposeResult:
         yield Static(self._render_header(), id="spotlight-header")
-        yield Static(self._render_body(), id="spotlight-body")
+        yield Input(
+            placeholder="filter rows of all sections (Esc clears)", id="app-filter"
+        )
+        with VerticalScroll(id="spotlight-scroll", can_focus=False):
+            yield Static(self._render_body(), id="spotlight-body")
+            yield AppLensSections(id="app-sections")
         with Horizontal(id="spotlight-actions"):
             yield Static(self._primary_label(), id="act-primary", classes="act-cell")
             # Shift-letters, shown as ⇧X so they never read like the global
@@ -213,11 +263,13 @@ class SpotlightPanel(Widget):
 
             bus = EventBus.get()
 
-            def _make_cb():
+            def _make_cb(state_changed: bool):
                 def _cb(_event) -> None:
                     # Fire-and-forget onto the main loop; never blocks the
                     # publisher's thread (avoids the call_from_thread deadlock).
                     self._ui.post(self.refresh_panel)
+                    if state_changed:
+                        self._ui.post(self._facts_state_changed)
 
                 return _cb
 
@@ -226,7 +278,7 @@ class SpotlightPanel(Widget):
                 EventType.TASK_STARTED,
                 EventType.TASK_STOPPED,
             ):
-                cb = _make_cb()
+                cb = _make_cb(event_type == EventType.STATE_CHANGED)
                 bus.subscribe(event_type, cb)
                 self._event_handlers.append((event_type, cb))
         except Exception as exc:
@@ -333,29 +385,25 @@ class SpotlightPanel(Widget):
 
         lines: list[str] = []
 
-        # 1. App info
+        # 1. App info (package + PID are in the header line above; the
+        # IDENTITY section below has the rest). One line keeps the sections
+        # on screen at 100x30.
         try:
             activity = spotlight.get_activity_name() or "—"
         except Exception:
             activity = "—"
-        pid = self._safe_pid()
-
-        lines.append("[#7dd3fc bold]App[/]")
-        lines.append(f"  package   [b]{package}[/]")
-        lines.append(f"  activity  {activity}")
-        lines.append(f"  pid       {pid if pid else '[#5b6479]—[/]'}")
-        lines.append("")
+        lines.append(f"[#7dd3fc bold]App[/]  activity {escape(str(activity))}")
 
         # 2. Active hooks (filtered to this app)
         hooks = self._hooks_for_app(package)
-        lines.append(f"[#7dd3fc bold]Active hooks[/] ([b]{len(hooks)}[/])")
-        if hooks:
-            for t in hooks:
-                name = getattr(t, "display_name", getattr(t, "name", "task"))
-                lines.append(f"  [#4ade80]●[/] {name}")
-        else:
-            lines.append("  [#5b6479]none[/]")
-        lines.append("")
+        names = [
+            escape(str(getattr(t, "display_name", getattr(t, "name", "task"))))
+            for t in hooks
+        ]
+        lines.append(
+            f"[#7dd3fc bold]Active hooks[/] ([b]{len(hooks)}[/])  "
+            + ("  ".join(f"[#4ade80]●[/] {n}" for n in names) or "[#5b6479]none[/]")
+        )
 
         # 3. Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
@@ -373,14 +421,14 @@ class SpotlightPanel(Widget):
         return "\n".join(lines)
 
     def _primary_label(self) -> str:
-        """Context-sensitive label for the Enter / primary action cell."""
+        """Context-sensitive label for the Space / primary action cell."""
         if not self._current_package():
-            return "⏎ Start"
+            return "␣ Start"
         if self._is_paused():
-            return "⏎ Resume"
+            return "␣ Resume"
         if self._safe_pid():
             return "[#5b6479]● running[/]"
-        return "⏎ Start"
+        return "␣ Start"
 
     def refresh_panel(self) -> None:
         try:
@@ -389,12 +437,161 @@ class SpotlightPanel(Widget):
             self.query_one("#act-primary", Static).update(self._primary_label())
         except Exception:
             pass
+        package = self._current_package()
+        sections = self._sections()
+        if sections is not None:
+            try:
+                sections.track(package, self._safe_pid() if package else None)
+            except Exception:
+                logger.debug("App lens sections track failed", exc_info=True)
+        self._update_caption()
         # The header's App row reads the same (cached) PID: keep both in step
         # (it said "not running" while this panel showed the live PID).
         try:
             self.screen._safe_refresh_status_bar()
         except Exception:
             pass
+
+    # -- sections (App lens body) -----------------------------------------
+
+    def _sections(self) -> AppLensSections | None:
+        try:
+            return self.query_one("#app-sections", AppLensSections)
+        except Exception:
+            return None
+
+    def _has_sections(self) -> bool:
+        sections = self._sections()
+        return sections is not None and sections.facts is not None
+
+    def _update_caption(self) -> None:
+        """Lens frame caption: the lens keys (footers show one key per row)."""
+        info = None
+        if self._has_sections():
+            sections = self._sections()
+            info = "⏎ inspect · / filter · z fold · u refresh · ␣ start"
+            if sections is not None and sections.filter_text:
+                info = f"“{sections.filter_text}” · " + info
+        try:
+            self.screen.set_lens_caption(LENS_ID, info=info)
+        except Exception:
+            pass
+
+    def _facts_state_changed(self) -> None:
+        sections = self._sections()
+        if sections is not None:
+            sections.note_state_changed()
+
+    def focus(self, scroll_visible: bool = True):
+        """Focus the last-used section table when an app is shown.
+
+        ``MainScreen`` focuses the lens on activation; ↑/↓ and Enter then
+        work on the section rows right away. Without an app the panel
+        itself keeps focus.
+        """
+        sections = self._sections()
+        if sections is not None and sections.focus_first():
+            return self
+        return super().focus(scroll_visible)
+
+    def on_lens_activated(self) -> None:
+        sections = self._sections()
+        if sections is not None:
+            sections.on_lens_activated()
+        self._update_caption()
+
+    def inspect_selected(self) -> InspectorContent | None:
+        """Enter: the Inspector page of the selected section row."""
+        sections = self._sections()
+        if sections is None or sections.facts is None:
+            return None
+        return sections.inspect_selected()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in ("filter", "fold", "refresh_facts"):
+            return self._has_sections()
+        return True
+
+    def action_fold(self) -> None:
+        """``z``: fold / unfold the focused (or last focused) section."""
+        sections = self._sections()
+        if sections is not None:
+            sections.toggle_fold()
+
+    def action_refresh_facts(self) -> None:
+        """``u``: re-read grants, AppOps, footprint, services (+ static cache)."""
+        sections = self._sections()
+        if sections is None:
+            return
+        if sections.refresh_runtime(static=True):
+            self._notify("Refreshing app facts…", "information")
+        else:
+            self._notify("App facts refresh queued (one is running)", "information")
+
+    def action_filter(self) -> None:
+        try:
+            box = self.query_one("#app-filter", Input)
+        except Exception:
+            return
+        box.add_class("-open")
+        box.focus()
+
+    def _set_filter(self, text: str) -> None:
+        self._filter_timer = None
+        sections = self._sections()
+        if sections is not None:
+            sections.set_filter(text)
+        self._update_caption()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "app-filter":
+            return
+        event.stop()
+        if self._filter_timer is not None:
+            try:
+                self._filter_timer.stop()
+            except Exception:
+                pass
+        value = event.value
+        try:
+            self._filter_timer = self.set_timer(0.15, lambda: self._set_filter(value))
+        except Exception:
+            self._set_filter(value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "app-filter":
+            return
+        event.stop()
+        self._set_filter(event.value)
+        if not event.value.strip():
+            event.input.remove_class("-open")
+        self.focus()
+
+    def handle_escape(self) -> bool:
+        """Esc (MainScreen hook): clear the ``/`` filter (input or applied)."""
+        try:
+            box = self.query_one("#app-filter", Input)
+        except Exception:
+            return False
+        sections = self._sections()
+        applied = sections.filter_text if sections is not None else ""
+        focused = self.screen.focused if self.is_attached else None
+        if focused is not box and not applied:
+            return False
+        if self._filter_timer is not None:
+            try:
+                self._filter_timer.stop()
+            except Exception:
+                pass
+            self._filter_timer = None
+        had_filter = bool(applied or box.value.strip())
+        box.value = ""
+        box.remove_class("-open")
+        self._set_filter("")
+        self.focus()
+        if had_filter:
+            self._notify("Filter cleared", "information")
+        return True
 
     # -- live running-state poll (slow fallback) --------------------------
 
@@ -599,7 +796,7 @@ class SpotlightPanel(Widget):
     # -- lifecycle actions (main-thread entry points) ---------------------
 
     def action_primary(self) -> None:
-        """Enter: Start if stopped, Resume if paused, else inform."""
+        """Space: Start if stopped, Resume if paused, else inform."""
         if not self._require_package():
             return
         if self._is_paused():
