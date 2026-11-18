@@ -1,18 +1,23 @@
 """Structured file diffs and read-only content previews (no Rich, no device).
 
-The text diffs of :mod:`sandroid.core.file_diff` are a stable format: they
-end up in sealed run results, the CLI output and ``analysis/changedfiles.py``
-and are therefore left untouched. This module computes the *same* changes as
-plain data -- grouped, named, typed -- for the TUI's Inspector (Files lens
-"Versions" tab) and anything else that wants to render or query a diff:
+The line diffs of :mod:`sandroid.core.file_diff` (plain text) end up in
+sealed run results, the CLI output and ``analysis/changedfiles.py``. This
+module computes the *same* changes as data -- grouped, named, typed -- for
+the TUI's Inspector (Files lens "Versions" tab), the ``diff.json`` /
+``diff.txt`` stored with every kept version (:func:`diff_document`,
+:func:`diff_from_dict`, :func:`render_plain_diff`) and anything else that
+wants to render or query a diff:
 
 * :func:`structured_diff` -- two local copies of one file to a
   :class:`StructuredDiff` (SQLite: per table with column names, rows keyed by
   their primary key; XML/ABX: key table; JSON: key paths; text: unified
   hunks with line numbers; anything else: size/hash + first differing bytes).
-* :func:`parse_text_diff` -- the stored text diff (``diff.txt`` of a kept
-  version, or a run's diff lines) back into a :class:`StructuredDiff`, for
-  cheap per-version summaries and for runs that kept no file copies.
+* :func:`diff_document` / :func:`diff_from_dict` -- a diff to and from the
+  ``diff.json`` stored with a kept version (the canonical record);
+  :func:`render_plain_diff` -- the plain ``diff.txt`` next to it.
+* :func:`parse_text_diff` -- a legacy text diff (``diff.txt`` of a version
+  kept before ``diff.json`` existed, or a run's diff lines) back into a
+  :class:`StructuredDiff`; only a fallback where no ``diff.json`` exists.
 * :func:`preview_file` -- a first look inside one local copy
   (:class:`Preview`): SQLite tables + rows, preference keys, JSON, text,
   image facts, or a hex dump.
@@ -30,6 +35,7 @@ import contextlib
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -281,14 +287,17 @@ _EPOCH_RANGES = (
 )
 
 
-def timestamp_hint(value: Any, column: str = "") -> str | None:
+def timestamp_hint(
+    value: Any, column: str = "", with_offset: bool = False
+) -> str | None:
     """A human time for an int that looks like an epoch timestamp, else None.
 
     Milli-, micro- and nanoseconds are recognised by magnitude alone (no
     other integers that large are common in app data); plain seconds only
     when the column name suggests a time (``date``, ``time``, ``_at`` ...),
     since sizes and counters overlap with that range. Local time, like the
-    pull times shown next to it.
+    pull times shown next to it; ``with_offset`` adds the UTC offset and the
+    unit (``2026-11-18 12:33:10+01:00, ms``) for files people keep.
     """
     if isinstance(value, bool):
         return None
@@ -306,6 +315,9 @@ def timestamp_hint(value: Any, column: str = "") -> str | None:
                 when = datetime.fromtimestamp(value / div)
             except (OverflowError, OSError, ValueError):
                 return None
+            if with_offset:
+                stamp = when.astimezone().isoformat(sep=" ", timespec="seconds")
+                return f"{stamp}, {unit} epoch"
             return when.strftime("%Y-%m-%d %H:%M:%S")
     return None
 
@@ -948,7 +960,13 @@ _PREF_SEGMENT = re.compile(r'^/map/(\w+)\[@name="(.*?)"\](?:\[\d+\])?(/.*)?$')
 
 
 def _plain_line(line: str) -> str:
-    if "[/" in line or "\\[" in line:
+    r"""A stored diff line without Rich markup.
+
+    Only the legacy SQLite lines (``\\[[success]INSERT[/success]] ...``,
+    written before diffs were stored as plain text) carry markup; a plain
+    line is returned as is, even when its data holds brackets.
+    """
+    if line.lstrip().startswith("\\[["):
         try:
             from rich.text import Text
 
@@ -1175,6 +1193,346 @@ def _parse_xml_lines(lines: list[str]) -> StructuredDiff:
 
 
 # ---------------------------------------------------------------------------
+# diff.json: a StructuredDiff on disk, and the plain diff.txt rendered from it
+# ---------------------------------------------------------------------------
+
+#: ``diff.json`` document format (bump on an incompatible change).
+DIFF_SCHEMA = "sandroid.file_diff"
+DIFF_SCHEMA_VERSION = 1
+#: Version of the structured diff engine in this module (bump when the
+#: computed changes would differ for the same two files).
+ENGINE_VERSION = "1"
+
+
+def _json_value(value: Any) -> Any:
+    """A cell / key value as JSON (blobs as ``{"$blob": ...}``)."""
+    if isinstance(value, Blob):
+        return {"$blob": {"size": value.size, "head_hex": value.head.hex()}}
+    if isinstance(value, (bytes, bytearray)):
+        return {"$blob": {"size": len(value), "head_hex": bytes(value[:32]).hex()}}
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"$float": repr(value)}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _json_value(v) for k, v in value.items()}
+    return value
+
+
+def _from_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if set(value) == {"$blob"} and isinstance(value["$blob"], dict):
+            blob = value["$blob"]
+            try:
+                head = bytes.fromhex(str(blob.get("head_hex") or ""))
+            except ValueError:
+                head = b""
+            return Blob(int(blob.get("size") or 0), head)
+        if set(value) == {"$float"}:
+            try:
+                return float(value["$float"])
+            except (TypeError, ValueError):
+                return value
+        return {k: _from_json_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_from_json_value(v) for v in value]
+    return value
+
+
+def _row_dict(row: RowChange) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "op": row.op,
+        "key": {c: _json_value(v) for c, v in row.key},
+    }
+    if row.op == "update":
+        out["changes"] = [
+            {"column": c, "old": _json_value(o), "new": _json_value(n)}
+            for c, o, n in row.changes
+        ]
+    else:
+        out["values"] = {c: _json_value(v) for c, v in row.values.items()}
+    return out
+
+
+def diff_to_dict(diff: StructuredDiff) -> dict[str, Any]:
+    """The changes of a :class:`StructuredDiff` as JSON-ready data.
+
+    SQLite: ``tables`` (columns, primary key, counts, rows: ``op`` +
+    ``key`` + the whole row or the changed cells with old/new); XML/ABX/JSON:
+    ``keys``; text: ``hunks``; anything else: ``binary``. Inverse:
+    :func:`diff_from_dict`.
+    """
+    added, changed, removed = diff.counts()
+    out: dict[str, Any] = {
+        "kind": diff.kind,
+        "changed": not diff.empty,
+        "summary": diff.summary(),
+        "counts": {"added": added, "changed": changed, "removed": removed},
+        "note": diff.note,
+        "error": diff.error,
+    }
+    if diff.tables:
+        out["tables"] = [
+            {
+                "name": t.name,
+                "columns": list(t.columns),
+                "primary_key": [c for c, _v in t.rows[0].key] if t.rows else [],
+                "inserted": t.inserted,
+                "updated": t.updated,
+                "deleted": t.deleted,
+                "truncated": t.truncated,
+                "note": t.note,
+                "rows": [_row_dict(r) for r in t.rows],
+            }
+            for t in diff.tables
+        ]
+    if diff.keys:
+        out["keys"] = [
+            {
+                "key": k.key,
+                "op": k.op,
+                "type": k.type,
+                "old": _json_value(k.old),
+                "new": _json_value(k.new),
+            }
+            for k in diff.keys
+        ]
+    if diff.hunks:
+        out["hunks"] = [
+            {
+                "old_start": h.old_start,
+                "new_start": h.new_start,
+                "lines": [
+                    {
+                        "tag": ln.tag,
+                        "old_no": ln.old_no,
+                        "new_no": ln.new_no,
+                        "text": ln.text,
+                    }
+                    for ln in h.lines
+                ],
+            }
+            for h in diff.hunks
+        ]
+    if diff.binary is not None:
+        b = diff.binary
+        out["binary"] = {
+            "old_size": b.old_size,
+            "new_size": b.new_size,
+            "old_sha256": b.old_sha256,
+            "new_sha256": b.new_sha256,
+            "first_difference": b.offset,
+            "window_start": b.window_start,
+            "old_bytes_hex": b.old_bytes.hex(),
+            "new_bytes_hex": b.new_bytes.hex(),
+        }
+    return out
+
+
+def diff_from_dict(data: dict[str, Any]) -> StructuredDiff:
+    """A :class:`StructuredDiff` from :func:`diff_to_dict` data (``diff.json``)."""
+    result = StructuredDiff(
+        kind=str(data.get("kind") or "none"),
+        note=str(data.get("note") or ""),
+        error=str(data.get("error") or ""),
+        source="json",
+    )
+    for t in data.get("tables") or []:
+        table = TableDiff(
+            name=str(t.get("name")),
+            columns=[str(c) for c in t.get("columns") or []],
+            inserted=int(t.get("inserted") or 0),
+            updated=int(t.get("updated") or 0),
+            deleted=int(t.get("deleted") or 0),
+            truncated=bool(t.get("truncated")),
+            note=str(t.get("note") or ""),
+        )
+        for r in t.get("rows") or []:
+            key = [
+                (str(c), _from_json_value(v)) for c, v in (r.get("key") or {}).items()
+            ]
+            if r.get("op") == "update":
+                changes = [
+                    (
+                        str(c.get("column")),
+                        _from_json_value(c.get("old")),
+                        _from_json_value(c.get("new")),
+                    )
+                    for c in r.get("changes") or []
+                ]
+                table.rows.append(RowChange("update", key=key, changes=changes))
+            else:
+                values = {
+                    str(c): _from_json_value(v)
+                    for c, v in (r.get("values") or {}).items()
+                }
+                table.rows.append(
+                    RowChange(str(r.get("op") or "insert"), key=key, values=values)
+                )
+        result.tables.append(table)
+    for k in data.get("keys") or []:
+        result.keys.append(
+            KeyChange(
+                key=str(k.get("key")),
+                op=str(k.get("op")),
+                old=_from_json_value(k.get("old")),
+                new=_from_json_value(k.get("new")),
+                type=str(k.get("type") or ""),
+            )
+        )
+    for h in data.get("hunks") or []:
+        hunk = TextHunk(int(h.get("old_start") or 0), int(h.get("new_start") or 0))
+        for ln in h.get("lines") or []:
+            hunk.lines.append(
+                TextLine(
+                    str(ln.get("tag") or " "),
+                    ln.get("old_no"),
+                    ln.get("new_no"),
+                    str(ln.get("text") or ""),
+                )
+            )
+        result.hunks.append(hunk)
+    b = data.get("binary")
+    if isinstance(b, dict):
+        try:
+            old_bytes = bytes.fromhex(str(b.get("old_bytes_hex") or ""))
+            new_bytes = bytes.fromhex(str(b.get("new_bytes_hex") or ""))
+        except ValueError:
+            old_bytes = new_bytes = b""
+        result.binary = BinaryChange(
+            old_size=b.get("old_size"),
+            new_size=b.get("new_size"),
+            old_sha256=str(b.get("old_sha256") or ""),
+            new_sha256=str(b.get("new_sha256") or ""),
+            offset=b.get("first_difference"),
+            window_start=int(b.get("window_start") or 0),
+            old_bytes=old_bytes,
+            new_bytes=new_bytes,
+        )
+    return result
+
+
+def diff_document(diff: StructuredDiff, **meta: Any) -> dict[str, Any]:
+    """The ``diff.json`` document: format and engine metadata, ``meta``
+    (version ids, compared files with sha256, ``created_at`` ...) and the
+    diff itself (:func:`diff_to_dict`).
+    """
+    try:
+        from sandroid import __version__ as sandroid_version
+    except Exception:  # pragma: no cover - partial installs
+        sandroid_version = "unknown"
+    doc: dict[str, Any] = {
+        "schema": DIFF_SCHEMA,
+        "schema_version": DIFF_SCHEMA_VERSION,
+        "engine": {
+            "name": "sandroid.core.file_inspect.structured_diff",
+            "version": ENGINE_VERSION,
+            "sandroid": sandroid_version,
+        },
+    }
+    doc.update(meta)
+    doc.update(diff_to_dict(diff))
+    return doc
+
+
+def _plain_value(value: Any, column: str = "") -> str:
+    """A value for ``diff.txt``: raw, plus a readable time for epoch-like ints."""
+    text = format_value(value)
+    hint = timestamp_hint(value, column, with_offset=True)
+    return f"{text}  ({hint})" if hint else text
+
+
+def _plain_header(doc: dict[str, Any], diff: StructuredDiff) -> list[str]:
+    out: list[str] = []
+    head = (
+        f"{doc.get('file') or doc.get('device_path') or ''}  {doc.get('version') or ''}"
+    )
+    if doc.get("base_version"):
+        head += f"  <-  {doc['base_version']}"
+    out.append(head.strip())
+    out.append(f"{diff.kind} · {doc.get('summary') or diff.summary()}")
+    if doc.get("created_at"):
+        out.append(f"created {doc['created_at']}")
+    compared = doc.get("compared") or {}
+    for side in ("base", "new"):
+        for f in compared.get(side) or []:
+            out.append(
+                f"{side:<4} {f.get('file')}  {f.get('size')} B  "
+                f"sha256 {f.get('sha256') or '?'}"
+            )
+    out.append("")
+    return out
+
+
+def _plain_tables(diff: StructuredDiff) -> list[str]:
+    out: list[str] = []
+    for t in diff.tables:
+        line = f"Table {t.name}  ({t.counts_text()})"
+        if t.note:
+            line += f"  -- {t.note}"
+        out.append(line)
+        width = max((len(c) for c in t.columns), default=0)
+        for r in t.rows:
+            out.append(f"  {r.op.upper()}  {r.key_text}".rstrip())
+            if r.op == "update":
+                for c, old, new in r.changes:
+                    out.append(
+                        f"    {c:<{width}}  {_plain_value(old, c)}  ->  "
+                        f"{_plain_value(new, c)}"
+                    )
+            else:
+                for c, v in r.values.items():
+                    out.append(f"    {c:<{width}}  {_plain_value(v, c)}")
+        if t.truncated:
+            out.append(f"  ... {t.total - len(t.rows)} more changed rows not listed")
+        out.append("")
+    return out
+
+
+def render_plain_diff(doc: dict[str, Any]) -> str:
+    """``diff.txt``: a ``diff.json`` document as plain text for people.
+
+    No markup. SQLite rows with column names and raw values (epoch-like
+    values followed by a readable local time with UTC offset); preference /
+    JSON keys with their type; text as unified hunks; binary as sizes,
+    hashes and the bytes around the first difference.
+    """
+    diff = diff_from_dict(doc)
+    out = _plain_header(doc, diff)
+    if diff.error:
+        out.append(f"Could not diff: {diff.error}")
+    elif diff.empty:
+        out.append(diff.note or "No change.")
+    out.extend(_plain_tables(diff))
+    for k in diff.keys:
+        typ = f" ({k.type})" if k.type else ""
+        if k.op == "changed":
+            out.append(
+                f"CHANGED  {k.key}{typ}: {_plain_value(k.old, k.key)}  ->  "
+                f"{_plain_value(k.new, k.key)}"
+            )
+        elif k.op == "added":
+            out.append(f"ADDED    {k.key}{typ} = {_plain_value(k.new, k.key)}")
+        else:
+            out.append(f"REMOVED  {k.key}{typ} = {_plain_value(k.old, k.key)}")
+    for h in diff.hunks:
+        olds = sum(1 for ln in h.lines if ln.tag != "+")
+        news = sum(1 for ln in h.lines if ln.tag != "-")
+        out.append(f"@@ -{h.old_start},{olds} +{h.new_start},{news} @@")
+        out.extend(f"{ln.tag}{ln.text}" for ln in h.lines)
+    b = diff.binary
+    if b is not None and not diff.empty:
+        out.append(f"Binary  {b.old_size} B  ->  {b.new_size} B")
+        out.append(f"  sha256 old {b.old_sha256}")
+        out.append(f"  sha256 new {b.new_sha256}")
+        if b.offset is not None:
+            out.append(f"  first difference at byte {b.offset}")
+            out.append(f"  old @{b.window_start}: {b.old_bytes.hex(' ')}")
+            out.append(f"  new @{b.window_start}: {b.new_bytes.hex(' ')}")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+# ---------------------------------------------------------------------------
 # content preview
 # ---------------------------------------------------------------------------
 
@@ -1364,6 +1722,9 @@ def preview_file(
 
 
 __all__ = [
+    "DIFF_SCHEMA",
+    "DIFF_SCHEMA_VERSION",
+    "ENGINE_VERSION",
     "BinaryChange",
     "Blob",
     "KeyChange",
@@ -1375,6 +1736,9 @@ __all__ = [
     "TextHunk",
     "TextLine",
     "detect_kind",
+    "diff_document",
+    "diff_from_dict",
+    "diff_to_dict",
     "flatten_json",
     "flatten_xml",
     "format_size",
@@ -1384,6 +1748,7 @@ __all__ = [
     "parse_text_diff",
     "preview_file",
     "readable_sqlite_copy",
+    "render_plain_diff",
     "split_sql_values",
     "structured_diff",
     "timestamp_hint",

@@ -696,3 +696,123 @@ def test_update_columns_keep_statement_order(tmp_path, monkeypatch):
     monkeypatch.setattr(file_diff, "_run_sqldiff", lambda a, b: next(runs))
     diff = file_diff._db_diff_copies("a", "b", "a")
     assert diff.index("zeta") < diff.index("alpha") < diff.index("mid")
+
+
+# ---------------------------------------------------------------------------
+# Run results hold plain diff text; markup only where it is displayed
+# ---------------------------------------------------------------------------
+
+_LEGACY_LINE = (
+    "\t\\[[success]INSERT[/success]] Table \\[t] row "
+    "\\[[success]2,'b'[/success]] has been added"
+)
+_LEGACY_UPDATE = (
+    "\t\\[[warning]UPDATE[/warning]] Table \\[t] row where \\[id=1] "
+    "changed: v=([warning]a → b[/warning])"
+)
+
+
+def _run_record(run_id: str, changed: list):
+    from sandroid.core import run_history
+
+    return run_history.RunRecord(
+        schema_version=run_history.SCHEMA_VERSION,
+        run_id=run_id,
+        label="",
+        recorded_at="",
+        completed_at="",
+        device_name="",
+        recording_path="",
+        duration=0,
+        changed_files=changed,
+    )
+
+
+def test_run_results_contain_no_display_markup(tmp_path, monkeypatch, fake_sqldiff):
+    raw = tmp_path / "raw"
+    monkeypatch.setenv("RAW_RESULTS_PATH", f"{raw}/")
+    rel = "data/data/x/databases/a.db"
+    _plain_db(raw / "first_pull" / rel, ["x"])
+    _plain_db(raw / "second_pull" / rel, ["x", "[bold]y"])
+    cf = _changed_files(raw, [f"/{rel}"])
+
+    out = cf.return_data()["Changed Files"]
+    lines = out[0][f"/{rel}"]
+    joined = "\n".join(lines)
+    for tag in ("[success]", "[warning]", "[error]", "[/", "\\["):
+        assert tag not in joined
+    assert joined == "\t[INSERT] Table [t] row [2,'[bold]y'] has been added"
+
+    # Sealed as-is: the results JSON keeps the data's brackets ...
+    cleaned = run_report.sanitize_results({"Changed Files": out})
+    assert cleaned["Changed Files"][0][f"/{rel}"] == lines
+    # ... and so does the run record (run.json).
+    from sandroid.core import run_history
+
+    record = _run_record("r1", out)
+    (row,) = run_history.file_diff_rows(record)
+    assert row.diff == lines
+
+    # The console still gets colour, with the data escaped.
+    from rich.text import Text
+
+    printed = file_diff.diff_markup(joined)
+    assert printed.startswith("\t\\[[success]INSERT[/success]]")
+    assert Text.from_markup(printed).plain == joined
+    console = cf.pretty_print()
+    assert "\\[[success]INSERT[/success]]" in console
+    assert "[2,'[bold]y'] has been added" in Text.from_markup(console).plain
+
+
+def test_old_runs_with_markup_are_stripped_when_shown_or_exported():
+    """Runs recorded before the change keep working: legacy lines are
+    rendered (TUI), stripped for exports (results JSON, AI, zoom export).
+    """
+    from rich.text import Text
+
+    from sandroid.tui.widgets.files_panel import diff_line_text, render_diff
+
+    assert file_diff.is_legacy_markup_line(_LEGACY_LINE)
+    assert not file_diff.is_legacy_markup_line("\t[INSERT] Table [t] row [1]")
+    plain = "\t[INSERT] Table [t] row [2,'b'] has been added"
+    assert file_diff.plain_diff_line(_LEGACY_LINE) == plain
+    assert file_diff.plain_diff_line(_LEGACY_UPDATE) == (
+        "\t[UPDATE] Table [t] row where [id=1] changed: v=(a → b)"
+    )
+    # Plain lines are never run through a markup parser.
+    data = "\t[INSERT] Table [t] row [1,'[bold]x[/bold]'] has been added"
+    assert file_diff.plain_diff_line(data) == data
+    assert diff_line_text(data).plain == data
+    # TUI: both forms render to the same text, both coloured.
+    assert diff_line_text(_LEGACY_LINE).plain == diff_line_text(plain).plain
+    assert diff_line_text(plain).spans
+    assert "[success]" not in render_diff([_LEGACY_LINE, plain]).plain
+    # Results JSON / PDF input.
+    cleaned = run_report.sanitize_results(
+        {"Changed Files": [{"/a.db": [_LEGACY_LINE, _LEGACY_UPDATE, data]}]}
+    )
+    assert cleaned["Changed Files"][0]["/a.db"] == [
+        plain,
+        "\t[UPDATE] Table [t] row where [id=1] changed: v=(a → b)",
+        data,
+    ]
+    # Zoom view / export: markup lines rendered, plain lines escaped.
+    zoom = file_diff.diff_markup(["~ /a.db", f"    {_LEGACY_LINE}", f"    {data}"])
+    assert Text.from_markup(zoom).plain.splitlines() == [
+        "~ /a.db",
+        f"    {plain}",
+        f"    {data}",
+    ]
+
+
+def test_ai_run_detail_strips_legacy_markup(monkeypatch):
+    from sandroid.ai.tools import recording_control
+    from sandroid.core import run_history
+
+    record = _run_record("old", [{"/a.db": [_LEGACY_LINE]}, "/b.bin"])
+    monkeypatch.setattr(run_history, "load_run", lambda run_id: record)
+    data = recording_control.get_run_detail("old")
+    assert data["changed_files"][0]["/a.db"] == (
+        "\t[INSERT] Table [t] row [2,'b'] has been added"
+    )
+    assert data["changed_files"][1] == "/b.bin"

@@ -46,8 +46,21 @@ _SQLDIFF_OLD = (
     "INSERT INTO moz_bookmarks(id,type,title) VALUES(9,1,'gone, really');\n"
 )
 
-#: The exact text ``db_diff`` produced before this change (sealed run
-#: results and the CLI print it): byte-for-byte.
+#: The exact text ``db_diff`` produces (sealed run results, the AI tools):
+#: plain text, no display markup.
+_DB_PLAIN = (
+    "\t[INSERT] Table [moz_historyvisits] row "
+    "[6,1,NULL,6,1794994868383,6,NULL] has been added\n"
+    "\t[UPDATE] Table [moz_meta] row where "
+    "[\"key\"='origin_frecency_count'] changed: value=(4 → 7)\n"
+    "\t[UPDATE] Table [moz_places] row where [id=2] "
+    "changed: visit_count=(2 → 3), frecency=(274 → 374)\n"
+    "\t[DELETE] Table [moz_bookmarks] row "
+    "[9,1,'gone, really'] has been removed"
+)
+
+#: What ``db_diff`` produced before diffs became plain text (runs recorded
+#: then still hold it): Rich markup in every line.
 _DB_TEXT = (
     "\t\\[[success]INSERT[/success]] Table \\[moz_historyvisits] row "
     "\\[[success]6,1,NULL,6,1794994868383,6,NULL[/success]] has been added\n"
@@ -82,8 +95,9 @@ _TXT_TEXT = (
 
 
 def test_existing_text_diff_formats_are_byte_identical(tmp_path, monkeypatch):
-    """The text diffs (``diff.txt``, run results, ``changedfiles``, CLI) are
-    exactly what they were; the structured diff is computed next to them.
+    """The text diffs (run results, ``changedfiles``, CLI) are plain text --
+    SQLite lines without the display markup they used to carry, XML and line
+    diffs exactly what they were; the structured diff is computed next to them.
     """
     calls = []
 
@@ -93,7 +107,16 @@ def test_existing_text_diff_formats_are_byte_identical(tmp_path, monkeypatch):
         return (_SQLDIFF_OLD if len(calls) == 1 else _SQLDIFF_NEW), None
 
     monkeypatch.setattr(file_diff, "_run_sqldiff", fake_run)
-    assert file_diff._db_diff_copies("old.db", "new.db", "old.db") == _DB_TEXT
+    db_text = file_diff._db_diff_copies("old.db", "new.db", "old.db")
+    assert db_text == _DB_PLAIN
+    # The legacy markup form is the same text once its markup is removed.
+    assert [file_diff.plain_diff_line(x) for x in _DB_TEXT.splitlines()] == (
+        _DB_PLAIN.splitlines()
+    )
+    # And both parse to the same structure.
+    assert fi.parse_text_diff(_DB_PLAIN).summary() == (
+        fi.parse_text_diff(_DB_TEXT).summary()
+    )
 
     pairs = write_pairs(tmp_path)
     old_xml, new_xml = pairs["xml"]
@@ -397,3 +420,82 @@ def test_flatten_json_paths():
         "a.b[1].c": ("null", None),
         "e": ("dict", {}),
     }
+
+
+# ---------------------------------------------------------------------------
+# diff.json round trip and the plain diff.txt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["sqlite", "xml", "json", "text", "binary"])
+def test_diff_json_round_trips_every_kind(tmp_path, kind):
+    old, new = write_pairs(tmp_path)[kind]
+    diff = fi.structured_diff(old, new)
+    assert not diff.empty
+    doc = json.loads(json.dumps(fi.diff_document(diff, version="v002_10-00-00")))
+    assert doc["schema"] == fi.DIFF_SCHEMA
+    assert doc["engine"]["version"] == fi.ENGINE_VERSION
+    assert doc["kind"] == diff.kind
+    assert doc["changed"] is True
+    assert doc["summary"] == diff.summary()
+    back = fi.diff_from_dict(doc)
+    assert back.source == "json"
+    assert back.summary() == diff.summary()
+    assert back.counts() == diff.counts()
+    assert fi.diff_to_dict(back) == fi.diff_to_dict(diff)
+    text = fi.render_plain_diff(doc)
+    assert text.endswith("\n")
+    for tag in ("[success]", "[warning]", "[error]", "[/"):
+        assert tag not in text
+
+
+def test_diff_json_keeps_blobs_and_odd_floats():
+    table = fi.TableDiff(name="t", columns=["id", "data", "x"], inserted=1)
+    table.rows.append(
+        fi.RowChange(
+            "insert",
+            key=[("id", 1)],
+            values={"id": 1, "data": fi.Blob(3, b"\x00\x01\x02"), "x": float("nan")},
+        )
+    )
+    diff = fi.StructuredDiff(kind="sqlite", tables=[table])
+    doc = json.loads(json.dumps(fi.diff_document(diff), allow_nan=False))
+    row = doc["tables"][0]["rows"][0]
+    assert row["key"] == {"id": 1}
+    assert row["values"]["data"] == {"$blob": {"size": 3, "head_hex": "000102"}}
+    assert row["values"]["x"] == {"$float": "nan"}
+    back = fi.diff_from_dict(doc).tables[0].rows[0].values
+    assert back["data"] == fi.Blob(3, b"\x00\x01\x02")
+    assert "<blob 3 B>" in fi.render_plain_diff(doc)
+
+
+def test_plain_diff_txt_names_columns_and_converts_times(tmp_path):
+    old, new = write_pairs(tmp_path)["sqlite"]
+    doc = fi.diff_document(
+        fi.structured_diff(old, new),
+        file="places.sqlite",
+        version="v002_10-00-00",
+        base_version="v001_09-59-00",
+        created_at="2026-11-18T10:00:00+01:00",
+        compared={"base": [{"file": "places.sqlite", "size": 1, "sha256": "ab"}]},
+    )
+    text = fi.render_plain_diff(doc)
+    lines = text.splitlines()
+    assert lines[0] == "places.sqlite  v002_10-00-00  <-  v001_09-59-00"
+    assert "created 2026-11-18T10:00:00+01:00" in lines
+    assert "base places.sqlite  1 B  sha256 ab" in lines
+    assert any(ln.startswith("Table moz_historyvisits  (+") for ln in lines)
+    assert any(ln.startswith("  INSERT  id=") for ln in lines)
+    visit = next(ln for ln in lines if ln.strip().startswith("visit_date"))
+    assert "ms epoch" in visit
+    assert visit.split()[1].isdigit()  # the raw value first, then the hint
+    assert "  ->  " in text
+
+
+def test_timestamp_hint_with_offset():
+    plain = fi.timestamp_hint(T_MS)
+    with_offset = fi.timestamp_hint(T_MS, with_offset=True)
+    assert plain
+    assert with_offset.startswith(plain)
+    assert with_offset.endswith(", ms epoch")
+    assert with_offset[len(plain) : len(plain) + 1] in "+-"

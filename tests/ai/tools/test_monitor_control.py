@@ -17,7 +17,7 @@ import pytest
 
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools import monitor_control
-from sandroid.core import file_diff, watchlist_store
+from sandroid.core import watchlist_store
 from sandroid.services import file_extraction_service
 from sandroid.tui import controller_registry
 
@@ -279,7 +279,11 @@ def test_get_file_diff_first_pull_reports_baseline(monkeypatch, tmp_path):
     promoted: list[str] = []
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: False)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
-    monkeypatch.setattr(watchlist_store, "promote", promoted.append)
+    monkeypatch.setattr(
+        watchlist_store,
+        "keep_version",
+        lambda path: promoted.append(path) or watchlist_store.KeptVersion(tmp_path),
+    )
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
@@ -302,38 +306,58 @@ def test_get_file_diff_changed(monkeypatch, tmp_path):
     previous_dir = tmp_path / "previous"
     previous_dir.mkdir()
 
-    promoted: list[str] = []
+    from sandroid.core.file_inspect import KeyChange, StructuredDiff
+
+    kept_paths: list[str] = []
+    changed = StructuredDiff(kind="xml", keys=[KeyChange("k", "added", new="1")])
+
+    def fake_keep_version(path):
+        kept_paths.append(path)
+        return watchlist_store.KeptVersion(tmp_path, changed, "some diff text")
+
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: True)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
     monkeypatch.setattr(watchlist_store, "previous_dir", lambda path: previous_dir)
-    monkeypatch.setattr(
-        watchlist_store,
-        "promote",
-        lambda path, diff=None: promoted.append((path, diff)),
-    )
+    monkeypatch.setattr(watchlist_store, "keep_version", fake_keep_version)
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
-
-    captured_diff_args: dict = {}
-
-    def fake_diff_files(previous_main, current_main, is_sqlite_fn):
-        captured_diff_args["previous_main"] = previous_main
-        captured_diff_args["current_main"] = current_main
-        captured_diff_args["is_sqlite_fn"] = is_sqlite_fn
-        return "some diff text", True
-
-    monkeypatch.setattr(file_diff, "diff_files", fake_diff_files)
 
     result = monitor_control.get_file_diff("/data/data/com.example/prefs.xml")
 
     assert result["baseline"] is False
     assert result["changed"] is True
     assert result["diff"] == "some diff text"
-    assert captured_diff_args["previous_main"] == previous_dir / "prefs.xml"
-    assert captured_diff_args["current_main"] == current_dir / "prefs.xml"
-    # The pull is kept as a version together with its diff.
-    assert promoted == [("/data/data/com.example/prefs.xml", "some diff text")]
+    # The pull is kept as a version (diff.json + diff.txt) through the store.
+    assert kept_paths == ["/data/data/com.example/prefs.xml"]
+
+
+def test_get_file_diff_keeps_a_real_version_with_diff_json(monkeypatch, tmp_path):
+    """End to end through the real store: plain diff text, diff.json written."""
+    forensic = _FakeForensicService()
+    contents = iter(["a\n", "a\nb\n"])
+
+    class _Fx:
+        def pull_file(self, remote, local):
+            from pathlib import Path
+
+            Path(local).write_text(next(contents), encoding="utf-8")
+            return type("R", (), {"success": True, "error": None})()
+
+    monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
+    monkeypatch.setattr("sandroid.services.get_file_extraction_service", _Fx)
+    monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
+
+    path = "/data/data/com.example/notes.txt"
+    first = monitor_control.get_file_diff(path)
+    second = monitor_control.get_file_diff(path)
+
+    assert first["baseline"] is True
+    assert second["changed"] is True
+    assert "+b" in second["diff"]
+    assert "[success]" not in second["diff"]
+    newest = watchlist_store.version_dirs(path)[-1]
+    assert watchlist_store.version_diff_doc(newest)["kind"] == "text"
 
 
 def test_get_file_diff_unchanged(monkeypatch, tmp_path):
@@ -347,13 +371,18 @@ def test_get_file_diff_unchanged(monkeypatch, tmp_path):
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: True)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
     monkeypatch.setattr(watchlist_store, "previous_dir", lambda path: previous_dir)
-    monkeypatch.setattr(watchlist_store, "promote", lambda path, *_diff: None)
+    from sandroid.core.file_inspect import StructuredDiff
+
+    monkeypatch.setattr(
+        watchlist_store,
+        "keep_version",
+        lambda path: watchlist_store.KeptVersion(
+            tmp_path, StructuredDiff(kind="text"), "No change.\n"
+        ),
+    )
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: False)
-    monkeypatch.setattr(
-        file_diff, "diff_files", lambda *a, **kw: ("\tNo changes detected", False)
-    )
 
     result = monitor_control.get_file_diff("/data/data/com.example/prefs.xml")
 
@@ -370,7 +399,11 @@ def test_get_file_diff_pulls_sqlite_companions(monkeypatch, tmp_path):
 
     monkeypatch.setattr(watchlist_store, "has_baseline", lambda path: False)
     monkeypatch.setattr(watchlist_store, "reset_current", lambda path: current_dir)
-    monkeypatch.setattr(watchlist_store, "promote", lambda path, *_diff: None)
+    monkeypatch.setattr(
+        watchlist_store,
+        "keep_version",
+        lambda path: watchlist_store.KeptVersion(tmp_path),
+    )
     monkeypatch.setattr("sandroid.services.get_forensic_service", lambda: forensic)
     monkeypatch.setattr("sandroid.services.get_file_extraction_service", lambda: fx)
     monkeypatch.setattr(file_extraction_service, "is_sqlite_file", lambda p: True)

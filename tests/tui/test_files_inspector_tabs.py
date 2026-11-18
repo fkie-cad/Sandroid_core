@@ -435,7 +435,7 @@ def test_versions_tab_shows_the_acquisition_record(tmp_path):
     text = _sections_text(fins.versions_sections(PLACES), 70)
     assert "pulled" in text
     assert "auto" in text
-    assert "device sha256 = local ✓ · mtime" in text
+    assert "device sha256 = local ✓ · changed" in text
     # A copy that does not match the on-device sha256 is flagged.
     record = store.version_record(dirs[-1])
     record["sha256_match"] = False
@@ -457,3 +457,153 @@ def test_listing_versions_of_an_unpulled_file_creates_no_folder(tmp_path):
     assert fins.versions_sections(PLACES)
     assert fins.content_sections(PLACES)
     assert not root.exists() or not any(root.rglob("*"))
+
+
+# ---------------------------------------------------------------------------
+# diff.json, "checked, no change" lines and the file-set hash line
+# ---------------------------------------------------------------------------
+
+
+def _keep(path: str, src: Path, when: datetime, record: dict | None = None) -> Path:
+    """One version kept the way the Files lens keeps it (``keep_version``:
+    acquisition.json + diff.json + diff.txt).
+    """
+    staging = store.reset_current(path)
+    for suffix in ("", "-wal"):
+        if Path(f"{src}{suffix}").exists():
+            shutil.copyfile(f"{src}{suffix}", staging / f"{src.name}{suffix}")
+    return store.keep_version(path, record, when).dir
+
+
+def test_versions_tab_reads_diff_json_not_the_copies(tmp_path):
+    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    _keep(PLACES, make_places(tmp_path / "a" / "places.sqlite", 1), t0)
+    v2 = _keep(
+        PLACES,
+        make_places(tmp_path / "b" / "places.sqlite", 2),
+        t0 + timedelta(minutes=1),
+    )
+    doc = store.version_diff_doc(v2)
+    assert doc["kind"] == "sqlite"
+    # Prove the Inspector draws diff.json: rename a table there only, and
+    # drop the copies (a diff is still shown, from the record).
+    doc["tables"][0]["name"] = "renamed_in_diff_json"
+    doc["summary"] = "renamed_in_diff_json +1"
+    (v2 / "diff.json").write_text(json.dumps(doc), encoding="utf-8")
+    for version in store.version_dirs(PLACES):
+        (version / "places.sqlite").unlink()
+    fins.clear_caches()
+    text = _sections_text(fins.versions_sections(PLACES), 90)
+    assert "renamed_in_diff_json" in text
+    assert "Column names: the stored text diff has none" not in text
+    assert "visit_date" in text or "frecency" in text or "id" in text
+
+
+def test_checks_collapse_into_one_line_between_versions(tmp_path):
+    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    _keep(PLACES, make_places(tmp_path / "a" / "places.sqlite", 1), t0)
+    _keep(
+        PLACES,
+        make_places(tmp_path / "b" / "places.sqlite", 2),
+        t0 + timedelta(minutes=2),
+    )
+    for minute, trigger in ((1, "auto"), (1, "auto")):
+        store.append_check(
+            PLACES,
+            {
+                "at": store.iso_tz(t0 + timedelta(minutes=minute, seconds=7)),
+                "trigger": trigger,
+                "event_at": None,
+                "device_sha256": {"places.sqlite": "a" * 64},
+                "same_as": "v001",
+                "note": "no change",
+            },
+        )
+    store.append_check(
+        PLACES,
+        {
+            "at": store.iso_tz(t0 + timedelta(minutes=3)),
+            "trigger": "manual",
+            "same_as": "v002",
+            "note": "no change",
+        },
+    )
+    fins.clear_caches()
+    listing = _render(fins.versions_sections(PLACES)[0][1], 90).splitlines()
+    assert len(listing) == 4
+    assert listing[0].lstrip().startswith("·")
+    assert "manual" in listing[0]
+    assert "checked, no change" in listing[0]
+    assert "×" not in listing[0]
+    assert "v2" in listing[1]
+    stamp = (t0 + timedelta(minutes=1, seconds=7)).strftime("%H:%M:%S")
+    assert stamp in listing[2]
+    assert "auto" in listing[2]
+    assert "checked, no change (2×)" in listing[2]
+    assert "v1" in listing[3]
+    # A click on a check line selects the version it found unchanged.
+    assert fins.select_version_row(PLACES, 2) is True
+    assert fins.state_for(PLACES).selected == store.version_dirs(PLACES)[0].name
+    assert fins.select_version_row(PLACES, 1) is True
+    assert fins.state_for(PLACES).selected is None  # v2 = newest
+    assert fins.select_version_row(PLACES, 4) is False
+
+
+def test_the_hash_line_covers_the_wal(tmp_path):
+    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    src = make_places(tmp_path / "a" / "places.sqlite", 3, wal=True)
+    main_sha = hashlib.sha256(src.read_bytes()).hexdigest()
+    wal = Path(f"{src}-wal")
+    wal_sha = hashlib.sha256(wal.read_bytes()).hexdigest()
+    mtime = int(t0.timestamp())
+    record = {
+        "schema_version": 2,
+        "device_path": PLACES,
+        "device": {"mtime": mtime - 60, "size": src.stat().st_size, "sha256": main_sha},
+        "local": {
+            "file": "places.sqlite",
+            "size": src.stat().st_size,
+            "sha256": main_sha,
+        },
+        "companions": [
+            {
+                "device_path": f"{PLACES}-wal",
+                "device": {
+                    "mtime": mtime,
+                    "size": wal.stat().st_size,
+                    "sha256": wal_sha,
+                },
+                "local": {
+                    "file": "places.sqlite-wal",
+                    "size": wal.stat().st_size,
+                    "sha256": wal_sha,
+                },
+                "sha256_match": True,
+            }
+        ],
+        "set": {
+            "local_sha256": store.set_sha256(
+                {"places.sqlite": main_sha, "places.sqlite-wal": wal_sha}
+            ),
+            "missing_locally": [],
+        },
+        "sha256_match": True,
+        "pulled_at": store.iso_tz(t0),
+        "trigger": "auto",
+    }
+    version = _keep(PLACES, src, t0, record)
+    text = _sections_text(fins.versions_sections(PLACES), 100)
+    set_sha = record["set"]["local_sha256"]
+    assert f"sha256 (db+wal) {set_sha[:10]}" in text
+    assert main_sha[:10] not in text  # not the main file's hash alone
+    assert "device sha256 = local ✓ (both)" in text
+    assert f"changed {t0:%H:%M:%S} (wal)" in text
+    assert " wal" in text.split("pulled", 1)[1].splitlines()[0]  # "… + 2.0 KB wal"
+    # A WAL that differs from the device is named.
+    stored = store.version_record(version)
+    stored["companions"][0]["device"]["sha256"] = "0" * 64
+    stored["sha256_match"] = False
+    (version / "acquisition.json").write_text(json.dumps(stored), encoding="utf-8")
+    fins.clear_caches()
+    text = _sections_text(fins.versions_sections(PLACES), 100)
+    assert "device sha256 ≠ local ✗ (wal)" in text

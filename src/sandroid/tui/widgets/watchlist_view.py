@@ -14,9 +14,16 @@ workers.
 **Storage** (``core/watchlist_store.py``): the ★ membership persists per
 package in the user config directory; every pull is a new version folder in
 the *session results folder* (``files/<package>/<app path>/vNNN_HH-MM-SS/``)
-with the copy, ``diff.txt`` and ``acquisition.json`` (device path, device
-mtime + size, the sha256 computed on the device before the pull, the local
-sha256 after it, the pull time and the trigger). Nothing is pruned.
+with the copy, ``diff.json`` (structured, canonical) + ``diff.txt`` (plain
+text rendered from it) and ``acquisition.json`` (device path; per member --
+the file and its ``-wal``/``-journal`` -- the device mtime + size, the sha256
+computed on the device before the pull and the local sha256 after it; the
+combined set hash; pull time, trigger and the active mark). Nothing is
+pruned. A pull whose on-device hashes equal the newest version's keeps no
+copy: it is one line in ``checks.jsonl`` (shown as "checked, no change").
+
+**Baseline**: ``w``/``n`` pull a first version of every newly watched file
+right away (``trigger: "watch"``), so the first change can be diffed.
 
 **Auto-pull on change** (``tui.auto_pull_on_change``, default on): there is
 ONE change detector, the file monitor. The lens hands every write it sees
@@ -95,15 +102,84 @@ class _RowInfo:
     diff_text: str | None = None  # last computed diff, if state is CHANGED
     # -- last successful pull (shown in the Inspector) ---------------------
     pulled_at: str | None = None  #: ISO timestamp
-    size: int | None = None  #: bytes of the main file
-    sha256: str | None = None  #: of the main file (local copy)
+    size: int | None = None  #: bytes of the file + its -wal/-journal
+    #: combined sha256 of the local copy's set (file + -wal/-journal; see
+    #: ``watchlist_store.set_sha256``)
+    sha256: str | None = None
     version: str | None = None  #: name of the version folder
+    checked_at: str | None = None  #: last "checked, no change" (ISO)
 
 
 #: SQLite files that belong to a database: pulled with it (a WAL-mode write
 #: only touches ``-wal`` until a checkpoint). ``-shm`` is left out on
 #: purpose: it changes on every read.
-SQLITE_COMPANIONS = ("-wal", "-journal")
+SQLITE_COMPANIONS = watchlist_store.SQLITE_COMPANIONS
+
+
+def device_set_of(
+    path: str, basename: str, device: dict[str, dict]
+) -> dict[str, str] | None:
+    """``{file name: sha256}`` of the file and the companions present on the
+    device, from ``_device_facts``; ``None`` when a hash is missing (no
+    comparison with the newest version is possible then).
+    """
+    out: dict[str, str] = {}
+    for suffix in ("", *SQLITE_COMPANIONS):
+        entry = device.get(path + suffix)
+        if entry is None:
+            if not suffix:
+                return None  # the file itself must be there
+            continue
+        sha = entry.get("sha256")
+        if not sha:
+            return None
+        out[basename + suffix] = sha
+    return out
+
+
+def _set_summary(
+    path: str,
+    basename: str,
+    device: dict[str, dict],
+    main_local: dict,
+    companions: list[dict],
+) -> dict:
+    """The ``set`` block of an acquisition record (file + -wal/-journal)."""
+    local = {
+        e["file"]: e["sha256"]
+        for e in [main_local, *(c["local"] for c in companions)]
+        if e.get("sha256")
+    }
+    device_members = device_set_of(path, basename, device)
+    mismatched = sorted(
+        name
+        for name, sha in local.items()
+        if device_members and device_members.get(name) not in (None, sha)
+    )
+    missing = sorted(set(device_members or {}) - set(local))
+    newest_member, newest = None, None
+    for suffix in ("", *SQLITE_COMPANIONS):
+        mtime = (device.get(path + suffix) or {}).get("mtime")
+        if isinstance(mtime, int) and (newest is None or mtime > newest):
+            newest_member, newest = basename + suffix, mtime
+    sizes = [main_local.get("size"), *(c["local"].get("size") for c in companions)]
+    return {
+        "hash": "sha256 over the sorted '<file name> <sha256>' lines of the members",
+        "members": sorted(local),
+        "device": device_members or {},
+        "local": local,
+        "device_sha256": (
+            watchlist_store.set_sha256(device_members) if device_members else None
+        ),
+        "local_sha256": watchlist_store.set_sha256(local) if local else None,
+        "match": None if not device_members else not (mismatched or missing),
+        "mismatched": mismatched,
+        "missing_locally": missing,
+        "size": sum(s for s in sizes if isinstance(s, int)),
+        "newest_member": newest_member,
+        "newest_mtime": newest,
+        "newest_mtime_iso": watchlist_store.iso_tz(newest) if newest else None,
+    }
 
 
 def _file_facts(path: Path) -> tuple[int | None, str | None]:
@@ -190,6 +266,9 @@ class WatchlistView(Widget):
         self._auto_timers: dict[str, tuple[object, datetime]] = {}
         #: Paths with a pull in flight (a write meanwhile re-arms the timer).
         self._pulling: set[str] = set()
+        #: The session's marks (``lens_shell.Mark``), kept current by the
+        #: Files lens: each kept version records the mark it was pulled in.
+        self.marks: list = []
 
     def compose(self):
         return ()
@@ -333,6 +412,7 @@ class WatchlistView(Widget):
         if "*" in path and path in self._watched_patterns:
             self._notify(f"Already watching: {path}", "warning")
             return False
+        before = set(self._rows)
         # add_spotlight_file() expands a wildcard through a device listing.
         added = forensic.add_spotlight_file(path, adb=self._adb())
         if "*" in path:
@@ -344,8 +424,24 @@ class WatchlistView(Widget):
             return False
         self._persist_index()
         self._reload_rows()
-        self._notify(f"Watching {path}")
+        baseline = self._pull_baselines(sorted(set(self._rows) - before))
+        tail = ""
+        if baseline == 1:
+            tail = " — pulling a first version"
+        elif baseline:
+            tail = f" — pulling first versions of {baseline} files"
+        self._notify(f"Watching {path}{tail}")
         return True
+
+    def _pull_baselines(self, paths: list[str]) -> int:
+        """Pull a first version (v001) of newly watched files right away, so
+        the first change after watching can be diffed. Files that already
+        have versions in this session are left alone. Returns how many.
+        """
+        todo = [p for p in paths if not watchlist_store.has_baseline(p)]
+        if todo:
+            self._start_pull(todo, trigger="watch")
+        return len(todo)
 
     def remove_path(self, path: str) -> bool:
         """Unwatch a literal path (its pulled versions stay on disk)."""
@@ -535,19 +631,35 @@ class WatchlistView(Widget):
     ) -> None:
         """Runs on a background thread (see ``_run_bg``).
 
-        Device facts (stat + sha256sum) first, then the pull (+ SQLite
-        companions) into the staging folder, the diff against the newest
-        version, and finally the new version folder with ``diff.txt`` and
-        ``acquisition.json``. Never touches widgets; reports via ``_post``.
+        Device facts (stat + sha256sum of the file and its ``-wal`` /
+        ``-journal``) first. When they equal the newest version's, nothing is
+        pulled: one line goes to ``checks.jsonl`` (version numbers count only
+        real changes). Otherwise the pull (+ SQLite companions) into the
+        staging folder, and -- unless the copy is byte-identical to the newest
+        version -- the new version folder with ``acquisition.json``,
+        ``diff.json`` and ``diff.txt`` (:func:`watchlist_store.keep_version`).
+        Never touches widgets; reports via ``_post``.
         """
         fx = get_file_extraction_service()
-        had_previous = watchlist_store.has_baseline(path)
         basename = os.path.basename(path.rstrip("/")) or "pulled_file"
         companions = [f"{path}{s}" for s in SQLITE_COMPANIONS]
         device = self._device_facts([path, *companions])
+        mark = self._active_mark(event_time or datetime.now())
+        dirs = watchlist_store.version_dirs(path)
+        latest = dirs[-1] if dirs else None
+        device_set = device_set_of(path, basename, device)
+        if latest is not None and device_set is not None:
+            known = watchlist_store.record_set(
+                watchlist_store.version_record(latest), "device"
+            )
+            if known == device_set:
+                self._record_check(
+                    path, latest, trigger, event_time, device_set, mark, "no change"
+                )
+                return
+
         current = watchlist_store.reset_current(path)
         current_main = current / basename
-
         result = fx.pull_file(path, str(current_main))
         if not result.success:
             self._post(
@@ -570,41 +682,87 @@ class WatchlistView(Widget):
                     if fx.pull_file(companion, local).success:
                         pulled_companions.append(companion)
 
-        facts = _file_facts(current_main)
         pulled_at = datetime.now()
         record = self._acquisition_record(
             path, current, basename, device, pulled_companions, pulled_at,
-            trigger, event_time,
+            trigger, event_time, mark,
         )  # fmt: skip
-        if not had_previous:
-            version = watchlist_store.promote(path, None, record, when=pulled_at)
+        file_set = record["set"]
+        facts = (file_set["size"], file_set["local_sha256"])
+        if latest is not None:
+            known_local = watchlist_store.record_set(
+                watchlist_store.version_record(latest), "local"
+            )
+            if known_local is not None and known_local == file_set["local"]:
+                # No device hash to compare first (no root?): the copy says it.
+                watchlist_store.discard_current(path)
+                self._record_check(
+                    path, latest, trigger, event_time, device_set or {}, mark,
+                    "no change (the pulled copy is identical)",
+                )  # fmt: skip
+                return
+
+        kept = watchlist_store.keep_version(path, record, pulled_at)
+        if latest is None:
             self._post(
                 self._apply_pull_result,
                 path,
                 RowState.BASELINE_ONLY,
-                self._baseline_message(version),
+                self._baseline_message(kept.dir),
                 None,
                 facts,
-                version.name,
+                kept.dir.name,
             )
             return
-
-        previous_main = watchlist_store.version_file(
-            watchlist_store.previous_dir(path), path
-        )
-        diff_text, changed = _compute_diff(previous_main, current_main)
-        version = watchlist_store.promote(
-            path, diff_text if changed else "", record, when=pulled_at
-        )
+        changed = kept.changed
         self._post(
             self._apply_pull_result,
             path,
             RowState.CHANGED if changed else RowState.UNCHANGED,
-            None if changed else "No changes since the version before.",
-            diff_text if changed else None,
+            None
+            if changed
+            else "Bytes changed (kept as a version), but no change in the content.",
+            kept.text if changed else None,
             facts,
-            version.name,
+            kept.dir.name,
         )
+
+    def _record_check(
+        self,
+        path: str,
+        latest: Path,
+        trigger: str,
+        event_time: datetime | None,
+        device_set: dict[str, str],
+        mark: dict | None,
+        note: str,
+    ) -> None:
+        """A pull found no change: one ``checks.jsonl`` line, no version."""
+        same_as = latest.name.split("_", 1)[0]
+        entry = watchlist_store.append_check(
+            path,
+            {
+                "at": watchlist_store.iso_tz(),
+                "trigger": trigger,
+                "event_at": watchlist_store.iso_tz(event_time) if event_time else None,
+                "device_sha256": device_set,
+                "same_as": same_as,
+                "note": note,
+                "mark": mark,
+            },
+        )
+        self._post(self._apply_check_result, path, latest.name, entry)
+
+    def _active_mark(self, when: datetime) -> dict | None:
+        """The mark whose segment ``when`` falls in (``None`` before the first)."""
+        active = None
+        for mark in list(self.marks):
+            mark_when = getattr(mark, "when", None)
+            if mark_when is not None and mark_when <= when:
+                active = mark
+        if active is None:
+            return None
+        return watchlist_store.mark_entry(active.number, active.name, active.when)
 
     @staticmethod
     def _acquisition_record(
@@ -616,8 +774,18 @@ class WatchlistView(Widget):
         pulled_at: datetime,
         trigger: str,
         event_time: datetime | None,
+        mark: dict | None = None,
     ) -> dict:
-        """The ``acquisition.json`` of one pull (see ``watchlist_store``)."""
+        """The ``acquisition.json`` of one pull (see ``watchlist_store``).
+
+        Per member (the file, and its pulled ``-wal``/``-journal``): the
+        device's mtime/size/sha256 and the local copy's size/sha256. ``set``
+        sums them up: the members' hashes on each side, one combined hash per
+        side (:func:`watchlist_store.set_sha256`), which members differ, the
+        total size and the newest device mtime -- the WAL is often the only
+        member that changed. ``sha256_match`` is the verdict for the whole
+        set.
+        """
 
         def _device_entry(device_path: str) -> dict:
             entry = device.get(device_path) or {}
@@ -625,9 +793,7 @@ class WatchlistView(Widget):
             return {
                 "mtime": mtime,
                 "mtime_iso": (
-                    datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
-                    if isinstance(mtime, int)
-                    else None
+                    watchlist_store.iso_tz(mtime) if isinstance(mtime, int) else None
                 ),
                 "size": entry.get("size"),
                 "sha256": entry.get("sha256"),
@@ -637,32 +803,42 @@ class WatchlistView(Widget):
             size, sha = _file_facts(current / name)
             return {"file": name, "size": size, "sha256": sha}
 
+        def _match(dev: dict, loc: dict) -> bool | None:
+            return (dev["sha256"] == loc["sha256"]) if dev["sha256"] else None
+
         main_device = _device_entry(path)
         main_local = _local_entry(basename)
-        device_sha, local_sha = main_device["sha256"], main_local["sha256"]
+        companion_entries = []
+        for companion in companions:
+            dev = _device_entry(companion)
+            loc = _local_entry(basename + companion[len(path) :])
+            companion_entries.append(
+                {
+                    "device_path": companion,
+                    "device": dev,
+                    "local": loc,
+                    "sha256_match": _match(dev, loc),
+                }
+            )
+        file_set = _set_summary(path, basename, device, main_local, companion_entries)
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "device_path": path,
             "package": watchlist_store.package_of(path),
             "device": main_device,
             "local": main_local,
-            "sha256_match": (device_sha == local_sha) if device_sha else None,
-            "companions": [
-                {
-                    "device_path": companion,
-                    "device": _device_entry(companion),
-                    "local": _local_entry(basename + companion[len(path) :]),
-                }
-                for companion in companions
-            ],
-            "pulled_at": pulled_at.isoformat(timespec="seconds"),
+            "sha256_match": file_set["match"],
+            "companions": companion_entries,
+            "set": file_set,
+            "pulled_at": watchlist_store.iso_tz(pulled_at),
             "trigger": trigger,
             "trigger_event_at": (
-                event_time.isoformat(timespec="seconds") if event_time else None
+                watchlist_store.iso_tz(event_time) if event_time else None
             ),
+            "mark": mark,
             "note": (
                 None
-                if device_sha
+                if main_device["sha256"]
                 else "no on-device sha256 (sha256sum failed: no root or no device)"
             ),
         }
@@ -672,11 +848,37 @@ class WatchlistView(Widget):
         files = [
             f
             for f in version.iterdir()
-            if f.is_file() and f.name not in ("acquisition.json", "diff.txt")
+            if f.is_file() and f.name not in watchlist_store.META_FILES
         ]
         total_bytes = sum(f.stat().st_size for f in files)
         plural = "s" if len(files) != 1 else ""
         return f"First version — {len(files)} file{plural}, {total_bytes} bytes."
+
+    def _apply_check_result(self, path: str, version: str, entry: dict) -> None:
+        """Main-thread callback: a pull found no change (nothing was kept)."""
+        self._pulling.discard(path)
+        info = self._rows.get(path)
+        if info is None:
+            return
+        at = str(entry.get("at") or "")
+        info.state = (
+            RowState.SETTLING if path in self._auto_timers else RowState.UNCHANGED
+        )
+        info.checked_at = at
+        info.diff_text = None
+        info.version = version
+        clock = at[11:19] if len(at) >= 19 else at
+        info.detail = (
+            f"Checked {clock}: no change since {entry.get('same_as') or version} "
+            "(on-device sha256 of the file and its -wal/-journal identical); "
+            "not pulled again."
+        )
+        if "identical" in str(entry.get("note") or ""):
+            info.detail = (
+                f"Checked {clock}: the pulled copy is identical to "
+                f"{entry.get('same_as') or version}, so it was not kept."
+            )
+        self._changed([path])
 
     def _apply_pull_result(
         self,

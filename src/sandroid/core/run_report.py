@@ -152,9 +152,13 @@ def sanitize_results(results: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of a results mapping that contains plain text only.
 
     ANSI sequences are removed from every string. The per-file diff lines in
-    ``"Changed Files"`` are produced for the console and additionally have
-    their Rich markup removed. The input is not modified.
+    ``"Changed Files"`` are plain text; legacy lines (runs recorded while the
+    diff engine still wrote Rich markup) additionally have their markup
+    removed. Plain lines are never run through the markup stripper, so data
+    in brackets survives. The input is not modified.
     """
+    from sandroid.core.file_diff import plain_diff_line
+
     cleaned = _deep_strip_ansi(copy.deepcopy(results))
     changed = cleaned.get("Changed Files")
     if isinstance(changed, list):
@@ -164,11 +168,9 @@ def sanitize_results(results: dict[str, Any]) -> dict[str, Any]:
                 new_changed.append(
                     {
                         name: (
-                            [plain_text(x) if isinstance(x, str) else x for x in v]
+                            [plain_diff_line(x) for x in v]
                             if isinstance(v, list)
-                            else plain_text(v)
-                            if isinstance(v, str)
-                            else v
+                            else plain_diff_line(v)
                         )
                         for name, v in entry.items()
                     }

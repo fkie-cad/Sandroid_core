@@ -57,6 +57,9 @@ def _isolated(tmp_path, monkeypatch):
     from sandroid.tui.widgets.watchlist_view import WatchlistView
 
     monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
+    # Watching pulls a first version: no device here either (a test that
+    # needs content patches its own fake over this one).
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull({}))
     svc = get_task_service()
     svc._tasks.pop("monitor", None)
     get_forensic_service()._spotlight_files.clear()
@@ -1310,6 +1313,61 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens() -> None
         assert mark.number == 2
         assert [m.number for m in panel.marks] == [1, 2]
         assert panel.segment == 2
+
+        # Marks and the monitor timeline survive in the session folder.
+        from sandroid.core import watchlist_store
+
+        marks = watchlist_store.read_jsonl(watchlist_store.marks_file())
+        assert [(m["number"], m["name"]) for m in marks] == [
+            (1, "tap login"),
+            (2, "from elsewhere"),
+        ]
+        assert all(datetime.fromisoformat(m["at"]).tzinfo is not None for m in marks)
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)))
+        events = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+        assert [(e["seq"], e["op"], e["path"], e["mark"]) for e in events] == [
+            (1, "CREATE", AAID, None),  # at T0, before the first mark
+            (2, "MODIFY", PREFS, 2),
+        ]
+        assert events[-1]["pkg"] == PKG
+        assert events[-1]["process"] == "fitness"
+        assert events[-1]["source"] == "fsmon"
+        assert events[-1]["at_source"] == "batch"  # no capture time on the item
+        assert events[0]["at"].startswith("2026-11-17T10:40:00.000")
+        assert datetime.fromisoformat(events[-1]["at"]).tzinfo is not None
+        assert (
+            watchlist_store.marks_file().parent == watchlist_store.files_root().parent
+        )
+
+
+def test_timeline_uses_an_events_capture_time_when_it_has_one() -> None:
+    """A monitor item that carries its capture time (epoch ``timestamp``)
+    is logged at that time, not at the batch's arrival.
+    """
+    from types import SimpleNamespace
+
+    from sandroid.core import watchlist_store
+
+    captured = datetime(2026, 11, 17, 10, 39, 58, 123000).timestamp()
+    item = SimpleNamespace(
+        label="MODIFY",
+        category="modify",
+        path=DB,
+        new_path=None,
+        process="fit",
+        source="kprobe",
+        timestamp=captured,
+    )
+    other = SimpleNamespace(label="OPEN", category="noise", path="/proc/x")
+    FilesPanel._export_events(SimpleNamespace(_marks=[]), [item, other], T0)
+    first, second = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+    assert first["at"].startswith("2026-11-17T10:39:58.123")
+    assert first["at_source"] == "capture"
+    assert first["pkg"] == PKG
+    assert second["at"].startswith("2026-11-17T10:40:00.000")
+    assert second["at_source"] == "batch"
+    assert second["pkg"] is None
+    assert [first["seq"], second["seq"]] == [1, 2]
 
 
 # --------------------------------------------------------------------------

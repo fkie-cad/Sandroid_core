@@ -118,6 +118,76 @@ def is_no_change(diff):
     )
 
 
+# -- plain diff text vs. display markup ----------------------------------------
+#
+# Every diff in this module is plain text: it is stored in sealed run results
+# (``run.json``, the results JSON), in watch versions and handed to the AI
+# tools. Colour is added only where it is shown (:func:`diff_markup` for the
+# console, ``files_panel.diff_line_text`` in the TUI). Runs recorded before
+# this change hold SQLite lines with Rich markup (``\[[success]INSERT[/success]]
+# ...``); :func:`plain_diff_line` strips it when such a run is displayed or
+# exported.
+
+#: Leading tag of a diff line -> console style (theme names).
+_DIFF_TAG_STYLES = (
+    ("[INSERT]", "success"),
+    ("[DELETE]", "error"),
+    ("[UPDATE]", "warning"),
+    ("[ADDED]", "success"),
+    ("[LINE ADDED]", "success"),
+    ("[DELETED]", "error"),
+    ("[LINE DELETED]", "error"),
+    ("[UPDATED]", "warning"),
+)
+
+
+def is_legacy_markup_line(line) -> bool:
+    """Whether ``line`` is a legacy SQLite diff line with Rich markup."""
+    return isinstance(line, str) and line.lstrip().startswith("\\[[")
+
+
+def plain_diff_line(line):
+    """A stored diff line as plain text (legacy Rich markup removed).
+
+    Plain lines are returned unchanged, even when their data holds brackets.
+    """
+    if not is_legacy_markup_line(line):
+        return line
+    try:
+        from rich.text import Text
+
+        return Text.from_markup(line).plain
+    except Exception:
+        from sandroid.core.run_report import strip_markup
+
+        return strip_markup(line)
+
+
+def diff_markup(diff):
+    """A plain diff (str or lines) as Rich console markup: data escaped, the
+    leading ``[INSERT]``/``[UPDATE]``/``[DELETE]``/... tag coloured.
+    Legacy markup lines are passed through unchanged.
+    """
+    from rich.markup import escape
+
+    lines = diff.splitlines() if isinstance(diff, str) else list(diff or [])
+    out = []
+    for line in lines:
+        if is_legacy_markup_line(line):
+            out.append(line)
+            continue
+        body = line.lstrip()
+        indent = line[: len(line) - len(body)]
+        for tag, style in _DIFF_TAG_STYLES:
+            if body.startswith(tag):
+                rest = body[len(tag) :]
+                out.append(f"{indent}\\[[{style}]{tag[1:-1]}[/{style}]]{escape(rest)}")
+                break
+        else:
+            out.append(escape(line))
+    return "\n".join(out)
+
+
 def clear_caches():
     """Forget cached per-path facts (call once per analysis run).
 
@@ -272,7 +342,7 @@ def _db_diff_copies(db_path1, db_path2, display_path):
             table_of_row = table_of_row[0 : table_of_row.find("(")]
             result = (
                 result
-                + f"\t\\[[success]INSERT[/success]] Table \\[{table_of_row}] row \\[[success]{row_value}[/success]] has been added\n"
+                + f"\t[INSERT] Table [{table_of_row}] row [{row_value}] has been added\n"
             )
 
     # updated rows
@@ -319,19 +389,16 @@ def _db_diff_copies(db_path1, db_path2, display_path):
                 new_val = new_pairs.get(key, "N/A")
 
                 if old_val != new_val:
-                    # Use color for changed values
-                    diff_details.append(
-                        f"{key}=([warning]{old_val} → {new_val}[/warning])"
-                    )
+                    # The changed cell: old → new
+                    diff_details.append(f"{key}=({old_val} → {new_val})")
                 else:
                     diff_details.append(f"{key}={old_val}")
 
             formatted_diff = ", ".join(diff_details)
 
             result = (
-                result
-                + f"\t\\[[warning]UPDATE[/warning]] Table \\[{table_of_row}] row "
-                f"where \\[{update_condition}] changed: {formatted_diff}\n"
+                result + f"\t[UPDATE] Table [{table_of_row}] row "
+                f"where [{update_condition}] changed: {formatted_diff}\n"
             )
 
     # deleted rows
@@ -344,7 +411,7 @@ def _db_diff_copies(db_path1, db_path2, display_path):
             table_of_row = table_of_row[0 : table_of_row.find("(")]
             result = (
                 result
-                + f"\t\\[[error]DELETE[/error]] Table \\[{table_of_row}] row \\[[error]{row_value}[/error]] has been removed\n"
+                + f"\t[DELETE] Table [{table_of_row}] row [{row_value}] has been removed\n"
             )
 
     return result[:-1]

@@ -214,3 +214,205 @@ class TestVersions:
         newer = self._pull("x")
         assert newer.name.startswith("v1000_")
         assert watchlist_store.version_dirs(self.PATH)[-1] == newer
+
+
+# ---------------------------------------------------------------------------
+# diff.json / diff.txt, the file set, checks, marks and the timeline
+# ---------------------------------------------------------------------------
+
+
+def _offset(stamp: str) -> bool:
+    """An ISO 8601 timestamp that carries its UTC offset."""
+    return datetime.fromisoformat(stamp).utcoffset() is not None
+
+
+class TestEvidenceRecords:
+    PATH = "/data/data/org.mozilla.firefox/files/places.sqlite"
+
+    def _stage(self, version: int, wal: bool = False):
+        import shutil
+
+        from file_inspect_samples import make_places
+
+        staging = watchlist_store.reset_current(self.PATH)
+        src = make_places(
+            staging.parent / f"src{version}" / "places.sqlite", version, wal
+        )
+        for suffix in ("", "-wal"):
+            if (src.parent / f"places.sqlite{suffix}").exists():
+                shutil.copyfile(
+                    src.parent / f"places.sqlite{suffix}",
+                    staging / f"places.sqlite{suffix}",
+                )
+        shutil.rmtree(src.parent)
+        return staging
+
+    def test_iso_tz_always_carries_the_offset(self):
+        assert _offset(watchlist_store.iso_tz())
+        assert _offset(watchlist_store.iso_tz(datetime(2026, 11, 18, 12, 33, 13)))
+        assert _offset(watchlist_store.iso_tz(1795001590))
+        naive = watchlist_store.local_naive(
+            datetime.fromisoformat(
+                watchlist_store.iso_tz(datetime(2026, 1, 2, 3, 4, 5))
+            )
+        )
+        assert naive == datetime(2026, 1, 2, 3, 4, 5)
+
+    def test_set_hash_covers_every_member(self):
+        one = watchlist_store.set_sha256({"a.db": "1" * 64})
+        two = watchlist_store.set_sha256({"a.db": "1" * 64, "a.db-wal": "2" * 64})
+        changed_wal = watchlist_store.set_sha256(
+            {"a.db": "1" * 64, "a.db-wal": "3" * 64}
+        )
+        assert len({one, two, changed_wal}) == 3
+        assert two == watchlist_store.set_sha256(
+            {"a.db-wal": "2" * 64, "a.db": "1" * 64}
+        )
+
+    def test_record_set_reads_new_and_legacy_records(self):
+        legacy = {
+            "device_path": self.PATH,
+            "device": {"sha256": "a" * 64},
+            "local": {"file": "places.sqlite", "sha256": "a" * 64},
+            "companions": [
+                {
+                    "device": {"sha256": "b" * 64},
+                    "local": {"file": "places.sqlite-wal", "sha256": "b" * 64},
+                }
+            ],
+        }
+        expected = {"places.sqlite": "a" * 64, "places.sqlite-wal": "b" * 64}
+        assert watchlist_store.record_set(legacy, "device") == expected
+        assert watchlist_store.record_set(legacy, "local") == expected
+        legacy["companions"][0]["device"]["sha256"] = None
+        assert watchlist_store.record_set(legacy, "device") is None  # unknown
+        new = {"set": {"device": expected, "local": {}}}
+        assert watchlist_store.record_set(new, "device") == expected
+        assert watchlist_store.record_set(new, "local") is None
+        assert watchlist_store.record_set(None, "device") is None
+
+    def test_keep_version_writes_diff_json_and_a_plain_diff_txt(self):
+        self._stage(1)
+        first = watchlist_store.keep_version(self.PATH)
+        assert first.diff is None
+        assert first.text is None
+        assert watchlist_store.version_diff_doc(first.dir) is None
+        assert sorted(p.name for p in first.dir.iterdir()) == ["places.sqlite"]
+
+        self._stage(3, wal=True)
+        kept = watchlist_store.keep_version(self.PATH)
+        assert kept.changed
+        doc = watchlist_store.version_diff_doc(kept.dir)
+        assert doc["schema"] == "sandroid.file_diff"
+        assert doc["schema_version"] == 1
+        assert doc["engine"]["version"]
+        assert doc["engine"]["sandroid"]
+        assert doc["version"] == kept.dir.name
+        assert doc["base_version"] == first.dir.name
+        assert _offset(doc["created_at"])
+        new_files = {f["file"]: f for f in doc["compared"]["new"]}
+        assert set(new_files) == {"places.sqlite", "places.sqlite-wal"}
+        assert new_files["places.sqlite-wal"]["role"] == "-wal"
+        assert new_files["places.sqlite-wal"]["sha256"] == watchlist_store.sha256_file(
+            kept.dir / "places.sqlite-wal"
+        )
+        assert [f["file"] for f in doc["compared"]["base"]] == ["places.sqlite"]
+        tables = {t["name"]: t for t in doc["tables"]}
+        visits = tables["moz_historyvisits"]
+        assert visits["primary_key"] == ["id"]
+        assert "visit_date" in visits["columns"]
+        insert = next(r for r in visits["rows"] if r["op"] == "insert")
+        assert insert["values"]["visit_date"] > 10**12
+        # The WAL-only title change is in the diff (the -wal was folded in).
+        places = tables["moz_places"]
+        assert any(
+            c["column"] == "title"
+            for r in places["rows"]
+            if r["op"] == "update"
+            for c in r["changes"]
+        )
+
+        text = (kept.dir / "diff.txt").read_text(encoding="utf-8")
+        assert text == watchlist_store.version_diff(kept.dir) == kept.text
+        for tag in ("[success]", "[warning]", "[error]", "[/", "\\["):
+            assert tag not in text
+        assert "Table moz_historyvisits" in text
+        assert "visit_date" in text  # column names
+        assert "ms epoch" in text  # readable time hint next to the raw value
+        hint = text.split("ms epoch")[0].rsplit("(", 1)[1]
+        assert datetime.fromisoformat(hint.rstrip(", ")).utcoffset() is not None
+        assert "  ->  " in text  # updates: old -> new
+
+    def test_bytes_changed_but_not_the_content_is_explained(self):
+        self._stage(1)
+        watchlist_store.keep_version(self.PATH)
+        staging = self._stage(1)
+        # Same rows, different bytes (a free page): a version, but no change.
+        (staging / "places.sqlite").write_bytes(
+            (staging / "places.sqlite").read_bytes() + b"\x00" * 4096
+        )
+        kept = watchlist_store.keep_version(self.PATH)
+        assert not kept.changed
+        doc = watchlist_store.version_diff_doc(kept.dir)
+        assert doc["changed"] is False
+        assert "bytes changed" in doc["note"]
+
+    def test_checks_are_appended_not_rewritten(self):
+        for n in range(3):
+            watchlist_store.append_check(
+                self.PATH,
+                {"at": watchlist_store.iso_tz(), "same_as": "v001", "n": n},
+            )
+        checks = watchlist_store.version_checks(self.PATH)
+        assert [c["n"] for c in checks] == [0, 1, 2]
+        file = watchlist_store.row_dir(self.PATH) / "checks.jsonl"
+        assert len(file.read_text(encoding="utf-8").splitlines()) == 3
+        # No version folder for a check.
+        assert watchlist_store.version_dirs(self.PATH) == []
+
+    def test_marks_and_timeline_are_json_lines_in_the_files_root(self):
+        when = datetime(2026, 11, 18, 12, 30, 0)
+        watchlist_store.append_mark(1, "open wikipedia", when)
+        watchlist_store.append_mark(2, "", when)
+        watchlist_store.append_timeline(
+            [{"at": watchlist_store.iso_tz(when), "op": "MODIFY", "path": self.PATH}]
+        )
+        marks = watchlist_store.read_jsonl(watchlist_store.marks_file())
+        assert [m["number"] for m in marks] == [1, 2]
+        assert marks[0]["name"] == "open wikipedia"
+        assert set(marks[0]) == {"number", "name", "at", "recorded_at"}
+        assert all(_offset(m["at"]) and _offset(m["recorded_at"]) for m in marks)
+        assert marks[0]["at"].startswith("2026-11-18T12:30:00.000")  # milliseconds
+        # Marks belong to the session (its root), the timeline to files/.
+        root = watchlist_store.files_root()
+        assert watchlist_store.marks_file() == root.parent / "marks.jsonl"
+        assert watchlist_store.timeline_file() == root / "timeline.jsonl"
+        (event,) = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+        assert event["op"] == "MODIFY"
+        assert event["seq"] == 1
+
+    def test_timeline_seq_increases_and_continues_after_a_restart(self):
+        watchlist_store.append_timeline([{"op": "A"}, {"op": "B"}])
+        watchlist_store.append_timeline([{"op": "C"}])
+        # A new process (same session folder) continues the numbering.
+        watchlist_store._TIMELINE_SEQ.clear()
+        watchlist_store.append_timeline([{"op": "D", "extra": {"future": 1}}])
+        events = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+        assert [(e["seq"], e["op"]) for e in events] == [
+            (1, "A"),
+            (2, "B"),
+            (3, "C"),
+            (4, "D"),
+        ]
+        assert next(iter(events[0])) == "seq"  # first key of every line
+
+    def test_readers_tolerate_unknown_fields_and_bad_lines(self):
+        file = watchlist_store.marks_file()
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(
+            '{"number": 1, "name": "a", "at": "x", "recorded_at": "x", "new": 1}\n'
+            "not json\n",
+            encoding="utf-8",
+        )
+        (mark,) = watchlist_store.read_jsonl(file)
+        assert mark["new"] == 1

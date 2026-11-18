@@ -88,6 +88,7 @@ from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Static
 
 from sandroid.core.adb_utils import watch_path_problem
+from sandroid.core.file_diff import is_legacy_markup_line
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
@@ -164,14 +165,22 @@ def render_diff(diff: str | list[str] | None) -> Text:
     return out
 
 
-#: Style tags the diff producers really use (SQLite diffs, run records). A
-#: line without one is plain text: XML paths such as ``string[@name="k"]``
-#: and file content must not be parsed as Rich markup (``[@...]`` is a tag
-#: to Rich, so the key name of a changed preference used to vanish).
-_MARKUP_HINT = re.compile(
+#: Diff lines are plain text; only legacy SQLite lines of runs / versions
+#: recorded before that (``\[[success]INSERT[/success]] ...``,
+#: ``file_diff.is_legacy_markup_line``) and display lines that *start* with a
+#: style tag carry Rich markup. Anything else -- XML paths such as
+#: ``string[@name="k"]``, file content, row values -- must not be parsed as
+#: markup (``[@...]`` is a tag to Rich).
+_MARKUP_START = re.compile(
     r"\[/?(?:success|warning|error|green|red|yellow|cyan|blue|magenta|bold|dim|"
     r"italic|#[0-9a-fA-F]{3})"
 )
+
+
+def _is_markup(line: str) -> bool:
+    return is_legacy_markup_line(line) or bool(_MARKUP_START.match(line.lstrip()))
+
+
 _LINE_STYLES = (
     (("[ADDED]", "[LINE ADDED]", "[INSERT]", "+"), "#4ade80"),
     (("[DELETED]", "[LINE DELETED]", "[DELETE]", "-"), "#fb7185"),
@@ -181,10 +190,10 @@ _LINE_STYLES = (
 
 
 def diff_line_text(line: str) -> Text:
-    """One diff line as ``Text``: Rich markup when it carries style tags,
+    """One diff line as ``Text``: a legacy markup line rendered as markup,
     otherwise literal text coloured by its ``[ADDED]``/``[DELETED]``/... tag.
     """
-    if _MARKUP_HINT.search(line):
+    if _is_markup(line):
         try:
             return Text.from_markup(line)
         except Exception:
@@ -203,9 +212,7 @@ def diff_markup(diff: str | list[str]) -> str:
     from rich.markup import escape
 
     lines = diff.splitlines() if isinstance(diff, str) else list(diff)
-    return "\n".join(
-        line if _MARKUP_HINT.search(line) else escape(line) for line in lines
-    )
+    return "\n".join(line if _is_markup(line) else escape(line) for line in lines)
 
 
 def _fmt_time(when: datetime | None) -> str:
@@ -651,6 +658,9 @@ class FilesPanel(Widget):
 
     def ingest(self, batch, now: datetime | None = None) -> None:
         """Fold a monitor batch in; the table redraws on the next tick."""
+        now = now or datetime.now()
+        batch = list(batch)
+        self._export_events(batch, now)
         touched = self.activity.ingest(batch, now=now)
         writes = self.activity.writes
         if writes:
@@ -664,6 +674,70 @@ class FilesPanel(Widget):
         if touched:
             self._dirty = True
             self._refresh_inspector(touched)
+
+    def _export_events(self, batch: list, now: datetime) -> None:
+        """Append the batch to the session's ``files/timeline.jsonl``.
+
+        One JSON object per monitor event, before any noise rule or category
+        filter (the file is the record, the table is a view): ``seq``
+        (added by the store), ``at`` (the event's capture time when the item
+        carries one as an epoch ``timestamp``, else when the batch reached
+        the lens; milliseconds + UTC offset), ``at_source`` (``capture`` /
+        ``batch``), ``op``/``category``, ``path`` (+ ``new_path`` of a
+        rename), ``pkg`` (the app whose data directory holds the path, when
+        known), ``process`` (fsmon's process / the kernel comm), ``pid``
+        when the backend reports one, ``source`` (fsmon / kprobe) and
+        ``mark`` (the number of the mark whose segment the event is in,
+        ``None`` before the first).
+        """
+        if not batch:
+            return
+        try:
+            from sandroid.core import watchlist_store
+
+            batch_at = watchlist_store.iso_tz(now, "milliseconds")
+            mark = sum(1 for m in self._marks if m.when <= now) or None
+            entries = []
+            for item in batch:
+                captured = getattr(item, "timestamp", None)
+                if isinstance(captured, (int, float)) and not isinstance(
+                    captured, bool
+                ):
+                    at = watchlist_store.iso_tz(float(captured), "milliseconds")
+                    at_source = "capture"
+                else:
+                    at, at_source = batch_at, "batch"
+                path = getattr(item, "path", "") or "/".join(
+                    p
+                    for p in (
+                        getattr(item, "directory", ""),
+                        getattr(item, "filename", ""),
+                    )
+                    if p
+                )
+                pkg = None
+                if path.startswith("/"):
+                    pkg = watchlist_store.package_of(
+                        getattr(item, "new_path", None) or path
+                    )
+                entries.append(
+                    {
+                        "at": at,
+                        "at_source": at_source,
+                        "op": getattr(item, "label", "") or None,
+                        "category": getattr(item, "category", None),
+                        "path": path,
+                        "new_path": getattr(item, "new_path", None),
+                        "pkg": pkg,
+                        "process": getattr(item, "process", "") or None,
+                        "pid": getattr(item, "pid", None),
+                        "source": getattr(item, "source", None),
+                        "mark": mark,
+                    }
+                )
+            watchlist_store.append_timeline(entries)
+        except Exception:
+            logger.debug("Files lens: timeline export failed", exc_info=True)
 
     def _on_monitor_lifecycle(self, event_type) -> None:
         from sandroid.core.events import EventType
@@ -1278,6 +1352,9 @@ class FilesPanel(Widget):
         """Adopt the session's marks; ``follow`` jumps to the newest segment."""
         self._marks = list(marks)
         self.activity.set_marks(m.when for m in self._marks)
+        wl = self._watchlist_or_none()
+        if wl is not None:
+            wl.marks = list(self._marks)  # kept versions record their mark
         if follow and self._marks:
             self._segment = len(self._marks)
         elif not self._marks:
@@ -1650,7 +1727,8 @@ class FilesPanel(Widget):
                 pull.add_row("pulled", info.pulled_at.replace("T", " "))
                 pull.add_row("size", _fmt_size(info.size))
                 if info.sha256:
-                    pull.add_row("sha256", info.sha256[:16] + "…")
+                    # The set hash: the file with its -wal / -journal.
+                    pull.add_row("set sha256", info.sha256[:16] + "…")
             if info.detail and info.state is not RowState.CHANGED:
                 pull.add_row("", Text(info.detail, style=_DIM))
             sections.append(("Last pull", pull))

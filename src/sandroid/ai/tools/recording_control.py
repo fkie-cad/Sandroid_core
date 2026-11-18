@@ -398,7 +398,7 @@ def get_run_detail(run_id: str, max_diff_chars: int = 20000) -> dict[str, Any]:
         ``changed_files``' diff text truncated as above, plus one added
         ``"diff_truncated": bool`` field (true if any file's diff was cut).
     """
-    from sandroid.core import run_history
+    from sandroid.core import file_diff, run_history
 
     try:
         max_diff_chars = int(max_diff_chars)
@@ -420,7 +420,13 @@ def get_run_detail(run_id: str, max_diff_chars: int = 20000) -> dict[str, Any]:
         if isinstance(entry, dict):
             new_entry: dict[str, str] = {}
             for path, lines in entry.items():
-                text = "\n".join(lines) if isinstance(lines, list) else str(lines)
+                # Runs recorded before diffs were stored as plain text carry
+                # Rich markup in their SQLite lines: hand the model plain text.
+                text = (
+                    "\n".join(str(file_diff.plain_diff_line(x)) for x in lines)
+                    if isinstance(lines, list)
+                    else str(file_diff.plain_diff_line(lines))
+                )
                 if len(text) > max_diff_chars:
                     omitted = len(text) - max_diff_chars
                     text = (

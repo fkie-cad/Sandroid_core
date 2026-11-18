@@ -1473,10 +1473,15 @@ class DiffsView(FilesSubViewBase):
         if not lines:
             self._notify("This run changed no files.")
             return
+        from sandroid.core.file_diff import diff_markup
         from sandroid.tui.modals.diff_zoom_modal import DiffZoomModal
 
+        # Plain diff lines are escaped (brackets in data are not markup);
+        # legacy runs' markup lines pass through and are rendered.
         self.app.push_screen(
-            DiffZoomModal(diff_text="\n".join(lines), title=self._current_label(run_id))
+            DiffZoomModal(
+                diff_text=diff_markup(lines), title=self._current_label(run_id)
+            )
         )
 
     def action_compare_runs(self) -> None:

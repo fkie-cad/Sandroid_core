@@ -990,6 +990,13 @@ class MainScreen(Screen):
         """Drop a mark: log separator line + ``MarksChanged`` to every lens."""
         mark = self.marks.add(name, when)
         try:
+            # Kept with the session's evidence: <session>/files/marks.jsonl.
+            from sandroid.core import watchlist_store
+
+            watchlist_store.append_mark(mark.number, mark.name, mark.when)
+        except Exception:
+            logger.debug("add_mark: marks.jsonl not written", exc_info=True)
+        try:
             from rich.markup import escape
 
             self.query_one("#activity-log", ActivityLog).write(

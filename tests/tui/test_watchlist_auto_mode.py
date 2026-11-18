@@ -127,7 +127,8 @@ async def test_a_write_to_a_watched_file_pulls_it_once_quiet(monkeypatch) -> Non
         (version,) = watchlist_store.version_dirs(PREFS)
         record = watchlist_store.version_record(version)
         assert record["trigger"] == "auto"
-        assert record["trigger_event_at"] == "2026-11-18T10:42:07"
+        assert record["trigger_event_at"] == watchlist_store.iso_tz(T0)
+        assert record["trigger_event_at"].startswith("2026-11-18T10:42:07")
         assert record["device"]["sha256"] == _sha("<map/>\n")
         assert record["local"]["sha256"] == _sha("<map/>\n")
         assert record["sha256_match"] is True

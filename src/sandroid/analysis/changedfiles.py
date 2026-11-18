@@ -108,6 +108,10 @@ class ChangedFiles(DataGatherBase):
         **Returns:**
 
         - **dict**: A dictionary with the key "Changed Files" and a list of changed files and their diffs.
+
+        The diff lines are plain text (no display markup): they are sealed
+        into the run results (``run.json``, the results JSON) as they are.
+        Colour is added where they are shown (``pretty_print``, the TUI).
         """
         base_folder = self._get_raw_results_path()
         result = []
@@ -180,49 +184,33 @@ class ChangedFiles(DataGatherBase):
                 path_to_file_noise_pull = os.path.join(
                     f"{base_folder}noise_pull", file.lstrip("/")
                 )
+                plain = None
                 if file_diff.is_sqlite_file(path_to_file_first_pull):
-                    diff = file_diff.db_diff(
+                    plain = file_diff.db_diff(
                         path_to_file_first_pull,
                         path_to_file_second_pull,
                         path_to_file_noise_pull,
                     )
-                    diff = (
-                        Toolbox.highlight_timestamps(Toolbox.truncate(diff), "accent")
-                        + "[info]"
-                        + "\n"
-                    )
-                    if "ITS ALL NOISE" not in diff:
-                        result = result + ("[accent]" + file + "\n")
-                        result = result + diff
                 elif file[-4:] == ".xml":
-                    diff = (
-                        Toolbox.highlight_timestamps(
-                            Toolbox.truncate(
-                                file_diff.xml_diff(
-                                    path_to_file_first_pull,
-                                    path_to_file_second_pull,
-                                    path_to_file_noise_pull,
-                                )
-                            ),
-                            "accent",
-                        )
-                        + "[info]"
-                        + "\n"
+                    plain = file_diff.xml_diff(
+                        path_to_file_first_pull,
+                        path_to_file_second_pull,
+                        path_to_file_noise_pull,
                     )
-                    if "ITS ALL NOISE" not in diff:
-                        result = result + ("[accent]" + file + "\n")
-                        result = result + diff
                 elif file[-4:] == ".txt":
-                    diff = (
-                        Toolbox.highlight_timestamps(
-                            Toolbox.truncate(file_diff.txt_diff(file)), "accent"
+                    plain = file_diff.txt_diff(file)
+                if plain is not None:
+                    # The diff is plain text; colour is added for the console
+                    # only (escaped, so data brackets are never markup).
+                    if "ITS ALL NOISE" not in plain:
+                        result = result + ("[accent]" + escape(file) + "\n")
+                        result = result + (
+                            Toolbox.highlight_timestamps(
+                                file_diff.diff_markup(Toolbox.truncate(plain)),
+                                "accent",
+                            )
+                            + "[info]\n"
                         )
-                        + "[info]"
-                        + "\n"
-                    )
-                    if "ITS ALL NOISE" not in diff:
-                        result = result + ("[accent]" + file + "\n")
-                        result = result + diff
                 else:
                     result = (
                         result

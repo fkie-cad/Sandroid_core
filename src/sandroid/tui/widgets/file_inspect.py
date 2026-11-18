@@ -11,7 +11,11 @@
 Data comes from :mod:`sandroid.core.file_inspect` (structured diffs and
 previews of the local copies; never the device) and
 :mod:`sandroid.core.watchlist_store` (``version_dirs`` / ``version_time`` /
-``version_diff`` / ``version_record`` / ``version_file``).
+``version_diff_doc`` / ``version_record`` / ``version_file`` /
+``version_checks``). A version's diff against the one before it is read
+from its ``diff.json``; only folders kept before ``diff.json`` existed are
+diffed from the copies or parsed from their text ``diff.txt``. Pulls that
+found no change (``checks.jsonl``) are one dim line between versions.
 
 Every renderable here adapts to the width it is drawn at: a SQLite row is a
 horizontal table when its columns fit, otherwise a "card" (column names
@@ -996,6 +1000,28 @@ def _stored_diff(version: Version) -> str | None:
         return None
 
 
+def stored_structured(version: Version) -> fi.StructuredDiff | None:
+    """The version's ``diff.json`` (against the version before it) as a
+    :class:`~sandroid.core.file_inspect.StructuredDiff`; ``None`` when the
+    folder has none (first version, or kept before ``diff.json`` existed).
+    """
+    key = ("json", str(version.dir))
+    cached = _DIFFS.get(key)
+    if cached is not None:
+        return cached
+    from sandroid.core import watchlist_store as store
+
+    try:
+        doc = store.version_diff_doc(version.dir)
+        diff = fi.diff_from_dict(doc) if doc is not None else None
+    except Exception:
+        logger.debug("diff.json unreadable", exc_info=True)
+        diff = None
+    if diff is not None:
+        _DIFFS.put(key, diff)
+    return diff
+
+
 #: Versions up to this size (both sides) get their list summary from a
 #: structured diff of the copies; larger ones from the stored text diff.
 SUMMARY_DIFF_BYTES = 1024 * 1024
@@ -1004,15 +1030,25 @@ SUMMARY_DIFF_BYTES = 1024 * 1024
 def version_summary(version: Version, previous: Version | None = None) -> str:
     """Short change summary of a version against the one before it.
 
-    From a structured diff of the two copies when it is cached or both are
-    small, else from the diff stored with the version (no file opened).
+    From the version's ``diff.json``; for folders without one (kept before
+    it existed) from a structured diff of the two copies when it is cached
+    or both are small, else from the legacy text diff stored with it.
     """
     key = ("summary", str(version.dir), str(previous.dir) if previous else "")
     cached = _SUMMARIES.get(key)
     if cached is not None:
         return cached
     summary = None
-    if previous is not None and previous.file.exists() and version.file.exists():
+    if previous is not None:
+        stored = stored_structured(version)
+        if stored is not None:
+            summary = stored.summary()
+    if (
+        summary is None
+        and previous is not None
+        and previous.file.exists()
+        and version.file.exists()
+    ):
         dkey = ("diff", str(previous.file), str(version.file))
         diff = _DIFFS.get(dkey)
         if diff is None and _size_of(previous.file, version.file) <= SUMMARY_DIFF_BYTES:
@@ -1042,15 +1078,80 @@ def _selected_index(versions: list[Version], state: InspectState) -> int:
     return len(versions) - 1
 
 
+@dataclass
+class CheckGroup:
+    """Pulls that found no change after one version (``checks.jsonl``),
+    collapsed to one list line: ``·  12:41:02  auto  checked, no change (2x)``
+    (with a multiplication sign).
+    """
+
+    version: int  # index into the versions list (the version they equal)
+    count: int
+    last: datetime | None
+    triggers: list[str]
+
+
+def load_checks(path: str, versions: list[Version]) -> dict[int, CheckGroup]:
+    """The "checked, no change" records of ``path`` grouped by the version
+    they found unchanged (``same_as``), keyed by that version's index.
+    """
+    from sandroid.core import watchlist_store as store
+
+    try:
+        checks = store.version_checks(path)
+    except Exception:
+        return {}
+    index = {v.name.split("_", 1)[0]: i for i, v in enumerate(versions)}
+    groups: dict[int, CheckGroup] = {}
+    for check in checks:
+        i = index.get(str(check.get("same_as") or ""))
+        if i is None:
+            continue
+        group = groups.setdefault(i, CheckGroup(i, 0, None, []))
+        group.count += 1
+        when = None
+        try:
+            when = store.local_naive(datetime.fromisoformat(str(check.get("at"))))
+        except (TypeError, ValueError):
+            pass
+        if when is not None and (group.last is None or when > group.last):
+            group.last = when
+        trigger = str(check.get("trigger") or "")
+        if trigger and trigger not in group.triggers:
+            group.triggers.append(trigger)
+    return groups
+
+
+def list_layout(
+    versions: list[Version], checks: dict[int, CheckGroup]
+) -> list[tuple[str, int]]:
+    """The version list's lines, newest first: ``("version", i)`` and, above
+    a version, ``("checks", i)`` for the no-change checks made after it.
+    """
+    out: list[tuple[str, int]] = []
+    for i in range(len(versions) - 1, -1, -1):
+        if i in checks:
+            out.append(("checks", i))
+        out.append(("version", i))
+    return out
+
+
 class VersionList:
-    """The version list (one line per version, newest first)."""
+    """The version list (one line per version, newest first), with the pulls
+    that found no change collapsed into one dim line between versions.
+    """
 
     def __init__(
-        self, versions: list[Version], selected: int, base: str | None
+        self,
+        versions: list[Version],
+        selected: int,
+        base: str | None,
+        checks: dict[int, CheckGroup] | None = None,
     ) -> None:
         self.versions = versions
         self.selected = selected
         self.base = base
+        self.checks = checks or {}
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
@@ -1065,7 +1166,24 @@ class VersionList:
         if width >= 58:
             grid.add_column(no_wrap=True)  # trigger
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-        for i in range(len(self.versions) - 1, -1, -1):
+        for kind, i in list_layout(self.versions, self.checks):
+            if kind == "checks":
+                group = self.checks[i]
+                cells = [
+                    Text(" "),
+                    Text("·", style=_DIM),
+                    Text(_when(group.last), style=_DIM),
+                ]
+                if width >= 50:
+                    cells.append(Text(""))
+                if width >= 58:
+                    cells.append(Text("+".join(group.triggers), style=_DIM))
+                text = "checked, no change" + (
+                    f" ({group.count}×)" if group.count > 1 else ""
+                )
+                cells.append(Text(text, style=_DIM))
+                grid.add_row(*cells)
+                continue
             v = self.versions[i]
             sel = i == self.selected
             cells: list = [
@@ -1113,42 +1231,113 @@ def _stamp(value: Any) -> str:
     return _when(when) if when is not None else ""
 
 
+def _set_sha(members: dict[str, str]) -> str:
+    from sandroid.core import watchlist_store as store
+
+    return store.set_sha256(members)
+
+
+def _role(name: str, main: str) -> str:
+    """``wal`` / ``journal`` for a companion file name, ``db`` for the main."""
+    return name[len(main) + 1 :] if name.startswith(main + "-") else "db"
+
+
+def _members(record: dict, version: Version) -> list[dict]:
+    """``[{"file", "role", "size", "device_sha", "local_sha", "mtime"}]`` of
+    the version's file set (the file + its pulled ``-wal``/``-journal``).
+    """
+    main_local = record.get("local") if isinstance(record.get("local"), dict) else {}
+    main = str(main_local.get("file") or version.file.name)
+    entries = [(main_local, record.get("device") or {})]
+    for companion in record.get("companions") or []:
+        if isinstance(companion, dict):
+            entries.append(
+                (companion.get("local") or {}, companion.get("device") or {})
+            )
+    out = []
+    for local, device in entries:
+        name = str(local.get("file") or "")
+        if not name:
+            continue
+        out.append(
+            {
+                "file": name,
+                "role": _role(name, main),
+                "size": local.get("size"),
+                "device_sha": device.get("sha256"),
+                "local_sha": local.get("sha256"),
+                "mtime": device.get("mtime"),
+            }
+        )
+    return out
+
+
 class RecordLines:
     """The acquisition record (``acquisition.json``, see ``watchlist_store``)
     in (at most) two dim lines: how and when the copy was pulled, then what
-    the device said about the file (mtime, size, sha256 vs the local copy).
+    the device said about the file set -- the file *and* its ``-wal`` /
+    ``-journal`` (a WAL-mode write often changes only the WAL): one hash
+    over the set, device = local per member (a mismatch names the member),
+    the newest device mtime and which member it is, the sizes per member.
     Facts that do not fit the width are left out rather than wrapped.
     """
 
     def __init__(self, version: Version) -> None:
         record = version.record or {}
-        device = record.get("device") if isinstance(record.get("device"), dict) else {}
-        local = record.get("local") if isinstance(record.get("local"), dict) else {}
-        local_sha = local.get("sha256")
+        members = _members(record, version)
+        file_set = record.get("set") if isinstance(record.get("set"), dict) else {}
+        local_set = {m["file"]: m["local_sha"] for m in members if m["local_sha"]}
+        set_sha = file_set.get("local_sha256") or (
+            _set_sha(local_set) if local_set else None
+        )
         self.first = [
             f"pulled {_stamp(record.get('pulled_at')) or _when(version.when)}"
         ]
         if record.get("trigger"):
             self.first.append(str(record["trigger"]))
-        self.first.append(fi.format_size(version.size))
-        if local_sha:
-            self.first.append(f"sha256 {str(local_sha)[:10]}…")
+        sizes = [
+            f"{fi.format_size(m['size'])}"
+            + ("" if m["role"] == "db" else f" {m['role']}")
+            for m in members
+        ]
+        self.first.append(" + ".join(sizes) if sizes else fi.format_size(version.size))
+        if set_sha:
+            label = "+".join(m["role"] for m in members) if len(members) > 1 else ""
+            self.first.append(
+                f"sha256{f' ({label})' if label else ''} {str(set_sha)[:10]}…"
+            )
         self.second: list[str] = []
-        self.mismatch = record.get("sha256_match") is False
+        mismatched = [
+            m
+            for m in members
+            if m["device_sha"] and m["local_sha"] and m["device_sha"] != m["local_sha"]
+        ]
+        self.mismatch = bool(mismatched) or record.get("sha256_match") is False
         if not record:
             return
         # The verdict first: it is the fact that must survive a narrow width.
-        device_sha = device.get("sha256")
-        if not device_sha:
+        known = [m for m in members if m["device_sha"]]
+        n = len(members)
+        if not known:
             self.second.append("device sha256 unknown")
-        elif record.get("sha256_match") is True:
-            self.second.append("device sha256 = local ✓")
+        elif mismatched:
+            names = ", ".join(m["role"] for m in mismatched)
+            self.second.append(f"device sha256 ≠ local ✗ ({names})")
+        elif len(known) < n:
+            self.second.append(f"device sha256 = local ✓ ({len(known)} of {n})")
         else:
-            self.second.append(f"device sha256 ≠ local ✗ ({str(device_sha)[:10]}…)")
-        if device.get("mtime") is not None:
-            self.second.append(f"mtime {_stamp(device['mtime'])}")
-        if device.get("size") is not None:
-            self.second.append(fi.format_size(device.get("size")))
+            both = "both" if n == 2 else f"all {n}"
+            self.second.append(
+                "device sha256 = local ✓" + (f" ({both})" if n > 1 else "")
+            )
+        stamped = [m for m in members if isinstance(m["mtime"], (int, float))]
+        if stamped:
+            newest = max(stamped, key=lambda m: m["mtime"])
+            where = f" ({newest['role']})" if n > 1 else ""
+            self.second.append(f"changed {_stamp(newest['mtime'])}{where}")
+        missing = file_set.get("missing_locally") or []
+        if missing:
+            self.second.append(f"not pulled: {', '.join(map(str, missing))}")
 
     @staticmethod
     def _fit(bits: list[str], width: int) -> str:
@@ -1200,7 +1389,8 @@ def versions_sections(
         return sections
     state = state_for(path)
     index = _selected_index(versions, state)
-    sections.append(("", VersionList(versions, index, state.base)))
+    checks = load_checks(path, versions)
+    sections.append(("", VersionList(versions, index, state.base, checks)))
     sections.append(("", Text(HINT_VERSIONS, style=_DIM)))
     if status is not None:
         sections.append(("", status))
@@ -1251,6 +1441,12 @@ def version_diff_body(
         f"v{older.number} {_when(older.when)}{based}"
     )
     parts: list = [record_text(selected), Text("")]
+    if older.number == newer.number - 1:
+        # The diff kept with the version (diff.json) -- no copy is opened.
+        stored = stored_structured(newer)
+        if stored is not None:
+            parts.append(DiffRenderable(stored, full))
+            return heading, Group(*parts)
     if older.file.exists() and newer.file.exists():
         diff, pending = structured_for(older.file, newer.file, notify)
         if pending:
@@ -1426,12 +1622,16 @@ def step_version(path: str, delta: int) -> bool:
 
 
 def select_version_row(path: str, row: int) -> bool:
-    """Select the version on list line ``row`` (0 = newest)."""
+    """Select the version on list line ``row`` (0 = the top line). A
+    "checked, no change" line selects the version it found unchanged.
+    """
     versions = load_versions(path)
-    if not 0 <= row < len(versions):
+    layout = list_layout(versions, load_checks(path, versions))
+    if not 0 <= row < len(layout):
         return False
-    index = len(versions) - 1 - row
-    state_for(path).selected = None if row == 0 else versions[index].name
+    index = layout[row][1]
+    newest = index == len(versions) - 1
+    state_for(path).selected = None if newest else versions[index].name
     return True
 
 

@@ -241,13 +241,29 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   a write the monitor reports for a ★ file pulls it ~1.5 s after the last
   write (a database with its ``-wal``/``-journal`` is one group); nothing
   polls, so with the monitor off the caption says "monitor off — watched
-  files not tracked · o starts it". Every pull is kept, never pruned, in the
-  session results folder:
+  files not tracked · o starts it". ``w`` / ``n`` pull a first version of
+  every newly watched file right away, so the first change can be diffed.
+  Every pull with a real change is kept, never pruned, in the session
+  results folder:
   ``files/<package>/<app path>/v001_HH-MM-SS/`` with the copy (+ database
-  companions), ``diff.txt`` and ``acquisition.json`` (device path, device
-  mtime and size, sha256 computed on the device before the pull, local
-  sha256, pull time, trigger manual/auto); files outside an app directory
-  go under ``files/_device/<path>/``.
+  companions), ``diff.json`` (the diff against the version before as data:
+  per table / key, operation, column names, old / new values, primary key;
+  with the compared files and their sha256, the base version and the engine
+  version), ``diff.txt`` (the same diff as plain text, rendered from
+  ``diff.json``: column names, raw values, readable times for epoch-like
+  values) and ``acquisition.json`` (device path; for the file *and* its
+  ``-wal`` / ``-journal``: device mtime and size, sha256 computed on the
+  device before the pull, local sha256; one combined set hash; pull time,
+  trigger manual/auto/watch, the active mark); files outside an app
+  directory go under ``files/_device/<path>/``. When the on-device sha256
+  of the file and its companions equals the newest version's, nothing is
+  pulled: one line goes to ``checks.jsonl`` in the file's folder and the
+  Versions tab shows it as ``· 12:41:02 auto checked, no change (2×)``
+  between versions. ``marks.jsonl`` in the session results folder (every
+  mark: number, name, time) and ``files/timeline.jsonl`` (every monitor
+  event: sequence number, time, operation, path, package, process, source,
+  mark) are written as they happen, with millisecond times. All timestamps
+  carry their UTC offset; readers ignore fields they do not know.
 - **Marks**: ``B`` drops a mark (optional name; ⏎ on an empty name keeps
   it unnamed, Esc drops none). The table then shows only the activity
   since that mark (★ rows stay, dimmed when untouched); ``A`` toggles

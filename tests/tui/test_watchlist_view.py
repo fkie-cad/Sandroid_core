@@ -44,8 +44,12 @@ def _isolated_results_path(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_device_hash(monkeypatch):
-    """The pre-pull on-device stat/sha256sum is an adb call: no device here."""
+    """The pre-pull on-device stat/sha256sum is an adb call: no device here.
+    Neither for the first-version pull ``add_path`` starts (a test that needs
+    content patches its own fake ``pull_file`` over this one).
+    """
     monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file({}))
 
 
 @pytest.fixture(autouse=True)
@@ -296,6 +300,138 @@ async def test_pattern_watch_matches_paths_and_unwatch_drops_its_matches() -> No
         assert view.patterns == []
 
 
+def _facts_for(content: dict[str, str]):
+    """``_device_facts`` fake: mtime/size/sha256 of the fake device files."""
+    import hashlib
+
+    def _facts(paths):
+        return {
+            p: {
+                "mtime": 1795001590 + i,
+                "size": len(content[p].encode()),
+                "sha256": hashlib.sha256(content[p].encode()).hexdigest(),
+            }
+            for i, p in enumerate(paths)
+            if p in content
+        }
+
+    return staticmethod(_facts)
+
+
+@pytest.mark.asyncio
+async def test_w_pulls_a_first_version_right_away(monkeypatch) -> None:
+    """Watching captures a baseline, so the first change can be diffed."""
+    content = {PATH_A: "v1\n"}
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file(content))
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        assert view.add_path(PATH_A) is True
+        await _wait_for(
+            pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY
+        )
+        (first,) = watchlist_store.version_dirs(PATH_A)
+        assert first.name.startswith("v001_")
+        assert watchlist_store.version_record(first)["trigger"] == "watch"
+
+        content[PATH_A] = "v1\nv2\n"
+        view.pull([PATH_A])
+        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
+        newest = watchlist_store.version_dirs(PATH_A)[-1]
+        assert "+v2" in watchlist_store.version_diff(newest)
+
+
+@pytest.mark.asyncio
+async def test_a_pattern_pulls_first_versions_of_its_matches(monkeypatch) -> None:
+    a, b = "/data/data/com.app/db/a.txt", "/data/data/com.app/db/b.txt"
+
+    class _Adb:
+        @staticmethod
+        def send_adb_command(_cmd):
+            return f"{a}\n{b}\n", ""
+
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull_file({a: "a\n", b: "b\n"})
+    )
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        view._adb = lambda: _Adb
+        await pilot.pause()
+        assert view.add_path("/data/data/com.app/db/*") is True
+        await _wait_for(
+            pilot,
+            lambda: all(view.rows[p].state is RowState.BASELINE_ONLY for p in (a, b)),
+        )
+        for p in (a, b):
+            (version,) = watchlist_store.version_dirs(p)
+            assert watchlist_store.version_record(version)["trigger"] == "watch"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_device_hashes_are_a_check_not_a_copy(monkeypatch) -> None:
+    """Same on-device sha256 for the file AND its -wal: nothing is pulled,
+    one checks.jsonl line is written, version numbers stay put. A change in
+    the -wal alone is a new version. Each record names the active mark.
+    """
+    from sandroid.tui.widgets.lens_shell import Mark
+
+    db = "/data/data/com.app/databases/app.db"
+    content = {db: "main\n", f"{db}-wal": "wal one\n"}
+    calls: list[str] = []
+    fake = _fake_pull_file(content)
+
+    def _pull(self, remote_path, local_path, compute_hash=False):
+        calls.append(remote_path)
+        return fake(self, remote_path, local_path, compute_hash)
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", _pull)
+    monkeypatch.setattr(WatchlistView, "_device_facts", _facts_for(content))
+    get_forensic_service().add_spotlight_file(db)
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        view.marks = [Mark(1, datetime(2026, 1, 1, 10, 0, 0), "tap login")]
+        view.pull([db])
+        await _wait_for(pilot, lambda: view.rows[db].state is RowState.BASELINE_ONLY)
+        (v1,) = watchlist_store.version_dirs(db)
+        record = watchlist_store.version_record(v1)
+        file_set = record["set"]
+        assert record["schema_version"] == 2
+        assert file_set["members"] == ["app.db", "app.db-wal"]
+        assert file_set["match"] is True
+        assert record["sha256_match"] is True
+        assert file_set["device_sha256"] == file_set["local_sha256"]
+        assert file_set["newest_member"] == "app.db-wal"
+        assert datetime.fromisoformat(file_set["newest_mtime_iso"]).tzinfo is not None
+        assert record["companions"][0]["sha256_match"] is True
+        assert record["mark"]["number"] == 1
+        assert record["mark"]["name"] == "tap login"
+        assert view.rows[db].sha256 == file_set["local_sha256"]
+
+        calls.clear()
+        view.pull([db])
+        await _wait_for(pilot, lambda: view.rows[db].checked_at is not None)
+        assert calls == []  # not pulled again
+        assert view.rows[db].state is RowState.UNCHANGED
+        assert "no change since v001" in view.rows[db].detail
+        assert len(watchlist_store.version_dirs(db)) == 1
+        (check,) = watchlist_store.version_checks(db)
+        assert check["same_as"] == "v001"
+        assert check["trigger"] == "manual"
+        assert check["note"] == "no change"
+        assert set(check["device_sha256"]) == {"app.db", "app.db-wal"}
+        assert datetime.fromisoformat(check["at"]).utcoffset() is not None
+        assert check["mark"]["name"] == "tap login"
+
+        content[f"{db}-wal"] = "wal two\n"  # a WAL-only write
+        view.pull([db])
+        await _wait_for(pilot, lambda: len(watchlist_store.version_dirs(db)) == 2)
+        assert watchlist_store.version_dirs(db)[-1].name.startswith("v002_")
+
+
 @pytest.mark.asyncio
 async def test_only_membership_survives_a_restart(monkeypatch) -> None:
     """Pull facts live in the session (versions in the session results
@@ -316,8 +452,11 @@ async def test_only_membership_survives_a_restart(monkeypatch) -> None:
         await _wait_for(pilot, lambda: view.rows[PATH_A].pulled_at is not None)
         row = view.rows[PATH_A]
         assert row.size == 4
-        assert row.sha256 == (
-            "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb"
+        # The set hash (the file + its -wal/-journal; here the file alone).
+        assert row.sha256 == watchlist_store.set_sha256(
+            {
+                "config_a": "edeaaff3f1774ad2888673770c6d64097e391bc362d7d6fb34982ddf0efd18cb"
+            }
         )
 
     get_forensic_service()._spotlight_files.clear()
@@ -374,11 +513,15 @@ async def test_second_pull_with_changed_content_shows_diff(monkeypatch) -> None:
         info = view._rows[PATH_A]
         assert info.diff_text is not None
         assert "line two" in info.diff_text
-        assert "[LINE ADDED]" in info.diff_text
+        assert "+line two" in info.diff_text  # plain diff.txt (unified hunks)
         # The fresh pull is the newest version, with its diff next to it.
         previous = watchlist_store.previous_dir(PATH_A)
         assert (previous / "config_a").read_text(encoding="utf-8") == content[PATH_A]
         assert "line two" in watchlist_store.version_diff(previous)
+        doc = watchlist_store.version_diff_doc(previous)
+        assert doc["kind"] == "text"
+        assert doc["changed"] is True
+        assert doc["base_version"] == watchlist_store.version_dirs(PATH_A)[0].name
         assert len(watchlist_store.version_dirs(PATH_A)) == 2
 
 
@@ -402,7 +545,14 @@ async def test_second_pull_with_unchanged_content_reports_unchanged(
         view.pull([PATH_A])
         await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.UNCHANGED)
 
-        assert "No changes" in view._rows[PATH_A].detail
+        # No device hash here (autouse fixture): the identical copy is not
+        # kept as a version; one "checked, no change" record instead.
+        assert "identical to v001" in view._rows[PATH_A].detail
+        assert len(watchlist_store.version_dirs(PATH_A)) == 1
+        (check,) = watchlist_store.version_checks(PATH_A)
+        assert check["same_as"] == "v001"
+        assert check["trigger"] == "manual"
+        assert not (watchlist_store.row_dir(PATH_A) / ".current").exists()
 
 
 @pytest.mark.asyncio

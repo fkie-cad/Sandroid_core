@@ -335,10 +335,10 @@ def get_file_diff(path: str) -> dict[str, Any]:
     same promote-after-diff step) rather than reaching into the widget
     itself -- that method runs on the widget's own background thread and
     reports back via Textual message-posting, neither of which applies to a
-    synchronous AI-tool dispatch. Uses the shared, promoted
-    :func:`sandroid.core.file_diff.diff_files` (the same function
-    ``watchlist_view.py``'s own ``_compute_diff`` now delegates to) so both
-    call sites agree on the extension/magic-header dispatch.
+    synchronous AI-tool dispatch. The version is kept through the shared
+    :func:`sandroid.core.watchlist_store.keep_version` (the same structured
+    diff, ``diff.json`` and plain ``diff.txt`` as the Files lens's pulls), so
+    the returned ``diff`` is that plain text.
 
     Deliberately passes ``file_extraction_service.is_sqlite_file`` (a plain,
     uncached magic-header read) as the sqlite check, NOT
@@ -369,7 +369,7 @@ def get_file_diff(path: str) -> dict[str, Any]:
             f"or control characters, got {path!r}"
         )
 
-    from sandroid.core import file_diff, watchlist_store
+    from sandroid.core import watchlist_store
     from sandroid.core.adb import Adb
     from sandroid.services import get_file_extraction_service, get_forensic_service
     from sandroid.services.file_extraction_service import is_sqlite_file
@@ -393,8 +393,10 @@ def get_file_diff(path: str) -> dict[str, Any]:
         for suffix in ("-wal", "-journal"):
             fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
 
+    # Kept as a new version with diff.json + the plain diff.txt rendered from
+    # it, like the Files lens's pulls.
+    kept = watchlist_store.keep_version(path)
     if not had_previous:
-        watchlist_store.promote(path)
         return {
             "path": path,
             "baseline": True,
@@ -402,17 +404,11 @@ def get_file_diff(path: str) -> dict[str, Any]:
             "message": "Baseline captured, no prior version to diff against.",
             "diff": None,
         }
-
-    previous_main = watchlist_store.previous_dir(path) / basename
-    diff_text, changed = file_diff.diff_files(
-        previous_main, current_main, is_sqlite_file
-    )
-    # Kept as a new version with its diff, like the Files lens's pulls.
-    watchlist_store.promote(path, diff_text if changed else "")
+    changed = kept.changed
     return {
         "path": path,
         "baseline": False,
         "changed": changed,
         "message": None if changed else "No changes since last pull.",
-        "diff": diff_text if changed else None,
+        "diff": kept.text if changed else None,
     }
