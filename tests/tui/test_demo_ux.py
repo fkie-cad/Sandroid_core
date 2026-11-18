@@ -179,7 +179,7 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         message = str(app.screen.message_text)
         assert "Run 1 · 18:22" in message
         assert "2 replays + a dry run" in message
-        assert "about 7 min" in message
+        assert "roughly 6-8 min" in message
         await pilot.press("n")
         await _settle(pilot)
         assert started == []
@@ -189,6 +189,32 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         await _settle(pilot)
         assert started == [1]
         assert app.screen.query_one("#lens-body").current == "runs-panel"
+
+
+def test_play_estimate_matches_measured_plays(monkeypatch) -> None:
+    """R4-N1: an 80 s recording, 2 replays + dry run, settle 8 s took 13 min
+    12 s and 16 min 10 s on the emulator; the dialog promised "about 6 min"
+    (snapshot loads, network resets, the baseline scan and the result pulls
+    were left out).
+    """
+    from types import SimpleNamespace
+
+    from sandroid.analysis import engine
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    monkeypatch.setattr(engine, "_replay_settle_seconds", lambda config: 8)
+    fake = SimpleNamespace(
+        recording_seconds=lambda path: 80.0,
+        get_recording_path=lambda: "rec.txt",
+        _current_number_of_runs=2,
+        _current_noise_filter=True,
+        _current_recording_label="Run 1",
+        _recording_run_id=None,
+    )
+    estimate = RecordingController.play_plan(fake)["estimate"]
+    low, high = estimate * 0.85, estimate * 1.15  # the range the dialog shows
+    for measured in (13 * 60 + 12, 16 * 60 + 10):
+        assert low <= measured <= high
 
 
 # --------------------------------------------------------------------------
@@ -754,6 +780,25 @@ async def test_shift_arrows_work_with_nothing_focused() -> None:
         after = app.screen.query_one("#lens-body").current
         assert after != before
         assert app.focused is not None
+
+
+def test_alt_screen_is_left_once_so_the_summary_stays(monkeypatch, capsys) -> None:
+    """NEW-3: the atexit reset sent ``ESC[?1049l`` again after the session
+    summary; that restores the cursor saved at startup, and the shell prompt
+    then overwrote the summary.
+    """
+    from sandroid.tui import terminal_reset
+
+    monkeypatch.setitem(terminal_reset._alt_screen_left, "done", False)
+    terminal_reset._write_reset_sequences()  # right after app.run() returned
+    first = capsys.readouterr().out
+    print("═══ Sandroid Session Complete ═══")
+    terminal_reset._write_reset_sequences()  # atexit
+    second = capsys.readouterr().out
+    assert first.count("\x1b[?1049l") == 1
+    assert "\x1b[?1049l" not in second
+    assert "\x1b[?1000l" in second  # mouse tracking still switched off
+    assert "\x1b[?25h" in second
 
 
 def test_importing_tui_app_emits_no_terminal_reset(tmp_path) -> None:

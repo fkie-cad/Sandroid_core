@@ -1322,3 +1322,197 @@ async def test_drawer_focus_offers_no_inspect_and_has_no_hscroll() -> None:
         log.log_info("x" * 300)
         await _settle(pilot)
         assert log.max_scroll_x == 0
+
+
+# --------------------------------------------------------------------------
+# fix round 4: quit always asks; keys after confirm; status under modals
+# --------------------------------------------------------------------------
+
+
+async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
+    """NEW-1 / Files M7: with friTap or the file monitor running, ``q``
+    stopped them on the UI thread instead of asking (~6 s freeze); the ``y``
+    meant for the dialog then opened Proxy Settings and Sandroid stayed up.
+    """
+    import threading
+    import time
+
+    from sandroid.services import get_task_service
+
+    stops: list[tuple[str, bool]] = []
+
+    def _slow_stop(name: str):
+        def _stop() -> None:
+            time.sleep(0.6)
+            stops.append((name, threading.current_thread() is threading.main_thread()))
+
+        return _stop
+
+    tasks = get_task_service()
+    app = _app()
+    try:
+        async with app.run_test(size=SIZE) as pilot:
+            await _boot(app, pilot)
+            for name, display in (("fritap", "FriTap"), ("monitor", "Monitor")):
+                tasks.register(
+                    name=name,
+                    display_name=display,
+                    instance=None,
+                    stop_callback=_slow_stop(name),
+                )
+            await _settle(pilot)
+            await pilot.press("q")
+            await _settle(pilot)
+            modal = app.screen
+            assert type(modal).__name__ == "QuitConfirmModal"
+            assert stops == []  # nothing stopped before the confirm
+            notes = str(modal.query_one("#quit-notes").render())
+            assert "stops friTap" in notes
+            assert "stops the file monitor" in notes
+            await pilot.press("y")
+            await _settle(pilot, 2)
+            # Still up, as a progress note that swallows keys.
+            assert app.screen is modal
+            assert modal.quitting
+            assert "Quitting" in str(modal.query_one("#quit-title").render())
+            for key in ("y", "escape", "M", "q", "n"):
+                await pilot.press(key)
+            await _settle(pilot, 2)
+            assert app.screen is modal
+            assert app.check_action("toggle_proxy", ()) is False
+            for _ in range(80):
+                await pilot.pause(0.05)
+                if app._exit:
+                    break
+            assert app._exit
+            assert sorted(stops) == [("fritap", False), ("monitor", False)]
+    finally:
+        for name in ("fritap", "monitor"):
+            tasks.unregister(name)
+
+
+async def test_q_asks_even_with_a_resident_frida_script(monkeypatch) -> None:
+    """R2-N2: the bypass script stays loaded after ``b`` turns every
+    category off, unregistered from the TaskService. ``q`` then silently
+    stopped this "untracked Frida job" (on the UI thread) instead of asking,
+    so the following ``y`` landed on Proxy Settings.
+    """
+    from sandroid.core import background_tracker as bt
+
+    cleaned: list[int] = []
+    report = bt.BackgroundWorkReport(
+        untracked_frida_jobs=[
+            bt.UntrackedWork(
+                work_type="frida_job",
+                name="Detection Bypass",
+                details="job_id=1",
+                identifier="1",
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        bt.BackgroundWorkTracker, "detect_untracked_work", lambda self: report
+    )
+    monkeypatch.setattr(
+        bt.BackgroundWorkTracker,
+        "force_cleanup",
+        lambda self, rep: cleaned.append(1) or [],
+    )
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("q")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        assert cleaned == []
+        await pilot.press("ctrl+c")  # a second quit key does not stack dialogs
+        await _settle(pilot)
+        assert (
+            sum(type(s).__name__ == "QuitConfirmModal" for s in app.screen_stack) == 1
+        )
+        await pilot.press("n")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+
+
+async def test_q_after_closing_the_objection_dialog_asks(monkeypatch) -> None:
+    """R2-N2 (b): ``b`` ``o`` Esc, then ``q`` must reach the quit dialog."""
+    from types import SimpleNamespace
+
+    from sandroid.tui import app as app_mod
+
+    monkeypatch.setattr(
+        app_mod,
+        "get_spotlight_service",
+        lambda: SimpleNamespace(
+            has_app=lambda: True, get_app_tuple=lambda: ("org.example", 0)
+        ),
+    )
+    app = _app()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("1")
+        await _settle(pilot)
+        await pilot.press("b")
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "ObjectionModal"
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        await pilot.press("q")
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        await pilot.press("n")
+        await _settle(pilot)
+
+
+async def test_status_bar_refreshes_while_a_modal_is_open(monkeypatch) -> None:
+    """R2-N1: the snapshot picker stays open after a load; the post-load
+    frida-server restart's status refresh found no status bar there, so the
+    strip said "Frida ○ off" for minutes.
+    """
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        bar = app.screen.query_one("#status-bar", StatusBar)
+        calls: list[int] = []
+        monkeypatch.setattr(bar, "update_from_toolbox", lambda: calls.append(1))
+        await pilot.press("question_mark")
+        await _settle(pilot)
+        assert type(app.screen).__name__ != "MainScreen"
+        app._update_status_bar()  # what _auto_start_frida_server calls
+        assert calls == [1]
+        app._refresh_status_bar()  # the proxy controller's refresh
+        assert calls == [1, 1]
+        await pilot.press("escape")
+
+
+def test_strip_keeps_the_device_proxy_while_it_cannot_be_read(monkeypatch):
+    """NEW-5: during the ^N settle the settings service is down ("Broken
+    pipe"); the strip said "device ○" while the caption said "device ✓",
+    and each read logged "Invalid proxy format".
+    """
+    from sandroid.core.proxy_manager import ProxyManager, ProxyStatus
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    bar.active_device = "emulator-5554"
+    bar.proxy_address = "10.0.2.2:8090"
+    answer = {"v": (ProxyStatus.ERROR, None)}
+    monkeypatch.setattr(ProxyManager, "get_proxy_settings", lambda self: answer["v"])
+    monkeypatch.setattr(StatusBar, "_schedule_frida_check", lambda self: None)
+    from sandroid.core.toolbox import Toolbox
+
+    def _no_device_manager(*_args):
+        raise RuntimeError("keeps the active device set above")
+
+    monkeypatch.setattr(Toolbox, "get_device_manager", _no_device_manager)
+    bar.update_from_toolbox()
+    assert bar.proxy_address == "10.0.2.2:8090"
+    answer["v"] = (ProxyStatus.NOT_SET, None)
+    bar.update_from_toolbox()
+    assert bar.proxy_address == ""

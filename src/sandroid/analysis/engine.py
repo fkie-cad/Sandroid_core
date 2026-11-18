@@ -1164,6 +1164,10 @@ class AnalysisEngine:
         if step.kind == "action":
             total = self.config.number_of_runs
             return f"replay {step.run_number}/{total}"
+        if step.kind == "pull" and getattr(step, "slot", "") == "first":
+            # After the snapshot load, before the next replay: the files'
+            # snapshot versions are pulled for the diffs (no results yet).
+            return "pulling original files"
         return self._PHASES.get(step.kind)
 
     def _emit_phase(self, run_number: int, phase: str) -> None:

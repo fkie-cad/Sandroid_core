@@ -266,6 +266,10 @@ class RecordingController:
         # "Run N · HH:MM") for a manual ``p`` / AI replay -- a manual Play
         # used to copy the previous run's label (M-31).
         self._play_label: str | None = None
+        #: Run id of the Play that ran right after the recording (named in
+        #: the Record dialog); ``p``'s confirm names the recording by that
+        #: run's *current* label, so a rename shows up there.
+        self._recording_run_id: str | None = None
         # Whether mitmproxy ran when the current Play started (recorded with
         # the run's flows).
         self._mitm_at_start: bool | None = None
@@ -423,7 +427,12 @@ class RecordingController:
             self._current_noise_filter,
         )
         self._recording_seq += 1
-        default_label = f"Run {self._recording_seq} · {time.strftime('%H:%M')}"
+        # Numbered like a manual Play (this device's next run), not per
+        # session: the session counter restarted at "Run 1" every launch.
+        # (Toolbox.device_name: no adb call on the UI thread.)
+        default_label = self._fresh_run_label(
+            getattr(self._get_toolbox(), "device_name", None)
+        )
         # Seed sane fallbacks immediately, in case the live callback below
         # never fires for some reason (e.g. the modal is torn down early).
         self._current_recording_label = default_label
@@ -452,6 +461,7 @@ class RecordingController:
                 return
 
             if result.completed:
+                self._recording_run_id = None  # a new recording
                 # Belt-and-suspenders: keep the seeds in sync even if
                 # on_settings_chosen was somehow never wired/fired.
                 if getattr(result, "label", ""):
@@ -533,6 +543,7 @@ class RecordingController:
             return {"success": False, "message": "Recording already in progress"}
 
         self._recording_seq += 1
+        self._recording_run_id = None
         self._current_recording_label = label or f"Run {self._recording_seq}"
         self._current_number_of_runs = number_of_runs
         self._current_noise_filter = noise_filter
@@ -710,8 +721,12 @@ class RecordingController:
 
         ``{"recording": label, "number_of_runs", "noise_filter", "seconds":
         recording length or None, "estimate": rough total seconds or None}``.
-        The estimate is (replays + dry run) x (recording + settle + ~35 s of
-        snapshot load, network reset and result collection) + ~15 s.
+        The estimate is (replays + dry run) x (recording + settle + ~150 s)
+        + ~180 s. Per replay window: snapshot load + network reset (45-120 s)
+        and the result collection pull (85-110 s); once: the baseline scan
+        (90-160 s) and the analysis -- as measured on the emulator (a Play of
+        an 80 s recording with 2 replays took 13-16 min, not the 6 min the
+        old ~35 s per window promised).
         """
         seconds = self.recording_seconds(self.get_recording_path())
         windows = self._current_number_of_runs + (
@@ -722,9 +737,17 @@ class RecordingController:
             from sandroid.analysis.engine import _replay_settle_seconds
 
             settle = _replay_settle_seconds(None)
-            estimate = windows * (seconds + settle + 35) + 15
+            estimate = windows * (seconds + settle + 150) + 180
+        label = self._current_recording_label
+        if self._recording_run_id:
+            try:
+                from sandroid.core import run_history
+
+                label = run_history.load_run(self._recording_run_id).label or label
+            except Exception:
+                pass
         return {
-            "recording": self._current_recording_label,
+            "recording": label,
             "number_of_runs": self._current_number_of_runs,
             "noise_filter": self._current_noise_filter,
             "seconds": seconds,
@@ -1207,15 +1230,27 @@ class RecordingController:
         except Exception:
             return None
 
-    def _fresh_run_label(self, device_name: str | None) -> str:
-        """``"Run N · HH:MM"`` for a manual Play (N = this device's next run)."""
+    def _fresh_run_label(
+        self, device_name: str | None, started_at: str | None = None
+    ) -> str:
+        """``"Run N · HH:MM"`` (N = this device's next run).
+
+        ``HH:MM`` is ``started_at`` (the Play's start, ISO) when given, so the
+        label agrees with the run's "When" -- not the end of its analysis.
+        """
         from sandroid.core import run_history
 
         try:
             n = len(run_history.load_index(device_name)) + 1
         except Exception:
             n = 1
-        return f"Run {n} · {time.strftime('%H:%M')}"
+        hhmm = time.strftime("%H:%M")
+        if started_at:
+            try:
+                hhmm = datetime.fromisoformat(started_at).strftime("%H:%M")
+            except ValueError:
+                pass
+        return f"Run {n} · {hhmm}"
 
     def _export_run_flows(
         self,
@@ -1293,9 +1328,11 @@ class RecordingController:
 
         completed_at = datetime.now().isoformat()
         label = _unique_run_label(
-            self._play_label or self._fresh_run_label(device_name),
+            self._play_label or self._fresh_run_label(device_name, recorded_at),
             device_name,
         )
+        if self._play_label:
+            self._recording_run_id = run_id
 
         if result is not None:
             duration = int(getattr(result, "action_duration", 0) or 0)

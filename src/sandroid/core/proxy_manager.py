@@ -295,7 +295,12 @@ class ProxyManager:
                 config = ProxyConfig.from_string(proxy_value)
                 return ProxyStatus.SET, config
             except ValueError:
-                logger.warning(f"Invalid proxy format from device: {proxy_value}")
+                if "Failure calling service" in proxy_value:
+                    # settings service down (system_server restarting after
+                    # a Zygote restart): unreadable for now, not invalid.
+                    logger.debug(f"Device proxy unreadable: {proxy_value}")
+                else:
+                    logger.warning(f"Invalid proxy format from device: {proxy_value}")
                 return ProxyStatus.ERROR, None
 
         except Exception as e:

@@ -564,6 +564,15 @@ class DiffsView(FilesSubViewBase):
         except OSError:
             facts["pdfs"] = []
         facts["recording"] = run_history.recording_digest(run_dir)
+        # The recording's own length (first to last input event); the run's
+        # "duration" is the replay window (replay + settle).
+        from sandroid.tui.controllers.recording_controller import (
+            RecordingController,
+        )
+
+        facts["recording_seconds"] = RecordingController.recording_seconds(
+            str(run_dir / "recording.txt")
+        )
         try:
             facts["pcaps"] = sorted(
                 (p.relative_to(run_dir).as_posix(), p.stat().st_size)
@@ -1025,7 +1034,9 @@ class DiffsView(FilesSubViewBase):
         grid.add_row("Run", Text(f"#{self._run_number(run_id)} · {run_id}"))
         grid.add_row("When", when)
         grid.add_row("Took", self._format_duration(self._run_seconds(s)))
-        recording = self._format_duration(s.get("duration"))
+        recording = self._format_duration(
+            facts.get("recording_seconds") or s.get("duration")
+        )
         replays = self._replays(run_id)
         if replays > 1:
             recording += f"  ·  {replays} replays"
@@ -1294,14 +1305,21 @@ class DiffsView(FilesSubViewBase):
             label = value.strip()
             if not label or label == current:
                 return
-            message = f"Rename run '{current}' to '{label}'?"
+            # Name the run like the input dialog did (# and id), not by its
+            # label alone.
+            message = (
+                f"Rename run #{self._run_number(run_id)} '{current}' "
+                f"({run_id}) to '{label}'?"
+            )
             if label.lower().endswith(".apk") or "/" in label:
                 message += (
                     "\nThis looks like a file path. To install an APK, "
                     "choose No and press n outside the Runs lens."
                 )
             self.app.push_screen(
-                ConfirmModal(title="Rename run", message=message),
+                ConfirmModal(
+                    title=f"Rename run #{self._run_number(run_id)}", message=message
+                ),
                 lambda yes: on_confirm(yes, label),
             )
 

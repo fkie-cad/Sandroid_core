@@ -664,8 +664,13 @@ class WatchlistView(Widget):
         # destination stays inside our own current/ cache directory. A
         # missing companion is normal (WAL mode has no -journal).
         if is_sqlite_file(str(current_main)):
-            for suffix in SQLITE_COMPANIONS:
-                fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
+            from sandroid.core.adb_utils import quiet_adb_warnings
+
+            # Not a warning when one is missing ("failed to stat remote
+            # object …db-journal" on every pull of a WAL database).
+            with quiet_adb_warnings():
+                for suffix in SQLITE_COMPANIONS:
+                    fx.pull_file(f"{path}{suffix}", f"{current_main}{suffix}")
 
         facts = _file_facts(current_main)
         keep = _max_versions()
@@ -858,7 +863,11 @@ class WatchlistView(Widget):
             if is_database_path(path):
                 targets.extend(f"{path}{s}" for s in SQLITE_COMPANIONS)
         try:
-            stdout, stderr = self._stat_command(targets)
+            from sandroid.core.adb_utils import quiet_adb_warnings
+
+            # A missing -journal/-wal is normal; the result is judged below.
+            with quiet_adb_warnings():
+                stdout, stderr = self._stat_command(targets)
         except Exception as exc:
             stdout, stderr = "", str(exc)
         self._post(self._apply_auto_tick_result, paths, stdout, stderr)

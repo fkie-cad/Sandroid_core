@@ -470,8 +470,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                         "down": radio_set.action_next_button,
                         "right": radio_set.action_next_button,
                         "space": radio_set.action_toggle_button,
-                        "enter": radio_set.action_toggle_button,
-                        "return": radio_set.action_toggle_button,
+                        "enter": lambda: self._radio_enter(radio_set),
+                        "return": lambda: self._radio_enter(radio_set),
                     }
                     action = radio_actions.get(key)
                     if action:
@@ -484,6 +484,18 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
         # For non-RadioSet focus or no RadioSet, call parent handler
         super().on_key(event)
+
+    def _radio_enter(self, radio_set: RadioSet) -> None:
+        """Enter on the mode choice: pick the highlighted mode, or -- when it
+        is already the chosen one (as when the dialog opens) -- start.
+
+        Enter used to toggle the already-chosen button, i.e. do nothing.
+        """
+        highlighted = getattr(radio_set, "_selected", None)
+        if highlighted is not None and highlighted != radio_set.pressed_index:
+            radio_set.action_toggle_button()
+            return
+        self._start()
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         """Handle mode selection change."""

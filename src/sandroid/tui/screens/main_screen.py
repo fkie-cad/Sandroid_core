@@ -114,9 +114,10 @@ class MainScreen(Screen):
         Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
         Binding("enter", "inspect", "Inspect"),
         # Inspector tabs while it is open, whatever has focus: [ / ] always;
-        # plain ←/→ only when the focused widget does not use them itself (an
-        # Input moves its caret; a DataTable keeps them while it can scroll
-        # sideways -- Textual skips its scroll binding otherwise).
+        # plain ←/→ too, except in a text input (caret). They are priority
+        # bindings: a lens table used to keep ←/→ for sideways scrolling
+        # only while it overflowed, so whether they switched tabs depended
+        # on the window size (they scrolled at 80x24, switched at 100x30).
         Binding(
             "left_square_bracket",
             "inspector_tab(-1)",
@@ -129,8 +130,20 @@ class MainScreen(Screen):
             "Inspector: next tab",
             show=False,
         ),
-        Binding("left", "inspector_tab(-1)", "Inspector: prev tab", show=False),
-        Binding("right", "inspector_tab(1)", "Inspector: next tab", show=False),
+        Binding(
+            "left",
+            "inspector_tab(-1)",
+            "Inspector: prev tab",
+            show=False,
+            priority=True,
+        ),
+        Binding(
+            "right",
+            "inspector_tab(1)",
+            "Inspector: next tab",
+            show=False,
+            priority=True,
+        ),
         # Back to LIVE from REVIEW scope (shown only while reviewing a run).
         Binding("L", "back_to_live", "Live"),
     ]
@@ -159,11 +172,16 @@ class MainScreen(Screen):
             return self.scope_run is not None
         if action == "inspector_tab":
             content = self.inspector_content
-            return self.inspector_is_open and bool(content and content.tabs)
+            if not (self.inspector_is_open and content and content.tabs):
+                return False
+            from textual.widgets import Input, TextArea
+
+            # A text input keeps ←/→ (caret) and [ / ] (typed characters).
+            return not isinstance(self.focused, Input | TextArea)
         return True
 
     def action_inspector_tab(self, delta: int) -> None:
-        """``[`` / ``]`` (or ←/→ when unused): switch the open Inspector's tab."""
+        """``[`` / ``]`` or ←/→: switch the open Inspector's tab."""
         try:
             self.query_one("#inspector", Inspector).action_tab(delta)
         except Exception:

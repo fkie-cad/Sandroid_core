@@ -519,8 +519,11 @@ class StatusBar(Static):
                 status, config = ProxyManager().get_proxy_settings()
                 if status == ProxyStatus.SET and config:
                     self.proxy_address = config.address
-                else:
+                elif status == ProxyStatus.NOT_SET:
                     self.proxy_address = ""
+                # ERROR (unreadable, e.g. while system_server restarts after
+                # ^N): keep the last known value -- "device ○" while the
+                # caption said "device ✓" was a read failure, not a change.
             else:
                 self.proxy_address = ""
         except Exception:

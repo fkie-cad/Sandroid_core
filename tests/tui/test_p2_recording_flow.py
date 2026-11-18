@@ -830,6 +830,17 @@ def test_manual_play_gets_a_fresh_label_not_the_previous_runs(monkeypatch, tmp_p
     assert "Bookmark article" in {e["label"] for e in run_history.load_index()}
     assert controller._play_label is None  # used once
 
+    # R4-N3: after renaming that run, p's confirm named the recording by
+    # its old label.
+    controller._current_recording_label = "Bookmark article"
+    run_id = next(
+        e["run_id"]
+        for e in run_history.load_index()
+        if e["label"] == "Bookmark article"
+    )
+    run_history.update_label(run_id, "R4 renamed")
+    assert controller.play_plan()["recording"] == "R4 renamed"
+
 
 def test_cancelled_record_dialog_keeps_the_previous_recordings_seed(
     monkeypatch, tmp_path
@@ -861,6 +872,28 @@ def test_cancelled_record_dialog_keeps_the_previous_recordings_seed(
     assert controller._recording_seq == 1
 
 
+def test_run_labels_count_the_devices_runs_and_use_the_play_start(
+    monkeypatch, tmp_path
+):
+    """R4-N2: the Record dialog proposed "Run 1" in every new session (a
+    per-session counter), so two runs were called "Run 1 · …". R4-N4: a
+    manual Play's label used the end of its analysis ("Run 4 · 00:21" for a
+    Play started at 00:05).
+    """
+    from sandroid.core import run_history
+
+    pushed: list = []
+    controller, _toolbox, _forensic = _playback_controller(
+        monkeypatch, tmp_path, push_modal=lambda modal, cb: pushed.append(cb)
+    )
+    monkeypatch.setattr(run_history, "load_index", lambda device=None: [1, 2, 3])
+    controller.start_recording()
+    assert controller._current_recording_label.startswith("Run 4 · ")
+    assert (
+        controller._fresh_run_label("dev", "2026-11-18T00:05:48.1") == "Run 4 · 00:05"
+    )
+
+
 def test_play_reports_phases_and_clears_them_at_the_end(monkeypatch, tmp_path):
     """M-35: the pill/strip get the Play's phase, and None when it is over."""
     phases: list = []
@@ -880,6 +913,10 @@ def test_play_reports_phases_and_clears_them_at_the_end(monkeypatch, tmp_path):
         "saving",
     ):
         assert expected in phases
+    # R4-N5: the pull of the original files right after a snapshot load
+    # (before replay 2) read "collecting results".
+    second = phases.index("replay 2/2")
+    assert phases[second - 1] == "pulling original files"
     assert phases[-1] is None
     # The run records its phase windows (replays + dry run).
     record = run_history.load_run(run_history.load_index()[0]["run_id"])

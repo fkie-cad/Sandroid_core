@@ -408,12 +408,15 @@ class SandroidTUI(App):
 
         self._widget_refresh_controller = WidgetRefreshController(
             query_widget=self.query_one,
+            # The MainScreen even under a modal: the snapshot picker stays
+            # open after a load, and the post-load frida-server restart's
+            # status refresh found no status bar ("Frida ○ off" for minutes).
             query_from_screen=lambda w_id, w_type: (
-                self.screen.query_one(w_id, w_type)
-                if isinstance(self.screen, MainScreen)
+                ms.query_one(w_id, w_type)
+                if (ms := self._main_screen_in_stack()) is not None
                 else None
             ),
-            is_main_screen=lambda: isinstance(self.screen, MainScreen),
+            is_main_screen=lambda: self._main_screen_in_stack() is not None,
             refresh_app=self.refresh,
             refresh_screen=lambda: (
                 self.screen.refresh(layout=True)
@@ -552,7 +555,13 @@ class SandroidTUI(App):
         ``p``/``1``-``4``/``D``/... would act on a session that does not
         exist yet. A refused priority binding falls through to the screen's
         own bindings (``r``/``d``/``q``/``Ctrl+C``, see StartupScreen).
+
+        Also refuses everything once a quit is under way: the cleanup runs
+        off the UI thread, and a key typed meanwhile (``y`` = Proxy Settings,
+        ``M`` = mitm) must not start anything new.
         """
+        if getattr(self, "_exit_started", False):
+            return False
         if self._startup_screen_up():
             return False
         return True
@@ -1011,7 +1020,7 @@ class SandroidTUI(App):
             return ViewMode.FORENSIC.value
 
     def action_request_quit(self) -> None:
-        """Show quit confirmation or stop running tasks."""
+        """Show the quit confirmation (always; running tools are listed)."""
         self._quit_controller.request_quit()
 
     def action_maybe_quit(self) -> None:
@@ -1844,10 +1853,12 @@ class SandroidTUI(App):
         ]
         estimate = plan.get("estimate")
         if estimate:
-            minutes = max(1, round(float(estimate) / 60))
+            # A range: snapshot loads and result pulls vary run to run.
+            low = max(1, round(float(estimate) * 0.85 / 60))
+            high = max(low + 1, round(float(estimate) * 1.15 / 60))
             seconds = plan.get("seconds") or 0
             lines.append(
-                f"Takes about {minutes} min (recording {round(seconds)} s); "
+                f"Takes roughly {low}-{high} min (recording {round(seconds)} s); "
                 "the header shows the phase."
             )
 
@@ -2027,7 +2038,7 @@ class SandroidTUI(App):
 
     def _refresh_status_bar(self) -> None:
         try:
-            ms = self._get_main_screen()
+            ms = self._main_screen_in_stack()
             if ms:
                 bar = ms.query_one("#status-bar")
                 if hasattr(bar, "refresh_status"):

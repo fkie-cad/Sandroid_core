@@ -493,3 +493,42 @@ def test_clear_flows_on_empty_dir_returns_zero(tmp_path):
     flow_dir = tmp_path / "mitm_flows"
 
     assert flow_log.clear_flows(flow_dir) == 0
+
+
+def test_flow_dir_follows_the_session_not_a_running_play(tmp_path, monkeypatch):
+    """R4-N6: a Play pins RAW_RESULTS_PATH to its bundle for its whole run.
+
+    The TUI's configuration service has no session of its own and falls back
+    to that env var, so the live Network lens switched to the (empty)
+    ``<bundle>/raw/mitm_flows`` and dropped every HTTP row. The session the
+    initialization service created is not pinned.
+    """
+    from types import SimpleNamespace
+
+    from sandroid import services
+    from sandroid.analysis.engine import _pinned_env
+    from sandroid.services.configuration_service import ConfigurationService
+
+    session_raw = tmp_path / "results" / "20261117_234433" / "Dev" / "raw"
+    bundle_raw = tmp_path / "results" / "runs" / "run1" / "raw"
+    monkeypatch.setenv("RAW_RESULTS_PATH", str(session_raw) + "/")
+    config = ConfigurationService()  # never initialized, as in the TUI
+    monkeypatch.setattr(services, "get_configuration_service", lambda: config)
+    monkeypatch.setattr(
+        services,
+        "get_initialization_service",
+        lambda: SimpleNamespace(get_raw_path=lambda: session_raw),
+    )
+    live = flow_log.resolve_flow_dir()
+    assert live == session_raw.resolve() / "mitm_flows"
+    play = SimpleNamespace(raw_results_path=str(bundle_raw), results_path="")
+    with _pinned_env(play):
+        assert config.get_raw_results_path().startswith(str(bundle_raw))
+        assert flow_log.resolve_flow_dir() == live
+    # Without a session (headless runs, tests) the old resolution applies.
+    monkeypatch.setattr(
+        services,
+        "get_initialization_service",
+        lambda: SimpleNamespace(get_raw_path=lambda: None),
+    )
+    assert flow_log.resolve_flow_dir() == live

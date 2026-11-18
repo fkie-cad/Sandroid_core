@@ -44,8 +44,8 @@ everything else out of the way until you ask for it:
 - **Lens bar**: ``1 App  2 Network  3 Files  4 Runs`` (a lens may show an
   alert badge such as ``⚑2``).
 - **Lens** (full width). ``Enter`` on a row opens the **Inspector** on the
-  right where the lens offers details; ``[`` / ``]`` (or ``←``/``→`` when the
-  lens does not use them) switch its tabs while focus stays in the lens;
+  right where the lens offers details; ``[`` / ``]`` (or ``←``/``→``, except
+  in a text input) switch its tabs while focus stays in the lens;
   ``Esc`` closes it. Switching to another lens closes it too.
 - **Log ticker** (one row): the newest activity-log line. The backtick key
   opens the **log drawer** with the full activity log.
@@ -76,8 +76,11 @@ Backtick (grave accent)     Toggle the log drawer
 ==========================  ==================================================
 
 ``Esc`` closes the Inspector / AI Chat first, then the log drawer, then
-clears an applied lens filter; it never quits. Quitting stops mitmweb and
-friTap and clears the device proxy Sandroid set; every step is time-boxed,
+clears an applied lens filter; it never quits. The quit dialog always comes
+first and lists what quitting stops (mitmweb, friTap, the file monitor, a
+recording, ...) and that it clears the device proxy Sandroid set. After the
+confirm the dialog stays up as "Quitting Sandroid…" and ignores keys until
+Sandroid has exited; every step is time-boxed and runs off the UI thread,
 so a tool that does not stop (e.g. a friTap agent stuck in a frozen app)
 cannot hang the quit. Every binding can be changed in the ``?`` editor (with live conflict
 detection); overrides are stored in ``tui.keybindings`` in your config.
@@ -291,8 +294,10 @@ Record/Play results and the run history (``r``/``p`` work from every lens;
    new / deleted files (with inline diffs), processes, sockets and network
    activity are shown. The header pill and the status strip show the phase
    (``● REPLAY · replay 1/2``, ``dry run``, ``analysing``). A Play takes
-   about (replays + 1) x (recording length + settle time + ~35 s) -- a 90 s
-   recording with 2 replays runs ~7 minutes.
+   roughly (replays + 1) x (recording length + settle time + ~2.5 min) + ~3
+   min -- each replay window adds a snapshot load, a network reset and a
+   result pull, and the baseline scan runs once. An 80 s recording with 2
+   replays took 13-16 minutes on the emulator; the dialog shows a range.
 
    The Play that starts right after a recording keeps the name chosen in the
    Record dialog; a later ``p`` gets a fresh name (``Run <n> · <time>``).

@@ -213,6 +213,11 @@ class BackgroundWorkTracker:
             # Skip main thread
             if thread.ident == self._main_thread_id:
                 continue
+            # A daemon thread cannot keep the process alive and ends with it
+            # (e.g. the emulator memory guard, a time-boxed Frida teardown):
+            # nothing to clean up, so not worth a "report this as a bug".
+            if thread.daemon:
+                continue
 
             # Skip known system threads
             thread_name = thread.name or ""

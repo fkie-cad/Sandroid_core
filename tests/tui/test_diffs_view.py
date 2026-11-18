@@ -625,6 +625,12 @@ async def test_rename_input_shows_the_old_label_selected_so_typing_replaces() ->
         for ch in "B replay":
             await pilot.press("space" if ch == " " else ch)
         assert field.value == "B replay"
+        # R4-N3: the confirm named the run only by its label.
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        message = str(app.screen.message_text)
+        assert "#1" in message
+        assert run_id in message
 
 
 @pytest.mark.asyncio
@@ -843,3 +849,72 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
         app._set_status_bar_mode(replaying=False)  # done, failed or stopped
         app._set_replay_phase(None)
         assert header.pill_text == "● LIVE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (160, 45)])
+async def test_arrows_switch_inspector_tabs_at_every_size(size) -> None:
+    """R2-N4: ←/→ switched the Inspector's tabs at 100x30 / 160x45 but
+    scrolled the Runs table sideways at 80x24, where it overflowed.
+    """
+    app = _sandroid_app()
+    async with app.run_test(size=size) as pilot:
+        ms, view, _ids = await _boot_runs_lens(
+            pilot, app, ["Consent · accept with a long label", "Consent · refuse"]
+        )
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert ms.inspector_is_open
+        table = view.query_one("#runs-table", DataTable)
+        table.focus()
+        await _settle(pilot)
+        inspector = ms.query_one("#inspector")
+        start = inspector.tab_index
+        await pilot.press("right")
+        await _settle(pilot)
+        assert inspector.tab_index == (start + 1) % 3
+        assert table.scroll_x == 0
+        await pilot.press("left")
+        await _settle(pilot)
+        assert inspector.tab_index == start
+        # A text input keeps its caret keys.
+        field = Input(value="abc", id="probe-input")
+        await ms.mount(field)
+        field.focus()
+        await _settle(pilot)
+        field.cursor_position = 3
+        await pilot.press("left")
+        assert inspector.tab_index == start
+        assert field.cursor_position == 2
+
+
+@pytest.mark.asyncio
+async def test_inspector_recording_is_the_recordings_own_length() -> None:
+    """R4-N4: "Recording 1m 33s" for an 80 s recording (93 s is the replay
+    window: replay + settle).
+    """
+    from rich.console import Console
+
+    run_id = "20260101_000000_aaaaaa"
+    _save(run_id, label="Bookmark", duration=93)
+    run_dir = run_history.run_dir_for_scope(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "recording.txt").write_text(
+        "1794955664890 /dev/input/event1 3 53 100\n"
+        "1794955745064 /dev/input/event1 3 53 120\n",
+        encoding="utf-8",
+    )
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await _wait_for(
+            pilot, lambda: view._detail_record is not None and run_id in view._facts
+        )
+        content = view.inspect_selected()
+        console = Console(width=200, record=True)
+        for heading, body in dict(content.tabs)["Summary"]:
+            console.print(heading)
+            console.print(body)
+        summary = console.export_text()
+        assert "1m 20s" in summary
+        assert "1m 33s" not in summary

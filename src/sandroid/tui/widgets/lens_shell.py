@@ -72,7 +72,7 @@ shows: ``title``, optional ``subtitle``, ordered ``sections`` of
 ``Table.grid()``, ``Syntax``, ``Text`` -- works), optional ``footer`` key
 hints (shown on the frame's bottom edge), optional ``tabs`` (a sequence of
 ``(tab name, sections)``; when given, ``sections`` is ignored and ``[``/``]``
--- or ←/→ unless the focused lens widget uses them -- or a click switches
+-- or ←/→ unless a text input has focus -- or a click switches
 tabs), and an optional ``key`` identifying the inspected row.
 
 * ``MainScreen.open_inspector(content)`` -- opens the side slot (closing the

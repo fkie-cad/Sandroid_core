@@ -257,91 +257,19 @@ class QuitController:
         """Default logging when no callback provided."""
         logger.info(message)
 
-    def _detect_and_stop_untracked_frida_jobs(self) -> list[str]:
-        """Detect and stop untracked Frida jobs.
-
-        This handles the case where FriTap registration failed but the job
-        is still running. Uses background_tracker to detect orphaned jobs.
-
-        Returns:
-            List of stopped job names, empty if nothing was stopped.
-        """
-        stopped_jobs = []
-
-        try:
-            from sandroid.core.background_tracker import get_background_tracker
-
-            tracker = get_background_tracker()
-            report = tracker.detect_untracked_work()
-
-            if report.untracked_frida_jobs:
-                # Found untracked Frida jobs - stop them
-                for job in report.untracked_frida_jobs:
-                    self._log_warning(f"Stopping untracked {job.name}")
-                    stopped_jobs.append(job.name)
-
-                # Use tracker's cleanup
-                tracker.force_cleanup(report)
-
-                # Log to activity log
-                for job_name in stopped_jobs:
-                    if self._log_task_stopped:
-                        self._log_task_stopped(job_name)
-
-        except Exception as e:
-            logger.debug(f"Error checking for untracked Frida jobs: {e}")
-
-        return stopped_jobs
-
     def request_quit(self) -> None:
-        """Show quit confirmation dialog or stop running tasks.
+        """Show the quit confirmation (``q``, Ctrl+C, Ctrl+Q, the palette).
 
-        Called by 'q' key and Ctrl+C.
-        - If background tasks are running (esp. monitor), stops them first
-        - If untracked Frida jobs are detected, stops them first
-        - Otherwise shows quit confirmation
+        Always asks first. It used to stop running tasks (friTap, the file
+        monitor, a resident bypass script) *instead* of asking -- on the UI
+        thread, so a friTap agent that could not unload froze the UI for
+        seconds, and the ``y`` typed for the expected dialog then opened
+        Proxy Settings. Running tools are now listed in the dialog and
+        stopped after the confirm, off the UI thread (``force_exit``).
         """
-        running_tasks = self._get_running_tasks()
-
-        # Check for untracked Frida jobs even if TaskService shows nothing
-        # This handles the case where FriTap registration failed silently
-        if not running_tasks:
-            untracked_jobs = self._detect_and_stop_untracked_frida_jobs()
-            if untracked_jobs:
-                # Stopped untracked jobs - refresh UI and return
-                if self._force_ui_refresh:
-                    self._force_ui_refresh()
-                return
-
-        if running_tasks:
-            # Stop running tasks instead of quitting
-            for task_name in running_tasks:
-                try:
-                    display_name = task_name
-                    if self._get_task:
-                        task = self._get_task(task_name)
-                        if task:
-                            display_name = (
-                                task.display_name
-                                if hasattr(task, "display_name")
-                                else task_name
-                            )
-
-                    if self._stop_task:
-                        self._stop_task(task_name)
-
-                    if self._log_task_stopped:
-                        self._log_task_stopped(display_name)
-
-                except Exception as e:
-                    logger.warning(f"Error stopping task {task_name}: {e}")
-
-            # Update UI after stopping tasks
-            if self._force_ui_refresh:
-                self._force_ui_refresh()
-            return
-
-        # No running tasks, show quit confirmation
+        current = self._get_current_screen() if self._get_current_screen else None
+        if type(current).__name__ == "QuitConfirmModal":
+            return  # already asking (or already quitting)
         self._show_quit_confirmation()
 
     def maybe_quit(self) -> None:
@@ -449,7 +377,11 @@ class QuitController:
             pass
 
     def _show_quit_confirmation(self) -> None:
-        """Show the quit confirmation modal."""
+        """Show the quit confirmation modal.
+
+        On confirm the dialog stays up as "Quitting…" (it swallows keys) while
+        ``exit_app`` cleans up off the UI thread.
+        """
         from sandroid.tui.modals import QuitConfirmModal
 
         if not self._push_modal:
@@ -462,7 +394,25 @@ class QuitController:
             if confirmed and self._exit_app:
                 self._exit_app()
 
-        self._push_modal(QuitConfirmModal(notes=self._quit_notes()), on_quit_result)
+        def on_confirm() -> None:
+            if self._exit_app:
+                self._exit_app()
+
+        self._push_modal(
+            QuitConfirmModal(notes=self._quit_notes(), on_confirm=on_confirm),
+            on_quit_result,
+        )
+
+    #: How the dialog names a running background task (TaskService name).
+    _TASK_NOTES = {
+        "fritap": "friTap",
+        "monitor": "the file monitor",
+        "recording": "the recording",
+        "bypass": "the bypass hooks",
+        "network_capture": "the network capture",
+        "dexray-intercept": "Dexray Intercept",
+        "trigdroid": "TrigDroid",
+    }
 
     @staticmethod
     def _quit_notes() -> list[str]:
@@ -481,10 +431,16 @@ class QuitController:
         try:
             from sandroid.services import get_task_service
 
-            if get_task_service().is_running("fritap"):
-                notes.append("stops friTap")
+            tasks = get_task_service().get_running_tasks()
         except Exception:
-            pass
+            tasks = []
+        for task in tasks:
+            name = getattr(task, "name", "")
+            label = QuitController._TASK_NOTES.get(name) or getattr(
+                task, "display_name", name
+            )
+            if label:
+                notes.append(f"stops {label}")
         return notes
 
     def force_exit(self) -> None:

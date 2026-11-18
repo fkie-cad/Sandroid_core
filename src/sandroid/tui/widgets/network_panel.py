@@ -1124,14 +1124,17 @@ class NetworkPanel(Widget):
         t = Text(time.strftime("%H:%M:%S", time.localtime(row.ts)), style="#5b6479")
         label, known = row.recipient
         who = Text(_ellipsize(label, who_w), style="#e5e9f0" if known else "#cbd5e1")
+        tag = _phase_tag(row.phase) if self.in_review else ""
         if row.kind == "tls":
             req = Text(no_wrap=True, overflow="ellipsis")
+            if tag:  # a dry-run / setup TLS failure is marked like its flows
+                req.append(f"{tag} ", style="#fbbf24")
             req.append("TLS ", style="#8f9bb3")
-            req.append(_ellipsize(row.host, req_w - 4), style="#e5e9f0")
+            host_w = req_w - 4 - (len(tag) + 1 if tag else 0)
+            req.append(_ellipsize(row.host, host_w), style="#e5e9f0")
             status = Text("✗ TLS", style="bold #fb7185")
             size = Text("")
         else:
-            tag = _phase_tag(row.phase) if self.in_review else ""
             if tag:
                 req = Text(no_wrap=True, overflow="ellipsis")
                 req.append(f"{tag} ", style="#fbbf24")

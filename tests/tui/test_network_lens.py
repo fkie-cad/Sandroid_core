@@ -706,6 +706,13 @@ def test_size_column_fits_three_digit_kilobytes():
     assert size == "↓ 190.9 KB"
     assert len(size) <= {k: w for k, _l, w in panel._layout()}["size"]
 
+    # R4-N7: in REVIEW with A, a setup/dry-run TLS failure had no marker.
+    panel._scope = "/runs/r1"
+    tls = FlowRow(key="f2", ts=0.0, host="ssl.gstatic.com", kind="tls", phase="setup")
+    request = panel._cells(tls, layout)[2].plain
+    assert request.startswith("setup TLS ssl.gstatic.com")
+    assert len(request) <= 40
+
 
 def test_decoded_body_note_and_protocol_label():
     """M1: decoded bodies say what they were decoded from; HTTPS/2 not 2.0."""
@@ -863,6 +870,12 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
             fritap_mod.set_lifecycle("stopped", "agent still unloading")
             await _wait(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
             assert "agent still unloading" in dict(fritap.status_rows())["friTap"]
+            # NEW-2: a failed unload dropped friTap from the caption (read
+            # like a clean stop); only the tab said "✗ failed".
+            fritap_mod.set_lifecycle("failed", "agent stuck in org.wikipedia")
+            await _wait(
+                pilot, lambda: "friTap ✗ failed" in ms._lens_captions["network"][0]
+            )
         finally:
             fritap_mod.set_lifecycle("stopped", "")
 
@@ -916,6 +929,24 @@ def test_ssl_unpin_indicator_follows_the_hooked_process(monkeypatch):
     assert any(
         "SSL unpin" in label and "off" in value for label, value in mitm.status_rows()
     )
+
+
+def test_bypass_install_lines_do_not_claim_inactive_categories(caplog):
+    """R2-N5: a Frida-only ``b 3`` logged root/debug/SSL "Hooked:" lines.
+    The combined script installs every category's hooks; flags gate them.
+    """
+    import logging
+
+    from sandroid.analysis import detection_bypass as db
+
+    svc = db.BypassService()
+    with caplog.at_level(logging.INFO, logger=db.logger.name):
+        for payload in (
+            {"type": "info", "hook": "root-bypass:File.exists"},
+            {"type": "ready", "message": "Root detection bypass hooks loaded"},
+        ):
+            svc._message_handler(None, {"type": "send", "payload": payload}, None)
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
 
 
 # --------------------------------------------------------------------------

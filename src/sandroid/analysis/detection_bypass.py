@@ -1390,9 +1390,13 @@ class BypassService:
                     ptype = payload.get("type", "")
                     hook = payload.get("hook", "")
                     if ptype == "info":
-                        logger.info(f"[Bypass] Hooked: {hook}")
-                    elif ptype == "ready":
-                        logger.info(f"[Bypass] {payload.get('message', 'Ready')}")
+                        # The combined script installs the hooks of every
+                        # category up front; FLAGS decide which act. So an
+                        # install line is no sign the category is on (a
+                        # Frida-only b 3 logged root/debug/SSL "Hooked:").
+                        logger.debug(f"[Bypass] Hook installed: {hook}")
+                    elif ptype == "ready":  # per category, see above
+                        logger.debug(f"[Bypass] {payload.get('message', 'Ready')}")
                     elif ptype == "debug":
                         logger.debug(f"[Bypass] {hook}: {payload.get('error', '')}")
             cb = self._on_message

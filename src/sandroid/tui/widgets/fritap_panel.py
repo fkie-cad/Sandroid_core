@@ -232,13 +232,16 @@ class FriTapPanel(Widget):
             return "stopped", ""
 
     def caption_token(self) -> str:
-        """The lens caption's friTap fragment ("" while stopped)."""
+        """The lens caption's friTap fragment ("" while cleanly stopped)."""
         running = self.is_running()
         phase, _detail = self._phase()
         if phase == "starting" and not running:
             return "[#facc15]friTap ◌ starting[/]"
         if phase == "stopping":
             return "[#facc15]friTap ◌ stopping[/]"
+        if phase == "failed" and not running:
+            # e.g. an agent stuck in a frozen app: not a clean stop.
+            return "[#fb7185]friTap ✗ failed[/]"
         if not running:
             return ""
         if phase == "hung":

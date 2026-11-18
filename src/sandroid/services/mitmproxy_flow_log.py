@@ -5,9 +5,8 @@ embedded mitmweb addon (``_ADDON_SOURCE``) -- this module has no dependency
 on mitmproxy's own package or on a live mitmweb process being up; it is
 plain JSON/file reading, safe to call whether or not mitmweb is running.
 
-Storage layout (mirrors the addon's own resolution -- see
-:func:`resolve_flow_dir` for why this two-line resolution is deliberately
-duplicated rather than shared)::
+Storage layout (``mitmproxy_service`` resolves the same folder with
+:func:`session_raw_root` before it starts mitmweb)::
 
     <raw_results>/mitm_flows/
         flows.jsonl             # append-only, one JSON record per line
@@ -68,22 +67,44 @@ _DETAIL_PARTS = {
 }
 
 
+def session_raw_root() -> Path:
+    """The live session's raw-results folder (absolute), never a run's.
+
+    A Play pins ``RAW_RESULTS_PATH`` to the run bundle while it runs
+    (``analysis.engine._pinned_env``), and the configuration service falls
+    back to that env var when it has no session of its own (the TUI). The
+    session the initialization service created is not pinned, so it wins;
+    otherwise the configuration service decides as before.
+    """
+    from sandroid.services import (
+        get_configuration_service,
+        get_initialization_service,
+    )
+
+    config = get_configuration_service()
+    raw: Any = None
+    is_initialized = getattr(config, "is_initialized", None)
+    if is_initialized is not None and not is_initialized():
+        try:
+            raw = get_initialization_service().get_raw_path()
+        except Exception:
+            raw = None
+    if raw is None:
+        raw = config.get_raw_results_path()
+    return Path(raw).expanduser().resolve()
+
+
 def resolve_flow_dir() -> Path:
     """Resolve ``<raw_results>/mitm_flows`` fresh, independently of the addon.
 
     Deliberately re-resolved on every call (never cached) -- the session's
     raw-results path can change across a device switch, mirroring
     ``ai/tools/_host_paths.py``'s "never cache the session-dependent root"
-    convention. Duplicates ``mitmproxy_service.py``'s own two-line
-    resolution rather than sharing an import: that module must resolve this
-    path *before* spawning mitmweb, and importing from ``ai/tools`` into
-    ``services`` would be a backwards dependency that doesn't exist anywhere
-    else in this codebase.
+    convention. It follows the *session* (:func:`session_raw_root`), not a
+    running Play's bundle: during a Play the live Network lens used to switch
+    to an empty folder in the bundle and drop every HTTP row.
     """
-    from sandroid.services import get_configuration_service
-
-    raw_root = Path(get_configuration_service().get_raw_results_path())
-    return raw_root.expanduser().resolve() / "mitm_flows"
+    return session_raw_root() / "mitm_flows"
 
 
 def _log_path(flow_dir: Path) -> Path:
@@ -636,4 +657,5 @@ __all__ = [
     "read_meta",
     "read_run_flows",
     "resolve_flow_dir",
+    "session_raw_root",
 ]

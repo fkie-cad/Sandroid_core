@@ -1066,20 +1066,16 @@ class MitmproxyService:
     def _resolve_flow_log_env() -> dict[str, str]:
         """Resolve the structured flow log's env vars for the mitmweb subprocess.
 
-        Path resolution deliberately duplicates
-        ``mitmproxy_flow_log.resolve_flow_dir``'s own two-line resolution
-        (see that module's docstring) rather than importing it, and rather
-        than importing ``ai/tools/file_transfer.py``'s private helper, which
-        would be a backwards ``services`` -> ``ai/tools`` dependency that
-        doesn't exist anywhere else in this codebase.
+        The folder is the session's (``mitmproxy_flow_log.session_raw_root``,
+        the same one the reader resolves) -- never a running Play's bundle,
+        whose ``RAW_RESULTS_PATH`` pin would otherwise send a mitmweb started
+        mid-Play into the bundle.
 
         Returns an empty dict (leaving the feature disabled at zero cost on
         the addon side) if config says it's off, or if path resolution fails
         for any reason -- never raises, never blocks ``start()``.
         """
         try:
-            from sandroid.services import get_configuration_service
-
             cfg = get_config().mitmproxy if get_config is not None else None
             enabled = (
                 getattr(cfg, "flow_log_enabled", True) if cfg is not None else True
@@ -1087,11 +1083,9 @@ class MitmproxyService:
             if not enabled:
                 return {}
 
-            raw_root = (
-                Path(get_configuration_service().get_raw_results_path())
-                .expanduser()
-                .resolve()
-            )
+            from sandroid.services.mitmproxy_flow_log import session_raw_root
+
+            raw_root = session_raw_root()
             flows_dir = raw_root / "mitm_flows"
             flows_dir.mkdir(parents=True, exist_ok=True)
             (flows_dir / "details").mkdir(parents=True, exist_ok=True)

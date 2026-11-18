@@ -1766,6 +1766,13 @@ class MonitorController:
             for path in state:
                 if path not in after and not probes_saw(path, start):
                     items.append(scan_item("FSE_DELETE", path, "scan"))
+            if items:
+                # Their rows carry the stop time, not when the file changed.
+                logger.info(
+                    "Monitor stop rescan: %d change(s) the probes did not see "
+                    "(timed at the stop)",
+                    len(items),
+                )
             self._publish_scan_items(wrapper, items)
 
         def loop() -> None:

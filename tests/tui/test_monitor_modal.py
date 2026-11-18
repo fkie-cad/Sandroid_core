@@ -340,3 +340,29 @@ async def test_opens_on_the_mode_choice_and_remembers_the_mode(monkeypatch) -> N
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.screen._get_selected_mode() == "path"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_mode_choice_starts_the_chosen_mode(monkeypatch) -> None:
+    """R3-N6: the dialog opens on PID/Path, where Enter did nothing (it
+    toggled the already-chosen button); Tab to the path field was needed.
+    """
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _PidSpotlight)
+    monkeypatch.setattr(MonitorConfigModal, "_last_mode", None)
+    _patch_backend(monkeypatch, "kprobe", availability=True)
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        started: list[str] = []
+        monkeypatch.setattr(
+            modal, "_start", lambda: started.append(modal._get_selected_mode())
+        )
+        await pilot.press("down")  # highlight Path: Enter picks it first
+        await pilot.press("enter")
+        await pilot.pause()
+        assert modal._get_selected_mode() == "path"
+        assert started == []
+        await pilot.press("enter")  # the chosen mode: start
+        await pilot.pause()
+        assert started == ["path"]

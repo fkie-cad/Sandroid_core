@@ -13,9 +13,14 @@ the terminal is always left in a usable state.
 import subprocess
 import sys
 
+# Leaving the alternate screen also restores the cursor saved when it was
+# entered. Sent a second time -- by the atexit reset, after the session
+# summary was printed -- it jumped the cursor back above the summary and the
+# shell prompt overwrote it. So it is sent once per process.
+_ALT_SCREEN_EXIT = "\033[?1049l"
+
 # Escape sequences that restore the terminal to a usable state.
-_RESET_SEQUENCES = (
-    "\033[?1049l"  # Exit alternate screen
+_MODE_RESETS = (
     "\033[?1000l"  # Disable X10 mouse tracking
     "\033[?1002l"  # Disable cell motion tracking
     "\033[?1003l"  # Disable all motion tracking
@@ -23,12 +28,23 @@ _RESET_SEQUENCES = (
     "\033[?25h"  # Show cursor
     "\033[0m"  # Reset all attributes
 )
+_RESET_SEQUENCES = _ALT_SCREEN_EXIT + _MODE_RESETS
+
+_alt_screen_left = {"done": False}
 
 
 def _write_reset_sequences() -> None:
-    """Write terminal reset escape sequences to stdout."""
+    """Write terminal reset escape sequences to stdout.
+
+    The alternate-screen exit is written only the first time (see
+    ``_ALT_SCREEN_EXIT``); the mode resets every time.
+    """
     try:
-        sys.stdout.write(_RESET_SEQUENCES)
+        if _alt_screen_left["done"]:
+            sys.stdout.write(_MODE_RESETS)
+        else:
+            sys.stdout.write(_RESET_SEQUENCES)
+            _alt_screen_left["done"] = True
         sys.stdout.flush()
     except Exception:
         pass
