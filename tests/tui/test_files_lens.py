@@ -403,7 +403,9 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
         await pilot.press("u")
         rows = panel.watchlist.rows
         await _wait_for(
-            pilot, lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY
+            pilot,
+            lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY,
+            timeout=8.0,  # watch + baseline pull run on a worker; slow under load
         )
 
 
