@@ -241,13 +241,34 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   changes). Every pull is kept as a version with its diff (the newest
   ``tui.watchlist_max_versions``, default 10), next to the watchlist.
 - ``Enter`` opens the Inspector: Summary (full path, ops, processes, last
-  pull), Diff (the last pull against the one before; ``z`` zooms, long
-  lines wrap), History (every kept pull with its diff) and Events. The keys
-  in its footer work while the Inspector has focus too. ``/`` filters,
+  pull), Versions, Content and Events. The keys in its footer work while
+  the Inspector has focus too.
+
+  *Versions* lists every kept pull, newest first (time, size, manual/auto,
+  what changed, e.g. ``moz_places +3 ~1 · moz_meta ~3``). Below the list is
+  the selected version's diff against the version before it: SQLite per
+  table with +inserted / ~updated / −deleted rows under their column names
+  (an update shows only the changed cells, old → new; epoch ms/µs values get
+  a dim local time), SharedPreferences / ABX / JSON as a key table, text as
+  numbered hunks, binary files as size, sha256 and the bytes around the first
+  difference. ``<`` / ``>`` (or a click) pick an older / newer version;
+  ``B`` makes the selected version the base the others are diffed against
+  (``B`` on it again clears it).
+
+  *Content* is a first look inside the selected version's local copy:
+  SQLite tables with row counts and the first 200 rows of one table (``<`` /
+  ``>`` or a click picks the table), preference keys with their types, a
+  JSON tree, the first lines of a text file, image facts, or a hex dump with
+  a type guess. Only local copies are read, never the device; a database is
+  read through a temporary copy with its ``-wal`` folded in.
+
+  ``z`` shows the selected diff or table full-screen (nothing cut; wide
+  tables scroll sideways). ``/`` filters,
   ``.`` shows full paths, Shift+``O`` sorts by recency / name / count,
   ``Home``/``End`` jump to the first/last row.
 - While a run is under review (``◆ REVIEW``), the table lists that run's
-  changed, new and deleted files and ``Enter`` shows the file's diff. Their
+  changed, new and deleted files and ``Enter`` shows the file's diff (drawn
+  like the Versions diff; with a Content tab when the run kept the file). Their
   short paths name the owning app (``com.google.android.apps.messaging:
   databases/bugle_db``), as do live rows of apps other than the monitored
   one.

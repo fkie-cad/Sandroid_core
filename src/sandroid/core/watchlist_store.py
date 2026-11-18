@@ -198,6 +198,46 @@ def version_diff(version: Path) -> str | None:
         return None
 
 
+#: Acquisition record a pull may keep next to its copy (see version_record).
+_RECORD_FILES = ("record.json", "acquisition.json", "pull.json")
+
+
+def version_file(version: Path, path: str) -> Path:
+    """The local copy of *path*'s main file inside one kept version.
+
+    Pulls store it under the device file's basename (``WatchlistView``);
+    companions (``-wal``/``-journal``) and ``diff.txt`` sit next to it.
+    """
+    name = os.path.basename(path.rstrip("/")) or "pulled_file"
+    candidate = version / name
+    if candidate.exists():
+        return candidate
+    others = [
+        f
+        for f in (version.iterdir() if version.is_dir() else ())
+        if f.is_file()
+        and f.name != _DIFF_FILE
+        and f.name not in _RECORD_FILES
+        and not f.name.endswith(("-wal", "-journal", "-shm"))
+    ]
+    return others[0] if len(others) == 1 else candidate
+
+
+def version_record(version: Path) -> dict | None:
+    """The acquisition record of a version (device path, device mtime/size/
+    sha256, local sha256, ``pulled_at``, ``trigger`` manual/auto), or None
+    when the pull kept none (versions from before records existed).
+    """
+    for name in _RECORD_FILES:
+        try:
+            data = json.loads((version / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 def previous_dir(path: str) -> Path:
     """The most recent kept pull of *path* (may not exist yet).
 
@@ -420,6 +460,8 @@ __all__ = [
     "save_membership",
     "version_diff",
     "version_dirs",
+    "version_file",
+    "version_record",
     "version_time",
     "watchlist_dir",
 ]

@@ -75,6 +75,13 @@ hints (shown on the frame's bottom edge), optional ``tabs`` (a sequence of
 -- or ←/→ unless a text input has focus -- or a click switches
 tabs), and an optional ``key`` identifying the inspected row.
 
+Interactive content (optional): ``keys`` maps ``less_than_sign`` /
+``greater_than_sign`` / ``B`` to ``callback(active tab name)`` -- MainScreen
+binds ``<`` ``>`` ``B`` to them while the Inspector is open (a binding of
+the focused widget still wins), e.g. the Files lens picks a version or a
+table with them; ``click(active tab name, body line) -> handled`` receives
+clicks in the body (line 0 = first line of the tab's first section).
+
 * ``MainScreen.open_inspector(content)`` -- opens the side slot (closing the
   AI chat if it was there) or replaces the content in place.
 * ``MainScreen.update_inspector(content)`` -- replace in place, only if the
@@ -156,7 +163,7 @@ from textual.widgets import Header, Static
 from textual.widgets._header import HeaderClock, HeaderTitle
 
 if TYPE_CHECKING:
-    from collections.abc import Hashable, Sequence
+    from collections.abc import Callable, Hashable, Mapping, Sequence
 
     from rich.console import RenderableType
     from textual.app import ComposeResult
@@ -227,6 +234,17 @@ class InspectorContent:
     footer: str | None = None
     tabs: Sequence[tuple[str, Sequence[Section]]] = ()
     key: Hashable | None = None
+    #: Optional interactive keys: ``{key name: callback(active tab name)}``.
+    #: ``MainScreen`` binds ``<``, ``>`` and ``B`` (``less_than_sign``,
+    #: ``greater_than_sign``, ``B``) to them while the Inspector is open;
+    #: a binding of the focused widget still wins.
+    keys: Mapping[str, Callable[[str | None], Any]] = field(
+        default_factory=dict, compare=False
+    )
+    #: Optional click handler ``(active tab name, body line) -> handled``;
+    #: the line counts from the top of the tab's sections (headings and the
+    #: blank line between sections included).
+    click: Callable[[str | None, int], bool] | None = field(default=None, compare=False)
     #: Filled in by ``MainScreen.open_inspector`` (the active lens id).
     lens: str | None = field(default=None, compare=False)
 
@@ -567,6 +585,14 @@ class Inspector(Vertical):
         except Exception:
             pass
 
+    @property
+    def tab_name(self) -> str | None:
+        """Name of the active tab (None without tabs)."""
+        content = self.content
+        if content is None or not content.tabs:
+            return None
+        return content.tabs[self.tab_index % len(content.tabs)][0]
+
     def select_tab(self, index: int) -> None:
         if self.content is None or not self.content.tabs:
             return
@@ -620,10 +646,27 @@ class Inspector(Vertical):
             close()
 
     def on_click(self, event) -> None:
-        """A click on the tab strip selects the tab under the pointer."""
-        if self.content is None or not self.content.tabs:
+        """A click on the tab strip selects the tab under the pointer; a click
+        in the body goes to the content's ``click`` handler (if any).
+        """
+        if self.content is None:
             return
         widget = getattr(event, "widget", None)
+        if getattr(widget, "id", None) == "inspector-body" and self.content.click:
+            try:
+                offset = event.get_content_offset(widget)
+            except Exception:
+                offset = None
+            if offset is not None:
+                try:
+                    handled = self.content.click(self.tab_name, offset.y)
+                except Exception:
+                    handled = False
+                if handled:
+                    event.stop()
+            return
+        if not self.content.tabs:
+            return
         if getattr(widget, "id", None) != "inspector-tabs":
             return
         try:

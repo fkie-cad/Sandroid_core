@@ -547,8 +547,8 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
         assert inspected.subtitle == PREFS
         assert [name for name, _s in inspected.tabs] == [
             "Summary",
-            "Diff",
-            "History",
+            "Versions",
+            "Content",
             "Events",
         ]
         summary = _plain(_tab(inspected, "Summary"))
@@ -560,7 +560,7 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
         events = _plain(_tab(inspected, "Events"))
         assert "RENAME" in events
         assert "from shared_prefs/consent.xml.bak" in events
-        assert "Not pulled yet" in _plain(_tab(inspected, "Diff"))
+        assert "Not pulled yet" in _plain(_tab(inspected, "Versions"))
 
         rows = panel.watchlist.rows
         panel.watchlist.pull([PREFS])
@@ -569,9 +569,9 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
         panel.watchlist.pull([PREFS])
         await _wait_for(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         inspected = panel.inspect_selected()
-        diff = _plain(_tab(inspected, "Diff"))
-        assert "true" in diff
-        assert "false" in diff
+        diff = _plain(_tab(inspected, "Versions"))
+        assert "true → false" in diff
+        assert "Diff  v2" in diff
         summary = _plain(_tab(inspected, "Summary"))
         assert "changed since the pull before" in summary
         assert "sha256" in summary
@@ -587,7 +587,7 @@ async def test_inspector_for_an_unwatched_row_says_how_to_diff() -> None:
         await pilot.pause()
         inspected = panel.inspect_selected()
         assert "not watched" in _plain(_tab(inspected, "Summary"))
-        assert "to diff this file" in _plain(_tab(inspected, "Diff"))
+        assert "to diff this file" in _plain(_tab(inspected, "Versions"))
 
 
 # --------------------------------------------------------------------------
@@ -1079,10 +1079,10 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         panel.watchlist.pull([PREFS])
         await _wait_for(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         panel.refresh_rows()
-        history = _plain(_tab(panel.inspect_selected(), "History"))
-        assert "#2" in history
-        assert "#1" in history
-        assert '[@name="k"]' in history
+        history = _plain(_tab(panel.inspect_selected(), "Versions"))
+        assert "▸ v2" in history
+        assert "v1" in history
+        assert "one → two" in history  # the k preference, old → new
         assert "first pull" in history
 
     get_forensic_service()._spotlight_files.clear()  # a new process
@@ -1096,7 +1096,7 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         assert info.diff_text
         assert "two" in info.diff_text
         panel.refresh_rows()
-        assert "two" in _plain(_tab(panel.inspect_selected(), "Diff"))
+        assert "two" in _plain(_tab(panel.inspect_selected(), "Versions"))
 
 
 async def test_inspector_keys_work_while_the_inspector_has_focus() -> None:

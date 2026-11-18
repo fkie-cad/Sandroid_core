@@ -146,6 +146,27 @@ class MainScreen(Screen):
         ),
         # Back to LIVE from REVIEW scope (shown only while reviewing a run).
         Binding("L", "back_to_live", "Live"),
+        # Interactive Inspector content (InspectorContent.keys), e.g. the
+        # Files lens's Versions / Content tabs. Enabled only while the open
+        # Inspector's content declares the key.
+        Binding(
+            "less_than_sign",
+            "inspector_key('less_than_sign')",
+            "Inspector: older version / previous table",
+            show=False,
+        ),
+        Binding(
+            "greater_than_sign",
+            "inspector_key('greater_than_sign')",
+            "Inspector: newer version / next table",
+            show=False,
+        ),
+        Binding(
+            "B",
+            "inspector_key('B')",
+            "Inspector: diff against this version (base)",
+            show=False,
+        ),
     ]
 
     #: Current review scope: a run id, or None for the live session. Watch it
@@ -170,6 +191,15 @@ class MainScreen(Screen):
             return hasattr(self.lens_widget(), "inspect_selected")
         if action == "back_to_live":
             return self.scope_run is not None
+        if action == "inspector_key":
+            content = self.inspector_content
+            if not (self.inspector_is_open and content is not None):
+                return False
+            if not parameters or parameters[0] not in (content.keys or {}):
+                return False
+            from textual.widgets import Input, TextArea
+
+            return not isinstance(self.focused, Input | TextArea)
         if action == "inspector_tab":
             content = self.inspector_content
             if not (self.inspector_is_open and content and content.tabs):
@@ -186,6 +216,18 @@ class MainScreen(Screen):
             self.query_one("#inspector", Inspector).action_tab(delta)
         except Exception:
             pass
+
+    def action_inspector_key(self, key: str) -> None:
+        """``<`` / ``>`` / ``B``: the open Inspector content's own key."""
+        content = self.inspector_content
+        handler = (content.keys or {}).get(key) if content is not None else None
+        if handler is None:
+            return
+        try:
+            tab = self.query_one("#inspector", Inspector).tab_name
+        except Exception:
+            tab = None
+        handler(tab)
 
     def action_back_to_live(self) -> None:
         """``L`` -- leave REVIEW scope (no-op in LIVE)."""

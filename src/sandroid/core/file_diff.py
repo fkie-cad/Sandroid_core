@@ -1014,4 +1014,22 @@ def diff_files(
     return diff, changed
 
 
+def diff_files_structured(
+    previous_main: Path, current_main: Path, is_sqlite_fn: Callable[[str], bool]
+):
+    """:func:`diff_files` plus the same change as data.
+
+    Returns ``(diff_text, changed, structured)``: ``diff_text``/``changed``
+    are exactly what :func:`diff_files` returns (the stored/CLI text format
+    is unchanged); ``structured`` is a
+    :class:`sandroid.core.file_inspect.StructuredDiff` of the two copies
+    (SQLite rows with column names, keyed XML/JSON, text hunks with line
+    numbers, binary windows) for renderers such as the TUI Inspector.
+    """
+    from sandroid.core.file_inspect import structured_diff
+
+    diff_text, changed = diff_files(previous_main, current_main, is_sqlite_fn)
+    return diff_text, changed, structured_diff(previous_main, current_main)
+
+
 # to get the sqldiff tool, run "sudo apt install sqlite3-tools"
