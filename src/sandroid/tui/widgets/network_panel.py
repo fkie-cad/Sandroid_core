@@ -28,7 +28,7 @@ Filters: ``/`` text (host, path, app, recipient, status; Esc clears it),
 ``T`` (target) spotlight app only, ``N`` show OS noise (connectivity checks,
 Play services background traffic, Google ``*-pa`` APIs, Sandroid's own
 ``mitm.it`` probe; hidden by default, the caption counts what it hides). ``N`` is "show hidden noise" in the Files lens
-too, and ``v`` is only the Runs lens's "review". The frame caption carries the
+too, and ``v`` is only the Sessions lens's "review". The frame caption carries the
 counts ("38 of 412").
 
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
@@ -1383,7 +1383,7 @@ class NetworkPanel(Widget):
             more = f" (+{len(pcaps) - 1} more)" if len(pcaps) > 1 else ""
             hints.append(
                 f"its packet capture: {escape(rel)} · {human_size(size)}{more} "
-                "(Runs ⏎ → Report shows the folder; open it in Wireshark)"
+                "(Sessions ⏎ → Report shows the folder; open it in Wireshark)"
             )
         hints.append("L back to LIVE")
         if self._phase_hidden and not self._show_all_phases:

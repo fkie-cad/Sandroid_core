@@ -131,7 +131,7 @@ class MenuController:
             ["forensic", "malware"],
             description=(
                 "Replay the current recording N times and diff the results "
-                "(opens the Runs lens; Shift+P there = PDF report)"
+                "(opens the Sessions lens; Shift+P there = PDF report)"
             ),
             inline_text="[p]lay the currently loaded action",
         )
@@ -467,7 +467,7 @@ class MenuController:
             ("1", "app", "App"),
             ("2", "network", "Network"),
             ("3", "files", "Files"),
-            ("4", "runs", "Runs"),
+            ("4", "runs", "Sessions"),
         ):
             self._register(
                 f"lens_{lens}",

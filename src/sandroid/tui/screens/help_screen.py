@@ -9,7 +9,7 @@ Order: the keys of the lens ``?`` was pressed in come first (the list opens
 there), then the Inspector's, then the global keys (General, lens
 navigation, main screen, the action categories), then the other lenses and
 the snapshot picker. A lens key that shadows a global key (Files ``w``/``n``/
-``O``, App ``b``, Runs ``n``) is listed with its lens meaning and marked
+``O``, App ``b``, Sessions ``n``) is listed with its lens meaning and marked
 "overrides global …"; the global row says which lens uses the key for
 something else -- the same key never appears twice without that context.
 """
@@ -89,7 +89,7 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("App lens › b bypass", "sandroid.tui.widgets.spotlight_panel", "BypassChordModal"),
     ("Network lens", "sandroid.tui.widgets.network_panel", "NetworkPanel"),
     ("Files lens", "sandroid.tui.widgets.files_panel", "FilesPanel"),
-    ("Runs lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
+    ("Sessions lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
     (
         "Snapshot picker (S)",
         "sandroid.tui.modals.snapshot_save_choice_modal",
@@ -103,7 +103,7 @@ _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
     "app": ("App lens", "App lens › b bypass"),
     "network": ("Network lens",),
     "files": ("Files lens",),
-    "runs": ("Runs lens",),
+    "runs": ("Sessions lens",),
 }
 #: Headings of the global (works everywhere) panel sections.
 _GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
