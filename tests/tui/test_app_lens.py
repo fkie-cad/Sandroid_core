@@ -1065,3 +1065,50 @@ async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
         sections.set_filter("read_sms")
         await _settle(pilot)
         assert [r.key for r in perms.rows_shown] == ["op:READ_SMS"]
+
+
+def test_compact_permission_cells_combine_grant_and_use() -> None:
+    data = build_permissions(
+        AppFacts(package=PKG, permissions=_grants(), appops=_appops())
+    )
+    assert data.compact_columns == ("permission", "✓·use", "last use")
+    compact = {
+        r.key: " | ".join(c.plain for c in r.compact) for r in data.rows if r.compact
+    }
+    assert compact["perm:android.permission.CAMERA"] == "CAMERA | ✓● | 5m ago"
+    assert (
+        compact["perm:android.permission.ACCESS_FINE_LOCATION"]
+        == "ACCESS_FINE_LOCATION | ✓○ | —"
+    )
+    assert compact["perm:android.permission.READ_CONTACTS"] == "READ_CONTACTS | ✗ | —"
+    assert compact["perm:android.permission.INTERNET"] == "INTERNET | ✓ | —"
+    assert compact["op:READ_CLIPBOARD"] == "READ_CLIPBOARD | op● | 10s ago"
+
+
+async def test_narrow_lens_shows_the_compact_permission_columns(fake):
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        perms = sections.section("permissions")
+        assert len(perms.columns) == 5
+        app.focused.move_cursor(row=0)
+        await pilot.press("enter")
+        await _wait(pilot, lambda: perms.compact)
+        await _settle(pilot)
+        labels = [str(c.label) for c in perms.columns.values()]
+        assert labels == ["permission", "✓·use", "last use"]
+        cam = next(
+            i for i, r in enumerate(perms.rows_shown) if r.key.endswith("CAMERA")
+        )
+        assert [str(c) for c in perms.get_row_at(cam)] == ["CAMERA", "✓●", "5m ago"]
+        # the whole grant / AppOps detail is still in the Inspector
+        perms.focus()
+        perms.move_cursor(row=cam)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert "AppOps CAMERA" in dict(ms.inspector_content.tabs[0][1])
+        ms.close_inspector()
+        await _wait(pilot, lambda: not perms.compact)
+        assert len(perms.columns) == 5

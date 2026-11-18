@@ -84,6 +84,10 @@ RUNTIME_KINDS = ("permissions", "appops", "services", "footprint", "details")
 #: Runtime kinds refreshed on STATE_CHANGED / lens activation (cheap ones).
 EVENT_KINDS = ("permissions", "appops", "services")
 
+#: Below this width (the lens next to an open Inspector at 100x30) sections
+#: with ``compact_columns`` switch to them.
+COMPACT_WIDTH = 80
+
 #: Keys of the "+N more" / "hide" toggle rows (``SectionData.hidden_rows``).
 MORE_KEY = "_more"
 LESS_KEY = "_less"
@@ -179,6 +183,8 @@ class Row:
     evidence: list[tuple[str, Any]] = field(default_factory=list)
     raw: Any = None
     inspectable: bool = True
+    #: Cells for ``SectionData.compact_columns`` (narrow lens), if any.
+    compact: tuple[Any, ...] | None = None
 
     @property
     def text(self) -> str:
@@ -199,6 +205,14 @@ class SectionData:
     #: Rows shown only on request (z / ⏎ on the "+N" row) or while filtering.
     hidden_rows: list[Row] = field(default_factory=list)
     hidden_label: str = "more"
+    hidden_short: str = "more"
+    #: A narrower column set used below :data:`COMPACT_WIDTH` (rows provide
+    #: ``Row.compact``); the Inspector keeps the full details.
+    compact_columns: tuple[str, ...] | None = None
+
+
+def _plain(cells: tuple[Any, ...]) -> str:
+    return " ".join(c.plain if isinstance(c, Text) else str(c) for c in cells)
 
 
 def _t(text: Any, style: str = "") -> Text:
@@ -603,6 +617,42 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
     return ", ".join(notes), style
 
 
+def _grant_glyph(g: Any) -> Text:
+    if g.granted is None:
+        return _t("?", _DIM)
+    if g.granted and getattr(g, "revoked", False):
+        return _t("✓⊘", _BAD)
+    return _t("✓", _OK) if g.granted else _t("✗", _DIM)
+
+
+def _use_glyph(ops: list[Any]) -> Text:
+    """``●`` used recently / now, dim ``●`` used before, ``○`` no recorded use."""
+    if not ops:
+        return _t("")
+    ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
+    if any(o.running for o in ops) or (ages and min(ages) <= RECENT_SECONDS):
+        return _t("●", _WARN)
+    if any(o.last_access for o in ops):
+        return _t("●", _DIM)
+    return _t("○", _DIM)
+
+
+def _last_use(ops: list[Any]) -> Text:
+    if any(o.running for o in ops):
+        return _t("now", f"bold {_WARN}")
+    ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
+    if ages:
+        return _t(ago(min(ages)))
+    raw = next((o.last_access for o in ops if o.last_access), None)
+    return _t(_cut(raw, 12)) if raw else _t("—", _DIM)
+
+
+def _compact_perm(name: str, grant: Text, ops: list[Any]) -> tuple[Any, ...]:
+    glyph = grant.copy()
+    glyph.append_text(_use_glyph(ops))
+    return (_t(_cut(name, 22)), glyph, _last_use(ops))
+
+
 def build_permissions(f: AppFacts) -> SectionData:
     cols = ("permission", "protection", "grant", "AppOps", "note")
     state = f.permissions
@@ -684,6 +734,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                 ),
                 title=_short_perm(g.name),
                 subtitle=escape(g.name),
+                compact=_compact_perm(_short_perm(g.name), _grant_glyph(g), g_ops),
                 evidence=evidence,
                 raw={
                     "grant": _to_dict(g),
@@ -726,6 +777,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                 ),
                 title=op.op,
                 subtitle="AppOps op without a requested permission",
+                compact=_compact_perm(op.op, _t("op", _DIM), [op]),
                 evidence=[(f"AppOps {op.op}", _op_evidence(op))],
                 raw={"appops": [_to_dict(op)]},
             )
@@ -752,6 +804,8 @@ def build_permissions(f: AppFacts) -> SectionData:
         summary,
         hidden_rows=hidden,
         hidden_label="other ops (no recorded use)",
+        hidden_short="other ops",
+        compact_columns=("permission", "✓·use", "last use"),
     )
 
 
@@ -1499,6 +1553,9 @@ class LensSection(DataTable):
         self._filter_text = ""
         #: The section's hidden rows (``SectionData.hidden_rows``) are shown.
         self.expanded = False
+        #: Narrow column set (``SectionData.compact_columns``) in use.
+        self.compact = False
+        self._shown_cells: list[tuple[Any, ...]] = []
         self.cell_padding = 1
 
     def toggle_expanded(self) -> None:
@@ -1554,17 +1611,41 @@ class LensSection(DataTable):
         if not hidden:
             return list(data.rows)
         width = len(data.columns)
+        # Short in compact mode: the text sits in the first (name) column
+        # and would push the narrow columns out of view.
+        label = data.hidden_short if self.compact else data.hidden_label
         if self.expanded:
-            toggle = _placeholder(
-                LESS_KEY[1:], f"− hide the {len(hidden)} {data.hidden_label} (z)", width
+            text = (
+                f"− hide {len(hidden)} (z)"
+                if self.compact
+                else (f"− hide the {len(hidden)} {label} (z)")
             )
+            toggle = _placeholder(LESS_KEY[1:], text, width)
             return [*data.rows, *hidden, toggle]
-        toggle = _placeholder(
-            MORE_KEY[1:],
-            f"+{len(hidden)} {data.hidden_label} — z shows them, / filters",
-            width,
+        text = (
+            f"+{len(hidden)} {label} · z"
+            if self.compact
+            else (f"+{len(hidden)} {label} — z shows them, / filters")
         )
+        toggle = _placeholder(MORE_KEY[1:], text, width)
         return [*data.rows, toggle]
+
+    def _columns_for(self, data: SectionData) -> tuple[str, ...]:
+        if self.compact and data.compact_columns:
+            return data.compact_columns
+        return data.columns
+
+    def _cells_for(self, row: Row, columns: tuple[str, ...]) -> tuple[Any, ...]:
+        """The row's cells for ``columns`` (compact cells when in use)."""
+        data = self.data
+        if (
+            row.compact is not None
+            and data is not None
+            and columns is data.compact_columns
+        ):
+            return row.compact
+        cells = tuple(row.cells[: len(columns)])
+        return cells + tuple(_t("") for _ in range(len(columns) - len(cells)))
 
     def show(self, data: SectionData, filter_text: str = "") -> None:
         """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
@@ -1572,33 +1653,35 @@ class LensSection(DataTable):
         self._filter_text = filter_text
         rows = self._visible_rows(data, filter_text)
         self._update_title()
+        columns = self._columns_for(data)
+        cells = [self._cells_for(r, columns) for r in rows]
         signature = (
-            data.columns,
+            columns,
             data.show_header,
-            tuple((r.key, r.text) for r in rows),
+            tuple((r.key, _plain(c)) for r, c in zip(rows, cells, strict=True)),
         )
         if signature == self._signature:
             # Same text; refresh the renderables (styles) only via rows_shown.
             self.rows_shown = rows
             return
-        shape = (data.columns, data.show_header, tuple(r.key for r in rows))
-        old_rows = self.rows_shown
+        shape = (columns, data.show_header, tuple(r.key for r in rows))
+        old_cells = self._shown_cells
         self._signature = signature
-        if shape == self._shape and len(old_rows) == len(rows):
+        if shape == self._shape and len(old_cells) == len(rows):
             # Same columns and rows (e.g. "5m ago" -> "5m ago" + 10 s): update
             # the changed cells in place; cursor and scroll stay put.
-            self._update_cells(old_rows, rows)
-            self.rows_shown = rows
+            self._update_cells(rows, old_cells, cells)
+            self.rows_shown, self._shown_cells = rows, cells
             return
         self._shape = shape
         cursor_key = self.cursor_key()
         scroll_x, scroll_y = self.scroll_x, self.scroll_y
         self.show_header = data.show_header
         self.clear(columns=True)
-        self._column_keys = list(self.add_columns(*data.columns))
-        for row in rows:
-            self.add_row(*row.cells, key=row.key)
-        self.rows_shown = rows
+        self._column_keys = list(self.add_columns(*columns))
+        for row, row_cells in zip(rows, cells, strict=True):
+            self.add_row(*row_cells, key=row.key)
+        self.rows_shown, self._shown_cells = rows, cells
         if cursor_key is not None:
             for index, row in enumerate(rows):
                 if row.key == cursor_key:
@@ -1609,21 +1692,33 @@ class LensSection(DataTable):
             # size is known (rows added or removed: clamped to the new end).
             self.call_after_refresh(self._restore_scroll, scroll_x, scroll_y)
 
+    def set_compact(self, compact: bool) -> None:
+        """Use the section's narrow column set (if it has one)."""
+        if compact == self.compact:
+            return
+        self.compact = compact
+        data = self.data
+        if data is not None and (data.compact_columns or data.hidden_rows):
+            self.show(data, self._filter_text)
+
     def _restore_scroll(self, x: float, y: float) -> None:
         self.scroll_to(x=x, y=y, animate=False)
 
-    def _update_cells(self, old_rows: list[Row], rows: list[Row]) -> None:
-        for old, new in zip(old_rows, rows, strict=True):
-            if old.text == new.text and old.cells == new.cells:
+    def _update_cells(
+        self,
+        rows: list[Row],
+        old_cells: list[tuple[Any, ...]],
+        new_cells: list[tuple[Any, ...]],
+    ) -> None:
+        for row, old, new in zip(rows, old_cells, new_cells, strict=True):
+            if old == new:
                 continue
-            for column, (before, after) in enumerate(
-                zip(old.cells, new.cells, strict=True)
-            ):
+            for column, (before, after) in enumerate(zip(old, new, strict=True)):
                 if before == after or column >= len(self._column_keys):
                     continue
                 try:
                     self.update_cell(
-                        new.key, self._column_keys[column], after, update_width=True
+                        row.key, self._column_keys[column], after, update_width=True
                     )
                 except Exception:
                     logger.debug("update_cell failed", exc_info=True)
@@ -1681,6 +1776,7 @@ class AppLensSections(Vertical):
         self._poll_timer: Any = None
         self._folded: set[str] = set()
         self._footprint_inflight: tuple[tuple[str | None, int], int] | None = None
+        self._compact = False
 
     # -- compose ---------------------------------------------------------
 
@@ -1734,6 +1830,14 @@ class AppLensSections(Vertical):
         if self._last_section:
             return self.section(self._last_section)
         return None
+
+    def on_resize(self, event: Any) -> None:
+        """Narrow lens (e.g. next to the Inspector): compact column sets."""
+        compact = event.size.width < COMPACT_WIDTH
+        if compact != self._compact:
+            self._compact = compact
+            for section in self.sections():
+                section.set_compact(compact)
 
     def on_descendant_focus(self, event: Any) -> None:
         widget = getattr(event, "widget", None)
