@@ -506,12 +506,14 @@ def avd_stop(avd_name: str | None):
                 ["taskkill", "/f", "/im", "emulator.exe"],
                 capture_output=True,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
         else:
             result = subprocess.run(
                 ["pkill", "-f", "emulator"],
                 capture_output=True,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
 
         if result.returncode == 0:

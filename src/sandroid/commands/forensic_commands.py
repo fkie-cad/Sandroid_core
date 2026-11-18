@@ -298,6 +298,7 @@ class PullSpotlightFileCommand(CommandHandler):
                         capture_output=True,
                         text=True,
                         timeout=30,
+                        stdin=subprocess.DEVNULL,
                     )
                     if result.returncode == 0:
                         if result.stdout.strip():

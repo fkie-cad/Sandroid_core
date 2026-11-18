@@ -111,9 +111,18 @@ class ConfirmModal(ForensicModal[bool]):
             if self.message_text:
                 yield Label(self.message_text, classes="modal-message")
             with Horizontal(classes="button-row"):
-                yield Button(self.yes_label, id="yes", classes="-primary")
+                # Guarded: No is the default (focused), so Yes must not look
+                # like the primary action (E2E L5).
+                yes_style = "-secondary" if self.guard_typing else "-primary"
+                yield Button(self.yes_label, id="yes", classes=yes_style)
                 yield Button(self.no_label, id="no", classes="-secondary")
             yield KeyHintFooter(hints={"button": "[dim]y=Yes  n=No  Esc=Cancel[/dim]"})
+
+    def on_descendant_focus(self, _event) -> None:
+        mark_focused_button(self)
+
+    def on_descendant_blur(self, _event) -> None:
+        self.call_after_refresh(mark_focused_button, self)
 
     def _armed(self) -> bool:
         """False while a guarded dialog is too fresh to accept Yes."""
@@ -126,12 +135,16 @@ class ConfirmModal(ForensicModal[bool]):
         """Guarded: a letter/digit other than y/n is stray typing -> No."""
         if not self.guard_typing:
             return
+        if self._stray:
+            # Closed as typing: the rest of the word (y/n included) is
+            # neither an answer here nor a command below.
+            event.stop()
+            event.prevent_default()
+            return
         char = event.character or ""
         if len(char) == 1 and char.isalnum() and event.key not in ("y", "n"):
             event.stop()
             event.prevent_default()
-            if self._stray:
-                return  # the rest of the word, before the dialog is gone
             self._stray = True
             self.app.notify(
                 f"{self.title_text}: not started — that looked like typing.",
@@ -156,6 +169,35 @@ class ConfirmModal(ForensicModal[bool]):
     def action_no(self) -> None:
         """Decline and close the modal."""
         self._dismiss_with_refresh(False)
+
+
+def mark_focused_button(screen) -> None:
+    """Make the focused dialog button stand out: the themes paint Yes/No
+    (or Quit/Cancel) by role only, so the focused one looked unfocused
+    (E2E L5). Inline styles beat every theme's ``Button`` rules.
+    """
+    for button in screen.query(".button-row Button"):
+        # screen.focused, not has_focus: that one lags a focus change.
+        focused = button is screen.focused
+        # The whole button, not just the label (reverse only flips the label).
+        button.styles.background = "#38bdf8" if focused else "#1f2a3d"
+        button.styles.color = "#050811" if focused else "#94a3b8"
+        button.styles.text_style = "bold" if focused else "none"
+        button.notify_style_update()  # else the old colours stay cached
+        button.refresh()
+
+
+def typing_guard_active(app) -> bool:
+    """True right after stray typing closed a dialog (see start_typing_guard)."""
+    for screen in getattr(app, "screen_stack", []):
+        active = getattr(screen, "typing_guard_active", None)
+        if active is not None:
+            try:
+                if active():
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 def start_typing_guard(app) -> None:

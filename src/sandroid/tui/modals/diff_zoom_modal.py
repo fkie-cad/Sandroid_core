@@ -376,11 +376,11 @@ class DiffZoomModal(ForensicModal[None]):
         """Hand ``target`` to the OS opener (mirrors ``FriTapPanel._open_folder``)."""
         try:
             if sys.platform == "darwin":
-                subprocess.Popen(["open", str(target)])
+                subprocess.Popen(["open", str(target)], stdin=subprocess.DEVNULL)
             elif sys.platform.startswith("win"):
                 os.startfile(str(target))  # type: ignore[attr-defined]  # noqa: S606
             elif sys.platform.startswith("linux"):
-                subprocess.Popen(["xdg-open", str(target)])
+                subprocess.Popen(["xdg-open", str(target)], stdin=subprocess.DEVNULL)
             else:
                 webbrowser.open(target.as_uri())
         except Exception as exc:

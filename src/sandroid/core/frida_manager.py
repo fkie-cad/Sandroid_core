@@ -1079,6 +1079,7 @@ class FridaManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 )
             else:
                 output = subprocess.run(
@@ -1086,6 +1087,7 @@ class FridaManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 )
 
             return output
@@ -1104,6 +1106,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return output
         except OSError as e:
@@ -1121,6 +1124,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return output
         except OSError as e:
@@ -1160,6 +1164,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             if bool(result.stdout):
                 self.is_magisk_mode = True
@@ -1170,6 +1175,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return bool(result.stdout)
         except OSError as e:

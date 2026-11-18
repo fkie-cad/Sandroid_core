@@ -443,11 +443,11 @@ class FriTapPanel(Widget):
         """
         try:
             if sys.platform == "darwin":
-                subprocess.Popen(["open", str(target)])
+                subprocess.Popen(["open", str(target)], stdin=subprocess.DEVNULL)
             elif sys.platform.startswith("win"):
                 os.startfile(str(target))  # type: ignore[attr-defined]  # noqa: S606
             elif sys.platform.startswith("linux"):
-                subprocess.Popen(["xdg-open", str(target)])
+                subprocess.Popen(["xdg-open", str(target)], stdin=subprocess.DEVNULL)
             else:
                 webbrowser.open(Path(target).as_uri())
         except Exception as exc:

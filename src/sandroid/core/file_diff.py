@@ -263,6 +263,7 @@ def _run_sqldiff(source, target):
             check=False,
             capture_output=True,
             text=False,
+            stdin=subprocess.DEVNULL,
         )
     except OSError as e:
         if not _sqldiff_missing_warned:

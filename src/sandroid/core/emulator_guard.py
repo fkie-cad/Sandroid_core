@@ -105,6 +105,7 @@ def _lsof_listener_pids(port: int) -> set[int] | None:
             text=True,
             timeout=5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None
@@ -297,6 +298,7 @@ class EmulatorMemoryGuard:
                 capture_output=True,
                 timeout=10,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
         except Exception:
             logger.debug("adb emu kill failed", exc_info=True)

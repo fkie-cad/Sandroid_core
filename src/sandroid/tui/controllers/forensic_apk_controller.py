@@ -506,6 +506,7 @@ class ForensicAPKController:
                 capture_output=True,
                 text=True,
                 timeout=120,
+                stdin=subprocess.DEVNULL,
             )
 
             if result.returncode == 0 and "Success" in result.stdout:
