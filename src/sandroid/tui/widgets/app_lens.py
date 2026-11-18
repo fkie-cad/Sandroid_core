@@ -37,7 +37,8 @@ Threading
   (``allow_pull=False``) and the runtime facts. Without a cache entry the
   APK is pulled and decoded afterwards in the same worker, shown as
   "analysing manifest…".
-* Runtime facts (grants, AppOps, services; footprint on load and ``u``)
+* Runtime facts (grants, AppOps, services; the footprint -- ``du``, can
+  take a minute -- in its own worker, on load and ``u`` only)
   refresh on ``STATE_CHANGED`` (throttled to one fetch per
   :data:`RUNTIME_MIN_INTERVAL` seconds, trailing), on lens activation when
   stale, and AppOps alone is polled every :data:`RUNTIME_MIN_INTERVAL`
@@ -1505,6 +1506,7 @@ class AppLensSections(Vertical):
         self._last_section: str | None = None
         self._poll_timer: Any = None
         self._folded: set[str] = set()
+        self._footprint_inflight: tuple[str | None, int] | None = None
 
     # -- compose ---------------------------------------------------------
 
@@ -1610,6 +1612,9 @@ class AppLensSections(Vertical):
             post(self._apply, token, rid, {"details": details})
             static = svc.static_overview(package, allow_pull=False)
             cached = getattr(static, "overview", None) is not None
+            # Only a plain cache miss is worth a pull (not a failed hash).
+            pull = not cached and getattr(static, "reason", None) == "not cached yet"
+            state = "ready" if cached else ("analysing" if pull else "missing")
             post(
                 self._apply,
                 token,
@@ -1617,7 +1622,7 @@ class AppLensSections(Vertical):
                 {
                     "static": static,
                     "defences": svc.defences(static) if cached else [],
-                    "static_state": "ready" if cached else "analysing",
+                    "static_state": state,
                 },
             )
             overview = getattr(static, "overview", None)
@@ -1629,14 +1634,8 @@ class AppLensSections(Vertical):
             )
             post(self._apply, token, rid, {"appops": svc.appops(package)})
             post(self._apply, token, rid, {"services": svc.services(package)})
-            post(self._apply, token, rid, {"footprint": svc.footprint(package)})
             post(self._runtime_done, token)
-            if cached:
-                return
-            reason = str(getattr(static, "reason", "") or "")
-            if reason and reason != "not cached yet":
-                # Nothing to pull (hashing failed, bad package ...).
-                post(self._apply, token, rid, {"static_state": "missing"})
+            if not pull:
                 return
             pulled = svc.static_overview(package, allow_pull=True)
             ok = getattr(pulled, "overview", None) is not None
@@ -1652,6 +1651,27 @@ class AppLensSections(Vertical):
             )
 
         self._run(work, "app-lens-load")
+        self._start_footprint()
+
+    def _start_footprint(self) -> None:
+        """``du`` of the data dirs: own worker (it can take a minute)."""
+        token = self._token()
+        package, serial = token[0], self._serial
+        if package is None or self._footprint_inflight == token:
+            return
+        rid = self._next_rid()
+        self._footprint_inflight = token
+
+        def work() -> None:
+            footprint = make_service(serial).footprint(package)
+            self._ui.post(self._apply, token, rid, {"footprint": footprint})
+            self._ui.post(self._footprint_done, token)
+
+        self._run(work, "app-lens-footprint")
+
+    def _footprint_done(self, token: tuple[str | None, int]) -> None:
+        if self._footprint_inflight == token:
+            self._footprint_inflight = None
 
     def _run(self, work: Callable[[], None], name: str) -> None:
         if not self._ui.bound:
@@ -1723,6 +1743,9 @@ class AppLensSections(Vertical):
         package, serial = token[0], self._serial
         if package is None:
             return
+        if "footprint" in kinds:
+            kinds = kinds - {"footprint"}
+            self._start_footprint()
         rid = self._next_rid()
         self._runtime_inflight = True
         self._last_runtime = time.monotonic()
@@ -1749,10 +1772,9 @@ class AppLensSections(Vertical):
                 "permissions": lambda: svc.permissions(package, overview or None),
                 "appops": lambda: svc.appops(package),
                 "services": lambda: svc.services(package),
-                "footprint": lambda: svc.footprint(package),
             }
             for kind in RUNTIME_KINDS:
-                if kind in kinds:
+                if kind in kinds and kind in fetch:
                     post(self._apply, token, rid, {kind: fetch[kind]()})
             post(self._runtime_done, token)
 

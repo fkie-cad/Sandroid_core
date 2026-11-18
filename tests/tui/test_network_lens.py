@@ -197,6 +197,10 @@ def test_recipient_labels():
     assert recipient_of("api.fittrack.de") == ("fittrack.de", False)
     # Labels come from Dexray Insight's tracker DB (the one intentional
     # change vs the old built-in table: unity3d.com is Unity, not Unity Ads).
+    import sandroid.tui.widgets.network_panel as net
+
+    if not net._insight_labeller():
+        pytest.skip("Dexray Insight >= 2.0 not importable here (fallback table)")
     assert recipient_of("unity3d.com") == ("Unity", True)
     assert recipient_of("unityads.unity3d.com") == ("Unity Ads", True)
 

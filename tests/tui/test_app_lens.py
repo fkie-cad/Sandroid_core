@@ -196,6 +196,7 @@ class FakeService:
 
     calls: list[tuple[str, str, str]] = []
     cached: set[str] = {PKG}
+    unhashable: set[str] = set()
     gates: dict[tuple[str, str], threading.Event] = {}
     version: dict[str, str] = {PKG: "4.2.0", OTHER: "9.9"}
 
@@ -226,6 +227,10 @@ class FakeService:
 
     def static_overview(self, package, *, allow_pull=True):
         self._note("static_pull" if allow_pull else "static_cache", package)
+        if package in FakeService.unhashable:
+            return StaticOverview(
+                package=package, ok=False, reason="could not hash APK on device"
+            )
         if package in FakeService.cached or allow_pull:
             FakeService.cached.add(package)
             return StaticOverview(
@@ -280,6 +285,7 @@ class FakeService:
 def fake(monkeypatch):
     FakeService.calls = []
     FakeService.cached = {PKG}
+    FakeService.unhashable = set()
     FakeService.gates = {}
     state = {"pkg": PKG}
     monkeypatch.setattr(app_lens, "make_service", FakeService)
@@ -574,6 +580,35 @@ async def test_uncached_apk_shows_analysing_then_pulls(fake):
             pilot,
             lambda: sum(m == "permissions" for m, _p, _t in FakeService.calls) >= 2,
         )
+
+
+async def test_a_slow_footprint_does_not_hold_up_the_manifest(fake):
+    FakeService.cached = set()
+    gate = threading.Event()
+    FakeService.gates[("footprint", PKG)] = gate
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: sections.facts.static_state == "ready")
+        assert sections.facts.footprint is None
+        assert "measuring" in _texts(sections.section("data"))[0]
+        gate.set()
+        await _wait(pilot, lambda: sections.facts.footprint is not None)
+
+
+async def test_unhashable_apk_is_not_pulled_and_says_why(fake):
+    FakeService.cached = set()
+    FakeService.unhashable = {PKG}
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: sections.facts and sections.facts.footprint)
+        await _settle(pilot)
+        assert sections.facts.static_state == "missing"
+        assert "could not hash" in _texts(sections.section("defences"))[0]
+        assert "static_pull" not in {m for m, _p, _t in FakeService.calls}
 
 
 async def test_stale_results_of_a_previous_app_are_dropped(fake):

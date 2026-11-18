@@ -86,7 +86,7 @@ class SpotlightPanel(Widget):
         u:       refresh runtime facts (grants, AppOps, footprint, services)
         R:       restart (force-stop + respawn with armed hooks)
         A:       attach to the live process + apply armed hooks
-        P:       start paused (advanced; Enter then resumes)
+        P:       start paused (advanced; Space then resumes)
         K:       kill the app + tear down all hooks
         X:       clear the spotlight selection
 
