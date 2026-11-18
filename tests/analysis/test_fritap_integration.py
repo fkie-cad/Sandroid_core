@@ -767,3 +767,34 @@ def test_afm_job_threads_are_daemon_threads():
     fake.thread.join(2)
     assert done.is_set()
     assert fake.thread.daemon
+
+
+def test_current_session_detach_is_published_for_the_frida_pill():
+    """E2E round 3 (N2): after ``kill -9 frida-server`` the pill stayed
+    "● running" for 37 s+; only a log line said "connection-terminated".
+    """
+    from sandroid.core.events import EventBus, EventType
+    from sandroid.core.frida_manager import install_stale_detach_guard
+
+    jm = _AfmJobManager()
+    install_stale_detach_guard(jm)
+    old = jm._attach_with_detach_handler(1111)
+    new = jm._attach_with_detach_handler(2222)
+    seen: list = []
+
+    def _cb(event):
+        if event.data.get("change_type") == "frida_detached":
+            seen.append((event.data["reason"], event.data["server_lost"]))
+
+    EventBus.get().subscribe(EventType.STATE_CHANGED, _cb)
+    try:
+        old.fire("connection-terminated")  # a previous session: not news
+        new.fire("process-terminated")  # the app died, the server is fine
+        new2 = jm._attach_with_detach_handler(3333)
+        new2.fire("connection-terminated")  # frida-server killed
+    finally:
+        EventBus.get().unsubscribe(EventType.STATE_CHANGED, _cb)
+    assert seen == [
+        ("process-terminated", False),
+        ("connection-terminated", True),
+    ]

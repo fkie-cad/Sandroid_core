@@ -59,6 +59,10 @@ class FakeSpotlight:
         self.set_pid_calls.append(pid)
         self._pid = pid
 
+    def announce_pid(self, pid, package=None) -> bool:
+        self.set_pid(pid)  # the real one publishes too
+        return True
+
     def spawn_app_paused(self, package: str):
         self.spawn_calls.append(package)
         return (object(), self._seed_pid)
@@ -624,3 +628,93 @@ def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
     assert (ok, msg) == (False, db.FRIDA_SERVER_DOWN_MSG)
     # The header already showed "not running" while the spawn ladder ran.
     assert seen_at_spawn == [(None, [None])]
+
+
+# ---------------------------------------------------------------------------
+# E2E round 3 (M6/N2): the header kept the dead PID for 13-28 s during ⇧R
+# ---------------------------------------------------------------------------
+
+
+def test_restart_says_restarting_from_the_kill_until_the_new_pid(monkeypatch):
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    svc, events = _real_spotlight()
+    order: list = []
+
+    class _Bypass:
+        def armed_categories(self):
+            return set()
+
+        def stop_all(self):
+            # Already published before the (slow) teardown and spawn.
+            order.append(("stop_all", svc.get_pid(), svc.is_restarting()))
+            return []
+
+        def apply_to_fresh_spawn_with_retry(self, package, armed):
+            assert svc.announce_pid(12345, package)  # the spawn knows it
+            order.append(("spawned", svc.get_pid(), svc.is_restarting()))
+            return True, "Spawned"
+
+    panel = SimpleNamespace(
+        _spotlight=lambda: svc,
+        _bypass=_Bypass,
+        _reset_frida_session=lambda: None,
+    )
+    monkeypatch.setattr(
+        Adb, "force_stop", staticmethod(lambda package: order.append(("kill",)))
+    )
+    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+
+    assert sp.SpotlightPanel._work_restart(panel) == (True, "Spawned")
+    assert order == [
+        ("kill",),
+        ("stop_all", None, True),
+        ("spawned", 12345, True),
+    ]
+    assert not svc.is_restarting("org.mozilla.firefox")
+    published = [
+        (e.data["pid"], e.data["restarting"])
+        for e in events
+        if e.data.get("change_type") == "spotlight_pid"
+    ]
+    # "restarting…" at the kill, the new PID at once, then the end.
+    assert published == [(None, True), (12345, True), (12345, False)]
+
+
+def test_shared_spotlight_service_publishes_pid_changes_on_the_bus():
+    """The shared instance has no injected bus: announce_pid was silent."""
+    from sandroid.core.events import EventBus, EventType
+    from sandroid.services.spotlight_service import SpotlightService
+
+    svc = SpotlightService()
+    svc.set_app("org.mozilla.firefox", pid=22155)
+    seen: list = []
+
+    def _cb(event):
+        if event.data.get("change_type") == "spotlight_pid":
+            seen.append(event.data["pid"])
+
+    EventBus.get().subscribe(EventType.STATE_CHANGED, _cb)
+    try:
+        assert svc.announce_pid(23326, "org.mozilla.firefox")
+    finally:
+        EventBus.get().unsubscribe(EventType.STATE_CHANGED, _cb)
+    assert seen == [23326]
+
+
+def test_fresh_spawn_announces_its_pid_before_hooks_and_resume(bypass, monkeypatch):
+    calls: list = []
+    spotlight = Mock()
+    spotlight.spawn_app_paused.return_value = (Mock(), 23326)
+    spotlight.announce_pid.side_effect = lambda pid, pkg: calls.append(pid) or True
+    monkeypatch.setattr("sandroid.services.get_spotlight_service", lambda: spotlight)
+    monkeypatch.setattr(
+        bypass, "set_active", lambda *a, **k: (calls.append("hooks"), (False, "x"))[1]
+    )
+    monkeypatch.setattr(bypass, "_teardown_failed_spawn", lambda *a: None)
+    monkeypatch.setattr(bypass, "_reset_script_state", lambda: None)
+    monkeypatch.setattr(bypass, "is_paused_session", lambda: True)
+    bypass.apply_to_fresh_spawn("org.mozilla.firefox", {"ssl"})
+    assert calls[:2] == [23326, "hooks"]
+    spotlight.set_pid.assert_not_called()

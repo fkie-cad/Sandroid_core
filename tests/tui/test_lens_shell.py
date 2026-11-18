@@ -1710,3 +1710,64 @@ async def test_live_pill_says_monitor_blind_while_it_is() -> None:
         await _settle(pilot)
         assert header.pill_text == "● LIVE"
         assert ms.query_one("#scope-pill").has_class("-live")
+
+
+def test_frida_pill_says_connection_lost_until_the_server_runs_again(monkeypatch):
+    """E2E round 3 (N2): a killed frida-server left the pill "● running"."""
+    from sandroid.core.events import Event, EventType
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    checks: list[int] = []
+    monkeypatch.setattr(
+        StatusBar, "_schedule_frida_check", lambda self: checks.append(1)
+    )
+    monkeypatch.setattr(StatusBar, "_schedule_frida_version_check", lambda self: None)
+    bar.frida_status = "Running"
+
+    def _pill() -> str:
+        seg = next(s.plain for s in bar._segments() if s.plain.startswith("Frida"))
+        return seg
+
+    assert "● running" in _pill()
+    # The app died (process-terminated): the server is fine, nothing changes.
+    bar._on_state_changed(
+        Event(
+            type=EventType.STATE_CHANGED,
+            data={"change_type": "frida_detached", "reason": "process-terminated"},
+        )
+    )
+    assert "● running" in _pill()
+    assert checks == []
+    bar._on_state_changed(
+        Event(
+            type=EventType.STATE_CHANGED,
+            data={
+                "change_type": "frida_detached",
+                "reason": "connection-terminated",
+                "server_lost": True,
+            },
+        )
+    )
+    assert "✕ connection lost" in _pill()
+    assert checks == [1]  # re-checked at once
+    bar._update_frida_status("Not running")
+    assert "✕ connection lost" in _pill()
+    bar._update_frida_status("Running")  # ⇧R / auto-start brought it back
+    assert "● running" in _pill()
+
+
+def test_header_says_restarting_without_a_pid_during_shift_r():
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bar = StatusBar()
+    bar.spotlight_app = "org.mozilla.firefox"
+    bar.spawn_mode = True
+    bar.spotlight_pid = None
+    bar.spotlight_restarting = True
+    app_seg = next(s.plain for s in bar._segments() if s.plain.startswith("App"))
+    assert "restarting…" in app_seg
+    assert "pid" not in app_seg
+    bar.spotlight_pid = 23326
+    app_seg = next(s.plain for s in bar._segments() if s.plain.startswith("App"))
+    assert "● running pid 23326" in app_seg

@@ -329,6 +329,33 @@ class KprobeTracer:
         stdout, stderr = Adb.send_adb_command(device_shell_command(device_cmd))
         return (stdout or "") + ("\n" + stderr if stderr else "")
 
+    #: Longest device command line sent in ONE ``adb shell`` (bytes before
+    #: host quoting). Old adbd versions cap a service request at 4 KiB.
+    _BATCH_MAX = 3500
+
+    @classmethod
+    def _shell_steps(cls, steps: list[str]) -> str:
+        """Run device ``steps`` in order, in as few adb round-trips as fit.
+
+        Steps are joined with ``;`` (a failed step never stops the next, as
+        in :meth:`teardown`) and split only between steps, never inside one,
+        when the line would exceed :attr:`_BATCH_MAX`. Each ``adb shell`` is
+        a ~100-200 ms round-trip: the session setup issued ~70 of them one
+        by one (a 12-13 s monitor start). Returns the combined output.
+        """
+        outputs: list[str] = []
+        batch: list[str] = []
+        size = 0
+        for step in steps:
+            if batch and size + len(step) + 3 > cls._BATCH_MAX:
+                outputs.append(cls._shell(" ; ".join(batch)))
+                batch, size = [], 0
+            batch.append(step)
+            size += len(step) + 3
+        if batch:
+            outputs.append(cls._shell(" ; ".join(batch)))
+        return "\n".join(outputs)
+
     @staticmethod
     def _dq(payload: str) -> str:
         """Quote a payload as one literal word for the device shell.
@@ -676,8 +703,14 @@ class KprobeTracer:
 
         Belt-and-suspenders so a leaked prior session (or the adb-already-dead
         teardown gap) can't wedge a fresh start. Safe when nothing exists
-        (every command swallows its own "doesn't exist" error).
+        (every command swallows its own "doesn't exist" error). One adb
+        round-trip (see :meth:`_shell_steps`).
         """
+        cls._shell_steps(cls._self_clean_steps(tracefs))
+
+    @classmethod
+    def _self_clean_steps(cls, tracefs: str) -> list[str]:
+        """The device steps of :meth:`_self_clean`, in order."""
         inst = cls._instance_dir(tracefs)
         events = f"{tracefs}/kprobe_events"
         # Every step is guarded by an on-device existence test. A bare
@@ -687,20 +720,37 @@ class KprobeTracer:
         # case, since a normal stop removes the instance -- the old unguarded
         # form leaked a "can't create ..." to stderr and spammed a WARNING per
         # probe on EVERY start. Guarding means a clean device emits no stderr.
-        cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
+        steps = [f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on"]
         for name in cls._PROBE_NAMES:
             enable = f"{inst}/events/kprobes/{name}/enable"
-            cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
-        cls._shell(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
-        cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+            steps.append(f"[ -e {enable} ] && echo 0 > {enable}")
+        newtask = f"{inst}/{cls._NEWTASK_EVENT}/enable"
+        steps.append(f"[ -e {newtask} ] && echo 0 > {newtask}")
+        steps.append(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
+        steps.append(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
         # Remove our probes from the GLOBAL kprobe_events, but only the ones
         # actually registered -- a ``-:name`` for an absent probe errors too.
         for name in cls._PROBE_NAMES:
-            cls._shell(
+            steps.append(
                 f'grep -q "kprobes/{name} " {events} 2>/dev/null '
                 f"&& echo {cls._dq('-:' + name)} >> {events}"
             )
-        cls._remove_follow_instance(tracefs)
+        steps.extend(cls._remove_follow_steps(tracefs))
+        return steps
+
+    #: ``task:task_newtask`` (relative to an instance): the parent's line
+    #: names each new thread with its ``clone_flags``. A thread's first own
+    #: events reach the reader before the kernel's pid->tgid map has it
+    #: ("(-------)", see ``_begin_session``); this line tells the translator
+    #: its process first. PID/app scope only (set_event_pid keeps it to the
+    #: app's threads).
+    _NEWTASK_EVENT = "events/task/task_newtask"
+
+    @classmethod
+    def _newtask_steps(cls, tracefs: str) -> list[str]:
+        """Enable ``task_newtask`` in the monitor instance (if it exists)."""
+        enable = f"{cls._instance_dir(tracefs)}/{cls._NEWTASK_EVENT}/enable"
+        return [f"[ -e {enable} ] && echo 1 > {enable}"]
 
     @classmethod
     def _active_probes(cls, mode: str) -> tuple[str, ...]:
@@ -719,22 +769,28 @@ class KprobeTracer:
         return cls._PROBE_NAMES
 
     @classmethod
-    def _install_probes(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
+    def _install_steps(cls, tracefs: str, probe_names: tuple[str, ...]) -> list[str]:
         """Append the mode-appropriate probe set to the global kprobe_events."""
         events = f"{tracefs}/kprobe_events"
-        for name, definition in zip(cls._PROBE_NAMES, cls._PROBE_DEFS, strict=True):
-            if name in probe_names:
-                cls._shell(f"echo {cls._dq(definition)} >> {events}")
+        return [
+            f"echo {cls._dq(definition)} >> {events}"
+            for name, definition in zip(cls._PROBE_NAMES, cls._PROBE_DEFS, strict=True)
+            if name in probe_names
+        ]
 
     @classmethod
-    def _enable_events(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
+    def _enable_steps(cls, tracefs: str, probe_names: tuple[str, ...]) -> list[str]:
         """Enable each of the mode's events inside the dedicated instance."""
         inst = cls._instance_dir(tracefs)
-        for name in probe_names:
-            cls._shell(f"echo 1 > {inst}/events/kprobes/{name}/enable")
+        return [f"echo 1 > {inst}/events/kprobes/{name}/enable" for name in probe_names]
 
     @classmethod
     def _apply_path_filter(cls, tracefs: str, paths: str | list[str]) -> None:
+        """:meth:`_path_filter_steps`, run at once."""
+        cls._shell_steps(cls._path_filter_steps(tracefs, paths))
+
+    @classmethod
+    def _path_filter_steps(cls, tracefs: str, paths: str | list[str]) -> list[str]:
         """Install an in-kernel ``field ~ "<path>/*"`` glob on the scoped probes.
 
         Accepts a single path or a list. Each path becomes one ``<p>/*`` glob;
@@ -749,10 +805,11 @@ class KprobeTracer:
         # probes match the path STRING a process passes, not the resolved path.
         path_list = expand_monitor_paths(paths)
         globs = [f"{p.rstrip('/')}/*" for p in path_list]
+        steps = []
         for name, field in cls._PATH_FILTER_FIELDS.items():
             expr = " || ".join(f'{field} ~ "{g}"' for g in globs)
-            cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
-        cls._apply_write_filter(tracefs, paths)
+            steps.append(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
+        return steps + cls._write_filter_steps(tracefs, paths)
 
     @classmethod
     def _seed_pid_tree(cls, tracefs: str, pid: int) -> None:
@@ -766,8 +823,12 @@ class KprobeTracer:
         tids = [tok.strip() for tok in out.split() if tok.strip().isdigit()]
         if not tids:
             tids = [str(pid)]
-        cls._shell(f"echo {cls._dq(' '.join(tids))} > {inst}/set_event_pid")
-        cls._shell(f"echo 1 > {inst}/options/event-fork")
+        cls._shell_steps(
+            [
+                f"echo {cls._dq(' '.join(tids))} > {inst}/set_event_pid",
+                f"echo 1 > {inst}/options/event-fork",
+            ]
+        )
 
     #: Placeholder written to ``set_event_pid`` when an app session starts
     #: with none of the app's processes running: an EMPTY list written with
@@ -780,14 +841,15 @@ class KprobeTracer:
     def _seed_pids(cls, tracefs: str, pids: list[int]) -> dict[int, list[int]]:
         """Seed every TID of every ``pid`` + enable event-fork (app scope).
 
-        ONE adb round-trip. With no pid the filter is armed with
+        Two adb round-trips (list, write). With no pid the filter is armed with
         :attr:`_NO_PID` (see there). Returns ``{pid: [tids]}`` as written.
         """
         inst = cls._instance_dir(tracefs)
         sep = f"{inst}/set_event_pid"
         if not pids:
-            cls._shell(f"echo {cls._NO_PID} > {sep}")
-            cls._shell(f"echo 1 > {inst}/options/event-fork")
+            cls._shell_steps(
+                [f"echo {cls._NO_PID} > {sep}", f"echo 1 > {inst}/options/event-fork"]
+            )
             return {}
         listing = "; ".join(
             f'echo "T {int(p)} $(ls /proc/{int(p)}/task 2>/dev/null | tr "\\n" " ")"'
@@ -797,8 +859,12 @@ class KprobeTracer:
         tids: list[int] = []
         for p in pids:
             tids.extend(tasks.get(int(p)) or [int(p)])
-        cls._shell(f"echo {cls._dq(' '.join(str(t) for t in tids))} > {sep}")
-        cls._shell(f"echo 1 > {inst}/options/event-fork")
+        cls._shell_steps(
+            [
+                f"echo {cls._dq(' '.join(str(t) for t in tids))} > {sep}",
+                f"echo 1 > {inst}/options/event-fork",
+            ]
+        )
         return {int(p): tasks.get(int(p)) or [int(p)] for p in pids}
 
     #: The app's processes seeded by the last :meth:`run_by_app` (pid -> tids).
@@ -824,9 +890,12 @@ class KprobeTracer:
         probe_names = cls._active_probes("pid")
         cls._begin_session(tracefs, probe_names)
         cls.last_seeded = cls._seed_pids(tracefs, list(pids))
-        if path:
-            cls._apply_path_filter(tracefs, path)
-        return cls._finish_session(tracefs, probe_names)
+        cls._exit_pids = []
+        cls._remember_exit_pids(list(cls.last_seeded))
+        steps = cls._path_filter_steps(tracefs, path) if path else []
+        return cls._finish_session(
+            tracefs, probe_names, steps + cls._newtask_steps(tracefs)
+        )
 
     # =========================================================================
     # Follow the app: add processes, notice starts, count lost events
@@ -844,6 +913,10 @@ class KprobeTracer:
     @classmethod
     def _remove_follow_instance(cls, tracefs: str) -> None:
         """Guarded, idempotent removal of the follow instance (ONE adb call)."""
+        cls._shell(" ; ".join(cls._remove_follow_steps(tracefs)))
+
+    @classmethod
+    def _remove_follow_steps(cls, tracefs: str) -> list[str]:
         inst = cls._follow_dir(tracefs)
         steps = [f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on"]
         for ev in (
@@ -852,7 +925,34 @@ class KprobeTracer:
         ):
             steps.append(f"[ -e {ev}/enable ] && echo 0 > {ev}/enable")
         steps.append(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
-        cls._shell(" ; ".join(steps))
+        return steps
+
+    #: Followed process ids whose exit the follow instance reports (newest
+    #: last, at most :attr:`_EXIT_PIDS_MAX`); see :func:`exit_filter_pids`.
+    _exit_pids: list[int] = []
+    _EXIT_PIDS_MAX = 64
+
+    @classmethod
+    def _remember_exit_pids(cls, pids: list[int]) -> None:
+        for pid in pids:
+            pid = int(pid)
+            if pid in cls._exit_pids:
+                cls._exit_pids.remove(pid)
+            cls._exit_pids.append(pid)
+        del cls._exit_pids[: -cls._EXIT_PIDS_MAX]
+
+    @classmethod
+    def _exit_filter_step(cls, tracefs: str) -> str:
+        """(Re)write the follow instance's ``sched_process_exit`` filter.
+
+        Quiet on failure (subshell + ``2>/dev/null``): :func:`parse_add_output`
+        reads a write error in the same output as a refused follow.
+        """
+        xev = f"{cls._follow_dir(tracefs)}/events/sched/sched_process_exit"
+        expr = exit_filter_pids(cls._exit_pids)
+        return (
+            f"[ -e {xev}/filter ] && (echo {cls._dq(expr)} > {xev}/filter) 2>/dev/null"
+        )
 
     @classmethod
     def start_rename_watch(cls, package: str) -> subprocess.Popen | None:
@@ -873,32 +973,39 @@ class KprobeTracer:
         cls._tracefs = tracefs
         inst = cls._follow_dir(tracefs)
         ev = f"{inst}/events/task/task_rename"
-        cls._remove_follow_instance(tracefs)
-        out = cls._shell(f"mkdir -p {inst} && [ -e {ev}/enable ] && echo OK")
-        if "OK" not in out:
+        xev = f"{inst}/events/sched/sched_process_exit"
+        # ONE adb round-trip: clean, create, filter, enable. A filter the
+        # kernel rejects (its write fails) falls back to the simpler one,
+        # then to none -- each tried in a subshell, so a failed redirect
+        # never ends the script.
+        f1, f2 = rename_filter(package), rename_filter(None)
+        configure = (
+            f"if [ -e {ev}/enable ]; then echo TP_OK; "
+            f"echo {cls._FOLLOW_BUFFER_KB} > {inst}/buffer_size_kb; "
+            f"(echo {cls._dq(f1)} > {ev}/filter) 2>/dev/null && echo RF1 || "
+            f"{{ (echo {cls._dq(f2)} > {ev}/filter) 2>/dev/null && echo RF2; }}; "
+            # A followed process's main thread exiting (force-stop, crash,
+            # kill) wakes the follower at once instead of at its next slow
+            # poll. Filtered by the followed PIDs, not by comm: an app may
+            # rename its main thread (Firefox: "AndroidUI"), so the old
+            # comm filter never matched. add_pids keeps it up to date.
+            f"{cls._exit_filter_step(tracefs)} && echo 1 > {xev}/enable; "
+            f"echo 1 > {ev}/enable && echo 1 > {inst}/tracing_on; fi"
+        )
+        out = cls._shell(
+            " ; ".join(
+                [*cls._remove_follow_steps(tracefs), f"mkdir -p {inst}", configure]
+            )
+        )
+        if "TP_OK" not in out:
             cls.logger.info("task_rename tracepoint unavailable: poll-only follow")
             cls._remove_follow_instance(tracefs)
             return None
-        cls._shell(f"echo {cls._FOLLOW_BUFFER_KB} > {inst}/buffer_size_kb")
-        for expr in (rename_filter(package), rename_filter(None), None):
-            if expr is None:
+        if "RF1" not in out:
+            if "RF2" in out:
+                cls.logger.info("task_rename filter rejected: zygote clauses only")
+            else:
                 cls.logger.info("task_rename filter rejected: watching unfiltered")
-                break
-            res = cls._shell(f"echo {cls._dq(expr)} > {ev}/filter && echo OK")
-            if "OK" in res and "rror" not in res and "nvalid" not in res:
-                break
-        # The app's main thread exiting (force-stop, crash, kill) wakes the
-        # follower's poll at once instead of at its next slow tick. Only
-        # with the in-kernel comm filter accepted: unfiltered, every thread
-        # exit device-wide would wake it.
-        exit_expr = exit_filter(package)
-        if exit_expr:
-            xev = f"{inst}/events/sched/sched_process_exit"
-            cls._shell(
-                f"[ -e {xev}/filter ] && echo {cls._dq(exit_expr)} > {xev}/filter"
-                f" && echo 1 > {xev}/enable"
-            )
-        cls._shell(f"echo 1 > {ev}/enable && echo 1 > {inst}/tracing_on")
         return cls._start_process(
             cls._build_adb_cmd("shell", "cat", f"{inst}/trace_pipe")
         )
@@ -957,6 +1064,9 @@ class KprobeTracer:
                 ' | cut -d" " -f20)"'
             )
         parts.append('echo "U $(cut -d" " -f1 /proc/uptime)"')
+        # Their exits are reported too (same round-trip).
+        cls._remember_exit_pids([int(p) for p in pids])
+        parts.append(cls._exit_filter_step(tracefs))
         return parse_add_output(cls._shell("; ".join(parts)))
 
     @classmethod
@@ -977,38 +1087,60 @@ class KprobeTracer:
 
     @classmethod
     def _begin_session(cls, tracefs: str, probe_names: tuple[str, ...]) -> None:
-        """Self-clean, create the instance, bump the buffer, install probes."""
-        cls._self_clean(tracefs)
+        """Self-clean, create the instance, bump the buffer, install probes.
+
+        One adb round-trip (two when the probe definitions overflow
+        :attr:`_BATCH_MAX`); the two values read for teardown come back as
+        ``BUF``/``CML`` lines.
+        """
         inst = cls._instance_dir(tracefs)
-        cls._shell(f"mkdir -p {inst}")
+        cmdlines = f"{tracefs}/saved_cmdlines_size"
         # Capture the fresh instance's default buffer size so teardown can
         # restore it (belt-and-suspenders if the instance rmdir later fails).
-        cls._orig_buffer_kb = cls._shell(f"cat {inst}/buffer_size_kb").strip() or None
-        cls._shell(f"echo {cls._BUFFER_SIZE_KB} > {inst}/buffer_size_kb")
+        steps = [
+            *cls._self_clean_steps(tracefs),
+            f"mkdir -p {inst}",
+            f'echo "BUF $(cat {inst}/buffer_size_kb)"',
+            f"echo {cls._BUFFER_SIZE_KB} > {inst}/buffer_size_kb",
+        ]
         # Every line then carries the writer's TGID next to its thread id
         # ("comm-TID (  TGID) [cpu]"): a thread born after the session
         # started is attributed to its process without a /proc lookup. The
         # kernel fills its pid->tgid map at the next context switch, so a
-        # line read before that shows "(-------)" (see KprobeStreamTranslator).
+        # line read before that shows "(-------)" (KprobeStreamTranslator
+        # learns such a thread's process from its task_newtask line).
         tgid_opt = f"{inst}/options/record-tgid"
-        cls._shell(f"[ -e {tgid_opt} ] && echo 1 > {tgid_opt}")
-        cmdlines = f"{tracefs}/saved_cmdlines_size"
+        steps.append(f"[ -e {tgid_opt} ] && echo 1 > {tgid_opt}")
         if cls._orig_cmdlines is None:
-            first = cls._shell(f"cat {cmdlines} 2>/dev/null").strip().split("\n")[0]
-            cls._orig_cmdlines = first if first.isdigit() else None
-        cls._shell(
+            steps.append(f'echo "CML $(cat {cmdlines} 2>/dev/null)"')
+        steps.append(
             f"[ -e {cmdlines} ] && echo {cls._CMDLINES_SIZE} > {cmdlines} 2>/dev/null"
         )
-        cls._install_probes(tracefs, probe_names)
+        out = cls._shell_steps(steps + cls._install_steps(tracefs, probe_names))
+        cls._orig_buffer_kb = _marker(out, "BUF") or None
+        if cls._orig_cmdlines is None:
+            first = _marker(out, "CML")
+            cls._orig_cmdlines = first if first.isdigit() else None
 
     @classmethod
     def _finish_session(
-        cls, tracefs: str, probe_names: tuple[str, ...]
+        cls,
+        tracefs: str,
+        probe_names: tuple[str, ...],
+        steps: list[str] | None = None,
     ) -> subprocess.Popen | None:
-        """Enable events, turn tracing on, and stream the instance trace_pipe."""
-        cls._enable_events(tracefs, probe_names)
+        """Filters (``steps``), enable events, tracing on, stream trace_pipe.
+
+        One adb round-trip for everything before the stream.
+        """
         inst = cls._instance_dir(tracefs)
-        cls._shell(f"echo 1 > {inst}/tracing_on")
+        cls._shell_steps(
+            [
+                *(steps or []),
+                *cls._enable_steps(tracefs, probe_names),
+                f"echo 1 > {inst}/tracing_on",
+            ]
+        )
         cmd = cls._build_adb_cmd("shell", "cat", f"{inst}/trace_pipe")
         return cls._start_process(cmd)
 
@@ -1033,9 +1165,10 @@ class KprobeTracer:
         probe_names = cls._active_probes("pid")
         cls._begin_session(tracefs, probe_names)
         cls._seed_pid_tree(tracefs, pid)
-        if path:
-            cls._apply_path_filter(tracefs, path)
-        return cls._finish_session(tracefs, probe_names)
+        steps = cls._path_filter_steps(tracefs, path) if path else []
+        return cls._finish_session(
+            tracefs, probe_names, steps + cls._newtask_steps(tracefs)
+        )
 
     @classmethod
     def run_by_path(cls, path: str | list[str]) -> subprocess.Popen | None:
@@ -1073,8 +1206,9 @@ class KprobeTracer:
         cls._tracefs = tracefs
         probe_names = cls._active_probes("path")
         cls._begin_session(tracefs, probe_names)
-        cls._apply_path_filter(tracefs, path)
-        return cls._finish_session(tracefs, probe_names)
+        return cls._finish_session(
+            tracefs, probe_names, cls._path_filter_steps(tracefs, path)
+        )
 
     @classmethod
     def run_capture_all(cls) -> subprocess.Popen | None:
@@ -1116,6 +1250,8 @@ class KprobeTracer:
             for name in cls._PROBE_NAMES:
                 enable = f"{inst}/events/kprobes/{name}/enable"
                 steps.append(f"[ -e {enable} ] && echo 0 > {enable}")
+            newtask = f"{inst}/{cls._NEWTASK_EVENT}/enable"
+            steps.append(f"[ -e {newtask} ] && echo 0 > {newtask}")
             steps.append(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
             if cls._orig_buffer_kb:
                 steps.append(
@@ -1145,6 +1281,7 @@ class KprobeTracer:
             cls._orig_cmdlines = None
             cls._write_scope = None
             cls.last_seeded = {}
+            cls._exit_pids = []
 
     # =========================================================================
     # Write scope (names writes from the dentry chain; see module docstring)
@@ -1163,7 +1300,7 @@ class KprobeTracer:
         ``/proc/1/mountinfo`` says where each filesystem (``dev``) and which
         directory of it is mounted; ``readlink -f`` resolves symlinked
         targets (``/sdcard``). Run off the UI thread, before the session
-        starts; the result is kept for :meth:`_apply_write_filter` and
+        starts; the result is kept for :meth:`_write_filter_steps` and
         handed to the translator. ``None`` on any failure (the translator
         then matches chains by the targets' path components alone and the
         write probes stay unfiltered).
@@ -1198,7 +1335,7 @@ class KprobeTracer:
         return scope
 
     @classmethod
-    def _apply_write_filter(cls, tracefs: str, paths: str | list[str]) -> None:
+    def _write_filter_steps(cls, tracefs: str, paths: str | list[str]) -> list[str]:
         """Scope vw/diw in-kernel by the targets' filesystem + directory name.
 
         Only with a complete :class:`WriteScope` resolved for exactly these
@@ -1210,13 +1347,15 @@ class KprobeTracer:
         """
         scope = cls._write_scope
         if scope is None or scope.paths != tuple(scope_aliases(paths)):
-            return
+            return []
         expr = write_filter(scope)
         if not expr:
-            return
+            return []
         inst = cls._instance_dir(tracefs)
-        for name in ("vw", "diw"):
-            cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
+        return [
+            f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter"
+            for name in ("vw", "diw")
+        ]
 
 
 # =============================================================================
@@ -1680,17 +1819,38 @@ def rename_filter(package: str | None) -> str:
     return " || ".join(clauses)
 
 
-def exit_filter(package: str | None) -> str | None:
-    """In-kernel filter for ``sched:sched_process_exit`` of the app's main
-    thread (its comm), or ``None`` when the package can't be filtered on.
+def exit_filter_pids(pids: list[int] | tuple[int, ...]) -> str:
+    """In-kernel filter for ``sched:sched_process_exit`` of the followed
+    processes' main threads (``pid`` is the exiting TID; a process's main
+    thread has TID == PID). ``pid == 0`` (the idle task never exits) while
+    none is followed. The comm can't be used: an app may rename its main
+    thread (Firefox: "AndroidUI").
     """
-    if not package or not _PACKAGE_RE.match(package):
+    ids = [int(p) for p in pids if int(p) > 0] or [0]
+    return " || ".join(f"pid == {p}" for p in ids)
+
+
+_NEWTASK_RE = re.compile(r"pid=(\d+)\s+comm=.*?\s+clone_flags=(?:0x)?([0-9a-fA-F]+)")
+
+#: ``clone_flags`` bit of a new thread (same process as its creator).
+CLONE_THREAD = 0x10000
+
+
+def parse_task_newtask(rest: str) -> tuple[int, bool] | None:
+    """``(new task id, is a thread)`` of a ``task_newtask`` line's payload."""
+    m = _NEWTASK_RE.search(rest or "")
+    if m is None:
         return None
-    clauses = [f'comm == "{android_comm(package)}"']
-    prefix = f'comm == "{package[:COMM_LEN]}"'
-    if prefix not in clauses:
-        clauses.append(prefix)
-    return " || ".join(clauses)
+    return int(m.group(1)), bool(int(m.group(2), 16) & CLONE_THREAD)
+
+
+def _marker(text: str, key: str) -> str:
+    """The value of the first ``<key> <value>`` line in ``text`` ('' if none)."""
+    for line in (text or "").splitlines():
+        head, _sep, value = line.strip().partition(" ")
+        if head == key:
+            return value.strip()
+    return ""
 
 
 _EXIT_RE = re.compile(r"sched_process_exit:\s+comm=.*?\s+pid=(\d+)")

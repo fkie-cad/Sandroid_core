@@ -276,6 +276,12 @@ class SpotlightPanel(Widget):
         except Exception:
             return False
 
+    def _restarting(self) -> bool:
+        try:
+            return bool(self._spotlight().is_restarting())
+        except Exception:
+            return False
+
     def _on_categories(self) -> list[str]:
         """Categories that are armed OR active (rendered ON)."""
         try:
@@ -312,6 +318,8 @@ class SpotlightPanel(Widget):
             state = f"[#fbbf24]◐ paused[/] PID [b]{pid}[/]"
         elif pid:
             state = f"[#4ade80]● running[/] PID [b]{pid}[/]"
+        elif self._restarting():
+            state = "[#fbbf24]◌ restarting…[/]"
         else:
             state = "[#fb7185]○ not running[/]"
 
@@ -762,13 +770,17 @@ class SpotlightPanel(Widget):
         # then fast-fails on the dead session. (The old order unloaded on the
         # live app first and could wedge the worker → "action in progress".)
         Adb.force_stop(package)
-        time.sleep(0.5)  # let the process die so the session connection breaks
-        bypass.stop_all()  # now fast: unloads fast-fail on the dead process
-        self._reset_frida_session()  # clears jobs/session, is_first_job=True
-        # Publishing clear: the app is dead now, and the spawn below can take
-        # a minute to fail -- the header must not keep the old PID meanwhile.
-        spotlight.announce_pid(None, package)
-        return bypass.apply_to_fresh_spawn_with_retry(package, armed)
+        # Publishing: the app is dead now, and the spawn below can take a
+        # minute -- the header says "restarting…" with no PID until the new
+        # one is known (apply_to_fresh_spawn announces it), not the old PID.
+        spotlight.begin_restart(package)
+        try:
+            time.sleep(0.5)  # let the process die so the session connection breaks
+            bypass.stop_all()  # now fast: unloads fast-fail on the dead process
+            self._reset_frida_session()  # clears jobs/session, is_first_job=True
+            return bypass.apply_to_fresh_spawn_with_retry(package, armed)
+        finally:
+            spotlight.end_restart()
 
     def _work_kill(self) -> tuple[bool, str]:
         spotlight = self._spotlight()

@@ -600,6 +600,36 @@ def install_zygote_pid_fix() -> bool:
     return True
 
 
+#: ``detached`` reasons that mean frida-server itself is gone (killed,
+#: crashed) or unreachable -- not just the hooked app.
+SERVER_LOST_REASONS = frozenset(
+    {"connection-terminated", "server-terminated", "device-lost"}
+)
+
+
+def publish_session_detached(reason: str) -> None:
+    """Tell the UI the current Frida session detached (``STATE_CHANGED``,
+    ``change_type="frida_detached"``). The Frida pill used to stay
+    "● running" after frida-server was killed: the only sign was a log line.
+    """
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.STATE_CHANGED,
+                data={
+                    "change_type": "frida_detached",
+                    "reason": str(reason),
+                    "server_lost": str(reason) in SERVER_LOST_REASONS,
+                },
+                source="frida",
+            )
+        )
+    except Exception:
+        logger.debug("frida detach publish failed", exc_info=True)
+
+
 def install_stale_detach_guard(job_manager) -> bool:
     """Make the JobManager ignore ``detached`` signals of its *previous* sessions.
 
@@ -631,6 +661,7 @@ def install_stale_detach_guard(job_manager) -> bool:
             original(job_manager, reason, None)
             if summary:
                 logger.warning(f"Target crashed: {summary}")
+            publish_session_detached(reason)
             return
         logger.debug(f"Ignoring detach ({reason}) of a previous Frida session")
         for job in jobs:

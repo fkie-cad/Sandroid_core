@@ -17,6 +17,7 @@ trace_pipe`` Popen) are monkeypatched. Covers:
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import threading
 import time
@@ -63,12 +64,23 @@ class _FakeShell:
     match wins. Defaults to ("", "").
     """
 
-    def __init__(self, rules):
+    def __init__(self, rules, split: bool = False):
         self.commands: list[str] = []
+        #: The adb round-trips as sent (``commands`` splits batched steps
+        #: when ``split``).
+        self.rounds: list[str] = []
         self._rules = rules
+        self._split = split
 
     def __call__(self, command: str):
-        self.commands.append(command)
+        self.rounds.append(command)
+        if self._split and command.startswith("shell "):
+            import shlex
+
+            body = shlex.split(command[len("shell ") :])[0]
+            self.commands.extend("shell " + step for step in body.split(" ; "))
+        else:
+            self.commands.append(command)
         for predicate, response in self._rules:
             if predicate(command):
                 return response
@@ -515,9 +527,9 @@ def _capture_run(monkeypatch, *, extra_rules=None):
     def _task_list(cmd):
         return "ls /proc/" in cmd and "/task" in cmd
 
-    rules.append((_buffer_read, ("7", "")))
+    rules.append((_buffer_read, ("BUF 7", "")))
     rules.append((_task_list, ("1234 1240 1241", "")))
-    fake = _FakeShell(rules)
+    fake = _FakeShell(rules, split=True)
     monkeypatch.setattr(Adb, "send_adb_command", fake)
 
     def _fake_start(cls, cmd):
@@ -709,7 +721,7 @@ def test_session_raises_and_restores_saved_cmdlines(monkeypatch):
         return "cat " in cmd and "saved_cmdlines_size" in cmd
 
     fake, captured, _ = _capture_run(
-        monkeypatch, extra_rules=[(_cmdlines_read, ("128", ""))]
+        monkeypatch, extra_rules=[(_cmdlines_read, ("BUF 7\nCML 128", ""))]
     )
     KprobeTracer.run_by_path("/data/data/com.x")
     assert any(
@@ -1172,7 +1184,7 @@ def test_kprobe_supported_false_when_the_parent_offset_is_wrong(monkeypatch):
 
 from sandroid.core.kprobe_tracer import (
     android_comm,
-    exit_filter,
+    exit_filter_pids,
     parse_add_output,
     parse_app_listing,
     parse_overruns,
@@ -1358,12 +1370,7 @@ def test_rename_watch_uses_its_own_unscoped_instance(monkeypatch):
     captured = {}
     fake = _install(
         monkeypatch,
-        _FakeShell(
-            [
-                (lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", "")),
-                (lambda c: "/filter" in c, ("OK", "")),
-            ]
-        ),
+        _FakeShell([(lambda c: "sandroid_follow" in c, ("TP_OK\nRF1", ""))]),
     )
     monkeypatch.setattr(
         KprobeTracer,
@@ -1372,13 +1379,16 @@ def test_rename_watch_uses_its_own_unscoped_instance(monkeypatch):
     )
     KprobeTracer._tracefs = "/sys/kernel/tracing"
     assert KprobeTracer.start_rename_watch(FFX) == "proc"
-    joined = "\n".join(fake.commands)
+    # N5 (round 3): clean + create + filter + enable in ONE adb round-trip.
+    (cmd,) = fake.commands
     inst = "/sys/kernel/tracing/instances/sandroid_follow"
-    assert f"{inst}/events/task/task_rename/filter" in joined
-    assert f"echo 1 > {inst}/events/task/task_rename/enable" in joined
-    assert "set_event_pid" not in joined  # never PID-scoped
+    assert f"{inst}/events/task/task_rename/filter" in cmd
+    assert f"echo 1 > {inst}/events/task/task_rename/enable" in cmd
+    assert "set_event_pid" not in cmd  # never PID-scoped
     assert captured["cmd"][-1] == f"{inst}/trace_pipe"
-    assert any(f"echo 64 > {inst}/buffer_size_kb" in c for c in fake.commands)
+    assert f"echo 64 > {inst}/buffer_size_kb" in cmd
+    # The old instance is removed before it is created again.
+    assert cmd.index(f"rmdir {inst}") < cmd.index(f"mkdir -p {inst}")
 
 
 def test_rename_watch_absent_tracepoint_means_poll_only(monkeypatch):
@@ -1397,33 +1407,27 @@ def test_rename_watch_absent_tracepoint_means_poll_only(monkeypatch):
 
 
 def test_rename_watch_falls_back_when_the_filter_is_refused(monkeypatch):
-    filters: list[str] = []
-
-    def _filter(cmd):
-        if "task_rename/filter" in cmd:
-            filters.append(cmd)
-            return len(filters) >= 2
-        return False
-
-    _install(
+    """The device tries the package filter, then the zygote-only one (each
+    in a subshell, so a refused write never ends the script).
+    """
+    fake = _install(
         monkeypatch,
-        _FakeShell(
-            [
-                (lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", "")),
-                (_filter, ("OK", "")),
-                (
-                    lambda c: "task_rename/filter" in c,
-                    ("", "write error: Invalid argument"),
-                ),
-            ]
-        ),
+        _FakeShell([(lambda c: "sandroid_follow" in c, ("TP_OK\nRF2", ""))]),
     )
     monkeypatch.setattr(KprobeTracer, "_start_process", classmethod(lambda cls, c: "p"))
     KprobeTracer._tracefs = "/sys/kernel/tracing"
     assert KprobeTracer.start_rename_watch(FFX) == "p"
+    (cmd,) = fake.commands
+    filters = [
+        part
+        for part in cmd.split("(echo ")[1:]
+        if "task_rename/filter" in part.split(")")[0]
+    ]
     assert len(filters) == 2
     assert "newcomm" in filters[0]
     assert "newcomm" not in filters[1]
+    # The fallback runs only when the first write failed.
+    assert ") 2>/dev/null && echo RF1 || {" in cmd
 
 
 def test_self_clean_also_removes_a_leaked_follow_instance(monkeypatch):
@@ -1450,27 +1454,42 @@ def test_session_records_the_tgid_on_every_line(monkeypatch):
 
 
 def test_rename_watch_also_watches_the_main_threads_exit(monkeypatch):
+    """L2 (round 3): the exit event is filtered by the followed PIDs (the
+    seeded ones at start, every added one later), never by comm.
+    """
     fake = _install(
         monkeypatch,
-        _FakeShell(
-            [(lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", ""))]
-        ),
+        _FakeShell([(lambda c: "sandroid_follow" in c, ("TP_OK\nRF1", ""))]),
     )
     monkeypatch.setattr(KprobeTracer, "_start_process", classmethod(lambda cls, c: "p"))
     KprobeTracer._tracefs = "/sys/kernel/tracing"
+    KprobeTracer._exit_pids = [4665]
     assert KprobeTracer.start_rename_watch(FFX) == "p"
-    (cmd,) = [c for c in fake.commands if "sched_process_exit/filter" in c]
-    assert 'comm == "mozilla.firefox"' in cmd
-    assert 'comm == "org.mozilla.fir"' in cmd
+    (quoted,) = fake.commands
+    cmd = shlex.split(quoted[len("shell ") :])[0]
+    exit_write = cmd.split("> /sys/kernel/tracing/instances/sandroid_follow/")[-3:]
+    assert "'pid == 4665'" in cmd
+    assert not any("comm ==" in part for part in exit_write)
     # Enabled only once the filter was accepted (&&): never device-wide.
-    assert cmd.index("/filter") < cmd.index("sched_process_exit/enable")
-    assert " && echo 1 > " in cmd
+    assert cmd.index("sched_process_exit/filter") < cmd.rindex(
+        "echo 1 > /sys/kernel/tracing/instances/sandroid_follow/events/sched"
+    )
+    # A followed process added later is watched too (same round-trip).
+    fake.commands.clear()
+    KprobeTracer.add_pids([5000])
+    (add,) = fake.commands
+    add = shlex.split(add[len("shell ") :])[0]
+    assert "'pid == 4665 || pid == 5000'" in add
+    assert "sched_process_exit/filter) 2>/dev/null" in add
+    KprobeTracer._exit_pids = []
 
 
 def test_exit_filter_and_parse():
-    assert exit_filter(None) is None
-    assert exit_filter("bad pkg;rm") is None
-    assert exit_filter("com.x") == 'comm == "com.x"'
+    """L2 (round 3): the exit filter names the followed PIDs. The comm
+    filter never matched: Firefox renames its main thread "AndroidUI".
+    """
+    assert exit_filter_pids([]) == "pid == 0"
+    assert exit_filter_pids([4665, 4700]) == "pid == 4665 || pid == 4700"
     line = (
         "  mozilla.firefox-4665    [001] d..2. 9876.6: sched_process_exit: "
         "comm=mozilla.firefox pid=4665 prio=120"
@@ -1487,3 +1506,87 @@ def test_follow_instance_removal_is_one_adb_call(monkeypatch):
     assert "task_rename/enable" in cmd
     assert "sched_process_exit/enable" in cmd
     assert cmd.index("tracing_on") < cmd.index("rmdir")
+
+
+# =============================================================================
+# E2E round 3: setup in few round-trips (N5), task_newtask (M4)
+# =============================================================================
+
+from sandroid.core.kprobe_tracer import parse_task_newtask
+
+
+def test_app_mode_setup_takes_a_handful_of_adb_round_trips(monkeypatch):
+    """N5: ~70 serial ``adb shell`` calls made an App/follow start 12-13 s."""
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, captured, sentinel = _capture_run(
+        monkeypatch,
+        extra_rules=[
+            (
+                lambda c: "ls /proc/24310/task" in c,
+                ("T 24310 24310 24311\n", ""),
+            )
+        ],
+    )
+    KprobeTracer._orig_cmdlines = None
+    assert KprobeTracer.run_by_app([24310], FF) is sentinel
+    # self-clean + create + probes (2 when the defs overflow one line),
+    # seed list + seed write, filters + enables + tracing on.
+    assert len(fake.rounds) <= 6, fake.rounds
+    for line in fake.rounds:
+        assert len(line) < 2 * KprobeTracer._BATCH_MAX
+    # Order inside the batches is kept: clean before create, probes before
+    # their enables, tracing on last.
+    cmds = fake.commands
+    rmdir = next(i for i, c in enumerate(cmds) if "rmdir /sys/kernel/tracing/inst" in c)
+    mkdir = next(i for i, c in enumerate(cmds) if "mkdir -p" in c)
+    install = next(i for i, c in enumerate(cmds) if "p:vw vfs_write" in c)
+    enable = next(
+        i for i, c in enumerate(cmds) if "kprobes/vw/enable" in c and "1 >" in c
+    )
+    on = max(i for i, c in enumerate(cmds) if "echo 1 > " in c and "tracing_on" in c)
+    assert rmdir < mkdir < install < enable < on
+    # The values read for teardown came back through the batch.
+    assert KprobeTracer._orig_buffer_kb == "7"
+
+
+def test_long_step_lists_are_split_between_steps(monkeypatch):
+    fake = _install(monkeypatch, _FakeShell([(lambda c: True, ("x", ""))]))
+    steps = [f"echo {i:04d} {'y' * 900}" for i in range(9)]
+    out = KprobeTracer._shell_steps(steps)
+    assert 2 <= len(fake.rounds) <= 4
+    sent = "".join(fake.rounds)
+    assert all(f"echo {i:04d} " in sent for i in range(9))  # none lost or cut
+    assert sent.index("echo 0000") < sent.index("echo 0008")
+    assert out.count("x") == len(fake.rounds)
+    fake.rounds.clear()
+    assert KprobeTracer._shell_steps([]) == ""
+    assert fake.rounds == []
+
+
+def test_pid_and_app_scope_enable_task_newtask_path_mode_does_not(monkeypatch):
+    """M4 residual: a new thread's first lines print "(-------)"; its
+    creator's task_newtask line names the process first.
+    """
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    newtask = "/instances/sandroid_mon/events/task/task_newtask/enable"
+    for run in (
+        lambda: KprobeTracer.run_by_app([24310], FF),
+        lambda: KprobeTracer.run_by_pid(1234),
+    ):
+        fake, _captured, _ = _capture_run(monkeypatch)
+        run()
+        assert any(newtask in c and "echo 1 > " in c for c in fake.commands)
+    fake, _captured, _ = _capture_run(monkeypatch)
+    KprobeTracer.run_by_path("/data/x")
+    assert not any(newtask in c and "echo 1 > " in c for c in fake.commands)
+    fake.commands.clear()
+    KprobeTracer.teardown()
+    assert any(newtask in c and "echo 0 > " in c for c in fake.commands)
+
+
+def test_task_newtask_lines_tell_threads_from_processes():
+    thread = "pid=20381 comm=Gecko_IOThread clone_flags=3d0f00 oom_score_adj=0"
+    assert parse_task_newtask(thread) == (20381, True)
+    fork = "pid=20500 comm=Binder 2 clone_flags=1200011 oom_score_adj=-1000"
+    assert parse_task_newtask(fork) == (20500, False)
+    assert parse_task_newtask("pid=1 comm=x") is None
