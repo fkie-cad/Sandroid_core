@@ -424,6 +424,19 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
             classes="setting-help",
         )
 
+        # App mode: follow the app (all processes, restarts), not one PID.
+        with Horizontal(classes="setting-row"):
+            yield Label("Follow the app:", classes="setting-label")
+            yield from self._switch_with_state(
+                config.tui.monitor_follow_app, "setting-tui--monitor_follow_app"
+            )
+        yield Static(
+            "[dim]App mode watches every process of the app and picks up "
+            "restarts and new processes (kprobe); off = one PID and its "
+            "children. Default for the monitor dialog's checkbox.[/dim]",
+            classes="setting-help",
+        )
+
         # Monitor per-category event visibility (Always / Only in verbose / Never)
         for category in _MONITOR_VISIBILITY_CATEGORIES:
             with Horizontal(classes="setting-row"):

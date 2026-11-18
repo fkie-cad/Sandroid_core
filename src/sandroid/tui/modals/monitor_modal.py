@@ -4,7 +4,15 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Input, Label, RadioButton, RadioSet, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    Label,
+    RadioButton,
+    RadioSet,
+    Static,
+)
 
 from sandroid.config import get_config
 from sandroid.core.kprobe_tracer import KprobeTracer
@@ -17,7 +25,10 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
     """Modal for configuring Monitor filesystem monitoring.
 
     Features:
-    - Choose between PID-based or Path-based monitoring
+    - Choose between App mode (the app's processes; with "follow" every
+      process of the app, also ones that start or restart later -- so it
+      can start before the app runs) and Path mode (every process writing
+      under the paths)
     - Shows current spotlight app info
     - Auto-fills path from spotlight app data directory
     - Validates inputs before starting
@@ -187,6 +198,18 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         width: 100%;
     }
 
+    MonitorConfigModal #follow-app {
+        background: transparent;
+        border: none;
+        padding: 0 1;
+        margin-top: 1;
+        height: auto;
+    }
+
+    MonitorConfigModal #follow-app:focus {
+        background: $panel;
+    }
+
     MonitorConfigModal #caveat-hint {
         color: $text-muted;
         height: auto;
@@ -261,6 +284,39 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         # True. A None (never-probed / inconclusive) verdict counts as NOT
         # kprobe, so the modal safely stays single-path.
         self._effective_kprobe = self._compute_effective_kprobe()
+
+        # Following the app (kprobe): default from tui.monitor_follow_app.
+        # With it App mode can start before the app runs.
+        self._can_follow = self._compute_can_follow()
+        self._follow_default = self._can_follow and self._follow_setting()
+        self._has_mode_choice = bool(self._spotlight_pid) or bool(
+            self._get_package_name() and self._can_follow
+        )
+
+    @staticmethod
+    def _follow_setting() -> bool:
+        try:
+            return bool(getattr(get_config().tui, "monitor_follow_app", True))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _compute_can_follow() -> bool:
+        """Following needs the kprobe backend (not known to be unavailable)."""
+        try:
+            return (
+                get_config().tui.monitor_backend == "kprobe"
+                and KprobeTracer.cached_availability() is not False
+            )
+        except Exception:
+            return False
+
+    def _app_label(self, follow: bool) -> str:
+        pkg = self._get_package_name()
+        if follow:
+            return f"App · {pkg} (all processes, follows restarts)"
+        pid = f"PID {self._spotlight_pid}" if self._spotlight_pid else "not running"
+        return f"App · {pkg} ({pid} + its children)"
 
     @staticmethod
     def _compute_effective_kprobe() -> bool:
@@ -364,22 +420,32 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             # Mode selection
             with Vertical(id="mode-section"):
                 yield Label("Monitoring Mode:", id="mode-label")
-                # Only show RadioSet if we have both options available
-                if self._spotlight_pid:
+                # Only show RadioSet if we have both options available: a
+                # running app, or (following) an app that may start later.
+                if self._has_mode_choice:
                     by_path = MonitorConfigModal._last_mode == "path"
                     with RadioSet(id="mode-select", classes="no-compact"):
                         yield RadioButton(
-                            f"Monitor by PID ({self._spotlight_pid})",
+                            self._app_label(self._follow_default),
                             id="mode-pid",
                             value=not by_path,
                         )
                         yield RadioButton(
-                            "Monitor by Path",
+                            "Path · every process writing under the paths below",
                             id="mode-path",
                             value=by_path,
                         )
+                    if self._can_follow:
+                        yield Checkbox(
+                            "Follow the app: every process, also new and "
+                            "restarted ones",
+                            value=self._follow_default,
+                            id="follow-app",
+                        )
                     yield Label(
-                        "[dim]PID mode falls back to path-mode on devices without fanotify support.[/dim]",
+                        "[dim]Without kprobe App mode watches one PID (fsmon "
+                        "falls back to Path mode on devices without fanotify)."
+                        "[/dim]",
                         id="pid-mode-hint",
                     )
                 else:
@@ -451,8 +517,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         navigation and toggle since Textual's binding system may not
         properly route events through modal inheritance.
         """
-        # Only handle RadioSet keys if PID is available (RadioSet exists)
-        if self._spotlight_pid:
+        # Only handle RadioSet keys if the mode choice (RadioSet) exists
+        if self._has_mode_choice:
             key = event.key.lower() if event.key else ""
             focused = self.app.focused
 
@@ -507,7 +573,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             )
             if event.pressed.id == "mode-pid":
                 path_hint.update(
-                    "[dim]PID mode: the app's events, narrowed to paths under "
+                    "[dim]App mode: the app's events, narrowed to paths under "
                     f"this prefix.{aliases}[/dim]"
                 )
             else:
@@ -517,6 +583,25 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 )
         except Exception:
             pass
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        """Follow toggled: the App choice says what it will watch."""
+        if event.checkbox.id != "follow-app":
+            return
+        try:
+            self.query_one("#mode-pid", RadioButton).label = self._app_label(
+                event.value
+            )
+        except Exception:
+            pass
+
+    def _follow_selected(self) -> bool:
+        if not self._can_follow:
+            return False
+        try:
+            return bool(self.query_one("#follow-app", Checkbox).value)
+        except Exception:
+            return self._follow_default
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button presses."""
@@ -622,8 +707,8 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
     def _get_selected_mode(self) -> str:
         """Get the selected monitoring mode."""
-        # If no PID available, only path mode is possible
-        if not self._spotlight_pid:
+        # Without the mode choice only path mode is possible
+        if not self._has_mode_choice:
             return "path"
 
         try:
@@ -662,6 +747,15 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 if not path.startswith("/"):
                     return False, "Path must be an absolute path (start with /)"
 
+            if (
+                self._get_selected_mode() == "pid"
+                and not self._spotlight_pid
+                and not self._follow_selected()
+            ):
+                return False, (
+                    "The app is not running: turn on Follow the app, or use Path"
+                )
+
             return True, ""
         except Exception as e:
             return False, f"Validation error: {e}"
@@ -683,7 +777,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
             paths = self._collect_paths()
 
             mode = self._get_selected_mode()
-            if self._spotlight_pid:
+            if self._has_mode_choice:
                 MonitorConfigModal._last_mode = mode
 
             config = MonitorConfig(
@@ -693,6 +787,7 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 target_paths=paths,
                 target_pid=self._spotlight_pid if mode == "pid" else None,
                 app_name=self._get_app_name(),
+                follow=mode == "pid" and self._follow_selected(),
             )
 
             self._dismiss_with_refresh(config)

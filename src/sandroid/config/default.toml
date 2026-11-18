@@ -131,6 +131,9 @@ show_theme_indicator = false
 # Files lens: pull a watched (★) file automatically when the file monitor sees
 # a write to it (debounced ~1.5 s; db + -wal + -journal are one group).
 # auto_pull_on_change = true
+# File monitor, App mode: follow the app (every process, restarts and new
+# processes; kprobe) instead of one PID. Default for the monitor dialog.
+# monitor_follow_app = true
 # Files lens path rules (edited live in the Files lens with R): "hide" drops
 # matching rows (N shows everything), "group" collapses them into one row per
 # folder. kind = prefix | segment | suffix | glob. Default: hide OS paths

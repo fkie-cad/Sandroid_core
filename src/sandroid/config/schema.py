@@ -553,6 +553,15 @@ class TUIConfig(BaseModel):
         "the file monitor sees a write to it (debounced ~1.5 s; a database "
         "and its -wal/-journal are one group). Needs the monitor running.",
     )
+    monitor_follow_app: bool = Field(
+        default=True,
+        description="File monitor, App mode: follow the APP, not one PID -- "
+        "every process of the app (its UID, or named <pkg> / <pkg>:<sub>), "
+        "also ones that start or restart while the monitor runs (kprobe "
+        "backend). Off: only the PID running at start and its children; the "
+        "Files lens says 'monitor blind' once it is gone. Default for the "
+        "checkbox in the monitor dialog.",
+    )
     files_noise_rules: list[dict] = Field(
         default_factory=default_files_noise_rules,
         description="Files lens path rules, in order: {action: hide|group, "

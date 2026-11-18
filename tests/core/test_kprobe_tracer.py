@@ -1160,3 +1160,268 @@ def test_kprobe_supported_false_when_the_parent_offset_is_wrong(monkeypatch):
     assert KprobeTracer.kprobe_supported() is False
     vw_def = next(c for c in fake.commands if "p:kpck_vw" in c)
     assert "parent=+0(+40(+24(+176($arg1)))):string" in vw_def
+
+
+# =============================================================================
+# Follow the app: multi-process seeding, task_rename watch, set_event_pid
+# adds, lost-event counters, process-table parsing (recorded device output)
+# =============================================================================
+
+from sandroid.core.kprobe_tracer import (
+    android_comm,
+    parse_add_output,
+    parse_app_listing,
+    parse_overruns,
+    parse_task_rename,
+    process_label,
+    rename_filter,
+)
+
+FFX = "org.mozilla.firefox"
+
+#: ``UID`` line + ``ps -A -o PID,UID,NAME`` + ``T`` lines, as the device
+#: printed them for Firefox (5 processes; the sandboxed tabs run under
+#: isolated UIDs, a fresh zygote child still shows ``zygote64``).
+_REC_LISTING = """UID 10219
+  PID   UID NAME
+    1     0 init
+  612     0 zygote64
+ 1290  1000 system_server
+24310 10219 org.mozilla.firefox
+24398 99012 org.mozilla.firefox:sandboxed_tab_17
+24402 10219 org.mozilla.firefox:gpu_process
+24455 99013 org.mozilla.firefox:sandboxed_tab_18
+24470 10219 org.mozilla.firefox:crashhelper_service
+24990 10220 com.other.app
+T 24310 24310 24311 24312
+"""
+
+_REC_STATS = """entries: 12
+overrun: 340
+commit overrun: 7
+bytes: 1234
+oldest event ts:  9876.123456
+now ts:  9880.654321
+dropped events: 0
+read events: 4321
+entries: 3
+overrun: 0
+commit overrun: 0
+bytes: 120
+oldest event ts:  9876.2
+now ts:  9880.6
+dropped events: 2
+read events: 99
+"""
+
+_REC_RENAME = (
+    "           <...>-25983   [002] d..2.  9876.543210: task_rename: pid=25983 "
+    "oldcomm=main newcomm=mozilla.firefox oom_score_adj=-1000"
+)
+
+
+def test_buffer_is_a_few_mb_per_cpu_not_64():
+    """64 MB/CPU = 256 MB on a 4-CPU 2 GB AVD; a few MB absorbs a stall."""
+    assert 1024 <= KprobeTracer._BUFFER_SIZE_KB <= 8192
+
+
+def test_run_by_app_seeds_every_process_and_all_their_tids(monkeypatch):
+    fake, captured, sentinel = _capture_run(
+        monkeypatch,
+        extra_rules=[
+            (
+                lambda c: "ls /proc/24310/task" in c,
+                ("T 24310 24310 24311\nT 24402 24402 24403 24404\n", ""),
+            )
+        ],
+    )
+    assert KprobeTracer.run_by_app([24310, 24402], FF) is sentinel
+    seed = next(c for c in fake.commands if "set_event_pid" in c and "24403" in c)
+    assert "24310 24311 24402 24403 24404" in seed
+    assert "> /sys/kernel/tracing/instances/sandroid_mon/set_event_pid" in seed
+    assert any("options/event-fork" in c for c in fake.commands)
+    assert KprobeTracer.last_seeded == {
+        24310: [24310, 24311],
+        24402: [24402, 24403, 24404],
+    }
+    # One adb round-trip lists every pid's tasks.
+    assert sum("ls /proc/" in c for c in fake.commands) == 1
+
+
+def test_run_by_app_before_the_app_runs_keeps_the_filter_armed(monkeypatch):
+    """An EMPTY set_event_pid would record every task: pid 0 keeps it on."""
+    fake, _captured, sentinel = _capture_run(monkeypatch)
+    assert KprobeTracer.run_by_app([], FF) is sentinel
+    seed = next(
+        c for c in fake.commands if "> " in c and "set_event_pid" in c and "echo 0" in c
+    )
+    assert "instances/sandroid_mon/set_event_pid" in seed
+    assert KprobeTracer.last_seeded == {}
+
+
+def test_add_pids_appends_twice_and_measures_the_gap(monkeypatch):
+    out = "T 25983 25983 25990 25991\nS 25983 987620\nU 9876.54\n"
+    fake = _install(monkeypatch, _FakeShell([(lambda c: True, (out, ""))]))
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    result = KprobeTracer.add_pids([25983])
+    (cmd,) = fake.commands
+    sep = "/sys/kernel/tracing/instances/sandroid_mon/set_event_pid"
+    # >> appends; > would clear the app's other processes first.
+    assert cmd.count(f">> {sep}") == 2
+    assert f"> {sep}" not in cmd.replace(f">> {sep}", "")
+    assert "/proc/25983/stat" in cmd
+    assert "/proc/uptime" in cmd
+    assert result.tasks == {25983: [25983, 25990, 25991]}
+    assert result.gap(25983) == pytest.approx(0.34, abs=1e-6)
+    assert result.error is False
+
+
+def test_add_pids_reports_a_refused_write():
+    res = parse_add_output(
+        "sh: echo: write error: Invalid argument\nT 5 5\nS 5 100\nU 2.0\n"
+    )
+    assert res.error is True
+    assert res.gap(5) == pytest.approx(1.0)
+    assert parse_add_output("U x\n").gap(5) is None
+
+
+def test_list_app_processes_matches_uid_and_names():
+    listing = parse_app_listing(_REC_LISTING, FFX)
+    assert listing.ok is True
+    assert listing.app_uid == 10219
+    assert sorted(listing.processes) == [24310, 24398, 24402, 24455, 24470]
+    assert listing.tasks == {24310: [24310, 24311, 24312]}
+    # A zygote child that already took the app's UID but not its name yet.
+    fresh = parse_app_listing(_REC_LISTING + "25983 10219 zygote64\n", FFX)
+    assert 25983 in fresh.processes
+    # The UID is learnt from the main process when /data/data is unreadable.
+    no_uid = parse_app_listing(_REC_LISTING.replace("UID 10219\n", ""), FFX)
+    assert no_uid.app_uid == 10219
+    # An adb failure is no process table (never "everything exited").
+    assert parse_app_listing("error: device offline", FFX).ok is False
+
+
+def test_a_system_uid_is_never_matched():
+    text = "UID 1000\n  PID   UID NAME\n 1290  1000 system_server\n"
+    assert parse_app_listing(text, "com.android.settings").processes == {}
+
+
+def test_list_app_processes_is_one_round_trip(monkeypatch):
+    fake = _install(monkeypatch, _FakeShell([(lambda c: True, (_REC_LISTING, ""))]))
+    listing = KprobeTracer.list_app_processes(FFX, [24310])
+    (cmd,) = fake.commands
+    assert "ps -A -o PID,UID,NAME" in cmd
+    assert "stat -c %u /data/data/org.mozilla.firefox" in cmd
+    assert "ls /proc/24310/task" in cmd
+    assert len(listing.processes) == 5
+
+
+def test_overrun_counters_are_summed_without_commit_overrun(monkeypatch):
+    assert parse_overruns(_REC_STATS) == 342
+    assert parse_overruns("") is None
+    fake = _install(monkeypatch, _FakeShell([(lambda c: True, (_REC_STATS, ""))]))
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    assert KprobeTracer.read_lost_events() == 342
+    assert "instances/sandroid_mon/per_cpu/cpu*/stats" in fake.commands[0]
+
+
+def test_task_rename_lines_and_filter():
+    assert parse_task_rename(_REC_RENAME) == (25983, "main", "mozilla.firefox")
+    spaced = _REC_RENAME.replace("newcomm=mozilla.firefox", "newcomm=Binder 1")
+    assert parse_task_rename(spaced) == (25983, "main", "Binder 1")
+    assert parse_task_rename(" vw: (vfs_write+0x0) file=0x1") is None
+    expr = rename_filter(FFX)
+    # Android keeps the LAST 15 chars of a long dotted name as the comm.
+    assert android_comm(FFX) == "mozilla.firefox"
+    assert android_comm("com.x") == "com.x"
+    assert 'oldcomm == "main"' in expr
+    assert 'newcomm ~ "org.mozilla.fir*"' in expr
+    assert 'newcomm == "mozilla.firefox"' in expr
+    # A package name with filter syntax in it never reaches the kernel.
+    assert "newcomm" not in rename_filter('x" || 1 == "1')
+
+
+def test_process_labels():
+    assert process_label(FFX, FFX) == "main"
+    assert process_label(f"{FFX}:sandboxed_tab_17", FFX) == "tab_17"
+    assert process_label(f"{FFX}:gpu_process", FFX) == "gpu_process"
+    assert process_label(f"{FFX}:org.mozilla.gecko.Svc$tab3", FFX) == "tab3"
+    assert process_label("com.shared.uid", FFX) == "com.shared.uid"
+
+
+def test_rename_watch_uses_its_own_unscoped_instance(monkeypatch):
+    captured = {}
+    fake = _install(
+        monkeypatch,
+        _FakeShell(
+            [
+                (lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", "")),
+                (lambda c: "/filter" in c, ("OK", "")),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        KprobeTracer,
+        "_start_process",
+        classmethod(lambda cls, cmd: captured.setdefault("cmd", cmd) and "proc"),
+    )
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    assert KprobeTracer.start_rename_watch(FFX) == "proc"
+    joined = "\n".join(fake.commands)
+    inst = "/sys/kernel/tracing/instances/sandroid_follow"
+    assert f"{inst}/events/task/task_rename/filter" in joined
+    assert f"echo 1 > {inst}/events/task/task_rename/enable" in joined
+    assert "set_event_pid" not in joined  # never PID-scoped
+    assert captured["cmd"][-1] == f"{inst}/trace_pipe"
+    assert any(f"echo 64 > {inst}/buffer_size_kb" in c for c in fake.commands)
+
+
+def test_rename_watch_absent_tracepoint_means_poll_only(monkeypatch):
+    fake = _install(monkeypatch, _FakeShell([]))
+    monkeypatch.setattr(
+        KprobeTracer,
+        "_start_process",
+        classmethod(lambda cls, cmd: pytest.fail("no stream without tracepoint")),
+    )
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    assert KprobeTracer.start_rename_watch(FFX) is None
+    assert any(
+        "rmdir /sys/kernel/tracing/instances/sandroid_follow" in c
+        for c in fake.commands
+    )
+
+
+def test_rename_watch_falls_back_when_the_filter_is_refused(monkeypatch):
+    filters: list[str] = []
+
+    def _filter(cmd):
+        if "/filter" in cmd:
+            filters.append(cmd)
+            return len(filters) >= 2
+        return False
+
+    _install(
+        monkeypatch,
+        _FakeShell(
+            [
+                (lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", "")),
+                (_filter, ("OK", "")),
+                (lambda c: "/filter" in c, ("", "write error: Invalid argument")),
+            ]
+        ),
+    )
+    monkeypatch.setattr(KprobeTracer, "_start_process", classmethod(lambda cls, c: "p"))
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    assert KprobeTracer.start_rename_watch(FFX) == "p"
+    assert len(filters) == 2
+    assert "newcomm" in filters[0]
+    assert "newcomm" not in filters[1]
+
+
+def test_self_clean_also_removes_a_leaked_follow_instance(monkeypatch):
+    fake, _captured, _ = _capture_run(monkeypatch)
+    KprobeTracer.run_by_path("/data/x")
+    assert any(
+        "rmdir /sys/kernel/tracing/instances/sandroid_follow" in c
+        for c in fake.commands
+    )

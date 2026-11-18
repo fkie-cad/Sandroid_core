@@ -1510,3 +1510,143 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
         assert version.parent == (
             watchlist_store.files_root() / PKG / "databases" / "app.db"
         )
+
+
+# --------------------------------------------------------------------------
+# lens: what the monitor records (follow the app, blind, lost events)
+# --------------------------------------------------------------------------
+
+
+def _register_watched_monitor(device, **cfg):
+    """A running monitor session whose MonitorWatch uses a fake device."""
+    from sandroid.tui.controllers.monitor_controller import MonitorWatch
+
+    config = MonitorConfig(app_name=PKG, target_path=ROOT, **cfg)
+    watch = MonitorWatch(config, "kprobe", device=device, now=lambda: T0)
+    wrapper = type("W", (), {"config": config, "watch": watch})()
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=lambda: None,
+        app_name=PKG,
+    )
+    return watch
+
+
+class _Device:
+    def __init__(self, table):
+        self.table = table
+
+    def listing(self, package, tracked):
+        from sandroid.core.kprobe_tracer import AppListing
+
+        return AppListing(10100, dict(self.table), {}, True)
+
+    def add(self, pids):
+        from sandroid.core.kprobe_tracer import AddResult
+
+        return AddResult({p: [p] for p in pids}, {}, None)
+
+    def lost(self):
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_caption_names_the_scope_following_and_how_to_stop() -> None:
+    from sandroid.core.kprobe_tracer import AppProcess
+
+    table = {
+        10: AppProcess(10, 10100, PKG),
+        11: AppProcess(11, 10100, f"{PKG}:sandboxed_tab_17"),
+    }
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        watch = _register_watched_monitor(_Device(table), mode="pid", follow=True)
+        watch.seed({10: [10], 11: [11]}, watch.initial_processes())
+        await pilot.pause()
+        panel.refresh_rows()
+        title, info = panel.caption()
+        assert title == "LIVE"
+        assert info.startswith(f"App {PKG} · 2 proc · following · o stops")
+        watch.lost_events = 7
+        assert "7 events lost" in panel.caption()[1]
+
+
+@pytest.mark.asyncio
+async def test_caption_says_blind_instead_of_live_when_the_target_is_gone() -> None:
+    from sandroid.core.kprobe_tracer import AppProcess
+
+    device = _Device({10: AppProcess(10, 10100, PKG)})
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        watch = _register_watched_monitor(device, mode="pid", target_pid=10)
+        watch.seed({10: []})
+        device.table = {}
+        watch.poll_once()
+        await pilot.pause()
+        panel.refresh_rows()
+        title, info = panel.caption()
+        assert title == "monitor blind since 10:40:00 · target gone"
+        assert "o stops · o again re-targets" in info
+
+
+@pytest.mark.asyncio
+async def test_path_mode_caption() -> None:
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_watched_monitor(_Device({}), mode="path")
+        await pilot.pause()
+        panel.refresh_rows()
+        expected = f"Path {ROOT} · every process · o stops"
+        assert panel.caption()[1].startswith(expected)
+
+
+@pytest.mark.asyncio
+async def test_restart_separator_in_events_and_writes_counted_per_process() -> None:
+    from dataclasses import replace
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        items = _items(
+            _fse("FSE_CONTENT_MODIFIED", DB), _fse("FSE_CONTENT_MODIFIED", DB)
+        )
+        items = [
+            replace(items[0], process="main · mozStorage #1"),
+            replace(items[1], process="tab_17 · DOM Worker"),
+        ]
+        panel.ingest(items[:1], now=T0)
+        text = f"{PKG} restarted 10:40:05 · new PID 25983 · gap ≈0.3 s"
+        # The monitor's timeline line, as the controller publishes it.
+        EventBus.get().publish(
+            Event(
+                type=EventType.TASK_OUTPUT,
+                data={
+                    "task_name": "Monitor",
+                    "monitor_note": {
+                        "text": text,
+                        "level": "warning",
+                        "when": T0 + timedelta(seconds=5),
+                    },
+                },
+                source="monitor",
+            )
+        )
+        await _wait_for(pilot, lambda: bool(panel._monitor_notes))
+        panel.ingest(items[1:], now=T0 + timedelta(seconds=9))
+        panel.refresh_rows()
+        inspected = panel.inspect_selected()
+        events = _plain(_tab(inspected, "Events")).splitlines()
+        sep = f"── {text} ──"
+        assert sep in events
+        # Newest first: the tab_17 write, the restart line, the main write.
+        idx = events.index(sep)
+        assert "tab_17 · DOM Worker" in events[idx - 1]
+        assert "main · mozStorage #1" in events[idx + 1]
+        summary = _plain(_tab(inspected, "Summary"))
+        assert "main, tab_17" in summary or "tab_17, main" in summary

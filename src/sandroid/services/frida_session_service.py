@@ -754,6 +754,10 @@ class FridaSessionService:
             announce(pid, package)
         except Exception as e:
             self._logger.debug(f"Could not update spotlight PID: {e}")
+        # Still paused: a running file monitor follows the new process now.
+        notify = getattr(spotlight, "notify_spawned", None)
+        if callable(notify):
+            notify(pid, package)
 
     def _attach_session(
         self, device: Any, spotlight: Any

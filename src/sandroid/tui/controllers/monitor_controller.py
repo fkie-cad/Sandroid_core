@@ -31,8 +31,8 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any
 
 from rich.markup import escape
@@ -72,6 +72,13 @@ class MonitorConfig:
     # resume rebuilds) so resume doesn't reset the backend or re-run the
     # (expensive) kprobe preflight for a session that already fell back to fsmon.
     backend: str = "auto"
+    # App mode ("pid") only: follow the APP rather than one PID -- every
+    # process of the app (its UID, or named <pkg> / <pkg>:<sub>), seeded at
+    # start and added as they start or restart (kprobe only; see
+    # MonitorWatch). With it the session may start before the app runs
+    # (target_pid None). Default from ``tui.monitor_follow_app`` via the
+    # dialog; False keeps the old "this PID + its children" scope.
+    follow: bool = False
 
 
 # Regex to strip ANSI escape sequences and carriage returns from PTY output.
@@ -394,10 +401,18 @@ class FileSystemMonitorItem(MonitorItem):
     process: str = field(default="", compare=False)
     path: str = field(default="", compare=False)
     new_path: str | None = field(default=None, compare=False)
+    #: When the reader thread captured the line (``time.time()``, the value
+    #: ``recent_events`` uses) and the writing process's PID (fsmon: as
+    #: reported; kprobe: the app process the thread belongs to, else the
+    #: thread id). None when unknown.
+    timestamp: float | None = field(default=None, compare=False)
+    pid: int | None = field(default=None, compare=False)
 
 
 def build_monitor_item(
-    line: str, prefix_candidates: tuple[str, ...] = ()
+    line: str,
+    prefix_candidates: tuple[str, ...] = (),
+    timestamp: float | None = None,
 ) -> FileSystemMonitorItem:
     """Parse+categorize one raw monitor line into a structured display item.
 
@@ -425,7 +440,12 @@ def build_monitor_item(
 
     if event is None:
         return FileSystemMonitorItem(
-            label="", color=None, category=None, directory="", filename=line
+            label="",
+            color=None,
+            category=None,
+            directory="",
+            filename=line,
+            timestamp=timestamp,
         )
 
     meta = MONITOR_EVENT_INFO.get(event.event_type)
@@ -455,6 +475,8 @@ def build_monitor_item(
         new_directory=new_directory,
         new_filename=new_filename,
         process=event.process,
+        timestamp=timestamp,
+        pid=event.pid,
         path=canonical_device_path(event.path),
         new_path=(
             canonical_device_path(event.new_path)
@@ -605,7 +627,13 @@ class KprobeStreamTranslator:
         self._tid_comm: dict[int, str] = {}
         #: In PID scoping every event comes from the app's process tree, so
         #: an unresolvable comm is attributed to the app.
-        pid_scoped = config is not None and bool(getattr(config, "target_pid", None))
+        pid_scoped = config is not None and (
+            bool(getattr(config, "target_pid", None))
+            or (
+                getattr(config, "follow", False)
+                and getattr(config, "mode", "") == "pid"
+            )
+        )
         self._scoped_app = (getattr(config, "app_name", "") or "") if pid_scoped else ""
         targets: list[str] = []
         if config is not None:
@@ -615,6 +643,25 @@ class KprobeStreamTranslator:
         #: What dentry chains are matched against (a guess from the targets'
         #: path components until the session's resolved scope arrives).
         self._scope: WriteScope | None = guess_write_scope(targets) if targets else None
+        #: tid -> the app process it belongs to ("main", "tab_17", ...), from
+        #: the session's MonitorWatch (None: no app scope).
+        self._labels: Callable[[int], str | None] | None = None
+        self._owner: Callable[[int], int | None] | None = None
+        self._pid: int | None = None
+        #: The session's MonitorWatch (set by ``_kprobe_setup``).
+        self.watch: Any = None
+
+    def set_process_labels(
+        self,
+        labels: Callable[[int], str | None] | None,
+        owner: Callable[[int], int | None] | None = None,
+    ) -> None:
+        """Prefix each event's thread name with its app process's label.
+
+        ``owner`` maps a thread id to its process id (``item.pid``).
+        """
+        self._labels = labels
+        self._owner = owner
 
     def set_write_scope(self, scope: WriteScope | None) -> None:
         """Use the device's view of the targets (mounts + real paths)."""
@@ -682,6 +729,7 @@ class KprobeStreamTranslator:
             new_directory=new_directory,
             new_filename=new_filename,
             process=self._comm,
+            pid=self._pid,
             path=path,
             new_path=new_path,
         )
@@ -723,6 +771,8 @@ class KprobeStreamTranslator:
         if m is None:
             return []
         tid = int(m.group("tid"))
+        owner = self._owner(tid) if self._owner is not None else None
+        self._pid = owner or tid
         self._comm = self._process(tid, m.group("comm").strip())
         event = m.group("event")
         fields = _parse_kprobe_fields(m.group("rest"))
@@ -733,6 +783,11 @@ class KprobeStreamTranslator:
             if event == "dfo":
                 self._pending.pop(tid, None)
             return []
+        if self._labels is not None and event not in ("dfo", "dfor", "fput"):
+            label = self._labels(tid)
+            if label:
+                # "tab_17 · DOM Worker": which app process, which thread.
+                self._comm = f"{label} · {self._comm}"
 
         # --- correlation-only events (never emit a row directly) ---
         if event == "dfo":
@@ -872,8 +927,24 @@ def _publish_monitor_batch(items: list[FileSystemMonitorItem]) -> None:
         logger.debug("Failed to publish monitor EventBus event", exc_info=True)
 
 
+def _publish_monitor_info(data: dict[str, Any]) -> None:
+    """Publish a monitor note/status change (the Files lens listens)."""
+    try:
+        from sandroid.core.events import Event, EventBus, EventType
+
+        EventBus.get().publish(
+            Event(
+                type=EventType.TASK_OUTPUT,
+                data={"task_name": "Monitor", **data},
+                source="monitor",
+            )
+        )
+    except Exception:
+        logger.debug("Failed to publish monitor info", exc_info=True)
+
+
 def _recent_event_from_monitor_event(
-    event: MonitorEvent, source: str
+    event: MonitorEvent, source: str, timestamp: float | None = None
 ) -> dict[str, Any]:
     """Build one ``MonitorProcessWrapper.recent_events`` entry from a raw fsmon event.
 
@@ -893,7 +964,7 @@ def _recent_event_from_monitor_event(
         ``MonitorProcessWrapper.record_event``).
     """
     return {
-        "timestamp": time.time(),
+        "timestamp": timestamp if timestamp is not None else time.time(),
         "event_type": event.event_type,
         "pid": event.pid,
         "process": event.process,
@@ -934,14 +1005,582 @@ def _recent_event_from_item(item: FileSystemMonitorItem) -> dict[str, Any]:
     path = item.path or path
     new_path = item.new_path or new_path
     return {
-        "timestamp": time.time(),
+        "timestamp": item.timestamp if item.timestamp is not None else time.time(),
         "event_type": item.label,
-        "pid": None,
+        "pid": item.pid,
         "process": item.process or None,
         "path": path,
         "new_path": new_path,
         "source": item.source,
     }
+
+
+# =============================================================================
+# MonitorWatch: follow the app, notice when the monitor goes blind, count
+# lost events (one per monitor session)
+# =============================================================================
+
+#: ``ps`` NAME of a zygote child before it set its own name (``setArgV0``).
+_UNNAMED = ("zygote64", "zygote", "usap64", "usap32", "<pre-initialized>")
+
+
+class _TracerDevice:
+    """MonitorWatch's device side: KprobeTracer's adb round-trips (a seam)."""
+
+    def listing(self, package: str, tracked: list[int]) -> Any:
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.list_app_processes(package, tracked)
+
+    def add(self, pids: list[int]) -> Any:
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.add_pids(pids)
+
+    def start_rename(self, package: str) -> Any:
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.start_rename_watch(package)
+
+    def stop_rename(self) -> None:
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        KprobeTracer.stop_rename_watch()
+
+    def lost(self) -> int | None:
+        from sandroid.core.kprobe_tracer import KprobeTracer
+
+        return KprobeTracer.read_lost_events()
+
+
+@dataclass
+class FollowedProcess:
+    """One app process in the monitor's scope."""
+
+    pid: int
+    name: str
+    label: str
+    tids: list[int] = field(default_factory=list)
+    #: Seconds between its start and being added (None: unknown).
+    gap: float | None = None
+    #: How it joined: "seed" (running at start), "poll", "spawn".
+    via: str = "seed"
+    #: Its start/restart line was emitted (waits for its final name).
+    announced: bool = False
+
+
+class MonitorWatch:
+    """Keeps a monitor session honest about what it records.
+
+    * **App scope** (``mode == "pid"`` with an app): tracks the app's
+      processes. With ``follow`` (kprobe) every process of the app -- its
+      UID, or named ``<pkg>`` / ``<pkg>:<sub>`` -- is in the trace scope:
+      the ones running at start are seeded, new and restarted ones are added
+      to ``set_event_pid`` (all TIDs) as they start. Starts are noticed by
+      ``task:task_rename`` in a separate tracefs instance (a zygote child
+      names itself right after taking the app's UID) and by a ``ps`` poll
+      every :attr:`POLL_SECONDS` as the fallback (and the only way when the
+      tracepoint is missing); every candidate is checked against the
+      process table before it is added. A paused spawn (Sandroid's own
+      Start) is handed over by :meth:`on_spawned` BEFORE the app resumes:
+      no gap. Exited processes leave the kernel's list by themselves (with
+      event-fork on, an exiting task is dropped from ``set_event_pid``);
+      the watch drops them from its own table on the next poll.
+    * **Blind**: without follow (or on fsmon), once every process the
+      session started with is gone the monitor records nothing for the
+      app; :meth:`caption` then says "monitor blind since HH:MM:SS · target
+      gone" instead of LIVE, with how to re-target.
+    * **Lost events** (kprobe): the ring buffer's per-CPU overrun counters
+      are read every :attr:`LOST_SECONDS` and at stop; "N events lost" is
+      shown when > 0.
+
+    Timeline notes (a restart with its gap, an exit, a loss) go to
+    ``on_note(text, level, when)``; any change of what :meth:`caption`
+    shows to ``on_change()``. Both are called from worker threads.
+    """
+
+    POLL_SECONDS = 2.0
+    #: Poll pace while task_rename reports starts (the poll then only
+    #: notices exits and late names; a ``ps -A`` costs the device ~50 ms).
+    POLL_SECONDS_WITH_RENAME = 5.0
+    #: Re-poll pace for a short while after a task_rename candidate.
+    BURST_SECONDS = 0.3
+    BURST_FOR = 1.5
+    LOST_SECONDS = 5.0
+
+    def __init__(
+        self,
+        config: Any,
+        backend: str,
+        device: Any = None,
+        on_note: Callable[[str, str, datetime], None] | None = None,
+        on_change: Callable[[], None] | None = None,
+        now: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self.config = config
+        self.backend = backend
+        self.package = (
+            (getattr(config, "app_name", "") or "")
+            if getattr(config, "mode", "") == "pid"
+            else ""
+        )
+        #: Process tracking (app scope).
+        self.track = bool(self.package)
+        self.kprobe = backend == "kprobe"
+        #: Follow the app (add new / restarted processes): kprobe only.
+        self.follow = bool(
+            self.track and self.kprobe and getattr(config, "follow", False)
+        )
+        self.device = device or _TracerDevice()
+        self.on_note = on_note
+        self.on_change = on_change
+        self._now = now
+        self.procs: dict[int, FollowedProcess] = {}
+        self._tid_owner: dict[int, int] = {}
+        self.app_uid: int | None = None
+        self.main_pid: int | None = None
+        #: A main process was seen this session (a new one is a restart).
+        self._main_seen = False
+        self.blind_since: datetime | None = None
+        #: Why the monitor is blind ("target gone" / "can't follow").
+        self.blind_reason = ""
+        #: App processes running that the monitor does NOT record.
+        self.unfollowed: set[int] = set()
+        self.lost_events = 0
+        #: True/False once the task_rename watch was tried (None: not tried).
+        self.rename_ok: bool | None = None
+        self._rename_proc: Any = None
+        #: The session's trace stream (see bind_process).
+        self._process: Any = None
+        #: Main pids that exited / the main's (re)start, within one poll.
+        self._exited: list[int] = []
+        self._restart_at: datetime | None = None
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._burst_until = 0.0
+        self._started = False
+        self._stopped = False
+        self._last_state: tuple = ()
+
+    # -- setup (off the UI thread, before tracing starts) ---------------------
+
+    def initial_processes(self) -> Any:
+        """The app's processes right now (for seeding the session)."""
+        listing = self.device.listing(self.package, [])
+        if getattr(listing, "app_uid", None):
+            self.app_uid = listing.app_uid
+        return listing
+
+    def seed(self, tasks: dict[int, list[int]], listing: Any = None) -> None:
+        """Record the processes the session started with (no timeline line)."""
+        known = getattr(listing, "processes", None) or {}
+        with self._lock:
+            for pid, tids in tasks.items():
+                info = known.get(pid)
+                name = info.name if info is not None else self.package
+                proc = FollowedProcess(pid, name, "", list(tids))
+                proc.announced = name not in _UNNAMED
+                self._add_proc(proc)
+                if name == self.package:
+                    self.main_pid = pid
+                    self._main_seen = True
+            if self.track and not tasks and not self.follow:
+                self._set_blind("target gone")
+
+    def start_rename_watch(self) -> None:
+        """Start the task_rename stream (follow mode; None = poll only)."""
+        if not self.follow:
+            return
+        try:
+            self._rename_proc = self.device.start_rename(self.package)
+        except Exception:
+            logger.debug("task_rename watch failed to start", exc_info=True)
+            self._rename_proc = None
+        self.rename_ok = self._rename_proc is not None
+
+    # -- lifecycle --------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start the poll (and rename reader) threads + the spawn hand-off."""
+        if self._started:
+            return
+        self._started = True
+        if self.track or self.kprobe:
+            threading.Thread(
+                target=self._poll_loop, daemon=True, name="monitor-watch-poll"
+            ).start()
+        if self._rename_proc is not None:
+            threading.Thread(
+                target=self._rename_loop, daemon=True, name="monitor-watch-rename"
+            ).start()
+        if self.follow:
+            try:
+                from sandroid.services.spotlight_service import SpotlightService
+
+                SpotlightService.add_spawn_listener(self.on_spawned)
+            except Exception:
+                logger.debug("spawn listener registration failed", exc_info=True)
+
+    def stop(self) -> None:
+        """Stop the threads, the rename stream and the spawn hand-off."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._stop.set()
+        self._wake.set()
+        try:
+            from sandroid.services.spotlight_service import SpotlightService
+
+            SpotlightService.remove_spawn_listener(self.on_spawned)
+        except Exception:
+            pass
+        proc = self._rename_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                self.device.stop_rename()
+            except Exception:
+                logger.debug("task_rename watch teardown failed", exc_info=True)
+
+    def bind_process(self, process: Any) -> None:
+        """Tie the threads to the session's stream: they end with it."""
+        self._process = process
+
+    def _session_alive(self) -> bool:
+        process = getattr(self, "_process", None)
+        if process is None:
+            return True
+        try:
+            return process.poll() is None
+        except Exception:
+            return False
+
+    def _poll_loop(self) -> None:
+        next_lost = time.monotonic() + self.LOST_SECONDS
+        while not self._stop.is_set() and self._session_alive():
+            burst = time.monotonic() < self._burst_until
+            pace = (
+                self.POLL_SECONDS_WITH_RENAME if self.rename_ok else self.POLL_SECONDS
+            )
+            self._wake.wait(self.BURST_SECONDS if burst else pace)
+            self._wake.clear()
+            if self._stop.is_set() or not self._session_alive():
+                break
+            try:
+                if self.track:
+                    self.poll_once()
+                if self.kprobe and time.monotonic() >= next_lost:
+                    next_lost = time.monotonic() + self.LOST_SECONDS
+                    self.check_lost()
+            except Exception:
+                logger.debug("monitor watch poll failed", exc_info=True)
+
+    def _rename_loop(self) -> None:
+        proc = self._rename_proc
+        try:
+            for line in proc.stdout:
+                if self._stop.is_set():
+                    break
+                self.on_rename_line(line)
+        except Exception:
+            logger.debug("task_rename reader ended", exc_info=True)
+        if not self._stop.is_set():
+            # The stream died (adb hiccup): the poll carries on alone.
+            self.rename_ok = False
+            self._changed()
+
+    # -- events -------------------------------------------------------------
+
+    def on_rename_line(self, line: str) -> None:
+        """A ``task_rename`` line: re-poll soon if it may be a new app process.
+
+        The rename itself proves nothing (any zygote child renames from
+        "main"); the next polls check the candidate's UID and name.
+        """
+        from sandroid.core.kprobe_tracer import parse_task_rename
+
+        parsed = parse_task_rename(line)
+        if parsed is None or parsed[0] in self.procs:
+            return
+        self._burst_until = time.monotonic() + self.BURST_FOR
+        self._wake.set()
+
+    def on_spawned(self, pid: int, package: str) -> None:
+        """Sandroid spawned ``package`` paused: follow it before it resumes."""
+        if not self.follow or package != self.package or self._stopped:
+            return
+        with self._lock:
+            if pid in self.procs:
+                return
+            self._adopt([pid], {}, via="spawn")
+            self._update_state()
+
+    def poll_once(self) -> None:
+        """One look at the process table: drop exits, follow starts."""
+        with self._lock:
+            listing = self.device.listing(self.package, list(self.procs))
+            if not getattr(listing, "ok", False):
+                return  # adb hiccup: never read as "every process exited"
+            if listing.app_uid:
+                self.app_uid = listing.app_uid
+            self._exited = []
+            self._restart_at = None
+            for pid in list(self.procs):
+                if pid not in listing.processes:
+                    self._drop(pid)
+                    continue
+                proc = self.procs[pid]
+                tids = listing.tasks.get(pid)
+                if tids:
+                    self._set_tids(proc, tids)
+                name = listing.processes[pid].name
+                # A spawned (paused) process may still show the zygote's
+                # name: never trade a real name for that.
+                if name != proc.name and name not in _UNNAMED:
+                    proc.name = name
+                    proc.label = ""
+                    self._label(proc)
+                self._announce(proc)
+            new = [p for p in listing.processes if p not in self.procs]
+            if self.follow:
+                self.unfollowed = set()
+                if new:
+                    self._adopt(new, listing.processes, via="poll")
+            else:
+                self.unfollowed = set(new)
+            noticed = self._now()
+            for pid in self._exited:
+                when = noticed
+                if self._restart_at is not None and self._restart_at <= noticed:
+                    when = self._restart_at - timedelta(microseconds=1)
+                self._note(
+                    f"{self.package} exited · PID {pid} · noticed {noticed:%H:%M:%S}",
+                    "warning",
+                    when,
+                )
+            self._exited = []
+            self._update_state()
+
+    def check_lost(self) -> int:
+        """Read the ring buffer's overrun counters; note any new loss."""
+        try:
+            lost = self.device.lost()
+        except Exception:
+            lost = None
+        if lost is not None and lost > self.lost_events:
+            new = lost - self.lost_events
+            self.lost_events = lost
+            self._note(
+                f"{new} trace events lost {self._now():%H:%M:%S} "
+                f"(ring buffer overrun, {lost} this session)",
+                "warning",
+            )
+            self._changed()
+        return self.lost_events
+
+    # -- table ---------------------------------------------------------------
+
+    def _label(self, proc: FollowedProcess) -> None:
+        from sandroid.core.kprobe_tracer import process_label
+
+        if not proc.label:
+            proc.label = (
+                f"pid {proc.pid}"
+                if proc.name in _UNNAMED
+                else process_label(proc.name, self.package)
+            )
+
+    def _add_proc(self, proc: FollowedProcess) -> None:
+        self._label(proc)
+        self.procs[proc.pid] = proc
+        self._set_tids(proc, proc.tids or [proc.pid])
+
+    def _set_tids(self, proc: FollowedProcess, tids: list[int]) -> None:
+        for tid in proc.tids:
+            if self._tid_owner.get(tid) == proc.pid:
+                del self._tid_owner[tid]
+        proc.tids = list(tids)
+        for tid in proc.tids:
+            self._tid_owner[tid] = proc.pid
+        self._tid_owner[proc.pid] = proc.pid
+
+    def _drop(self, pid: int) -> None:
+        proc = self.procs.pop(pid, None)
+        if proc is None:
+            return
+        for tid in [*proc.tids, pid]:
+            if self._tid_owner.get(tid) == pid:
+                del self._tid_owner[tid]
+        if pid == self.main_pid:
+            self.main_pid = None
+            # Noted at the end of the poll: a restart found in the same poll
+            # dates it (the old process was gone before the new one started).
+            self._exited.append(pid)
+
+    def _adopt(self, pids: list[int], known: dict, via: str) -> None:
+        """Add ``pids`` (all TIDs) to the trace scope and the table."""
+        result = self.device.add(pids)
+        for pid in pids:
+            tids = result.tasks.get(pid)
+            if not tids:
+                continue  # exited before it could be added
+            info = known.get(pid)
+            name = info.name if info is not None else self.package
+            gap = 0.0 if via == "spawn" else result.gap(pid)
+            proc = FollowedProcess(pid, name, "", list(tids), gap=gap, via=via)
+            self._add_proc(proc)
+            self._announce(proc)
+        if getattr(result, "error", False):
+            self._set_blind("can't follow")
+
+    def _announce(self, proc: FollowedProcess) -> None:
+        """The timeline line for a process that joined (once its name is final)."""
+        if proc.announced or proc.name in _UNNAMED:
+            return
+        proc.announced = True
+        if proc.via == "spawn":
+            gap = "spawned paused · no gap"
+        elif proc.gap is None:
+            gap = "gap unknown"
+        else:
+            gap = f"gap ≈{proc.gap:.1f} s"
+        started = self._now()
+        if proc.gap is not None and proc.via != "spawn":
+            started -= timedelta(seconds=proc.gap)
+        if proc.name == self.package:
+            restarted = self._main_seen
+            self._main_seen = True
+            self.main_pid = proc.pid
+            self._restart_at = started
+            what = "restarted" if restarted else "started"
+            new = "new PID" if restarted else "PID"
+            text = (
+                f"{self.package} {what} {started:%H:%M:%S} · {new} {proc.pid} · {gap}"
+            )
+            if restarted and proc.via != "spawn":
+                text += " · Frida hooks are gone (⇧R re-applies)"
+            self._note(text, "warning" if restarted else "info", started)
+        else:
+            self._note(
+                f"+ {proc.label} (PID {proc.pid}) followed · {gap}", "info", started
+            )
+
+    def _set_blind(self, reason: str) -> None:
+        if self.blind_since is None:
+            self.blind_since = self._now()
+            self.blind_reason = reason
+
+    def _update_state(self) -> None:
+        if self.follow:
+            if self.blind_reason != "can't follow":
+                self.blind_since, self.blind_reason = None, ""
+        elif self.track and not self.procs:
+            self._set_blind("target gone")
+        self._changed()
+
+    def _changed(self) -> None:
+        state = (
+            tuple(sorted(self.procs)),
+            self.blind_since,
+            self.lost_events,
+            self.rename_ok,
+            tuple(sorted(self.unfollowed)),
+        )
+        if state == self._last_state:
+            return
+        self._last_state = state
+        if self.on_change is not None:
+            try:
+                self.on_change()
+            except Exception:
+                logger.debug("monitor watch on_change failed", exc_info=True)
+
+    def _note(self, text: str, level: str, when: datetime | None = None) -> None:
+        if self.on_note is not None:
+            try:
+                self.on_note(text, level, when or self._now())
+            except Exception:
+                logger.debug("monitor watch on_note failed", exc_info=True)
+
+    # -- reads (any thread) --------------------------------------------------
+
+    def pid_for_tid(self, tid: int) -> int | None:
+        """The app process a thread belongs to (None: not known)."""
+        return self._tid_owner.get(tid)
+
+    def label_for_tid(self, tid: int) -> str | None:
+        """The app process (``main``, ``tab_17``...) a thread belongs to."""
+        owner = self._tid_owner.get(tid)
+        proc = self.procs.get(owner) if owner is not None else None
+        return proc.label if proc is not None else None
+
+    def describe(self) -> str:
+        """The scope in a few words ("app org.x · 5 processes · following")."""
+        if not self.track:
+            return ""
+        n = len(self.procs)
+        if self.follow:
+            if not n:
+                return f"app {self.package} · not running yet · following"
+            plural = "es" if n != 1 else ""
+            return f"app {self.package} · {n} process{plural} · following"
+        return f"app {self.package} · PID {self.main_pid or '?'} + children"
+
+    def caption(self) -> tuple[str | None, list[str]]:
+        """``(title, info parts)`` for the Files lens frame.
+
+        ``title`` replaces "LIVE" while the monitor is blind (else None).
+        """
+        config = self.config
+        parts: list[str] = []
+        title = None
+        if self.blind_since is not None:
+            title = (
+                f"monitor blind since {self.blind_since:%H:%M:%S} · {self.blind_reason}"
+            )
+            parts.append(f"App {self.package}")
+            hint = "o stops · o again re-targets"
+            if not self.follow:
+                hint += " · follow restarts: monitor dialog / Settings"
+            parts.append(hint)
+        elif self.track:
+            n = len(self.procs)
+            if self.follow:
+                if n:
+                    parts.append(f"App {self.package} · {n} proc · following")
+                else:
+                    parts.append(
+                        f"App {self.package} · not running · follows its start"
+                    )
+                if self.rename_ok is False:
+                    parts.append("start detection by poll")
+            else:
+                main = self.main_pid or next(iter(self.procs), None)
+                parts.append(f"App {self.package} · PID {main} + children")
+                if self.unfollowed:
+                    n_un = len(self.unfollowed)
+                    plural = "es" if n_un != 1 else ""
+                    parts.append(f"{n_un} app process{plural} not followed")
+        else:
+            paths = list(getattr(config, "target_paths", None) or [])
+            first = paths[0] if paths else getattr(config, "target_path", "")
+            more = f" +{len(paths) - 1}" if len(paths) > 1 else ""
+            pid = getattr(config, "target_pid", None)
+            scope = f"PID {pid}" if pid else "every process"
+            parts.append(f"Path {first}{more} · {scope}")
+        if self.lost_events:
+            parts.append(f"{self.lost_events} events lost")
+        if title is None:
+            parts.append("o stops")
+        return title, parts
 
 
 class MonitorController:
@@ -1505,6 +2144,13 @@ class MonitorController:
         # Start output reader thread
         self._start_output_reader(wrapper)
 
+        # Follow the app / notice blindness / count lost events -- for as
+        # long as the session's stream runs.
+        watch = getattr(wrapper, "watch", None)
+        if isinstance(watch, MonitorWatch):
+            watch.bind_process(getattr(wrapper, "process", None))
+            watch.start()
+
         # monitor actually STARTED (not just the config modal opening) —
         # jump to the Files tab's Monitor sub-tab so the live stream is
         # immediately visible, mirroring "h" (friTap) ->
@@ -1589,8 +2235,25 @@ class MonitorController:
             else:
                 process = FSMon.run_fsmon_by_path(config.target_path)
                 mode_desc = f"path {config.target_path}"
+                if config.mode == "pid":
+                    # App mode before the app runs needs kprobe (follow);
+                    # fsmon watches the path instead -- say so everywhere.
+                    mode_desc += " (app not running; fsmon can't follow it)"
+                    config = MonitorConfig(
+                        mode="path",
+                        target_path=config.target_path,
+                        target_pid=None,
+                        app_name=config.app_name,
+                        backend="fsmon",
+                    )
 
-            wrapper = MonitorProcessWrapper(process, config)
+            watch = self._make_watch(config, "fsmon")
+            if watch.track and config.target_pid:
+                watch.seed({config.target_pid: []})
+            if getattr(config, "follow", False) and watch.track:
+                mode_desc += " (fsmon can't follow restarts)"
+            wrapper = MonitorProcessWrapper(process, config, teardown=watch.stop)
+            wrapper.watch = watch
             return self._register_and_start(config, wrapper, mode_desc)
 
         except Exception as e:
@@ -1638,8 +2301,27 @@ class MonitorController:
             except Exception:
                 logger.debug("monitor write-scope read failed", exc_info=True)
 
-        if config.target_pid:
+        watch = self._make_watch(config, "kprobe")
+        if watch.follow:
+            # App scope: every process of the app, seeded now and followed
+            # (new/restarted ones are added as they start). The table is read
+            # again after the rename watch is up, so a process that started
+            # in between is added too -- no window without either.
+            listing = watch.initial_processes()
+            pids = sorted(getattr(listing, "processes", None) or {})
+            process = KprobeTracer.run_by_app(pids, paths or None)
+            if process is not None:
+                watch.seed(dict(KprobeTracer.last_seeded), listing)
+                watch.start_rename_watch()
+                try:
+                    watch.poll_once()
+                except Exception:
+                    logger.debug("monitor watch first poll failed", exc_info=True)
+            mode_desc = f"{watch.describe()} (kprobe)"
+        elif config.target_pid:
             process = KprobeTracer.run_by_pid(config.target_pid, paths or None)
+            if watch.track:
+                watch.seed({config.target_pid: []})
             if config.mode == "pid":
                 mode_desc = f"PID {config.target_pid} + children (kprobe)"
             else:
@@ -1660,6 +2342,7 @@ class MonitorController:
             mode_desc += f" (+{extra} path{'s' if extra != 1 else ''})"
 
         if process is None:
+            watch.stop()
             return None
 
         # One long-lived translator per session, reset now; the reader thread
@@ -1667,7 +2350,49 @@ class MonitorController:
         translator = KprobeStreamTranslator()
         translator.reset(config)
         translator.set_write_scope(scope)
+        translator.watch = watch
+        if watch.track:
+            translator.set_process_labels(watch.label_for_tid, watch.pid_for_tid)
         return process, translator, mode_desc
+
+    def _make_watch(self, config: MonitorConfig, backend: str) -> MonitorWatch:
+        """The session's :class:`MonitorWatch` (notes/status reach the UI)."""
+        return MonitorWatch(
+            config,
+            backend,
+            device=self._watch_device(),
+            on_note=self._watch_note,
+            on_change=self._watch_changed,
+        )
+
+    def _watch_device(self) -> Any:
+        """The watch's device side (``None`` = KprobeTracer); a test seam."""
+        return None
+
+    def _on_ui(self, fn: Callable[..., Any], *args: Any) -> None:
+        """Run ``fn`` on the UI thread (directly when already there)."""
+        if threading.current_thread() is threading.main_thread():
+            fn(*args)
+            return
+        try:
+            self._call_from_thread(fn, *args)
+        except Exception:
+            logger.debug("monitor watch UI hand-off failed", exc_info=True)
+
+    def _watch_note(self, text: str, level: str, when: datetime) -> None:
+        """A timeline line: the log, and a separator in the Files Events."""
+
+        def emit() -> None:
+            (self._log_warning if level == "warning" else self._log_info)(text)
+            _publish_monitor_info(
+                {"monitor_note": {"text": text, "level": level, "when": when}}
+            )
+
+        self._on_ui(emit)
+
+    def _watch_changed(self) -> None:
+        """What the Files caption shows about the monitor changed."""
+        self._on_ui(_publish_monitor_info, {"monitor_status": True})
 
     def _write_scope(self, paths) -> Any:
         """``KprobeTracer.resolve_write_scope`` -- only on a device whose
@@ -1696,12 +2421,24 @@ class MonitorController:
             self._log_error("Failed to start kprobe monitor")
             return False
         process, translator, mode_desc = setup
+        watch = getattr(translator, "watch", None)
+        if watch is None:
+            watch = self._make_watch(config, "kprobe")
+
+        def _teardown() -> None:
+            # Runs after the trace_pipe reader was killed, before the
+            # instance is removed: the overrun counters are still there.
+            watch.stop()
+            watch.check_lost()
+            KprobeTracer.teardown()
+
         wrapper = MonitorProcessWrapper(
             process,
             config,
-            teardown=KprobeTracer.teardown,
+            teardown=_teardown,
             translator=translator,
         )
+        wrapper.watch = watch
         return self._register_and_start(config, wrapper, mode_desc)
 
     def _launch_kprobe(self, config: MonitorConfig) -> bool:
@@ -1761,7 +2498,9 @@ class MonitorController:
             item_buffer: deque[FileSystemMonitorItem] = deque(maxlen=2000)
 
             def ingest(line_str: str) -> None:
+                now = time.time()
                 for item in translator.feed(line_str):
+                    item = replace(item, timestamp=now)
                     item_buffer.append(item)
                     try:
                         monitor_process_wrapper.record_event(
@@ -1784,15 +2523,17 @@ class MonitorController:
 
         else:
             # fsmon: deque of raw lines; items built on the main thread.
-            line_buffer: deque[str] = deque(maxlen=2000)
+            # (line, capture time): the item built later keeps the time.
+            line_buffer: deque[tuple[str, float]] = deque(maxlen=2000)
 
             def ingest(line_str: str) -> None:
-                line_buffer.append(line_str)
+                now = time.time()
+                line_buffer.append((line_str, now))
                 event = parse_monitor_line(line_str)
                 if event is not None:
                     try:
                         monitor_process_wrapper.record_event(
-                            _recent_event_from_monitor_event(event, "fsmon")
+                            _recent_event_from_monitor_event(event, "fsmon", now)
                         )
                     except Exception:
                         logger.debug(
@@ -1916,9 +2657,11 @@ class MonitorController:
         )
 
         items: list[FileSystemMonitorItem] = []
-        for line in lines:
+        for entry in lines:
+            # A raw line, or (line, capture time) from the reader thread.
+            line, stamp = entry if isinstance(entry, tuple) else (entry, None)
             try:
-                items.append(build_monitor_item(line, prefix_candidates))
+                items.append(build_monitor_item(line, prefix_candidates, stamp))
             except Exception:
                 logger.debug("Failed to parse monitor line for batch", exc_info=True)
 
@@ -2041,7 +2784,23 @@ class MonitorController:
             return False
 
         resolved = config
-        if config.mode == "pid":
+        if (
+            config.mode == "pid"
+            and getattr(config, "follow", False)
+            and config.app_name
+        ):
+            # Following the app: no PID to re-resolve -- the session seeds
+            # whatever of the app runs now and follows the rest.
+            resolved = MonitorConfig(
+                mode="pid",
+                target_path=config.target_path,
+                target_paths=config.target_paths,
+                target_pid=None,
+                app_name=config.app_name,
+                backend=config.backend,
+                follow=True,
+            )
+        elif config.mode == "pid":
             new_pid = None
             if config.app_name:
                 try:

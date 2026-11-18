@@ -366,3 +366,90 @@ async def test_enter_on_the_mode_choice_starts_the_chosen_mode(monkeypatch) -> N
         await pilot.press("enter")  # the chosen mode: start
         await pilot.pause()
         assert started == ["path"]
+
+
+# -- follow the app: App vs Path naming, App mode before the app runs --------
+
+
+class _AppNotRunningSpotlight(_StubSpotlight):
+    def get_app_tuple(self):
+        return ("org.mozilla.firefox", "Firefox")
+
+
+@pytest.mark.asyncio
+async def test_app_mode_is_offered_before_the_app_runs_when_following(
+    monkeypatch,
+) -> None:
+    """Monitor first, then spawn: App mode needs no PID while following."""
+    from textual.widgets import Checkbox, RadioButton
+
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _AppNotRunningSpotlight)
+    monkeypatch.setattr(MonitorConfigModal, "_last_mode", None)
+    _patch_backend(monkeypatch, "kprobe", availability=True)
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        app_label = str(modal.query_one("#mode-pid", RadioButton).label)
+        path_label = str(modal.query_one("#mode-path", RadioButton).label)
+        assert app_label == (
+            "App · org.mozilla.firefox (all processes, follows restarts)"
+        )
+        assert path_label.startswith("Path · every process")
+        assert modal.query_one("#follow-app", Checkbox).value is True
+        captured: dict = {}
+        modal._dismiss_with_refresh = lambda result: captured.update(result=result)
+        modal._start()
+        config = captured["result"]
+        assert (config.mode, config.follow, config.target_pid) == ("pid", True, None)
+        assert config.app_name == "org.mozilla.firefox"
+
+        # Follow off: the App choice names one PID, and without one it can't
+        # start -- the dialog says what to do instead.
+        modal.query_one("#follow-app", Checkbox).value = False
+        await pilot.pause()
+        assert "not running + its children" in str(
+            modal.query_one("#mode-pid", RadioButton).label
+        )
+        valid, msg = modal._validate()
+        assert valid is False
+        assert "Follow the app" in msg
+
+
+@pytest.mark.asyncio
+async def test_follow_default_comes_from_the_setting(monkeypatch) -> None:
+    from textual.widgets import Checkbox
+
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _PidSpotlight)
+    monkeypatch.setattr(MonitorConfigModal, "_last_mode", None)
+    cfg = _make_config(backend="kprobe")
+    cfg.tui.monitor_follow_app = False
+    monkeypatch.setattr(monitor_modal, "get_config", lambda: cfg)
+    monkeypatch.setattr(
+        monitor_modal.KprobeTracer, "cached_availability", classmethod(lambda c: True)
+    )
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        assert modal.query_one("#follow-app", Checkbox).value is False
+        captured: dict = {}
+        modal._dismiss_with_refresh = lambda result: captured.update(result=result)
+        modal._start()
+        assert captured["result"].follow is False
+        assert captured["result"].target_pid == 3676
+
+
+@pytest.mark.asyncio
+async def test_fsmon_offers_no_follow_and_no_app_mode_without_a_pid(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _AppNotRunningSpotlight)
+    _patch_backend(monkeypatch, "fsmon", availability=None)
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        assert len(modal.query("#mode-select")) == 0
+        assert len(modal.query("#follow-app")) == 0
+        assert modal._get_selected_mode() == "path"

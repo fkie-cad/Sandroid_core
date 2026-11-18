@@ -49,6 +49,14 @@ reports for a ★ file pulls it once the writes are quiet (~1.5 s), see
 watched the caption says "monitor off — watched files not tracked · o
 starts it".
 
+**Monitor status** (``MonitorWatch`` of the running session): the caption
+says what is recorded and how to stop it ("App org.x · 5 proc · following
+· o stops", "Path /sdcard · every process", "N events lost"), and replaces
+LIVE with "monitor blind since HH:MM:SS · target gone" once the session
+records nothing for its app. The watch's timeline lines (app restarted +
+gap, exited, events lost) are separators in every file's Events, next to
+the marks; Summary "by" counts writes per app process (main, tab_17, gpu).
+
 Keys (on this lens): ``w`` watch/unwatch · ``u`` pull the row · ``U`` pull
 all watched · ``/`` filter · ``n`` watch a path or pattern that is not in
 the table · ``B`` mark · ``A`` all / since mark · ``<``/``>`` mark
@@ -78,7 +86,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from rich.table import Table
 from rich.text import Text
@@ -124,6 +132,14 @@ _STATE_STAR = {
     RowState.ERROR: "bold #ef4444",
     RowState.SETTLING: "#a3873f",
 }
+
+
+class _Sep(NamedTuple):
+    """A separator line in the Events tab (a mark or a monitor note)."""
+
+    when: datetime
+    text: str
+    style: str
 
 
 def _load_run_record(scope: str):
@@ -478,6 +494,8 @@ class FilesPanel(Widget):
         self._dirty = True
         self._path_width = 0
         self._notice_kind: str | None = None
+        #: ``(when, text, level)`` monitor timeline lines (add_monitor_note).
+        self._monitor_notes: list[tuple[datetime, str, str]] = []
         self._resume_config: Any = None
         self._event_handlers: list = []
         self._main_loop = None
@@ -645,9 +663,39 @@ class FilesPanel(Widget):
         """A monitor batch (source-only match: other tasks never leak in)."""
         if getattr(event, "source", None) != "monitor":
             return
-        batch = (getattr(event, "data", None) or {}).get("batch")
+        data = getattr(event, "data", None) or {}
+        note = data.get("monitor_note")
+        if note:
+            self.add_monitor_note(
+                note.get("text", ""), note.get("when"), note.get("level", "warning")
+            )
+        if note or data.get("monitor_status"):
+            self._update_caption()  # the caption shows the monitor's scope
+        batch = data.get("batch")
         if batch:
             self.ingest(batch)
+
+    #: Monitor timeline lines kept for the Events tab.
+    _MAX_NOTES = 200
+
+    def add_monitor_note(
+        self, text: str, when: datetime | None = None, level: str = "warning"
+    ) -> None:
+        """A monitor timeline line (restart + gap, exit, lost events).
+
+        Shown as a separator in every file's Events, like a mark.
+        """
+        if not text:
+            return
+        self._monitor_notes.append((when or datetime.now(), text, level))
+        del self._monitor_notes[: -self._MAX_NOTES]
+        self._refresh_inspector()
+
+    def _monitor_watch(self):
+        """The running session's ``MonitorWatch`` (None: none / not running)."""
+        running, task = self._monitor_task()
+        watch = getattr(getattr(task, "instance", None), "watch", None)
+        return watch if running and hasattr(watch, "caption") else None
 
     def ingest(self, batch, now: datetime | None = None) -> None:
         """Fold a monitor batch in; the table redraws on the next tick."""
@@ -1224,6 +1272,19 @@ class FilesPanel(Widget):
                 parts.append("auto-pull off")
             if not rows and not self._filter and not (watching and not running):
                 parts = []
+            # What the monitor records: scope, following, lost events, how to
+            # stop -- and "blind" instead of LIVE once it records nothing.
+            watch = self._monitor_watch() if running else None
+            if watch is not None:
+                try:
+                    blind, status = watch.caption()
+                except Exception:
+                    blind, status = None, []
+                if blind:
+                    if self._segment is not None:
+                        parts.insert(0, title)
+                    title = blind
+                parts = list(status) + parts
         if self._filter:
             parts.insert(0, f"/{self._filter}")
         return title, " · ".join(parts)
@@ -1632,7 +1693,12 @@ class FilesPanel(Widget):
             grid.add_row("first", _fmt_time(act.first))
             grid.add_row("last", _fmt_time(act.last))
             if act.processes:
-                top = sorted(act.processes.items(), key=lambda kv: -kv[1])[:3]
+                # "tab_17 · DOM Worker" (app scope): count per app process.
+                procs: dict[str, int] = {}
+                for name, n in act.processes.items():
+                    key = name.split(" · ", 1)[0]
+                    procs[key] = procs.get(key, 0) + n
+                top = sorted(procs.items(), key=lambda kv: -kv[1])[:3]
                 grid.add_row("by", ", ".join(name for name, _n in top))
             if act.moved_to:
                 grid.add_row("now", Text(f"renamed → {app_relative(act.moved_to)}"))
@@ -1672,20 +1738,29 @@ class FilesPanel(Widget):
         if act is None or not act.events:
             return Text("No events seen.", style=_DIM)
         out = Text()
-        # Marks newer than an event are printed above it (newest first).
-        # The newest mark before the oldest event closes the list.
-        pending = sorted(self._marks, key=lambda m: m.when, reverse=True)
+        # Separators: the marks, and the monitor's own timeline lines
+        # (restart + gap, exit, lost events) -- see add_monitor_note.
+        seps = [
+            _Sep(m.when, f"── {m.label()} · {m.when:%H:%M:%S} ──", "#facc15")
+            for m in self._marks
+        ]
+        seps += [
+            # A restart / exit / loss stands out; a followed sub-process less.
+            _Sep(when, f"── {text} ──", "#fb923c" if level == "warning" else "#a3873f")
+            for when, text, level in self._notes()
+        ]
+        # Separators newer than an event are printed above it (newest
+        # first). The newest mark before the oldest event closes the list.
+        pending = sorted(seps, key=lambda m: m.when, reverse=True)
         oldest = act.events[0].when
-        older = [m for m in pending if m.when < oldest]
+        older = [m for m in pending if m.when < oldest and m.style == "#facc15"]
         pending = [m for m in pending if m.when >= oldest] + older[:1]
         for ev in reversed(act.events):
             while pending and pending[0].when > ev.when:
                 mark = pending.pop(0)
                 if out:
                     out.append("\n")
-                out.append(
-                    f"── {mark.label()} · {mark.when:%H:%M:%S} ──", style="#facc15"
-                )
+                out.append(mark.text, style=mark.style)
             if out:
                 out.append("\n")
             out.append(_fmt_time(ev.when), style=_DIM)
@@ -1706,8 +1781,11 @@ class FilesPanel(Widget):
                 out.append("  " + " · ".join(extra), style=_DIM)
         for mark in pending:
             out.append("\n")
-            out.append(f"── {mark.label()} · {mark.when:%H:%M:%S} ──", style="#facc15")
+            out.append(mark.text, style=mark.style)
         return out
+
+    def _notes(self) -> list[tuple[datetime, str, str]]:
+        return list(getattr(self, "_monitor_notes", ()))
 
     def _review_summary(self, row: _Row) -> list:
         grid = self._grid()
