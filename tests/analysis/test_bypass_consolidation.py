@@ -650,6 +650,7 @@ globalThis.NULL = 'NULL';
 // Exports resolve to their names (the 64 aliases to the same function, as
 // on 64-bit bionic); replacements are recorded so the shared path hider can
 // be driven below, and a second replace of one address throws like Frida.
+const listeners = {};  // export -> attached callbacks
 const ALIASES = { fopen64: 'fopen', stat64: 'stat', lstat64: 'lstat', fstatat64: 'fstatat' };
 const replaced = {};
 const attached = [];
@@ -663,7 +664,11 @@ globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
         if (addr in replaced) throw new Error('already replaced');
         replaced[addr] = cb;
     };
-    if (k === 'attach') return (addr, cb) => { attached.push(String(addr)); return deep('listener'); };
+    if (k === 'attach') return (addr, cb) => {
+        attached.push(String(addr));
+        (listeners[addr] = listeners[addr] || []).push(cb);
+        return deep('listener');
+    };
     return t[k];
 } });
 globalThis.NativeFunction = function () { return () => 'REAL'; };
@@ -693,8 +698,25 @@ for (const flag of (replaced.access ? [true, false] : [])) {
         probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
     }
 }
+// Root's property listener: what an app reads for a key whose real value
+// is `value` ('' = the device does not set it).
+function prop(key, value) {
+    const out = { s: value, readUtf8String() { return this.s; }, writeUtf8String(v) { this.s = v; } };
+    for (const cb of listeners['__system_property_get'] || []) {
+        const ctx = { returnAddress: 'app' };
+        cb.onEnter.call(ctx, [{ readUtf8String: () => key }, out]);
+        cb.onLeave.call(ctx, { replace() {} });
+    }
+    return out.s;
+}
+rpc.exports.setFlags({ root: true, emulator: false });
+const props = {
+    debuggableUnset: prop('ro.debuggable', ''), debuggableOn: prop('ro.debuggable', '1'),
+    debuggableOff: prop('ro.debuggable', '0'), secureUnset: prop('ro.secure', ''),
+    secureOff: prop('ro.secure', '0'), secureOn: prop('ro.secure', '1'),
+};
 const hiderErrors = sent.filter(m => m && m.type === 'debug' && ('' + m.hook).indexOf('path-hider') === 0);
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached, hiderErrors}));
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached, hiderErrors, props}));
 """
 
 
@@ -1082,3 +1104,18 @@ def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
     off = r["off"]
     assert off["swapped"] is False
     assert off["text"] == "Name:\tapp\nTracerPid:\t1234\n"
+
+
+def test_root_spoofs_debuggable_and_secure_only_when_revealing(
+    tmp_path, monkeypatch
+) -> None:
+    """The AVD leaves both unset (""): a spoofed "0"/"1" was itself a tell."""
+    props = _run_guard(tmp_path, monkeypatch)["props"]
+    assert props == {
+        "debuggableUnset": "",
+        "debuggableOn": "0",
+        "debuggableOff": "0",
+        "secureUnset": "",
+        "secureOff": "1",
+        "secureOn": "1",
+    }

@@ -716,22 +716,26 @@ function _looksLikeRootPath(s) {
         if (sysprop) {
             Interceptor.attach(sysprop, {
                 onEnter: function (args) {
+                    this._key = null;
+                    if (!FLAGS.root) return;
                     try { this._key = args[0].readUtf8String(); }
                     catch (e) { this._key = null; }
                     this._out = args[1];
                 },
                 onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // inert when root bypass off
+                    if (!FLAGS.root || this._key === null) return;
                     try {
-                        if (this._key === 'ro.debuggable') {
-                            this._out.writeUtf8String('0');
-                            rv.replace(ptr(1));
-                            send({type: 'info', hook: 'root-bypass:prop:ro.debuggable'});
-                        } else if (this._key === 'ro.secure') {
-                            this._out.writeUtf8String('1');
-                            rv.replace(ptr(1));
-                            send({type: 'info', hook: 'root-bypass:prop:ro.secure'});
-                        }
+                        // Only a present, revealing value changes. A device
+                        // that does not set the property gives every app "",
+                        // and a spoofed "0"/"1" there is itself the tell.
+                        var cur = this._out.readUtf8String();
+                        var want = null;
+                        if (this._key === 'ro.debuggable' && cur === '1') want = '0';
+                        else if (this._key === 'ro.secure' && cur === '0') want = '1';
+                        if (want === null) return;
+                        this._out.writeUtf8String(want);
+                        rv.replace(ptr(1));
+                        send({type: 'info', hook: 'root-bypass:prop:' + this._key});
                     } catch (e) {}
                 }
             });
