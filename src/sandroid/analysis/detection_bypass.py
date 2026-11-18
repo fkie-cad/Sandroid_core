@@ -119,14 +119,43 @@ var CATEGORY_INSTALLERS = [];  // [category, installer], in priority order
 var INSTALLED = {};
 var INSTALL_FAILED = [];
 
+function _installFailed(category, e) {
+    if (INSTALL_FAILED.indexOf(category) === -1) INSTALL_FAILED.push(category);
+    send({merge_error: category, error: '' + e});
+}
+
+// Java.perform bodies often run later (after resume on a paused spawn);
+// while a category installs, wrap them so a throw inside one is recorded
+// for that category too, not lost as an unhandled script error.
 function _installCategory(category, installer) {
     if (INSTALLED[category]) return;
     INSTALLED[category] = true;
+    var hasJava = typeof Java !== 'undefined' && Java !== null &&
+        typeof Java.perform === 'function';
+    var perform = hasJava ? Java.perform : null;
+    if (hasJava) {
+        try {
+            Java.perform = function (fn) {
+                return perform.call(Java, function () {
+                    try {
+                        return fn.apply(this, arguments);
+                    } catch (e) {
+                        _installFailed(category, e);
+                    }
+                });
+            };
+        } catch (e) {
+            hasJava = false;
+        }
+    }
     try {
         installer();
     } catch (e) {
-        INSTALL_FAILED.push(category);
-        send({merge_error: category, error: '' + e});
+        _installFailed(category, e);
+    } finally {
+        if (hasJava) {
+            try { Java.perform = perform; } catch (e) {}
+        }
     }
 }
 
@@ -1410,12 +1439,13 @@ Java.perform(function () {
         send({type: 'info', hook: 'root-bypass:PackageManager'});
     } catch (e) {}
 
-    // Build.TAGS -> release-keys. This is a field write performed once at load,
-    // NOT a runtime-reversible method body — so flag-gating can only honour the
-    // *baked* initial flag. If root is armed at load it is applied; it is sticky
-    // for the session thereafter (toggling root off later won't restore the real
-    // TAGS, and toggling root on later won't set them). Acceptable fidelity
-    // caveat — TAGS is rarely the sole root signal.
+    // Build.TAGS -> release-keys. A field write, NOT a flag-gated method
+    // body: it happens once, when the root category installs -- at load if
+    // root is armed for the spawn, or on the live flip that first turns root
+    // on. It is sticky for the session (turning root off does not restore the
+    // real TAGS; the emulator category leaves TAGS alone on its own flip-off
+    // while root is on). Acceptable fidelity caveat — TAGS is rarely the sole
+    // root signal.
     try {
         if (FLAGS.root) {
             var Build = Java.use('android.os.Build');

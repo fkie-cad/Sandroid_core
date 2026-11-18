@@ -1400,3 +1400,52 @@ int main (void)
     assert build.returncode == 0, build.stderr
     run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, run.stdout
+
+
+_NODE_LATE_JAVA = r"""
+const fs = require('fs');
+const helpers = fs.readFileSync(process.argv[2], 'utf8');
+const sent = [];
+const deferred = [];
+globalThis.send = m => sent.push(m);
+globalThis.FLAGS = {x: true, y: true};
+globalThis.FLAG_LISTENERS = [];
+globalThis.NULL = 'NULL';
+const realPerform = fn => { deferred.push(fn); };  // runs later, like a spawn
+globalThis.Java = {perform: realPerform};
+(0, eval)(helpers);
+registerCategory('x', function () {
+    Java.perform(function () { throw new Error('late Java failure'); });
+});
+registerCategory('y', function () { Java.perform(function () {}); });
+const restored = Java.perform === realPerform;
+deferred.forEach(fn => fn());  // the VM is ready: bodies run now
+console.log(JSON.stringify({failed: INSTALL_FAILED, restored,
+                            errors: sent.filter(m => m.merge_error)}));
+"""
+
+
+def test_install_failures_include_late_java_perform_bodies(tmp_path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    from sandroid.analysis.detection_bypass import _PREAMBLE_HELPERS_JS
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed; JS behaviour check skipped")
+    (tmp_path / "helpers.js").write_text(_PREAMBLE_HELPERS_JS)
+    (tmp_path / "late.js").write_text(_NODE_LATE_JAVA)
+    proc = subprocess.run(
+        [node, str(tmp_path / "late.js"), str(tmp_path / "helpers.js")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["failed"] == ["x"]  # recorded although it threw later
+    assert result["restored"] is True  # Java.perform is the real one again
+    assert result["errors"][0]["merge_error"] == "x"
