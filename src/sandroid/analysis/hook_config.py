@@ -220,7 +220,12 @@ class HookConfiguration:
         },
         "services": {
             "name": "Service Hooks",
-            "description": "Bluetooth, camera, clipboard, location, telephony",
+            # telephony_hooks replace the TelephonyManager methods the
+            # Bypass (b) emulator category replaces: the two exclude each other.
+            "description": (
+                "Bluetooth, camera, clipboard, location, telephony "
+                "(telephony conflicts with the Emulator bypass, b 6)"
+            ),
             "hooks": [
                 "bluetooth_hooks",
                 "camera_hooks",

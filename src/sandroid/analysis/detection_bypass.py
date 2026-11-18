@@ -45,6 +45,8 @@ import os
 import tempfile
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import frida
@@ -1254,11 +1256,15 @@ class IntegrityBypassManager(BypassManagerBase):
 #   File.exists() probes are covered without a second File.exists hook (one
 #   Java method has one implementation; the root category owns that one).
 #
-# Build fields are static finals that zygote set before the app existed, so
-# they are written, not hooked: at load when FLAGS.emulator is baked in (the
-# armed-then-Start path, before the app's first instruction) and on a live
-# set_flags flip via FLAG_LISTENERS (restored on flip-off). Checks an app ran
-# at startup are only fooled on the spawn path, hence APPLY_AT_SPAWN.
+# Nothing is hooked until the category is on: the hooks install the first
+# time FLAGS.emulator is set -- baked in at load (the armed-then-Start path,
+# before the app's first instruction) or flipped live via FLAG_LISTENERS --
+# and the Java replacements and the property listener are removed again on
+# flip-off. So SSL-only sessions carry none of them, and Dexray's
+# telephony_hooks only collide while emulator is on (BypassService refuses
+# that pairing). Build fields are static finals zygote set before the app
+# existed, so they are written, not hooked, and restored on flip-off. Checks
+# an app ran at startup are only fooled on the spawn path (APPLY_AT_SPAWN).
 _EMULATOR_DETECTION_SCRIPT = r"""
 'use strict';
 
@@ -1394,49 +1400,46 @@ function _spoofProp(key, value) {
     return null;
 }
 
+// Everything below installs lazily, the first time FLAGS.emulator turns on
+// (baked in at load, or a set_flags flip via FLAG_LISTENERS), and the Java
+// replacements are reverted when it turns off. An SSL-only session never
+// carries them, and Dexray's telephony_hooks (which replace the same
+// TelephonyManager methods from a second script) only collide while the
+// emulator category is on, which BypassService refuses.
+var _emuInstalled = false;
+var _emuPropListener = null;
+var _emuPathsRegistered = false;
+var _emuJavaHooks = [];  // replaced Java methods, reverted on flip-off
+
 // Native: __system_property_get (TrigDroid's mapping). Stacks with the root
 // category's listener on the same export; that one owns ro.debuggable /
 // ro.secure, this one only the emulator keys.
-(function () {
-    try {
-        var propGet = _libcExport('__system_property_get');
-        if (!propGet) return;
-        Interceptor.attach(propGet, {
-            onEnter: function (args) {
-                this._out = null;
-                if (!FLAGS.emulator) return;
-                try {
-                    this._key = args[0].readUtf8String();
-                    this._out = args[1];
-                    this._ra = this.returnAddress;
-                } catch (e) { this._out = null; }
-            },
-            onLeave: function (rv) {
-                if (!FLAGS.emulator || !this._out) return;
-                try {
-                    var cur = this._out.readUtf8String();
-                    var s = _spoofProp(this._key, cur);
-                    if (s === null || !_isAppCaller(this._ra)) return;
-                    this._out.writeUtf8String(s);
-                    rv.replace(ptr(s.length));
-                    send({type: 'info', hook: 'emulator-bypass:prop:' + this._key});
-                } catch (e) {}
-            }
-        });
-        send({type: 'info', hook: 'emulator-bypass:__system_property_get'});
-    } catch (e) {
-        send({type: 'debug', hook: 'emulator-bypass:__system_property_get', error: e.message});
-    }
-})();
-
-// Native: hide emulator files and pipes from access/faccessat/fopen probes
-// through the shared path hider (one replacement per export, see preamble).
-try {
-    hidePaths('emulator', function (path, returnAddress) {
-        return _isEmuPath(path) && _isAppCaller(returnAddress);
+function _emuInstallPropHook() {
+    var propGet = _libcExport('__system_property_get');
+    if (!propGet) return;
+    _emuPropListener = Interceptor.attach(propGet, {
+        onEnter: function (args) {
+            this._out = null;
+            if (!FLAGS.emulator) return;
+            try {
+                this._key = args[0].readUtf8String();
+                this._out = args[1];
+                this._ra = this.returnAddress;
+            } catch (e) { this._out = null; }
+        },
+        onLeave: function (rv) {
+            if (!FLAGS.emulator || !this._out) return;
+            try {
+                var cur = this._out.readUtf8String();
+                var s = _spoofProp(this._key, cur);
+                if (s === null || !_isAppCaller(this._ra)) return;
+                this._out.writeUtf8String(s);
+                rv.replace(ptr(s.length));
+                send({type: 'info', hook: 'emulator-bypass:prop:' + this._key});
+            } catch (e) {}
+        }
     });
-} catch (e) {
-    send({type: 'debug', hook: 'emulator-bypass:path-hider', error: e.message});
+    send({type: 'info', hook: 'emulator-bypass:__system_property_get'});
 }
 
 // Build.* fields: one coherent device profile, written (not hooked).
@@ -1493,40 +1496,42 @@ function _emuApplyBuild(on) {
     });
 }
 
-if (FLAGS.emulator) _emuApplyBuild(true);
-FLAG_LISTENERS.push(function (flags) { _emuApplyBuild(!!flags.emulator); });
+function _emuHook(method, impl) {
+    method.implementation = impl;
+    _emuJavaHooks.push(method);
+}
 
-Java.perform(function () {
+function _emuInstallJavaHooks() {
     // Build.getSerial (TrigDroid).
     try {
         var BuildCls = Java.use('android.os.Build');
-        BuildCls.getSerial.implementation = function () {
+        _emuHook(BuildCls.getSerial, function () {
             if (!FLAGS.emulator) return this.getSerial();
             send({type: 'info', hook: 'emulator-bypass:Build.getSerial'});
             return 'RF8M33XXXXX';
-        };
+        });
     } catch (e) {}
 
     // SystemProperties.get (Dexray): Java-level reads skip __system_property_get
     // on current Android (they use __system_property_read_callback).
     try {
         var SP = Java.use('android.os.SystemProperties');
-        SP.get.overload('java.lang.String').implementation = function (key) {
+        _emuHook(SP.get.overload('java.lang.String'), function (key) {
             var v = this.get(key);
             if (!FLAGS.emulator) return v;
             var s = _spoofProp(key, v);
             if (s === null) return v;
             send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
             return s;
-        };
-        SP.get.overload('java.lang.String', 'java.lang.String').implementation = function (key, def) {
+        });
+        _emuHook(SP.get.overload('java.lang.String', 'java.lang.String'), function (key, def) {
             var v = this.get(key, def);
             if (!FLAGS.emulator) return v;
             var s = _spoofProp(key, v);
             if (s === null) return v;
             send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
             return s === '' ? def : s;
-        };
+        });
         send({type: 'info', hook: 'emulator-bypass:SystemProperties.get'});
     } catch (e) {}
 
@@ -1548,18 +1553,63 @@ Java.perform(function () {
             var name = row[0], sig = row[1], fake = row[2];
             try {
                 var m = TM[name].overload.apply(TM[name], sig);
-                m.implementation = function () {
+                _emuHook(m, function () {
                     if (!FLAGS.emulator) return m.apply(this, arguments);
                     send({type: 'info', hook: 'emulator-bypass:TelephonyManager.' + name});
                     return fake;
-                };
+                });
             } catch (e) {}
         });
         send({type: 'info', hook: 'emulator-bypass:TelephonyManager'});
     } catch (e) {}
 
-    send({type: 'ready', message: 'Emulator detection bypass hooks loaded'});
+}
+
+function _emuInstall() {
+    if (_emuInstalled) return;
+    _emuInstalled = true;
+    try { _emuInstallPropHook(); } catch (e) {
+        send({type: 'debug', hook: 'emulator-bypass:__system_property_get', error: e.message});
+    }
+    // Emulator files and pipes go through the shared path hider (one
+    // replacement per export, see preamble); registered once, flag-gated.
+    if (!_emuPathsRegistered) {
+        _emuPathsRegistered = true;
+        try {
+            hidePaths('emulator', function (path, returnAddress) {
+                return _isEmuPath(path) && _isAppCaller(returnAddress);
+            });
+        } catch (e) {
+            send({type: 'debug', hook: 'emulator-bypass:path-hider', error: e.message});
+        }
+    }
+    Java.perform(_emuInstallJavaHooks);
+    _emuApplyBuild(true);
+}
+
+function _emuUninstall() {
+    if (!_emuInstalled) return;
+    _emuInstalled = false;
+    _emuApplyBuild(false);
+    Java.perform(function () {
+        _emuJavaHooks.forEach(function (m) {
+            try { m.implementation = null; } catch (e) {}
+        });
+        _emuJavaHooks = [];
+    });
+    if (_emuPropListener !== null) {
+        try { _emuPropListener.detach(); } catch (e) {}
+        _emuPropListener = null;
+    }
+    send({type: 'info', hook: 'emulator-bypass:uninstalled'});
+}
+
+if (FLAGS.emulator) _emuInstall();
+FLAG_LISTENERS.push(function (flags) {
+    if (flags.emulator) _emuInstall(); else _emuUninstall();
 });
+
+send({type: 'ready', message: 'Emulator detection bypass ready (installs on enable)'});
 """
 
 EMULATOR_DETECTION_HOOKS = [
@@ -1624,8 +1674,26 @@ EXPERIMENTAL_SUFFIX = " (experimental)"
 BYPASS_CONFLICT_CHOICE = (
     "choose one: Dexray's bypass group or the Bypass (b) categories"
 )
+#: Dexray's ``telephony_hooks`` replace the same TelephonyManager methods as
+#: the emulator category, from a second script (the same two-bridge
+#: double-replace that crashed File.exists), so that pair excludes too.
+TELEPHONY_CONFLICT_CHOICE = (
+    "choose one: Dexray's telephony hooks or the Emulator bypass (b 6)"
+)
 #: Owner name Dexray Intercept claims exclusivity under.
 DEXRAY_BYPASS_OWNER = "Dexray Intercept"
+
+
+@dataclass(frozen=True)
+class _ExclusiveClaim:
+    """Another bypass source holding some categories (see claim_exclusive)."""
+
+    owner: str
+    what: str
+    categories: frozenset[str]
+    choice: str
+    is_alive: Callable[[], bool] | None
+
 
 _CATEGORY_DISPLAY = {
     "ssl": "SSL Pinning Bypass",
@@ -1686,70 +1754,90 @@ class BypassService:
         # when unregistered), so _register_task can refresh a changed display
         # without re-registering identically every toggle.
         self._task_display: str | None = None
-        # Another bypass source that holds exclusivity (Dexray's bypass
-        # group): (owner, is_alive). While set, no category may be armed or
-        # started. See claim_exclusive().
-        self._exclusive_owner: tuple[str, Callable[[], bool] | None] | None = None
+        # Other bypass sources holding categories (Dexray's bypass group or
+        # telephony hooks), by claim token. While a claim covers a category,
+        # it may not be armed or started. See claim_exclusive().
+        self._claims: dict[str, _ExclusiveClaim] = {}
 
     # -- mutual exclusion with other bypass sources (Dexray) --------------
 
     def claim_exclusive(
-        self, owner: str, is_alive: Callable[[], bool] | None = None
-    ) -> tuple[bool, str]:
-        """Claim the device's bypasses for another source (Dexray's group).
+        self,
+        owner: str,
+        *,
+        what: str = "its bypass group",
+        categories=None,
+        choice: str = BYPASS_CONFLICT_CHOICE,
+        is_alive: Callable[[], bool] | None = None,
+    ) -> tuple[str | None, str]:
+        """Claim bypass categories for another source (e.g. Dexray's group).
 
-        Refused while any category is armed or active, or while a bypass
-        load is in flight. While the claim is held, arming or starting a
-        category is refused in turn. Arming checks under ``_lock`` and a
-        load checks while holding ``_mutate_lock``, so neither side can slip
-        in between.
+        Refused while any claimed category is armed or active, or while a
+        bypass load is in flight. While the claim is held, arming or starting
+        a claimed category is refused in turn. Arming checks under ``_lock``
+        and a load checks while holding ``_mutate_lock``, so neither side can
+        slip in between.
 
         Args:
             owner: User-facing name of the claiming source.
+            what: What of the owner conflicts (``"its telephony hooks"``).
+            categories: Categories claimed; None claims every category.
+            choice: The "choose one: ..." sentence both refusals end with.
             is_alive: Optional liveness probe; a claim whose probe returns
                 False (or raises) is dropped the next time it is checked.
 
         Returns:
-            (ok, message). ``message`` explains a refusal.
+            ``(token, message)``: the token releases this claim (and only this
+            one) via :meth:`release_exclusive`; ``token`` is None when refused,
+            and ``message`` says why.
         """
+        cats = frozenset(self.categories() if categories is None else categories)
         with self._lock:
-            on = self._categories_by_priority(self._armed | self._active)
+            on = [
+                c
+                for c in self._categories_by_priority(self._armed | self._active)
+                if c in cats
+            ]
             if not on and self._mutate_lock.locked():
-                return False, (
-                    f"Not starting {owner} with its bypass group: a Bypass (b) "
-                    f"change is in progress — {BYPASS_CONFLICT_CHOICE}."
+                return None, (
+                    f"Not starting {owner} with {what}: a Bypass (b) change "
+                    f"is in progress — {choice}."
                 )
             if on:
                 names = ", ".join(self._plain_name(c) for c in on)
-                return False, (
-                    f"Not starting {owner} with its bypass group: Bypass (b) "
-                    f"has {names} on — {BYPASS_CONFLICT_CHOICE}."
+                return None, (
+                    f"Not starting {owner} with {what}: Bypass (b) has "
+                    f"{names} on — {choice}."
                 )
-            self._exclusive_owner = (owner, is_alive)
-        return True, f"{owner} holds the bypasses"
+            token = uuid.uuid4().hex
+            self._claims[token] = _ExclusiveClaim(owner, what, cats, choice, is_alive)
+        return token, f"{owner} holds {', '.join(sorted(cats))}"
 
-    def release_exclusive(self, owner: str) -> None:
-        """Release a claim taken with :meth:`claim_exclusive` (idempotent)."""
+    def release_exclusive(self, token: str | None) -> None:
+        """Release the claim ``token`` names (idempotent; others are kept)."""
+        if token is None:
+            return
         with self._lock:
-            if self._exclusive_owner and self._exclusive_owner[0] == owner:
-                self._exclusive_owner = None
+            self._claims.pop(token, None)
 
-    def exclusive_conflict(self) -> str | None:
-        """Why a category cannot be armed/started now, or None if it can."""
+    def exclusive_conflict(self, categories=None) -> str | None:
+        """Why ``categories`` (default: any) cannot be armed/started, or None."""
+        wanted = set(self.categories() if categories is None else categories)
         with self._lock:
-            claim = self._exclusive_owner
-        if claim is None:
-            return None
-        owner, is_alive = claim
-        if is_alive is not None:
-            try:
-                alive = bool(is_alive())
-            except Exception:
-                alive = False
-            if not alive:
-                self.release_exclusive(owner)
-                return None
-        return f"{owner} is running with its bypass group — {BYPASS_CONFLICT_CHOICE}."
+            claims = list(self._claims.items())
+        for token, claim in claims:
+            if not claim.categories & wanted:
+                continue
+            if claim.is_alive is not None:
+                try:
+                    alive = bool(claim.is_alive())
+                except Exception:
+                    alive = False
+                if not alive:
+                    self.release_exclusive(token)
+                    continue
+            return f"{claim.owner} is running with {claim.what} — {claim.choice}."
+        return None
 
     # -- category metadata (data holders) ---------------------------------
 
@@ -2195,7 +2283,7 @@ class BypassService:
             # Checked while holding _mutate_lock: claim_exclusive refuses while
             # it is held, so a Dexray claim and this load cannot interleave.
             if target:
-                conflict = self.exclusive_conflict()
+                conflict = self.exclusive_conflict(target)
                 if conflict:
                     return False, conflict
             jm = Toolbox.get_frida_job_manager()
@@ -2296,7 +2384,7 @@ class BypassService:
             None when armed, else the refusal message.
         """
         with self._lock:
-            conflict = self.exclusive_conflict()
+            conflict = self.exclusive_conflict([category])
             if conflict:
                 return conflict
             self._armed.add(category)
@@ -2330,7 +2418,7 @@ class BypassService:
         cls = self._manager_class(category)
         if cls is None:
             return False, f"Unknown bypass category: {category}"
-        conflict = self.exclusive_conflict()
+        conflict = self.exclusive_conflict([category])
         if conflict:
             return False, conflict
         with self._lock:
@@ -2549,7 +2637,7 @@ class BypassService:
         spotlight = get_spotlight_service()
         cats = set(categories)
         if cats:
-            conflict = self.exclusive_conflict()
+            conflict = self.exclusive_conflict(cats)
             if conflict:
                 return False, conflict  # before spawning anything
 
@@ -2673,7 +2761,7 @@ class BypassService:
         spotlight = get_spotlight_service()
         do_spawn = spawn_fn or self.apply_to_fresh_spawn
         if categories:
-            conflict = self.exclusive_conflict()
+            conflict = self.exclusive_conflict(categories)
             if conflict:
                 return False, conflict  # not a spawn failure: no retry ladder
 

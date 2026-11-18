@@ -111,7 +111,10 @@ def test_emulator_script_is_merged_into_the_one_flag_gated_script() -> None:
     order = svc._categories_by_priority(svc.categories())
     assert order.index("frida") < order.index("emulator") < order.index("root")
     # One Java.perform-gated Build write path, gated on FLAGS.emulator.
-    assert "if (FLAGS.emulator) _emuApplyBuild(true);" in _EMULATOR_DETECTION_SCRIPT
+    assert "if (FLAGS.emulator) _emuInstall();" in _EMULATOR_DETECTION_SCRIPT
+    # Java methods are only replaced through _emuHook (so flip-off reverts
+    # them): one assignment there, one revert to null in _emuUninstall.
+    assert _EMULATOR_DETECTION_SCRIPT.count(".implementation =") == 2
     assert "FLAGS.root" not in _EMULATOR_DETECTION_SCRIPT.replace(
         "if (f === 'TAGS' && FLAGS.root) return;", ""
     )
@@ -187,7 +190,10 @@ globalThis.ptr = v => ({ptr: String(v)});
 const listeners = {};
 const replaced = {};
 globalThis.Interceptor = {
-    attach: (addr, cb) => { listeners[addr] = cb; },
+    attach: (addr, cb) => {
+        listeners[addr] = cb;
+        return {detach() { delete listeners[addr]; }};
+    },
     replace: (addr, cb) => { replaced[addr] = cb; },
 };
 globalThis.NativeFunction = function (addr) { return () => 'REAL'; };
@@ -210,6 +216,7 @@ function cstr(s) { return {s, readUtf8String() { return this.s; },
 // path, null when the real function ran.
 function callNative(sym, path, caller) {
     const fn = replaced[sym];
+    if (!fn) return null;  // not installed: the real function runs
     const ctx = {returnAddress: caller, errno: 0};
     const args = sym === 'faccessat' ? [-100, cstr(path), 0, 0] : [cstr(path), 0];
     const ret = fn.apply(ctx, args);
@@ -217,8 +224,9 @@ function callNative(sym, path, caller) {
 }
 function callProp(key, caller) {
     const cb = listeners['__system_property_get'];
-    const ctx = {returnAddress: caller};
     const outBuf = cstr(props[key] || '');
+    if (!cb) return [outBuf.s, null];  // not installed
+    const ctx = {returnAddress: caller};
     cb.onEnter.call(ctx, [cstr(key), outBuf]);
     let rv = null;
     cb.onLeave.call(ctx, {replace: v => { rv = v.ptr; }});
@@ -226,16 +234,18 @@ function callProp(key, caller) {
 }
 const get1 = sysprops.get.sig('java.lang.String');
 const get2 = sysprops.get.sig('java.lang.String', 'java.lang.String');
+// Installed replacement, or the original method when none is installed.
+function impl(m) { return m.implementation || m; }
 function snapshot() {
     return {
         model: build.MODEL.value, fp: build.FINGERPRINT.value, tags: build.TAGS.value,
-        serial: build.getSerial.implementation.call(build),
-        qemu: get1.implementation.call(sysprops, 'ro.kernel.qemu'),
-        model_prop: get1.implementation.call(sysprops, 'ro.product.model'),
-        debuggable: get1.implementation.call(sysprops, 'ro.debuggable'),
-        other: get2.implementation.call(sysprops, 'persist.x', 'd'),
-        qemu_def: get2.implementation.call(sysprops, 'ro.kernel.qemu', 'd'),
-        line1: tm.getLine1Number.sig().implementation.call(tm),
+        serial: impl(build.getSerial).call(build),
+        qemu: impl(get1).call(sysprops, 'ro.kernel.qemu'),
+        model_prop: impl(get1).call(sysprops, 'ro.product.model'),
+        debuggable: impl(get1).call(sysprops, 'ro.debuggable'),
+        other: impl(get2).call(sysprops, 'persist.x', 'd'),
+        qemu_def: impl(get2).call(sysprops, 'ro.kernel.qemu', 'd'),
+        line1: impl(tm.getLine1Number.sig()).call(tm),
         pipe_app: callNative('access', '/dev/qemu_pipe', 'app'),
         pipe_java: callNative('faccessat', '/dev/socket/qemud', 'jdk'),
         pipe_sys: callNative('access', '/dev/goldfish_pipe', 'sys'),
@@ -245,10 +255,18 @@ function snapshot() {
         prop_sys: callProp('ro.kernel.qemu', 'sys'),
     };
 }
-const result = {load: snapshot()};
+// What the script has hooked right now (natives + replaced Java methods).
+function installed() {
+    const java = [build.getSerial, get1, get2, tm.getLine1Number.sig(),
+                  tm.getDeviceId.sig()].filter(m => m.implementation).length;
+    return {natives: Object.keys(listeners).length + Object.keys(replaced).length,
+            java};
+}
+const result = {installedAtLoad: installed(), load: snapshot()};
 globalThis.FLAGS.emulator = !globalThis.FLAGS.emulator;
 FLAG_LISTENERS.forEach(l => l(globalThis.FLAGS));
 result.flipped = snapshot();
+result.installedAfterFlip = installed();
 console.log(JSON.stringify(result));
 """
 
@@ -326,13 +344,19 @@ _REAL = {
 def test_emulator_script_applies_at_load_and_restores_on_flag_off(tmp_path) -> None:
     """Armed before Start: baked FLAGS.emulator spoofs from the first read."""
     result = _run_emulator_harness(tmp_path, "on")
+    assert result["installedAtLoad"] == {"natives": 5, "java": 5}
     assert result["load"] == _SPOOFED
     assert result["flipped"] == _REAL
+    # Flip-off reverts the Java replacements and detaches the property
+    # listener; only the shared path-hider replacements stay (flag-gated).
+    assert result["installedAfterFlip"] == {"natives": 4, "java": 0}
 
 
 def test_emulator_script_is_inert_until_flag_flips_on(tmp_path) -> None:
     """Off at load: nothing changes until set_flags turns it on live."""
     result = _run_emulator_harness(tmp_path, "off")
+    # Off at load: nothing is hooked (no always-on cost, no telephony clash).
+    assert result["installedAtLoad"] == {"natives": 0, "java": 0}
     assert result["load"] == _REAL
     assert result["flipped"] == _SPOOFED
 
@@ -363,7 +387,7 @@ def bypass_service(monkeypatch):
     return svc
 
 
-def _dexray_monitor(bypass_hooks: bool):
+def _dexray_monitor(bypass_hooks: bool, telephony_hooks: bool = False):
     import types
 
     from sandroid.analysis.malwaremonitor import MalwareMonitor
@@ -373,10 +397,14 @@ def _dexray_monitor(bypass_hooks: bool):
     mm.running = False
     mm.last_error = None
     mm._accept_messages = False
-    mm._holds_bypass_claim = False
+    mm._bypass_claims = []
     mm._owns_session = False
     mm._spawned_at = None
-    mm.hook_config = {"aes_hooks": True, "bypass_hooks": bypass_hooks}
+    mm.hook_config = {
+        "aes_hooks": True,
+        "bypass_hooks": bypass_hooks,
+        "telephony_hooks": telephony_hooks,
+    }
     mm.reached_setup = False
     toolbox = types.SimpleNamespace(malware_monitor_running=False)
     mm._get_toolbox = lambda: toolbox
@@ -623,3 +651,54 @@ def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> Non
     for sym, fail in (("access", -1), ("faccessat", -1), ("fopen", "NULL")):
         assert result["probes"][f"{sym}:true"] == [[fail, 2], "REAL"], sym
         assert result["probes"][f"{sym}:false"] == ["REAL", "REAL"], sym
+
+
+#: The telephony refusal (Dexray's telephony_hooks vs the emulator category).
+TELEPHONY_CHOICE_TEXT = (
+    "choose one: Dexray's telephony hooks or the Emulator bypass (b 6)"
+)
+
+
+def test_dexray_telephony_hooks_refused_while_emulator_is_armed(
+    bypass_service,
+) -> None:
+    bypass_service.toggle("emulator")
+    mm = _dexray_monitor(bypass_hooks=False, telephony_hooks=True)
+
+    assert mm.start_monitoring() is False
+    assert TELEPHONY_CHOICE_TEXT in mm.last_error
+    assert mm.reached_setup is False
+    assert mm._bypass_claims == []
+
+
+def test_dexray_telephony_hooks_only_block_the_emulator_category(
+    bypass_service,
+) -> None:
+    bypass_service.toggle("root")  # root does not touch TelephonyManager
+    mm = _dexray_monitor(bypass_hooks=False, telephony_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+
+    now_on, msg = bypass_service.toggle("emulator")
+    assert now_on is False
+    assert TELEPHONY_CHOICE_TEXT in msg
+    assert bypass_service.toggle("ssl")[0] is True  # other categories are fine
+    ok, msg = bypass_service.start("emulator")
+    assert ok is False
+    assert TELEPHONY_CHOICE_TEXT in msg
+
+    mm._release_bypass_exclusivity()
+    assert bypass_service.toggle("emulator")[0] is True
+
+
+def test_claims_are_per_token_not_per_owner(bypass_service) -> None:
+    """A headless and a TUI MalwareMonitor never release each other's claim."""
+    headless = _dexray_monitor(bypass_hooks=True)
+    tui = _dexray_monitor(bypass_hooks=True)
+    assert headless._claim_bypass_exclusivity() is True
+    assert tui._claim_bypass_exclusivity() is True
+    assert headless._bypass_claims != tui._bypass_claims
+
+    headless._release_bypass_exclusivity()
+    assert bypass_service.exclusive_conflict(["root"]) is not None  # tui's
+    tui._release_bypass_exclusivity()
+    assert bypass_service.exclusive_conflict(["root"]) is None
