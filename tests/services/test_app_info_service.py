@@ -477,6 +477,38 @@ def test_appops_uid_block_without_prefix_and_effective_mode():
     assert ops["COARSE_LOCATION"].package_mode is None
 
 
+def test_appops_running_start_line_sets_running():
+    text = (
+        "Package com.example.app:\n"
+        "  CAMERA (allow):\n"
+        "    null=[\n"
+        "      Access: [fgsvcl-s] 2026-05-01 12:00:00.000 (-2s)\n"
+        "    ]\n"
+        "    Running start at: +2s\n"
+        "  RECORD_AUDIO (allow):\n"
+        "      Access: [top-s] 2026-05-01 11:00:00.000 (-1h)\n"
+    )
+    ops = {o.op: o for o in ais.parse_appops(text)}
+    assert ops["CAMERA"].running is True
+    assert ops["CAMERA"].foreground is True  # fgsvcl = location FGS state
+    assert ops["RECORD_AUDIO"].running is False
+
+
+def test_appops_op_code_order_ends_uid_block():
+    # COARSE_LOCATION (op 0) after CAMERA (op 26): codes restart -> package.
+    text = "Uid mode: CAMERA: ignore\nCOARSE_LOCATION: allow\n"
+    ops = {o.op: o for o in ais.parse_appops(text)}
+    assert ops["CAMERA"].uid_mode == "ignore"
+    assert ops["COARSE_LOCATION"].uid_mode is None
+    assert ops["COARSE_LOCATION"].package_mode == "allow"
+    # Increasing codes stay in the uid block.
+    ops = {
+        o.op: o
+        for o in ais.parse_appops("Uid mode: CAMERA: ignore\nRECORD_AUDIO: deny\n")
+    }
+    assert ops["RECORD_AUDIO"].uid_mode == "deny"
+
+
 def test_appops_repeated_op_ends_uid_block():
     text = "Uid mode: CAMERA: ignore\nRECORD_AUDIO: deny\nCAMERA: allow\n"
     ops = {o.op: o for o in ais.parse_appops(text)}
@@ -738,13 +770,27 @@ def test_cache_other_androguard_version_is_stale(cache_root, monkeypatch):
     assert cache.read_overview(H1) == overview
 
 
-def test_cache_files_are_share_readable(cache_root):
-    ais.ApkCache().write_entry(H1, overview={"schema": 1}, meta_updates={"a": 1})
-    expected = 0o666 & ~ais._UMASK if ais._UMASK is not None else None
+def test_cache_files_are_share_readable(cache_root, monkeypatch):
+    umask = os.umask(0o022)  # test-local, single-threaded
+    os.umask(umask)
+    os.umask(0o022)
+    try:
+        # The service itself must neither read the umask nor use mkstemp.
+        monkeypatch.setattr(os, "umask", lambda *_a: pytest.fail("umask read"))
+        monkeypatch.setattr(
+            ais.tempfile, "mkstemp", lambda *a, **k: pytest.fail("mkstemp")
+        )
+        ais.ApkCache().write_entry(H1, overview={"schema": 1}, meta_updates={"a": 1})
+    finally:
+        monkeypatch.undo()
+        os.umask(umask)
     for name in ("meta.json", "overview.json"):
         mode = stat.S_IMODE((cache_root / "apk" / H1 / name).stat().st_mode)
-        assert mode == expected
-        assert mode & 0o044  # group/other can read (mkstemp alone gives 0600)
+        assert mode == 0o644  # 0o666 under the umask (mkstemp alone gives 0600)
+    assert sorted(p.name for p in (cache_root / "apk" / H1).iterdir()) == [
+        "meta.json",
+        "overview.json",
+    ]
 
 
 def test_cache_readers_tolerate_malformed_json(cache_root):
@@ -1528,9 +1574,8 @@ def test_insight1_uses_legacy_call(monkeypatch, tmp_path, cache_root):
             return json.dumps(INSIGHT_MAIN)
 
     calls = []
+    # An Insight without the configurable entry point gets the legacy call.
     fake_asam = SimpleNamespace(
-        Configuration=type("Cfg", (), {"DEFAULT_CONFIG": {"modules": {}}}),
-        start_apk_static_analysis_new=lambda *a, **k: pytest.fail("new path used"),
         start_apk_static_analysis=lambda **k: calls.append(k) or (Results(), "", ""),
     )
     analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
@@ -1627,3 +1672,201 @@ def test_ai_tools_keep_original_error_behaviour(monkeypatch):
         app_query.get_package_details(PKG)
     with pytest.raises(RuntimeError, match="adb exploded"):
         app_query.list_exported_components(PKG)
+
+
+# ---------------------------------------------------------------------------
+# Insight summary: no host paths; trackers and protections kept
+# ---------------------------------------------------------------------------
+
+INSIGHT_WITH_PATHS = {
+    "apk_overview": {
+        "general_info": {"package_name": PKG},
+        "native_libs": ["lib/arm64-v8a/libflutter.so"],
+    },
+    "apkid_analysis": {
+        "files": [
+            {
+                "filename": "/Users/someone/work/run/app.apk!classes2.dex",
+                "matches": {"anti_vm": ["Build.MODEL check"]},
+            },
+            {"filename": "/Users/someone/work/run/app.apk", "matches": {}},
+        ],
+        "raw_output": "x",
+    },
+    "tracker_analysis": {
+        "detected_trackers": [
+            {
+                "name": "Google AdMob",
+                "category": "Advertisement",
+                "version": "22.1",
+                "website": "https://admob.google.com",
+                "network_signature": "googleads.g.doubleclick.net",
+                "locations": ["/home/someone/apktool/smali/com/google/Ads.smali"],
+                "code_signature": "com.google.android.gms.ads",
+            }
+        ],
+        "detected_protections": [
+            {
+                "id": "rootbeer",
+                "name": "RootBeer",
+                "defeats": ["root"],
+                "confidence": "high",
+                "evidence": "entry_point",
+                "matched_libs": ["/private/tmp/x/lib/arm64-v8a/libtoolChecker.so"],
+            }
+        ],
+    },
+}
+
+
+def test_insight_summary_scrubs_host_paths_and_keeps_trackers(cache_root):
+    key = ais.record_insight_result([H1], INSIGHT_WITH_PATHS)
+    meta = ais.ApkCache().read_meta(key)
+    text = json.dumps(meta)
+    for leak in ("/Users/", "/home/", "/private/"):
+        assert leak not in text
+    summary = meta["insight"]["summary"]
+    names = [f["filename"] for f in summary["apkid_analysis"]["files"]]
+    assert names == ["classes2.dex", "app.apk"]
+    (tracker,) = summary["tracker_analysis"]["detected_trackers"]
+    assert tracker["name"] == "Google AdMob"
+    assert tracker["website"] == "https://admob.google.com"  # URLs untouched
+    assert "locations" not in tracker
+    (protection,) = summary["tracker_analysis"]["detected_protections"]
+    assert protection["evidence"] == "entry_point"
+    assert protection["confidence"] == "high"
+    assert protection["matched_libs"] == ["libtoolChecker.so"]
+    assert summary["apk_overview"]["native_libs"] == ["lib/arm64-v8a/libflutter.so"]
+
+
+def test_scrub_paths_generic():
+    scrubbed = ais.scrub_paths(
+        {
+            "a": "error reading /home/u/run/f.json line 3",
+            "b": ["C:\\Users\\u\\app.apk", "lib/x86/libc++.so", "com.foo.Bar"],
+            "c": 5,
+        }
+    )
+    assert scrubbed == {
+        "a": "error reading f.json line 3",
+        "b": ["app.apk", "lib/x86/libc++.so", "com.foo.Bar"],
+        "c": 5,
+    }
+
+
+def test_static_overview_exposes_trackers_and_protections(fake_adb, cache_root):
+    fake_adb({"pm path": PM_PATH, "sha256sum": SHA_OUT})
+    ais.ApkCache().write_entry(
+        H1,
+        overview={
+            "schema": ais.OVERVIEW_SCHEMA,
+            "androguard_version": ais._androguard_version(),
+        },
+    )
+    ais.record_insight_result([H1], INSIGHT_WITH_PATHS)
+
+    result = ais.get_static_overview(PKG)
+
+    assert result.from_cache
+    assert [t["name"] for t in result.trackers] == ["Google AdMob"]
+    assert [p["name"] for p in result.protections] == ["RootBeer"]
+    assert "trackers" in result.to_dict()
+    assert ais.insight_trackers("garbage") == []
+
+
+# ---------------------------------------------------------------------------
+# Insight offline configuration
+# ---------------------------------------------------------------------------
+
+
+class _Insight2Configuration:
+    DEFAULT_CONFIG = {
+        "caching": {"enabled": True},
+        "modules": {
+            "tracker_analysis": {
+                "fetch_exodus_trackers": True,
+                "exodus_offline": False,
+            },
+            "library_detection": {"version_analysis": {"enabled": True}},
+        },
+    }
+
+    def __init__(self, config_dict=None):
+        self.config_dict = config_dict
+
+
+class _Insight1Configuration:
+    DEFAULT_CONFIG = {
+        "modules": {"tracker_analysis": {"fetch_exodus_trackers": True}},
+    }
+
+    def __init__(self, config_dict=None):
+        self.config_dict = config_dict
+
+
+def _offline_run(monkeypatch, tmp_path, configuration, **analysis_config):
+    seen = {}
+
+    def start_new(apk, config, print_results_to_terminal=False, verbose=False):
+        seen["config"] = config.config_dict
+        return {"main": INSIGHT_MAIN, "security": None}, "", ""
+
+    fake_asam = SimpleNamespace(
+        Configuration=configuration,
+        start_apk_static_analysis_new=start_new,
+        start_apk_static_analysis=lambda **k: pytest.fail("legacy path used"),
+    )
+    analyzer = _analyzer(monkeypatch, tmp_path, fake_asam)
+    analyzer._analysis_config.update(analysis_config)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"apk-bytes")
+    assert analyzer._run_dexray_analysis(
+        str(apk), "app", str(tmp_path) + "/", time.time(), other_split_sha256s=[]
+    )
+    return seen["config"]
+
+
+def test_insight2_offline_config(monkeypatch, tmp_path, cache_root, caplog):
+    caplog.set_level("INFO", logger="sandroid.analysis.static_analysis")
+    config = _offline_run(monkeypatch, tmp_path, _Insight2Configuration)
+
+    modules = config["modules"]
+    assert modules["tracker_analysis"] == {"exodus_offline": True}
+    libs = modules["library_detection"]
+    assert libs["apktool_detection"]["auto_update_definitions"] is False
+    assert libs["version_analysis"]["enabled"] is False
+    assert config["security"]["cve_scanning"]["enabled"] is False
+    assert config["security"]["enable_owasp_assessment"] is True  # kept
+    assert config["modules"]["signature_detection"]["enabled"] is False
+    assert "caching" in config
+    offline_lines = [r for r in caplog.records if "runs offline" in r.getMessage()]
+    assert len(offline_lines) == 1
+
+
+def test_insight1_offline_uses_fetch_flag_and_no_cache(
+    monkeypatch, tmp_path, cache_root
+):
+    config = _offline_run(monkeypatch, tmp_path, _Insight1Configuration)
+    assert config["modules"]["tracker_analysis"] == {"fetch_exodus_trackers": False}
+    assert "caching" not in config  # 1.0.0.1 has no analysis cache
+
+
+def test_insight_online_when_configured(monkeypatch, tmp_path, cache_root):
+    config = _offline_run(
+        monkeypatch, tmp_path, _Insight2Configuration, insight_offline=False
+    )
+    assert "tracker_analysis" not in config["modules"]
+    assert "cve_scanning" not in config["security"]
+
+
+def test_insight_offline_default_comes_from_config(monkeypatch, tmp_path):
+    from sandroid.config.schema import AnalysisConfig
+
+    assert AnalysisConfig().insight_offline is True
+    analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
+    monkeypatch.setattr(
+        static_analysis,
+        "get_config",
+        lambda: SimpleNamespace(analysis=SimpleNamespace(insight_offline=False)),
+    )
+    assert analyzer._insight_offline() is False

@@ -704,7 +704,40 @@ OP_PERMISSIONS = {
     "NEARBY_WIFI_DEVICES": "android.permission.NEARBY_WIFI_DEVICES",
 }
 
-_FG_STATES = {"top", "fg", "fgsvc", "pers", "fgs"}
+_FG_STATES = {"top", "fg", "fgsvc", "fgsvcl", "pers", "fgs"}
+
+#: AppOps op names in op-code order (``AppOpsManager.OP_*``). AOSP prints
+#: each uid/package block sorted by op code, so in ``cmd appops get`` an op
+#: whose code is not above the previous one starts a new (package) block.
+_OP_ORDER_TEXT = (
+    "COARSE_LOCATION FINE_LOCATION GPS VIBRATE READ_CONTACTS WRITE_CONTACTS "
+    "READ_CALL_LOG WRITE_CALL_LOG READ_CALENDAR WRITE_CALENDAR WIFI_SCAN "
+    "POST_NOTIFICATION NEIGHBORING_CELLS CALL_PHONE READ_SMS WRITE_SMS "
+    "RECEIVE_SMS RECEIVE_EMERGENCY_BROADCAST RECEIVE_MMS RECEIVE_WAP_PUSH "
+    "SEND_SMS READ_ICC_SMS WRITE_ICC_SMS WRITE_SETTINGS SYSTEM_ALERT_WINDOW "
+    "ACCESS_NOTIFICATIONS CAMERA RECORD_AUDIO PLAY_AUDIO READ_CLIPBOARD "
+    "WRITE_CLIPBOARD TAKE_MEDIA_BUTTONS TAKE_AUDIO_FOCUS AUDIO_MASTER_VOLUME "
+    "AUDIO_VOICE_VOLUME AUDIO_RING_VOLUME AUDIO_MEDIA_VOLUME AUDIO_ALARM_VOLUME "
+    "AUDIO_NOTIFICATION_VOLUME AUDIO_BLUETOOTH_VOLUME WAKE_LOCK "
+    "MONITOR_LOCATION MONITOR_HIGH_POWER_LOCATION GET_USAGE_STATS "
+    "MUTE_MICROPHONE TOAST_WINDOW PROJECT_MEDIA ACTIVATE_VPN WRITE_WALLPAPER "
+    "ASSIST_STRUCTURE ASSIST_SCREENSHOT READ_PHONE_STATE ADD_VOICEMAIL USE_SIP "
+    "PROCESS_OUTGOING_CALLS USE_FINGERPRINT BODY_SENSORS READ_CELL_BROADCASTS "
+    "MOCK_LOCATION READ_EXTERNAL_STORAGE WRITE_EXTERNAL_STORAGE TURN_SCREEN_ON "
+    "GET_ACCOUNTS RUN_IN_BACKGROUND AUDIO_ACCESSIBILITY_VOLUME "
+    "READ_PHONE_NUMBERS REQUEST_INSTALL_PACKAGES PICTURE_IN_PICTURE "
+    "INSTANT_APP_START_FOREGROUND ANSWER_PHONE_CALLS RUN_ANY_IN_BACKGROUND "
+    "CHANGE_WIFI_STATE REQUEST_DELETE_PACKAGES BIND_ACCESSIBILITY_SERVICE "
+    "ACCEPT_HANDOVER MANAGE_IPSEC_TUNNELS START_FOREGROUND BLUETOOTH_SCAN "
+    "USE_BIOMETRIC ACTIVITY_RECOGNITION SMS_FINANCIAL_TRANSACTIONS "
+    "READ_MEDIA_AUDIO WRITE_MEDIA_AUDIO READ_MEDIA_VIDEO WRITE_MEDIA_VIDEO "
+    "READ_MEDIA_IMAGES WRITE_MEDIA_IMAGES LEGACY_STORAGE ACCESS_ACCESSIBILITY "
+    "READ_DEVICE_IDENTIFIERS ACCESS_MEDIA_LOCATION QUERY_ALL_PACKAGES "
+    "MANAGE_EXTERNAL_STORAGE INTERACT_ACROSS_PROFILES ACTIVATE_PLATFORM_VPN "
+    "LOADER_USAGE_STATS"
+)
+_OP_ORDER = _OP_ORDER_TEXT.split()
+_OP_CODE = {name: code for code, name in enumerate(_OP_ORDER)}
 _BG_STATES = {"bg", "cch", "cached"}
 
 
@@ -869,9 +902,11 @@ def parse_appops(text: str) -> list[AppOpEntry]:
       ``Uid mode: `` once, before the FIRST uid-level op only; the following
       uid ops carry no prefix. They are kept in uid scope until a line
       carries time fields (uid entries never do) or an op name repeats.
-      A package op printed without time fields right after the uid block is
-      inherently ambiguous in this format, which is why :func:`get_appops`
-      prefers ``dumpsys appops --package``.
+      Blocks are sorted by op code, so an op whose code is not above the
+      previous uid op also starts the package block. A package op printed
+      without time fields and with a higher code right after the uid block
+      stays ambiguous, which is why :func:`get_appops` prefers
+      ``dumpsys appops --package``.
     * the block format of ``dumpsys appops --package`` (and newer builds):
       ``CAMERA (allow):`` followed by ``Access: [fg-s] 2026-01-02
       10:00:00.000 (-5m3s) duration=+2s proxy[uid=1000, pkg=x, ...]`` /
@@ -891,6 +926,7 @@ def parse_appops(text: str) -> list[AppOpEntry]:
     entries: dict[str, AppOpEntry] = {}
     current: AppOpEntry | None = None
     uid_block: set[str] | None = None  # ops seen in the current uid block
+    last_uid_code = -1  # op code of the previous uid-block op (-1 = unknown)
 
     def get(op: str) -> AppOpEntry:
         if op not in entries:
@@ -905,6 +941,10 @@ def parse_appops(text: str) -> list[AppOpEntry]:
         if event:
             if current is not None:
                 _apply_event(current, event)
+            continue
+        if line.startswith("Running start at:"):
+            if current is not None:
+                current.running = True
             continue
         block = _BLOCK_OP_RE.match(line)
         if block:
@@ -921,15 +961,21 @@ def parse_appops(text: str) -> list[AppOpEntry]:
         if not semi:
             continue
         prefix, op, mode, rest = semi.groups()
+        code = _OP_CODE.get(op, -1)
         if prefix:
             uid_block = set()
+            last_uid_code = -1
         elif uid_block is not None and (
-            "=" in rest or "(running)" in rest or op in uid_block
+            "=" in rest
+            or "(running)" in rest
+            or op in uid_block
+            or (code >= 0 and last_uid_code >= 0 and code <= last_uid_code)
         ):
             uid_block = None  # first package-level line
         entry = get(op)
         if uid_block is not None:
             uid_block.add(op)
+            last_uid_code = code
             entry.uid_mode = mode
             current = None
         else:
@@ -1473,25 +1519,6 @@ class CacheLockTimeoutError(RuntimeError):
     """Raised when an entry's lock file could not be acquired in time."""
 
 
-_UMASK: int | None = None
-_UMASK_LOCK = threading.Lock()
-
-
-def _shared_file_mode() -> int:
-    """``0o666 & ~umask`` (0o664 typically): readable by the team share.
-
-    ``mkstemp`` creates 0600 files and ``os.replace`` keeps that mode, which
-    would make cache entries unreadable for everyone else on a share.
-    """
-    global _UMASK
-    with _UMASK_LOCK:
-        if _UMASK is None:
-            current = os.umask(0)
-            os.umask(current)
-            _UMASK = current
-    return 0o666 & ~_UMASK
-
-
 def _androguard_version() -> str | None:
     """Installed androguard version (cached facts from another are stale)."""
     return tool_versions().get("androguard")
@@ -1508,7 +1535,7 @@ class ApkCache:
         <root>/apk/<key>/overview.json   androguard-derived facts
 
     ``<key>`` is :func:`apk_key_for` (config splits excluded). Writes are
-    atomic (temp file + ``os.replace``, mode ``0o666 & ~umask``) and
+    atomic (temp file created 0o666 under the umask + ``os.replace``) and
     serialised per entry by a token-owned ``.lock`` file. Only APK-derived
     data belongs here, never device/runtime facts, and no local paths.
 
@@ -1691,12 +1718,12 @@ class ApkCache:
     @staticmethod
     def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         """Write JSON via a temp file in the same dir + ``os.replace``."""
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
+        # Created 0o666 so the kernel applies the umask/ACLs of the share
+        # (mkstemp's 0600 would make entries unreadable for the team, and
+        # reading the umask via os.umask() races other threads).
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, _shared_file_mode())
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2, sort_keys=True, default=str)
                 handle.flush()
@@ -2113,6 +2140,11 @@ class StaticOverview(_DictMixin):
         overview: overview.json content (see :func:`build_apk_overview`).
         meta: meta.json content.
         insight: The Insight summary recorded in meta.json, or ``None``.
+        trackers: Insight ``tracker_analysis.detected_trackers`` (name,
+            category, version, website, network_domains/network_signature,
+            confidence, detection_method), ``[]`` without an Insight run.
+        protections: Insight protection SDKs (id, name, category, defeats,
+            confidence, evidence, matched_classes, matched_libs).
         from_cache: The overview came from the cache (no pull).
         ok / reason: ``ok`` False means nothing usable; see ``reason``.
     """
@@ -2122,9 +2154,17 @@ class StaticOverview(_DictMixin):
     overview: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
     insight: dict[str, Any] | None = None
+    trackers: list[dict[str, Any]] = field(default_factory=list)
+    protections: list[dict[str, Any]] = field(default_factory=list)
     from_cache: bool = False
     ok: bool = True
     reason: str | None = None
+
+    def set_insight(self, insight: dict[str, Any] | None) -> None:
+        """Set :attr:`insight` and the tracker/protection lists derived from it."""
+        self.insight = insight
+        self.trackers = insight_trackers(insight)
+        self.protections = insight_protections(insight)
 
 
 def load_insight_results(meta: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2174,7 +2214,7 @@ def get_static_overview(
             result.key = apk_key_for(hashes)
             result.meta = cache.read_meta(result.key)
             result.overview = cache.read_overview(result.key)
-            result.insight = load_insight_results(result.meta)
+            result.set_insight(load_insight_results(result.meta))
             if result.overview is not None:
                 result.from_cache = True
                 return result
@@ -2237,7 +2277,7 @@ def get_static_overview(
                 },
             )
             result.meta = cache.read_meta(key)
-            result.insight = load_insight_results(result.meta)
+            result.set_insight(load_insight_results(result.meta))
         return result
     except Exception as exc:
         logger.warning("static overview failed for %s: %s", package, exc)
@@ -2246,33 +2286,120 @@ def get_static_overview(
         return result
 
 
+_ABS_POSIX_PATH_RE = re.compile(r"(?<![\w.:/~])/(?:[^\s/:'\"!]+/)+[^\s/:'\"!]*")
+_ABS_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\(?:[^\s\\:'\"!]+\\)+[^\s\\:'\"!]*")
+
+_TRACKER_KEEP = (
+    "name",
+    "category",
+    "version",
+    "website",
+    "network_domains",
+    "network_signature",
+    "confidence",
+    "detection_method",
+)
+_PROTECTION_KEEP = (
+    "id",
+    "name",
+    "category",
+    "description",
+    "website",
+    "defeats",
+    "confidence",
+    "evidence",
+    "matched_classes",
+    "matched_libs",
+)
+
+
+def scrub_paths(value: Any) -> Any:
+    """Replace absolute host paths inside *value* by their basename.
+
+    Shared meta.json must not leak ``/Users/<name>/...`` or session paths.
+    Applied recursively to dicts/lists; relative paths (``lib/arm64/x.so``)
+    and URLs are left alone.
+    """
+    if isinstance(value, dict):
+        return {k: scrub_paths(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub_paths(v) for v in value]
+    if isinstance(value, str):
+        value = _ABS_POSIX_PATH_RE.sub(lambda m: m.group(0).rsplit("/", 1)[-1], value)
+        return _ABS_WIN_PATH_RE.sub(lambda m: m.group(0).rsplit("\\", 1)[-1], value)
+    return value
+
+
+def _pick(items: Any, keep: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Keep only *keep* keys (present ones) of each dict in *items*."""
+    return [
+        {k: item[k] for k in keep if k in item}
+        for item in _as_list(items)
+        if isinstance(item, dict)
+    ]
+
+
 def _insight_summary(results: dict[str, Any]) -> dict[str, Any]:
-    """The small, defence-relevant subset of Insight results kept in meta.json."""
-    apkid = results.get("apkid_analysis") or {}
-    if isinstance(apkid, dict):
-        apkid = {k: v for k, v in apkid.items() if k != "raw_output"}
-    detected = _library_entries(results)
+    """The small, lens-relevant subset of Insight results kept in meta.json.
+
+    APKiD file names are reduced to the part after ``!`` (the entry inside
+    the APK) and every other absolute path is scrubbed (:func:`scrub_paths`).
+    """
+    apkid = _as_dict(results.get("apkid_analysis"))
+    apkid = {k: v for k, v in apkid.items() if k != "raw_output"}
+    if isinstance(apkid.get("files"), list):
+        apkid["files"] = [
+            (
+                {
+                    **f,
+                    "filename": os.path.basename(
+                        str(f.get("filename", "")).rsplit("!", 1)[-1]
+                    ),
+                }
+                if isinstance(f, dict)
+                else f
+            )
+            for f in apkid["files"]
+        ]
     keep = ("name", "package_name", "category", "version", "confidence", "vendor")
     overview = _as_dict(results.get("apk_overview"))
     tracker = _as_dict(results.get("tracker_analysis"))
-    return {
-        "apkid_analysis": apkid,
-        "library_detection": {
-            "detected_libraries": [
-                {k: lib.get(k) for k in keep}
-                for lib in detected
-                if isinstance(lib, dict)
-            ]
-        },
-        "detected_protections": results.get("detected_protections"),
-        "tracker_analysis": {
-            "detected_protections": tracker.get("detected_protections")
-        },
-        "apk_overview": {
-            "native_libs": overview.get("native_libs", []),
-            "cross_platform_framework": overview.get("cross_platform_framework"),
-        },
-    }
+    return scrub_paths(
+        {
+            "apkid_analysis": apkid,
+            "library_detection": {
+                "detected_libraries": _pick(_library_entries(results), keep)
+            },
+            "detected_protections": results.get("detected_protections"),
+            "tracker_analysis": {
+                "detected_trackers": _pick(
+                    tracker.get("detected_trackers"), _TRACKER_KEEP
+                ),
+                "detected_protections": _pick(
+                    tracker.get("detected_protections"), _PROTECTION_KEEP
+                ),
+            },
+            "apk_overview": {
+                "native_libs": overview.get("native_libs", []),
+                "cross_platform_framework": overview.get("cross_platform_framework"),
+            },
+        }
+    )
+
+
+def insight_trackers(insight: Any) -> list[dict[str, Any]]:
+    """Detected trackers from Insight results or the cached summary."""
+    tracker = _as_dict(_as_dict(insight).get("tracker_analysis"))
+    return _pick(tracker.get("detected_trackers"), _TRACKER_KEEP)
+
+
+def insight_protections(insight: Any) -> list[dict[str, Any]]:
+    """Detected protection SDKs from Insight results or the cached summary."""
+    insight = _as_dict(insight)
+    tracker = _as_dict(insight.get("tracker_analysis"))
+    return _pick(tracker.get("detected_protections"), _PROTECTION_KEEP) + _pick(
+        insight.get("detected_protections"), _PROTECTION_KEEP
+    )
 
 
 def record_insight_result(

@@ -1096,6 +1096,33 @@ def build_trackers(f: AppFacts) -> SectionData:
     libs = [lib for lib in libs or [] if isinstance(lib, dict)]
     rows: list[Row] = []
     cats: dict[str, int] = {}
+    trackers = getattr(f.static, "trackers", None)
+    if not trackers:
+        from sandroid.services.app_info_service import insight_trackers
+
+        trackers = insight_trackers(insight)
+    for i, trk in enumerate(
+        sorted(trackers, key=lambda x: (str(x.get("category")), str(x.get("name"))))
+    ):
+        name = str(trk.get("name") or "?")
+        domains = trk.get("network_domains") or trk.get("network_signature") or ""
+        if isinstance(domains, list):
+            domains = ", ".join(str(d) for d in domains)
+        rows.append(
+            Row(
+                key=f"trk:{i}:{name}",
+                cells=(
+                    _t(_cut(name, 30), _WARN),
+                    _t(_cut(str(trk.get("category") or "tracker"), 18), _DIM),
+                    _t(_cut(str(trk.get("version") or "—"), 12), _DIM),
+                    _t(_cut(str(domains or trk.get("website") or "—"), 20), _DIM),
+                ),
+                title=name,
+                subtitle="tracker (Insight)",
+                evidence=[("", _grid((k, str(v)) for k, v in trk.items() if v))],
+                raw=trk,
+            )
+        )
     for i, lib in enumerate(
         sorted(libs, key=lambda x: (str(x.get("category")), str(x.get("name"))))
     ):
@@ -1136,6 +1163,9 @@ def build_trackers(f: AppFacts) -> SectionData:
     if not rows:
         rows.append(_placeholder("none", "no SDKs detected by Insight", 4))
     summary = f"{len(libs)} SDK" + ("s" if len(libs) != 1 else "")
+    if trackers:
+        summary = f"{len(trackers)} tracker" + "s" * (len(trackers) != 1)
+        summary += f" · {len(libs)} SDK" + "s" * (len(libs) != 1)
     if cats:
         top = sorted(cats.items(), key=lambda kv: -kv[1])[:3]
         summary += " · " + ", ".join(f"{n} {c}" for c, n in top)

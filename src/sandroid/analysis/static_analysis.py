@@ -101,6 +101,46 @@ def _insight_supports_cache_dir() -> bool:
     )
 
 
+def _merge_dict(base: dict, update: dict) -> None:
+    """Recursively merge *update* into *base* (in place)."""
+    for key, value in update.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge_dict(base[key], value)
+        else:
+            base[key] = value
+
+
+def _insight_offline_config(configuration) -> dict:
+    """Insight config that keeps an analysis off the network.
+
+    Keys are feature-detected against ``Configuration.DEFAULT_CONFIG``:
+    Insight >= 2.0.0 has ``tracker_analysis.exodus_offline`` (use the cached
+    Exodus list if present, otherwise skip Exodus); older versions only get
+    ``fetch_exodus_trackers: false``. The IzzyOnDroid library-definition
+    auto-update (gitlab.com), library version analysis (Maven/npm/PyPI) and
+    CVE scanning are switched off as well; unknown keys are ignored by
+    Insight's config merge.
+    """
+    defaults = getattr(configuration, "DEFAULT_CONFIG", None)
+    modules = defaults.get("modules", {}) if isinstance(defaults, dict) else {}
+    tracker_defaults = modules.get("tracker_analysis", {})
+    tracker = (
+        {"exodus_offline": True}
+        if "exodus_offline" in tracker_defaults
+        else {"fetch_exodus_trackers": False}
+    )
+    return {
+        "modules": {
+            "tracker_analysis": tracker,
+            "library_detection": {
+                "apktool_detection": {"auto_update_definitions": False},
+                "version_analysis": {"enabled": False},
+            },
+        },
+        "security": {"cve_scanning": {"enabled": False}},
+    }
+
+
 class StaticAnalysis(DataGatherBase):
     """Handles static analysis of APK files using dexray-insight (formerly ASAM).
 
@@ -579,45 +619,75 @@ class StaticAnalysis(DataGatherBase):
 
         return ApkCache(enabled=self._analysis_config.get("use_cache", True))
 
-    def _start_insight(self, apk_file_path: str):
-        """Call Dexray Insight, handing 2.0.0 the shared cache dir.
+    def _insight_offline(self) -> bool:
+        """``analysis.insight_offline`` (default True), per-run overridable."""
+        if "insight_offline" in self._analysis_config:
+            return bool(self._analysis_config["insight_offline"])
+        try:
+            if get_config is not None:
+                return bool(getattr(get_config().analysis, "insight_offline", True))
+        except Exception:
+            pass
+        return True
 
-        1.0.0.1 has no analysis cache: it gets the legacy call unchanged.
+    def _start_insight(self, apk_file_path: str):
+        """Call Dexray Insight with the shared cache dir and offline settings.
+
+        Uses ``start_apk_static_analysis_new`` + ``Configuration`` whenever the
+        installed Insight has them (1.0.0.1 and 2.0.0 do; the legacy wrapper
+        is exactly that call with a fixed config). Cache and offline keys are
+        feature-detected; an Insight without that entry point gets the legacy
+        call unchanged.
 
         Returns:
             Insight's ``(results, result_file_name, security_result_file_name)``.
         """
         verbose = self._analysis_config.get("verbose_output", False)
         do_sec = self._analysis_config.get("run_security_analysis", True)
+        offline = self._insight_offline()
+        configuration = getattr(asam, "Configuration", None)
+        if configuration is None or not hasattr(asam, "start_apk_static_analysis_new"):
+            if offline:
+                logger.warning(
+                    "This Dexray Insight version cannot be configured; "
+                    "it may contact the network"
+                )
+            return asam.start_apk_static_analysis(
+                apk_file_path=apk_file_path,
+                do_signature_check=False,
+                apk_to_diff=None,
+                print_results_to_terminal=True,
+                is_verbose=verbose,
+                do_sec_analysis=do_sec,
+                exclude_net_libs=None,
+            )
+        # Same config the legacy wrapper builds, plus cache/offline sections.
+        config_dict: dict = {
+            "modules": {
+                "signature_detection": {"enabled": False},
+                "apk_diffing": {"enabled": False},
+            },
+            "security": {"enable_owasp_assessment": do_sec},
+            "logging": {"level": "DEBUG" if verbose else "INFO"},
+        }
         if _insight_supports_cache_dir():
             cache = self._apk_cache()
             caching = {"enabled": cache.enabled}
             if cache.enabled:
                 cache.insight_dir.mkdir(parents=True, exist_ok=True)
                 caching["cache_dir"] = str(cache.insight_dir)
-            # Same config the legacy wrapper builds, plus the cache section.
-            config = asam.Configuration(
-                config_dict={
-                    "modules": {
-                        "signature_detection": {"enabled": False},
-                        "apk_diffing": {"enabled": False},
-                    },
-                    "security": {"enable_owasp_assessment": do_sec},
-                    "logging": {"level": "DEBUG" if verbose else "INFO"},
-                    "caching": caching,
-                }
+            config_dict["caching"] = caching
+        if offline:
+            _merge_dict(config_dict, _insight_offline_config(configuration))
+            logger.info(
+                "Dexray Insight runs offline (no Exodus fetch, no library-"
+                "definition update, no version/CVE lookups)"
             )
-            return asam.start_apk_static_analysis_new(
-                apk_file_path, config, print_results_to_terminal=True, verbose=verbose
-            )
-        return asam.start_apk_static_analysis(
-            apk_file_path=apk_file_path,
-            do_signature_check=False,
-            apk_to_diff=None,
+        return asam.start_apk_static_analysis_new(
+            apk_file_path,
+            configuration(config_dict=config_dict),
             print_results_to_terminal=True,
-            is_verbose=verbose,
-            do_sec_analysis=do_sec,
-            exclude_net_libs=None,
+            verbose=verbose,
         )
 
     def _record_in_apk_cache(

@@ -386,6 +386,35 @@ def test_trackers_hint_without_insight_and_defences_are_static() -> None:
     assert "a = deeper" in defences.summary
 
 
+def test_trackers_render_insight_tracker_rows() -> None:
+    static = StaticOverview(package=PKG, overview=OVERVIEW, from_cache=True)
+    static.set_insight(
+        {
+            **INSIGHT,
+            "tracker_analysis": {
+                "detected_trackers": [
+                    {
+                        "name": "Google AdMob",
+                        "category": "Advertisement",
+                        "version": "22.1",
+                        "network_signature": "googleads.g.doubleclick.net",
+                        "locations": ["/Users/someone/tmp/x"],
+                    }
+                ]
+            },
+        }
+    )
+    assert static.trackers[0]["name"] == "Google AdMob"
+    assert "locations" not in static.trackers[0]
+    f = AppFacts(package=PKG, static=static, static_state="ready")
+    section = build_trackers(f)
+    texts = [r.text for r in section.rows]
+    assert "Google AdMob" in texts[0]
+    assert "googleads.g" in texts[0]
+    assert any("Firebase Analytics" in t for t in texts)
+    assert section.summary.startswith("1 tracker · 3 SDKs")
+
+
 def test_route_text_names_keys_and_marks_missing_digits() -> None:
     assert route_text(["h", "b1", "v"]) == "h friTap · b1 ssl"
     assert route_text(["b6"]) == "b6 emulator (n/a)"
