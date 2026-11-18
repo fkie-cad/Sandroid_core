@@ -643,7 +643,7 @@ function banning(objName, keys) {
 }
 globalThis.Module = banning('Module', ['findExportByName', 'getExportByName', 'findBaseAddress', 'getBaseAddress', 'enumerateExports', 'enumerateImports', 'enumerateSymbols', 'ensureInitialized']);
 globalThis.Memory = banning('Memory', ['readUtf8String', 'writeUtf8String', 'readCString', 'readUtf16String', 'writeUtf16String', 'readAnsiString', 'writeAnsiString', 'readPointer', 'writePointer', 'readByteArray', 'writeByteArray', 'readU8', 'readS32', 'readU32', 'writeU8', 'writeS32', 'writeU32']);
-for (const g of ['Java', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', 'Socket', 'File', 'Kernel', 'ApiResolver', 'ModuleMap', 'CModule', 'Instruction', 'Backtracer', 'hexdump', 'recv', 'Arm64Relocator', 'X86Relocator', 'Arm64Writer', 'X86Writer']) globalThis[g] = deep(g);
+for (const g of ['Java', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', 'Socket', 'File', 'Kernel', 'ApiResolver', 'ModuleMap', 'Instruction', 'Backtracer', 'hexdump', 'recv', 'Arm64Relocator', 'X86Relocator', 'Arm64Writer', 'X86Writer']) globalThis[g] = deep(g);
 globalThis.Java = new Proxy(deep('Java'), { get(t, k) { if (k === 'perform' || k === 'performNow') return fn => { try { fn(); } catch (e) { sent.push({javaError: '' + e}); } }; if (k === 'available') return true; return t[k]; } });
 globalThis.ptr = () => deep('ptr');
 globalThis.NULL = 'NULL';
@@ -674,6 +674,15 @@ globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
 globalThis.NativeFunction = function () { return () => 'REAL'; };
 globalThis.NativeCallback = function (fn) { return fn; };
 globalThis.SystemFunction = function () { return () => ({ value: 'REAL', errno: 13 }); };
+// argv[3] === 'cmodule': a CModule that records its symbols and hands out
+// named replacements (the C itself is validated by cc and on the device).
+const cmodules = [];
+if (process.argv[3] === 'cmodule') {
+    globalThis.CModule = function (src, symbols) {
+        cmodules.push(Object.keys(symbols));
+        return new Proxy({}, { get: (t, k) => 'C:' + String(k) });
+    };
+}
 globalThis.int64 = () => deep('int64'); globalThis.uint64 = () => deep('uint64');
 globalThis.send = m => sent.push(m);
 globalThis.rpc = { exports: {} };
@@ -692,7 +701,7 @@ function probe(sym, path) {
 // Native hooks the load itself installed (before any setFlags).
 const atLoad = { attached: attached.slice(), replaced: Object.keys(replaced) };
 const probes = {};
-for (const flag of (replaced.access ? [true, false] : [])) {
+for (const flag of (typeof replaced.access === 'function' ? [true, false] : [])) {
     rpc.exports.setFlags({ root: flag, emulator: false });
     for (const sym of ['access', 'faccessat', 'fopen', 'stat', 'lstat', 'fstatat']) {
         probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
@@ -716,11 +725,13 @@ const props = {
     secureOff: prop('ro.secure', '0'), secureOn: prop('ro.secure', '1'),
 };
 const hiderErrors = sent.filter(m => m && m.type === 'debug' && ('' + m.hook).indexOf('path-hider') === 0);
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached, hiderErrors, props}));
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached, hiderErrors, props, cmodules,
+    modes: sent.filter(m => m && m.type === 'info' && /^(path-hider|proc-filter):(cmodule|js)$/.test(m.hook)).map(m => m.hook),
+    replacedBy: Object.fromEntries(Object.entries(replaced).map(([k, v]) => [k, typeof v === 'function' ? 'js' : v]))}));
 """
 
 
-def _run_guard(tmp_path: Path, monkeypatch, on=None) -> dict:
+def _run_guard(tmp_path: Path, monkeypatch, on=None, mode: str = "") -> dict:
     """Run the merged bundle in node (Frida/Java mocked) and report."""
     import json
     import shutil
@@ -734,7 +745,7 @@ def _run_guard(tmp_path: Path, monkeypatch, on=None) -> dict:
     guard = tmp_path / "guard.js"
     guard.write_text(_NODE_GUARD)
     proc = subprocess.run(
-        [node, str(guard), str(bundle)],
+        [node, str(guard), str(bundle), mode],
         capture_output=True,
         text=True,
         timeout=60,
@@ -993,12 +1004,16 @@ def test_no_category_ever_hooks_libc_read(tmp_path, monkeypatch) -> None:
 _NODE_PROC = r"""
 const fs = require('fs');
 const helpers = fs.readFileSync(process.argv[2], 'utf8');
+const mode = process.argv[3] || '';
 const sent = [];
 globalThis.send = m => sent.push(m);
 globalThis.FLAGS = {frida: true, debug: true};
+globalThis.FLAG_LISTENERS = [];
+globalThis.NULL = 'NULL';
 globalThis.ptr = v => ({ptr: Number(v)});
-// A fake process: files, fds with offsets, and pointers into JS strings.
+// A fake process: files (byte strings), fds with offsets, byte buffers.
 const OWN = 4242;
+const CUT_UTF8 = 'Name:\tna\xc3\nTracerPid:\t7\n';  // a name cut mid-UTF-8
 const files = {
     '/proc/self/maps': '7f00-7f10 r-xp 0 00:00 0 /system/lib64/libc.so\n' +
         '7f20-7f30 r-xp 0 00:00 0 /data/local/tmp/re.frida.server/frida-agent-64.so\n',
@@ -1006,61 +1021,92 @@ const files = {
         '7f20-7f30 r-xp 0 00:00 0 /memfd:frida-agent-64.so (deleted)\nSize: 8 kB\n',
     '/proc/self/status': 'Name:\tapp\nTracerPid:\t1234\n',
     '/proc/self/task/77/status': 'Name:\tgum-js-loop\nTracerPid:\t0\n',
-    '/proc/999/maps': 'frida everywhere\n',
     '/proc/self/task/78/status': 'Name:\tapp\nTracerPid:\t0\n',
+    '/proc/self/task/79/status': CUT_UTF8,
+    '/proc/999/maps': 'frida everywhere\n',
     '/proc/self/cmdline': 'app',
+    '/proc/thread-self/maps': 'x frida-agent\nno newline at the end',
 };
 const fds = {};
 let nextFd = 10;
-function mem(text) { return {store: {text}, off: 0, add(n) { return {store: this.store, off: this.off + n, add: this.add, readUtf8String: this.readUtf8String}; },
-                            readUtf8String(n) { return this.store.text.slice(this.off, n === undefined ? undefined : this.off + n); }}; }
-globalThis.Memory = {
-    alloc: () => mem(''),
-    allocUtf8String: t => mem(t),
-    copy: (dst, src, n) => { dst.store.text = src.store.text.slice(0, n); },
-};
+function mem(bytes) {
+    const store = {bytes};
+    const at = off => ({store, off, add: n => at(off + n),
+        readByteArray: n => Uint8Array.from(store.bytes.slice(off, off + n)).buffer,
+        writeByteArray: ab => { const u = new Uint8Array(ab); for (let i = 0; i < u.length; i++) store.bytes[off + i] = u[i]; },
+        writeS32: v => { store.s32 = v; }});
+    return at(0);
+}
+const bytesOf = str => Array.from(str, c => c.charCodeAt(0) & 0xff);
+globalThis.Memory = {alloc: () => mem([]), allocUtf8String: t => mem(bytesOf(t))};
+let writes = 0;
 const natives = {
-    read: (fd, p, n) => { const f = fds[fd]; const chunk = f.data.slice(f.pos, f.pos + Number(n));
-                          f.pos += chunk.length; p.store.text = p.store.text.slice(0, p.off) + chunk; return chunk.length; },
-    write: (fd, p, n) => { fds[fd].data += p.store.text.slice(p.off, p.off + Number(n)); return Number(n); },
+    read: (fd, p, n) => { const f = fds[fd]; const chunk = f.data.slice(f.pos, f.pos + Math.min(Number(n), 5));
+                          f.pos += chunk.length; bytesOf(chunk).forEach((b, i) => { p.store.bytes[p.off + i] = b; });
+                          return chunk.length; },
+    // Short writes (3 bytes at most) and an EINTR now and then.
+    write: (fd, p, n) => { writes++;
+                           if (writes % 4 === 0) return {value: -1, errno: 4};
+                           const k = Math.min(Number(n), 3);
+                           fds[fd].data += String.fromCharCode(...p.store.bytes.slice(p.off, p.off + k));
+                           return {value: k, errno: 0}; },
     lseek: (fd, off) => { fds[fd].pos = Number(off); return 0; },
     close: fd => { fds[fd].closed = true; return 0; },
-    memfd_create: () => { const fd = nextFd++; fds[fd] = {data: '', pos: 0, path: '/memfd:proc'}; return fd; },
+    memfd_create: (name, flags) => { const fd = nextFd++; fds[fd] = {data: '', pos: 0, memfd: true, flags}; return fd; },
 };
 globalThis.NativeFunction = function (addr) { return natives[addr]; };
+globalThis.SystemFunction = function (addr) { return natives[addr]; };
 globalThis.Process = {id: OWN, arch: 'arm64',
                       findModuleByName: () => ({findExportByName: n => n})};
 const listeners = {};
 const attached = [];
-globalThis.Interceptor = {attach: (addr, cb) => { attached.push(addr); listeners[addr] = cb; }};
+const cmodules = [];
+globalThis.Interceptor = {attach: (addr, cb, data) => { attached.push(addr); listeners[addr] = cb; }};
+if (mode === 'cmodule') {
+    // Record the wiring; the C listener itself is validated on the device.
+    globalThis.CModule = function (src, symbols) { cmodules.push({src, symbols: Object.keys(symbols)}); };
+    globalThis.NativeCallback = function (fn) { return fn; };
+}
 (0, eval)(helpers);
-filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaInProc);
-filterProcFiles('debug', ['status'], zeroTracerPid);
+filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaLine);
+filterProcFiles('debug', ['status'], zeroTracerPidLine);
 
-function open(path, sym) {
+function open(path, sym, oflags) {
     sym = sym || 'openat';
     const cb = listeners[sym];
     const ctx = {};
     const arg = {readUtf8String: () => path};
-    cb.onEnter.call(ctx, sym === 'openat' ? [-100, arg] : [arg]);
+    const flags = {toInt32: () => oflags || 0};
+    cb.onEnter.call(ctx, sym === 'openat' ? [-100, arg, flags] : [arg, flags]);
     const fd = nextFd++;
     fds[fd] = {data: files[path], pos: 0, path};
     let out = fd;
     cb.onLeave.call(ctx, {toInt32: () => fd, replace: v => { out = v.ptr; }});
     const f = fds[out];
-    return {swapped: out !== fd, closedReal: !!fds[fd].closed,
+    return {swapped: out !== fd, closedReal: !!fds[fd].closed, memfdFlags: f.flags,
             text: f.data.slice(f.pos)};
 }
-const r = {attached};
-for (const path of Object.keys(files)) r[path] = open(path);
-r.viaOpen = open('/proc/self/maps', 'open');
-FLAGS.frida = false; FLAGS.debug = false;
-r.off = open('/proc/self/status');
+const r = {attached, mode: PROC_FILTER_MODE, cmodules};
+if (mode !== 'cmodule') {
+    for (const path of Object.keys(files)) r[path] = open(path);
+    r.viaOpen = open('/proc/self/maps', 'open');
+    r.cloexec = open('/proc/self/status', 'openat', 0x80000);
+    // A filter that throws: the real fd, rewound, never an empty read.
+    PROC_FILTERS.push({cat: 'frida', kinds: ['maps'], line: () => { throw new Error('boom'); }});
+    r.throwing = open('/proc/self/maps');
+    PROC_FILTERS.pop();
+    // Over the cap: passes through unfiltered (a missed hide, not a crash).
+    PROC_FILTER_MAX_BYTES = 10;
+    r.overCap = open('/proc/self/maps');
+    PROC_FILTER_MAX_BYTES = 8 * 1024 * 1024;
+    FLAGS.frida = false; FLAGS.debug = false;
+    r.off = open('/proc/self/status');
+}
 console.log(JSON.stringify(r));
 """
 
 
-def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
+def _run_proc(tmp_path: Path, mode: str = "") -> dict:
     import json
     import shutil
     import subprocess
@@ -1073,14 +1119,19 @@ def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
     (tmp_path / "helpers.js").write_text(_PREAMBLE_HELPERS_JS)
     (tmp_path / "proc.js").write_text(_NODE_PROC)
     proc = subprocess.run(
-        [node, str(tmp_path / "proc.js"), str(tmp_path / "helpers.js")],
+        [node, str(tmp_path / "proc.js"), str(tmp_path / "helpers.js"), mode],
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    r = json.loads(proc.stdout.strip().splitlines()[-1])
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
+    r = _run_proc(tmp_path)
+    assert r["mode"] == "js"  # no CModule in node: the JS fallback
     assert "read" not in r["attached"]
     maps = r["/proc/self/maps"]
     assert maps["swapped"]
@@ -1091,19 +1142,51 @@ def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
     assert "frida" not in smaps
     assert "Size: 8 kB" not in smaps  # the whole frida entry is gone
     assert "Size: 4 kB" in smaps
-    status = r["/proc/self/status"]
-    assert status["text"] == "Name:\tapp\nTracerPid:\t0\n"
+    assert r["/proc/self/status"]["text"] == "Name:\tapp\nTracerPid:\t0\n"
     task = r["/proc/self/task/77/status"]
     assert task["text"] == "Name:\tThread-2\nTracerPid:\t0\n"
+    # A name cut mid-UTF-8 neither throws nor loses bytes (latin1 decoding).
+    assert r["/proc/self/task/79/status"]["text"] == "Name:\tna\xc3\nTracerPid:\t0\n"
+    # A last line without a newline stays without one.
+    assert r["/proc/thread-self/maps"]["text"] == "no newline at the end"
     # Not ours / not a filtered file / nothing to hide: the real fd, rewound.
     unchanged = "/proc/self/task/78/status"
     for path in ("/proc/999/maps", "/proc/self/cmdline", unchanged):
         assert r[path]["swapped"] is False
-    assert r[unchanged]["text"] == "Name:\tapp\nTracerPid:\t0\n"  # rewound
+    assert r[unchanged]["text"] == "Name:\tapp\nTracerPid:\t0\n"
     assert r["viaOpen"]["swapped"] is True
     off = r["off"]
     assert off["swapped"] is False
     assert off["text"] == "Name:\tapp\nTracerPid:\t1234\n"
+
+
+def test_proc_filter_failures_fall_back_to_the_real_file(tmp_path) -> None:
+    r = _run_proc(tmp_path)
+    real_maps = (
+        "7f00-7f10 r-xp 0 00:00 0 /system/lib64/libc.so\n"
+        "7f20-7f30 r-xp 0 00:00 0 /data/local/tmp/re.frida.server/frida-agent-64.so\n"
+    )
+    for case in ("throwing", "overCap"):
+        assert r[case]["swapped"] is False, case
+        assert r[case]["closedReal"] is False, case
+        assert r[case]["text"] == real_maps, case  # rewound, not empty
+
+
+def test_proc_filter_memfd_keeps_the_apps_cloexec_choice(tmp_path) -> None:
+    r = _run_proc(tmp_path)
+    assert r["/proc/self/status"]["memfdFlags"] == 0  # opened without O_CLOEXEC
+    assert r["cloexec"]["memfdFlags"] == 1  # O_CLOEXEC -> MFD_CLOEXEC
+
+
+def test_proc_filter_uses_the_cmodule_fast_path_when_available(tmp_path) -> None:
+    r = _run_proc(tmp_path, "cmodule")
+    assert r["mode"] == "cmodule"
+    assert r["cmodules"][0]["symbols"] == [
+        "sandroid_proc_flags",
+        "sandroid_own_pid",
+        "sandroid_proc_swap",
+    ]
+    assert r["attached"] == ["open", "openat", "__open_2", "__openat_2"]
 
 
 def test_root_spoofs_debuggable_and_secure_only_when_revealing(
@@ -1119,3 +1202,201 @@ def test_root_spoofs_debuggable_and_secure_only_when_revealing(
         "secureOff": "1",
         "secureOn": "1",
     }
+
+
+def test_path_hider_uses_the_cmodule_fast_path_when_available(
+    tmp_path, monkeypatch
+) -> None:
+    """The stat family is replaced in C; JS only for candidates."""
+    result = _run_guard(tmp_path, monkeypatch, mode="cmodule")
+    assert "path-hider:cmodule" in result["modes"]
+    assert "proc-filter:cmodule" in result["modes"]
+    path_symbols = next(s for s in result["cmodules"] if "sandroid_path_flags" in s)
+    assert set(path_symbols) == {
+        "sandroid_path_flags",
+        "sandroid_path_decide",
+        "sandroid_errno",
+        "real_access",
+        "real_faccessat",
+        "real_fopen",
+        "real_stat",
+        "real_lstat",
+        "real_fstatat",
+    }
+    for sym in ("access", "faccessat", "fopen", "stat", "lstat", "fstatat"):
+        assert result["replacedBy"][sym] == f"C:replace_{sym}", sym
+    assert result["hiderErrors"] == []  # 64 aliases: same address, skipped
+
+
+def test_path_hider_falls_back_to_js_without_cmodule(tmp_path, monkeypatch) -> None:
+    result = _run_guard(tmp_path, monkeypatch)
+    assert "path-hider:js" in result["modes"]
+    assert set(result["replacedBy"].values()) == {"js"}
+
+
+def _cc():
+    import shutil
+
+    return shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
+
+
+_GUM_STUB = """
+#ifndef GUM_STUB_H
+#define GUM_STUB_H
+#include <stddef.h>
+typedef void * gpointer;
+typedef unsigned long gsize;
+typedef int gint;
+typedef struct { void * function; void * cpu_context; gint system_error;
+                 void * backend; } GumInvocationContext;
+GumInvocationContext * gum_interceptor_get_current_invocation (void);
+gpointer gum_invocation_context_get_return_address (GumInvocationContext * c);
+gpointer gum_invocation_context_get_nth_argument (GumInvocationContext * c,
+                                                  unsigned n);
+gpointer gum_invocation_context_get_return_value (GumInvocationContext * c);
+void gum_invocation_context_replace_return_value (GumInvocationContext * c,
+                                                  gpointer v);
+gpointer gum_invocation_context_get_listener_function_data (
+    GumInvocationContext * c);
+gpointer gum_invocation_context_get_listener_invocation_data (
+    GumInvocationContext * c, gsize size);
+#define GUM_IC_GET_INVOCATION_DATA(context, data_type) \\
+    ((data_type *) gum_invocation_context_get_listener_invocation_data ( \\
+        context, sizeof (data_type)))
+#endif
+"""
+
+
+@pytest.mark.parametrize("source", ["_PATH_HIDER_C", "_PROC_FILTER_C"])
+def test_cmodule_sources_are_plain_c89(tmp_path, source) -> None:
+    """TinyCC compiles them in the target; check they are plain C here."""
+    import subprocess
+
+    import sandroid.analysis.detection_bypass as db
+
+    cc = _cc()
+    if cc is None:
+        pytest.skip("no C compiler")
+    (tmp_path / "gum").mkdir()
+    (tmp_path / "gum" / "guminterceptor.h").write_text(_GUM_STUB)
+    (tmp_path / "m.c").write_text(getattr(db, source))
+    proc = subprocess.run(
+        [
+            cc,
+            "-std=c89",
+            "-pedantic",
+            "-Wall",
+            "-Werror",
+            "-fsyntax-only",
+            f"-I{tmp_path}",
+            str(tmp_path / "m.c"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_cmodule_candidates_cover_every_hidden_path(tmp_path) -> None:
+    """The C pre-check must never skip a path JS would hide."""
+    import subprocess
+
+    import sandroid.analysis.detection_bypass as db
+
+    cc = _cc()
+    if cc is None:
+        pytest.skip("no C compiler")
+    hidden = [
+        # root (SU_PATHS + the basename / magisk rules)
+        "/system/xbin/su",
+        "/system/bin/su",
+        "/sbin/su",
+        "/su/bin/su",
+        "/system/app/Superuser.apk",
+        "/system/xbin/busybox",
+        "/data/local/su",
+        "/data/local/bin/su",
+        "/data/local/xbin/su",
+        "/system/sd/xbin/su",
+        "/system/bin/failsafe/su",
+        "/data/adb/magisk",
+        "/data/adb/modules",
+        "/data/adb/su",
+        "/debug_ramdisk/su",
+        "/x/MagiskHide",
+        "/x/daemonsu",
+        "/x/supersu",
+        # emulator (EMU_PATHS + the basename tokens)
+        "/dev/qemu_pipe",
+        "/dev/goldfish_pipe",
+        "/dev/socket/qemud",
+        "/dev/socket/genyd",
+        "/dev/socket/baseband_genyd",
+        "/sys/qemu_trace",
+        "/system/bin/qemu-props",
+        "/system/bin/qemud",
+        "/system/lib/libc_malloc_debug_qemu.so",
+        "/dev/vboxguest",
+        "/dev/vboxuser",
+        "/system/bin/nox-prop",
+        "/system/bin/ttVM-prop",
+        "/system/bin/microvirt-prop",
+        "/system/bin/windroyed",
+        "/system/lib/libdroid4x.so",
+        "/fstab.ranchu",
+        "/init.goldfish.rc",
+        "/ueventd.vbox86.rc",
+        "/fstab.nox",
+        "/ueventd.andy.rc",
+        "/x86.prop",
+        "/ueventd.android_x86.rc",
+        "/init.ttVM_x86.rc",
+    ]
+    (tmp_path / "gum").mkdir()
+    (tmp_path / "gum" / "guminterceptor.h").write_text(_GUM_STUB)
+    (tmp_path / "m.c").write_text(db._PATH_HIDER_C)
+    paths = ",\n".join('"' + p + '"' for p in hidden)
+    (tmp_path / "t.c").write_text("""
+#include <stdio.h>
+#include <gum/guminterceptor.h>
+volatile int sandroid_path_flags = 3;
+int sandroid_path_decide (const char * p, void * r) { (void) p; (void) r; return 0; }
+int * sandroid_errno (void) { static int e; return &e; }
+GumInvocationContext * gum_interceptor_get_current_invocation (void) { return 0; }
+gpointer gum_invocation_context_get_return_address (GumInvocationContext * c)
+{ (void) c; return 0; }
+int real_access (const char * p, int m) { (void) p; (void) m; return 0; }
+int real_faccessat (int d, const char * p, int m, int f)
+{ (void) d; (void) p; (void) m; (void) f; return 0; }
+void * real_fopen (const char * p, const char * m) { (void) p; (void) m; return 0; }
+int real_stat (const char * p, void * s) { (void) p; (void) s; return 0; }
+int real_lstat (const char * p, void * s) { (void) p; (void) s; return 0; }
+int real_fstatat (int d, const char * p, void * s, int f)
+{ (void) d; (void) p; (void) s; (void) f; return 0; }
+#include "m.c"
+static const char * paths[] = { PATHS, NULL };
+int main (void)
+{
+  int i, missed = 0;
+  for (i = 0; paths[i] != NULL; i++)
+    if (!candidate (paths[i])) { printf ("missed %s\\n", paths[i]); missed++; }
+  sandroid_path_flags = 0;
+  if (candidate ("/system/bin/su")) { printf ("flags off\\n"); missed++; }
+  if (candidate ("/data/app/x/base.apk") || candidate ("/system/lib64/libc.so"))
+  { printf ("false positive\\n"); missed++; }
+  return missed;
+}
+""".replace("PATHS", paths))
+    exe = tmp_path / "t"
+    build = subprocess.run(
+        [cc, f"-I{tmp_path}", "-o", str(exe), str(tmp_path / "t.c")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+    run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stdout

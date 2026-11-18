@@ -108,7 +108,7 @@ def _java_bridge_prelude() -> str:
 #: written against them throws inside its ``try`` and silently never
 #: installs. Use these helpers and the NativePointer instance methods
 #: (``p.readUtf8String()``, ``p.writeUtf8String(s)``) instead.
-_PREAMBLE_HELPERS_JS = r"""
+_PREAMBLE_HEAD_JS = r"""
 // Lazy categories: every category body is registered here and only runs
 // (installs its native and Java hooks) the first time its flag is on --
 // baked in at load or flipped by setFlags. An SSL-only session installs only
@@ -153,20 +153,376 @@ function _findExport(lib, name) {
 }
 function _libcExport(name) { return _findExport('libc.so', name); }
 
+"""
+
+#: C fast path of the shared path hider (CModule; see the preamble's
+#: ``hidePaths``). Compiled in the target by Frida's TinyCC.
+_PATH_HIDER_C = r"""
+/* Sandroid path hider: C fast path for the libc file probes.
+ *
+ * Every access/faccessat/fopen/stat/lstat/fstatat call lands here. Only a
+ * path that a cheap, case-insensitive name check marks as a candidate for an
+ * enabled hiding class calls into JS (sandroid_path_decide), which makes the
+ * exact decision; every other call goes straight to the original without
+ * touching the JS runtime. The real errno is handed back to the caller.
+ */
+#include <gum/guminterceptor.h>
+
+#ifndef NULL
+# define NULL ((void *) 0)
+#endif
+
+/* bit 1: root names on, bit 2: emulator names on (JS keeps it current). */
+extern volatile int sandroid_path_flags;
+extern int sandroid_path_decide (const char * path, void * return_address);
+extern int * sandroid_errno (void);
+
+extern int real_access (const char * path, int mode);
+extern int real_faccessat (int dirfd, const char * path, int mode, int flags);
+extern void * real_fopen (const char * path, const char * mode);
+extern int real_stat (const char * path, void * st);
+extern int real_lstat (const char * path, void * st);
+extern int real_fstatat (int dirfd, const char * path, void * st, int flags);
+
+static int
+lower (int c)
+{
+  return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+static int
+contains (const char * s, const char * needle)
+{
+  for (; *s != '\0'; s++)
+  {
+    const char * a = s;
+    const char * b = needle;
+    while (*b != '\0' && lower (*a) == *b)
+    {
+      a++;
+      b++;
+    }
+    if (*b == '\0')
+      return 1;
+  }
+  return 0;
+}
+
+static int
+equals (const char * a, const char * b)
+{
+  while (*a != '\0' && *b != '\0' && lower (*a) == *b)
+  {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static const char *
+base_name (const char * p)
+{
+  const char * b = p;
+  for (; *p != '\0'; p++)
+  {
+    if (*p == '/')
+      b = p + 1;
+  }
+  return b;
+}
+
+/* Superset of the root category's _looksLikeRootPath(). */
+static int
+root_candidate (const char * p)
+{
+  const char * b = base_name (p);
+  return equals (b, "su") || equals (b, "busybox") || equals (b, "supersu") ||
+      equals (b, "daemonsu") || contains (b, "magisk") ||
+      contains (b, "superuser") || contains (p, "/data/adb/");
+}
+
+/* Superset of the emulator category's _isEmuPath(). */
+static int
+emu_candidate (const char * p)
+{
+  static const char * needles[] = {
+    "qemu", "goldfish", "ranchu", "genyd", "vbox", "nox", "ttvm", "microvirt",
+    "windroyed", "droid4x", "andy", "x86.prop", "android_x86", NULL
+  };
+  int i;
+  for (i = 0; needles[i] != NULL; i++)
+  {
+    if (contains (p, needles[i]))
+      return 1;
+  }
+  return 0;
+}
+
+static int
+candidate (const char * p)
+{
+  int f = sandroid_path_flags;
+  if (f == 0 || p == NULL)
+    return 0;
+  return ((f & 1) != 0 && root_candidate (p)) ||
+      ((f & 2) != 0 && emu_candidate (p));
+}
+
+/* Ask JS; on "hide" the caller sees errno ENOENT. */
+static int
+hide (const char * p)
+{
+  GumInvocationContext * ic = gum_interceptor_get_current_invocation ();
+  if (!sandroid_path_decide (p, gum_invocation_context_get_return_address (ic)))
+    return 0;
+  ic->system_error = 2;
+  return 1;
+}
+
+/* The interceptor restores errno from system_error on return: copy the
+ * original call's errno there, or every real failure reads as errno 0. */
+static void
+keep_errno (void)
+{
+  gum_interceptor_get_current_invocation ()->system_error = *sandroid_errno ();
+}
+
+int
+replace_access (const char * path, int mode)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_access (path, mode);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_faccessat (int dirfd, const char * path, int mode, int flags)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_faccessat (dirfd, path, mode, flags);
+  keep_errno ();
+  return r;
+}
+
+void *
+replace_fopen (const char * path, const char * mode)
+{
+  void * r;
+  if (candidate (path) && hide (path))
+    return NULL;
+  r = real_fopen (path, mode);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_stat (const char * path, void * st)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_stat (path, st);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_lstat (const char * path, void * st)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_lstat (path, st);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_fstatat (int dirfd, const char * path, void * st, int flags)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_fstatat (dirfd, path, st, flags);
+  keep_errno ();
+  return r;
+}
+"""
+
+#: C fast path of the shared /proc filter (CModule attach listener; see the
+#: preamble's ``filterProcFiles``).
+_PROC_FILTER_C = r"""
+/* Sandroid /proc filter: C fast path for the open family (attach listener).
+ *
+ * Only an open of this process's own /proc/{self,thread-self,<pid>}
+ * [/task/<tid>]/{maps,smaps,status}, while a /proc filter is on, calls into
+ * JS (sandroid_proc_swap) to answer with a filtered memfd; every other open
+ * returns without touching the JS runtime.
+ */
+#include <gum/guminterceptor.h>
+
+#ifndef NULL
+# define NULL ((void *) 0)
+#endif
+
+extern volatile int sandroid_proc_flags;
+extern volatile int sandroid_own_pid;
+extern int sandroid_proc_swap (int fd, int kind, int oflags);
+
+typedef struct _ProcState ProcState;
+struct _ProcState
+{
+  int kind;
+  int oflags;
+};
+
+static int
+starts (const char * s, const char * prefix)
+{
+  while (*prefix != '\0')
+  {
+    if (*s != *prefix)
+      return 0;
+    s++;
+    prefix++;
+  }
+  return 1;
+}
+
+static int
+same (const char * a, const char * b)
+{
+  while (*a != '\0' && *a == *b)
+  {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+/* 1 maps, 2 smaps, 3 status, 0 anything else. */
+static int
+proc_kind (const char * p)
+{
+  int value = 0;
+  int n = 0;
+  if (p == NULL || !starts (p, "/proc/"))
+    return 0;
+  p += 6;
+  if (starts (p, "self/"))
+    p += 5;
+  else if (starts (p, "thread-self/"))
+    p += 12;
+  else
+  {
+    while (*p >= '0' && *p <= '9')
+    {
+      value = value * 10 + (*p - '0');
+      p++;
+      n++;
+    }
+    if (n == 0 || *p != '/' || value != sandroid_own_pid)
+      return 0;
+    p++;
+  }
+  if (starts (p, "task/"))
+  {
+    p += 5;
+    n = 0;
+    while (*p >= '0' && *p <= '9')
+    {
+      p++;
+      n++;
+    }
+    if (n == 0 || *p != '/')
+      return 0;
+    p++;
+  }
+  if (same (p, "maps"))
+    return 1;
+  if (same (p, "smaps"))
+    return 2;
+  if (same (p, "status"))
+    return 3;
+  return 0;
+}
+
+void
+onEnter (GumInvocationContext * ic)
+{
+  ProcState * s = GUM_IC_GET_INVOCATION_DATA (ic, ProcState);
+  int path_index = (int) (gsize) gum_invocation_context_get_listener_function_data (ic);
+  s->kind = 0;
+  if (sandroid_proc_flags == 0)
+    return;
+  s->kind = proc_kind (
+      (const char *) gum_invocation_context_get_nth_argument (ic, path_index));
+  if (s->kind != 0)
+    s->oflags = (int) (gsize) gum_invocation_context_get_nth_argument (ic,
+        path_index + 1);
+}
+
+void
+onLeave (GumInvocationContext * ic)
+{
+  ProcState * s = GUM_IC_GET_INVOCATION_DATA (ic, ProcState);
+  int fd;
+  int swapped;
+  if (s->kind == 0)
+    return;
+  fd = (int) (gsize) gum_invocation_context_get_return_value (ic);
+  if (fd < 0)
+    return;
+  swapped = sandroid_proc_swap (fd, s->kind, s->oflags);
+  if (swapped >= 0)
+    gum_invocation_context_replace_return_value (ic, (gpointer) (gsize) swapped);
+}
+"""
+
+_PREAMBLE_TAIL_JS = r"""
 // Shared path hider: ONE Interceptor.replace per libc probe (access,
-// faccessat, fopen/fopen64, stat/lstat/fstatat and their 64 aliases) for
-// every category that hides files (root, emulator). A hidden path gets -1 / NULL with errno = ENOENT, like a missing
-// file, and the real call never runs (no leaked FILE*). Two categories
-// cannot each replace the same export, hence the registry.
-var PATH_HIDERS = [];  // {cat, test(path, returnAddress)}
+// faccessat, fopen, stat, lstat, fstatat; the 64 names are aliases on
+// bionic) for every category that hides files (root, emulator). A hidden
+// path gets -1 / NULL with errno = ENOENT, like a missing file, and the real
+// call never runs (no leaked FILE*). Two categories cannot each replace the
+// same export, hence the registry.
+//
+// Fast path: the replacements are C (PATH_HIDER_C, a CModule). stat and
+// friends are among the hottest calls at ART boot, so a call only enters
+// JS when a cheap name check marks the path as a candidate of an enabled
+// class (bits in _pathFlags, kept current on every setFlags); all others go
+// straight to the original. If the CModule cannot be built, the same
+// replacements run in JS (checking FLAGS before touching the path).
+// PATH_HIDER_MODE says which one is active ('cmodule' / 'js').
+var PATH_HIDERS = [];  // {cat, test(path, returnAddress), cls}
 var _pathHiderInstalled = false;
 var _ENOENT = 2;
+var PATH_HIDER_MODE = null;
+var _pathFlags = null;  // int the C fast path reads
+var _pathKeep = [];     // CModule + NativeCallbacks, kept alive
 
 function _anyPathHiderOn() {
     for (var i = 0; i < PATH_HIDERS.length; i++) {
         if (FLAGS[PATH_HIDERS[i].cat]) return true;
     }
     return false;
+}
+
+function _pathHiderBits() {
+    var bits = 0;
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        if (FLAGS[PATH_HIDERS[i].cat]) bits |= PATH_HIDERS[i].cls;
+    }
+    return bits;
+}
+
+function _syncPathFlags() {
+    if (_pathFlags !== null) _pathFlags.writeS32(_pathHiderBits());
 }
 
 function _hiddenBy(path, returnAddress) {
@@ -179,22 +535,40 @@ function _hiddenBy(path, returnAddress) {
     return null;
 }
 
+// Tolerant C-string read: never throws (a name cut mid-UTF-8 throws in
+// readUtf8String on Frida 17).
+function _readPath(p) {
+    try { return p.readUtf8String(); } catch (e) {}
+    try { return p.readCString(); } catch (e) {}
+    return null;
+}
+
 var _pathProbeAddrs = {};  // one replacement per address (aliases share one)
 
-function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
+// [export, return type, argument types, path argument, value when hidden]
+var PATH_PROBES = [
+    ['access', 'int', ['pointer', 'int'], 0, -1],
+    ['faccessat', 'int', ['int', 'pointer', 'int', 'int'], 1, -1],
+    ['fopen', 'pointer', ['pointer', 'pointer'], 0, NULL],
+    ['stat', 'int', ['pointer', 'pointer'], 0, -1],
+    ['lstat', 'int', ['pointer', 'pointer'], 0, -1],
+    ['fstatat', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1],
+    ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL],
+    ['stat64', 'int', ['pointer', 'pointer'], 0, -1],
+    ['lstat64', 'int', ['pointer', 'pointer'], 0, -1],
+    ['fstatat64', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1]
+];
+
+function _replacePathProbeJs(sym, retType, argTypes, pathIndex, failValue) {
     var addr = _libcExport(sym);
-    if (addr === null) return;
-    // fopen64/stat64/... are the same function as fopen/stat on 64-bit
-    // bionic: replacing it twice throws "already replaced".
-    if (_pathProbeAddrs[addr.toString()]) return;
+    if (addr === null || _pathProbeAddrs[addr.toString()]) return;
     _pathProbeAddrs[addr.toString()] = sym;
     // SystemFunction (not NativeFunction): its result carries the errno the
     // real call set, which the pass-through must hand back to the caller.
     var original = new SystemFunction(addr, retType, argTypes);
     Interceptor.replace(addr, new NativeCallback(function () {
         if (_anyPathHiderOn()) {
-            var path = null;
-            try { path = arguments[pathIndex].readUtf8String(); } catch (e) {}
+            var path = _readPath(arguments[pathIndex]);
             var cat = path === null ? null : _hiddenBy(path, this.returnAddress);
             if (cat !== null) {
                 try { this.errno = _ENOENT; } catch (e) {}
@@ -211,30 +585,67 @@ function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
     }, retType, argTypes));
 }
 
-function hidePaths(category, test) {
-    PATH_HIDERS.push({cat: category, test: test});
-    if (_pathHiderInstalled) return;
+// The C fast path for the base probes; throws when CModule is unavailable.
+function _installPathHiderC() {
+    if (typeof CModule === 'undefined') throw new Error('no CModule');
+    var errnoFn = _libcExport('__errno');
+    if (errnoFn === null) throw new Error('no __errno');
+    var flags = Memory.alloc(4);
+    var decide = new NativeCallback(function (pathPtr, returnAddress) {
+        var path = _readPath(pathPtr);
+        var cat = path === null ? null : _hiddenBy(path, returnAddress);
+        if (cat === null) return 0;
+        send({type: 'info', hook: cat + '-bypass:' + path});
+        return 1;
+    }, 'int', ['pointer', 'pointer']);
+    var symbols = {
+        sandroid_path_flags: flags,
+        sandroid_path_decide: decide,
+        sandroid_errno: errnoFn
+    };
+    var base = ['access', 'faccessat', 'fopen', 'stat', 'lstat', 'fstatat'];
+    var addrs = {};
+    base.forEach(function (sym) {
+        var a = _libcExport(sym);
+        if (a === null) throw new Error('no ' + sym);
+        addrs[sym] = a;
+        symbols['real_' + sym] = a;
+    });
+    var cm = new CModule(PATH_HIDER_C, symbols);
+    _pathKeep.push(cm, decide);
+    _pathFlags = flags;
+    _syncPathFlags();
+    base.forEach(function (sym) {
+        Interceptor.replace(addrs[sym], cm['replace_' + sym]);
+        _pathProbeAddrs[addrs[sym].toString()] = sym;
+    });
+}
+
+function hidePaths(category, test, cls) {
+    PATH_HIDERS.push({cat: category, test: test, cls: cls});
+    if (_pathHiderInstalled) {
+        _syncPathFlags();
+        return;
+    }
     _pathHiderInstalled = true;
-    var probes = [
-        ['access', 'int', ['pointer', 'int'], 0, -1],
-        ['faccessat', 'int', ['int', 'pointer', 'int', 'int'], 1, -1],
-        ['fopen', 'pointer', ['pointer', 'pointer'], 0, NULL],
-        ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL],
-        // stat("/system/bin/su") == 0 was a tell the access/fopen hiding missed.
-        ['stat', 'int', ['pointer', 'pointer'], 0, -1],
-        ['stat64', 'int', ['pointer', 'pointer'], 0, -1],
-        ['lstat', 'int', ['pointer', 'pointer'], 0, -1],
-        ['lstat64', 'int', ['pointer', 'pointer'], 0, -1],
-        ['fstatat', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1],
-        ['fstatat64', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1]
-    ];
-    probes.forEach(function (p) {
+    FLAG_LISTENERS.push(_syncPathFlags);
+    try {
+        _installPathHiderC();
+        PATH_HIDER_MODE = 'cmodule';
+    } catch (e) {
+        PATH_HIDER_MODE = 'js';
+        send({type: 'info', hook: 'path-hider:js-fallback', error: '' + e});
+    }
+    // Remaining probes (all of them in JS mode; distinct 64 aliases in C
+    // mode -- on bionic they are the same address and skipped).
+    PATH_PROBES.forEach(function (p) {
         try {
-            _replacePathProbe(p[0], p[1], p[2], p[3], p[4]);
+            _replacePathProbeJs(p[0], p[1], p[2], p[3], p[4]);
         } catch (e) {
             send({type: 'debug', hook: 'path-hider:' + p[0], error: e.message});
         }
     });
+    send({type: 'info', hook: 'path-hider:' + PATH_HIDER_MODE});
 }
 
 // Shared /proc filter for the frida and debug categories. It replaces the old
@@ -244,17 +655,51 @@ function hidePaths(category, test) {
 // /proc/{self,thread-self,<pid>}[/task/<tid>]/{maps,smaps,status} files is
 // answered with a memfd holding the filtered text (only when a filter
 // changed something; otherwise the real fd, rewound, is kept). `read` is
-// never hooked. A caller that readlink()s the fd sees "/memfd:proc".
-var PROC_FILTERS = [];  // {cat, kinds, filter(text, kind) -> text}
+// never hooked.
+//
+// Fast path: the open-family listener is C (PROC_FILTER_C); it only enters
+// JS for those few files while a filter is on. JS fallback otherwise
+// (PROC_FILTER_MODE). The text is streamed in 64 KiB chunks, decoded
+// byte-wise (latin1: never throws, bytes survive exactly) and filtered line
+// by line; a file over PROC_FILTER_MAX_BYTES passes through unfiltered (a
+// missed hide, never a crash or an empty read). Any failure closes the memfd
+// and rewinds the real fd, so the app always reads the real file at worst.
+//
+// Remaining tells of a swapped fd: readlink(/proc/self/fd/N) shows
+// "/memfd:proc (deleted)", and fstat() shows a non-zero st_size and a tmpfs
+// device where a /proc file has size 0. The memfd is close-on-exec only if
+// the app opened the file with O_CLOEXEC.
+var PROC_FILTERS = [];  // {cat, kinds, line(line, kind, state) -> line|null}
 var _procFilterInstalled = false;
+var PROC_FILTER_MODE = null;
+var PROC_FILTER_MAX_BYTES = 8 * 1024 * 1024;
+var _PROC_CHUNK = 64 * 1024;
+var _PROC_KINDS = [null, 'maps', 'smaps', 'status'];
+var _O_CLOEXEC = 0x80000;
+var _MFD_CLOEXEC = 1;
+var _EINTR = 4;
 var _PROC_RE = /^\/proc\/(self|thread-self|\d+)(?:\/task\/\d+)?\/(maps|smaps|status)$/;
 var _procIo = null;
+var _procFlags = null;  // int the C fast path reads
+var _procKeep = [];
 
 function _procKind(path) {
+    if (path === null || path.indexOf('/proc/') !== 0) return null;
     var m = _PROC_RE.exec(path);
     if (m === null) return null;
     if (/^\d+$/.test(m[1]) && parseInt(m[1], 10) !== Process.id) return null;
     return m[2];
+}
+
+function _anyProcFilterOn() {
+    for (var i = 0; i < PROC_FILTERS.length; i++) {
+        if (FLAGS[PROC_FILTERS[i].cat]) return true;
+    }
+    return false;
+}
+
+function _syncProcFlags() {
+    if (_procFlags !== null) _procFlags.writeS32(_anyProcFilterOn() ? 1 : 0);
 }
 
 function _procFiltersFor(kind) {
@@ -273,7 +718,8 @@ function _procNative() {
     var nr = {arm64: 279, x64: 319, arm: 385, ia32: 356}[Process.arch];
     _procIo = {
         read: new NativeFunction(_libcExport('read'), 'long', ['int', 'pointer', 'ulong']),
-        write: new NativeFunction(_libcExport('write'), 'long', ['int', 'pointer', 'ulong']),
+        // SystemFunction: a failed write's errno tells EINTR (retry) apart.
+        write: new SystemFunction(_libcExport('write'), 'long', ['int', 'pointer', 'ulong']),
         lseek: new NativeFunction(_libcExport('lseek'), 'long', ['int', 'long', 'int']),
         close: new NativeFunction(_libcExport('close'), 'int', ['int']),
         memfd: memfd !== null
@@ -287,64 +733,145 @@ function _procNative() {
     return _procIo;
 }
 
-function _procReadAll(io, fd) {
-    var cap = 256 * 1024;
-    var buf = Memory.alloc(cap);
-    var total = 0;
-    for (;;) {
-        var n = Number(io.read(fd, buf.add(total), cap - total));
-        if (n < 0) return null;
-        if (n === 0) break;
-        total += n;
-        if (total === cap) {
-            if (cap >= 16 * 1024 * 1024) return null;  // not a /proc text file
-            var bigger = Memory.alloc(cap * 2);
-            Memory.copy(bigger, buf, total);
-            buf = bigger;
-            cap *= 2;
+function _latin1(bytes) {
+    var u = new Uint8Array(bytes);
+    var s = '';
+    for (var i = 0; i < u.length; i += 4096) {
+        s += String.fromCharCode.apply(null, u.subarray(i, i + 4096));
+    }
+    return s;
+}
+
+// Write every byte of `text` (latin1, as decoded) to `fd`; retries partial
+// writes and EINTR. False on any other failure.
+function _procWriteAll(io, fd, text) {
+    if (text.length === 0) return true;
+    var u = new Uint8Array(text.length);
+    for (var i = 0; i < text.length; i++) u[i] = text.charCodeAt(i) & 0xff;
+    var mem = Memory.alloc(u.length);
+    mem.writeByteArray(u.buffer);
+    var done = 0;
+    var interrupted = 0;
+    while (done < u.length) {
+        var r = io.write(fd, mem.add(done), u.length - done);
+        var n = Number(r.value);
+        if (n > 0) {
+            done += n;
+        } else if (n < 0 && r.errno === _EINTR && ++interrupted < 100) {
+            continue;
+        } else {
+            return false;
         }
     }
-    return total === 0 ? '' : buf.readUtf8String(total);
+    return true;
 }
 
-// The filtered memfd for the just-opened /proc `fd`, or -1 to keep `fd`.
-function _procFilteredFd(fd, kind, filters) {
+// Filter complete lines; `last` is a final line without its newline.
+function _procFilterLines(lines, kind, filters, state, last) {
+    var out = '';
+    var changed = false;
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        for (var j = 0; j < filters.length && line !== null; j++) {
+            line = filters[j].line(line, kind, state);
+        }
+        if (line !== lines[i]) changed = true;
+        if (line !== null) out += (last && i === lines.length - 1) ? line : line + '\n';
+    }
+    return {text: out, changed: changed};
+}
+
+// The filtered memfd for the just-opened /proc `fd`, or -1 to keep `fd`
+// (always rewound to the start then).
+function _procFilteredFd(fd, kind, filters, oflags) {
     var io = _procNative();
     if (io.memfd === null) return -1;
-    var text = _procReadAll(io, fd);
-    var out = text;
-    if (text !== null) {
-        for (var i = 0; i < filters.length; i++) out = filters[i].filter(out, kind);
-    }
-    if (text === null || out === text) {
-        io.lseek(fd, 0, 0);  // SEEK_SET: the caller reads it from the start
+    var mfd = -1;
+    var handed = false;
+    try {
+        var mfdFlags = (oflags & _O_CLOEXEC) ? _MFD_CLOEXEC : 0;
+        mfd = Number(io.memfd(Memory.allocUtf8String('proc'), mfdFlags));
+        if (mfd < 0) return -1;
+        var buf = Memory.alloc(_PROC_CHUNK);
+        var total = 0;
+        var carry = '';
+        var changed = false;
+        var state = {};
+        for (;;) {
+            var n = Number(io.read(fd, buf, _PROC_CHUNK));
+            if (n < 0) return -1;
+            if (n === 0) break;
+            total += n;
+            if (total > PROC_FILTER_MAX_BYTES) return -1;  // missed hide
+            var lines = (carry + _latin1(buf.readByteArray(n))).split('\n');
+            carry = lines.pop();
+            var part = _procFilterLines(lines, kind, filters, state, false);
+            changed = changed || part.changed;
+            if (!_procWriteAll(io, mfd, part.text)) return -1;
+        }
+        if (carry.length) {
+            var tail = _procFilterLines([carry], kind, filters, state, true);
+            changed = changed || tail.changed;
+            if (!_procWriteAll(io, mfd, tail.text)) return -1;
+        }
+        if (!changed) return -1;
+        io.lseek(mfd, 0, 0);  // SEEK_SET
+        handed = true;
+        return mfd;
+    } catch (e) {
         return -1;
+    } finally {
+        if (handed) {
+            io.close(fd);
+        } else {
+            if (mfd >= 0) io.close(mfd);
+            io.lseek(fd, 0, 0);  // the caller reads the real file from the start
+        }
     }
-    var mfd = Number(io.memfd(Memory.allocUtf8String('proc'), 1));  // MFD_CLOEXEC
-    if (mfd < 0) {
-        io.lseek(fd, 0, 0);
-        return -1;
-    }
-    var bytes = Memory.allocUtf8String(out);
-    var len = unescape(encodeURIComponent(out)).length;  // UTF-8 byte length
-    var done = 0;
-    while (done < len) {
-        var w = Number(io.write(mfd, bytes.add(done), len - done));
-        if (w <= 0) break;
-        done += w;
-    }
-    io.lseek(mfd, 0, 0);
-    io.close(fd);
-    return mfd;
 }
 
-function filterProcFiles(category, kinds, filter) {
-    PROC_FILTERS.push({cat: category, kinds: kinds, filter: filter});
-    if (_procFilterInstalled) return;
-    _procFilterInstalled = true;
+function _procSwap(fd, kind, oflags) {
+    if (kind === null) return -1;
+    var filters = _procFiltersFor(kind);
+    if (filters.length === 0) return -1;
+    try {
+        return _procFilteredFd(fd, kind, filters, oflags);
+    } catch (e) {
+        return -1;
+    }
+}
+
+// [export, path argument]; fortified callers use __open_2/__openat_2.
+var PROC_OPENS = [['open', 0], ['openat', 1], ['__open_2', 0], ['__openat_2', 1]];
+
+function _installProcFilterC() {
+    if (typeof CModule === 'undefined') throw new Error('no CModule');
+    var flags = Memory.alloc(4);
+    var pid = Memory.alloc(4);
+    pid.writeS32(Process.id);
+    var swap = new NativeCallback(function (fd, kind, oflags) {
+        return _procSwap(fd, _PROC_KINDS[kind] || null, oflags);
+    }, 'int', ['int', 'int', 'int']);
+    var cm = new CModule(PROC_FILTER_C, {
+        sandroid_proc_flags: flags,
+        sandroid_own_pid: pid,
+        sandroid_proc_swap: swap
+    });
+    _procKeep.push(cm, swap);
+    _procFlags = flags;
+    _syncProcFlags();
     var seen = {};
-    // [export, path argument]; fortified callers use __open_2/__openat_2.
-    [['open', 0], ['openat', 1], ['__open_2', 0], ['__openat_2', 1]].forEach(function (e) {
+    PROC_OPENS.forEach(function (e) {
+        var addr = _libcExport(e[0]);
+        if (addr === null || seen[addr.toString()]) return;
+        seen[addr.toString()] = true;
+        Interceptor.attach(addr, cm, ptr(e[1]));
+    });
+}
+
+function _installProcFilterJs() {
+    var seen = {};
+    PROC_OPENS.forEach(function (e) {
         var addr = _libcExport(e[0]);
         if (addr === null || seen[addr.toString()]) return;
         seen[addr.toString()] = true;
@@ -353,26 +880,44 @@ function filterProcFiles(category, kinds, filter) {
             Interceptor.attach(addr, {
                 onEnter: function (args) {
                     this._kind = null;
-                    if (PROC_FILTERS.length === 0) return;
-                    try {
-                        var kind = _procKind(args[pathIndex].readUtf8String());
-                        if (kind !== null && _procFiltersFor(kind).length) this._kind = kind;
-                    } catch (e) {}
+                    if (!_anyProcFilterOn()) return;  // flags before any work
+                    var kind = _procKind(_readPath(args[pathIndex]));
+                    if (kind !== null && _procFiltersFor(kind).length) {
+                        this._kind = kind;
+                        this._oflags = args[pathIndex + 1].toInt32();
+                    }
                 },
                 onLeave: function (rv) {
                     if (this._kind === null) return;
                     var fd = rv.toInt32();
                     if (fd < 0) return;
-                    try {
-                        var mfd = _procFilteredFd(fd, this._kind, _procFiltersFor(this._kind));
-                        if (mfd >= 0) rv.replace(ptr(mfd));
-                    } catch (e) {}
+                    var mfd = _procSwap(fd, this._kind, this._oflags);
+                    if (mfd >= 0) rv.replace(ptr(mfd));
                 }
             });
-        } catch (e) {
-            send({type: 'debug', hook: 'proc-filter:' + e[0], error: e.message});
+        } catch (err) {
+            send({type: 'debug', hook: 'proc-filter:' + e[0], error: err.message});
         }
     });
+}
+
+function filterProcFiles(category, kinds, line) {
+    PROC_FILTERS.push({cat: category, kinds: kinds, line: line});
+    if (_procFilterInstalled) {
+        _syncProcFlags();
+        return;
+    }
+    _procFilterInstalled = true;
+    FLAG_LISTENERS.push(_syncProcFlags);
+    try {
+        _installProcFilterC();
+        PROC_FILTER_MODE = 'cmodule';
+    } catch (e) {
+        PROC_FILTER_MODE = 'js';
+        send({type: 'info', hook: 'proc-filter:js-fallback', error: '' + e});
+        _installProcFilterJs();
+    }
+    send({type: 'info', hook: 'proc-filter:' + PROC_FILTER_MODE});
 }
 
 // Frida's traces in /proc: maps/smaps entries of its agent and thread names.
@@ -385,31 +930,34 @@ function _hasFridaToken(line) {
     return false;
 }
 
-function hideFridaInProc(text, kind) {
-    var lines = text.split('\n');
+// Line filter (null drops the line). status: keep the Name: line (a status
+// without one is a tell) and rename the thread; smaps: drop whole entries (a
+// header line plus its attribute lines); maps: drop the line.
+function hideFridaLine(line, kind, state) {
     if (kind === 'status') {
-        // Keep the line (a status without Name: is a tell), rename the thread.
-        return lines.map(function (l) {
-            return (l.indexOf('Name:') === 0 && _hasFridaToken(l)) ? 'Name:\tThread-2' : l;
-        }).join('\n');
+        return (line.indexOf('Name:') === 0 && _hasFridaToken(line)) ? 'Name:\tThread-2' : line;
     }
     if (kind === 'smaps') {
-        // Drop whole entries: a header line plus its attribute lines.
-        var out = [];
-        var skip = false;
-        lines.forEach(function (l) {
-            if (/^[0-9a-f]+-[0-9a-f]+ /.test(l)) skip = _hasFridaToken(l);
-            if (!skip) out.push(l);
-        });
-        return out.join('\n');
+        if (/^[0-9a-f]+-[0-9a-f]+ /.test(line)) state.fridaSkip = _hasFridaToken(line);
+        return state.fridaSkip ? null : line;
     }
-    return lines.filter(function (l) { return !_hasFridaToken(l); }).join('\n');
+    return _hasFridaToken(line) ? null : line;
 }
 
-function zeroTracerPid(text) {
-    return text.replace(/TracerPid:[ \t]*\d+/g, 'TracerPid:\t0');
+function zeroTracerPidLine(line) {
+    return /^TracerPid:[ \t]*\d+$/.test(line) ? 'TracerPid:\t0' : line;
 }
 """
+
+_PREAMBLE_HELPERS_JS = (
+    _PREAMBLE_HEAD_JS
+    + "var PATH_HIDER_C = "
+    + json.dumps(_PATH_HIDER_C)
+    + ";\nvar PROC_FILTER_C = "
+    + json.dumps(_PROC_FILTER_C)
+    + ";\n"
+    + _PREAMBLE_TAIL_JS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +1095,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
 // open/openat filter in the preamble -- no libc read hook).
 (function () {
     try {
-        filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaInProc);
+        filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaLine);
         send({type: 'info', hook: 'frida-bypass:proc-filter'});
     } catch (e) {
         send({type: 'debug', hook: 'frida-bypass:proc-filter', error: e.message});
@@ -559,6 +1107,8 @@ _FRIDA_DETECTION_SCRIPT = r"""
         if (strstr) {
             Interceptor.attach(strstr, {
                 onEnter: function (args) {
+                    this._block = false;
+                    if (!FLAGS.frida) return;  // flag before any work
                     try {
                         var needle = args[1].readUtf8String();
                         this._block = needle && (
@@ -755,7 +1305,7 @@ function _looksLikeRootPath(s) {
 // on, so this never throttles a Hermes app at boot. We deliberately do NOT
 // hook open/openat (far too hot — fopen/access cover RootBeer's primitives).
 try {
-    hidePaths('root', function (path) { return _looksLikeRootPath(path); });
+    hidePaths('root', function (path) { return _looksLikeRootPath(path); }, 1);
     send({type: 'info', hook: 'root-bypass:access/faccessat/fopen'});
 } catch (e) {
     send({type: 'debug', hook: 'root-bypass:path-hider', error: e.message});
@@ -1113,7 +1663,7 @@ _DEBUG_DETECTION_SCRIPT = r"""
 // ptrace-based debugger checks pass (shared open/openat filter in the
 // preamble -- no libc read hook).
 try {
-    filterProcFiles('debug', ['status'], zeroTracerPid);
+    filterProcFiles('debug', ['status'], zeroTracerPidLine);
     send({type: 'info', hook: 'debug-bypass:tracerpid-filter'});
 } catch (e) {
     send({type: 'debug', hook: 'debug-bypass:tracerpid-filter', error: e.message});
@@ -1815,7 +2365,7 @@ function _emuInstall() {
         try {
             hidePaths('emulator', function (path, returnAddress) {
                 return _isEmuPath(path) && _isAppCaller(returnAddress);
-            });
+            }, 2);
         } catch (e) {
             send({type: 'debug', hook: 'emulator-bypass:path-hider', error: e.message});
         }
