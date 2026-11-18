@@ -45,6 +45,62 @@ except ImportError:
 logger = getLogger(__name__)
 
 
+def _insight_counts(analysis_results: dict) -> dict[str, int]:
+    """Count permissions/components in a Dexray Insight result dict.
+
+    Insight (1.0.0.1 and 2.0.0 alike) nests them under ``apk_overview``:
+    ``apk_overview.permissions.permissions`` (a list inside a dict) and
+    ``apk_overview.components.{activities,services,receivers}``. Flat
+    top-level lists (older shapes) are still honoured.
+
+    Args:
+        analysis_results: Insight's main result dict.
+
+    Returns:
+        ``{"permissions": n, "activities": n, "services": n, "receivers": n}``.
+    """
+    overview = analysis_results.get("apk_overview") or {}
+    components = overview.get("components") or {}
+    permissions = overview.get("permissions")
+    if isinstance(permissions, dict):
+        permissions = permissions.get("permissions")
+    counts = {"permissions": permissions}
+    for key in ("activities", "services", "receivers"):
+        counts[key] = components.get(key) if isinstance(components, dict) else None
+    result = {}
+    for key, value in counts.items():
+        if not value:
+            value = analysis_results.get(key)
+        result[key] = len(value) if isinstance(value, (list, tuple, dict)) else 0
+    return result
+
+
+def _insight_version() -> str | None:
+    """Installed Dexray Insight version, if known."""
+    try:
+        from importlib import metadata
+
+        return metadata.version("dexray-insight")
+    except Exception:
+        return None
+
+
+def _insight_supports_cache_dir() -> bool:
+    """True for Insight >= 2.0.0 (configurable analysis cache).
+
+    Feature-detected (``Configuration.DEFAULT_CONFIG["caching"]`` plus the
+    ``start_apk_static_analysis_new`` entry point) so 1.0.0.1 keeps using the
+    legacy call unchanged.
+    """
+    configuration = getattr(asam, "Configuration", None)
+    defaults = getattr(configuration, "DEFAULT_CONFIG", None)
+    return (
+        hasattr(asam, "start_apk_static_analysis_new")
+        and isinstance(defaults, dict)
+        and "caching" in defaults
+    )
+
+
 class StaticAnalysis(DataGatherBase):
     """Handles static analysis of APK files using dexray-insight (formerly ASAM).
 
@@ -79,6 +135,8 @@ class StaticAnalysis(DataGatherBase):
         self._analysis_config = {
             "run_security_analysis": True,
             "verbose_output": False,
+            # Per-run "don't cache" switch for the shared APK/Insight cache.
+            "use_cache": True,
         }
         self._output_files = []
 
@@ -219,7 +277,7 @@ class StaticAnalysis(DataGatherBase):
             if config is None:
                 logger.info("Dexray-insight configuration cancelled")
                 return False
-            self._analysis_config = config
+            self._analysis_config = {**self._analysis_config, **config}
 
         # Route to appropriate analysis method
         if self._apk_path:
@@ -263,7 +321,12 @@ class StaticAnalysis(DataGatherBase):
         logger.info("Running dexray-insight static analysis. This might take a while.")
 
         return self._run_dexray_analysis(
-            str(apk_file), apk_name, insight_dir, start_time, cleanup_apk=False
+            str(apk_file),
+            apk_name,
+            insight_dir,
+            start_time,
+            cleanup_apk=False,
+            other_split_sha256s=[],
         )
 
     def _analyze_device_apk(self, start_time: float) -> bool:
@@ -301,8 +364,19 @@ class StaticAnalysis(DataGatherBase):
             }
             return False
 
-        # Parse APK path (format: "package:/path/to/app.apk")
-        device_apk_path = apk_path[8:-1]
+        # Parse APK path(s) (one "package:/path/to/x.apk" line per split;
+        # base.apk is analysed, the other splits only feed the cache key).
+        from sandroid.services.app_info_service import parse_pm_path_output
+
+        device_paths = parse_pm_path_output(apk_path)
+        if not device_paths:
+            logger.warning(f"No APK path for {apk_name}")
+            self.last_results = {"error": "No APK path found", "app_name": apk_name}
+            return False
+        device_apk_path = next(
+            (p for p in device_paths if p.endswith("/base.apk")), device_paths[0]
+        )
+        other_splits = [p for p in device_paths if p != device_apk_path]
         local_apk_path = f"{insight_dir}{apk_name}.apk"
 
         logger.debug(
@@ -336,8 +410,45 @@ class StaticAnalysis(DataGatherBase):
             return False
 
         return self._run_dexray_analysis(
-            local_apk_path, apk_name, insight_dir, start_time, cleanup_apk=True
+            local_apk_path,
+            apk_name,
+            insight_dir,
+            start_time,
+            cleanup_apk=True,
+            other_split_sha256s=(
+                self._remote_split_hashes(other_splits)
+                if self._analysis_config.get("use_cache", True)
+                else None
+            ),
         )
+
+    def _remote_split_hashes(self, device_paths: list[str]) -> list[str] | None:
+        """sha256 of the non-base splits, hashed on the device.
+
+        Returns:
+            The hashes (empty for a single-APK app), or ``None`` when any
+            split could not be hashed (the run is then not recorded in the
+            APK cache, whose key covers every split).
+        """
+        if not device_paths:
+            return []
+        try:
+            import shlex
+
+            from sandroid.core.adb_utils import device_shell_command
+            from sandroid.services.app_info_service import parse_sha256sum_output
+
+            stdout, _stderr = self._send_adb_command(
+                device_shell_command(
+                    "sha256sum " + " ".join(shlex.quote(p) for p in device_paths)
+                )
+            )
+            hashes = parse_sha256sum_output(stdout)
+            if all(p in hashes for p in device_paths):
+                return [hashes[p] for p in device_paths]
+        except Exception as e:
+            logger.debug(f"Hashing APK splits on device failed: {e}")
+        return None
 
     def _run_dexray_analysis(
         self,
@@ -346,6 +457,7 @@ class StaticAnalysis(DataGatherBase):
         insight_dir: str,
         start_time: float,
         cleanup_apk: bool = False,
+        other_split_sha256s: list[str] | None = None,
     ) -> bool:
         """Run dexray-insight analysis on an APK file.
 
@@ -357,24 +469,15 @@ class StaticAnalysis(DataGatherBase):
             insight_dir: Directory where result files should be stored
             start_time: Analysis start time for duration tracking
             cleanup_apk: If True, delete the APK file after analysis (for pulled APKs)
+            other_split_sha256s: sha256 of the app's other splits (``[]`` for a
+                single APK); ``None`` skips recording the run in the APK cache.
 
         Returns:
             True if analysis completed, False if failed
         """
         try:
-            # Use dexray-insight API with configuration
-            results, result_file_name, security_result_file_name = (
-                asam.start_apk_static_analysis(
-                    apk_file_path=apk_file_path,
-                    do_signature_check=False,
-                    apk_to_diff=None,
-                    print_results_to_terminal=True,
-                    is_verbose=self._analysis_config.get("verbose_output", False),
-                    do_sec_analysis=self._analysis_config.get(
-                        "run_security_analysis", True
-                    ),
-                    exclude_net_libs=None,
-                )
+            results, result_file_name, security_result_file_name = self._start_insight(
+                apk_file_path
             )
 
             if results is None:
@@ -399,10 +502,18 @@ class StaticAnalysis(DataGatherBase):
                     security_result_file_name = dest_path
                     logger.debug(f"Moved security result file to {dest_path}")
 
-            # Convert results to dictionary for compatibility
+            # Convert results to dictionary for compatibility. Insight 2.0.0
+            # returns a plain ``{"main": ..., "security": ...}`` dict on a
+            # full-hit cache re-run instead of a results object.
+            if isinstance(results, dict):
+                analysis_results = results.get("main", results)
+                json_output = json.dumps(analysis_results, indent=4, default=str)
+            else:
+                analysis_results = results.to_dict()
+                json_output = results.to_json()
             self.last_results = {
-                "analysis_results": results.to_dict(),
-                "json_output": results.to_json(),
+                "analysis_results": analysis_results,
+                "json_output": json_output,
                 "app_name": apk_name,
                 "result_files": {
                     "main_result": result_file_name,
@@ -423,6 +534,15 @@ class StaticAnalysis(DataGatherBase):
             )
 
             logger.info(f"Static analysis completed successfully for {apk_name}")
+
+            if other_split_sha256s is not None:
+                self._record_in_apk_cache(
+                    apk_file_path,
+                    other_split_sha256s,
+                    analysis_results,
+                    result_file_name,
+                    security_result_file_name,
+                )
 
             # Calculate analysis duration
             duration = time.time() - start_time
@@ -447,6 +567,88 @@ class StaticAnalysis(DataGatherBase):
                 except OSError as e:
                     logger.warning(f"Could not remove APK file: {e}")
 
+    def _apk_cache(self):
+        """The shared APK cache, honouring the per-run ``use_cache`` switch."""
+        from sandroid.services.app_info_service import ApkCache
+
+        return ApkCache(enabled=self._analysis_config.get("use_cache", True))
+
+    def _start_insight(self, apk_file_path: str):
+        """Call Dexray Insight, handing 2.0.0 the shared cache dir.
+
+        1.0.0.1 has no analysis cache: it gets the legacy call unchanged.
+
+        Returns:
+            Insight's ``(results, result_file_name, security_result_file_name)``.
+        """
+        verbose = self._analysis_config.get("verbose_output", False)
+        do_sec = self._analysis_config.get("run_security_analysis", True)
+        if _insight_supports_cache_dir():
+            cache = self._apk_cache()
+            caching = {"enabled": cache.enabled}
+            if cache.enabled:
+                cache.insight_dir.mkdir(parents=True, exist_ok=True)
+                caching["cache_dir"] = str(cache.insight_dir)
+            # Same config the legacy wrapper builds, plus the cache section.
+            config = asam.Configuration(
+                config_dict={
+                    "modules": {
+                        "signature_detection": {"enabled": False},
+                        "apk_diffing": {"enabled": False},
+                    },
+                    "security": {"enable_owasp_assessment": do_sec},
+                    "logging": {"level": "DEBUG" if verbose else "INFO"},
+                    "caching": caching,
+                }
+            )
+            return asam.start_apk_static_analysis_new(
+                apk_file_path, config, print_results_to_terminal=True, verbose=verbose
+            )
+        return asam.start_apk_static_analysis(
+            apk_file_path=apk_file_path,
+            do_signature_check=False,
+            apk_to_diff=None,
+            print_results_to_terminal=True,
+            is_verbose=verbose,
+            do_sec_analysis=do_sec,
+            exclude_net_libs=None,
+        )
+
+    def _record_in_apk_cache(
+        self,
+        apk_file_path: str,
+        other_split_sha256s: list[str],
+        analysis_results: dict,
+        result_file: str | None,
+        security_result_file: str | None,
+    ) -> None:
+        """Record this run in the APK cache's meta.json (best effort)."""
+        try:
+            from sandroid.services.app_info_service import (
+                record_insight_result,
+                sha256_file,
+            )
+
+            cache = self._apk_cache()
+            if not cache.enabled:
+                return
+            key = record_insight_result(
+                [sha256_file(apk_file_path), *other_split_sha256s],
+                analysis_results if isinstance(analysis_results, dict) else {},
+                result_file=result_file or None,
+                security_result_file=security_result_file or None,
+                insight_version=_insight_version(),
+                insight_cache_dir=(
+                    str(cache.insight_dir) if _insight_supports_cache_dir() else None
+                ),
+                package=self.last_analysed_app,
+                cache=cache,
+            )
+            if key:
+                logger.debug(f"Recorded Insight result in APK cache entry {key}")
+        except Exception as e:
+            logger.debug(f"Recording Insight result in APK cache failed: {e}")
+
     def _publish_analysis_events(self, duration: float) -> None:
         """Publish events for analysis findings.
 
@@ -455,45 +657,15 @@ class StaticAnalysis(DataGatherBase):
         """
         analysis_data = self.last_results.get("analysis_results", {})
         if isinstance(analysis_data, dict):
-            # Report permissions found
-            permissions = analysis_data.get("permissions", [])
-            if permissions:
-                TaskOutput(
-                    task_name="static_analysis",
-                    message=f"Found {len(permissions)} permissions",
-                    level="info",
-                    source="static_analysis",
-                ).publish()
-
-            # Report activities found
-            activities = analysis_data.get("activities", [])
-            if activities:
-                TaskOutput(
-                    task_name="static_analysis",
-                    message=f"Found {len(activities)} activities",
-                    level="info",
-                    source="static_analysis",
-                ).publish()
-
-            # Report services found
-            services = analysis_data.get("services", [])
-            if services:
-                TaskOutput(
-                    task_name="static_analysis",
-                    message=f"Found {len(services)} services",
-                    level="info",
-                    source="static_analysis",
-                ).publish()
-
-            # Report receivers found
-            receivers = analysis_data.get("receivers", [])
-            if receivers:
-                TaskOutput(
-                    task_name="static_analysis",
-                    message=f"Found {len(receivers)} receivers",
-                    level="info",
-                    source="static_analysis",
-                ).publish()
+            # Report permissions/components found (nested under apk_overview)
+            for key, count in _insight_counts(analysis_data).items():
+                if count:
+                    TaskOutput(
+                        task_name="static_analysis",
+                        message=f"Found {count} {key}",
+                        level="info",
+                        source="static_analysis",
+                    ).publish()
 
         # Publish analysis completion event
         AnalysisCompleted(

@@ -187,6 +187,10 @@ class PathConfig(BaseModel):
         default=Path("~/.cache/sandroid/").expanduser(),
         description="Directory for cache files",
     )
+    apk_cache_path: Path = Field(
+        default=Path("~/.cache/sandroid/apk_cache/").expanduser(),
+        description="Shared APK static-facts cache (may be a team share)",
+    )
 
     @validator("*", pre=True)
     def expand_user_path(cls, v):

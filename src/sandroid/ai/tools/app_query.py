@@ -1,75 +1,39 @@
 """Real, ADB-backed app-query tools for the Sandroid AI chat.
 
-Every tool here dispatches to a genuinely existing :class:`~sandroid.core.adb.Adb`
-classmethod (or a thin new parser over its raw ``dumpsys package`` output) --
-no ``"note": "SAMPLE DATA"`` markers, this is real device data.
+Thin wrappers: the logic lives in :mod:`sandroid.services.app_info_service`
+(shared with the App lens, which must never import from ``ai``). This module
+only adds tool-input handling (package-name resolution/validation, string
+boolean coercion) and maps service errors to :class:`ToolExecutionError`.
 
 Importing this module registers all six tools into the
 :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton as a side effect
 (see the ``@sandroid_tool`` decorator). All tools in this module are
 ``RiskTier.READ_ONLY`` and ``category="app_query"``.
 
-``list_exported_components`` is the one exception to "thin parser over raw
-``dumpsys`` output": real ``dumpsys package <pkg>`` output does not contain
-exported/permission/intent-filter data at all (verified against a live
-emulator -- see :mod:`sandroid.services.component_info_parser`'s module
-docstring for the full story), so that tool instead pulls the app's real
-APK(s) off the device and decodes the manifest locally via ``androguard``.
+``list_exported_components`` pulls the app's real APK(s) and decodes the
+manifest via ``androguard``: ``dumpsys package <pkg>`` carries no
+exported/permission/intent-filter data (see
+:mod:`sandroid.services.component_info_parser`).
 """
 
 import logging
-import os
-import shlex
-import subprocess
-import tempfile
 from typing import Any
 
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.ai.tools._shared import (
     PACKAGE_NAME_PARAM,
-    parse_pm_path_output,
     resolve_package_name,
     validate_package_name,
 )
 from sandroid.ai.tools.registry import RiskTier, sandroid_tool
 from sandroid.core.adb import Adb
-from sandroid.services.component_info_parser import (
-    merge_component_info,
-    parse_component_info,
-    parse_extended_package_info,
-)
+from sandroid.services import app_info_service
 
 logger = logging.getLogger(__name__)
 
-# androguard is a real dependency here (declared directly in the
-# `static-analysis` extra, and already a transitive dependency of
-# `dexray-insight`), but stays optional at runtime -- mirrors
-# `sandroid.analysis.static_analysis`'s handling of `dexray_insight` itself,
-# so a `pip install sandroid` without extras doesn't break this whole module
-# (all six tools share this import) just because it can't enumerate exported
-# components.
-try:
-    from androguard.core.apk import APK
-    from androguard.util import set_log as _set_androguard_log
-    from lxml import etree
-
-    try:
-        # androguard's own default loguru sink is DEBUG-level and dumps
-        # megabytes of AXML-parsing internals per APK loaded -- silence it.
-        # Guarded because loguru raises if some other import path already
-        # reconfigured the default sink first.
-        _set_androguard_log("ERROR")
-    except Exception:
-        pass
-except ImportError:  # pragma: no cover - exercised via ANDROGUARD_AVAILABLE
-    APK = None
-    etree = None
-
-# `Adb.send_adb_command`'s blanket 30s timeout is too short for pulling a
-# real installed APK -- verified on a live emulator: WhatsApp's base.apk
-# alone (139MB) took ~52s to pull. Use the streaming Popen variant with this
-# much more generous timeout instead, just for the pull step.
-_APK_PULL_TIMEOUT_SECONDS = 180
+# androguard availability flag (``None`` when the static-analysis extra is
+# missing); tests patch it to simulate the missing dependency.
+APK = app_info_service.androguard_apk_class()
 
 
 @sandroid_tool(
@@ -153,31 +117,22 @@ def is_package_installed(package_name: str) -> dict[str, bool]:
 def list_installed_packages(include_system: bool = False) -> dict[str, Any]:
     """List installed packages, defaulting to user-installed only.
 
-    Real integration point: :meth:`sandroid.core.adb.Adb.get_installed_packages`.
-    Deliberately defaults to ``user_only=True`` (opt-in ``include_system``,
-    never the other way round) since the underlying call is N+1 ADB round
-    trips (one ``dumpsys package`` per package).
+    Delegates to :func:`sandroid.services.app_info_service.list_installed_packages`
+    (``Adb.get_installed_packages``; N+1 adb round trips, hence opt-in
+    ``include_system``).
 
     Args:
-        include_system: Whether to also include system packages. Tool-call
-            arguments arrive as whatever ``json.loads`` produced from the
-            model's raw JSON text with no schema validation in between (see
-            ``ToolRegistry.dispatch``), so a model that emits a JSON string
-            (``"false"``) instead of a real JSON boolean for this
-            ``"type": "boolean"`` parameter is a real, observed failure mode
-            -- verified against a live device: ``not "false"`` is ``False``
-            in Python (any non-empty string is truthy), which would silently
-            *include* system packages while the caller asked to exclude
-            them. Coerce the common string spellings defensively rather than
-            let that invert silently.
+        include_system: Whether to also include system packages. Arguments
+            arrive as whatever ``json.loads`` produced, so a model emitting
+            the string ``"false"`` is a real, observed failure mode (``not
+            "false"`` is ``False``); the common string spellings are coerced.
 
     Returns:
-        ``{"packages": [...], "count": len(...)}`` -- ``packages`` is the raw
-        list of dicts returned by ``Adb.get_installed_packages``.
+        ``{"packages": [...], "count": len(...)}``.
     """
     if isinstance(include_system, str):
         include_system = include_system.strip().lower() in ("true", "1", "yes")
-    packages = Adb.get_installed_packages(user_only=not include_system)
+    packages = app_info_service.list_installed_packages(include_system=include_system)
     return {"packages": packages, "count": len(packages)}
 
 
@@ -199,22 +154,19 @@ def list_installed_packages(include_system: bool = False) -> dict[str, Any]:
 def get_package_pid(package_name: str | None = None) -> dict[str, Any]:
     """Look up a package's running PID, without the Frida enumeration fallback.
 
-    Real integration point: :meth:`sandroid.core.adb.Adb.get_pid_for_package_name`.
-    Always calls it with ``use_frida_fallback=False`` explicitly -- the
-    default (``True``) spawns Frida device enumeration, which is heavy and
-    unsafe to trigger cold from the chat worker thread.
+    Delegates to :func:`sandroid.services.app_info_service.get_package_pid`
+    (always ``use_frida_fallback=False``: Frida enumeration is heavy and
+    unsafe to trigger cold from the chat worker thread).
 
     Args:
-        package_name: Fully qualified package name, or ``None`` to resolve
-            the current spotlight app via
-            :func:`sandroid.ai.tools._shared.resolve_package_name`.
+        package_name: Fully qualified package name, or ``None`` for the
+            current spotlight app.
 
     Returns:
         ``{"package_name": pkg, "pid": pid_or_none}``.
     """
     pkg = resolve_package_name(package_name)
-    pid = Adb.get_pid_for_package_name(pkg, use_frida_fallback=False)
-    return {"package_name": pkg, "pid": pid}
+    return {"package_name": pkg, "pid": app_info_service.get_package_pid(pkg)}
 
 
 @sandroid_tool(
@@ -236,59 +188,28 @@ def get_package_pid(package_name: str | None = None) -> dict[str, Any]:
 def get_package_details(package_name: str | None = None) -> dict[str, Any]:
     """Return extended package info parsed from ``dumpsys package <pkg>``.
 
-    Real integration point: ``Adb.send_adb_command`` +
-    :func:`sandroid.services.component_info_parser.parse_extended_package_info`.
+    Delegates to :func:`sandroid.services.app_info_service.get_package_details`.
 
     Args:
-        package_name: Fully qualified package name, or ``None`` to resolve
-            the current spotlight app.
+        package_name: Fully qualified package name, or ``None`` for the
+            current spotlight app.
 
     Returns:
         The parser's field dict (``version_name``, ``version_code``,
         ``target_sdk``, ``min_sdk``, ``apk_path``, ``data_dir``,
         ``install_date``, ``uid``, ``requested_permissions``,
-        ``install_source``, ``signing_info``) merged with
-        ``{"package_name": pkg}``.
+        ``install_source``, ``signing_info``) plus ``package_name``.
     """
-    pkg = resolve_package_name(package_name)
-    stdout, _stderr = Adb.send_adb_command(f"shell dumpsys package {shlex.quote(pkg)}")
-    details = parse_extended_package_info(stdout or "")
-    return {**details, "package_name": pkg}
+    return app_info_service.get_package_details(resolve_package_name(package_name))
 
 
 def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
-    """Pull *pkg*'s real APK(s) off the device and parse each one's manifest.
-
-    Real integration point: ``Adb.send_adb_command`` for both ``pm path``
-    and ``pull``, then ``androguard.core.apk.APK`` to decode
-    ``AndroidManifest.xml`` (and read the effective ``targetSdkVersion``),
-    then :func:`sandroid.services.component_info_parser.parse_component_info`
-    per split. This is the fix for the confirmed bug: real
-    ``dumpsys package <pkg>`` output has no exported/permission/intent-filter
-    data at all, so that can no longer be the data source -- see
-    :mod:`sandroid.services.component_info_parser`'s module docstring.
-
-    Splits are pulled to a temporary directory that is cleaned up
-    unconditionally. A split that fails to pull or fails to parse (corrupt
-    transfer, resource-only split with no manifest) is skipped with a
-    logged warning rather than aborting the whole enumeration -- one bad
-    split shouldn't hide every other component.
-
-    Args:
-        pkg: Fully qualified package name, already resolved.
-
-    Returns:
-        One :func:`parse_component_info` result per successfully parsed
-        split (``base.apk`` first, matching ``pm path``'s own ordering --
-        verified on a real device). Empty if the package has no APK paths
-        (e.g. not installed).
+    """Pull *pkg*'s APK(s) and parse each manifest (see the service).
 
     Raises:
-        ToolExecutionError: ``androguard`` is not installed in this
-            environment (the ``sandroid[static-analysis]`` extra was not
-            installed) -- raised rather than silently returning an empty
-            component list, since that would look exactly like the
-            false-negative bug this replaces.
+        ToolExecutionError: ``androguard`` is not installed -- raised rather
+            than returning an empty list, which would look exactly like
+            "no exported components".
     """
     if APK is None:
         raise ToolExecutionError(
@@ -296,59 +217,10 @@ def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
             "(install the 'sandroid[static-analysis]' extra) -- it is not "
             "available in this environment"
         )
-
-    stdout, _stderr = Adb.send_adb_command(f"shell pm path {shlex.quote(pkg)}")
-    device_paths = parse_pm_path_output(stdout)
-    if not device_paths:
-        return []
-
-    infos: list[dict[str, Any]] = []
-    with tempfile.TemporaryDirectory(prefix="sandroid_component_info_") as tmp_dir:
-        for index, device_path in enumerate(device_paths):
-            local_path = os.path.join(tmp_dir, f"split_{index}.apk")
-            process = Adb.send_adb_command_popen(
-                f"pull {shlex.quote(device_path)} {shlex.quote(local_path)}"
-            )
-            try:
-                _pull_stdout, pull_stderr = process.communicate(
-                    timeout=_APK_PULL_TIMEOUT_SECONDS
-                )
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.communicate()
-                logger.warning(
-                    "list_exported_components: pulling %s timed out after %ss, "
-                    "skipping",
-                    device_path,
-                    _APK_PULL_TIMEOUT_SECONDS,
-                )
-                continue
-            if not os.path.exists(local_path):
-                logger.warning(
-                    "list_exported_components: failed to pull %s (%s), skipping",
-                    device_path,
-                    pull_stderr,
-                )
-                continue
-
-            try:
-                apk = APK(local_path)
-                manifest_xml = etree.tostring(apk.get_android_manifest_xml()).decode(
-                    "utf-8"
-                )
-                target_sdk = apk.get_effective_target_sdk_version()
-            except Exception as exc:
-                logger.warning(
-                    "list_exported_components: failed to parse manifest from "
-                    "%s (%s), skipping",
-                    device_path,
-                    exc,
-                )
-                continue
-
-            infos.append(parse_component_info(manifest_xml, target_sdk))
-
-    return infos
+    try:
+        return app_info_service.pull_and_parse_manifests(pkg)
+    except app_info_service.AndroguardUnavailableError as exc:
+        raise ToolExecutionError(str(exc)) from exc
 
 
 @sandroid_tool(
@@ -370,44 +242,21 @@ def _pull_and_parse_manifests(pkg: str) -> list[dict[str, Any]]:
 def list_exported_components(package_name: str | None = None) -> dict[str, Any]:
     """Enumerate exported components parsed from the app's real manifest.
 
-    Real integration point: :func:`_pull_and_parse_manifests` (``pm path`` +
-    ``pull`` + ``androguard``) +
-    :func:`sandroid.services.component_info_parser.merge_component_info`.
+    Delegates to :func:`_pull_and_parse_manifests` +
+    :func:`sandroid.services.app_info_service.summarize_exported_components`.
 
     Args:
-        package_name: Fully qualified package name, or ``None`` to resolve
-            the current spotlight app.
+        package_name: Fully qualified package name, or ``None`` for the
+            current spotlight app.
 
     Returns:
-        ``{"package_name": pkg, "components": {...}, "exported_without_permission_count": n}``.
-        ``components`` is passed straight through from
-        ``merge_component_info``. The count covers every component (across
-        all four types) that is ``exported`` and has no guarding permission:
-        for activities/services/receivers that means ``permission is None``;
-        for providers (which have no single ``permission`` field) it means
-        both ``read_permission`` and ``write_permission`` are ``None``.
+        ``{"package_name": pkg, "components": {...},
+        "exported_without_permission_count": n}`` -- the count covers every
+        exported component with no guarding permission (providers: neither
+        read nor write permission).
     """
     pkg = resolve_package_name(package_name)
-    infos = _pull_and_parse_manifests(pkg)
-    components = merge_component_info(infos)["components"]
-
-    exported_without_permission_count = 0
-    for component_list in components.values():
-        for component in component_list:
-            if not component.get("exported"):
-                continue
-            if "permission" in component:
-                is_guarded = component.get("permission") is not None
-            else:
-                is_guarded = (
-                    component.get("read_permission") is not None
-                    or component.get("write_permission") is not None
-                )
-            if not is_guarded:
-                exported_without_permission_count += 1
-
-    return {
-        "package_name": pkg,
-        "components": components,
-        "exported_without_permission_count": exported_without_permission_count,
-    }
+    summary = app_info_service.summarize_exported_components(
+        _pull_and_parse_manifests(pkg)
+    )
+    return {"package_name": pkg, **summary}
