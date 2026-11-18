@@ -63,6 +63,11 @@ TEXT_DIFF_MAX = 4 * 1024 * 1024
 
 SQLITE_MAGIC = b"SQLite format 3\x00"
 SQLITE_COMPANIONS = ("-wal", "-journal")
+#: Bookkeeping tables (Android / Room / SQLite): the Content tab opens on
+#: one of these only when the database has nothing else.
+METADATA_TABLES = frozenset(
+    {"android_metadata", "room_master_table", "sqlite_sequence", "sqlite_stat1"}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1597,8 +1602,13 @@ def _preview_sqlite(preview: Preview, path: str, table: str | None, limit: int) 
             preview.tables = sqlite_tables(con)
             names = [t.name for t in preview.tables]
             if table not in names:
-                ranked = [t for t in preview.tables if t.kind == "table" and t.rows]
-                ranked.sort(key=lambda t: (-(t.rows or 0), t.name))
+                # The largest table first -- never a bookkeeping table: with
+                # one row each, android_metadata used to win on its name
+                # (E2E: Firefox's downloads DB opened on its locale row).
+                ranked = [t for t in preview.tables if t.kind == "table"]
+                ranked.sort(
+                    key=lambda t: (t.name in METADATA_TABLES, -(t.rows or 0), t.name)
+                )
                 table = ranked[0].name if ranked else (names[0] if names else None)
             preview.table = table
             if table is not None:

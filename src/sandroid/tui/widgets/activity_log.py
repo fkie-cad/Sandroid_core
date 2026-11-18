@@ -5,6 +5,7 @@ import time
 from collections import deque
 from datetime import datetime
 
+from rich.highlighter import ReprHighlighter
 from textual.message import Message
 from textual.widgets import RichLog
 
@@ -12,6 +13,22 @@ from sandroid._version import __version__
 from sandroid.core.console import SANDROID_LOGO
 from sandroid.core.enums import ViewMode
 from sandroid.tui.themes import FIXED_COLORS
+
+
+class _LogHighlighter(ReprHighlighter):
+    """Rich's repr highlighter without the path / file name colouring.
+
+    It painted every device and results path in magenta -- on the dark
+    themes that reads as red, so a normal "Pulled /data/... to ..." INFO
+    line looked like an error (E2E finding). Numbers, URLs, quoted strings
+    etc. keep their colours.
+    """
+
+    _DROP = frozenset({"repr.path", "repr.filename"})
+
+    def highlight(self, text) -> None:
+        super().highlight(text)
+        text.spans = [span for span in text.spans if span.style not in self._DROP]
 
 
 class ActivityLog(RichLog):
@@ -25,7 +42,18 @@ class ActivityLog(RichLog):
     - Other colors are pulled from the current theme
     - Every write posts :class:`ActivityLog.LineWritten` (the main screen's
       one-row log ticker mirrors it while the log drawer is closed)
+    - Lines are wrapped to the log's *current* width: RichLog renders a
+      line once, when written, and the log lives in a drawer that is hidden
+      (width 0) most of the time -- so every line written while it was
+      closed wrapped at ``min_width`` (20 columns at 200; E2E finding). The
+      last ``REFLOW_ENTRIES`` writes are kept and re-rendered whenever the
+      width changes (the drawer opens, the terminal is resized); writes
+      while it is hidden are only rendered then.
     """
+
+    #: Writes kept for re-rendering at a new width (the plain-text copy for
+    #: the clipboard keeps everything).
+    REFLOW_ENTRIES = 1000
 
     class LineWritten(Message):
         """A line was written; ``content`` is what was passed to write()."""
@@ -42,8 +70,13 @@ class ActivityLog(RichLog):
         super().__init__(
             highlight=True, markup=True, wrap=True, auto_scroll=True, **kwargs
         )
+        self.highlighter = _LogHighlighter()
         # Store plain text copies of all log lines for clipboard export
         self._plain_lines: list[str] = []
+        # (content, width, expand, shrink) of the recent writes (_reflow).
+        self._entries: deque[tuple] = deque(maxlen=self.REFLOW_ENTRIES)
+        self._rendered_width = 0
+        self._reflow_pending = False
         # (normalized text, monotonic time) of the last few log lines, for
         # dropping the same message arriving again via a second channel.
         self._recent: deque[tuple[str, float]] = deque(maxlen=24)
@@ -143,19 +176,70 @@ class ActivityLog(RichLog):
         # Store plain text version (strip Rich markup)
         plain = re.sub(r"\[/?[^\]]*\]", "", str(content))
         self._plain_lines.append(plain)
-        # Call parent write with all arguments
-        super().write(
-            content,
-            width=width,
-            expand=expand,
-            shrink=shrink,
-            scroll_end=scroll_end,
-        )
+        self._entries.append((content, width, expand, shrink))
+        width_now = self._content_width()
+        if width_now <= 0:
+            # Hidden (the closed drawer): render when it gets a width.
+            self._reflow_pending = True
+        elif self._reflow_pending or width_now != self._rendered_width:
+            self._reflow()
+        else:
+            super().write(
+                content,
+                width=width or width_now,
+                expand=expand,
+                shrink=shrink,
+                scroll_end=scroll_end,
+            )
         self.post_message(self.LineWritten(content))
+
+    def _content_width(self) -> int:
+        """The width lines wrap to now (0 while hidden or not laid out)."""
+        if not getattr(self, "_size_known", True):
+            return 0
+        try:
+            return max(0, self.scrollable_content_region.width)
+        except Exception:
+            return 0
+
+    def _reflow(self) -> None:
+        """Re-render the kept writes at the current width."""
+        width_now = self._content_width()
+        if width_now <= 0:
+            self._reflow_pending = True
+            return
+        self._reflow_pending = False
+        self._rendered_width = width_now
+        at_end = self.is_vertical_scroll_end or not self.lines
+        RichLog.clear(self)
+        for content, width, expand, shrink in self._entries:
+            RichLog.write(
+                self, content, width=width or width_now, expand=expand,
+                shrink=shrink,
+                scroll_end=False,
+            )  # fmt: skip
+        if at_end and self.auto_scroll:
+            self.scroll_end(animate=False, immediate=True)
+
+    def on_resize(self, _event) -> None:
+        # After RichLog's own handler (it marks the size known first).
+        self.call_after_refresh(self._reflow_if_needed)
+
+    def on_show(self, _event) -> None:
+        self.call_after_refresh(self._reflow_if_needed)
+
+    def _reflow_if_needed(self) -> None:
+        width_now = self._content_width()
+        if width_now > 0 and (
+            self._reflow_pending or width_now != self._rendered_width
+        ):
+            self._reflow()
 
     def clear(self) -> None:
         """Clear the log content."""
         self._plain_lines.clear()
+        self._entries.clear()
+        self._reflow_pending = False
         super().clear()
 
     def _get_theme_colors(self) -> dict:
@@ -293,12 +377,18 @@ class ActivityLog(RichLog):
     def log_task_stopped(self, task_name: str) -> None:
         """Log a task stopped event.
 
-        Uses FIXED_COLORS for consistent "stopped" recognition across themes.
+        A normal stop is not an error: muted, not red (red is for ERROR
+        lines). The same stop reported twice (task service + controller) is
+        shown once.
 
         Args:
             task_name: Name of the task
         """
-        self.write(f"[{FIXED_COLORS['stopped']} bold]<<< Stopped: {task_name}[/]")
+        line = f"<<< Stopped: {task_name}"
+        if self._is_repeat(line):
+            return
+        muted = self._get_theme_colors()["text_muted"]
+        self.write(f"[{muted} bold]{line}[/]")
 
     def _log_with_level(
         self, level_key: str, label: str, message: str, bold: bool = True

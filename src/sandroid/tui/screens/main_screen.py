@@ -13,6 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import ContentSwitcher, DataTable, OptionList, Static
 
 from sandroid.core.menu_controller import MenuController
@@ -329,6 +330,9 @@ class MainScreen(Screen):
         self._scope_label: str | None = None
         # lens id -> (title, info) for the lens frame.
         self._lens_captions: dict[str, tuple[str | None, str | None]] = {}
+        # Typing guard (see on_key): monotonic deadline, ignored text.
+        self._typing_until = 0.0
+        self._typed_ignored = ""
         logger.debug("[MAIN_SCREEN] __init__ complete")
 
     def compose(self) -> ComposeResult:
@@ -909,6 +913,170 @@ class MainScreen(Screen):
             self.query_one("#chat-input").focus()
         except Exception:
             pass
+
+    # -- focus guard + key routing ---------------------------------------------
+    #
+    # E2E finding (Files lens on Firefox): after ``B`` + a name, the since-mark
+    # view was empty for a moment; the lens hid its table while focus was
+    # still on its way there (``Widget.focus`` is deferred), Textual's
+    # ``_reset_focus`` found no visible sibling and left focus on *nothing*.
+    # The next modal close (``?`` help) then auto-focused the first focusable
+    # widget in the DOM -- the hidden App lens. From there ``/`` did nothing
+    # (no lens binding in the chain), ``A`` ran the hidden App lens's Attach,
+    # and the typed word "places" fired the global p/l/a/c/e/s commands.
+    # Three layers keep that from happening again:
+    #
+    # 1. ``_rehome_focus``: whenever focus is lost (any blur, any screen
+    #    resume) and it is on nothing, on a widget inside a hidden view, or on
+    #    the bare active lens, the active lens gets it back.
+    # 2. ``on_key`` routing: a key the focus chain does not handle but the
+    #    active lens binds runs on the lens (lens keys never fall through to a
+    #    dead end because focus wandered off).
+    # 3. Typing guard: ``/`` that finds no filter to open (the lens has none)
+    #    starts a short window in which single-letter app commands are not
+    #    run -- the word typed after it is text, not commands.
+
+    #: Seconds after an unhandled ``/`` (and after each further typed key)
+    #: during which single-letter app commands are swallowed.
+    TYPING_GUARD_SECONDS = 1.5
+
+    @property
+    def AUTO_FOCUS(self) -> str:
+        """Textual focuses this on resume when nothing has focus: the active
+        lens, never the first focusable widget of a hidden lens.
+        """
+        spec = LENS_BY_ID.get(self.active_lens)
+        return f"#{spec.widget_id}" if spec else "*"
+
+    def _focus_in_limbo(self) -> bool:
+        """True when focus is on nothing or on a widget the user cannot see
+        (inside a hidden lens / view) -- keys then reach no visible target.
+        """
+        from sandroid.tui.widgets.lens_shell import is_shown
+
+        focused = self.focused
+        return focused is None or not is_shown(focused)
+
+    def _focus_is_elsewhere_on_purpose(self) -> bool:
+        """A text field (the AI chat, a lens filter) or the side slot has
+        focus: its unhandled keys (Ctrl+L ...) must not run lens commands.
+        """
+        from textual.widgets import Input, TextArea
+
+        focused = self.focused
+        if focused is None:
+            return False
+        if isinstance(focused, Input | TextArea):
+            return True
+        slot = self._side_slot()
+        return slot is not None and slot in focused.ancestors
+
+    def _rehome_focus(self, resumed: bool = False) -> None:
+        """Give focus back to the active lens if it is in limbo (see above).
+
+        ``resumed``: after a modal closed, the bare lens itself may hold the
+        focus (``AUTO_FOCUS``); it then forwards it to its table / list.
+        """
+        try:
+            if self.app.screen is not self or not self.is_attached:
+                return  # a modal is on top: on_screen_resume runs this again
+        except Exception:
+            return
+        lens = self.lens_widget()
+        if lens is None:
+            return
+        focused = self.focused
+        if resumed and focused is lens and type(lens).focus is not Widget.focus:
+            lens.focus()
+            return
+        if self._focus_in_limbo():
+            lens.focus()
+
+    def on_descendant_blur(self, _event) -> None:
+        self.call_after_refresh(self._rehome_focus)
+
+    def on_screen_resume(self, _event) -> None:
+        self.call_after_refresh(self._rehome_focus, True)
+
+    def start_typing_guard(self) -> None:
+        """Treat the next letters as stray text, not commands (see on_key).
+
+        Also called by the guarded confirmations (Play, Quit) when a letter
+        reveals that the key which opened them was part of a typed word: the
+        rest of the word must not run app commands either.
+        """
+        import time
+
+        self._typing_until = time.monotonic() + self.TYPING_GUARD_SECONDS
+        self._typed_ignored = ""
+
+    def _lens_binding_for(self, key: str):
+        """The active lens's enabled binding for ``key`` (None if it has none)."""
+        lens = self.lens_widget()
+        if lens is None:
+            return None, None
+        for binding in lens._bindings.key_to_bindings.get(key, ()):
+            action_name = binding.action.split("(", 1)[0]
+            try:
+                if lens.check_action(action_name, ()) is False:
+                    continue
+            except Exception:
+                continue
+            return lens, binding
+        return None, None
+
+    async def on_key(self, event) -> None:
+        """Route keys whose focus target is gone; guard text typed into nothing.
+
+        Runs for every key that bubbled up from the focused widget unhandled
+        (a focused text input consumes printable keys before this), and
+        before the app's own non-priority bindings run.
+        """
+        import time
+
+        if self.app.screen is not self:
+            return
+        key = event.key
+        active = self.active_bindings.get(key)
+        limbo = self._focus_in_limbo()
+        lens, lens_binding = self._lens_binding_for(key)
+        if lens_binding is not None and (
+            limbo or (active is None and not self._focus_is_elsewhere_on_purpose())
+        ):
+            # Focus wandered off (or sits where nothing binds the key): the
+            # visible lens gets the key and focus back.
+            event.stop()
+            event.prevent_default()
+            if limbo:
+                lens.focus()
+            await self.app.run_action(lens_binding.action, lens)
+            return
+
+        now = time.monotonic()
+        single = event.character is not None and len(key) == 1 and key.isalnum()
+        if (
+            self._typing_until > now
+            and single
+            and active is not None
+            and active.node in (self, self.app)
+        ):
+            # Part of a word typed after a "/" that opened nothing.
+            event.stop()
+            event.prevent_default()
+            self._typing_until = now + self.TYPING_GUARD_SECONDS
+            self._typed_ignored += event.character or ""
+            return
+        if self._typing_until and self._typing_until <= now:
+            self._typing_until = 0.0
+            self._typed_ignored = ""
+        if key == "slash" and active is None:
+            self.start_typing_guard()
+            label = LENS_BY_ID[self.active_lens].label
+            self.app.notify(
+                f"The {label} lens has no filter — the next letters you type "
+                "are ignored, not run as commands.",
+                timeout=3,
+            )
 
     # -- log drawer + ticker --------------------------------------------------
 

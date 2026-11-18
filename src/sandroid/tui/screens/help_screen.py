@@ -4,6 +4,14 @@ This modal screen lists every feature action grouped by category together
 with its currently effective key, and lets the user rebind, reset (per row
 or all), and persist the result to the static config file. Changes are
 applied LIVE via :meth:`textual.app.App.set_keymap`.
+
+Order: the keys of the lens ``?`` was pressed in come first (the list opens
+there), then the Inspector's, then the global keys (General, lens
+navigation, main screen, the action categories), then the other lenses and
+the snapshot picker. A lens key that shadows a global key (Files ``w``/``n``/
+``O``, App ``b``, Runs ``n``) is listed with its lens meaning and marked
+"overrides global …"; the global row says which lens uses the key for
+something else -- the same key never appears twice without that context.
 """
 
 import logging
@@ -90,6 +98,19 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("Snapshot picker (S)", "sandroid.tui.widgets.snapshots_panel", "SnapshotsPanel"),
 ]
 
+#: Lens id -> the ``_PANEL_SECTIONS`` headings that belong to that lens.
+_LENS_SECTIONS: dict[str, tuple[str, ...]] = {
+    "app": ("App lens", "App lens › b bypass"),
+    "network": ("Network lens",),
+    "files": ("Files lens",),
+    "runs": ("Runs lens",),
+}
+#: Headings of the global (works everywhere) panel sections.
+_GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
+#: Main-screen bindings with this description prefix are Inspector keys
+#: (``[`` ``]`` ``{`` ``}`` ``*``): listed in the Inspector section.
+_INSPECTOR_PREFIX = "Inspector: "
+
 #: App-wide keys that no MenuController action describes (they are plain App
 #: bindings without a rebindable id). Listed first, under "General".
 _GENERAL_KEYS: list[tuple[str, str]] = [
@@ -126,6 +147,15 @@ def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
     ``Del / Backspace``), and ``<desc> 1`` .. ``<desc> N`` bound to the digit
     keys collapse to one ``<desc> 1-N`` row. Best effort: ``[]`` on errors.
     """
+    return [
+        (shown, desc) for shown, desc, _raw in _panel_binding_rows(module, cls_name)
+    ]
+
+
+def _panel_binding_rows(
+    module: str, cls_name: str
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Like :func:`_panel_bindings`, plus each row's raw binding keys."""
     import importlib
 
     try:
@@ -133,6 +163,7 @@ def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
     except Exception:
         return []
     merged: dict[str, list[str]] = {}
+    raw: dict[str, list[str]] = {}
     for entry in cls.__dict__.get("BINDINGS", []):
         if isinstance(entry, Binding):
             key, desc = entry.key, entry.description
@@ -148,14 +179,36 @@ def _panel_bindings(module: str, cls_name: str) -> list[tuple[str, str]]:
         keys = merged.setdefault(desc, [])
         if shown not in keys:
             keys.append(shown)
-    rows: list[tuple[str, str]] = []
+        raw.setdefault(desc, []).extend(k.strip() for k in key.split(","))
+    rows: list[tuple[str, str, tuple[str, ...]]] = []
     for desc, keys in merged.items():
         if desc.endswith(" #"):
             span = f"{keys[0]}-{keys[-1]}" if len(keys) > 1 else keys[0]
-            rows.append((span, f"{desc[:-2]} {span}"))
+            rows.append((span, f"{desc[:-2]} {span}", tuple(raw[desc])))
         else:
-            rows.append((" / ".join(keys), desc))
+            rows.append((" / ".join(keys), desc, tuple(raw[desc])))
     return rows
+
+
+def _cap(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _same_meaning(global_name: str, lens_desc: str) -> bool:
+    """``SSL unpinning on/off`` vs the Network lens's ``SSL unpin``: one
+    action under two labels, not a lens key overriding a global one.
+    """
+    a, b = global_name.lower(), lens_desc.lower()
+    return a.startswith(b) or b.startswith(a) or a in b
+
+
+def _current_lens(app) -> str | None:
+    """The active lens of the main screen below the help (None if unknown)."""
+    for screen in reversed(getattr(app, "screen_stack", [])):
+        lens = getattr(screen, "active_lens", None)
+        if isinstance(lens, str):
+            return lens
+    return None
 
 
 # Column widths for the aligned row layout (command / description / key) on
@@ -269,6 +322,7 @@ class HelpScreen(ModalScreen):
         name: str = None,
         id: str = None,
         classes: str = None,
+        lens: str | None = None,
     ):
         """Initialize the keybinding editor.
 
@@ -278,8 +332,15 @@ class HelpScreen(ModalScreen):
             name: Screen name.
             id: Screen ID.
             classes: CSS classes.
+            lens: Lens id whose keys lead the list (default: the main
+                screen's active lens).
         """
         super().__init__(name=name, id=id, classes=classes)
+        self._lens = lens
+        # Shadowed keys: (section heading, key display) -> the global action
+        # name it overrides; raw global key -> "Files lens: Watch" notes.
+        self._overrides: dict[tuple[str, str], str] = {}
+        self._global_notes: dict[str, list[str]] = {}
         self._controller = MenuController.get()
         # Rebindable id -> default key; populated in on_mount once the app and
         # its BINDINGS are reliably reachable.
@@ -338,6 +399,8 @@ class HelpScreen(ModalScreen):
     def on_mount(self) -> None:
         """Build the data model and option list once mounted."""
         app = self.app
+        if self._lens is None:
+            self._lens = _current_lens(app)
         self._defaults = {b.id: b.key for b in app.BINDINGS if b.id}
         cfg = getattr(app, "sandroid_config", None)
         if cfg is not None and getattr(cfg, "tui", None) is not None:
@@ -479,84 +542,169 @@ class HelpScreen(ModalScreen):
                 continue
             by_category.setdefault(action.category, []).append(action)
 
+        # -- collect: global action rows, panel sections ---------------------
+        def action_order(a: Action):
+            # The demo/main flow (Record, Play) leads, digit keys (the lenses
+            # 1-4) follow in key order; the rest alphabetical.
+            return (
+                a.name not in ("record", "play"),
+                a.name != "record",
+                not str(a.key or "").isdigit(),
+                str(a.key) if str(a.key or "").isdigit() else "",
+                a.display_name.lower(),
+            )
+
+        global_keys: dict[str, str] = dict(_GENERAL_KEYS)
+        categories: list[tuple[ActionCategory, list[tuple[Action, str]]]] = []
+        for category in _CATEGORY_ORDER:
+            actions = by_category.get(category)
+            if not actions:
+                continue
+            block = []
+            for action in sorted(actions, key=action_order):
+                rebindable = action.name in self._defaults
+                key = self._effective_key(action.name) if rebindable else action.key
+                block.append((action, key))
+                if key:
+                    global_keys.setdefault(key, action.display_name)
+            categories.append((category, block))
+
+        sections: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {}
+        for heading, module, cls_name in _PANEL_SECTIONS:
+            rows = _panel_binding_rows(module, cls_name)
+            if heading == "Main screen":
+                inspector = [r for r in rows if r[1].startswith(_INSPECTOR_PREFIX)]
+                rows = [r for r in rows if r not in inspector]
+                sections.setdefault("Inspector (while open)", []).extend(
+                    (k, _cap(d[len(_INSPECTOR_PREFIX) :]), raw)
+                    for k, d, raw in inspector
+                )
+            sections.setdefault(heading, []).extend(rows)
+
+        # A lens key that is also a global key: the lens meaning wins while
+        # the lens has focus -- say so on both rows.
+        self._overrides = {}
+        self._global_notes = {}
+        for lens_id, headings in _LENS_SECTIONS.items():
+            for heading in headings[:1]:  # the lens itself, not its chords
+                for shown, desc, raw in sections.get(heading, []):
+                    for key in raw:
+                        name = global_keys.get(key)
+                        if name is None or _same_meaning(name, desc):
+                            continue  # not global, or the same meaning
+                        self._overrides[(heading, shown)] = (
+                            f"{_format_key_display(key)} = {name}"
+                        )
+                        self._global_notes.setdefault(key, []).append(
+                            f"{heading.split()[0]}: {desc}"
+                        )
+
+        # -- emit, in order ----------------------------------------------------
         first_enabled: int | None = None
-        index = 0
-        option_list.add_option(Option("[dim]── General ──[/]", disabled=True))
-        index += 1
+        lead: int | None = None
+
+        def add(option: Option) -> int:
+            option_list.add_option(option)
+            return option_list.option_count - 1
+
+        def heading_row(text: str) -> None:
+            add(Option(f"[dim]── {text} ──[/]", disabled=True))
+
+        def panel_section(heading: str) -> int | None:
+            rows = sections.get(heading) or []
+            if not rows:
+                return None
+            heading_row(heading)
+            first = None
+            for shown, desc, _raw in rows:
+                override = self._overrides.get((heading, shown))
+                text = f"{desc} · overrides global {override}" if override else desc
+                label = self._columns(text, "", shown, colored=False)
+                color = "#e3b341" if override else "#8b949e"
+                # Enabled (so the list can scroll down to it from the
+                # keyboard) but not rebindable: no id in self._defaults.
+                index = add(
+                    Option(
+                        f"[{color}]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{shown}"
+                    )
+                )
+                first = index if first is None else first
+            return first
+
+        current = _LENS_SECTIONS.get(self._lens or "", ())
+        for heading in current:
+            index = panel_section(heading)
+            if lead is None:
+                lead = index
+        if current and lead is not None:
+            add(
+                Option(
+                    "[dim]   ↑ this lens's keys win over global ones[/]",
+                    disabled=True,
+                )
+            )
+        panel_section("Inspector (while open)")
+
+        heading_row("General")
         for key, desc in _GENERAL_KEYS:
             label = self._columns(desc, "", _format_key_display(key), colored=False)
-            option_list.add_option(
+            add(
                 Option(
                     f"[#8b949e]{label}[/]",
                     id=f"{_PANEL_PREFIX}General|{_format_key_display(key)}",
                 )
             )
-            index += 1
-        for category in _CATEGORY_ORDER:
-            actions = by_category.get(category)
-            if not actions:
-                continue
-            header = f"── {category.name.title()} ──"
-            option_list.add_option(Option(f"[dim]{header}[/]", disabled=True))
-            index += 1
-
-            # The demo/main flow (Record, Play) leads, digit keys (the lenses
-            # 1-4) follow in key order; the rest alphabetical.
-            for action in sorted(
-                actions,
-                key=lambda a: (
-                    a.name not in ("record", "play"),
-                    a.name != "record",
-                    not str(a.key or "").isdigit(),
-                    str(a.key) if str(a.key or "").isdigit() else "",
-                    a.display_name.lower(),
-                ),
-            ):
+        for heading in _GLOBAL_PANEL_SECTIONS:
+            panel_section(heading)
+        for category, block in categories:
+            heading_row(category.name.title())
+            for action, key in block:
                 rebindable = action.name in self._defaults
-                key = self._effective_key(action.name) if rebindable else action.key
                 key_display = _format_key_display(key)
                 desc = self._row_description(action)
+                name = action.display_name
+                notes = self._global_notes.get(key or "")
+                if notes:
+                    # Same key, other meaning in a lens: say so first in the
+                    # description (the detail pane has the lens meanings).
+                    lenses = ", ".join(n.split(":")[0] for n in notes)
+                    desc = f"not in {lenses} · {desc}"
                 if rebindable:
-                    label = self._columns(
-                        action.display_name, desc, key_display, colored=True
-                    )
-                    option_list.add_option(Option(label, id=action.name))
+                    label = self._columns(name, desc, key_display, colored=True)
+                    index = add(Option(label, id=action.name))
                     if first_enabled is None:
                         first_enabled = index
                 else:
-                    label = self._columns(
-                        action.display_name, desc, key_display, colored=False
-                    )
+                    label = self._columns(name, desc, key_display, colored=False)
                     # Not rebindable: dim (the detail pane says "fixed").
-                    option_list.add_option(Option(f"[dim]{label}[/]", disabled=True))
-                index += 1
+                    add(Option(f"[dim]{label}[/]", disabled=True))
 
-        shown_headings: set[str] = set()
-        for heading, module, cls_name in _PANEL_SECTIONS:
-            rows = _panel_bindings(module, cls_name)
-            if not rows:
+        shown_lens_headings = {h for hs in _LENS_SECTIONS.values() for h in hs}
+        for headings in _LENS_SECTIONS.values():
+            if headings == current:
                 continue
-            if heading not in shown_headings:
-                shown_headings.add(heading)
-                option_list.add_option(
-                    Option(f"[dim]── {heading} ──[/]", disabled=True)
-                )
-                index += 1
-            for key, desc in rows:
-                label = self._columns(desc, "", key, colored=False)
-                # Enabled (so the list can scroll down to it from the
-                # keyboard) but not rebindable: no id in self._defaults.
-                option_list.add_option(
-                    Option(f"[#8b949e]{label}[/]", id=f"{_PANEL_PREFIX}{heading}|{key}")
-                )
-                index += 1
+            for heading in headings:
+                panel_section(heading)
+        for heading, _module, _cls in _PANEL_SECTIONS:
+            if (
+                heading in shown_lens_headings
+                or heading in _GLOBAL_PANEL_SECTIONS
+                or heading in ("Inspector (while open)",)
+            ):
+                continue
+            if heading in sections:
+                panel_section(heading)
+                sections.pop(heading)  # listed once (two classes, one heading)
 
-        # Restore / set highlight to a sane enabled index.
+        # Restore / set highlight: the current lens's first key, else the
+        # first rebindable row.
         if previous is not None and 0 <= previous < option_list.option_count:
             option_list.highlighted = previous
+        elif lead is not None:
+            option_list.highlighted = lead
+            option_list.scroll_to(y=0, animate=False)
         elif first_enabled is not None:
             option_list.highlighted = first_enabled
-
         self._refresh_detail()
 
     # -- Detail pane ----------------------------------------------------------
@@ -600,6 +748,11 @@ class HelpScreen(ModalScreen):
                 else "Works only while this lens / view has focus "
                 "(1-4 or Shift+←/→ switch lenses)."
             )
+            override = self._overrides.get((heading, key))
+            if override:
+                where += (
+                    f" Overrides the global key {override} while this lens has focus."
+                )
             return (
                 f"[bold #58a6ff]{heading}[/]  [dim]·  panel key[/]\n\n"
                 f"[#c9d1d9]{where}[/]\n\n"
@@ -617,6 +770,12 @@ class HelpScreen(ModalScreen):
 
         head = f"[bold #58a6ff]{action.display_name}[/]  [dim]·  {cat}[/]"
         body = f"[#c9d1d9]{full_desc}[/]"
+        notes = self._global_notes.get(cur or "")
+        if notes:
+            body += (
+                f"\n[#e3b341]Not while these lenses have focus — the key means "
+                f"something else there: {'; '.join(notes)}.[/]"
+            )
         if rebindable:
             default = self._defaults.get(action.name)
             key_line = f"[dim]Key[/]  [bold #ff79c6]\\[{cur_disp}][/]"

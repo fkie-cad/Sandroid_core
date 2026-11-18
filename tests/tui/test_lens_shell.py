@@ -864,6 +864,8 @@ async def test_inspector_tabs_switch_while_focus_stays_in_the_lens() -> None:
         await _settle(pilot)
         ms.open_inspector(InspectorContent(title="run", tabs=tabs))
         await _settle(pilot)
+        # (No runs here: show the table -- a hidden widget never keeps focus.)
+        ms.query_one("#runs-panel").set_class(True, "-has-runs")
         table = ms.query_one("#runs-panel").query_one(DataTable)
         table.focus()
         await _settle(pilot)
@@ -1516,3 +1518,134 @@ def test_strip_keeps_the_device_proxy_while_it_cannot_be_read(monkeypatch):
     answer["v"] = (ProxyStatus.NOT_SET, None)
     bar.update_from_toolbox()
     assert bar.proxy_address == ""
+
+
+# --------------------------------------------------------------------------
+# E2E Files/Firefox: the log drawer wrapped at 20 columns, paths in red
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [(200, 50), (100, 30)])
+async def test_drawer_lines_use_the_drawer_width_and_only_errors_are_red(
+    size,
+) -> None:
+    """Lines written while the drawer was closed (width 0) wrapped at
+    ``min_width`` = 20 columns, and the repr highlighter painted paths
+    magenta (red on the dark theme); a normal stop was red too, twice.
+    """
+    from sandroid.tui.widgets import ActivityLog
+
+    app = _app()
+    async with app.run_test(size=size) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        log = ms.query_one("#activity-log", ActivityLog)
+        ms.toggle_log_drawer()  # open once (size known), then close
+        await _settle(pilot)
+        ms.toggle_log_drawer()
+        await _settle(pilot)
+        path = (
+            "/data/data/org.mozilla.firefox/cache/k3m7yjvw.default/cache2/"
+            "entries/98651ACF954B76241C3F4101CF4BC5B2C0B66362"
+        )
+        log.log_info(f"Pulled {path} to /private/tmp/results/files/{path[11:]}")
+        log.log_task_stopped("Monitor")
+        log.log_task_stopped("Monitor")  # the same stop from a second channel
+        await _settle(pilot)
+        ms.toggle_log_drawer()
+        await _settle(pilot)
+        width = log.scrollable_content_region.width
+        assert width > size[0] - 10
+        texts = ["".join(seg.text for seg in strip).rstrip() for strip in log.lines]
+        pulled = [i for i, t in enumerate(texts) if "INFO:" in t and "Pulled" in t]
+        assert pulled, texts
+        # The long line uses the drawer width (it wrapped at 20 columns).
+        stop = next(i for i, t in enumerate(texts) if "<<< Stopped" in t)
+        assert stop - pulled[0] <= (3 if size[0] >= 200 else 6)  # 20 cols: 13
+        assert max(len(t) for t in texts[pulled[0] : stop]) > 60
+        assert sum("<<< Stopped: Monitor" in t for t in texts) == 1
+        # No red / magenta on the INFO line (paths) or the normal stop.
+        red = {"#fb7185", "#ff5555", "magenta", "bright_magenta"}
+        for strip in log.lines[pulled[0] :]:
+            for seg in strip:
+                color = seg.style.color if seg.style else None
+                name = color.name if color is not None else ""
+                assert name not in red, (seg.text, name)
+        # A resize re-wraps what is already there.
+        lines_before = len(log.lines)
+        await pilot.resize_terminal(size[0] // 2, size[1])
+        await _settle(pilot, 8)
+        assert len(log.lines) > lines_before
+        # An ERROR line is still coloured.
+        log.log_error("pull failed")
+        await _settle(pilot)
+        assert any(
+            seg.style and seg.style.color and "ERROR" in seg.text
+            for seg in log.lines[-1]
+        )
+
+
+# --------------------------------------------------------------------------
+# E2E Files/Firefox: ? opens on the current lens; shadowed keys explained
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("size", [(200, 50), (100, 30)])
+async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
+    size,
+) -> None:
+    from rich.text import Text
+    from textual.widgets import OptionList
+
+    app = _app()
+    async with app.run_test(size=size) as pilot:
+        await _boot(app, pilot)
+        await pilot.press("3")
+        await _settle(pilot)
+        await pilot.press("question_mark")
+        await _settle(pilot)
+        help_screen = app.screen
+        assert type(help_screen).__name__ == "HelpScreen"
+        options = help_screen.query_one("#kb-list", OptionList)
+        rows = [
+            Text.from_markup(str(options.get_option_at_index(i).prompt)).plain
+            for i in range(options.option_count)
+        ]
+        heads = [r.strip("─ ") for r in rows if r.startswith("──")]
+        # Current lens first, then the Inspector, then the global keys, then
+        # the other lenses.
+        assert heads[0] == "Files lens"
+        assert heads[1] == "Inspector (while open)"
+        assert heads[2] == "General"
+        assert heads.index("Recording") < heads.index("App lens")
+        assert heads.index("App lens") < heads.index("Network lens")
+        assert heads.index("Network lens") < heads.index("Runs lens")
+        # The list opens on the Files lens's first key, scrolled to the top.
+        assert options.highlighted == 1
+        assert options.scroll_offset.y == 0
+        # Files w / n / O: the lens meaning, marked as overriding the global.
+        files = rows[1 : rows.index(next(r for r in rows[1:] if r.startswith("──")))]
+        watch = next(r for r in files if r.rstrip().endswith("[w]"))
+        assert watch.startswith("Watch · overrides global w = ")
+        assert "network capture" in watch.lower()
+        assert sum("overrides global" in r for r in files) == 3  # w, n, O
+        # The global rows say where the key means something else.
+        rest = rows[len(files) + 1 :]
+        capture = next(r for r in rest if r.rstrip().endswith("[w]"))
+        assert "not in Files" in capture
+        install = next(r for r in rest if r.rstrip().endswith("[n]"))
+        assert "not in Files, Runs" in install
+        # The App lens's b (bypass) is marked in its own section too.
+        app_start = rows.index(next(r for r in rows if r.startswith("── App lens ──")))
+        bypass = next(r for r in rows[app_start:] if r.rstrip().endswith("[b]"))
+        assert "overrides global" in bypass
+        # Every row fits the list.
+        width = options.scrollable_content_region.width
+        assert max(len(r) for r in rows) <= width
+        # The detail pane (wide terminals) spells the override out.
+        if size[0] >= 200:
+            options.highlighted = rows.index(watch)
+            await _settle(pilot)
+            detail = str(help_screen.query_one("#kb-detail").render())
+            assert "Overrides the global key w = " in detail
+        await pilot.press("escape")

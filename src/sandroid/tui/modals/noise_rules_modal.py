@@ -161,6 +161,23 @@ class NoiseRulesModal(ForensicModal[None]):
     def on_mount(self) -> None:
         super().on_mount()
         self._fill()
+        self._mark_focused_button()
+
+    def on_descendant_focus(self, _event) -> None:
+        self._mark_focused_button()
+
+    def on_descendant_blur(self, _event) -> None:
+        self.call_after_refresh(self._mark_focused_button)
+
+    def _mark_focused_button(self) -> None:
+        """Make the focused button stand out (E2E: the theme painted all
+        three alike, so Tab gave no visible cue). Inline styles: they beat
+        every theme's ``Button`` rules.
+        """
+        for button in self.query(".button-row Button"):
+            focused = button.has_focus
+            button.styles.text_style = "bold reverse" if focused else "none"
+            button.styles.opacity = 1.0 if focused else 0.75
 
     # -- table ---------------------------------------------------------------
 

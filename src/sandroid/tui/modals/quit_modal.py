@@ -67,6 +67,7 @@ class QuitConfirmModal(DangerModal[bool]):
         self._notes = list(notes or [])
         self._on_confirm = on_confirm
         self.quitting = False
+        self._stray = False
 
     def compose(self) -> ComposeResult:
         """Create the modal layout."""
@@ -98,6 +99,29 @@ class QuitConfirmModal(DangerModal[bool]):
         except NoMatches:
             pass
 
+    def on_key(self, event) -> None:
+        """A letter/digit other than y/n/q is stray typing: cancel the quit.
+
+        ``q`` is one key: a word typed while no text field had focus
+        ("sqlite") opened this dialog, and its Enter must not quit.
+        """
+        if self.quitting:
+            return
+        char = event.character or ""
+        if len(char) == 1 and char.isalnum() and event.key not in ("y", "n", "q"):
+            event.stop()
+            event.prevent_default()
+            if self._stray:
+                return  # the rest of the word, before the dialog is gone
+            self._stray = True
+            self.app.notify(
+                "Quit cancelled — that looked like typing.", severity="warning"
+            )
+            from .confirm_modal import start_typing_guard
+
+            start_typing_guard(self.app)
+            self._dismiss_with_refresh(False)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks."""
         if self.quitting:
@@ -118,7 +142,7 @@ class QuitConfirmModal(DangerModal[bool]):
         loop: if the app's loop is stuck the dismiss callback never runs, and
         the watchdog still tears down mitmweb / the device proxy and exits.
         """
-        if self.quitting:
+        if self.quitting or self._stray:
             return
         try:
             from sandroid.tui.controllers.quit_controller import arm_exit_watchdog

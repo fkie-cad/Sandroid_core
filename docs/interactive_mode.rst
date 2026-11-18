@@ -266,9 +266,11 @@ Sandroid's own pulls (adb's ``sync svc``) never count as activity.
   carry their UTC offset; readers ignore fields they do not know.
 - **Marks**: ``B`` drops a mark (optional name; ⏎ on an empty name keeps
   it unnamed, Esc drops none). The table then shows only the activity
-  since that mark (★ rows stay, dimmed when untouched); ``A`` toggles
-  everything / since the last mark and ``<``/``>`` step through the
-  segments. The caption names the segment, the log and the Inspector's
+  since that mark (★ rows with activity in it stay on top; the idle ★ rows
+  fold into one row, ``▸ ★ 21 watched · idle since mark 3``, that ⏎ or →
+  opens and ← folds); ``A`` toggles everything / since the last mark (4 or
+  more never-touched ★ rows fold there too) and ``<``/``>`` step through
+  the segments. The caption names the segment, the log and the Inspector's
   Events tab show the marks as separator lines.
 - **Hidden and grouped rows**: by default only OS paths (``/proc/``,
   ``/system/``, ``/data/dalvik-cache/``, ``/data/app/`` ...) and rows with

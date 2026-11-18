@@ -30,10 +30,15 @@ it advertises while it has focus (``lens_shell.Inspector.on_key``).
 mark ("bookmark"; the time is taken when the key is pressed) and asks for an
 optional name (⏎ on an empty name = unnamed, Esc = no mark). The table then
 shows only what happened since that mark: counts/ops per segment, rows
-without activity in the segment hidden, ★ rows stay pinned (dimmed when
-untouched). ``A`` toggles everything / since the last mark; ``<``/``>`` step
-through the segments (before mark 1, mark 1 → 2, ...). The caption names
-the segment ("since mark 3 'tap login' · 10:42:07").
+without activity in the segment hidden, ★ rows with activity in it pinned on
+top. The idle ★ rows (and patterns) fold into ONE row below them --
+``▸ ★ 21 watched · idle since mark 3`` -- that ⏎/→ opens and ← folds like a
+cache group (a single idle ★ row stays as it is). The everything view
+(``A``) folds idle ★ rows only when they flood the table (4 or more never
+touched this session: ``▸ ★ 20 watched · idle``). ``A`` toggles everything /
+since the last mark; ``<``/``>`` step through the segments (before mark 1,
+mark 1 → 2, ...). The caption names the segment ("since mark 3 'tap login'
+· 10:42:07").
 
 **Path rules** (``tui.files_noise_rules``): by default only OS paths
 (``/proc/``, ``/system/``, ``/data/dalvik-cache/``...) and open-only rows are
@@ -249,6 +254,8 @@ class _Row:
     members: list[_Row] = field(default_factory=list)
     #: 1 for a member row shown below its expanded group.
     depth: int = 0
+    #: The group row folding the idle ★ rows (``group`` is ``IDLE_FOLD``).
+    fold: bool = False
 
 
 class FilesSubViewBase(Widget):
@@ -327,6 +334,15 @@ _DIGITS = re.compile(r"(\d+)")
 
 #: ``O`` cycles the order of the unpinned rows.
 SORT_MODES = ("recent", "name", "count")
+
+#: Group id (and row key) of the one row folding the idle ★ rows.
+IDLE_FOLD = "\u2605 idle"
+#: Idle ★ rows fold into one row from this many on: in a mark segment (the
+#: E2E flood: 20 shared_prefs/*.xml watches without activity buried the
+#: segment's real activity) and in the everything view (A), where only a
+#: flood of never-touched watches folds.
+FOLD_IDLE_IN_SEGMENT = 2
+FOLD_IDLE_IN_ALL = 4
 
 
 class _LensInput(Input):
@@ -836,8 +852,8 @@ class FilesPanel(Widget):
         """Pinned ★ rows, then activity (and cache groups), in sort order.
 
         In a mark segment only rows with activity in it are listed (★ rows
-        stay, dim when untouched). Rows hidden by a rule are counted per
-        rule kind in ``self._hidden``.
+        stay; idle ones fold into one ``IDLE_FOLD`` row, see the module doc).
+        Rows hidden by a rule are counted per rule kind in ``self._hidden``.
         """
         wl = self._watchlist_or_none()
         segment = self._segment
@@ -902,9 +918,19 @@ class FilesPanel(Widget):
                 return (-count, *recency(row))
             return recency(row)
 
-        rows = sorted(
+        pinned_rows = sorted(
             (r for r in pinned.values() if self._matches(r)), key=order
-        ) + sorted(rest, key=order)
+        )
+        # Idle ★ rows (no activity in the viewed segment / ever) fold into
+        # one expandable row below the active ★ rows: watching 20 prefs
+        # files must not push the segment's real activity off the screen.
+        idle = [r for r in pinned_rows if r.stats is None]
+        limit = FOLD_IDLE_IN_ALL if segment is None else FOLD_IDLE_IN_SEGMENT
+        if len(idle) >= limit:
+            active = [r for r in pinned_rows if r.stats is not None]
+            fold = _Row(key=IDLE_FOLD, group=IDLE_FOLD, members=idle, fold=True)
+            pinned_rows = [*active, fold]
+        rows = pinned_rows + sorted(rest, key=order)
         out: list[_Row] = []
         for row in rows:
             out.append(row)
@@ -1076,7 +1102,35 @@ class FilesPanel(Widget):
         own = app_package(root) if root else None
         return package if own and package != own else None
 
+    def _idle_label(self) -> str:
+        """``idle since mark 3`` / ``idle mark 1 → 2`` / ``idle`` (no marks)."""
+        seg, marks = self._segment, self._marks
+        if seg is None or not marks:
+            return "idle"
+        if seg == 0:
+            return "idle before mark 1"
+        if seg >= len(marks):
+            return f"idle since mark {seg}"
+        return f"idle mark {seg} → {seg + 1}"
+
+    def _fold_cell(self, row: _Row) -> Text:
+        """``★ 21 watched · idle since mark 3`` (shortest form on a narrow
+        table: ``★ 21 watched · idle``, ``★ 21 idle``).
+        """
+        n = len(row.members)
+        idle = self._idle_label()
+        for tail in (f" watched · {idle}", " watched · idle", " idle"):
+            if 2 + len(str(n)) + len(tail) <= self._path_width:
+                break
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append("★ ", style=_STAR)
+        text.append(str(n), style="#c4b5fd")
+        text.append(tail, style=_DIM)
+        return text
+
     def _group_cell(self, row: _Row) -> Text:
+        if row.fold:
+            return self._fold_cell(row)
         shown = (row.group or "") if self._full_paths else app_relative(row.group or "")
         n = len(row.members)
         tail = f" · {n} file{'s' if n != 1 else ''}"
@@ -1222,13 +1276,17 @@ class FilesPanel(Widget):
                         table.scroll_to, y=keep_scroll, animate=False, immediate=True
                     )
         empty = not rows
-        had_focus = self.app.focused is table
+        # This screen's focus, not app.focused (the top screen's): with a
+        # modal open the table could be hidden while it still held this
+        # screen's focus, and Textual then dropped focus to nothing.
+        focused = self.screen.focused
+        had_focus = focused is table
         self.set_class(empty, "-empty")
         if empty:
             self.query_one("#files-empty", Static).update(self._empty_text())
             if had_focus:
                 super().focus()
-        elif self.app.focused is self:
+        elif focused is self:
             table.focus()
         self._update_caption()
 
@@ -1270,7 +1328,7 @@ class FilesPanel(Widget):
         else:
             title = "LIVE" if self._segment is None else self._segment_title()
             wl = self._watchlist_or_none()
-            n_groups = sum(1 for r in rows if r.group is not None)
+            n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(
                 1 for r in rows if not r.pattern and r.group is None and not r.depth
             )
@@ -1391,8 +1449,9 @@ class FilesPanel(Widget):
     # -- groups ----------------------------------------------------------------------
 
     def expand_current(self, expand: bool) -> bool:
-        """→/⏎ open the cache group under the cursor, ← folds it (also from
-        one of its files). False when the row is not part of a group.
+        """→/⏎ open the cache group (or the idle ★ fold) under the cursor,
+        ← folds it (also from one of its files). False when the row is not
+        part of a group.
         """
         row = self.current_row()
         if row is None:
@@ -1414,9 +1473,8 @@ class FilesPanel(Widget):
             self._expanded.discard(folder)
         self.refresh_rows()
         try:
-            self.table.move_cursor(
-                row=self.table.get_row_index(folder + "/"), animate=False
-            )
+            key = next(r.key for r in self._rows if r.group == folder)
+            self.table.move_cursor(row=self.table.get_row_index(key), animate=False)
         except Exception:
             pass
         return True
@@ -1832,10 +1890,23 @@ class FilesPanel(Widget):
             return False
         return True
 
+    def _group_row_hint(self, row: _Row) -> bool:
+        """``w``/``u`` on a group row (cache folder, idle ★ fold): say how to
+        reach its files instead of acting on the folder.
+        """
+        if row.group is None:
+            return False
+        self.app.notify(
+            "A group row — ⏎ or → lists its files.", severity="warning", timeout=3
+        )
+        return True
+
     def action_toggle_watch(self) -> None:
         row = self.current_row()
         if row is None:
             self.app.notify("No file selected.", severity="warning")
+            return
+        if self._group_row_hint(row):
             return
         wl = self.watchlist
         if row.watched is not None and row.watched != row.key and not row.pattern:
@@ -1860,6 +1931,8 @@ class FilesPanel(Widget):
         row = self.current_row()
         if row is None:
             self.app.notify("No file selected.", severity="warning")
+            return
+        if self._group_row_hint(row):
             return
         wl = self.watchlist
         if row.pattern:
