@@ -361,9 +361,6 @@ def test_snapshot_console_ko_reply_is_a_failure(verb):
 _STDIN_ALLOWED = {
     # ``stty sane`` acts on the terminal on its stdin: it needs the tty.
     ("tui/terminal_reset.py", "_run_stty_sane"),
-    # Set on branch fix/guard-spawn (cd30e2c); drop these two after merging.
-    ("core/adb.py", "send_adb_command"),
-    ("core/adb.py", "send_adb_exec_out_command"),
 }
 
 
