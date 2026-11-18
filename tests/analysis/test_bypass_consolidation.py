@@ -797,3 +797,19 @@ def test_claim_of_a_dead_dexray_job_is_dropped(bypass_service) -> None:
     session["up"] = False  # the app died
     assert bypass_service.exclusive_conflict(["root"]) is None
     assert bypass_service.toggle("root")[0] is True
+
+
+def test_status_bar_shows_every_category_including_emulator(
+    bypass_service, monkeypatch
+) -> None:
+    """The glance listed only the first five: emulator-only showed nothing."""
+    from sandroid.tui.widgets.status_bar import StatusBar
+
+    bypass_service.toggle("emulator")
+    bypass_service.toggle("root")
+    bar = StatusBar()
+    monkeypatch.setattr(bar, "_schedule_frida_check", lambda: None)
+    monkeypatch.setattr(bar, "_schedule_frida_version_check", lambda: None)
+    bar.update_from_toolbox()
+    assert bar.bypass_categories == ["root", "emulator"]  # display order
+    assert any("bypass root emulator" in str(t) for t in bar._segments())
