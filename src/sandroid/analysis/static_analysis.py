@@ -376,7 +376,13 @@ class StaticAnalysis(DataGatherBase):
         device_apk_path = next(
             (p for p in device_paths if p.endswith("/base.apk")), device_paths[0]
         )
-        other_splits = [p for p in device_paths if p != device_apk_path]
+        # Per-device config splits (ABI/density/locale) are not part of the
+        # cache key, so the same app on two devices shares one entry.
+        from sandroid.services.app_info_service import is_config_split
+
+        other_splits = [
+            p for p in device_paths if p != device_apk_path and not is_config_split(p)
+        ]
         local_apk_path = f"{insight_dir}{apk_name}.apk"
 
         logger.debug(
@@ -423,7 +429,7 @@ class StaticAnalysis(DataGatherBase):
         )
 
     def _remote_split_hashes(self, device_paths: list[str]) -> list[str] | None:
-        """sha256 of the non-base splits, hashed on the device.
+        """sha256 of the non-base key splits, hashed on the device.
 
         Returns:
             The hashes (empty for a single-APK app), or ``None`` when any
@@ -624,6 +630,8 @@ class StaticAnalysis(DataGatherBase):
     ) -> None:
         """Record this run in the APK cache's meta.json (best effort)."""
         try:
+            import hashlib
+
             from sandroid.services.app_info_service import (
                 record_insight_result,
                 sha256_file,
@@ -632,15 +640,18 @@ class StaticAnalysis(DataGatherBase):
             cache = self._apk_cache()
             if not cache.enabled:
                 return
+            md5 = hashlib.md5(usedforsecurity=False)
+            with open(apk_file_path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    md5.update(chunk)
             key = record_insight_result(
                 [sha256_file(apk_file_path), *other_split_sha256s],
                 analysis_results if isinstance(analysis_results, dict) else {},
                 result_file=result_file or None,
                 security_result_file=security_result_file or None,
                 insight_version=_insight_version(),
-                insight_cache_dir=(
-                    str(cache.insight_dir) if _insight_supports_cache_dir() else None
-                ),
+                insight_cache_used=_insight_supports_cache_dir(),
+                apk_md5=md5.hexdigest(),
                 package=self.last_analysed_app,
                 cache=cache,
             )

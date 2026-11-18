@@ -5,10 +5,12 @@ classmethods are replaced on ``sandroid.core.adb.Adb`` with ``staticmethod``
 fakes (same convention as ``tests/ai/tools/test_app_query.py``).
 """
 
+import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -159,14 +161,14 @@ ACTIVITY MANAGER SERVICES (dumpsys activity services)
     packageName=com.example.app
     processName=com.example.app
     app=ProcessRecord{c1d2e3f 4321:com.example.app/u0a150}
-    isForeground=true foregroundId=1001 types=0x00000048 foregroundNoti=Notification(channel=loc pri=0)
+    isForeground=true foregroundId=1001 types=00000048 foregroundNoti=Notification(channel=loc pri=0)
     createTime=-5m2s ago startingBgTimeout=--
   * ServiceRecord{5a5a5a5 u0 com.example.app/.SyncService}
     intent={cmp=com.example.app/.SyncService}
     app=ProcessRecord{c1d2e3f 4321:com.example.app/u0a150}
     createTime=-1m ago startingBgTimeout=--
   * ServiceRecord{6b6b6b6 u0 com.other.app/.Svc}
-    isForeground=true foregroundId=7 types=0x00000001 foregroundNoti=Notification()
+    isForeground=true foregroundId=7 types=00000001 foregroundNoti=Notification()
 """
 
 #: Older ``foregroundServiceType=`` spelling (API 30/31).
@@ -226,6 +228,11 @@ def fake_adb(monkeypatch):
         return fake
 
     return install
+
+
+@pytest.fixture(autouse=True)
+def _fresh_split_hash_memo(monkeypatch):
+    monkeypatch.setattr(ais, "_SPLIT_HASH_MEMO", {})
 
 
 @pytest.fixture
@@ -374,22 +381,26 @@ def test_parse_android_duration(text, seconds):
 
 
 def test_appops_api30_semicolon_format():
-    ops = {(o.scope, o.op): o for o in ais.parse_appops(APPOPS_API30)}
+    ops = {o.op: o for o in ais.parse_appops(APPOPS_API30)}
 
-    assert ops[("uid", "COARSE_LOCATION")].mode == "foreground"
-    coarse = ops[("package", "COARSE_LOCATION")]
-    assert coarse.mode == "allow"
+    coarse = ops["COARSE_LOCATION"]
+    assert coarse.uid_mode == "foreground"
+    assert coarse.package_mode == "allow"
+    assert coarse.mode == "foreground"  # uid mode wins
+    # Unprefixed line right after "Uid mode:" stays in uid scope.
+    assert ops["LEGACY_STORAGE"].uid_mode == "allow"
+    assert ops["LEGACY_STORAGE"].package_mode is None
     assert coarse.last_access == "+3m10s510ms ago"
     assert coarse.last_access_ago_s == 190.51
     assert coarse.permission == "android.permission.ACCESS_COARSE_LOCATION"
-    camera = ops[("package", "CAMERA")]
+    camera = ops["CAMERA"]
     assert camera.mode == "ignore"
     assert camera.last_reject_ago_s == 3720.0
     assert camera.last_access is None
-    clip = ops[("package", "READ_CLIPBOARD")]
+    clip = ops["READ_CLIPBOARD"]
     assert clip.permission is None
     assert clip.last_access_ago_s == 303.0
-    storage = ops[("package", "READ_EXTERNAL_STORAGE")]
+    storage = ops["READ_EXTERNAL_STORAGE"]
     assert storage.duration_s == 0.012
     # No state markers in this format.
     assert clip.foreground is None
@@ -397,7 +408,7 @@ def test_appops_api30_semicolon_format():
 
 
 def test_appops_api34_running_and_reject():
-    ops = {o.op: o for o in ais.parse_appops(APPOPS_API34) if o.scope == "package"}
+    ops = {o.op: o for o in ais.parse_appops(APPOPS_API34)}
 
     assert ops["CAMERA"].running is True
     assert ops["CAMERA"].last_access_ago_s == 2.0
@@ -415,37 +426,101 @@ def test_appops_api34_running_and_reject():
 
 
 def test_appops_api36_block_format():
-    ops = {(o.scope, o.op): o for o in ais.parse_appops(APPOPS_API36_BLOCK)}
+    ops = {o.op: o for o in ais.parse_appops(APPOPS_API36_BLOCK)}
 
-    assert ops[("uid", "COARSE_LOCATION")].mode == "foreground"
-    clip = ops[("package", "READ_CLIPBOARD")]
+    coarse = ops["COARSE_LOCATION"]
+    assert (coarse.uid_mode, coarse.package_mode, coarse.mode) == (
+        "foreground",
+        None,
+        "foreground",
+    )
+    clip = ops["READ_CLIPBOARD"]
     assert clip.mode == "allow"
     assert clip.last_access == "2026-05-01 12:00:00.123"  # most recent tag
     assert clip.last_access_ago_s == 303.123
     assert clip.access_states == ["top-s", "bg-s"]
     assert clip.foreground is True
     assert clip.background is True
-    camera = ops[("package", "CAMERA")]
+    camera = ops["CAMERA"]
     assert camera.mode == "ignore"
     assert camera.reject_states == ["bg-s"]
     assert camera.last_reject_ago_s == 900.0
-    fine = ops[("package", "FINE_LOCATION")]
+    fine = ops["FINE_LOCATION"]
     assert fine.duration_s == 2.5
     assert fine.foreground is True
     assert fine.background is False
 
 
-def test_get_appops_falls_back_to_dumpsys(fake_adb):
-    fake = fake_adb({"cmd appops": "", "dumpsys appops": APPOPS_API36_BLOCK})
+#: ``cmd appops get``: "Uid mode: " precedes only the FIRST uid op.
+APPOPS_UID_BLOCK = """\
+Uid mode: COARSE_LOCATION: foreground
+FINE_LOCATION: foreground
+CAMERA: ignore
+CAMERA: allow; time=+5m ago
+FINE_LOCATION: allow; time=+1m ago; duration=+3s
+"""
+
+
+def test_appops_uid_block_without_prefix_and_effective_mode():
+    ops = {o.op: o for o in ais.parse_appops(APPOPS_UID_BLOCK)}
+
+    fine = ops["FINE_LOCATION"]
+    assert (fine.uid_mode, fine.package_mode, fine.mode) == (
+        "foreground",
+        "allow",
+        "foreground",
+    )
+    camera = ops["CAMERA"]
+    assert (camera.uid_mode, camera.package_mode) == ("ignore", "allow")
+    assert camera.mode == "ignore"  # effective: uid mode wins
+    assert camera.last_access_ago_s == 300.0
+    assert ops["COARSE_LOCATION"].package_mode is None
+
+
+def test_appops_repeated_op_ends_uid_block():
+    text = "Uid mode: CAMERA: ignore\nRECORD_AUDIO: deny\nCAMERA: allow\n"
+    ops = {o.op: o for o in ais.parse_appops(text)}
+    assert ops["CAMERA"].uid_mode == "ignore"
+    assert ops["CAMERA"].package_mode == "allow"
+    assert ops["RECORD_AUDIO"].uid_mode == "deny"
+
+
+def test_appops_access_line_with_proxy_suffix():
+    text = (
+        "Package com.example.app:\n"
+        "  RECORD_AUDIO (allow):\n"
+        "    null=[\n"
+        "      Access: [fg-tp] 2026-05-01 12:00:00.000 (-2m3s) duration=+1s "
+        "proxy[uid=1000, pkg=com.google.android.gms, attributionTag=null]\n"
+        "    ]\n"
+    )
+    (audio,) = ais.parse_appops(text)
+    assert audio.last_access_ago_s == 123.0
+    assert audio.duration_s == 1.0
+    assert audio.proxy_packages == ["com.google.android.gms"]
+    assert audio.foreground is True
+
+
+def test_get_appops_prefers_dumpsys(fake_adb):
+    fake = fake_adb({"dumpsys appops": APPOPS_API36_BLOCK})
     state = ais.get_appops(PKG, serial="emulator-5554")
 
     assert state.ok
     assert state.source == "dumpsys appops"
-    assert [c for c, _s in fake.calls] == [
-        f"shell cmd appops get {PKG}",
-        f"shell dumpsys appops --package {PKG}",
-    ]
+    assert [c for c, _s in fake.calls] == [f"shell dumpsys appops --package {PKG}"]
     assert {s for _c, s in fake.calls} == {"emulator-5554"}
+
+
+def test_get_appops_falls_back_to_cmd_appops(fake_adb):
+    fake = fake_adb({"dumpsys appops": "", "cmd appops": APPOPS_API30})
+    state = ais.get_appops(PKG)
+
+    assert state.ok
+    assert state.source == "cmd appops get"
+    assert [c for c, _s in fake.calls] == [
+        f"shell dumpsys appops --package {PKG}",
+        f"shell cmd appops get {PKG}",
+    ]
 
 
 def test_get_appops_reports_reason_on_errors(fake_adb):
@@ -501,6 +576,32 @@ def test_footprint_wraps_script_for_su(fake_adb):
     assert result.root_method == "su -c"
     assert "su -c " in fake.calls[-1][0]
     assert "du -sk" in fake.calls[-1][0]
+
+
+def test_footprint_without_root_ignores_tiny_du_size(fake_adb):
+    noisy = FOOTPRINT_NOROOT.replace(
+        f"du: /data/data/{PKG}: Permission denied",
+        f"du: /data/data/{PKG}/cache: Permission denied\n8\t/data/data/{PKG}",
+    )
+    fake_adb({"du -sk": noisy, "id": "uid=2000(shell)"})
+    result = ais.get_data_footprint(PKG)
+    assert result.private_kb is None
+    assert result.private_reason == "root required (enable adb root)"
+
+
+def test_footprint_timeout_reported(monkeypatch):
+    timeouts = []
+
+    def slow(command, serial=None, timeout=30):
+        timeouts.append(timeout)
+        if "du -sk" in command:
+            return "", f"Command timed out after {timeout:g} seconds"
+        return "uid=0(root)", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(slow))
+    result = ais.get_data_footprint(PKG)
+    assert result.reason == "timed out after 120s (du)"
+    assert timeouts[-1] == ais.FOOTPRINT_TIMEOUT_SECONDS
 
 
 def test_footprint_script_quotes_paths():
@@ -562,6 +663,10 @@ def test_get_running_services_state(fake_adb):
     ("raw", "types"),
     [
         ("0x00000008", ["location"]),
+        ("00000008", ["location"]),
+        ("00000048", ["location", "camera"]),  # %08X: hex, not decimal 48
+        ("00000010", ["connectedDevice"]),
+        ("FFFFFFFF", ["manifest"]),
         ("0xffffffff", ["manifest"]),
         ("0x40000000", ["specialUse"]),
         ("0", []),
@@ -595,7 +700,11 @@ def test_cache_layout_and_meta_merge(cache_root):
     assert cache.root == cache_root
     assert cache.insight_dir == cache_root / "insight"
 
-    overview = {"schema": ais.OVERVIEW_SCHEMA, "package": PKG}
+    overview = {
+        "schema": ais.OVERVIEW_SCHEMA,
+        "package": PKG,
+        "androguard_version": ais._androguard_version(),
+    }
     assert cache.write_entry(H1, overview=overview, meta_updates={"package": PKG})
     first = cache.read_meta(H1)
     assert cache.write_entry(H1, meta_updates={"version_code": 7})
@@ -616,6 +725,40 @@ def test_cache_overview_schema_mismatch_is_a_miss(cache_root):
     cache = ais.ApkCache()
     cache.write_entry(H1, overview={"schema": -1})
     assert cache.read_overview(H1) is None
+
+
+def test_cache_other_androguard_version_is_stale(cache_root, monkeypatch):
+    cache = ais.ApkCache()
+    overview = {"schema": ais.OVERVIEW_SCHEMA, "androguard_version": "3.0.0"}
+    cache.write_entry(H1, overview=overview)
+    monkeypatch.setattr(ais, "_androguard_version", lambda: "4.1.3")
+    assert cache.read_overview(H1) is None
+    # Without androguard here, any version is served (cannot rebuild anyway).
+    monkeypatch.setattr(ais, "_androguard_version", lambda: None)
+    assert cache.read_overview(H1) == overview
+
+
+def test_cache_files_are_share_readable(cache_root):
+    ais.ApkCache().write_entry(H1, overview={"schema": 1}, meta_updates={"a": 1})
+    expected = 0o666 & ~ais._UMASK if ais._UMASK is not None else None
+    for name in ("meta.json", "overview.json"):
+        mode = stat.S_IMODE((cache_root / "apk" / H1 / name).stat().st_mode)
+        assert mode == expected
+        assert mode & 0o044  # group/other can read (mkstemp alone gives 0600)
+
+
+def test_cache_readers_tolerate_malformed_json(cache_root):
+    entry = cache_root / "apk" / H1
+    entry.mkdir(parents=True)
+    (entry / "meta.json").write_text("[1, 2]")
+    (entry / "overview.json").write_text("{not json")
+    (cache_root / "apk" / "not-a-key").mkdir()
+    cache = ais.ApkCache()
+    assert cache.read_meta(H1) is None
+    assert cache.read_overview(H1) is None
+    assert cache.find(PKG) == []
+    assert ais.load_insight_results({"insight": "x"}) is None
+    assert ais.load_insight_results({"insight": {"summary": [1]}}) is None
 
 
 def test_disabled_cache_never_writes(cache_root):
@@ -643,6 +786,56 @@ def test_cache_lock_timeout_and_stale_lock(cache_root):
     os.utime(lock, (old, old))
     assert cache.write_entry(H1, meta_updates={"x": 1}) is True  # stale: broken
     assert not lock.exists()
+    assert [p.name for p in entry.iterdir()] == ["meta.json"]  # no stale leftovers
+
+
+def test_cache_lock_release_keeps_foreign_lock(cache_root):
+    cache = ais.ApkCache()
+    with cache._locked(H1) as entry:
+        lock = entry / ".lock"
+        lock.write_text("someone-else")  # e.g. our lock was broken and re-taken
+    assert lock.read_text() == "someone-else"
+
+
+def test_cache_stale_break_restores_a_fresh_lock(cache_root, monkeypatch):
+    cache = ais.ApkCache(stale_lock_after=60)
+    entry = cache_root / "apk" / H1
+    entry.mkdir(parents=True)
+    lock = entry / ".lock"
+    lock.write_text("new-owner")
+    old = time.time() - 120
+    real_stat = Path.stat
+
+    def stale_once(self, *a, **k):  # stat says stale, then the owner refreshes
+        if self.name == ".lock":
+            return SimpleNamespace(st_mtime=old)
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", stale_once)
+    cache._break_if_stale(lock)
+    assert lock.read_text() == "new-owner"  # renamed aside, verified, linked back
+    assert [p.name for p in entry.iterdir()] == [".lock"]
+
+
+def test_cache_lock_times_out_on_stat_errors(cache_root, monkeypatch):
+    cache = ais.ApkCache(lock_timeout=0.2)
+    entry = cache_root / "apk" / H1
+    entry.mkdir(parents=True)
+    (entry / ".lock").write_text("x")
+
+    real_stat = Path.stat
+
+    def broken_stat(self, *a, **k):
+        if self.name == ".lock":
+            raise PermissionError("share hiccup")
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", broken_stat)
+    started = time.monotonic()
+    with pytest.raises(ais.CacheLockTimeoutError):
+        with cache._locked(H1):
+            pass
+    assert time.monotonic() - started < 2
 
 
 def test_atomic_write_leaves_no_temp_files(cache_root):
@@ -669,9 +862,14 @@ SHA_OUT = (
 
 def test_static_overview_cache_hit_needs_no_pull(fake_adb, cache_root, monkeypatch):
     fake = fake_adb({"pm path": PM_PATH, "sha256sum": SHA_OUT})
-    key = ais.compute_apk_key([H1, H2])
+    key = H1  # the config split (H2) is not part of the key
     ais.ApkCache().write_entry(
-        key, overview={"schema": ais.OVERVIEW_SCHEMA, "native_libs": []}
+        key,
+        overview={
+            "schema": ais.OVERVIEW_SCHEMA,
+            "native_libs": [],
+            "androguard_version": ais._androguard_version(),
+        },
     )
     monkeypatch.setattr(
         ais, "_pull_apks", lambda *a, **k: pytest.fail("must not pull on a hit")
@@ -695,10 +893,40 @@ def test_static_overview_lookup_only_miss(fake_adb, cache_root):
     assert result.reason == "not cached yet"
 
 
+def test_apk_key_ignores_config_splits():
+    with_abi = [("/x/base.apk", H1), ("/x/split_config.arm64_v8a.apk", H2)]
+    with_other_abi = [("/x/base.apk", H1), ("/x/split_config.x86_64.apk", H3)]
+    assert ais.apk_key_for(with_abi) == ais.apk_key_for(with_other_abi) == H1
+    feature = [("/x/base.apk", H1), ("/x/split_feature.apk", H2)]
+    assert ais.apk_key_for(feature) == ais.compute_apk_key([H1, H2])
+
+
+def test_split_hashes_are_memoized_per_install(fake_adb):
+    fake = fake_adb(
+        {
+            "grep": "versionCode=7 minSdk=24\nlastUpdateTime=2026-05-01 10:00:00",
+            "pm path": PM_PATH,
+            "sha256sum": SHA_OUT,
+        }
+    )
+    first = ais.device_split_hashes(PKG, "emulator-5554")
+    second = ais.device_split_hashes(PKG, "emulator-5554")
+    assert first == second
+    assert sum("sha256sum" in c for c, _s in fake.calls) == 1
+    # A different install identity (update) re-hashes.
+    fake.answers["grep"] = "versionCode=8\nlastUpdateTime=2026-06-01 10:00:00"
+    ais.device_split_hashes(PKG, "emulator-5554")
+    assert sum("sha256sum" in c for c, _s in fake.calls) == 2
+
+
 def _fake_pull(tmp_path):
     def pull(package, dest_dir, serial=None):
         pulled = []
-        for name, data in (("base.apk", b"base"), ("split.apk", b"split")):
+        for name, data in (
+            ("base.apk", b"base"),
+            ("split.apk", b"split"),
+            ("split_config.arm64_v8a.apk", b"abi"),
+        ):
             local = os.path.join(dest_dir, name)
             Path(local).write_bytes(data)
             pulled.append((f"/data/app/x/{name}", local))
@@ -736,7 +964,13 @@ def test_static_overview_pull_builds_and_caches(
     assert not result.from_cache
     assert result.key == expected_key
     meta = ais.ApkCache().read_meta(expected_key)
-    assert [s["name"] for s in meta["splits"]] == ["base.apk", "split.apk"]
+    assert [s["name"] for s in meta["splits"]] == [
+        "base.apk",
+        "split.apk",
+        "split_config.arm64_v8a.apk",
+    ]
+    assert [s["config"] for s in meta["splits"]] == [False, False, True]
+    assert "/data/app" not in json.dumps(meta)  # no device/local paths
     assert meta["version_code"] == 3
     assert "androguard" in meta["tool_versions"]
     assert "created_at" in meta
@@ -746,14 +980,37 @@ def test_static_overview_dont_cache_switch(fake_adb, cache_root, monkeypatch, tm
     fake_adb({})
     monkeypatch.setattr(ais, "androguard_available", lambda: True)
     monkeypatch.setattr(ais, "_pull_apks", _fake_pull(tmp_path))
-    monkeypatch.setattr(ais, "build_apk_overview", lambda p: {"schema": 1})
+    built = {"schema": ais.OVERVIEW_SCHEMA, "package": PKG}
+    monkeypatch.setattr(ais, "build_apk_overview", lambda p: built)
 
     service = ais.AppInfoService(use_cache=False)
     result = service.static_overview(PKG)
 
     assert result.ok
-    assert result.overview == {"schema": 1}
+    assert result.overview == built
     assert not cache_root.exists()
+
+
+@pytest.mark.parametrize(
+    "built",
+    [
+        {"schema": 2, "errors": ["base.apk: Bad magic number"], "splits": []},
+        {"schema": 2, "package": PKG, "errors": ["split.apk manifest: boom"]},
+    ],
+)
+def test_failed_decode_is_never_cached(
+    built, fake_adb, cache_root, monkeypatch, tmp_path
+):
+    fake_adb({})
+    monkeypatch.setattr(ais, "androguard_available", lambda: True)
+    monkeypatch.setattr(ais, "_pull_apks", _fake_pull(tmp_path))
+    monkeypatch.setattr(ais, "build_apk_overview", lambda p: built)
+
+    result = ais.get_static_overview(PKG)
+
+    assert result.reason.startswith("not cached: APK decode incomplete")
+    assert result.ok is bool(built.get("package"))
+    assert not (cache_root / "apk").exists()
 
 
 def test_static_overview_reports_missing_androguard(fake_adb, cache_root, monkeypatch):
@@ -779,7 +1036,12 @@ def test_record_and_load_insight_result(cache_root, tmp_path):
         "library_detection": {"detected_libraries": [{"name": "RootBeer", "x": 1}]},
     }
     key = ais.record_insight_result(
-        [H1], insight, result_file=str(result_file), insight_version="2.0.0"
+        [H1],
+        insight,
+        result_file=str(result_file),
+        insight_version="2.0.0",
+        insight_cache_used=True,
+        apk_md5="d" * 32,
     )
 
     assert key == H1
@@ -790,10 +1052,16 @@ def test_record_and_load_insight_result(cache_root, tmp_path):
     summary = meta["insight"]["summary"]
     assert "raw_output" not in summary["apkid_analysis"]
     assert summary["library_detection"]["detected_libraries"][0]["name"] == "RootBeer"
-    # Result file gone -> summary is served; present -> full file.
+    # Only cache-relative references: no absolute/local paths in meta.json.
+    assert str(tmp_path) not in json.dumps(meta)
+    assert meta["insight"]["result_name"] == "dexray_app.json"
+    assert meta["insight"]["cache"] == "insight"
+    assert meta["insight"]["apk_md5"] == "d" * 32
     assert ais.load_insight_results(meta) == summary
+    # A shared meta naming an existing absolute path is never followed.
     result_file.write_text(json.dumps({"full": True}))
-    assert ais.load_insight_results(meta) == {"full": True}
+    meta["insight"]["result_file"] = str(result_file)
+    assert ais.load_insight_results(meta) == summary
     # Don't-cache switch: nothing recorded.
     assert (
         ais.record_insight_result([H2], insight, cache=ais.ApkCache(enabled=False))
@@ -849,7 +1117,16 @@ def test_nsc_facts(monkeypatch):
         {"domains": ["api.example.com"], "pins": 2, "expiration": "2027-01-01"}
     ]
     assert facts["trust_user_ca"] is False
-    assert facts["trust_user_ca_debug_only"]
+    assert facts["trust_user_ca_debug_only"]  # not debuggable: not effective
+    assert facts["debug_overrides_active"] is False
+
+
+def _nsc(monkeypatch, xml, attrs=None, target=34, debuggable=False):
+    from lxml import etree
+
+    root = etree.fromstring(xml.encode())
+    monkeypatch.setattr(ais, "_resolve_nsc_xml", lambda apk: (root, "res/xml/n.xml"))
+    return ais._nsc_facts(_FakeApk(attrs or {}), target, debuggable)
 
 
 def test_nsc_defaults_without_config(monkeypatch):
@@ -857,7 +1134,52 @@ def test_nsc_defaults_without_config(monkeypatch):
     old = ais._nsc_facts(_FakeApk({"usesCleartextTraffic": "true"}), 23)
     assert old["trust_user_ca"] is True
     assert old["uses_cleartext_traffic"] is True
-    assert ais._nsc_facts(_FakeApk({}), 30)["trust_user_ca"] is False
+    assert old["cleartext_effective"] is True
+    modern = ais._nsc_facts(_FakeApk({}), 30)
+    assert modern["trust_user_ca"] is False
+    assert modern["cleartext_effective"] is False  # targetSdk >= 28 default
+
+
+def test_nsc_overrides_uses_cleartext_traffic(monkeypatch):
+    xml = '<network-security-config><base-config cleartextTrafficPermitted="false"/></network-security-config>'
+    facts = _nsc(monkeypatch, xml, {"usesCleartextTraffic": "true"})
+    assert facts["uses_cleartext_traffic"] is True
+    assert facts["cleartext_effective"] is False
+    assert facts["cleartext_source"] == "NSC base-config"
+    ids = {d.id for d in ais.suspect_defences({"nsc": facts})}
+    assert "nsc:cleartext" not in ids
+
+
+def test_nsc_base_without_trust_anchors_old_target(monkeypatch):
+    xml = '<network-security-config><base-config cleartextTrafficPermitted="true"/></network-security-config>'
+    facts = _nsc(monkeypatch, xml, target=23)
+    assert facts["trust_user_ca"] is True
+    assert facts["trust_user_ca_source"].startswith("platform default")
+
+
+def test_nsc_domain_scoped_user_ca_and_override_pins(monkeypatch):
+    xml = """<network-security-config>
+      <domain-config>
+        <domain>staging.example.com</domain>
+        <trust-anchors><certificates src="user" overridePins="true"/></trust-anchors>
+        <pin-set><pin digest="SHA-256">AAAA</pin></pin-set>
+      </domain-config>
+    </network-security-config>"""
+    facts = _nsc(monkeypatch, xml)
+    assert facts["trust_user_ca"] is False
+    assert facts["trust_user_ca_domains"] == ["staging.example.com"]
+    assert facts["override_pins_scopes"] == ["staging.example.com"]
+    defences = {d.id: d for d in ais.suspect_defences({"nsc": facts})}
+    assert "nsc:user_ca" not in defences
+    assert "staging.example.com" in defences["nsc:user_ca_scoped"].evidence[0]
+    assert any("overridePins" in e for e in defences["nsc:pinning"].evidence)
+
+
+def test_nsc_debug_overrides_apply_when_debuggable(monkeypatch):
+    facts = _nsc(monkeypatch, NSC_XML, debuggable=True)
+    assert facts["debug_overrides_active"] is True
+    assert facts["trust_user_ca"] is True
+    assert "debug-overrides" in facts["trust_user_ca_source"]
 
 
 # ---------------------------------------------------------------------------
@@ -901,9 +1223,12 @@ def test_suspect_defences_from_all_sources():
     }
     defences = {d.id: d for d in ais.suspect_defences(overview, INSIGHT_RESULTS)}
 
-    assert defences["apkid:anti_vm"].routes == ["b6"]
+    # No code location: common in GMS/Firebase, so verify first, low confidence.
+    assert defences["apkid:anti_vm"].routes == ["v", "b6"]
+    assert defences["apkid:anti_vm"].confidence == "low"
+    assert "likely benign" in defences["apkid:anti_vm"].title
     assert len(defences["apkid:anti_vm"].evidence) == 2
-    assert defences["apkid:anti_debug"].routes == ["b4"]
+    assert defences["apkid:anti_debug"].routes == ["v", "b4"]
     assert defences["apkid:packer"].routes == ["v"]
     assert "apkid:compiler" not in defences
     assert defences["lib:rootbeer"].routes == ["b2"]
@@ -920,6 +1245,84 @@ def test_suspect_defences_from_all_sources():
     ordered = ais.suspect_defences(overview, INSIGHT_RESULTS)
     assert not ordered[0].weakness
     assert ordered[-1].weakness  # defences first
+
+
+@pytest.mark.parametrize(
+    ("match", "routes", "confidence"),
+    [
+        ("Build.FINGERPRINT check in Lcom/evil/Guard;", ["b6"], "medium"),
+        ("Build.FINGERPRINT check in com.evil.guard.Checks", ["b6"], "medium"),
+        ("Build.FINGERPRINT check in Lcom/google/android/gms/Foo;", ["v", "b6"], "low"),
+        ("Build.MODEL check in androidx.test.Runner", ["v", "b6"], "low"),
+    ],
+)
+def test_apkid_anti_vm_located_in_app_code(match, routes, confidence):
+    insight = {
+        "apkid_analysis": {
+            "files": [{"filename": "classes.dex", "matches": {"anti_vm": [match]}}]
+        }
+    }
+    (item,) = ais.suspect_defences({}, insight)
+    assert item.routes == routes
+    assert item.confidence == confidence
+
+
+@pytest.mark.parametrize(
+    ("libs", "ids"),
+    [
+        (["libssl.so", "libcrypto.so"], {"native:openssl_tls"}),
+        (["libcrypto.so"], {"native:crypto_lib"}),
+        (["libssl_helper.so", "libflutter_ext.so", "libnss3x.so"], set()),
+        (["libconscrypt_jni.so"], {"native:conscrypt_tls"}),
+    ],
+)
+def test_native_tls_exact_basenames(libs, ids):
+    found = {d.id: d for d in ais.suspect_defences({"native_libs": libs})}
+    assert set(found) == ids
+    if "native:crypto_lib" in found:
+        assert found["native:crypto_lib"].routes == []
+        assert "TLS not implied" in found["native:crypto_lib"].hint
+    if "native:openssl_tls" in found:
+        assert "native lib libcrypto.so" in found["native:openssl_tls"].evidence
+
+
+def test_suspect_defences_tolerate_malformed_shared_json():
+    overview = {"native_libs": 5, "nsc": "x"}
+    insight = {
+        "apkid_analysis": {"files": "bad"},
+        "library_detection": [1, "x"],
+        "tracker_analysis": {"detected_protections": 7},
+        "detected_protections": [{"name": "RootBeer", "defeats": "root"}],
+        "apk_overview": [],
+    }
+    found = ais.suspect_defences(overview, insight)
+    assert [d.id for d in found] == ["lib:rootbeer"]
+    assert ais.suspect_defences("nope", ["nope"]) == []
+
+
+@pytest.mark.parametrize(
+    ("evidence", "confidence", "line"),
+    [
+        ("sdk_present", "low", "Insight: SDK present, may not be enforced"),
+        ("entry_point", "high", "Insight: entry point referenced (likely enforced)"),
+    ],
+)
+def test_insight_protection_evidence_kind(evidence, confidence, line):
+    item = {
+        "id": "rootbeer",
+        "name": "RootBeer",
+        "category": "Root Detection",
+        "defeats": ["root"],
+        "confidence": "high",
+        "evidence": evidence,
+    }
+    (found,) = ais.suspect_defences(
+        {}, {"tracker_analysis": {"detected_protections": [item]}}
+    )
+    assert found.confidence == confidence
+    assert line in found.evidence
+    if evidence == "sdk_present":
+        assert found.hint.startswith("SDK present, may not be enforced")
 
 
 def test_suspect_defences_tolerates_missing_and_odd_inputs():
@@ -1111,7 +1514,9 @@ def test_insight2_gets_cache_dir_and_dict_results_are_handled(
     key = ais.sha256_file(apk)
     meta = ais.ApkCache().read_meta(key)
     assert meta["package"] == PKG
-    assert meta["insight"]["cache_dir"] == str(cache_root / "insight")
+    assert meta["insight"]["cache"] == "insight"
+    assert meta["insight"]["apk_md5"] == hashlib.md5(b"apk-bytes").hexdigest()
+    assert str(tmp_path) not in json.dumps(meta)
 
 
 def test_insight1_uses_legacy_call(monkeypatch, tmp_path, cache_root):
@@ -1175,5 +1580,50 @@ def test_device_mode_parses_split_pm_path(monkeypatch, tmp_path, cache_root):
     pull = next(c for c in commands if c.startswith("pull "))
     assert "/base.apk" in pull
     assert "split_config" not in pull
-    key = ais.compute_apk_key([ais.hashlib.sha256(b"base").hexdigest(), H2])
-    assert ais.ApkCache().read_meta(key)["insight"]["cache_dir"] is None
+    # Only a config split besides base: it is not hashed and not in the key.
+    assert not any("sha256sum" in c for c in commands)
+    key = ais.hashlib.sha256(b"base").hexdigest()
+    assert ais.ApkCache().read_meta(key)["insight"]["cache"] is None
+
+
+# ---------------------------------------------------------------------------
+# Facade never-raise contract vs. the AI tools' original error behaviour
+# ---------------------------------------------------------------------------
+
+
+def _raise(*_a, **_k):
+    raise RuntimeError("adb exploded")
+
+
+def test_facade_details_pid_installed_never_raise(monkeypatch):
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(_raise))
+    monkeypatch.setattr(Adb, "get_pid_for_package_name", staticmethod(_raise))
+    monkeypatch.setattr(Adb, "get_installed_packages", staticmethod(_raise))
+    service = ais.AppInfoService("emulator-5554")
+
+    for fact in (service.details(PKG), service.pid(PKG), service.installed()):
+        assert fact.ok is False
+        assert "adb exploded" in fact.reason
+    assert service.details("bad;pkg").reason.startswith("invalid")
+
+
+def test_facade_details_reports_missing_package(fake_adb):
+    fake_adb({"dumpsys package": ""})
+    fact = ais.AppInfoService().details(PKG)
+    assert fact.ok is False
+    assert "package not found" in fact.reason
+
+    fake_adb({"dumpsys package": DUMPSYS_PACKAGE_API30})
+    fact = ais.AppInfoService().details(PKG)
+    assert fact.ok
+    assert fact.value["uid"] == 10123
+
+
+def test_ai_tools_keep_original_error_behaviour(monkeypatch):
+    from sandroid.ai.tools import app_query
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(_raise))
+    with pytest.raises(RuntimeError, match="adb exploded"):
+        app_query.get_package_details(PKG)
+    with pytest.raises(RuntimeError, match="adb exploded"):
+        app_query.list_exported_components(PKG)

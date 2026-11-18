@@ -30,6 +30,7 @@ shared global), and ``None`` keeps the current global target.
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import json
 import logging
@@ -38,7 +39,9 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,7 +66,7 @@ logger = logging.getLogger(__name__)
 APK_PULL_TIMEOUT_SECONDS = 180
 
 #: Bumped whenever the overview.json layout changes; older entries rebuild.
-OVERVIEW_SCHEMA = 1
+OVERVIEW_SCHEMA = 2
 
 #: Status every :class:`SuspectedDefence` carries until verified dynamically.
 STATIC_STATUS = "suspected (static)"
@@ -158,6 +161,17 @@ def _adb_stdout(command: str, serial: str | None) -> str:
     return stdout or ""
 
 
+def _adb_raw(command: str, serial: str | None) -> tuple[str, str]:
+    """Run adb returning ``(stdout, stderr)``; exceptions propagate.
+
+    Used by the functions the AI tools wrap, which keep their original
+    error behaviour (a failing adb layer raises into the tool dispatcher).
+    """
+    if serial is None:
+        return Adb.send_adb_command(command)
+    return Adb.send_adb_command(command, serial=serial)
+
+
 def _bad_package_reason(package: str) -> str | None:
     """Reason string when *package* is not a valid package name, else None."""
     if not is_valid_package_name(package):
@@ -168,6 +182,16 @@ def _bad_package_reason(package: str) -> str | None:
 def _utc_now() -> str:
     """Current UTC time as an ISO-8601 string."""
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """*value* if it is a dict, else ``{}`` (shared JSON is untrusted)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    """*value* if it is a list, else ``[]`` (shared JSON is untrusted)."""
+    return value if isinstance(value, list) else []
 
 
 def _indent(line: str) -> int:
@@ -212,8 +236,8 @@ def get_package_details(package: str, serial: str | None = None) -> dict[str, An
         :func:`parse_extended_package_info`'s fields merged with
         ``{"package_name": package}``.
     """
-    stdout = _adb_stdout(f"shell dumpsys package {shlex.quote(package)}", serial)
-    details = parse_extended_package_info(stdout)
+    stdout, _stderr = _adb_raw(f"shell dumpsys package {shlex.quote(package)}", serial)
+    details = parse_extended_package_info(stdout or "")
     return {**details, "package_name": package}
 
 
@@ -257,9 +281,8 @@ def _pull_apks(
     Returns:
         ``(device_path, local_path)`` per pulled split, ``base.apk`` first.
     """
-    device_paths = parse_pm_path_output(
-        _adb_stdout(f"shell pm path {shlex.quote(package)}", serial)
-    )
+    stdout, _stderr = _adb_raw(f"shell pm path {shlex.quote(package)}", serial)
+    device_paths = parse_pm_path_output(stdout)
     pulled: list[tuple[str, str]] = []
     for index, device_path in enumerate(device_paths):
         local_path = os.path.join(dest_dir, f"split_{index}.apk")
@@ -586,7 +609,7 @@ def parse_permission_state(
                     )
 
     dangerous = dangerous or set()
-    manifest_protection = manifest_protection or {}
+    manifest_protection = _as_dict(manifest_protection)
     for item in grants.values():
         if declared.get(item.name):
             item.protection, item.protection_source = declared[item.name], "dumpsys"
@@ -687,14 +710,16 @@ _BG_STATES = {"bg", "cch", "cached"}
 
 @dataclass
 class AppOpEntry(_DictMixin):
-    """One AppOps op of a package.
+    """One AppOps op of a package (uid- and package-level state merged).
 
     Times are kept both raw (as printed) and as "seconds ago" when parsable.
 
     Attributes:
         op: Op name (``CAMERA``, ``READ_CLIPBOARD`` ...).
-        mode: ``allow``/``ignore``/``deny``/``foreground``/``default``/...
-        scope: ``"package"`` or ``"uid"`` (uid-level mode).
+        mode: Effective mode: the uid-level mode when one is set (it wins in
+            ``AppOpsService.checkOperation``), else the package mode.
+        uid_mode: Uid-level mode, ``None`` if not set.
+        package_mode: Package-level mode, ``None`` if not printed.
         permission: Matching runtime permission, ``None`` if the op has none.
         last_access / last_access_ago_s: Last access (raw text / seconds ago).
         last_reject / last_reject_ago_s: Last rejection.
@@ -704,11 +729,14 @@ class AppOpEntry(_DictMixin):
             ``["fg-s", "top-s"]`` (only in the dumpsys-style format).
         foreground / background: Derived from the access states; ``None``
             when the format carries no state.
+        proxy_packages: Packages that accessed the op on this app's behalf
+            (``proxy[uid=..., pkg=...]``).
     """
 
     op: str
     mode: str | None = None
-    scope: str = "package"
+    uid_mode: str | None = None
+    package_mode: str | None = None
     permission: str | None = None
     last_access: str | None = None
     last_access_ago_s: float | None = None
@@ -721,6 +749,7 @@ class AppOpEntry(_DictMixin):
     reject_states: list[str] = field(default_factory=list)
     foreground: bool | None = None
     background: bool | None = None
+    proxy_packages: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -739,13 +768,14 @@ _DURATION_FULL_RE = re.compile(r"[+-]?(?:\d+(?:ms|d|h|m|s))+")
 _DURATION_UNITS = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0, "ms": 0.001}
 
 _OP_NAME = r"[A-Z][A-Z0-9_]+"
-_SEMI_OP_RE = re.compile(rf"^(?:Uid mode:\s*)?({_OP_NAME}):\s*([a-z_]+)(.*)$")
+_SEMI_OP_RE = re.compile(rf"^(Uid mode:\s*)?({_OP_NAME}):\s*([a-z_]+)(.*)$")
 _UID_OP_RE = re.compile(rf"^({_OP_NAME}):\s*mode=([a-z_]+)")
 _BLOCK_OP_RE = re.compile(rf"^({_OP_NAME})\s*\(([a-z_]+)[^)]*\):\s*$")
 _EVENT_RE = re.compile(
     r"^(Access|Reject):\s*\[([^\]]*)\]\s*(.*?)\s*(?:\(([^)]*)\))?"
-    r"(?:\s*duration=(\S+))?\s*$"
+    r"(?:\s*duration=(\S+))?(?:\s*proxy\[([^\]]*)\])?\s*$"
 )
+_PROXY_PKG_RE = re.compile(r"pkg=([^,\]\s]+)")
 
 
 def parse_android_duration(text: str | None) -> float | None:
@@ -789,10 +819,14 @@ def _apply_semicolon_fields(entry: AppOpEntry, rest: str) -> None:
 
 def _apply_event(entry: AppOpEntry, match: re.Match[str]) -> None:
     """Merge one ``Access:``/``Reject:`` line, keeping the most recent."""
-    kind, state, stamp, relative, duration = match.groups()
+    kind, state, stamp, relative, duration, proxy = match.groups()
     state = state.strip()
     ago = parse_android_duration(relative)
     raw = (stamp or "").strip() or (relative or "").strip() or None
+    if proxy:
+        proxy_pkg = _PROXY_PKG_RE.search(proxy)
+        if proxy_pkg and proxy_pkg.group(1) not in entry.proxy_packages:
+            entry.proxy_packages.append(proxy_pkg.group(1))
     if kind == "Access":
         if state and state not in entry.access_states:
             entry.access_states.append(state)
@@ -831,13 +865,18 @@ def parse_appops(text: str) -> list[AppOpEntry]:
     Handles, in one pass:
 
     * ``cmd appops get`` lines: ``CAMERA: allow; time=+5m3s ago;
-      rejectTime=+1h ago; duration=+2s``, ``(running)`` and the
-      ``Uid mode: OP: mode`` prefix;
-    * the block format of newer builds and ``dumpsys appops --package``:
-      ``CAMERA (allow):`` followed by ``Access: [fg-s] 2026-01-02 10:00:00.000
-      (-5m3s) duration=+2s`` / ``Reject: [bg-s]...`` lines, optionally grouped
-      in ``null=[ ... ]`` attribution tags;
-    * dumpsys uid-level ``OP: mode=allow`` lines.
+      rejectTime=+1h ago; duration=+2s`` and ``(running)``. AOSP prints
+      ``Uid mode: `` once, before the FIRST uid-level op only; the following
+      uid ops carry no prefix. They are kept in uid scope until a line
+      carries time fields (uid entries never do) or an op name repeats.
+      A package op printed without time fields right after the uid block is
+      inherently ambiguous in this format, which is why :func:`get_appops`
+      prefers ``dumpsys appops --package``.
+    * the block format of ``dumpsys appops --package`` (and newer builds):
+      ``CAMERA (allow):`` followed by ``Access: [fg-s] 2026-01-02
+      10:00:00.000 (-5m3s) duration=+2s proxy[uid=1000, pkg=x, ...]`` /
+      ``Reject: [bg-s]...`` lines, optionally grouped in ``null=[ ... ]``
+      attribution tags, plus uid-level ``OP: mode=allow`` lines.
 
     Unknown lines are ignored; ops without a matching permission (e.g.
     ``READ_CLIPBOARD``) are kept.
@@ -846,18 +885,17 @@ def parse_appops(text: str) -> list[AppOpEntry]:
         text: Raw command output.
 
     Returns:
-        One :class:`AppOpEntry` per (scope, op), in first-seen order.
+        One :class:`AppOpEntry` per op (first-seen order), with ``uid_mode``,
+        ``package_mode`` and the effective ``mode``.
     """
-    entries: dict[tuple[str, str], AppOpEntry] = {}
+    entries: dict[str, AppOpEntry] = {}
     current: AppOpEntry | None = None
+    uid_block: set[str] | None = None  # ops seen in the current uid block
 
-    def get(op: str, scope: str) -> AppOpEntry:
-        key = (scope, op)
-        if key not in entries:
-            entries[key] = AppOpEntry(
-                op=op, scope=scope, permission=OP_PERMISSIONS.get(op)
-            )
-        return entries[key]
+    def get(op: str) -> AppOpEntry:
+        if op not in entries:
+            entries[op] = AppOpEntry(op=op, permission=OP_PERMISSIONS.get(op))
+        return entries[op]
 
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
@@ -870,24 +908,36 @@ def parse_appops(text: str) -> list[AppOpEntry]:
             continue
         block = _BLOCK_OP_RE.match(line)
         if block:
-            current = get(block.group(1), "package")
-            current.mode = block.group(2)
+            uid_block = None
+            current = get(block.group(1))
+            current.package_mode = block.group(2)
             continue
         uid_op = _UID_OP_RE.match(line)
         if uid_op:
-            entry = get(uid_op.group(1), "uid")
-            entry.mode = uid_op.group(2)
+            get(uid_op.group(1)).uid_mode = uid_op.group(2)
             current = None
             continue
         semi = _SEMI_OP_RE.match(line)
-        if semi:
-            scope = "uid" if line.startswith("Uid mode:") else "package"
-            entry = get(semi.group(1), scope)
-            entry.mode = semi.group(2)
-            _apply_semicolon_fields(entry, semi.group(3))
-            current = entry
+        if not semi:
             continue
+        prefix, op, mode, rest = semi.groups()
+        if prefix:
+            uid_block = set()
+        elif uid_block is not None and (
+            "=" in rest or "(running)" in rest or op in uid_block
+        ):
+            uid_block = None  # first package-level line
+        entry = get(op)
+        if uid_block is not None:
+            uid_block.add(op)
+            entry.uid_mode = mode
+            current = None
+        else:
+            entry.package_mode = mode
+            _apply_semicolon_fields(entry, rest)
+            current = entry
     for entry in entries.values():
+        entry.mode = entry.uid_mode or entry.package_mode
         _derive_fg_bg(entry)
     return list(entries.values())
 
@@ -898,8 +948,8 @@ _APPOPS_ERROR_HINTS = ("unknown package", "error:", "exception", "not found")
 def get_appops(package: str, serial: str | None = None) -> AppOpsState:
     """Read *package*'s AppOps (never raises).
 
-    Tries ``cmd appops get <pkg>`` and falls back to
-    ``dumpsys appops --package <pkg>`` when that yields nothing parsable.
+    Prefers ``dumpsys appops --package <pkg>`` (uid vs package scope is
+    unambiguous there) and falls back to ``cmd appops get <pkg>``.
 
     Args:
         package: Fully qualified package name.
@@ -915,8 +965,8 @@ def get_appops(package: str, serial: str | None = None) -> AppOpsState:
     last_output = ""
     try:
         for source, command in (
-            ("cmd appops get", f"shell cmd appops get {quoted}"),
             ("dumpsys appops", f"shell dumpsys appops --package {quoted}"),
+            ("cmd appops get", f"shell cmd appops get {quoted}"),
         ):
             output = _adb(command, serial)
             last_output = output
@@ -943,6 +993,9 @@ def get_appops(package: str, serial: str | None = None) -> AppOpsState:
 # ---------------------------------------------------------------------------
 
 _FOOTPRINT_SEP = "@@SANDROID_SEP@@"
+
+#: ``du`` over a large app's data can take far longer than adb's 30s default.
+FOOTPRINT_TIMEOUT_SECONDS = 120
 _DB_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 
@@ -1071,8 +1124,12 @@ def parse_footprint_output(
     result.external_kb, result.external_reason = _parse_du(external)
     result.shared_prefs_count = _count_entries(prefs, kind="prefs")
     result.databases_count = _count_entries(dbs, kind="dbs")
-    if root_method is None and result.private_kb is None:
+    if root_method is None:
+        # Unprivileged toybox du can print "Permission denied" plus a tiny
+        # size of the top dir itself -- never report that as the app's size.
+        result.private_kb = None
         result.private_reason = "root required (enable adb root)"
+        result.shared_prefs_count = result.databases_count = None
     return result
 
 
@@ -1096,7 +1153,17 @@ def get_data_footprint(package: str, serial: str | None = None) -> DataFootprint
         method = detect_root_method(serial)
         wrap = None if method in (None, "adb root") else method
         script = _root_wrap(footprint_script(package), wrap)
-        output = _adb(device_shell_command(script), serial)
+        output = _adb(
+            device_shell_command(script), serial, timeout=FOOTPRINT_TIMEOUT_SECONDS
+        )
+        if _FOOTPRINT_SEP not in output and "timed out" in output.lower():
+            return DataFootprint(
+                package=package,
+                private_dir=f"/data/data/{package}",
+                external_dir=f"/sdcard/Android/data/{package}",
+                root_method=method,
+                reason=f"timed out after {FOOTPRINT_TIMEOUT_SECONDS}s (du)",
+            )
         return parse_footprint_output(output, package, method)
     except Exception as exc:
         logger.debug("footprint failed for %s: %s", package, exc)
@@ -1178,14 +1245,19 @@ _CREATE_RE = re.compile(r"createTime=(\S+)")
 
 
 def decode_fgs_types(raw: str | None) -> list[str]:
-    """Decode a foreground-service type value (``0x00000048``/``8``/labels)."""
+    """Decode a foreground-service type value.
+
+    AOSP prints ``types=%08X`` (zero-padded hex, no ``0x``); ``0x``-prefixed
+    hex and label strings (``location|camera``) are accepted too. Numeric
+    values are ALWAYS read as hex.
+    """
     if not raw:
         return []
     text = raw.strip().rstrip(",")
-    try:
-        value = int(text, 16) if not text.isdigit() else int(text)
-    except ValueError:
+    hex_digits = text[2:] if text.lower().startswith("0x") else text
+    if not re.fullmatch(r"[0-9a-fA-F]+", hex_digits or "-"):
         return [t for t in re.split(r"[|,]", text) if t and t != "none"]
+    value = int(hex_digits, 16)
     if value in (0xFFFFFFFF, -1):
         return ["manifest"]
     if value == 0:
@@ -1293,13 +1365,14 @@ def sha256_file(path: str | os.PathLike[str]) -> str:
 
 
 def compute_apk_key(split_sha256s: list[str]) -> str:
-    """Cache key for an app from the sha256 of each installed split.
+    """Cache key from the sha256 of each split that is part of the key.
 
-    One split (plain APK): the key is that sha256. Several splits: the key is
-    the sha256 of the sorted per-split hex digests joined by newlines.
+    One hash (plain APK): the key is that sha256. Several: the key is the
+    sha256 of the sorted hex digests joined by newlines. Use
+    :func:`apk_key_for` to drop per-device config splits first.
 
     Args:
-        split_sha256s: Lower-case hex sha256 of every installed split.
+        split_sha256s: Lower-case hex sha256 digests.
 
     Returns:
         The key (64 hex chars).
@@ -1315,6 +1388,24 @@ def compute_apk_key(split_sha256s: list[str]) -> str:
     return hashlib.sha256("\n".join(hashes).encode("ascii")).hexdigest()
 
 
+def is_config_split(path_or_name: str) -> bool:
+    """True for a per-device config split (``split_config.<abi|dpi|lang>``)."""
+    return os.path.basename(path_or_name).startswith("split_config.")
+
+
+def apk_key_for(splits: list[tuple[str, str]]) -> str:
+    """Cache key for ``[(device_path_or_name, sha256), ...]``.
+
+    Per-device config splits (ABI/density/locale) are excluded, so the same
+    app installed on two devices shares one entry.
+
+    Raises:
+        ValueError: *splits* is empty.
+    """
+    kept = [sha for name, sha in splits if not is_config_split(name)]
+    return compute_apk_key(kept or [sha for _name, sha in splits])
+
+
 def parse_sha256sum_output(output: str) -> dict[str, str]:
     """Parse ``sha256sum <paths>`` output into ``{path: hex}``."""
     found = {}
@@ -1325,15 +1416,41 @@ def parse_sha256sum_output(output: str) -> dict[str, str]:
     return found
 
 
+#: ``(serial, package, identity) -> [(device_path, sha256), ...]`` so a
+#: cache-only lookup (``allow_pull=False``) does not re-hash on every call.
+_SPLIT_HASH_MEMO: dict[tuple[str | None, str, str], list[tuple[str, str]]] = {}
+_SPLIT_HASH_MEMO_LOCK = threading.Lock()
+
+
+def _package_identity(package: str, serial: str | None) -> str | None:
+    """``versionCode``/``lastUpdateTime`` lines of the install (cheap)."""
+    command = (
+        f"dumpsys package {shlex.quote(package)} "
+        "| grep -E 'versionCode=|lastUpdateTime='"
+    )
+    output = _adb_stdout(device_shell_command(command), serial)
+    lines = sorted({line.strip() for line in output.splitlines() if line.strip()})
+    return "\n".join(lines) or None
+
+
 def device_split_hashes(
-    package: str, serial: str | None = None
+    package: str, serial: str | None = None, *, use_memo: bool = True
 ) -> list[tuple[str, str]] | None:
     """Hash every installed split of *package* on the device.
+
+    Memoized per (serial, package, versionCode + lastUpdateTime): a repeat
+    call for an unchanged install costs one cheap ``dumpsys | grep``.
 
     Returns:
         ``[(device_path, sha256), ...]`` (``pm path`` order), or ``None``
         when the package has no APK path or a split could not be hashed.
     """
+    identity = _package_identity(package, serial) if use_memo else None
+    memo_key = (serial, package, identity or "")
+    if identity:
+        with _SPLIT_HASH_MEMO_LOCK:
+            if memo_key in _SPLIT_HASH_MEMO:
+                return list(_SPLIT_HASH_MEMO[memo_key])
     paths = parse_pm_path_output(
         _adb_stdout(f"shell pm path {shlex.quote(package)}", serial)
     )
@@ -1345,11 +1462,39 @@ def device_split_hashes(
     hashes = parse_sha256sum_output(output)
     if not all(p in hashes for p in paths):
         return None
-    return [(p, hashes[p]) for p in paths]
+    result = [(p, hashes[p]) for p in paths]
+    if identity:
+        with _SPLIT_HASH_MEMO_LOCK:
+            _SPLIT_HASH_MEMO[memo_key] = result
+    return list(result)
 
 
 class CacheLockTimeoutError(RuntimeError):
     """Raised when an entry's lock file could not be acquired in time."""
+
+
+_UMASK: int | None = None
+_UMASK_LOCK = threading.Lock()
+
+
+def _shared_file_mode() -> int:
+    """``0o666 & ~umask`` (0o664 typically): readable by the team share.
+
+    ``mkstemp`` creates 0600 files and ``os.replace`` keeps that mode, which
+    would make cache entries unreadable for everyone else on a share.
+    """
+    global _UMASK
+    with _UMASK_LOCK:
+        if _UMASK is None:
+            current = os.umask(0)
+            os.umask(current)
+            _UMASK = current
+    return 0o666 & ~_UMASK
+
+
+def _androguard_version() -> str | None:
+    """Installed androguard version (cached facts from another are stale)."""
+    return tool_versions().get("androguard")
 
 
 class ApkCache:
@@ -1359,12 +1504,13 @@ class ApkCache:
 
         <root>/insight/                  Dexray Insight 2.x's own cache_dir
         <root>/apk/<key>/meta.json       splits, package, version, tools,
-                                         created_at, Insight result info
+                                         created_at, Insight summary
         <root>/apk/<key>/overview.json   androguard-derived facts
 
-    ``<key>`` is :func:`compute_apk_key`. Writes are atomic (temp file +
-    ``os.replace``) and serialised per entry by a ``.lock`` file. Only
-    APK-derived data belongs here, never device/runtime facts.
+    ``<key>`` is :func:`apk_key_for` (config splits excluded). Writes are
+    atomic (temp file + ``os.replace``, mode ``0o666 & ~umask``) and
+    serialised per entry by a token-owned ``.lock`` file. Only APK-derived
+    data belongs here, never device/runtime facts, and no local paths.
 
     Args:
         root: Cache root; defaults to :func:`default_apk_cache_root`.
@@ -1399,7 +1545,7 @@ class ApkCache:
 
     def entry_dir(self, key: str) -> Path:
         """Directory of one entry (key validated as 64 hex chars)."""
-        if not re.fullmatch(r"[0-9a-f]{64}", key or ""):
+        if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
             raise ValueError(f"invalid apk cache key {key!r}")
         return self.apk_dir / key
 
@@ -1420,9 +1566,17 @@ class ApkCache:
         return self._read_json(key, "meta.json")
 
     def read_overview(self, key: str) -> dict[str, Any] | None:
-        """Return the entry's overview.json if current, else ``None``."""
+        """Return the entry's overview.json if current, else ``None``.
+
+        An entry built with a different androguard version than the one
+        installed here is stale (a miss); without androguard any version is
+        accepted, since it could not be rebuilt anyway.
+        """
         data = self._read_json(key, "overview.json")
         if data is None or data.get("schema") != OVERVIEW_SCHEMA:
+            return None
+        current = _androguard_version()
+        if current and data.get("androguard_version") != current:
             return None
         return data
 
@@ -1438,11 +1592,18 @@ class ApkCache:
         Returns:
             ``[(key, meta), ...]`` sorted by ``updated_at`` descending.
         """
-        if not self.enabled or not self.apk_dir.is_dir():
+        if not self.enabled:
+            return []
+        try:
+            entries = list(self.apk_dir.iterdir())
+        except OSError:
             return []
         found = []
-        for entry in self.apk_dir.iterdir():
-            meta = self._read_json(entry.name, "meta.json") if entry.is_dir() else None
+        for entry in entries:
+            try:
+                meta = self.read_meta(entry.name)
+            except ValueError:  # not a key-shaped directory
+                continue
             if not meta or meta.get("package") != package:
                 continue
             if version_code is not None and str(meta.get("version_code")) != str(
@@ -1450,39 +1611,82 @@ class ApkCache:
             ):
                 continue
             found.append((entry.name, meta))
-        found.sort(key=lambda kv: kv[1].get("updated_at") or "", reverse=True)
+        found.sort(key=lambda kv: str(kv[1].get("updated_at") or ""), reverse=True)
         return found
 
     # -- writing -------------------------------------------------------------
 
+    @staticmethod
+    def _try_create_lock(lock: Path, token: str) -> bool:
+        """Create *lock* exclusively holding *token*; False if it exists."""
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w") as handle:
+            handle.write(token)
+        return True
+
+    def _break_if_stale(self, lock: Path) -> None:
+        """Remove an abandoned lock without racing a fresh owner.
+
+        The stale lock is first moved aside with an atomic rename (only one
+        breaker can win); if what was moved turns out to be fresh -- a new
+        owner took the lock between stat and rename -- it is linked back.
+        """
+        try:
+            age = time.time() - lock.stat().st_mtime
+        except OSError:
+            return  # released meanwhile, or a share hiccup: caller sleeps
+        if age <= self.stale_lock_after:
+            return
+        grave = lock.with_name(f".lock.stale.{uuid.uuid4().hex}")
+        try:
+            os.rename(lock, grave)
+        except OSError:
+            return  # another breaker won, or the owner released it
+        try:
+            fresh = time.time() - grave.stat().st_mtime <= self.stale_lock_after
+        except OSError:
+            fresh = False
+        if fresh:
+            with contextlib.suppress(OSError):
+                os.link(grave, lock)
+        with contextlib.suppress(OSError):
+            grave.unlink()
+
+    @staticmethod
+    def _release(lock: Path, token: str) -> None:
+        """Unlink *lock* only if it still holds our token."""
+        try:
+            if lock.read_text().strip() != token:
+                logger.warning("apk cache lock %s was taken over; left as is", lock)
+                return
+            lock.unlink()
+        except OSError:
+            pass
+
     @contextlib.contextmanager
     def _locked(self, key: str) -> Iterator[Path]:
-        """Hold the entry's ``.lock`` file (O_EXCL create; stale locks broken)."""
+        """Hold the entry's ``.lock`` file until the block ends.
+
+        Raises:
+            CacheLockTimeoutError: Not acquired within ``lock_timeout``.
+        """
         entry = self.entry_dir(key)
         entry.mkdir(parents=True, exist_ok=True)
         lock = entry / ".lock"
+        token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
         deadline = time.monotonic() + self.lock_timeout
-        while True:
-            try:
-                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                with os.fdopen(fd, "w") as handle:
-                    handle.write(f"{os.getpid()} {_utc_now()}\n")
-                break
-            except FileExistsError:
-                try:
-                    if time.time() - lock.stat().st_mtime > self.stale_lock_after:
-                        lock.unlink(missing_ok=True)
-                        continue
-                except OSError:
-                    continue
-                if time.monotonic() > deadline:
-                    raise CacheLockTimeoutError(f"lock busy: {lock}") from None
-                time.sleep(0.05)
+        while not self._try_create_lock(lock, token):
+            self._break_if_stale(lock)
+            if time.monotonic() > deadline:
+                raise CacheLockTimeoutError(f"lock busy: {lock}")
+            time.sleep(0.05)
         try:
             yield entry
         finally:
-            with contextlib.suppress(OSError):
-                lock.unlink()
+            self._release(lock, token)
 
     @staticmethod
     def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -1491,6 +1695,8 @@ class ApkCache:
             prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
         )
         try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, _shared_file_mode())
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2, sort_keys=True, default=str)
                 handle.flush()
@@ -1541,17 +1747,23 @@ class ApkCache:
 # ---------------------------------------------------------------------------
 
 
-def tool_versions() -> dict[str, str | None]:
-    """Versions of the tools that produced cached facts."""
-    from importlib import metadata
+_TOOL_VERSIONS: dict[str, str | None] | None = None
 
-    versions: dict[str, str | None] = {}
-    for dist in ("sandroid", "androguard", "dexray-insight"):
-        try:
-            versions[dist] = metadata.version(dist)
-        except Exception:
-            versions[dist] = None
-    return versions
+
+def tool_versions() -> dict[str, str | None]:
+    """Versions of the tools that produced cached facts (looked up once)."""
+    global _TOOL_VERSIONS
+    if _TOOL_VERSIONS is None:
+        from importlib import metadata
+
+        versions: dict[str, str | None] = {}
+        for dist in ("sandroid", "androguard", "dexray-insight"):
+            try:
+                versions[dist] = metadata.version(dist)
+            except Exception:
+                versions[dist] = None
+        _TOOL_VERSIONS = versions
+    return dict(_TOOL_VERSIONS)
 
 
 def _resolve_nsc_xml(apk: Any) -> tuple[Any, str | None]:
@@ -1589,20 +1801,41 @@ def _resolve_nsc_xml(apk: Any) -> tuple[Any, str | None]:
     return None, None
 
 
-def _nsc_facts(apk: Any, target_sdk: int | None) -> dict[str, Any]:
-    """Pin-sets, cleartext and user-CA trust from the APK's NSC + manifest."""
+def _nsc_facts(
+    apk: Any, target_sdk: int | None, debuggable: bool = False
+) -> dict[str, Any]:
+    """Effective pinning, cleartext and user-CA trust from NSC + manifest.
+
+    Platform rules applied: an NSC overrides ``usesCleartextTraffic`` (API
+    24+, i.e. every device Sandroid targets); without an explicit value
+    cleartext defaults to permitted below targetSdk 28; user CAs are trusted
+    by default below targetSdk 24 (also for a base-config without
+    trust-anchors); ``debug-overrides`` only apply when the app is
+    debuggable.
+    """
     android_ns = "{http://schemas.android.com/apk/res/android}"
+    known = target_sdk is not None
+    default_user_ca = known and target_sdk < 24
+    default_cleartext = (target_sdk < 28) if known else None
     facts: dict[str, Any] = {
         "present": False,
         "path": None,
         "uses_cleartext_traffic": None,
         "cleartext_base": None,
+        "cleartext_effective": None,
+        "cleartext_source": None,
         "cleartext_domains": [],
         "pin_sets": [],
-        "trust_user_ca": False,
+        "trust_user_ca": default_user_ca,
+        "trust_user_ca_source": (
+            f"platform default (targetSdk {target_sdk})" if default_user_ca else None
+        ),
+        "trust_user_ca_domains": [],
         "trust_user_ca_debug_only": False,
+        "debug_overrides_active": False,
         "bundled_ca": False,
         "override_pins": False,
+        "override_pins_scopes": [],
         "reason": None,
     }
     attr = apk.get_attribute_value("application", "usesCleartextTraffic")
@@ -1611,39 +1844,62 @@ def _nsc_facts(apk: Any, target_sdk: int | None) -> dict[str, Any]:
     try:
         root, path = _resolve_nsc_xml(apk)
     except Exception as exc:
+        root, path = None, None
         facts["reason"] = f"NSC unreadable: {exc}"
-        return facts
     if root is None:
-        # Platform defaults: user CAs trusted only below targetSdk 24.
-        facts["trust_user_ca"] = target_sdk is not None and target_sdk < 24
+        if facts["uses_cleartext_traffic"] is not None:
+            facts["cleartext_effective"] = facts["uses_cleartext_traffic"]
+            facts["cleartext_source"] = "android:usesCleartextTraffic"
+        else:
+            facts["cleartext_effective"] = default_cleartext
+            facts["cleartext_source"] = f"platform default (targetSdk {target_sdk})"
         return facts
     facts["present"], facts["path"] = True, path
 
     def attr_of(element: Any, name: str) -> str | None:
         return element.get(name) or element.get(f"{android_ns}{name}")
 
-    def trust(scope: Any, debug: bool) -> None:
-        for cert in scope.iter("certificates"):
+    def anchors(scope: Any) -> list[Any] | None:
+        """Direct ``trust-anchors/certificates``; None without trust-anchors."""
+        if scope.find("trust-anchors") is None:
+            return None
+        return scope.findall("trust-anchors/certificates")
+
+    def scan(certs: list[Any], scope_name: str) -> bool:
+        """Record bundled CAs / overridePins; return True if user CAs trusted."""
+        user = False
+        for cert in certs:
             src = (attr_of(cert, "src") or "").lower()
             if src == "user":
-                facts["trust_user_ca_debug_only" if debug else "trust_user_ca"] = True
+                user = True
             elif src.startswith("@"):
                 facts["bundled_ca"] = True
             if (attr_of(cert, "overridePins") or "").lower() == "true":
                 facts["override_pins"] = True
+                if scope_name not in facts["override_pins_scopes"]:
+                    facts["override_pins_scopes"].append(scope_name)
+        return user
 
-    for base in root.iter("base-config"):
+    base = root.find("base-config")
+    facts["cleartext_effective"] = default_cleartext
+    facts["cleartext_source"] = f"NSC default (targetSdk {target_sdk})"
+    if base is not None:
         value = attr_of(base, "cleartextTrafficPermitted")
         if value is not None:
             facts["cleartext_base"] = value.lower() == "true"
-        trust(base, debug=False)
-    for overrides in root.iter("debug-overrides"):
-        trust(overrides, debug=True)
+            facts["cleartext_effective"] = facts["cleartext_base"]
+            facts["cleartext_source"] = "NSC base-config"
+        certs = anchors(base)
+        if certs is not None:
+            facts["trust_user_ca"] = scan(certs, "base-config")
+            facts["trust_user_ca_source"] = "NSC base-config"
     for domain_cfg in root.iter("domain-config"):
         domains = [(d.text or "").strip() for d in domain_cfg.findall("domain")]
         if (attr_of(domain_cfg, "cleartextTrafficPermitted") or "").lower() == "true":
             facts["cleartext_domains"].extend(domains)
-        trust(domain_cfg, debug=False)
+        certs = anchors(domain_cfg)
+        if certs is not None and scan(certs, ", ".join(domains) or "domain-config"):
+            facts["trust_user_ca_domains"].extend(domains)
         for pin_set in domain_cfg.findall("pin-set"):
             facts["pin_sets"].append(
                 {
@@ -1652,10 +1908,16 @@ def _nsc_facts(apk: Any, target_sdk: int | None) -> dict[str, Any]:
                     "expiration": attr_of(pin_set, "expiration"),
                 }
             )
-    if not any(True for _ in root.iter("base-config")):
-        facts["trust_user_ca"] = facts["trust_user_ca"] or (
-            target_sdk is not None and target_sdk < 24
-        )
+    overrides = root.find("debug-overrides")
+    if overrides is not None:
+        certs = anchors(overrides) or []
+        if debuggable:
+            facts["debug_overrides_active"] = True
+            if scan(certs, "debug-overrides"):
+                facts["trust_user_ca"] = True
+                facts["trust_user_ca_source"] = "NSC debug-overrides (debuggable app)"
+        elif any((attr_of(c, "src") or "").lower() == "user" for c in certs):
+            facts["trust_user_ca_debug_only"] = True
     return facts
 
 
@@ -1769,12 +2031,15 @@ def build_apk_overview(apk_paths: list[str]) -> dict[str, Any]:
         with contextlib.suppress(Exception):
             split_name = apk.get_attribute_value("manifest", "split")
         overview["splits"].append({"file": os.path.basename(path), "split": split_name})
-        with contextlib.suppress(Exception):
+        try:
             infos.append(_manifest_component_info(apk))
+        except Exception as exc:
+            overview["errors"].append(f"{os.path.basename(path)} manifest: {exc}")
         with contextlib.suppress(Exception):
             lib_paths.update(
                 f for f in apk.get_files() if f.startswith("lib/") and f.endswith(".so")
             )
+    overview["androguard_version"] = _androguard_version()
     if base is None:
         return overview
 
@@ -1820,12 +2085,20 @@ def build_apk_overview(apk_paths: list[str]) -> dict[str, Any]:
     overview["permission_protection"] = requested_prot
     overview["declared_permissions"] = declared_prot
     try:
-        overview["nsc"] = _nsc_facts(base, target_sdk)
+        overview["nsc"] = _nsc_facts(base, target_sdk, overview["debuggable"])
     except Exception as exc:
         overview["nsc"] = {"present": False, "reason": f"NSC unreadable: {exc}"}
+    by_abi: dict[str, set[str]] = {}
+    for lib in lib_paths:
+        parts = lib.split("/")
+        if len(parts) >= 3:
+            by_abi.setdefault(parts[1], set()).add(parts[-1])
     overview["native_lib_paths"] = sorted(lib_paths)
     overview["native_libs"] = sorted({os.path.basename(p) for p in lib_paths})
-    overview["abis"] = sorted({p.split("/")[1] for p in lib_paths if p.count("/") >= 2})
+    # Libs come from whichever ABI split was pulled; the cache key ignores
+    # config splits, so they are recorded per ABI.
+    overview["native_libs_by_abi"] = {abi: sorted(libs) for abi, libs in by_abi.items()}
+    overview["abis"] = sorted(by_abi)
     overview["signer"] = _signer_facts(base)
     return overview
 
@@ -1839,8 +2112,7 @@ class StaticOverview(_DictMixin):
         key: Cache key (see :func:`compute_apk_key`), ``None`` if unknown.
         overview: overview.json content (see :func:`build_apk_overview`).
         meta: meta.json content.
-        insight: Insight results (full result JSON when the recorded file
-            still exists, else the summary kept in meta.json), or ``None``.
+        insight: The Insight summary recorded in meta.json, or ``None``.
         from_cache: The overview came from the cache (no pull).
         ok / reason: ``ok`` False means nothing usable; see ``reason``.
     """
@@ -1856,18 +2128,12 @@ class StaticOverview(_DictMixin):
 
 
 def load_insight_results(meta: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Insight results recorded in *meta* (full file if present, else summary)."""
-    info = (meta or {}).get("insight") or {}
-    result_file = info.get("result_file")
-    if result_file and os.path.isfile(result_file):
-        try:
-            with open(result_file, encoding="utf-8") as handle:
-                data = json.load(handle)
-            if isinstance(data, dict):
-                return data
-        except (OSError, ValueError):
-            pass
-    summary = info.get("summary")
+    """The Insight summary recorded in *meta*, or ``None``.
+
+    Never opens a path named in meta.json: a shared meta is untrusted input.
+    """
+    info = meta.get("insight") if isinstance(meta, dict) else None
+    summary = info.get("summary") if isinstance(info, dict) else None
     return summary if isinstance(summary, dict) else None
 
 
@@ -1905,7 +2171,7 @@ def get_static_overview(
     try:
         hashes = device_split_hashes(package, serial)
         if hashes:
-            result.key = compute_apk_key([h for _p, h in hashes])
+            result.key = apk_key_for(hashes)
             result.meta = cache.read_meta(result.key)
             result.overview = cache.read_overview(result.key)
             result.insight = load_insight_results(result.meta)
@@ -1932,21 +2198,33 @@ def get_static_overview(
             if hashes and len(pulled) != len(hashes):
                 result.ok = False
                 result.reason = "only some splits could be pulled"
-            key = compute_apk_key(local_hashes)
+            key = apk_key_for(
+                [
+                    (d, digest)
+                    for (d, _l), digest in zip(pulled, local_hashes, strict=True)
+                ]
+            )
             overview = build_apk_overview([local for _d, local in pulled])
             splits = [
                 {
-                    "path": device_path,
                     "name": os.path.basename(device_path),
                     "sha256": digest,
                     "size": os.path.getsize(local),
+                    "config": is_config_split(device_path),
                 }
                 for (device_path, local), digest in zip(
                     pulled, local_hashes, strict=True
                 )
             ]
         result.key, result.overview = key, overview
-        if result.ok:
+        decode_failed = not overview.get("package") or bool(overview.get("errors"))
+        if decode_failed:
+            # Never cache a failed/partial decode: it would be served forever.
+            errors = "; ".join(str(e) for e in overview.get("errors") or [])
+            result.reason = f"not cached: APK decode incomplete ({errors or 'no base'})"
+            if not overview.get("package"):
+                result.ok = False
+        if result.ok and not decode_failed:
             cache.write_entry(
                 key,
                 overview=overview,
@@ -1973,12 +2251,10 @@ def _insight_summary(results: dict[str, Any]) -> dict[str, Any]:
     apkid = results.get("apkid_analysis") or {}
     if isinstance(apkid, dict):
         apkid = {k: v for k, v in apkid.items() if k != "raw_output"}
-    libraries = results.get("library_detection") or {}
-    detected = (
-        libraries.get("detected_libraries", []) if isinstance(libraries, dict) else []
-    )
+    detected = _library_entries(results)
     keep = ("name", "package_name", "category", "version", "confidence", "vendor")
-    overview = results.get("apk_overview") or {}
+    overview = _as_dict(results.get("apk_overview"))
+    tracker = _as_dict(results.get("tracker_analysis"))
     return {
         "apkid_analysis": apkid,
         "library_detection": {
@@ -1990,9 +2266,7 @@ def _insight_summary(results: dict[str, Any]) -> dict[str, Any]:
         },
         "detected_protections": results.get("detected_protections"),
         "tracker_analysis": {
-            "detected_protections": (results.get("tracker_analysis") or {}).get(
-                "detected_protections"
-            )
+            "detected_protections": tracker.get("detected_protections")
         },
         "apk_overview": {
             "native_libs": overview.get("native_libs", []),
@@ -2008,18 +2282,26 @@ def record_insight_result(
     result_file: str | None = None,
     security_result_file: str | None = None,
     insight_version: str | None = None,
-    insight_cache_dir: str | None = None,
+    insight_cache_used: bool = False,
+    apk_md5: str | None = None,
     package: str | None = None,
     cache: ApkCache | None = None,
 ) -> str | None:
     """Record a Dexray Insight run in the APK cache's meta.json.
 
+    Only cache-relative references are stored (file basenames, the analysed
+    APK's md5 -- Insight's own cache key under ``<root>/insight/``), never
+    absolute local paths, which would leak home/session paths on a share.
+
     Args:
-        split_sha256s: sha256 of every split of the analysed app.
+        split_sha256s: sha256 of every key split (config splits excluded,
+            see :func:`apk_key_for`).
         analysis_results: Insight's main result dict.
-        result_file / security_result_file: Paths of the written JSON files.
+        result_file / security_result_file: The written JSON files (only
+            their basenames are kept).
         insight_version: Insight version string.
-        insight_cache_dir: The cache dir Insight was given (if any).
+        insight_cache_used: Insight was given ``<root>/insight/``.
+        apk_md5: md5 of the analysed APK (Insight's cache key).
         package: Package name if not derivable from the results.
         cache: Cache to use; defaults to ``ApkCache()``.
 
@@ -2031,19 +2313,20 @@ def record_insight_result(
         if not cache.enabled or not split_sha256s:
             return None
         key = compute_apk_key(split_sha256s)
-        general = ((analysis_results or {}).get("apk_overview") or {}).get(
-            "general_info"
-        ) or {}
+        general = _as_dict(
+            _as_dict(_as_dict(analysis_results).get("apk_overview")).get("general_info")
+        )
         updates: dict[str, Any] = {
             "insight": {
-                "result_file": os.path.abspath(result_file) if result_file else None,
-                "security_result_file": (
-                    os.path.abspath(security_result_file)
+                "result_name": os.path.basename(result_file) if result_file else None,
+                "security_result_name": (
+                    os.path.basename(security_result_file)
                     if security_result_file
                     else None
                 ),
                 "version": insight_version,
-                "cache_dir": insight_cache_dir,
+                "cache": "insight" if insight_cache_used else None,
+                "apk_md5": apk_md5,
                 "recorded_at": _utc_now(),
                 "summary": _insight_summary(analysis_results or {}),
             }
@@ -2057,7 +2340,7 @@ def record_insight_result(
         if "splits" not in existing:
             updates["splits"] = [{"sha256": h} for h in split_sha256s]
         updates["tool_versions"] = {
-            **(existing.get("tool_versions") or {}),
+            **_as_dict(existing.get("tool_versions")),
             **tool_versions(),
         }
         return key if cache.write_entry(key, meta_updates=updates) else None
@@ -2076,19 +2359,20 @@ class SuspectedDefence(_DictMixin):
     """A protection the app probably has, from static facts only.
 
     Attributes:
-        id: Stable id (``"root:rootbeer"``) for dedup/UI keys.
+        id: Stable id (``"lib:rootbeer"``) for dedup/UI keys.
         category: ``root``/``integrity``/``debug``/``emulator``/``frida``/
-            ``rasp``/``packer``/``obfuscator``/``tls_stack``/``pinning``/
-            ``cleartext``/``user_ca``.
+            ``rasp``/``packer``/``obfuscator``/``tls_stack``/``crypto_lib``/
+            ``pinning``/``cleartext``/``user_ca``.
         title: Short label.
         evidence: Human-readable evidence strings.
-        routes: Suggested keys: ``h`` friTap, ``b1``..``b6`` bypass digits
-            (b1 ssl, b2 root, b3 frida, b4 debug, b5 integrity, b6
-            emulator), ``v`` verify.
+        routes: Suggested keys, primary first: ``h`` friTap, ``b1``..``b6``
+            bypass digits (b1 ssl, b2 root, b3 frida, b4 debug, b5
+            integrity, b6 emulator), ``v`` verify.
         hint: One-line advice for the route.
         source: ``apkid``/``library``/``native_libs``/``nsc``/
-            ``insight_protections``/``files``.
+            ``insight_protections``.
         weakness: True for facts that *ease* analysis (cleartext, user CA).
+        confidence: ``"low"``/``"medium"``/``"high"``.
         status: Always ``"suspected (static)"``.
     """
 
@@ -2100,8 +2384,11 @@ class SuspectedDefence(_DictMixin):
     hint: str = ""
     source: str = ""
     weakness: bool = False
+    confidence: str = "medium"
     status: str = STATIC_STATUS
 
+
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 _ALL_BYPASSES = ["b2", "b3", "b4", "b5", "b6"]
 
@@ -2177,10 +2464,12 @@ PROTECTION_LIBRARIES: tuple[
     (("trustkit",), "trustkit", "pinning", "TrustKit", ["b1"], "Pinning; b1."),
 )
 
-#: Native-lib basename prefix -> (id, category, title, routes, hint).
+
+#: (basename glob, id, category, title, routes, hint) -- exact basenames:
+#: ``libssl.so`` matches, ``libssl_helper.so`` does not.
 NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
     (
-        "libflutter",
+        "libflutter.so",
         "flutter_tls",
         "tls_stack",
         "Flutter (own BoringSSL)",
@@ -2189,7 +2478,7 @@ NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
         "miss it (stripped symbols); try h, expect pattern-based hooks.",
     ),
     (
-        "libnss3",
+        "libnss3.so",
         "nss_tls",
         "tls_stack",
         "NSS (own CA store)",
@@ -2197,7 +2486,7 @@ NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
         "NSS ignores the Android trust store: use friTap (h), not b1.",
     ),
     (
-        "libcronet",
+        "libcronet*.so",
         "cronet_tls",
         "tls_stack",
         "Cronet (Chromium net stack)",
@@ -2205,7 +2494,7 @@ NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
         "Own BoringSSL; keys via h, cert checks may still hit b1.",
     ),
     (
-        "libconscrypt",
+        "libconscrypt*.so",
         "conscrypt_tls",
         "tls_stack",
         "Bundled Conscrypt",
@@ -2213,15 +2502,7 @@ NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
         "App-bundled Conscrypt provider; b1 usually works, h for keys.",
     ),
     (
-        "libssl",
-        "openssl_tls",
-        "tls_stack",
-        "Bundled OpenSSL/BoringSSL",
-        ["h"],
-        "Native TLS outside the platform stack; friTap (h).",
-    ),
-    (
-        "libcrypto",
+        "libssl.so",
         "openssl_tls",
         "tls_stack",
         "Bundled OpenSSL/BoringSSL",
@@ -2230,14 +2511,14 @@ NATIVE_TLS_LIBS: tuple[tuple[str, str, str, str, list[str], str], ...] = (
     ),
 )
 
-#: Native-lib basename prefix -> library protection id (file-only evidence).
+#: Exact native-lib basename -> library protection id (file-only evidence).
 NATIVE_PROTECTION_LIBS = {
-    "libpairipcore": "pairip",
+    "libpairipcore.so": "pairip",
 }
 
+#: APKiD category -> (category, title, routes, hint). anti_vm/anti_debug are
+#: handled separately (they fire on GMS/Firebase code).
 _APKID_CATEGORIES = {
-    "anti_vm": ("emulator", "Emulator detection", ["b6"], "Emulator checks; b6."),
-    "anti_debug": ("debug", "Debugger detection", ["b4"], "Debug checks; b4."),
     "packer": (
         "packer",
         "Packer",
@@ -2258,7 +2539,19 @@ _APKID_CATEGORIES = {
     ),
 }
 
-#: Keyword in an Insight protection's category/name -> routes.
+#: APKiD check categories that commonly fire on Google/AndroidX code.
+_APKID_CHECKS = {
+    "anti_vm": ("emulator", "Emulator checks", "b6"),
+    "anti_debug": ("debug", "Debugger checks", "b4"),
+}
+
+#: Package prefixes whose anti-VM/anti-debug code is benign library noise.
+_BENIGN_CODE_PREFIXES = ("com.google.", "androidx.", "com.google.firebase.")
+
+_CLASS_REF_RE = re.compile(r"L([A-Za-z_$][\w$]*(?:/[\w$]+)+);")
+_DOTTED_CLASS_RE = re.compile(r"\b([a-z][\w$]*(?:\.[a-z_$][\w$]*)+\.[A-Z][\w$]*)")
+
+#: Keyword in an Insight protection's category/name -> (category, routes).
 _PROTECTION_KEYWORD_ROUTES = (
     (("root", "jailbreak"), "root", ["b2"]),
     (
@@ -2272,47 +2565,6 @@ _PROTECTION_KEYWORD_ROUTES = (
     (("pinning", "ssl", "tls", "certificate"), "pinning", ["b1"]),
     (("rasp", "tamper"), "rasp", _ALL_BYPASSES),
 )
-
-
-def _iter_apkid_matches(apkid: Any) -> Iterator[tuple[str, str, str]]:
-    """Yield ``(filename, category, match)`` from Insight's apkid_analysis."""
-    if not isinstance(apkid, dict):
-        return
-    for file_entry in apkid.get("files") or []:
-        if not isinstance(file_entry, dict):
-            continue
-        filename = str(file_entry.get("filename", "?")).split("!")[-1]
-        for category, matches in (file_entry.get("matches") or {}).items():
-            for match in matches or []:
-                yield filename, category, str(match)
-
-
-def _library_entries(insight: dict[str, Any]) -> list[dict[str, Any]]:
-    """Detected libraries from Insight results (both 1.x and 2.x shapes)."""
-    libraries = insight.get("library_detection")
-    if isinstance(libraries, dict):
-        libraries = libraries.get("detected_libraries")
-    return [lib for lib in libraries or [] if isinstance(lib, dict)]
-
-
-def _protection_entries(raw: Any) -> list[dict[str, Any]]:
-    """Normalise Insight ``detected_protections`` (list/dict/strings)."""
-    if isinstance(raw, dict):
-        if isinstance(raw.get("protections"), list):
-            raw = raw["protections"]
-        else:
-            raw = [
-                {"name": k, **(v if isinstance(v, dict) else {"evidence": v})}
-                for k, v in raw.items()
-            ]
-    entries = []
-    for item in raw or []:
-        if isinstance(item, str):
-            entries.append({"name": item})
-        elif isinstance(item, dict):
-            entries.append(item)
-    return entries
-
 
 #: Insight ``defeats`` values (Sandroid's bypass categories) -> route keys.
 DEFEAT_ROUTES = {
@@ -2330,12 +2582,67 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
+def _confidence(value: Any, default: str = "medium") -> str:
+    """Normalise a confidence (``"high"``, ``0.93``) to low/medium/high."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return "high" if value >= 0.9 else "medium" if value >= 0.6 else "low"
+    text = str(value or "").strip().lower()
+    return text if text in _CONFIDENCE_RANK else default
+
+
+def _iter_apkid_matches(apkid: Any) -> Iterator[tuple[str, str, str]]:
+    """Yield ``(filename, category, match)`` from Insight's apkid_analysis."""
+    for file_entry in _as_list(_as_dict(apkid).get("files")):
+        if not isinstance(file_entry, dict):
+            continue
+        filename = str(file_entry.get("filename", "?")).split("!")[-1]
+        for category, matches in _as_dict(file_entry.get("matches")).items():
+            for match in _as_list(matches):
+                yield filename, str(category), str(match)
+
+
+def _code_locations(match: str) -> list[str]:
+    """Dotted class names an APKiD match string points at (often none)."""
+    found = [m.replace("/", ".") for m in _CLASS_REF_RE.findall(match)]
+    found += _DOTTED_CLASS_RE.findall(match)
+    return found
+
+
+def _library_entries(insight: dict[str, Any]) -> list[dict[str, Any]]:
+    """Detected libraries from Insight results (both 1.x and 2.x shapes)."""
+    libraries = insight.get("library_detection")
+    if isinstance(libraries, dict):
+        libraries = libraries.get("detected_libraries")
+    return [lib for lib in _as_list(libraries) if isinstance(lib, dict)]
+
+
+def _protection_entries(raw: Any) -> list[dict[str, Any]]:
+    """Normalise Insight ``detected_protections`` (list/dict/strings)."""
+    if isinstance(raw, dict):
+        if isinstance(raw.get("protections"), list):
+            raw = raw["protections"]
+        else:
+            raw = [
+                {"name": k, **(v if isinstance(v, dict) else {"evidence": v})}
+                for k, v in raw.items()
+            ]
+    entries = []
+    for item in _as_list(raw):
+        if isinstance(item, str):
+            entries.append({"name": item})
+        elif isinstance(item, dict):
+            entries.append(item)
+    return entries
+
+
 def _protection_defence(item: dict[str, Any]) -> SuspectedDefence:
     """Turn one Insight ``detected_protections`` entry into a defence.
 
     Routes come from ``defeats`` when present, else from keywords in the
-    category/name. Entries naming a known protection library reuse that
-    library's id, so library detection and Insight merge into one row.
+    category/name. ``evidence`` of ``"sdk_present"`` means the SDK is only
+    bundled (may not be enforced, low confidence); ``"entry_point"`` means
+    its checks are referenced. Entries naming a known protection library
+    reuse that library's id, so library detection and Insight merge.
     """
     name = str(item.get("name") or item.get("protection") or item.get("type") or "?")
     category_text = str(item.get("category") or item.get("type") or name).lower()
@@ -2344,29 +2651,33 @@ def _protection_defence(item: dict[str, Any]) -> SuspectedDefence:
         if any(k in category_text or k in name.lower() for k in keywords):
             cat, routes = kw_cat, list(kw_routes)
             break
-    defeats = item.get("defeats")
-    if isinstance(defeats, list) and defeats:
-        mapped = [DEFEAT_ROUTES[d] for d in defeats if d in DEFEAT_ROUTES]
-        if mapped:
-            routes = sorted(set(mapped))
-            if len(mapped) > 2:
-                cat = "rasp"
+    defeats = [d for d in _as_list(item.get("defeats")) if d in DEFEAT_ROUTES]
+    if defeats:
+        routes = sorted({DEFEAT_ROUTES[d] for d in defeats})
+        if len(routes) > 2:
+            cat = "rasp"
     defence_id = f"insight:{_slug(str(item.get('id') or name))}"
     lowered = name.lower()
     for needles, lib_id, lib_cat, _title, _routes, _hint in PROTECTION_LIBRARIES:
         if any(n in lowered for n in needles):
             defence_id, cat = f"lib:{lib_id}", lib_cat
             break
+    confidence = _confidence(item.get("confidence"))
+    hint = str(item.get("description") or "")
     evidence_lines: list[str] = []
     evidence = item.get("evidence")
-    if isinstance(evidence, list):
+    if evidence == "sdk_present":
+        evidence_lines.append("Insight: SDK present, may not be enforced")
+        confidence = "low"
+        hint = ("SDK present, may not be enforced. " + hint).strip()
+    elif evidence == "entry_point":
+        evidence_lines.append("Insight: entry point referenced (likely enforced)")
+    elif isinstance(evidence, list):
         evidence_lines += [f"Insight: {e}" for e in evidence[:5]]
     elif evidence:
         evidence_lines.append(f"Insight: {evidence}")
     for key, label in (("matched_classes", "class"), ("matched_libs", "native lib")):
-        values = item.get(key)
-        if isinstance(values, list):
-            evidence_lines += [f"Insight {label}: {v}" for v in values[:3]]
+        evidence_lines += [f"Insight {label}: {v}" for v in _as_list(item.get(key))[:3]]
     if not evidence_lines:
         evidence_lines.append(f"Insight detected {name}")
     if item.get("confidence"):
@@ -2377,9 +2688,233 @@ def _protection_defence(item: dict[str, Any]) -> SuspectedDefence:
         title=name,
         evidence=evidence_lines,
         routes=routes,
-        hint=str(item.get("description") or ""),
+        hint=hint,
         source="insight_protections",
+        confidence=confidence,
     )
+
+
+def _apkid_defences(insight: dict[str, Any]) -> list[SuspectedDefence]:
+    """APKiD categories; anti_vm/anti_debug are low-confidence by default."""
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for filename, category, match in _iter_apkid_matches(insight.get("apkid_analysis")):
+        grouped.setdefault(category, []).append((filename, match))
+    out = []
+    for category, hits in grouped.items():
+        evidence = [f"APKiD {category}: {m} ({f})" for f, m in hits]
+        if category in _APKID_CHECKS:
+            cat, title, route = _APKID_CHECKS[category]
+            outside = [
+                loc
+                for _f, m in hits
+                for loc in _code_locations(m)
+                if not loc.startswith(_BENIGN_CODE_PREFIXES)
+            ]
+            if outside:
+                evidence.append(f"in app code: {', '.join(sorted(set(outside)))}")
+                out.append(
+                    SuspectedDefence(
+                        id=f"apkid:{category}",
+                        category=cat,
+                        title=title,
+                        evidence=evidence,
+                        routes=[route],
+                        hint=f"Checks outside Google/AndroidX code; {route}.",
+                        source="apkid",
+                        confidence="medium",
+                    )
+                )
+            else:
+                out.append(
+                    SuspectedDefence(
+                        id=f"apkid:{category}",
+                        category=cat,
+                        title=f"{title} (common, likely benign)",
+                        evidence=evidence,
+                        routes=["v", route],
+                        hint=(
+                            "APKiD flags this in GMS/Firebase code too; likely "
+                            f"benign -- verify before arming {route}."
+                        ),
+                        source="apkid",
+                        confidence="low",
+                    )
+                )
+        elif category in _APKID_CATEGORIES:
+            cat, title, routes, hint = _APKID_CATEGORIES[category]
+            out.append(
+                SuspectedDefence(
+                    id=f"apkid:{category}",
+                    category=cat,
+                    title=title,
+                    evidence=evidence,
+                    routes=list(routes),
+                    hint=hint,
+                    source="apkid",
+                )
+            )
+    return out
+
+
+def _library_defences(insight: dict[str, Any]) -> list[SuspectedDefence]:
+    """Insight library detection matched against :data:`PROTECTION_LIBRARIES`."""
+    out = []
+    for lib in _library_entries(insight):
+        haystack = " ".join(
+            str(lib.get(k) or "") for k in ("name", "package_name", "vendor")
+        ).lower()
+        for needles, lib_id, cat, title, routes, hint in PROTECTION_LIBRARIES:
+            if any(n in haystack for n in needles):
+                label = lib.get("name") or lib.get("package_name")
+                out.append(
+                    SuspectedDefence(
+                        id=f"lib:{lib_id}",
+                        category=cat,
+                        title=title,
+                        evidence=[f"library detected: {label}"],
+                        routes=list(routes),
+                        hint=hint,
+                        source="library",
+                        confidence=_confidence(lib.get("confidence")),
+                    )
+                )
+    return out
+
+
+def _native_defences(
+    overview: dict[str, Any], insight: dict[str, Any]
+) -> list[SuspectedDefence]:
+    """TLS stacks and protection SDKs from exact native-lib basenames."""
+    native = {os.path.basename(str(p)) for p in _as_list(overview.get("native_libs"))}
+    insight_overview = _as_dict(insight.get("apk_overview"))
+    native |= {
+        os.path.basename(str(p)) for p in _as_list(insight_overview.get("native_libs"))
+    }
+    out = []
+    for pattern, lib_id, cat, title, routes, hint in NATIVE_TLS_LIBS:
+        hits = sorted(n for n in native if fnmatch.fnmatchcase(n, pattern))
+        if not hits:
+            continue
+        if lib_id == "openssl_tls" and "libcrypto.so" in native:
+            hits.append("libcrypto.so")
+        out.append(
+            SuspectedDefence(
+                id=f"native:{lib_id}",
+                category=cat,
+                title=title,
+                evidence=[f"native lib {n}" for n in hits],
+                routes=list(routes),
+                hint=hint,
+                source="native_libs",
+            )
+        )
+    if "libcrypto.so" in native and "libssl.so" not in native:
+        out.append(
+            SuspectedDefence(
+                id="native:crypto_lib",
+                category="crypto_lib",
+                title="Bundled crypto library",
+                evidence=["native lib libcrypto.so (no libssl.so)"],
+                hint="Crypto lib, TLS not implied.",
+                source="native_libs",
+                confidence="low",
+            )
+        )
+    for basename, lib_id in NATIVE_PROTECTION_LIBS.items():
+        if basename in native:
+            spec = next(p for p in PROTECTION_LIBRARIES if p[1] == lib_id)
+            out.append(
+                SuspectedDefence(
+                    id=f"lib:{lib_id}",
+                    category=spec[2],
+                    title=spec[3],
+                    evidence=[f"native lib {basename}"],
+                    routes=list(spec[4]),
+                    hint=spec[5],
+                    source="native_libs",
+                    confidence="high",
+                )
+            )
+    return out
+
+
+def _nsc_defences(overview: dict[str, Any]) -> list[SuspectedDefence]:
+    """Pinning, effective cleartext and (scoped) user-CA trust from the NSC."""
+    nsc = _as_dict(overview.get("nsc"))
+    out = []
+    pin_sets = [p for p in _as_list(nsc.get("pin_sets")) if isinstance(p, dict)]
+    if pin_sets:
+        domains = sorted({str(d) for p in pin_sets for d in _as_list(p.get("domains"))})
+        evidence = [f"pin-set for {', '.join(domains) or '?'}"]
+        hint = "Platform pinning via NSC; b1 covers it, h as fallback."
+        scopes = [str(s) for s in _as_list(nsc.get("override_pins_scopes"))]
+        if nsc.get("override_pins"):
+            evidence.append(
+                f"overridePins=true on {', '.join(scopes) or 'trust anchors'}: "
+                "those CAs bypass the pins"
+            )
+            hint += " A CA in an overridePins anchor skips pinning."
+        out.append(
+            SuspectedDefence(
+                id="nsc:pinning",
+                category="pinning",
+                title="NSC certificate pinning",
+                evidence=evidence,
+                routes=["b1", "h"],
+                hint=hint,
+                source="nsc",
+                confidence="high",
+            )
+        )
+    cleartext = []
+    if nsc.get("cleartext_effective"):
+        cleartext.append(f"cleartext permitted ({nsc.get('cleartext_source')})")
+    domains = [str(d) for d in _as_list(nsc.get("cleartext_domains"))]
+    if domains:
+        cleartext.append("cleartext for " + ", ".join(domains))
+    if cleartext and nsc.get("present") and nsc.get("uses_cleartext_traffic"):
+        cleartext.append("android:usesCleartextTraffic ignored (NSC present)")
+    if cleartext:
+        out.append(
+            SuspectedDefence(
+                id="nsc:cleartext",
+                category="cleartext",
+                title="Cleartext traffic allowed",
+                evidence=cleartext,
+                hint="Some traffic may be readable in the proxy without a CA.",
+                source="nsc",
+                weakness=True,
+                confidence="high",
+            )
+        )
+    if nsc.get("trust_user_ca"):
+        out.append(
+            SuspectedDefence(
+                id="nsc:user_ca",
+                category="user_ca",
+                title="User CAs trusted",
+                evidence=[f"user CAs trusted ({nsc.get('trust_user_ca_source')})"],
+                hint="A user-installed proxy CA is enough; no system CA needed.",
+                source="nsc",
+                weakness=True,
+                confidence="high",
+            )
+        )
+    scoped = [str(d) for d in _as_list(nsc.get("trust_user_ca_domains"))]
+    if scoped:
+        out.append(
+            SuspectedDefence(
+                id="nsc:user_ca_scoped",
+                category="user_ca",
+                title="User CAs trusted for some domains",
+                evidence=["domain-config trusts user CAs: " + ", ".join(scoped)],
+                hint="A user CA works only for these domains.",
+                source="nsc",
+                weakness=True,
+                confidence="high",
+            )
+        )
+    return out
 
 
 def suspect_defences(
@@ -2387,11 +2922,12 @@ def suspect_defences(
 ) -> list[SuspectedDefence]:
     """Derive suspected defences from cached static facts (pure function).
 
-    Sources: APKiD categories (anti_vm/anti_debug/packer/obfuscator),
-    Insight library detection matched against :data:`PROTECTION_LIBRARIES`,
-    native libs (TLS stacks, PairIP core), the network security config
-    (pin-sets, cleartext, user-CA trust) and Insight ``detected_protections``
-    when present.
+    Sources: APKiD categories, Insight library detection matched against
+    :data:`PROTECTION_LIBRARIES`, exact native-lib basenames (TLS stacks,
+    PairIP core), the network security config and Insight
+    ``tracker_analysis.detected_protections`` (or a top-level
+    ``detected_protections``) when present. Malformed input (wrong JSON
+    types from a shared cache) is tolerated: a failing source is skipped.
 
     Args:
         overview: overview.json dict (may be ``None``).
@@ -2402,164 +2938,62 @@ def suspect_defences(
         Deduplicated :class:`SuspectedDefence` list, defences before
         weaknesses.
     """
-    overview = overview or {}
-    insight = insight or {}
+    overview = _as_dict(overview)
+    insight = _as_dict(insight)
     if isinstance(insight.get("main"), dict):
         insight = insight["main"]
     found: dict[str, SuspectedDefence] = {}
 
     def add(item: SuspectedDefence) -> None:
-        if item.id in found:
-            existing = found[item.id]
-            for line in item.evidence:
-                if line not in existing.evidence:
-                    existing.evidence.append(line)
-            for route in item.routes:
-                if route not in existing.routes:
-                    existing.routes.append(route)
-        else:
+        existing = found.get(item.id)
+        if existing is None:
             found[item.id] = item
+            return
+        for line in item.evidence:
+            if line not in existing.evidence:
+                existing.evidence.append(line)
+        for route in item.routes:
+            if route not in existing.routes:
+                existing.routes.append(route)
+        if _CONFIDENCE_RANK.get(item.confidence, 1) > _CONFIDENCE_RANK.get(
+            existing.confidence, 1
+        ):
+            existing.confidence = item.confidence
 
-    # APKiD
-    for filename, category, match in _iter_apkid_matches(insight.get("apkid_analysis")):
-        spec = _APKID_CATEGORIES.get(category)
-        if not spec:
-            continue
-        cat, title, routes, hint = spec
-        add(
-            SuspectedDefence(
-                id=f"apkid:{category}",
-                category=cat,
-                title=title,
-                evidence=[f"APKiD {category}: {match} ({filename})"],
-                routes=list(routes),
-                hint=hint,
-                source="apkid",
-            )
-        )
+    def protections() -> list[SuspectedDefence]:
+        raw = _protection_entries(insight.get("detected_protections"))
+        tracker = _as_dict(insight.get("tracker_analysis"))
+        raw += _protection_entries(tracker.get("detected_protections"))
+        return [_protection_defence(item) for item in raw]
 
-    # Library detection
-    for lib in _library_entries(insight):
-        haystack = " ".join(
-            str(lib.get(k) or "") for k in ("name", "package_name", "vendor")
-        ).lower()
-        for needles, lib_id, cat, title, routes, hint in PROTECTION_LIBRARIES:
-            if any(n in haystack for n in needles):
-                label = lib.get("name") or lib.get("package_name")
-                add(
-                    SuspectedDefence(
-                        id=f"lib:{lib_id}",
-                        category=cat,
-                        title=title,
-                        evidence=[f"library detected: {label}"],
-                        routes=list(routes),
-                        hint=hint,
-                        source="library",
-                    )
-                )
-
-    # Native libraries (overview first, Insight's list as fallback)
-    native = list(overview.get("native_libs") or [])
-    insight_native = (insight.get("apk_overview") or {}).get("native_libs") or []
-    native += [os.path.basename(str(p)) for p in insight_native]
-    for lib in sorted(set(native)):
-        for prefix, lib_id, cat, title, routes, hint in NATIVE_TLS_LIBS:
-            if lib.startswith(prefix):
-                add(
-                    SuspectedDefence(
-                        id=f"native:{lib_id}",
-                        category=cat,
-                        title=title,
-                        evidence=[f"native lib {lib}"],
-                        routes=list(routes),
-                        hint=hint,
-                        source="native_libs",
-                    )
-                )
-        for prefix, lib_id in NATIVE_PROTECTION_LIBS.items():
-            if lib.startswith(prefix):
-                spec = next(p for p in PROTECTION_LIBRARIES if p[1] == lib_id)
-                add(
-                    SuspectedDefence(
-                        id=f"lib:{lib_id}",
-                        category=spec[2],
-                        title=spec[3],
-                        evidence=[f"native lib {lib}"],
-                        routes=list(spec[4]),
-                        hint=spec[5],
-                        source="native_libs",
-                    )
-                )
-
-    # Network security config
-    nsc = overview.get("nsc") or {}
-    if nsc.get("pin_sets"):
-        domains = sorted({d for p in nsc["pin_sets"] for d in p.get("domains", [])})
-        add(
-            SuspectedDefence(
-                id="nsc:pinning",
-                category="pinning",
-                title="NSC certificate pinning",
-                evidence=[f"pin-set for {', '.join(domains) or '?'}"],
-                routes=["b1", "h"],
-                hint="Platform pinning via NSC; b1 covers it, h as fallback.",
-                source="nsc",
-            )
-        )
-    cleartext = []
-    if nsc.get("cleartext_base"):
-        cleartext.append("base-config cleartextTrafficPermitted=true")
-    if nsc.get("cleartext_domains"):
-        cleartext.append("cleartext for " + ", ".join(nsc["cleartext_domains"]))
-    if nsc.get("uses_cleartext_traffic"):
-        cleartext.append('android:usesCleartextTraffic="true"')
-    if cleartext:
-        add(
-            SuspectedDefence(
-                id="nsc:cleartext",
-                category="cleartext",
-                title="Cleartext traffic allowed",
-                evidence=cleartext,
-                hint="Some traffic may be readable in the proxy without a CA.",
-                source="nsc",
-                weakness=True,
-            )
-        )
-    if nsc.get("trust_user_ca"):
-        add(
-            SuspectedDefence(
-                id="nsc:user_ca",
-                category="user_ca",
-                title="User CAs trusted",
-                evidence=[
-                    (
-                        "NSC trusts user certificates"
-                        if nsc.get("present")
-                        else "targetSdk < 24: user CAs trusted by default"
-                    )
-                ],
-                hint="A user-installed proxy CA is enough; no system CA needed.",
-                source="nsc",
-                weakness=True,
-            )
-        )
-
-    # Insight detected_protections: tracker_analysis.detected_protections in
-    # Insight >= 2.0 (id, name, category, defeats, confidence,
-    # matched_classes, matched_libs); a top-level key is honoured too.
-    tracker = insight.get("tracker_analysis")
-    raw_protections = _protection_entries(insight.get("detected_protections"))
-    if isinstance(tracker, dict):
-        raw_protections += _protection_entries(tracker.get("detected_protections"))
-    for item in raw_protections:
-        add(_protection_defence(item))
-
+    sources = (
+        lambda: _apkid_defences(insight),
+        lambda: _library_defences(insight),
+        lambda: _native_defences(overview, insight),
+        lambda: _nsc_defences(overview),
+        protections,
+    )
+    for source in sources:
+        try:
+            for item in source():
+                add(item)
+        except Exception as exc:  # malformed shared JSON
+            logger.debug("defence source skipped: %s", exc)
     return sorted(found.values(), key=lambda d: (d.weakness, d.category, d.id))
 
 
 # ---------------------------------------------------------------------------
 # Facade
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class Fact(_DictMixin):
+    """A single facade result: ``value`` when ``ok``, else ``reason``."""
+
+    value: Any = None
+    ok: bool = True
+    reason: str | None = None
 
 
 class AppInfoService:
@@ -2582,15 +3016,49 @@ class AppInfoService:
         self.use_cache = use_cache
         self.cache = ApkCache(cache_root, enabled=use_cache)
 
-    def details(self, package: str) -> dict[str, Any]:
-        """See :func:`get_package_details`."""
-        return get_package_details(package, self.serial)
+    def details(self, package: str) -> Fact:
+        """Package details (``value``: :func:`get_package_details` dict).
+
+        Never raises; ``ok`` is False when adb failed or the package is not
+        in the dump (unlike the AI tool, which keeps its original contract).
+        """
+        reason = _bad_package_reason(package)
+        if reason:
+            return Fact(ok=False, reason=reason)
+        try:
+            stdout, stderr = _adb_raw(
+                f"shell dumpsys package {shlex.quote(package)}", self.serial
+            )
+        except Exception as exc:
+            return Fact(ok=False, reason=str(exc))
+        if f"Package [{package}]" not in (stdout or ""):
+            why = (stderr or "").strip() or "package not found (device offline?)"
+            return Fact(ok=False, reason=why[:200])
+        details = parse_extended_package_info(stdout)
+        return Fact(value={**details, "package_name": package})
+
+    def pid(self, package: str) -> Fact:
+        """Running PID (``value`` None = not running). Never raises."""
+        reason = _bad_package_reason(package)
+        if reason:
+            return Fact(ok=False, reason=reason)
+        try:
+            return Fact(value=get_package_pid(package, self.serial))
+        except Exception as exc:
+            return Fact(ok=False, reason=str(exc))
+
+    def installed(self, include_system: bool = False) -> Fact:
+        """Installed packages (``value``: list of dicts). Never raises."""
+        try:
+            return Fact(value=list_installed_packages(include_system, self.serial))
+        except Exception as exc:
+            return Fact(ok=False, reason=str(exc))
 
     def permissions(
         self, package: str, overview: dict[str, Any] | None = None
     ) -> PermissionState:
         """See :func:`get_permission_state`; *overview* adds manifest levels."""
-        protection = (overview or {}).get("permission_protection")
+        protection = _as_dict(_as_dict(overview).get("permission_protection"))
         return get_permission_state(
             package, self.serial, manifest_protection=protection
         )
