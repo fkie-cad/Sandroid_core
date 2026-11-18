@@ -16,17 +16,21 @@ This module provides:
   blocking, root-app package hiding, ``release-keys`` build tags.
 - :class:`DebugDetectionBypassManager` — ``Debug.isDebuggerConnected`` /
   ``waitingForDebugger`` and ``TracerPid`` filtering.
+- :class:`IntegrityBypassManager` — PairIP license-check / Play gate.
+- :class:`EmulatorDetectionBypassManager` — one coherent device profile for
+  ``Build.*``, qemu/goldfish/ranchu property hiding, emulator file/pipe hiding
+  and TelephonyManager fakes (ported from TrigDroid and Dexray Intercept).
 - :class:`BypassService` — process-wide singleton that owns the armed/active
   category sets and one persistent flag-gated Frida script (toggled via the
   ``set_flags`` RPC — instant, gap-free, one Java bridge).
 
-Emulator detection has no native manager: incoherent field spoofing gives
-false confidence and can trip heuristics harder, so that one category stays on
-TrigDroid's RPC device-profile path.
+BypassService is the only source of bypasses in Sandroid (TrigDroid's bypass
+wrapper is gone; Dexray Intercept's own bypass group is mutually exclusive
+with it).
 
 **EXPERIMENTAL.** All bypass categories (SSL unpinning incl. the native
-cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug
-detection) are experimental, off by default, and only applied after an
+cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug/
+emulator detection) are experimental, off by default, and only applied after an
 explicit analyst toggle. Results must be verified; a bypass can silently miss.
 
 For authorized security testing, forensic analysis, and research only.
@@ -202,6 +206,9 @@ class BypassManagerBase:
     - ``FRIDA_SCRIPT`` — the Frida JS payload.
     - ``PRIORITY`` — load order (lower installs earlier in the merged script,
       so the anti-anti-Frida prelude can land before root/debug/SSL).
+    - ``APPLY_AT_SPAWN`` — True when the app reads what the bypass changes
+      at startup (Build fields), so turning it on live is only complete after
+      a restart; the toggle message says so.
     """
 
     TOOL_NAME: str = "bypass"
@@ -209,6 +216,7 @@ class BypassManagerBase:
     HOOKS_REGISTRY: list[str] = []
     FRIDA_SCRIPT: str = ""
     PRIORITY: int = 10
+    APPLY_AT_SPAWN: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1233,420 @@ class IntegrityBypassManager(BypassManagerBase):
 
 
 # ---------------------------------------------------------------------------
+# Emulator detection bypass
+# ---------------------------------------------------------------------------
+
+# Ported from TrigDroid's emulator-detection hook set (trigdroid/scripts/hooks/
+# emulator-detection.js: device profile -> Build.* fields, ro.* / qemu system
+# properties via __system_property_get, Build.getSerial, TelephonyManager
+# fakes) and Dexray Intercept's install_emulator_detection_bypass
+# (profiling.js: emulator-valued Build.* fields, SystemProperties.get for
+# ro.kernel.qemu / ro.product.model). Neither source hides emulator files, so
+# the /dev/qemu_pipe, qemud socket and goldfish/ranchu file hiding is new,
+# modelled on the root category's access/faccessat/fopen probes. Neither
+# source fakes sensors or the battery, so this category does not either.
+#
+# Coherence instead of blind spoofing (the reason this category was missing):
+#
+# - Build.* is replaced as ONE device profile (Pixel 4 XL, TrigDroid's default)
+#   and only when at least one field shows an emulator value, so a real device
+#   is never relabelled and no half-spoofed mix is left behind. FINGERPRINT is
+#   built from the device's own Build.VERSION.RELEASE / Build.ID /
+#   VERSION.INCREMENTAL, so it agrees with the Android version the app sees.
+# - Native property spoofing and file hiding only answer *app* callers: a
+#   caller inside /system, /apex, /vendor, ... keeps the truth, so the
+#   emulator's own graphics stack (goldfish pipe, ro.kernel.qemu.gles,
+#   ro.hardware) keeps working inside the hooked process. Java's File I/O
+#   (libopenjdk/libjavacore) counts as an app caller, which is how
+#   File.exists() probes are covered without a second File.exists hook (one
+#   Java method has one implementation; the root category owns that one).
+#
+# Build fields are static finals that zygote set before the app existed, so
+# they are written, not hooked: at load when FLAGS.emulator is baked in (the
+# armed-then-Start path, before the app's first instruction) and on a live
+# set_flags flip via FLAG_LISTENERS (restored on flip-off). Checks an app ran
+# at startup are only fooled on the spawn path, hence APPLY_AT_SPAWN.
+_EMULATOR_DETECTION_SCRIPT = r"""
+'use strict';
+
+var EMU_PROFILE = {
+    MODEL: 'Pixel 4 XL', MANUFACTURER: 'Google', BRAND: 'google',
+    DEVICE: 'coral', PRODUCT: 'coral', HARDWARE: 'coral', BOARD: 'coral',
+    TAGS: 'release-keys', TYPE: 'user'
+};
+var EMU_BUILD_FIELDS = [
+    'FINGERPRINT', 'MODEL', 'MANUFACTURER', 'BRAND', 'DEVICE', 'PRODUCT',
+    'HARDWARE', 'BOARD', 'TAGS', 'TYPE'
+];
+// Identity fields decide whether this is an emulator at all; TAGS/TYPE are
+// replaced along with them but never decide (a userdebug phone is no emulator).
+var EMU_IDENTITY_FIELDS = EMU_BUILD_FIELDS.filter(function (f) {
+    return f !== 'TAGS' && f !== 'TYPE';
+});
+// Value tokens that mark an emulator (TrigDroid's EMULATOR_INDICATORS +
+// Dexray's emulatorIndicators + the current sdk_gphone/emu64 images).
+var EMU_VALUE_TOKENS = [
+    'generic', 'google_sdk', 'sdk_gphone', 'sdk_x86', 'sdk_google',
+    'android sdk built for', 'emulator', 'emu64', 'genymotion', 'goldfish',
+    'ranchu', 'vbox86'
+];
+var EMU_EXACT_VALUES = ['sdk', 'unknown'];
+// Build tags/type of a debug image (emulator images are userdebug/dev-keys).
+var EMU_DEBUG_VALUES = ['test-keys', 'dev-keys', 'userdebug', 'eng'];
+
+function _emuValue(v) {
+    if (v === null || v === undefined) return false;
+    var s = ('' + v).toLowerCase();
+    if (EMU_EXACT_VALUES.indexOf(s) !== -1) return true;
+    for (var i = 0; i < EMU_VALUE_TOKENS.length; i++) {
+        if (s.indexOf(EMU_VALUE_TOKENS[i]) !== -1) return true;
+    }
+    return false;
+}
+
+// --- emulator files / pipes ---------------------------------------------
+var EMU_PATHS = [
+    '/dev/qemu_pipe', '/dev/goldfish_pipe', '/dev/socket/qemud',
+    '/dev/socket/genyd', '/dev/socket/baseband_genyd', '/sys/qemu_trace',
+    '/system/bin/qemu-props', '/system/bin/qemud',
+    '/system/lib/libc_malloc_debug_qemu.so',
+    '/system/lib64/libc_malloc_debug_qemu.so',
+    '/dev/vboxguest', '/dev/vboxuser', '/system/bin/nox-prop',
+    '/system/bin/ttVM-prop', '/system/bin/microvirt-prop',
+    '/system/bin/windroyed', '/system/lib/libdroid4x.so'
+];
+// Basename tokens: fstab.ranchu, init.goldfish.rc, ueventd.vbox86.rc, ...
+var EMU_NAME_TOKENS = [
+    'goldfish', 'ranchu', 'qemu', 'vbox86', 'ttvm_x86', 'android_x86', 'genyd'
+];
+var EMU_NAMES = [
+    'fstab.nox', 'init.nox.rc', 'ueventd.nox.rc', 'fstab.andy',
+    'ueventd.andy.rc', 'x86.prop'
+];
+
+function _isEmuPath(p) {
+    if (!p) return false;
+    var v = '' + p;
+    if (EMU_PATHS.indexOf(v) !== -1) return true;
+    var i = v.lastIndexOf('/');
+    var base = (i === -1 ? v : v.substring(i + 1)).toLowerCase();
+    if (EMU_NAMES.indexOf(base) !== -1) return true;
+    for (var j = 0; j < EMU_NAME_TOKENS.length; j++) {
+        if (base.indexOf(EMU_NAME_TOKENS[j]) !== -1) return true;
+    }
+    return false;
+}
+
+// --- caller scoping (see the Python comment above) ------------------------
+var EMU_SYSTEM_PREFIXES = [
+    '/system/', '/apex/', '/vendor/', '/product/', '/system_ext/', '/odm/'
+];
+var EMU_JAVA_IO_LIBS = ['libopenjdk.so', 'libjavacore.so'];
+
+function _isAppCaller(addr) {
+    try {
+        var m = Process.findModuleByAddress(addr);
+        if (!m) return true;  // anonymous / JIT / unpacked code: the app
+        var p = '' + m.path;
+        for (var i = 0; i < EMU_JAVA_IO_LIBS.length; i++) {
+            if (p.indexOf('/' + EMU_JAVA_IO_LIBS[i]) !== -1) return true;
+        }
+        for (var j = 0; j < EMU_SYSTEM_PREFIXES.length; j++) {
+            if (p.indexOf(EMU_SYSTEM_PREFIXES[j]) === 0) return false;
+        }
+    } catch (e) {}
+    return true;
+}
+
+function _libcExport(name) {
+    try {
+        var m = Process.getModuleByName('libc.so');
+        var a = m.findExportByName(name);
+        if (a) return a;
+    } catch (e) {}
+    try { return Module.findExportByName('libc.so', name); } catch (e) {}
+    return null;
+}
+
+// --- system properties ------------------------------------------------------
+var _emuFingerprint = null;  // set once the Build profile is computed
+
+function _profileFingerprint() {
+    if (_emuFingerprint) return _emuFingerprint;
+    return 'google/coral/coral:12/SP1A.210812.016.C1/7676683:user/release-keys';
+}
+
+// Replacement for property `key` whose current value is `value`, or null to
+// leave it alone. ro.debuggable / ro.secure stay with the root category.
+function _spoofProp(key, value) {
+    if (!key) return null;
+    var k = '' + key;
+    var kl = k.toLowerCase();
+    // qemu / goldfish / ranchu markers are unset on a real device.
+    if (kl.indexOf('qemu') !== -1 || kl.indexOf('goldfish') !== -1 ||
+        kl.indexOf('ranchu') !== -1) {
+        return (value === null || value === '') ? null : '';
+    }
+    var dot = k.lastIndexOf('.');
+    var leaf = dot === -1 ? k : k.substring(dot + 1);
+    if (value !== null && EMU_DEBUG_VALUES.indexOf(('' + value).toLowerCase()) !== -1) {
+        if (leaf === 'tags') return EMU_PROFILE.TAGS;
+        if (leaf === 'type') return EMU_PROFILE.TYPE;
+    }
+    if (!_emuValue(value)) return null;
+    if (k === 'ro.hardware' || k === 'ro.boot.hardware') return EMU_PROFILE.HARDWARE;
+    if (k === 'ro.build.product') return EMU_PROFILE.PRODUCT;
+    if (k === 'ro.build.characteristics') return 'nosdcard';
+    if (k.indexOf('ro.product.') === 0 || k.indexOf('ro.build.') === 0 ||
+        k.indexOf('ro.vendor.') === 0 || k.indexOf('ro.system.') === 0 ||
+        k.indexOf('ro.bootimage.') === 0 || k.indexOf('ro.odm.') === 0) {
+        if (leaf === 'model') return EMU_PROFILE.MODEL;
+        if (leaf === 'manufacturer') return EMU_PROFILE.MANUFACTURER;
+        if (leaf === 'brand') return EMU_PROFILE.BRAND;
+        if (leaf === 'device') return EMU_PROFILE.DEVICE;
+        if (leaf === 'name') return EMU_PROFILE.PRODUCT;
+        if (leaf === 'board') return EMU_PROFILE.BOARD;
+        if (leaf === 'fingerprint') return _profileFingerprint();
+    }
+    return null;
+}
+
+// Native: __system_property_get (TrigDroid's mapping). Stacks with the root
+// category's listener on the same export; that one owns ro.debuggable /
+// ro.secure, this one only the emulator keys.
+(function () {
+    try {
+        var propGet = _libcExport('__system_property_get');
+        if (!propGet) return;
+        Interceptor.attach(propGet, {
+            onEnter: function (args) {
+                this._out = null;
+                if (!FLAGS.emulator) return;
+                try {
+                    this._key = args[0].readUtf8String();
+                    this._out = args[1];
+                    this._ra = this.returnAddress;
+                } catch (e) { this._out = null; }
+            },
+            onLeave: function (rv) {
+                if (!FLAGS.emulator || !this._out) return;
+                try {
+                    var cur = this._out.readUtf8String();
+                    var s = _spoofProp(this._key, cur);
+                    if (s === null || !_isAppCaller(this._ra)) return;
+                    this._out.writeUtf8String(s);
+                    rv.replace(ptr(s.length));
+                    send({type: 'info', hook: 'emulator-bypass:prop:' + this._key});
+                } catch (e) {}
+            }
+        });
+        send({type: 'info', hook: 'emulator-bypass:__system_property_get'});
+    } catch (e) {
+        send({type: 'debug', hook: 'emulator-bypass:__system_property_get', error: e.message});
+    }
+})();
+
+// Native: hide emulator files and pipes from access/faccessat/fopen probes
+// (listeners stack with the root category's on the same exports).
+(function () {
+    function _hidePath(sym, argIndex, failValue) {
+        try {
+            var p = _libcExport(sym);
+            if (!p) return;
+            Interceptor.attach(p, {
+                onEnter: function (args) {
+                    this._hide = false;
+                    if (!FLAGS.emulator) return;
+                    try {
+                        var path = args[argIndex].readUtf8String();
+                        if (_isEmuPath(path) && _isAppCaller(this.returnAddress)) {
+                            this._hide = true;
+                            this._path = path;
+                        }
+                    } catch (e) {}
+                },
+                onLeave: function (rv) {
+                    if (!FLAGS.emulator || !this._hide) return;
+                    rv.replace(ptr(failValue));
+                    send({type: 'info', hook: 'emulator-bypass:' + sym + '(' + this._path + ')'});
+                }
+            });
+            send({type: 'info', hook: 'emulator-bypass:' + sym});
+        } catch (e) {
+            send({type: 'debug', hook: 'emulator-bypass:' + sym, error: e.message});
+        }
+    }
+    _hidePath('access', 0, '-1');
+    _hidePath('faccessat', 1, '-1');
+    _hidePath('fopen', 0, '0');
+    _hidePath('fopen64', 0, '0');
+})();
+
+// Build.* fields: one coherent device profile, written (not hooked).
+var _emuBuildOriginal = null;
+
+function _emuApplyBuild(on) {
+    Java.perform(function () {
+        var Build = Java.use('android.os.Build');
+        if (on) {
+            if (_emuBuildOriginal) return;
+            var orig = {};
+            var emulated = false;
+            EMU_BUILD_FIELDS.forEach(function (f) {
+                try {
+                    var v = '' + Build[f].value;
+                    orig[f] = v;
+                    if (EMU_IDENTITY_FIELDS.indexOf(f) !== -1 && _emuValue(v)) {
+                        emulated = true;
+                    }
+                } catch (e) {}
+            });
+            if (!emulated) {
+                send({type: 'info', hook: 'emulator-bypass:Build(no emulator values)'});
+                return;
+            }
+            try {
+                var Version = Java.use('android.os.Build$VERSION');
+                _emuFingerprint = 'google/coral/coral:' + Version.RELEASE.value +
+                    '/' + Build.ID.value + '/' + Version.INCREMENTAL.value +
+                    ':user/release-keys';
+            } catch (e) {
+                _emuFingerprint = _profileFingerprint();
+            }
+            EMU_BUILD_FIELDS.forEach(function (f) {
+                try {
+                    Build[f].value = f === 'FINGERPRINT' ? _emuFingerprint : EMU_PROFILE[f];
+                } catch (e) {}
+            });
+            _emuBuildOriginal = orig;
+            send({type: 'info', hook: 'emulator-bypass:Build=' + EMU_PROFILE.MODEL});
+        } else {
+            if (!_emuBuildOriginal) return;
+            var saved = _emuBuildOriginal;
+            _emuBuildOriginal = null;
+            EMU_BUILD_FIELDS.forEach(function (f) {
+                // TAGS is also the root category's (sticky) field.
+                if (f === 'TAGS' && FLAGS.root) return;
+                try {
+                    if (f in saved) Build[f].value = saved[f];
+                } catch (e) {}
+            });
+            send({type: 'info', hook: 'emulator-bypass:Build restored'});
+        }
+    });
+}
+
+if (FLAGS.emulator) _emuApplyBuild(true);
+FLAG_LISTENERS.push(function (flags) { _emuApplyBuild(!!flags.emulator); });
+
+Java.perform(function () {
+    // Build.getSerial (TrigDroid).
+    try {
+        var BuildCls = Java.use('android.os.Build');
+        BuildCls.getSerial.implementation = function () {
+            if (!FLAGS.emulator) return this.getSerial();
+            send({type: 'info', hook: 'emulator-bypass:Build.getSerial'});
+            return 'RF8M33XXXXX';
+        };
+    } catch (e) {}
+
+    // SystemProperties.get (Dexray): Java-level reads skip __system_property_get
+    // on current Android (they use __system_property_read_callback).
+    try {
+        var SP = Java.use('android.os.SystemProperties');
+        SP.get.overload('java.lang.String').implementation = function (key) {
+            var v = this.get(key);
+            if (!FLAGS.emulator) return v;
+            var s = _spoofProp(key, v);
+            if (s === null) return v;
+            send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
+            return s;
+        };
+        SP.get.overload('java.lang.String', 'java.lang.String').implementation = function (key, def) {
+            var v = this.get(key, def);
+            if (!FLAGS.emulator) return v;
+            var s = _spoofProp(key, v);
+            if (s === null) return v;
+            send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
+            return s === '' ? def : s;
+        };
+        send({type: 'info', hook: 'emulator-bypass:SystemProperties.get'});
+    } catch (e) {}
+
+    // TelephonyManager fakes (TrigDroid's bypassTelephonyChecks values).
+    var TELEPHONY = [
+        ['getDeviceId', [], '358240051111110'],
+        ['getDeviceId', ['int'], '358240051111110'],
+        ['getSubscriberId', [], '310260000000000'],
+        ['getLine1Number', [], '+15551234567'],
+        ['getSimSerialNumber', [], '89014103211118510720'],
+        ['getNetworkOperatorName', [], 'T-Mobile'],
+        ['getNetworkOperator', [], '310260'],
+        ['getPhoneType', [], 1],   // PHONE_TYPE_GSM
+        ['getSimState', [], 5]     // SIM_STATE_READY
+    ];
+    try {
+        var TM = Java.use('android.telephony.TelephonyManager');
+        TELEPHONY.forEach(function (row) {
+            var name = row[0], sig = row[1], fake = row[2];
+            try {
+                var m = TM[name].overload.apply(TM[name], sig);
+                m.implementation = function () {
+                    if (!FLAGS.emulator) return m.apply(this, arguments);
+                    send({type: 'info', hook: 'emulator-bypass:TelephonyManager.' + name});
+                    return fake;
+                };
+            } catch (e) {}
+        });
+        send({type: 'info', hook: 'emulator-bypass:TelephonyManager'});
+    } catch (e) {}
+
+    send({type: 'ready', message: 'Emulator detection bypass hooks loaded'});
+});
+"""
+
+EMULATOR_DETECTION_HOOKS = [
+    "android.os.Build.FINGERPRINT",
+    "android.os.Build.MODEL",
+    "android.os.Build.MANUFACTURER",
+    "android.os.Build.BRAND",
+    "android.os.Build.DEVICE",
+    "android.os.Build.PRODUCT",
+    "android.os.Build.HARDWARE",
+    "android.os.Build.BOARD",
+    "android.os.Build.TAGS",
+    "android.os.Build.TYPE",
+    "android.os.Build.getSerial",
+    "android.os.SystemProperties.get",
+    "android.telephony.TelephonyManager.getDeviceId",
+    "android.telephony.TelephonyManager.getSubscriberId",
+    "android.telephony.TelephonyManager.getLine1Number",
+    "android.telephony.TelephonyManager.getSimSerialNumber",
+    "android.telephony.TelephonyManager.getNetworkOperatorName",
+    "android.telephony.TelephonyManager.getNetworkOperator",
+    "android.telephony.TelephonyManager.getPhoneType",
+    "android.telephony.TelephonyManager.getSimState",
+    # Native listeners stacked on exports the root category also attaches to
+    # (distinct ids, like the debug category's ``libc:read:tracerpid``).
+    "libc:__system_property_get:emulator",
+    "libc:access:emulator",
+    "libc:faccessat:emulator",
+    "libc:fopen:emulator",
+]
+
+
+class EmulatorDetectionBypassManager(BypassManagerBase):
+    """Hide emulator markers (Build.*, qemu props, emulator files, telephony)."""
+
+    TOOL_NAME = "emulator_detection_bypass"
+    DISPLAY_NAME = "Emulator Detection Bypass (experimental)"
+    HOOKS_REGISTRY = EMULATOR_DETECTION_HOOKS
+    FRIDA_SCRIPT = _EMULATOR_DETECTION_SCRIPT
+    PRIORITY = 8  # before root/debug (10): Build/props must be in place early
+    APPLY_AT_SPAWN = True
+
+
+# ---------------------------------------------------------------------------
 # Bypass service (singleton owning all managers)
 # ---------------------------------------------------------------------------
 
@@ -1243,6 +1665,7 @@ _CATEGORY_DISPLAY = {
     "root": "Root Detection Bypass",
     "debug": "Debug Detection Bypass",
     "integrity": "Integrity / Attestation Bypass",
+    "emulator": "Emulator Detection Bypass",
 }
 
 
@@ -1256,8 +1679,8 @@ class BypassService:
     **One persistent flag-gated script.** Instead of loading/unloading a script
     per category (a fresh ``script.load`` each time = a new frida-java-bridge on
     the contended JS thread, which is slow and causes a no-hooks gap on
-    off-toggle), this assembles ONE combined script (preamble + all four
-    category sources, each hook body early-checking its ``FLAGS[category]``) and
+    off-toggle), this assembles ONE combined script (preamble + every
+    category's source, each hook body early-checking its ``FLAGS[category]``) and
     loads it once per session. Toggling a category is then an instant
     ``set_flags`` RPC — no reload, no gap, and exactly one Java bridge (so the
     paused-spawn #218 crash is moot: one combined script = one ``create_script``
@@ -1308,11 +1731,12 @@ class BypassService:
             "root": RootDetectionBypassManager,
             "debug": DebugDetectionBypassManager,
             "integrity": IntegrityBypassManager,
+            "emulator": EmulatorDetectionBypassManager,
         }.get(category)
 
     def categories(self) -> list[str]:
         """All known category keys, in display order."""
-        return ["ssl", "root", "frida", "debug", "integrity"]
+        return ["ssl", "root", "frida", "debug", "integrity", "emulator"]
 
     def _plain_name(self, category: str) -> str:
         return _CATEGORY_DISPLAY.get(category, category)
@@ -1354,9 +1778,9 @@ class BypassService:
     def _flag_dict(self, target) -> dict[str, bool]:
         """Map a target category set to the full ``{category: bool}`` flag dict.
 
-        Always carries all four keys so the baked ``FLAGS`` object and every
-        ``set_flags`` RPC are complete (the JS preamble's ``setFlags`` merges,
-        but a complete dict keeps state unambiguous).
+        Always carries every category key so the baked ``FLAGS`` object and
+        every ``set_flags`` RPC are complete (the JS preamble's ``setFlags``
+        merges, but a complete dict keeps state unambiguous).
         """
         target = set(target)
         return {cat: (cat in target) for cat in self.categories()}
@@ -1503,10 +1927,13 @@ class BypassService:
 
         Layout (realm-top scope):
 
-        - Preamble: ``'use strict';`` + ``var FLAGS = <json>;`` + ``rpc.exports``
-          (``setFlags`` merges a partial dict and returns FLAGS; ``getFlags``
-          returns it). ``json.dumps`` is used everywhere — category names are
-          never string-interpolated.
+        - Preamble: ``'use strict';`` + ``var FLAGS = <json>;`` +
+          ``var FLAG_LISTENERS = [];`` + ``rpc.exports`` (``setFlags`` merges a
+          partial dict, calls every ``FLAG_LISTENERS`` entry with FLAGS -- for
+          state a hook body cannot gate, like the emulator category's Build
+          field writes -- and returns FLAGS; ``getFlags`` returns it).
+          ``json.dumps`` is used everywhere — category names are never
+          string-interpolated.
         - Each category source wrapped in a ``try``/``catch`` IIFE (reusing AFM's
           ``_build_merged_source`` shape for ``var`` isolation + failure
           reporting via ``send({merge_error: <label>})``), ordered by priority so
@@ -1527,6 +1954,7 @@ class BypassService:
             + "var FLAGS = "
             + json.dumps(initial_flags)
             + ";\n"
+            "var FLAG_LISTENERS = [];\n"
             "rpc.exports = {\n"
             "    setFlags: function (f) {\n"
             "        if (f) {\n"
@@ -1535,6 +1963,9 @@ class BypassService:
             "                    FLAGS[k] = !!f[k];\n"
             "                }\n"
             "            }\n"
+            "        }\n"
+            "        for (var i = 0; i < FLAG_LISTENERS.length; i++) {\n"
+            "            try { FLAG_LISTENERS[i](FLAGS); } catch (e) {}\n"
             "        }\n"
             "        return FLAGS;\n"
             "    },\n"
@@ -1901,6 +2332,11 @@ class BypassService:
                 if not ok:
                     self._disarm(category)
                     return False, msg
+                if getattr(self._manager_class(category), "APPLY_AT_SPAWN", False):
+                    return True, (
+                        f"{name} active — restart the app (R) so checks it "
+                        "ran at startup see it too"
+                    )
                 return True, f"{name} active"
             return True, f"{name} armed — Start to apply"
 

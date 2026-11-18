@@ -718,6 +718,28 @@ def test_app_bindings_have_no_duplicate_keys() -> None:
         "3",
         "4",
     ]
+    # ``t`` (TrigDroid's bypass wrapper) is retired: free, and its old id is
+    # ignored when it lingers in a user's keybindings.
+    assert "t" not in keys
+    assert "trigdroid" not in by_id
+    from sandroid.tui.app import effective_keymap
+
+    assert effective_keymap({"trigdroid": "t"}) == {}
+
+
+def test_bypass_chord_digits_never_clash() -> None:
+    """``b`` then ``6`` is Emulator; no chord key is bound twice."""
+    from sandroid.tui.widgets.spotlight_panel import BypassChordModal, SpotlightPanel
+
+    chord = [b.key for b in BypassChordModal.BINDINGS]
+    assert len(chord) == len(set(chord)), chord
+    actions = {b.key: b.action for b in BypassChordModal.BINDINGS}
+    assert [k for k in chord if k.isdigit()] == ["1", "2", "3", "4", "5", "6"]
+    assert actions["6"] == "pick('emulator')"
+    # The chord is reached via the panel's own ``b``; ``t`` stays unbound there.
+    panel = [b.key for b in SpotlightPanel.BINDINGS]
+    assert "b" in panel
+    assert "t" not in panel
 
 
 async def test_picker_s_then_digit_saves_slot(monkeypatch) -> None:

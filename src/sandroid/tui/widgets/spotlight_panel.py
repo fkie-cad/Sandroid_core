@@ -67,7 +67,8 @@ class SpotlightPanel(Widget):
     """Bottom-left panel: spotlight app status + live state + actions.
 
     Bindings (when focused):
-        b then 1-5: toggle/arm SSL / Root / Frida / Debug / Integrity bypass
+        b then 1-6: toggle/arm SSL / Root / Frida / Debug / Integrity /
+                 Emulator bypass
                  (``b`` then ``o`` launches Objection, the global ``b``)
         Enter:   primary (Start if stopped · Resume if paused)
         R:       restart (force-stop + respawn with armed hooks)
@@ -360,7 +361,7 @@ class SpotlightPanel(Widget):
         # 3. Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
         lines.append(
-            "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-5 · armed applies on Start)[/]"
+            "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-6 · armed applies on Start)[/]"
         )
         toggle_cells = []
         for key, category, label in _BYPASS_TOGGLES:
@@ -1084,7 +1085,7 @@ class BypassChordModal(_FridaModalBase):
             yield Label("Bypass", classes="modal-title")
             yield Static("\n".join(rows), id="bypass-chord-list")
             yield KeyHintFooter(
-                hints={"default": "[dim]1-5 toggle · o Objection · Esc cancel[/dim]"}
+                hints={"default": "[dim]1-6 toggle · o Objection · Esc cancel[/dim]"}
             )
 
     def action_pick(self, choice: str) -> None:

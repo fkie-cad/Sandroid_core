@@ -468,6 +468,14 @@ async def test_b_then_digit_toggles_bypass(monkeypatch) -> None:
         await _settle(pilot)
         assert toggles == ["root"]
         assert type(app.screen).__name__ == "MainScreen"
+        await pilot.press("b", "6")
+        await _settle(pilot)
+        assert toggles == ["root", "emulator"]
+        assert app.screen.active_lens == "app"
+        await pilot.press("t")  # retired TrigDroid key: opens nothing
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert toggles == ["root", "emulator"]
 
 
 async def test_zero_and_s_open_the_snapshot_picker() -> None:
@@ -978,7 +986,7 @@ async def test_help_fits_small_terminals_and_lists_every_global_key(size) -> Non
         nav = [r for r in rows if re.match(r"(App|Network|Files|Runs) lens ", r)]
         assert [n.split()[0] for n in nav[:4]] == ["App", "Network", "Files", "Runs"]
         bypass = rows.index(next(r for r in rows if "b bypass" in r))
-        section = rows[bypass + 1 : bypass + 7]
+        section = rows[bypass + 1 : bypass + 8]
         assert sum("Objection" in r for r in section) == 1
         await pilot.press("escape")
 

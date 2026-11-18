@@ -24,6 +24,7 @@ BYPASS_KEYS: tuple[tuple[str, str, str], ...] = (
     ("3", "frida", "Frida"),
     ("4", "debug", "Debug"),
     ("5", "integrity", "Integrity"),
+    ("6", "emulator", "Emulator"),
 )
 
 

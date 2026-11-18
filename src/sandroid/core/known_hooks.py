@@ -298,6 +298,52 @@ DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
     dynamic_hooks=False,
 )
 
+EMULATOR_DETECTION_BYPASS_TOOL = ToolHookInfo(
+    name="emulator_detection_bypass",
+    display_name="Emulator Detection Bypass (exp.)",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[
+        HookCategory.EMULATOR_DETECTION,
+        HookCategory.BUILD_PROPERTIES,
+    ],
+    native_hooks=[
+        # Listeners stack with the root bypass's on the same exports.
+        "__system_property_get",
+        "access",
+        "faccessat",
+        "fopen",
+        "fopen64",
+    ],
+    java_hooks=[
+        "android.os.Build.FINGERPRINT",
+        "android.os.Build.MODEL",
+        "android.os.Build.MANUFACTURER",
+        "android.os.Build.BRAND",
+        "android.os.Build.DEVICE",
+        "android.os.Build.PRODUCT",
+        "android.os.Build.HARDWARE",
+        "android.os.Build.BOARD",
+        "android.os.Build.TAGS",
+        "android.os.Build.TYPE",
+        "android.os.Build.getSerial",
+        "android.os.SystemProperties.get",
+        "android.telephony.TelephonyManager.getDeviceId",
+        "android.telephony.TelephonyManager.getSubscriberId",
+        "android.telephony.TelephonyManager.getLine1Number",
+        "android.telephony.TelephonyManager.getSimSerialNumber",
+        "android.telephony.TelephonyManager.getNetworkOperatorName",
+        "android.telephony.TelephonyManager.getNetworkOperator",
+        "android.telephony.TelephonyManager.getPhoneType",
+        "android.telephony.TelephonyManager.getSimState",
+    ],
+    description="One coherent device profile for Build.*, qemu/goldfish/ranchu "
+    "property hiding, emulator file/pipe hiding, TelephonyManager fakes",
+    dynamic_hooks=False,
+    notes="Ported from TrigDroid's emulator-detection hooks and Dexray "
+    "Intercept's emulator bypass. Native spoofing answers app callers only. "
+    "Arm before Start: apps check this at startup.",
+)
+
 # ============================================================================
 # MALWARE MONITOR (Dexray-Intercept)
 # ============================================================================
@@ -502,6 +548,7 @@ KNOWN_TOOLS: dict[str, ToolHookInfo] = {
     "frida_detection_bypass": FRIDA_DETECTION_BYPASS_TOOL,
     "root_detection_bypass": ROOT_DETECTION_BYPASS_TOOL,
     "debug_detection_bypass": DEBUG_DETECTION_BYPASS_TOOL,
+    "emulator_detection_bypass": EMULATOR_DETECTION_BYPASS_TOOL,
     "malwaremonitor": MALWARE_MONITOR_HOOKS,
 }
 

@@ -49,8 +49,8 @@ state. Below it, four **lenses** take the full width -- switch with
 ``1``-``4``:
 
 - ``1`` **App** -- the app under investigation (start, attach, restart, kill);
-  ``b`` then ``1``-``5`` toggles the Frida bypasses (SSL, Root, Frida, Debug,
-  Integrity; experimental)
+  ``b`` then ``1``-``6`` toggles the Frida bypasses (SSL, Root, Frida, Debug,
+  Integrity, Emulator; experimental)
 - ``2`` **Network** -- *Mitmproxy* (proxying, CA injection) and *friTap*
 - ``3`` **Files** -- what the app writes, one row per file; ``w`` watches
   a file (★, pinned on top), ``u`` pulls and diffs it

@@ -104,9 +104,11 @@ lens focused:
 - ``Enter`` start (or resume a paused start), Shift+``A`` attach, Shift+``P``
   start paused, Shift+``R`` restart with the armed hooks, Shift+``K`` kill and
   tear down hooks, Shift+``X`` clear the selection
-- ``b`` then ``1``-``5`` toggles/arms the Frida bypass categories **SSL**,
-  **Root**, **Frida**, **Debug** and **Integrity**
-  (PairIP/licensing/attestation); ``b`` then ``o`` (or ``b`` again) opens
+- ``b`` then ``1``-``6`` toggles/arms the Frida bypass categories **SSL**,
+  **Root**, **Frida**, **Debug**, **Integrity**
+  (PairIP/licensing/attestation) and **Emulator** (Build profile, qemu
+  properties, emulator files, telephony; arm it before Start, since apps
+  check this at startup); ``b`` then ``o`` (or ``b`` again) opens
   the Objection shell (elsewhere ``b`` opens it directly). Objection loads no
   bypass hooks of its own: the ``b`` categories (BypassService) are the only
   source of bypasses. ``Ctrl+P`` toggles SSL unpinning globally.

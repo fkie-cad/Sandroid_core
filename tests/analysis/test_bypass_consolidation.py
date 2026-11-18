@@ -53,3 +53,281 @@ def test_trigger_execution_survives() -> None:
     assert callable(Trigdroid.perform)
     state = get_trigdroid_config_service().get_state_dict()
     assert state == {"spawn_mode": True, "auto_resume": True}
+
+
+# -- emulator category -----------------------------------------------------------
+
+
+def test_emulator_is_a_bypass_service_category() -> None:
+    from sandroid.analysis.detection_bypass import (
+        EMULATOR_DETECTION_HOOKS,
+        BypassService,
+        EmulatorDetectionBypassManager,
+    )
+
+    svc = BypassService()
+    assert svc.categories()[-1] == "emulator"
+    assert svc._manager_class("emulator") is EmulatorDetectionBypassManager
+    assert EmulatorDetectionBypassManager.APPLY_AT_SPAWN is True
+    assert "experimental" in svc.display_name("emulator").lower()
+    assert svc._flag_dict({"emulator"})["emulator"] is True
+    assert svc._flag_dict({"root"})["emulator"] is False
+    union = svc._union_hooks(svc.categories())
+    for hook in EMULATOR_DETECTION_HOOKS:
+        assert hook in union
+    for hook in ("android.os.Build.FINGERPRINT", "android.os.SystemProperties.get"):
+        assert hook in EMULATOR_DETECTION_HOOKS
+
+
+def test_emulator_hooks_are_known_to_conflict_detection() -> None:
+    from sandroid.core.known_hooks import KNOWN_TOOLS
+
+    tool = KNOWN_TOOLS["emulator_detection_bypass"]
+    assert "android.os.SystemProperties.get" in tool.java_hooks
+    assert "__system_property_get" in tool.native_hooks
+
+
+def test_emulator_script_is_merged_into_the_one_flag_gated_script() -> None:
+    import json
+
+    from sandroid.analysis.detection_bypass import (
+        _EMULATOR_DETECTION_SCRIPT,
+        BypassService,
+    )
+
+    svc = BypassService()
+    flags = svc._flag_dict({"emulator"})
+    src = svc._assemble_source(flags)
+    # Exactly one script: the emulator body sits in its own guarded IIFE...
+    assert src.count(_EMULATOR_DETECTION_SCRIPT) == 1
+    assert 'send({merge_error: "emulator"' in src
+    # ...with the flag baked in at load (the paused-spawn path) and a
+    # set_flags listener hook for the live flip.
+    assert "var FLAGS = " + json.dumps(flags) in src
+    assert "var FLAG_LISTENERS = [];" in src
+    assert src.index("var FLAG_LISTENERS") < src.index(_EMULATOR_DETECTION_SCRIPT)
+    # Load order: anti-anti-Frida (5) < emulator (8) < root/debug (10).
+    order = svc._categories_by_priority(svc.categories())
+    assert order.index("frida") < order.index("emulator") < order.index("root")
+    # One Java.perform-gated Build write path, gated on FLAGS.emulator.
+    assert "if (FLAGS.emulator) _emuApplyBuild(true);" in _EMULATOR_DETECTION_SCRIPT
+    assert "FLAGS.root" not in _EMULATOR_DETECTION_SCRIPT.replace(
+        "if (f === 'TAGS' && FLAGS.root) return;", ""
+    )
+
+
+def test_live_emulator_toggle_says_restart(monkeypatch) -> None:
+    from sandroid.analysis.detection_bypass import BypassService
+
+    svc = BypassService()
+    monkeypatch.setattr(svc, "_spotlight_running", lambda: True)
+    monkeypatch.setattr(
+        svc, "set_active", lambda target, paused, on_message=None: (True, "ok")
+    )
+    now_on, msg = svc.toggle("emulator")
+    assert now_on is True
+    assert "restart" in msg.lower()
+    _now_on, msg = svc.toggle("root")
+    assert "restart" not in msg.lower()
+
+
+_NODE_HARNESS = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const out = [];
+// A Java method with per-signature overloads; calling the dispatcher (what
+// ``this.name(...)`` does inside a replacement) reaches the original.
+function method(orig) {
+    const f = function (...a) { return orig.apply(this, a); };
+    const sigs = {};
+    f.overload = function (...sig) {
+        const key = sig.join(',');
+        if (!sigs[key]) {
+            sigs[key] = function (...a) { return orig.apply(this, a); };
+        }
+        return sigs[key];
+    };
+    f.sig = (...sig) => f.overload(...sig);
+    return f;
+}
+const build = {
+    FINGERPRINT: {value: 'google/sdk_gphone64_x86_64/emu64xa:16/BP22/1:userdebug/dev-keys'},
+    MODEL: {value: 'sdk_gphone64_x86_64'}, MANUFACTURER: {value: 'Google'},
+    BRAND: {value: 'google'}, DEVICE: {value: 'emu64xa'},
+    PRODUCT: {value: 'sdk_gphone64_x86_64'}, HARDWARE: {value: 'ranchu'},
+    BOARD: {value: 'goldfish_x86_64'}, TAGS: {value: 'dev-keys'},
+    TYPE: {value: 'userdebug'}, ID: {value: 'BP22.250325.006'},
+    getSerial: method(() => 'EMULATOR36X'),
+};
+if (process.argv[4] === 'real') {  // a real (userdebug) phone
+    Object.assign(build, {
+        FINGERPRINT: {value: 'google/oriole/oriole:14/AP1A/1:userdebug/release-keys'},
+        MODEL: {value: 'Pixel 6'}, DEVICE: {value: 'oriole'},
+        PRODUCT: {value: 'oriole'}, HARDWARE: {value: 'oriole'},
+        BOARD: {value: 'oriole'}, TAGS: {value: 'release-keys'},
+    });
+}
+const props = {'ro.kernel.qemu': '1', 'ro.product.model': 'sdk_gphone64_x86_64',
+               'ro.build.tags': 'dev-keys', 'ro.debuggable': '1', 'persist.x': 'y'};
+const sysprops = {get: method((k, d) => (k in props ? props[k] : (d === undefined ? '' : d)))};
+const tm = {};
+['getDeviceId', 'getSubscriberId', 'getLine1Number', 'getSimSerialNumber',
+ 'getNetworkOperatorName', 'getNetworkOperator', 'getPhoneType', 'getSimState']
+    .forEach(n => { tm[n] = method(() => 'REAL-' + n); });
+const classes = {
+    'android.os.Build': build,
+    'android.os.Build$VERSION': {RELEASE: {value: '16'}, INCREMENTAL: {value: '13'}},
+    'android.os.SystemProperties': sysprops,
+    'android.telephony.TelephonyManager': tm,
+};
+globalThis.Java = {perform: fn => fn(), use: n => classes[n]};
+globalThis.send = m => out.push(m);
+globalThis.ptr = v => ({ptr: String(v)});
+const listeners = {};
+globalThis.Interceptor = {attach: (addr, cb) => { listeners[addr] = cb; }};
+const modules = {app: '/data/app/x/lib/arm64/libapp.so', sys: '/vendor/lib64/libEGL_emu.so',
+                 jdk: '/apex/com.android.art/lib64/libopenjdk.so'};
+globalThis.Process = {
+    findModuleByAddress: a => ({path: modules[a]}),
+    getModuleByName: () => ({findExportByName: n => n}),
+};
+globalThis.Module = {findExportByName: (l, n) => n};
+globalThis.FLAGS = {emulator: process.argv[3] === 'on', root: false};
+globalThis.FLAG_LISTENERS = [];
+(0, eval)(src);
+
+function cstr(s) { return {s, readUtf8String() { return this.s; },
+                           writeUtf8String(v) { this.s = v; }}; }
+function callNative(sym, path, caller) {
+    const cb = listeners[sym];
+    const ctx = {returnAddress: caller};
+    const args = sym === 'faccessat' ? [null, cstr(path)] : [cstr(path)];
+    cb.onEnter.call(ctx, args);
+    let rv = null;
+    cb.onLeave.call(ctx, {replace: v => { rv = v.ptr; }});
+    return rv;
+}
+function callProp(key, caller) {
+    const cb = listeners['__system_property_get'];
+    const ctx = {returnAddress: caller};
+    const outBuf = cstr(props[key] || '');
+    cb.onEnter.call(ctx, [cstr(key), outBuf]);
+    let rv = null;
+    cb.onLeave.call(ctx, {replace: v => { rv = v.ptr; }});
+    return [outBuf.s, rv];
+}
+const get1 = sysprops.get.sig('java.lang.String');
+const get2 = sysprops.get.sig('java.lang.String', 'java.lang.String');
+function snapshot() {
+    return {
+        model: build.MODEL.value, fp: build.FINGERPRINT.value, tags: build.TAGS.value,
+        serial: build.getSerial.implementation.call(build),
+        qemu: get1.implementation.call(sysprops, 'ro.kernel.qemu'),
+        model_prop: get1.implementation.call(sysprops, 'ro.product.model'),
+        debuggable: get1.implementation.call(sysprops, 'ro.debuggable'),
+        other: get2.implementation.call(sysprops, 'persist.x', 'd'),
+        qemu_def: get2.implementation.call(sysprops, 'ro.kernel.qemu', 'd'),
+        line1: tm.getLine1Number.sig().implementation.call(tm),
+        pipe_app: callNative('access', '/dev/qemu_pipe', 'app'),
+        pipe_java: callNative('faccessat', '/dev/socket/qemud', 'jdk'),
+        pipe_sys: callNative('access', '/dev/goldfish_pipe', 'sys'),
+        rc_app: callNative('fopen', '/init.ranchu.rc', 'app'),
+        plain_app: callNative('access', '/data/local/tmp/x', 'app'),
+        prop_app: callProp('ro.kernel.qemu', 'app'),
+        prop_sys: callProp('ro.kernel.qemu', 'sys'),
+    };
+}
+const result = {load: snapshot()};
+globalThis.FLAGS.emulator = !globalThis.FLAGS.emulator;
+FLAG_LISTENERS.forEach(l => l(globalThis.FLAGS));
+result.flipped = snapshot();
+console.log(JSON.stringify(result));
+"""
+
+
+def _run_emulator_harness(
+    tmp_path: Path, flag_at_load: str, device: str = "emulator"
+) -> dict:
+    import json
+    import shutil
+    import subprocess
+
+    from sandroid.analysis.detection_bypass import _EMULATOR_DETECTION_SCRIPT
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed; JS behaviour check skipped")
+    script = tmp_path / "emulator.js"
+    script.write_text(_EMULATOR_DETECTION_SCRIPT)
+    harness = tmp_path / "harness.js"
+    harness.write_text(_NODE_HARNESS)
+    proc = subprocess.run(
+        [node, str(harness), str(script), flag_at_load, device],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+_SPOOFED = {
+    "model": "Pixel 4 XL",
+    "fp": "google/coral/coral:16/BP22.250325.006/13:user/release-keys",
+    "tags": "release-keys",
+    "serial": "RF8M33XXXXX",
+    "qemu": "",
+    "model_prop": "Pixel 4 XL",
+    "debuggable": "1",  # ro.debuggable is the root category's, not ours
+    "other": "y",
+    "qemu_def": "d",
+    "line1": "+15551234567",
+    "pipe_app": "-1",
+    "pipe_java": "-1",  # File.exists() via libopenjdk counts as the app
+    "pipe_sys": None,  # the emulator's own graphics stack keeps its pipe
+    "rc_app": "0",
+    "plain_app": None,
+    "prop_app": ["", "0"],
+    "prop_sys": ["1", None],
+}
+_REAL = {
+    "model": "sdk_gphone64_x86_64",
+    "fp": "google/sdk_gphone64_x86_64/emu64xa:16/BP22/1:userdebug/dev-keys",
+    "tags": "dev-keys",
+    "serial": "EMULATOR36X",
+    "qemu": "1",
+    "model_prop": "sdk_gphone64_x86_64",
+    "debuggable": "1",
+    "other": "y",
+    "qemu_def": "1",
+    "line1": "REAL-getLine1Number",
+    "pipe_app": None,
+    "pipe_java": None,
+    "pipe_sys": None,
+    "rc_app": None,
+    "plain_app": None,
+    "prop_app": ["1", None],
+    "prop_sys": ["1", None],
+}
+
+
+def test_emulator_script_applies_at_load_and_restores_on_flag_off(tmp_path) -> None:
+    """Armed before Start: baked FLAGS.emulator spoofs from the first read."""
+    result = _run_emulator_harness(tmp_path, "on")
+    assert result["load"] == _SPOOFED
+    assert result["flipped"] == _REAL
+
+
+def test_emulator_script_is_inert_until_flag_flips_on(tmp_path) -> None:
+    """Off at load: nothing changes until set_flags turns it on live."""
+    result = _run_emulator_harness(tmp_path, "off")
+    assert result["load"] == _REAL
+    assert result["flipped"] == _SPOOFED
+
+
+def test_emulator_script_never_relabels_a_real_device(tmp_path) -> None:
+    """Build.* is replaced as one profile only when it shows an emulator."""
+    result = _run_emulator_harness(tmp_path, "on", device="real")
+    assert result["load"]["model"] == "Pixel 6"
+    assert result["load"]["tags"] == "release-keys"
