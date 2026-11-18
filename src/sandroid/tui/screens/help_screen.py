@@ -9,7 +9,7 @@ Order: the keys of the lens ``?`` was pressed in come first (the list opens
 there), then the Inspector's, then the global keys (General, lens
 navigation, main screen, the action categories), then the other lenses and
 the snapshot picker. A lens key that shadows a global key (Files ``w``/``n``/
-``O``, App ``b``, Runs ``n``) is listed with its lens meaning and marked
+``O``, App ``b``, Sessions ``n``) is listed with its lens meaning and marked
 "overrides global …"; the global row says which lens uses the key for
 something else -- the same key never appears twice without that context.
 """
@@ -89,7 +89,7 @@ _PANEL_SECTIONS: list[tuple[str, str, str]] = [
     ("App lens › b bypass", "sandroid.tui.widgets.spotlight_panel", "BypassChordModal"),
     ("Network lens", "sandroid.tui.widgets.network_panel", "NetworkPanel"),
     ("Files lens", "sandroid.tui.widgets.files_panel", "FilesPanel"),
-    ("Runs lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
+    ("Sessions lens", "sandroid.tui.widgets.diffs_view", "DiffsView"),
     (
         "Snapshot picker (S)",
         "sandroid.tui.modals.snapshot_save_choice_modal",
@@ -103,7 +103,17 @@ _LENS_SECTIONS: dict[str, tuple[str, ...]] = {
     "app": ("App lens", "App lens › b bypass"),
     "network": ("Network lens",),
     "files": ("Files lens",),
-    "runs": ("Runs lens",),
+    "runs": ("Sessions lens",),
+}
+#: Display-only rows listed first in a lens's section: keys the lens gets
+#: from elsewhere (Enter = MainScreen's inspect, Tab = focus order), which
+#: its own BINDINGS cannot show. ``(key display, description, raw keys)``.
+_LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
+    "App lens": [
+        ("⏎", "Inspect the selected row (Evidence / Raw tabs)", ("enter",)),
+        ("Tab / ⇧Tab", "Next / previous section", ("tab", "shift+tab")),
+    ],
+    "Network lens": [("⏎", "Inspect the selected flow", ("enter",))],
 }
 #: Headings of the global (works everywhere) panel sections.
 _GLOBAL_PANEL_SECTIONS = ("Lens navigation", "Main screen")
@@ -581,6 +591,8 @@ class HelpScreen(ModalScreen):
                     for k, d, raw in inspector
                 )
             sections.setdefault(heading, []).extend(rows)
+        for heading, extra in _LENS_EXTRA_ROWS.items():
+            sections[heading] = [*extra, *sections.get(heading, [])]
 
         # A lens key that is also a global key: the lens meaning wins while
         # the lens has focus -- say so on both rows.

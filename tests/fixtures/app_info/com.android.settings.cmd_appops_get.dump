@@ -1,0 +1,27 @@
+Uid mode: READ_CALENDAR: ignore
+WRITE_CALENDAR: ignore
+READ_SMS: ignore
+RECEIVE_SMS: ignore
+RECEIVE_MMS: ignore
+RECEIVE_WAP_PUSH: ignore
+CAMERA: foreground
+RECORD_AUDIO: ignore
+ADD_VOICEMAIL: ignore
+USE_SIP: ignore
+PROCESS_OUTGOING_CALLS: ignore
+BODY_SENSORS: ignore
+READ_CELL_BROADCASTS: ignore
+ANSWER_PHONE_CALLS: ignore
+ACCEPT_HANDOVER: ignore
+ACTIVITY_RECOGNITION: ignore
+ACCESS_MEDIA_LOCATION: ignore
+UWB_RANGING: ignore
+NEARBY_WIFI_DEVICES: ignore
+READ_CONTACTS: allow; time=+581d0h33m31s750ms ago
+READ_CALL_LOG: allow; time=+581d4h48m18s473ms ago
+GET_USAGE_STATS: default; time=+351d16h6m5s3ms ago
+READ_PHONE_STATE: allow; time=+581d4h48m18s473ms ago
+INTERACT_ACROSS_PROFILES: default
+USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER: default; time=+6m6s563ms ago
+BLUETOOTH_CONNECT: allow; time=+6m7s37ms ago
+MEDIA_ROUTING_CONTROL: default; time=+6m7s1ms ago

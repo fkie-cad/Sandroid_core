@@ -290,8 +290,12 @@ async def test_enter_opens_inspector_via_lens_hook(monkeypatch) -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _boot(app, pilot)
         ms = app.screen
-        # App lens has no hook: Enter stays Start/Resume, no Inspector.
-        assert ms.check_action("inspect", ()) is False
+        # The App lens inspects too (Space is Start/Resume); with no app
+        # selected there is no row, so Enter opens nothing.
+        assert ms.check_action("inspect", ()) is True
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert not ms.inspector_is_open
         await pilot.press("3")
         await _settle(pilot)
         assert ms.check_action("inspect", ()) is True
@@ -983,8 +987,13 @@ async def test_help_fits_small_terminals_and_lists_every_global_key(size) -> Non
         width = options.scrollable_content_region.width
         assert max(len(r) for r in rows) <= width
         # Lenses in key order; one row per action within a section.
-        nav = [r for r in rows if re.match(r"(App|Network|Files|Runs) lens ", r)]
-        assert [n.split()[0] for n in nav[:4]] == ["App", "Network", "Files", "Runs"]
+        nav = [r for r in rows if re.match(r"(App|Network|Files|Sessions) lens ", r)]
+        assert [n.split()[0] for n in nav[:4]] == [
+            "App",
+            "Network",
+            "Files",
+            "Sessions",
+        ]
         bypass = rows.index(next(r for r in rows if "b bypass" in r))
         section = rows[bypass + 1 : bypass + 8]
         assert sum("Objection" in r for r in section) == 1
@@ -1612,7 +1621,7 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
         assert heads[2] == "General"
         assert heads.index("Recording") < heads.index("App lens")
         assert heads.index("App lens") < heads.index("Network lens")
-        assert heads.index("Network lens") < heads.index("Runs lens")
+        assert heads.index("Network lens") < heads.index("Sessions lens")
         # The list opens on the Files lens's first key, scrolled to the top.
         assert options.highlighted == 1
         assert options.scroll_offset.y == 0
@@ -1627,7 +1636,7 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
         capture = next(r for r in rest if r.rstrip().endswith("[w]"))
         assert "not in Files" in capture
         install = next(r for r in rest if r.rstrip().endswith("[n]"))
-        assert "not in Files, Runs" in install
+        assert "not in Files, Sessions" in install
         # The App lens's b (bypass) is marked in its own section too.
         app_start = rows.index(next(r for r in rows if r.startswith("── App lens ──")))
         bypass = next(r for r in rows[app_start:] if r.rstrip().endswith("[b]"))

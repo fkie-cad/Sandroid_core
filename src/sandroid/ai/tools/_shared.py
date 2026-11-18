@@ -9,6 +9,16 @@ helper library other tool modules import from.
 from sandroid.ai.errors import ToolExecutionError
 from sandroid.core.adb_utils import PACKAGE_NAME_RE, is_valid_package_name
 
+# Re-exported: the parser lives in the UI-shared service layer.
+from sandroid.services.app_info_service import parse_pm_path_output
+
+__all__ = [
+    "PACKAGE_NAME_PARAM",
+    "parse_pm_path_output",
+    "resolve_package_name",
+    "validate_package_name",
+]
+
 #: Android's real package-identifier format: two or more dot-separated
 #: segments, each segment starting with a letter and containing only
 #: letters/digits/underscore (mirrors the JLS package-name grammar Android
@@ -32,30 +42,6 @@ PACKAGE_NAME_PARAM = {
         "the analyst's current spotlight app."
     ),
 }
-
-
-def parse_pm_path_output(stdout: str) -> list[str]:
-    """Parse ``pm path <pkg>`` output into a list of on-device APK paths.
-
-    Real output is one ``package:/absolute/path/to/*.apk`` line per APK
-    (``base.apk`` plus any installed splits) -- verified against a live
-    emulator across several multi-split apps (Microsoft Edge, Snapchat,
-    Telegram, Uber all install ``base.apk`` + several ``split_*.apk``).
-
-    Args:
-        stdout: Raw stdout from ``adb shell pm path <pkg>``.
-
-    Returns:
-        A list of on-device APK paths, in the order ``pm path`` printed
-        them. Empty if *stdout* has no ``package:`` lines (e.g. the package
-        is not installed).
-    """
-    paths = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if line.startswith("package:"):
-            paths.append(line[len("package:") :])
-    return paths
 
 
 def resolve_package_name(package_name: str | None) -> str:

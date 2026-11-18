@@ -172,7 +172,7 @@ class PlayerCommand(CommandHandler):
             )
         return CommandResult(
             success=True,
-            message="Replay from the TUI (press 'p'; results open in the Runs lens).",
+            message="Replay from the TUI (press 'p'; results open in the Sessions lens).",
             should_return_to_menu=True,
         )
 

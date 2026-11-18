@@ -1,0 +1,48 @@
+Uid mode: READ_CALENDAR: ignore
+WRITE_CALENDAR: ignore
+RECEIVE_WAP_PUSH: ignore
+CAMERA: foreground
+RECORD_AUDIO: foreground
+ADD_VOICEMAIL: ignore
+USE_SIP: ignore
+BODY_SENSORS: foreground
+READ_CELL_BROADCASTS: ignore
+READ_EXTERNAL_STORAGE: ignore
+WRITE_EXTERNAL_STORAGE: ignore
+READ_PHONE_NUMBERS: ignore
+ANSWER_PHONE_CALLS: ignore
+ACCEPT_HANDOVER: ignore
+READ_WRITE_HEALTH_DATA: ignore
+COARSE_LOCATION: allow
+FINE_LOCATION: allow; time=+2m27s903ms ago
+GPS: allow; time=+2m31s881ms ago; duration=+4s53ms
+READ_CONTACTS: allow; time=+7m32s555ms ago
+WRITE_CONTACTS: allow; time=+4h22m11s217ms ago
+READ_CALL_LOG: allow; time=+7m15s13ms ago
+WIFI_SCAN: allow; time=+2m31s824ms ago
+READ_SMS: allow; time=+7m15s19ms ago
+READ_CLIPBOARD: allow; time=+583d1h45m8s676ms ago
+WAKE_LOCK: allow; time=+4m29s382ms ago; duration=+3ms
+MONITOR_LOCATION: allow; time=+7m32s136ms ago (running)
+MONITOR_HIGH_POWER_LOCATION: allow; time=+2m31s971ms ago; duration=+4s105ms
+GET_USAGE_STATS: default; rejectTime=+7m32s1ms ago
+PROCESS_OUTGOING_CALLS: allow; time=+581d4h52m56s978ms ago
+GET_ACCOUNTS: allow; time=+17s33ms ago
+BLUETOOTH_SCAN: allow; time=+7m38s506ms ago
+USE_BIOMETRIC: allow; time=+1d17h42m31s987ms ago
+ACTIVITY_RECOGNITION: allow; time=+7m32s473ms ago (running)
+READ_MEDIA_AUDIO: allow; time=+7m32s166ms ago
+WRITE_MEDIA_AUDIO: deny; rejectTime=+7m32s162ms ago
+READ_MEDIA_VIDEO: allow; time=+7m32s165ms ago
+WRITE_MEDIA_VIDEO: deny; rejectTime=+7m32s160ms ago
+READ_MEDIA_IMAGES: allow; time=+7m32s169ms ago
+WRITE_MEDIA_IMAGES: deny; rejectTime=+7m32s160ms ago
+MANAGE_EXTERNAL_STORAGE: default; rejectTime=+7m32s181ms ago
+NO_ISOLATED_STORAGE: deny; rejectTime=+7m32s182ms ago
+USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER: default; rejectTime=+2m27s118ms ago
+FINE_LOCATION_SOURCE: allow; time=+2m27s931ms ago
+BLUETOOTH_CONNECT: allow; time=+2m27s375ms ago
+ACTIVITY_RECOGNITION_SOURCE: allow; time=+7m39s252ms ago (running)
+BLUETOOTH_ADVERTISE: allow; time=+223d16h50m23s340ms ago
+NEARBY_WIFI_DEVICES: allow; time=+7m33s514ms ago
+READ_MEDIA_VISUAL_USER_SELECTED: allow; time=+7m32s171ms ago

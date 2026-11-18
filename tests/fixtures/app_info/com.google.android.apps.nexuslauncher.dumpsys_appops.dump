@@ -1,0 +1,78 @@
+Current AppOps Service state:
+  Settings:
+    top_state_settle_time=+5s0ms
+    fg_service_state_settle_time=+5s0ms
+    bg_state_settle_time=+1s0ms
+
+
+  Uid u0a176:
+    state=top
+    capability=LCMNFUA
+    appWidgetVisible=false
+      COARSE_LOCATION: mode=ignore
+      FINE_LOCATION: mode=ignore
+      READ_CONTACTS: mode=ignore
+      WRITE_CONTACTS: mode=ignore
+      READ_CALL_LOG: mode=ignore
+      WRITE_CALL_LOG: mode=ignore
+      READ_CALENDAR: mode=ignore
+      WRITE_CALENDAR: mode=ignore
+      CALL_PHONE: mode=ignore
+      READ_SMS: mode=ignore
+      RECEIVE_SMS: mode=ignore
+      RECEIVE_MMS: mode=ignore
+      RECEIVE_WAP_PUSH: mode=ignore
+      SEND_SMS: mode=ignore
+      CAMERA: mode=ignore
+      RECORD_AUDIO: mode=ignore
+      READ_PHONE_STATE: mode=ignore
+      ADD_VOICEMAIL: mode=ignore
+      USE_SIP: mode=ignore
+      PROCESS_OUTGOING_CALLS: mode=ignore
+      BODY_SENSORS: mode=ignore
+      READ_CELL_BROADCASTS: mode=ignore
+      READ_EXTERNAL_STORAGE: mode=ignore
+      WRITE_EXTERNAL_STORAGE: mode=ignore
+      GET_ACCOUNTS: mode=ignore
+      READ_PHONE_NUMBERS: mode=ignore
+      ANSWER_PHONE_CALLS: mode=ignore
+      ACCEPT_HANDOVER: mode=ignore
+      BLUETOOTH_SCAN: mode=ignore
+      ACTIVITY_RECOGNITION: mode=ignore
+      READ_MEDIA_AUDIO: mode=ignore
+      READ_MEDIA_VIDEO: mode=ignore
+      READ_MEDIA_IMAGES: mode=ignore
+      LEGACY_STORAGE: mode=ignore
+      ACCESS_MEDIA_LOCATION: mode=ignore
+      BLUETOOTH_CONNECT: mode=ignore
+      UWB_RANGING: mode=ignore
+      BLUETOOTH_ADVERTISE: mode=ignore
+      NEARBY_WIFI_DEVICES: mode=ignore
+      READ_MEDIA_VISUAL_USER_SELECTED: mode=ignore
+      UNARCHIVAL_CONFIRMATION: mode=ignore
+      RECEIVE_SENSITIVE_NOTIFICATIONS: mode=allow
+    Package com.google.android.apps.nexuslauncher:
+      VIBRATE (allow): 
+        null=[
+          Access: [top-s] 2026-11-18 10:28:41.892 (-4h19m37s476ms) duration=+102ms
+          Access: [fg-s] 2026-06-19 00:51:58.555 (-152d14h56m20s813ms) duration=+20ms
+        ]
+      ASSIST_STRUCTURE (allow): 
+        null=[
+          Access: [top-s] 2026-06-18 11:45:28.586 (-153d4h2m50s782ms)
+        ]
+      RECEIVE_SENSITIVE_NOTIFICATIONS (ignore): 
+        null=[
+          Access: [top-s] 2026-11-18 14:42:02.112 (-6m17s256ms)
+          Reject: [top-s]2025-04-14 10:22:30.938 (-583d5h25m48s430ms)
+          Access: [fg-s] 2026-06-01 16:19:25.797 (-169d23h28m53s571ms)
+        ]
+
+
+  AppOps policy location tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, network_location_provider, gnss_location_provider, network_location_calibration, current_semantic_location, fused_location_provider, wearable_flp_shim, geofencer_provider]
+    #1: 1000=android[LocationService, GnssService]
+
+  AppOps policy activity recognition tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, current_semantic_location, fused_location_provider, geofencer_provider]
+

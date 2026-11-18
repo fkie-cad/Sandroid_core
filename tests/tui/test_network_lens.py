@@ -142,9 +142,9 @@ def write_flows(
                     if req and "=" in str(req)
                     else None
                 ),
-                "response_content_type": "application/json"
-                if resp and str(resp).startswith("{")
-                else None,
+                "response_content_type": (
+                    "application/json" if resp and str(resp).startswith("{") else None
+                ),
             }
             f.write(json.dumps(rec) + "\n")
             (flow_dir / "details" / f"flow-{seq}.json").write_text(
@@ -194,6 +194,31 @@ def test_recipient_labels():
     assert recipient_of("graph.facebook.com") == ("Meta", True)
     assert recipient_of("app-measurement.com") == ("Google Analytics", True)
     assert recipient_of("launches.appsflyer.com") == ("AppsFlyer", True)
+    assert recipient_of("api.fittrack.de") == ("fittrack.de", False)
+    # Labels come from Dexray Insight's tracker DB (the one intentional
+    # change vs the old built-in table: unity3d.com is Unity, not Unity Ads).
+    import sandroid.tui.widgets.network_panel as net
+
+    if not net._insight_labeller():
+        pytest.skip("Dexray Insight >= 2.0 not importable here (fallback table)")
+    assert recipient_of("unity3d.com") == ("Unity", True)
+    assert recipient_of("unityads.unity3d.com") == ("Unity Ads", True)
+
+
+def test_recipient_labels_fall_through_hosts_insight_does_not_know(monkeypatch):
+    import sandroid.tui.widgets.network_panel as net
+
+    monkeypatch.setattr(net, "_INSIGHT_LABELLER", lambda host: None)
+    assert recipient_of("graph.facebook.com") == ("Meta", True)
+    assert recipient_of("api.fittrack.de") == ("fittrack.de", False)
+
+
+def test_recipient_labels_fall_back_without_insight(monkeypatch):
+    import sandroid.tui.widgets.network_panel as net
+
+    monkeypatch.setattr(net, "_INSIGHT_LABELLER", False)
+    assert recipient_of("graph.facebook.com") == ("Meta", True)
+    assert recipient_of("x.unity3d.com") == ("Unity Ads", True)
     assert recipient_of("api.fittrack.de") == ("fittrack.de", False)
     assert recipient_of("a.b.example.co.uk") == ("example.co.uk", False)
 
@@ -333,7 +358,7 @@ async def _lens_with_flows(app, pilot, flow_dir, base=None):
     return ms, panel
 
 
-async def test_empty_state_and_enter_starts_mitm(flow_dir, monkeypatch):
+async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms = await _boot(app, pilot)
@@ -348,9 +373,22 @@ async def test_empty_state_and_enter_starts_mitm(flow_dir, monkeypatch):
             panel.mitm, "action_toggle_running", lambda: calls.append("toggle")
         )
         assert app.focused is panel
+        # Enter is "inspect" everywhere: with nothing captured it does nothing.
         await pilot.press("enter")
         await _settle(pilot)
+        assert calls == []
+        assert not ms.inspector_is_open
+        await pilot.press("space")
+        await _settle(pilot)
         assert calls == ["toggle"]
+        # Space only starts: with mitmproxy running it stops nothing (M does).
+        monkeypatch.setattr(panel.mitm, "is_running", lambda: True)
+        await pilot.press("space")
+        await _settle(pilot)
+        assert calls == ["toggle"]
+        await pilot.press("M")
+        await _settle(pilot)
+        assert calls == ["toggle", "toggle"]
 
 
 async def test_flows_fill_the_table_noise_hidden(flow_dir):

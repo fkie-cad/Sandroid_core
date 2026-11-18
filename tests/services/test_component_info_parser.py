@@ -541,3 +541,9 @@ def test_extended_info_still_includes_base_package_info_parser_fields():
     assert result["min_sdk"] == 21
     assert result["data_dir"] == "/data/user/0/com.whatsapp"
     assert result["install_date"] == "2026-07-09 23:40:54"
+
+
+def test_last_update_time_extracted():
+    result = parse_extended_package_info(DUMPSYS_PACKAGE_FIXTURE)
+    assert result["last_update"] == "2026-07-09 23:44:28"
+    assert parse_extended_package_info("nothing")["last_update"] is None

@@ -187,6 +187,10 @@ class PathConfig(BaseModel):
         default=Path("~/.cache/sandroid/").expanduser(),
         description="Directory for cache files",
     )
+    apk_cache_path: Path = Field(
+        default=Path("~/.cache/sandroid/apk_cache/").expanduser(),
+        description="Shared APK static-facts cache (may be a team share)",
+    )
 
     @validator("*", pre=True)
     def expand_user_path(cls, v):
@@ -201,6 +205,10 @@ class AnalysisConfig(BaseModel):
 
     number_of_runs: int = Field(
         default=2, ge=2, description="Minimum number of analysis runs"
+    )
+    insight_offline: bool = Field(
+        default=True,
+        description="Run Dexray Insight without network lookups (Exodus, updates)",
     )
     avoid_strong_noise_filter: bool = Field(
         default=False, description="Disable strong noise filtering (dry run)"

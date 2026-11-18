@@ -4,7 +4,7 @@ Layout (top to bottom, see ``MainScreen.compose``)::
 
     ShellHeader   #shell-header   breadcrumb · snapshot · scope pill · clock
     StatusBar     #status-bar     1-2 rows of live tool state
-    LensBar       #lens-bar       1 App  2 Network  3 Files  4 Runs  (+ badges)
+    LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  (+ badges)
     #workspace    Horizontal
       #lens-host  framed ContentSwitcher #lens-body holding the four lenses
       #side-slot  right-hand slot: Inspector #inspector  OR  chat #chat-dock
@@ -27,7 +27,7 @@ lens id    key  label        widget id              widget (module)
 ``app``    1    App          ``spotlight-panel``    SpotlightPanel (spotlight_panel)
 ``network``2    Network      ``network-panel``      NetworkPanel (network_panel)
 ``files``  3    Files        ``files-panel``        FilesPanel (files_panel)
-``runs``   4    Runs         ``runs-panel``         DiffsView (diffs_view)
+``runs``   4    Sessions     ``runs-panel``         DiffsView (diffs_view)
 =========  ===  ===========  =====================  =============================
 
 To replace a lens body, keep the widget id (or change it here *and* in
@@ -50,9 +50,9 @@ Optional duck-typed hooks a lens widget may implement:
   ``MainScreen`` calls it (a) when Enter reaches the screen unhandled, and
   (b) when an ``OptionList.OptionSelected`` or ``DataTable.RowSelected``
   message bubbles out of the *active* lens (that is what Enter or a click on
-  a row of those widgets posts). Returning ``None`` does nothing. A lens
-  that handles Enter itself (SpotlightPanel's Start/Resume) simply does not
-  implement the hook, or calls ``self.screen.open_inspector(...)`` itself.
+  a row of those widgets posts). Returning ``None`` does nothing. Every
+  lens inspects on Enter now; lens-level "do it" actions live on Space
+  (App: Start/Resume, Network: start/stop mitmproxy).
   Note: the footer shows one binding per key, the focused widget's first;
   a focused OptionList/DataTable owns a hidden Enter binding, so advertise
   "⏎ inspect" in the lens itself (e.g. via ``set_lens_caption`` info).
@@ -210,7 +210,8 @@ LENSES: tuple[LensSpec, ...] = (
     LensSpec("app", "1", "App", "spotlight-panel"),
     LensSpec("network", "2", "Network", "network-panel"),
     LensSpec("files", "3", "Files", "files-panel"),
-    LensSpec("runs", "4", "Runs", "runs-panel"),
+    # Labelled "Sessions" (id and widget id stay "runs" / "runs-panel").
+    LensSpec("runs", "4", "Sessions", "runs-panel"),
 )
 LENS_BY_ID: dict[str, LensSpec] = {spec.id: spec for spec in LENSES}
 LENS_BY_WIDGET: dict[str, LensSpec] = {spec.widget_id: spec for spec in LENSES}
@@ -469,7 +470,7 @@ class ShellHeader(Header):
 
 
 class LensBar(Horizontal):
-    """``1 App  2 Network  3 Files  4 Runs`` with optional per-lens badges.
+    """``1 App  2 Network  3 Files  4 Sessions`` with optional per-lens badges.
 
     Clicks are routed by ``MainScreen.on_click`` (ids ``lens-tab-<lens id>``).
     Carries ``-level-active`` while Shift+←/→ cycles lenses (vs. a lens's own

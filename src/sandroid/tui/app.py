@@ -126,7 +126,7 @@ class SandroidTUI(App):
             "3", "switch_lens('files')", "Files lens", show=False, id="lens_files"
         ),
         Binding(
-            "4", "switch_lens('runs')", "Runs lens", show=False, id="lens_runs"
+            "4", "switch_lens('runs')", "Sessions lens", show=False, id="lens_runs"
         ),
         Binding("grave_accent", "toggle_log", "Log", show=False, id="toggle_log"),
         Binding("D", "show_device_selector", "Devices", show=False, priority=True),
@@ -704,7 +704,7 @@ class SandroidTUI(App):
                 message=(
                     "Sandroid runs as this terminal UI by default.\n"
                     "\n"
-                    "  1-4           App · Network · Files · Runs\n"
+                    "  1-4           App · Network · Files · Sessions\n"
                     "  ⏎ / Esc       details on demand / close them\n"
                     "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
@@ -1722,7 +1722,7 @@ class SandroidTUI(App):
         if rc.is_replaying:
             self.notify(
                 "A replay is still running -- wait for it to finish "
-                "(progress in the Runs lens, 4).",
+                "(progress in the Sessions lens, 4).",
                 title=f"Cannot {what}",
                 severity="warning",
             )
@@ -1865,7 +1865,7 @@ class SandroidTUI(App):
                 title="Stop replay",
                 guard_typing=True,
                 message="A replay is running. Stop it now? The partial run "
-                "is still saved in the Runs lens (4).",
+                "is still saved in the Sessions lens (4).",
             ),
             on_result,
         )

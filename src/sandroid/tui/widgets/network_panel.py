@@ -28,7 +28,7 @@ Filters: ``/`` text (host, path, app, recipient, status; Esc clears it),
 ``T`` (target) spotlight app only, ``N`` show OS noise (connectivity checks,
 Play services background traffic, Google ``*-pa`` APIs, Sandroid's own
 ``mitm.it`` probe; hidden by default, the caption counts what it hides). ``N`` is "show hidden noise" in the Files lens
-too, and ``v`` is only the Runs lens's "review". The frame caption carries the
+too, and ``v`` is only the Sessions lens's "review". The frame caption carries the
 counts ("38 of 412").
 
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
@@ -92,7 +92,10 @@ STATUS_KEY = "network:capture-status"
 # recipients + OS noise
 # --------------------------------------------------------------------------
 
-#: (domain suffix, recipient label), most specific first.
+#: (domain suffix, recipient label), most specific first. Fallback only:
+#: :func:`recipient_of` asks Dexray Insight's tracker database
+#: (``label_for_domain``) first and uses this table when that import fails
+#: (Insight older than 2.0).
 _RECIPIENTS: tuple[tuple[str, str], ...] = (
     ("app-measurement.com", "Google Analytics"),
     ("google-analytics.com", "Google Analytics"),
@@ -215,9 +218,40 @@ def registrable_domain(host: str) -> str:
     return ".".join(parts[-keep:])
 
 
+_INSIGHT_LABELLER: Any = None
+
+
+def _insight_labeller() -> Any:
+    """Dexray Insight's ``label_for_domain`` or ``False`` (imported once)."""
+    global _INSIGHT_LABELLER
+    if _INSIGHT_LABELLER is None:
+        try:
+            from dexray_insight.modules.tracker_analysis import label_for_domain
+
+            _INSIGHT_LABELLER = label_for_domain
+        except Exception:
+            _INSIGHT_LABELLER = False
+    return _INSIGHT_LABELLER
+
+
 def recipient_of(host: str) -> tuple[str, bool]:
-    """``(label, known)``: a known tracker/vendor name, else the domain."""
+    """``(label, known)``: a known tracker/vendor name, else the domain.
+
+    The name comes from Dexray Insight's tracker database (one source for
+    the App lens's SDK list and these labels); a host Insight does not
+    know, or no Insight 2.x at all, falls back to the built-in
+    ``_RECIPIENTS`` table before the bare domain.
+    """
     h = (host or "").lower()
+    labeller = _insight_labeller()
+    if labeller:
+        try:
+            match = labeller(h)
+        except Exception:
+            match = None
+        if match:
+            return str(match[0]), True
+        # Not in Insight's database: the built-in table may still know it.
     for suffix, label in _RECIPIENTS:
         if _host_matches(h, suffix):
             return label, True
@@ -643,9 +677,12 @@ class NetworkPanel(Widget):
     POLL_SECONDS = 1.0
 
     BINDINGS = [
-        # Shown in the footer, which keeps two lens keys: "⏎ start mitm" and
+        # Shown in the footer, which keeps two lens keys: "␣ start mitm" and
         # "^D device proxy" while nothing is captured, then "/" and "T".
-        Binding("enter", "start_stop", "Start/stop mitm"),
+        # Space, not Enter: Enter means "inspect" in every lens (MainScreen).
+        # Space only STARTS mitmproxy; stopping it (which also clears our
+        # device proxy) stays on the deliberate M.
+        Binding("space", "start_mitm", "Start mitm", key_display="␣"),
         Binding("slash", "filter", "Filter"),
         Binding("T", "toggle_app_only", "App only"),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
@@ -794,6 +831,9 @@ class NetworkPanel(Widget):
         yield FriTapPanel(id="fritap-panel")
 
     def on_mount(self) -> None:
+        # Recipient labels come from Dexray Insight; its first import takes
+        # ~0.2 s (androguard), so warm it off the UI thread.
+        self.run_worker(_insight_labeller, thread=True, name="net-insight-labels")
         self._rebuild()
         try:
             self.set_interval(self.POLL_SECONDS, self._tick)
@@ -1346,7 +1386,7 @@ class NetworkPanel(Widget):
             more = f" (+{len(pcaps) - 1} more)" if len(pcaps) > 1 else ""
             hints.append(
                 f"its packet capture: {escape(rel)} · {human_size(size)}{more} "
-                "(Runs ⏎ → Report shows the folder; open it in Wireshark)"
+                "(Sessions ⏎ → Report shows the folder; open it in Wireshark)"
             )
         hints.append("L back to LIVE")
         if self._phase_hidden and not self._show_all_phases:
@@ -1801,8 +1841,8 @@ class NetworkPanel(Widget):
     # -- actions ---------------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action == "start_stop":
-            # Only while nothing is captured; with rows Enter inspects.
+        if action == "start_mitm":
+            # Only while nothing is captured (footer room); M works always.
             return not self.in_review and not self._model()
         if action == "toggle_phases":
             return self.in_review
@@ -1811,7 +1851,12 @@ class NetworkPanel(Widget):
             return bool(self._model())
         return True
 
-    def action_start_stop(self) -> None:
+    def action_start_mitm(self) -> None:
+        """Space: start mitmproxy; never stops it (M does)."""
+        mitm = self.mitm
+        if mitm is not None and mitm.is_running():
+            self.app.notify("mitmproxy is already running — M stops it", timeout=3)
+            return
         self.action_mitm("toggle_running")
 
     def action_mitm(self, name: str) -> None:
