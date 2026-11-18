@@ -495,3 +495,132 @@ class TestRealSpawnPath:
         recover.assert_not_called()  # crash != dirty => no server restart
         assert "exhausted 3 attempts" in msg
         assert "anti-Frida" in msg
+
+
+# --------------------------------------------------------------------------
+# E2E M6: frida-server down after a wedge -> one clear message, fresh state
+# --------------------------------------------------------------------------
+GADGET = (
+    "need Gadget to attach on jailed Android; its default location is: "
+    "/x/.cache/frida/gadget-android-arm64.so"
+)
+NO_PID = "Failed to spawn com.x (no PID — is frida-server running?)"
+
+
+class TestFridaServerDown:
+    def test_failed_restart_stops_the_ladder_with_a_clear_message(
+        self, bypass, spotlight, cfg, force_stop_spy, monkeypatch
+    ):
+        cfg(attempts=4)
+        recover = Mock(return_value=False)  # "frida-server restart -> ready=False"
+        monkeypatch.setattr(bypass, "_recover_frida_server", recover)
+        sfn = make_spawn_fn([(False, NO_PID)] * 4, spotlight)
+
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
+
+        assert ok is False
+        assert len(sfn.calls) == 1  # not 3 more doomed "need Gadget" attempts
+        assert msg.startswith(db.FRIDA_SERVER_DOWN_MSG)
+        recover.assert_called_once()
+
+    def test_gadget_error_after_restart_stops_the_ladder(
+        self, bypass, spotlight, cfg, force_stop_spy, monkeypatch
+    ):
+        cfg(attempts=4)
+        monkeypatch.setattr(bypass, "_recover_frida_server", Mock(return_value=True))
+        sfn = make_spawn_fn(
+            [(False, NO_PID), (False, GADGET), (True, "Spawned")], spotlight
+        )
+
+        ok, msg = bypass.apply_to_fresh_spawn_with_retry("com.x", {"ssl"}, spawn_fn=sfn)
+
+        assert ok is False
+        assert len(sfn.calls) == 2
+        assert msg == f"{db.FRIDA_SERVER_DOWN_MSG} (spawn of com.x)"
+
+    def test_spawn_reports_the_gadget_error_as_server_down(
+        self, bypass, spotlight, monkeypatch
+    ):
+        """apply_to_fresh_spawn names the cause instead of frida's wording."""
+        spotlight.spawn_app_paused = lambda package: (None, -1)
+        spotlight.last_spawn_error = GADGET
+        monkeypatch.setattr(BypassService, "_reset_script_state", lambda self: None)
+
+        ok, msg = bypass.apply_to_fresh_spawn("com.x", {"ssl"})
+
+        assert ok is False
+        assert msg == f"{db.FRIDA_SERVER_DOWN_MSG} (spawn of com.x)"
+        assert db.classify_spawn_failure(msg) == "dirty"
+        # Any other failure keeps the old wording.
+        spotlight.last_spawn_error = "timeout was reached"
+        assert bypass.apply_to_fresh_spawn("com.x", {"ssl"})[1] == NO_PID
+
+    def test_recover_reports_readiness(self, bypass, monkeypatch):
+        fm = Mock()
+        fm.restart_frida_server_and_wait.return_value = False
+        svc = Mock()
+        svc.get_frida_manager.return_value = fm
+        monkeypatch.setattr("sandroid.services.get_frida_session_service", lambda: svc)
+        assert bypass._recover_frida_server() is False
+        svc.get_frida_manager.return_value = None
+        assert bypass._recover_frida_server() is None
+
+
+def _real_spotlight(pid: int = 9117):
+    from sandroid.services.spotlight_service import SpotlightService
+
+    events: list = []
+    svc = SpotlightService(event_bus=SimpleNamespace(publish=events.append))
+    svc.set_app("org.mozilla.firefox", pid=pid)
+    events.clear()
+    return svc, events
+
+
+def _pid_events(events) -> list:
+    return [
+        e.data["pid"] for e in events if e.data.get("change_type") == "spotlight_pid"
+    ]
+
+
+def test_failed_spawn_teardown_publishes_the_cleared_pid(bypass, force_stop_spy):
+    """E2E M6: the header kept "running pid 9117" for a minute after the
+    spawn failed; the PID clear must publish STATE_CHANGED (panel + header
+    refresh), not only update the cache.
+    """
+    svc, events = _real_spotlight()
+    bypass._teardown_failed_spawn(svc, "org.mozilla.firefox")
+    assert svc.get_pid() is None
+    assert _pid_events(events) == [None]
+
+
+def test_restart_publishes_the_dead_pid_before_spawning(monkeypatch):
+    from sandroid.core.adb import Adb
+    from sandroid.tui.widgets import spotlight_panel as sp
+
+    svc, events = _real_spotlight()
+    seen_at_spawn = []
+
+    class _Bypass:
+        def armed_categories(self):
+            return {"ssl"}
+
+        def stop_all(self):
+            return []
+
+        def apply_to_fresh_spawn_with_retry(self, package, armed):
+            seen_at_spawn.append((svc.get_pid(), _pid_events(events)))
+            return False, db.FRIDA_SERVER_DOWN_MSG
+
+    panel = SimpleNamespace(
+        _spotlight=lambda: svc,
+        _bypass=_Bypass,
+        _reset_frida_session=lambda: None,
+    )
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(lambda package: None))
+    monkeypatch.setattr(sp.time, "sleep", lambda s: None)
+
+    ok, msg = sp.SpotlightPanel._work_restart(panel)
+
+    assert (ok, msg) == (False, db.FRIDA_SERVER_DOWN_MSG)
+    # The header already showed "not running" while the spawn ladder ran.
+    assert seen_at_spawn == [(None, [None])]

@@ -765,7 +765,9 @@ class SpotlightPanel(Widget):
         time.sleep(0.5)  # let the process die so the session connection breaks
         bypass.stop_all()  # now fast: unloads fast-fail on the dead process
         self._reset_frida_session()  # clears jobs/session, is_first_job=True
-        spotlight.set_pid(None)
+        # Publishing clear: the app is dead now, and the spawn below can take
+        # a minute to fail -- the header must not keep the old PID meanwhile.
+        spotlight.announce_pid(None, package)
         return bypass.apply_to_fresh_spawn_with_retry(package, armed)
 
     def _work_kill(self) -> tuple[bool, str]:

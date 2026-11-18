@@ -158,6 +158,34 @@ Emulator (``[emulator]``)
    # Automatically start AVD when needed
    avd_auto_start = false
 
+   # Host-memory guard for the active emulator (GB, 0 disables it)
+   max_host_memory_gb = 10
+
+   # What to do above the limit: "kill" or "warn"
+   memory_guard_action = "kill"
+
+**Host-memory guard.** With guest Vulkan enabled, the emulator leaks host
+memory on every snapshot load and can grow to tens of GB. Sandroid therefore
+watches the qemu process behind the active serial every 10 s:
+
+* On macOS it measures the *physical footprint* (``footprint -p <pid>``), the
+  memory the leak grows. Elsewhere, or without ``footprint``, it measures the
+  resident set size (RSS). macOS RSS also counts resident guest RAM a second
+  time: a healthy 8 GB AVD showed 8.5–15.0 GB RSS but 6.5–9.3 GB footprint.
+* The enforced limit scales with the AVD's RAM (``-memory`` or ``hw.ramSize``
+  in the AVD's ``hardware-qemu.ini`` / ``config.ini``) so a healthy AVD is
+  never stopped:
+
+  * footprint: ``max(max_host_memory_gb, RAM + 4 GB)``, e.g. 12 GB for an
+    8 GB AVD and 10 GB for a 2 GB AVD;
+  * RSS: ``max(max_host_memory_gb, 2 × RAM + 4 GB)``, e.g. 20 GB for an 8 GB
+    AVD.
+
+  When the RAM cannot be read, ``max_host_memory_gb`` applies unchanged.
+* The emulator is stopped (``kill``) or reported (``warn``) only when a second
+  reading, one poll interval later, is still above the limit. A warning is
+  logged once at 75 % of the limit.
+
 Frida (``[frida]``)
 ~~~~~~~~~~~~~~~~~~~
 

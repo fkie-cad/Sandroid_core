@@ -145,6 +145,66 @@ def test_selinux_check_warns_when_still_enforcing():
     assert "Enforcing" in check.message
 
 
+class _ModeAdb(_FakeAdb):
+    """getenforce answers the device's current mode; setenforce 0 changes it."""
+
+    def __init__(self, mode: str):
+        super().__init__({})
+        self.mode = mode
+
+    def send_adb_command(self, command: str, serial=None):
+        self.calls.append(command)
+        if command == "shell getenforce":
+            return self.mode + "\n", ""
+        if command == "shell setenforce 0":
+            self.mode = "Permissive"
+        return "", ""
+
+
+def _selinux_infos(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelname == "INFO" and "SELinux mode changed" in r.getMessage()
+    ]
+
+
+def test_selinux_change_is_logged_with_reason(caplog):
+    """E2E M6: SELinux was found Permissive and no log said who changed it."""
+    import logging
+
+    from sandroid.services.setup_checks import check_and_set_selinux
+
+    fake = _ModeAdb("Enforcing")
+    with caplog.at_level(logging.INFO, logger="sandroid.services.setup_checks"):
+        assert check_and_set_selinux(fake).passed
+    (line,) = _selinux_infos(caplog)
+    assert "Enforcing -> Permissive" in line
+    assert "device preparation" in line
+    assert "reason: binder calls from root" in line
+    # When it is set: unchanged (still exactly one setenforce 0).
+    assert fake.calls.count("shell setenforce 0") == 1
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="sandroid.services.setup_checks"):
+        assert check_and_set_selinux(_ModeAdb("Permissive")).passed
+    assert _selinux_infos(caplog) == []  # no change, no claim of one
+
+
+def test_snapshot_selinux_restore_is_logged(caplog):
+    import logging
+
+    from sandroid.services.emulator_service import EmulatorService
+
+    with caplog.at_level(logging.INFO):
+        assert EmulatorService()._restore_selinux_permissive(
+            _ModeAdb("Enforcing"), "emulator-5554"
+        )
+    (line,) = _selinux_infos(caplog)
+    assert "on emulator-5554: Enforcing -> Permissive" in line
+    assert "snapshot load" in line
+
+
 def test_root_check_waits_for_device_after_adbd_restart(monkeypatch):
     from sandroid.services import setup_checks
 
