@@ -418,8 +418,15 @@ TUI (``[tui]``)
    # whose writes go through files opened before the monitor started
    # (0 = off; the stop-time rescan still runs)
    monitor_stat_interval = 10.0
-   # Files lens: pulled versions kept per watched file (2-500)
-   watchlist_max_versions = 10
+   # Files lens: pull a watched (★) file when the monitor sees a write to it
+   # (debounced ~1.5 s; a database and its -wal/-journal are one group)
+   auto_pull_on_change = true
+   # Files lens hide / group rules (edited live with R in the Files lens):
+   # {action = "hide"|"group", kind = "prefix"|"segment"|"suffix"|"glob",
+   # pattern, enabled}. Default: hide /proc/ /sys/ /dev/ /system/ /apex/
+   # /vendor/ /product/ /data/dalvik-cache/ /data/misc/ /data/system/
+   # /data/app/; group cache and code_cache folders.
+   # files_noise_rules = [ ... ]
 
    # Override keys: maps a binding id (the MenuController action name) to a key
    # string, e.g. {'proxy': 'ctrl+y'}. Edited by the in-app ? keybinding editor

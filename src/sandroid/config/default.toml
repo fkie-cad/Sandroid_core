@@ -131,8 +131,18 @@ show_theme_indicator = false
 # kprobe monitor: seconds between re-stats of the app's database files, whose
 # writes go through files opened before the monitor started (0 = off).
 # monitor_stat_interval = 10.0
-# Files lens: pulled versions kept per watched file (2-500).
-# watchlist_max_versions = 10
+# Files lens: pull a watched (★) file automatically when the file monitor sees
+# a write to it (debounced ~1.5 s; db + -wal + -journal are one group).
+# auto_pull_on_change = true
+# Files lens path rules (edited live in the Files lens with R): "hide" drops
+# matching rows (N shows everything), "group" collapses them into one row per
+# folder. kind = prefix | segment | suffix | glob. Default: hide OS paths
+# (/proc/ /sys/ /dev/ /system/ /apex/ /vendor/ /product/ /data/dalvik-cache/
+# /data/misc/ /data/system/ /data/app/), group cache/ and code_cache/.
+# files_noise_rules = [
+#   { action = "hide", kind = "prefix", pattern = "/proc/", enabled = true },
+#   { action = "group", kind = "segment", pattern = "cache", enabled = true },
+# ]
 
 # Device Paths - Android device filesystem paths
 # Override these to match non-standard device setups

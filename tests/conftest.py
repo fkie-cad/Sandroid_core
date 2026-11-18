@@ -308,7 +308,7 @@ def _sandroid_tmp_cwd(request):
 
 @pytest.fixture(autouse=True)
 def _isolated_watchlist_dir(tmp_path, monkeypatch):
-    """Give every test its own Files-lens watchlist directory.
+    """Give every test its own Files-lens watchlist + pulled-files directory.
 
     The watchlist lives in a stable per-user, per-device directory (it must
     survive restarts); tests point it at their own ``tmp_path`` instead --
@@ -318,6 +318,8 @@ def _isolated_watchlist_dir(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "SDROID_WATCHLIST_DIR", str(tmp_path / "spotlight_files" / ".watchlist")
     )
+    # Pulled versions go to <session results>/files; keep them per test too.
+    monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "session" / "files"))
 
 
 def pytest_collection_modifyitems(config, items):

@@ -46,12 +46,17 @@ PREFS = f"{ROOT}/shared_prefs/consent.xml"
 DB = f"{ROOT}/databases/app.db"
 CACHE = f"{ROOT}/cache/okhttp/journal"
 AAID = f"{ROOT}/files/aaid.txt"
+MISC = "/data/misc/keystore/x"
 T0 = datetime(2026, 11, 17, 10, 40, 0)
 
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("RESULTS_PATH", str(tmp_path))
+    # The pre-pull on-device stat/sha256sum is an adb call: no device here.
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
     svc = get_task_service()
     svc._tasks.pop("monitor", None)
     get_forensic_service()._spotlight_files.clear()
@@ -192,23 +197,34 @@ def test_tally_counts_every_item_even_hidden_and_never() -> None:
 
 
 def test_noise_rules_and_show_all() -> None:
+    """Only OS paths and open-only rows are hidden; never the app's data."""
     model = FileActivity({"noise": "verbose", "attrs": "never"})
     model.ingest(
         _items(
             _fse("FSE_CONTENT_MODIFIED", CACHE),
             _fse("FSE_OPEN", AAID),
             _fse("FSE_CONTENT_MODIFIED", PREFS),
+            _fse("FSE_CONTENT_MODIFIED", MISC),
         ),
         now=T0,
     )
-    assert [r.key for r in model.visible_rows()] == [PREFS]
+    assert {r.key for r in model.visible_rows()} == {CACHE, PREFS}
     assert model.hidden_count() == 2
+    assert model.hide_reason(model.paths[MISC]) == "prefix"
+    assert model.hide_reason(model.paths[AAID]) == "open-only"
     model.show_all = True
-    assert {r.key for r in model.visible_rows()} == {CACHE, AAID, PREFS}
+    assert {r.key for r in model.visible_rows()} == {CACHE, AAID, PREFS, MISC}
     assert model.hidden_count() == 0
     assert is_noise_path("/proc/1/stat")
-    assert is_noise_path(f"{ROOT}/files/x.tmp")
-    assert not is_noise_path(DB)
+    for app_data in (
+        f"{ROOT}/files/x.tmp",
+        f"{ROOT}/app_webview/Default/Cookies",
+        f"{ROOT}/no_backup/id",
+        f"{ROOT}/files/.hidden",
+        "/data/local/tmp/payload.dex",
+        DB,
+    ):
+        assert not is_noise_path(app_data), app_data
 
 
 def test_tracked_paths_are_capped_oldest_first() -> None:
@@ -301,12 +317,16 @@ async def test_watched_rows_are_pinned_on_top_with_a_star() -> None:
             f"{ROOT}/files/datastore/*",
         }
         by_key = {row.key: row for row in panel._rows}
+        # Its write made the pattern adopt the file (so auto-pull can pull it).
         assert by_key[f"{ROOT}/files/datastore/p.pb"].watched == (
+            f"{ROOT}/files/datastore/p.pb"
+        )
+        assert panel.watchlist.watched_by(f"{ROOT}/files/datastore/q.pb") == (
             f"{ROOT}/files/datastore/*"
         )
         assert str(panel._mark_cell(by_key[DB])) == "★"
         assert str(panel._mark_cell(by_key[AAID])) == ""
-        assert "2 watched" in panel.caption()[1]
+        assert "3 watched" in panel.caption()[1]
 
 
 @pytest.mark.asyncio
@@ -392,20 +412,20 @@ async def test_N_toggles_noise_and_the_caption_counts_it() -> None:
         panel = app.query_one(FilesPanel)
         panel.ingest(
             _items(
-                _fse("FSE_CONTENT_MODIFIED", CACHE),
+                _fse("FSE_CONTENT_MODIFIED", MISC),
                 _fse("FSE_CONTENT_MODIFIED", PREFS),
             ),
             now=T0,
         )
         assert _keys(panel) == [PREFS]
-        assert "1 hidden" in panel.caption()[1]
+        assert "1 hidden: prefix 1" in panel.caption()[1]
         panel.table.focus()
         await pilot.press("v")  # v is only "review" (Runs lens) now
         await pilot.pause()
         assert _keys(panel) == [PREFS]
         await pilot.press("N")
         await pilot.pause()
-        assert set(_keys(panel)) == {PREFS, CACHE}
+        assert set(_keys(panel)) == {PREFS, MISC}
         assert "hidden" not in panel.caption()[1]
         await pilot.press("N")
         await pilot.pause()
@@ -556,11 +576,12 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
         assert "M 1×" in summary
         assert "R 1×" in summary
         assert "fitness" in summary
-        assert "never pulled" in summary
+        # The monitor saw writes to the ★ file: an auto-pull is pending.
+        assert "settling" in summary
         events = _plain(_tab(inspected, "Events"))
         assert "RENAME" in events
         assert "from shared_prefs/consent.xml.bak" in events
-        assert "Not pulled yet" in _plain(_tab(inspected, "Diff"))
+        assert "settling" in _plain(_tab(inspected, "Diff"))
 
         rows = panel.watchlist.rows
         panel.watchlist.pull([PREFS])
@@ -946,7 +967,9 @@ async def test_pattern_does_not_star_deleted_paths_or_directories() -> None:
         )
         _keys(panel)
         by_key = {row.key: row for row in panel._rows}
-        assert by_key[f"{ROOT}/files/live.txt"].watched == f"{ROOT}/files/*"
+        # The created file was adopted by the pattern (its own ★ row now);
+        # the one deleted again in the same batch was not.
+        assert by_key[f"{ROOT}/files/live.txt"].watched == f"{ROOT}/files/live.txt"
         assert by_key[f"{ROOT}/files/gone.txt"].watched is None
         assert by_key[f"{ROOT}/files/sub"].watched is None
         assert panel.caption()[1].startswith("3 paths + 1 pattern")
@@ -1090,13 +1113,15 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
         await pilot.pause()
+        # Only the ★ membership persists; the versions of this session are
+        # still in its results folder (and listed by the History tab).
         assert PREFS in panel.watchlist.rows
         info = panel.watchlist.rows[PREFS]
-        assert info.state is RowState.CHANGED
-        assert info.diff_text
-        assert "two" in info.diff_text
+        assert info.state is RowState.BASELINE_ONLY
         panel.refresh_rows()
-        assert "two" in _plain(_tab(panel.inspect_selected(), "Diff"))
+        history = _plain(_tab(panel.inspect_selected(), "History"))
+        assert "#2" in history
+        assert "nothing is deleted" in history
 
 
 async def test_inspector_keys_work_while_the_inspector_has_focus() -> None:
@@ -1133,3 +1158,365 @@ async def test_inspector_keys_work_while_the_inspector_has_focus() -> None:
         await pilot.press("right_square_bracket")
         await pilot.pause()
         assert ms.query_one("#inspector").tab_index == 1
+
+
+# --------------------------------------------------------------------------
+# marks + since-mark view
+# --------------------------------------------------------------------------
+
+
+def _row(panel: FilesPanel, key: str):
+    return next(r for r in panel._rows if r.key == key)
+
+
+@pytest.mark.asyncio
+async def test_marks_show_only_activity_since_and_step_through_segments() -> None:
+    """A mark splits the session: counts/ops per segment, rows without
+    activity in it hidden, ★ rows pinned but dim; ``A`` shows everything,
+    ``<``/``>`` step through the segments; the caption names the segment.
+    """
+    get_forensic_service().add_spotlight_file(DB)  # ★, never touched
+    new = f"{ROOT}/files/token.json"
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.drop_mark("tap login", T0 + timedelta(seconds=10))
+        assert panel.segment == 1
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)),
+            now=T0 + timedelta(seconds=20),
+        )
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", new)), now=T0 + timedelta(seconds=25)
+        )
+        assert _keys(panel) == [DB, new, PREFS]
+        assert _row(panel, PREFS).stats.count == 1  # reset per segment
+        assert _row(panel, DB).dim
+        assert panel._path_cell(_row(panel, DB)).spans[-1].style == "#5b6479"
+        assert panel.caption()[0] == "since mark 1 'tap login' · 10:40:10"
+
+        panel.table.focus()
+        await pilot.press("A")  # everything again
+        await pilot.pause()
+        assert set(_keys(panel)) == {DB, new, PREFS, AAID}
+        assert _row(panel, PREFS).stats.count == 2
+        assert panel.caption()[0] == "LIVE"
+        await pilot.press("A")
+        await pilot.pause()
+        assert panel.segment == 1
+
+        panel.drop_mark("", T0 + timedelta(seconds=30))  # unnamed
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", AAID)), now=T0 + timedelta(seconds=35)
+        )
+        assert _keys(panel) == [DB, AAID]
+        assert panel.caption()[0] == "since mark 2 · 10:40:30"
+        await pilot.press("less_than_sign")
+        await pilot.pause()
+        assert _keys(panel) == [DB, new, PREFS]
+        assert panel.caption()[0] == ("mark 1 'tap login' → mark 2 · 10:40:10–10:40:30")
+        await pilot.press("less_than_sign")
+        await pilot.pause()
+        assert set(_keys(panel)) == {DB, PREFS, AAID}
+        assert _row(panel, AAID).stats.ops == {"create": 1}
+        assert panel.caption()[0] == "before mark 1 'tap login' · until 10:40:10"
+        await pilot.press("less_than_sign")  # stays at the first segment
+        await pilot.press("greater_than_sign", "greater_than_sign")
+        await pilot.pause()
+        assert panel.segment == 2
+
+        # The Inspector's Events tab has the marks as separator lines.
+        events = _plain(_tab(panel._inspector_for(_row(panel, AAID)), "Events"))
+        lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
+        assert lines[0].startswith("10:40:35")
+        assert lines[1] == "── mark 2 · 10:40:30 ──"
+        assert lines[2] == "── mark 1 'tap login' · 10:40:10 ──"
+        assert lines[3].startswith("10:40:00")
+        # A file first touched after a mark ends with that mark.
+        panel._segment = None
+        panel.refresh_rows()
+        events = _plain(_tab(panel._inspector_for(_row(panel, new)), "Events"))
+        lines = [ln.strip() for ln in events.splitlines() if ln.strip()]
+        assert lines[0] == "── mark 2 · 10:40:30 ──"
+        assert lines[1].startswith("10:40:25")
+        assert lines[2] == "── mark 1 'tap login' · 10:40:10 ──"
+        assert len(lines) == 3
+
+
+@pytest.mark.asyncio
+async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels() -> None:
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.press("B")
+        await pilot.pause()
+        field = panel.query_one("#files-input", Input)
+        assert app.focused is field
+        assert "name mark 1" in field.placeholder
+        await pilot.press("enter")  # empty name = unnamed
+        await pilot.pause()
+        assert [m.label() for m in panel.marks] == ["mark 1"]
+        await pilot.press("B", *"login", "enter")
+        await pilot.pause()
+        assert [m.label() for m in panel.marks] == ["mark 1", "mark 2 'login'"]
+        await pilot.press("B")
+        await pilot.press("escape")  # no mark
+        await pilot.pause()
+        assert len(panel.marks) == 2
+        assert len(panel.activity.mark_times) == 2
+        assert not field.has_class("-shown")
+
+
+def test_the_new_lens_keys_shadow_no_app_wide_key() -> None:
+    """``B``/``A``/``<``/``>``/``R`` are free app-wide (``m`` is Dexray, ``a``
+    Analyze -- the lens no longer shadows ``a``).
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.screens.main_screen import MainScreen
+
+    app_keys = {b.key for b in SandroidTUI.BINDINGS} | {
+        b.key for b in MainScreen.BINDINGS
+    }
+    lens_keys = {b.key for b in FilesPanel.BINDINGS}
+    for key in ("B", "A", "less_than_sign", "greater_than_sign", "R"):
+        assert key in lens_keys
+        assert key not in app_keys
+    assert "a" not in lens_keys  # auto-pull poll mode removed; Analyze works
+
+
+async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens() -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        for _ in range(8):
+            await pilot.pause(0.05)
+        if type(app.screen).__name__ != "MainScreen":
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+        ms = app.screen
+        await pilot.press("3")
+        await pilot.pause(0.1)
+        panel = ms.lens_widget("files")
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.press("B", *"tap login", "enter")
+        await pilot.pause(0.1)
+        assert [m.label() for m in ms.marks] == ["mark 1 'tap login'"]
+        assert "mark 1 'tap login'" in ms.query_one("#log-ticker").last_line
+        assert panel.segment == 1
+        assert ms.query_one("#lens-host").border_title.startswith(
+            "Files · since mark 1 'tap login' · "
+        )
+        mark = ms.add_mark("from elsewhere")
+        await pilot.pause(0.1)
+        assert mark.number == 2
+        assert [m.number for m in panel.marks] == [1, 2]
+        assert panel.segment == 2
+
+
+# --------------------------------------------------------------------------
+# cache groups + rule editor
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cache_folders_collapse_into_one_expandable_row() -> None:
+    cache_files = [f"{ROOT}/cache/okhttp/{n}" for n in ("journal", "a.0", "b.1")]
+    app = _Harness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(*[_fse("FSE_CONTENT_MODIFIED", p) for p in cache_files]), now=T0
+        )
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", f"{ROOT}/code_cache/x.bin")),
+            now=T0 + timedelta(seconds=1),
+        )
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0 + timedelta(seconds=2)
+        )
+        group = f"{ROOT}/cache/"
+        assert _keys(panel) == [PREFS, f"{ROOT}/code_cache/", group]
+        row = _row(panel, group)
+        assert panel._path_cell(row).plain == "cache/ · 3 files"
+        assert str(panel._mark_cell(row)) == "▸"
+        assert row.stats.count == 3
+        assert panel.caption()[1].startswith("1 path + 2 groups")
+
+        panel.table.focus()
+        panel.table.move_cursor(row=2)
+        await pilot.press("enter")  # opens the group, no Inspector
+        await pilot.pause()
+        assert _keys(panel)[2] == group
+        assert set(_keys(panel)[3:]) == set(cache_files)
+        assert str(panel._mark_cell(_row(panel, group))) == "▾"
+        assert panel._path_cell(_row(panel, cache_files[0])).plain.startswith("  ")
+        panel.table.move_cursor(row=4)
+        await pilot.press("left")  # folds from a member row
+        await pilot.pause()
+        assert len(_keys(panel)) == 3
+        assert panel._cursor_key() == group
+        await pilot.press("right")
+        await pilot.pause()
+        assert len(_keys(panel)) == 6
+        await pilot.press("N")  # raw: no grouping
+        await pilot.pause()
+        assert set(_keys(panel)) == {PREFS, f"{ROOT}/code_cache/x.bin", *cache_files}
+
+
+@pytest.mark.asyncio
+async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> None:
+    import sandroid.config as config_module
+    from sandroid.config.schema import default_files_noise_rules
+    from sandroid.tui.modals.noise_rules_modal import NoiseRulesModal
+
+    saved: list[dict] = []
+    monkeypatch.setattr(
+        config_module, "update_config", lambda updates, **kw: saved.append(updates)
+    )
+    app = _Harness()
+    async with app.run_test(size=(140, 40)) as pilot:
+        panel = app.query_one(FilesPanel)
+        panel.ingest(
+            _items(
+                _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/cache/a"),
+                _fse("FSE_CONTENT_MODIFIED", f"{ROOT}/files/app.log"),
+                _fse("FSE_CONTENT_MODIFIED", PREFS),
+            ),
+            now=T0,
+        )
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.press("R")
+        await pilot.pause()
+        modal = app.screen
+        assert isinstance(modal, NoiseRulesModal)
+        assert modal.rules == default_files_noise_rules()
+
+        assert modal.add_rule("hide", "suffix", ".log")
+        assert f"{ROOT}/files/app.log" not in _keys(panel)
+        assert "1 hidden: suffix 1" in panel.caption()[1]
+        assert saved[-1]["tui.files_noise_rules"][-1] == {
+            "action": "hide",
+            "kind": "suffix",
+            "pattern": ".log",
+            "enabled": True,
+        }
+        assert not modal.add_rule("hide", "suffix", ".log")  # no duplicates
+
+        cache_rule = next(
+            i for i, r in enumerate(modal.rules) if r["pattern"] == "cache"
+        )
+        modal.toggle_rule(cache_rule)  # cache no longer grouped
+        assert f"{ROOT}/cache/a" in _keys(panel)
+        assert saved[-1]["tui.files_noise_rules"][cache_rule]["enabled"] is False
+
+        modal.remove_rule(len(modal.rules) - 1)
+        assert f"{ROOT}/files/app.log" in _keys(panel)
+
+        modal.reset_defaults()
+        assert modal.rules == default_files_noise_rules()
+        assert f"{ROOT}/cache/" in _keys(panel)
+        assert len(saved) == 4
+
+        # Keys inside the editor: Space toggles, Delete removes.
+        table = modal.query_one("#rules-table")
+        table.focus()
+        table.move_cursor(row=0)
+        await pilot.press("space")
+        await pilot.pause()
+        assert modal.rules[0]["enabled"] is False
+        await pilot.press("delete")
+        await pilot.pause()
+        assert len(modal.rules) == len(default_files_noise_rules()) - 1
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, NoiseRulesModal)
+
+
+def test_noise_rules_are_validated_and_saved_in_the_config() -> None:
+    from pydantic import ValidationError
+
+    from sandroid.config.schema import TUIConfig
+
+    cfg = TUIConfig(
+        files_noise_rules=[{"action": "group", "kind": "glob", "pattern": "*.tmp"}]
+    )
+    assert cfg.files_noise_rules == [
+        {"action": "group", "kind": "glob", "pattern": "*.tmp", "enabled": True}
+    ]
+    with pytest.raises(ValidationError):
+        TUIConfig(
+            files_noise_rules=[{"action": "drop", "kind": "glob", "pattern": "x"}]
+        )
+    with pytest.raises(ValidationError):
+        TUIConfig(files_noise_rules=[{"kind": "regex", "pattern": "x"}])
+    defaults = TUIConfig().files_noise_rules
+    assert {r["pattern"] for r in defaults if r["action"] == "hide"} >= {
+        "/proc/",
+        "/data/dalvik-cache/",
+        "/data/app/",
+    }
+    assert "/data/local/tmp/" not in {r["pattern"] for r in defaults}
+    assert [r["pattern"] for r in defaults if r["action"] == "group"] == [
+        "cache",
+        "code_cache",
+    ]
+
+
+# --------------------------------------------------------------------------
+# auto-pull + monitor-off caption
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_monitor_off_caption_when_files_are_watched() -> None:
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.refresh_rows()
+        hint = "monitor off — watched files not tracked · o starts it"
+        assert hint in panel.caption()[1]
+        _register_monitor()
+        panel.refresh_rows()
+        assert hint not in panel.caption()[1]
+
+
+@pytest.mark.asyncio
+async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> None:
+    from sandroid.core import watchlist_store
+    from sandroid.tui.widgets import watchlist_view
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    monkeypatch.setattr(watchlist_view, "AUTO_PULL_QUIET", 0.1)
+    monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
+    monkeypatch.setattr(
+        FileExtractionService, "pull_file", _fake_pull({DB: "SQLite format 3\x00"})
+    )
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        _register_monitor()
+        await pilot.pause()
+        _publish(_fse("FSE_CONTENT_MODIFIED", DB + "-wal"))
+        await _wait_for(pilot, lambda: panel.watchlist.pending_auto == [DB])
+        rows = panel.watchlist.rows
+        await _wait_for(pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY)
+        (version,) = watchlist_store.version_dirs(DB)
+        record = watchlist_store.version_record(version)
+        assert record["trigger"] == "auto"
+        assert record["note"].startswith("no on-device sha256")
+        assert version.parent == (
+            watchlist_store.files_root() / PKG / "databases" / "app.db"
+        )

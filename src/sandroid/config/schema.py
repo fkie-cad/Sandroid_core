@@ -454,6 +454,40 @@ class ThemeConfig(BaseModel):
         return v.lower()
 
 
+#: OS paths the Files lens hides by default (never the app's own data;
+#: ``/data/local/tmp/`` is deliberately not one -- malware drops files there).
+FILES_OS_PREFIXES: tuple[str, ...] = (
+    "/proc/",
+    "/sys/",
+    "/dev/",
+    "/system/",
+    "/apex/",
+    "/vendor/",
+    "/product/",
+    "/data/dalvik-cache/",
+    "/data/misc/",
+    "/data/system/",
+    "/data/app/",
+)
+
+#: Rule kinds/actions of ``tui.files_noise_rules``.
+FILES_RULE_KINDS: tuple[str, ...] = ("prefix", "segment", "suffix", "glob")
+FILES_RULE_ACTIONS: tuple[str, ...] = ("hide", "group")
+
+
+def default_files_noise_rules() -> list[dict]:
+    """Default ``tui.files_noise_rules``: hide OS paths, group cache folders."""
+    rules: list[dict] = [
+        {"action": "hide", "kind": "prefix", "pattern": p, "enabled": True}
+        for p in FILES_OS_PREFIXES
+    ]
+    for segment in ("cache", "code_cache"):
+        rules.append(
+            {"action": "group", "kind": "segment", "pattern": segment, "enabled": True}
+        )
+    return rules
+
+
 class TUIConfig(BaseModel):
     """TUI (Terminal User Interface) configuration."""
 
@@ -521,12 +555,18 @@ class TUIConfig(BaseModel):
         "database files (writes through files opened before the monitor "
         "started escape the probes). 0 = off; the stop-time rescan still runs.",
     )
-    watchlist_max_versions: int = Field(
-        default=10,
-        ge=2,
-        le=500,
-        description="Files lens: pulled versions kept per watched file "
-        "(oldest are deleted first).",
+    auto_pull_on_change: bool = Field(
+        default=True,
+        description="Files lens: pull a watched (★) file automatically when "
+        "the file monitor sees a write to it (debounced ~1.5 s; a database "
+        "and its -wal/-journal are one group). Needs the monitor running.",
+    )
+    files_noise_rules: list[dict] = Field(
+        default_factory=default_files_noise_rules,
+        description="Files lens path rules, in order: {action: hide|group, "
+        "kind: prefix|segment|suffix|glob, pattern, enabled}. 'hide' drops "
+        "matching rows (N shows them), 'group' collapses them into one row "
+        "per folder. Edited live from the Files lens (R).",
     )
     keybindings: dict[str, str] = Field(
         default_factory=dict,
@@ -573,6 +613,38 @@ class TUIConfig(BaseModel):
                     f"Must be one of: {', '.join(sorted(valid))}"
                 )
         return v
+
+    @validator("files_noise_rules")
+    def validate_files_noise_rules(cls, v):
+        """Each rule: a known action and kind, a non-empty pattern."""
+        cleaned: list[dict] = []
+        for rule in v:
+            if not isinstance(rule, dict):
+                raise ValueError(f"Invalid files_noise_rules entry: {rule!r}")  # noqa: TRY004
+            action = rule.get("action", "hide")
+            kind = rule.get("kind")
+            pattern = rule.get("pattern")
+            if action not in FILES_RULE_ACTIONS:
+                raise ValueError(
+                    f"Invalid files_noise_rules action: {action!r}. Must be one "
+                    f"of: {', '.join(FILES_RULE_ACTIONS)}"
+                )
+            if kind not in FILES_RULE_KINDS:
+                raise ValueError(
+                    f"Invalid files_noise_rules kind: {kind!r}. Must be one of: "
+                    f"{', '.join(FILES_RULE_KINDS)}"
+                )
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise ValueError("files_noise_rules: every rule needs a pattern")
+            cleaned.append(
+                {
+                    "action": action,
+                    "kind": kind,
+                    "pattern": pattern,
+                    "enabled": bool(rule.get("enabled", True)),
+                }
+            )
+        return cleaned
 
     @validator("monitor_backend")
     def validate_monitor_backend(cls, v):
