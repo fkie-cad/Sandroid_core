@@ -78,6 +78,7 @@ _INSTALLER_RE = re.compile(r"installerPackageName=(\S+)")
 # `dumpsys package` blob -- there is no separate structured signing-cert
 # section to parse, so this raw capture is the extent of "signing info".
 _SIGNATURES_RE = re.compile(r"signatures=PackageSignatures\{([^}]*)\}")
+_LAST_UPDATE_RE = re.compile(r"lastUpdateTime=([^\n]+)")
 
 
 def _extract_requested_permissions(dumpsys_output: str) -> list[str]:
@@ -127,6 +128,7 @@ def parse_extended_package_info(dumpsys_output: str) -> dict[str, Any]:
       or literally ``"null"`` (e.g. sideloaded via ``adb install``)
     - ``signing_info``: raw ``PackageSignatures{...}`` body as a string, or
       ``None`` if the dump has no ``signatures=`` line
+    - ``last_update``: ``lastUpdateTime=`` as printed, or ``None``
 
     Args:
         dumpsys_output: Raw stdout of ``adb shell dumpsys package <pkg>``.
@@ -147,6 +149,9 @@ def parse_extended_package_info(dumpsys_output: str) -> dict[str, Any]:
     result["signing_info"] = (
         signatures_match.group(1).strip() if signatures_match else None
     )
+
+    last_update = _LAST_UPDATE_RE.search(dumpsys_output)
+    result["last_update"] = last_update.group(1).strip() if last_update else None
 
     result["requested_permissions"] = _extract_requested_permissions(dumpsys_output)
 
