@@ -164,6 +164,9 @@ Emulator (``[emulator]``)
    # What to do above the limit: "kill" or "warn"
    memory_guard_action = "kill"
 
+   # Set the device clock to host time after every snapshot load
+   sync_clock_after_snapshot = true
+
 **Host-memory guard.** With guest Vulkan enabled, the emulator leaks host
 memory on every snapshot load and can grow to tens of GB. Sandroid therefore
 watches the qemu process behind the active serial every 10 s:
@@ -185,6 +188,17 @@ watches the qemu process behind the active serial every 10 s:
 * The emulator is stopped (``kill``) or reported (``warn``) only when a second
   reading, one poll interval later, is still above the limit. A warning is
   logged once at 75 % of the limit.
+
+**Device clock after a snapshot load.** A snapshot restores the guest clock
+it was saved with, so after a load the device can be minutes or hours behind
+the host. With ``sync_clock_after_snapshot`` on (default, also in Settings →
+General), Sandroid sets the device wall clock to host time with a root
+``date`` when it is more than 1 s off, and re-measures. Either way the
+offsets before and after go to the session's ``clock.jsonl`` (see
+:doc:`interactive_mode`); a failed sync is logged once as a warning and the
+offset is still recorded. Off keeps the snapshot's frozen clock. The device's
+CLOCK_MONOTONIC (used by getevent, Frida, ``logcat -v monotonic``, kprobe) is
+never changed; its offset is recorded too.
 
 Frida (``[frida]``)
 ~~~~~~~~~~~~~~~~~~~

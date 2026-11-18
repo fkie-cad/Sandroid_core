@@ -551,6 +551,14 @@ class DeviceManager:
 
         logger.info(f"Switched to device: {device.display_name}")
 
+        # First device-clock sample of this device (clock.jsonl), off-thread.
+        try:
+            from . import device_clock
+
+            device_clock.record_async("device-connect", serial)
+        except Exception as e:
+            logger.debug(f"Could not sample the device clock: {e}")
+
         # Notify listeners
         for callback in self._on_device_change_callbacks:
             try:
