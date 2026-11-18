@@ -1,0 +1,362 @@
+Current AppOps Service state:
+  Settings:
+    top_state_settle_time=+5s0ms
+    fg_service_state_settle_time=+5s0ms
+    bg_state_settle_time=+1s0ms
+
+
+  Uid u0a144:
+    state=fg
+    capability=LCMNFUA
+    appWidgetVisible=false
+      READ_CALENDAR: mode=ignore
+      WRITE_CALENDAR: mode=ignore
+      RECEIVE_WAP_PUSH: mode=ignore
+      CAMERA: mode=foreground
+      RECORD_AUDIO: mode=foreground
+      ADD_VOICEMAIL: mode=ignore
+      USE_SIP: mode=ignore
+      BODY_SENSORS: mode=foreground
+      READ_CELL_BROADCASTS: mode=ignore
+      READ_EXTERNAL_STORAGE: mode=ignore
+      WRITE_EXTERNAL_STORAGE: mode=ignore
+      READ_PHONE_NUMBERS: mode=ignore
+      ANSWER_PHONE_CALLS: mode=ignore
+      ACCEPT_HANDOVER: mode=ignore
+      READ_WRITE_HEALTH_DATA: mode=ignore
+    Package com.google.android.gms:
+      COARSE_LOCATION (allow): 
+      FINE_LOCATION (allow): 
+        network_location_provider=[
+          Access: [fg-s] 2026-06-16 10:13:55.684 (-155d5h35m42s459ms)
+        ]
+        com.google.android.gms.personalsafety=[
+          Access: [top-s] 2025-04-14 14:04:51.367 (-583d1h44m46s776ms)
+          Access: [fgsvc-s] 2025-05-19 20:23:30.428 (-547d19h26m7s715ms)
+        ]
+        location_nlp_network=[
+          Access: [fgsvc-s] 2025-12-02 11:20:44.461 (-351d3h28m53s682ms)
+          Access: [fg-s] 2026-04-08 22:59:18.352 (-223d16h50m19s791ms)
+        ]
+        com.google.android.gms.gcm=[
+          Access: [fgsvc-s] 2025-12-02 10:48:46.101 (-351d4h0m52s42ms)
+          Access: [fg-s] 2026-11-18 14:42:08.503 (-7m29s640ms)
+        ]
+        earthquake_alerting=[
+          Access: [fg-s] 2026-11-18 14:47:14.459 (-2m23s684ms)
+        ]
+        fused_location_provider=[
+          Access: [fg-s] 2026-11-18 10:27:13.784 (-4h22m24s359ms)
+        ]
+        nearby_connections=[
+          Access: [fgsvc-s] 2025-12-02 06:11:30.579 (-351d8h38m7s564ms)
+          Access: [fg-s] 2026-11-18 14:42:11.321 (-7m26s822ms)
+        ]
+        com.google.android.gms.findmydevice=[
+          Access: [fgsvc-s] 2025-05-19 20:23:30.426 (-547d19h26m7s717ms)
+          Access: [fg-s] 2026-11-18 14:47:14.406 (-2m23s737ms)
+        ]
+        com.google.android.gms.threadnetwork=[
+          Access: [fg-s] 2026-11-18 10:27:25.718 (-4h22m12s425ms)
+        ]
+      GPS (allow / switch COARSE_LOCATION=allow): 
+        null=[
+          Access: [fg-s] 2026-11-18 14:47:10.481 (-2m27s662ms) duration=+4s53ms
+        ]
+      READ_CONTACTS (allow): 
+        gms_broadcast_receiver=[
+          Access: [fg-s] 2025-04-14 10:22:43.805 (-583d5h26m54s338ms)
+        ]
+        com.google.android.gms.people=[
+          Access: [top-s] 2025-04-14 14:05:11.309 (-583d1h44m26s834ms)
+          Access: [fg-s] 2026-11-18 14:42:09.807 (-7m28s336ms)
+        ]
+        nearby_sharing=[
+          Access: [fg-s] 2026-04-08 23:00:35.110 (-223d16h49m3s33ms)
+        ]
+        com.google.android.gms.icing=[
+          Access: [fg-s] 2026-11-18 14:42:04.346 (-7m33s797ms)
+        ]
+      WRITE_CONTACTS (allow): 
+        com.google.android.gms.people=[
+          Access: [top-s] 2025-04-14 14:05:11.236 (-583d1h44m26s907ms)
+          Access: [fg-s] 2026-11-18 10:27:31.145 (-4h22m6s998ms)
+        ]
+      READ_CALL_LOG (allow): 
+        com.google.android.gms.constellation=[
+          Access: [fgsvc-s] 2025-12-02 06:52:45.312 (-351d7h56m52s831ms)
+          Access: [fg-s] 2026-11-18 14:42:27.349 (-7m10s794ms)
+        ]
+      WIFI_SCAN (allow / switch COARSE_LOCATION=allow): 
+        network_location_provider=[
+          Access: [fgsvc-s] 2025-12-02 11:20:43.574 (-351d3h28m54s569ms)
+          Access: [fg-s] 2026-11-18 14:42:11.314 (-7m26s829ms)
+        ]
+        network_location_calibration=[
+          Access: [fgsvc-s] 2025-12-02 10:48:52.146 (-351d4h0m45s997ms)
+          Access: [fg-s] 2026-11-17 15:43:26.667 (-23h6m11s476ms)
+        ]
+        com.google.android.gms.gcm=[
+          Access: [fgsvc-s] 2025-12-02 10:48:46.142 (-351d4h0m52s1ms)
+          Access: [fg-s] 2026-11-18 14:42:08.503 (-7m29s640ms)
+        ]
+        fused_location_provider=[
+          Access: [fgsvc-s] 2026-06-05 14:40:04.246 (-166d1h9m33s897ms)
+          Access: [fg-s] 2026-11-18 14:47:10.538 (-2m27s605ms)
+        ]
+        geofencer_provider=[
+          Access: [fgsvc-s] 2025-12-02 10:48:42.437 (-351d4h0m55s706ms)
+          Access: [fg-s] 2026-11-16 21:07:05.294 (-1d17h42m32s849ms)
+        ]
+      READ_SMS (allow): 
+        com.google.android.gms.constellation=[
+          Access: [fgsvc-s] 2025-12-02 06:52:43.641 (-351d7h56m54s502ms)
+          Access: [fg-s] 2026-11-18 14:42:27.343 (-7m10s800ms)
+        ]
+      READ_CLIPBOARD (allow): 
+        app=[
+          Access: [top-s] 2025-04-14 14:04:33.686 (-583d1h45m4s457ms)
+        ]
+      WAKE_LOCK (allow): 
+        null=[
+          Access: [top-s] 2025-09-30 10:45:25.432 (-414d5h4m12s711ms) duration=+3ms
+          Access: [fgsvc-s] 2026-11-18 12:50:47.458 (-1h58m50s685ms) duration=+662ms
+        ]
+      MONITOR_LOCATION (allow / switch COARSE_LOCATION=allow): 
+        com.google.android.gms.personalsafety=[
+          Access: [top-s] 2025-09-30 10:45:25.432 (-414d5h4m12s711ms) duration=+7s397ms
+          Access: [fgsvc-s] 2026-11-18 12:50:47.429 (-1h58m50s714ms) duration=+1s81ms
+          Running start at: +7m28s264ms
+        ]
+        earthquake_alerting=[
+          Access: [fgsvc-s] 2026-11-18 12:50:47.429 (-1h58m50s714ms) duration=+1s81ms
+          Access: [fg-s] 2026-11-18 14:42:10.226 (-7m27s917ms) duration=+7m28s83ms
+          Running start at: +7m27s916ms
+        ]
+        fused_location_provider=[
+          Access: [fgsvc-s] 2026-07-22 19:28:05.289 (-118d20h21m32s854ms) duration=+150ms
+          Access: [fg-s] 2026-11-18 14:42:04.648 (-7m33s495ms) duration=+29s993ms
+        ]
+        com.google.android.gms.findmydevice=[
+          Access: [top-s] 2025-09-30 10:45:25.432 (-414d5h4m12s711ms) duration=+7s397ms
+          Access: [fgsvc-s] 2026-11-18 12:50:47.429 (-1h58m50s714ms) duration=+1s81ms
+          Running start at: +7m29s248ms
+        ]
+      MONITOR_HIGH_POWER_LOCATION (allow / switch COARSE_LOCATION=allow): 
+        earthquake_alerting=[
+          Access: [fg-s] 2026-11-18 14:47:10.391 (-2m27s752ms) duration=+4s105ms
+        ]
+      GET_USAGE_STATS (default): 
+        null=[
+          Reject: [fgsvc-s]2025-12-02 10:07:59.661 (-351d4h41m38s482ms)
+          Reject: [fg-s]2026-11-18 14:42:10.361 (-7m27s782ms)
+        ]
+        com.google.android.gms.security__nonwearable=[
+          Reject: [fg-s]2026-11-18 14:42:09.864 (-7m28s279ms)
+        ]
+        com.google.android.gms.stats=[
+          Reject: [top-s]2025-04-14 14:04:50.628 (-583d1h44m47s515ms)
+          Reject: [fgsvc-s]2025-12-02 10:20:31.185 (-351d4h29m6s958ms)
+        ]
+      PROCESS_OUTGOING_CALLS (allow): 
+        gms_broadcast_receiver=[
+          Access: [fg-s] 2025-04-16 10:56:45.308 (-581d4h52m52s835ms)
+        ]
+        com.google.android.gms.thunderbird=[
+          Access: [fg-s] 2025-04-16 10:56:45.384 (-581d4h52m52s759ms)
+        ]
+      GET_ACCOUNTS (allow): 
+        com.google.android.gms.usagereporting=[
+          Access: [fgsvc-tp] 2025-12-02 10:31:58.564 (-351d4h17m39s579ms)
+          Access: [fg-tp] 2026-11-18 14:49:25.329 (-12s814ms)
+        ]
+      BLUETOOTH_SCAN (allow): 
+        nearby_sharing=[
+          Access: [fgsvc-tpd] 2025-04-25 17:07:11.378 (-571d22h42m26s765ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=nearby_connections]
+          Access: [fgsvc-s] 2025-11-30 22:46:24.233 (-352d16h3m13s910ms)
+        ]
+        nearby_fast_pair=[
+          Access: [top-s] 2025-04-14 14:04:51.360 (-583d1h44m46s783ms)
+          Access: [fgsvc-s] 2025-11-30 22:46:24.233 (-352d16h3m13s910ms)
+        ]
+        nearby_connections=[
+          Access: [fgsvc-s] 2025-11-30 15:11:48.245 (-352d23h37m49s898ms)
+          Access: [fgsvc-tp] 2025-04-25 17:07:11.378 (-571d22h42m26s765ms)
+        ]
+      USE_BIOMETRIC (allow): 
+        com.google.android.gms.wallet=[
+          Access: [top-s] 2025-04-14 14:05:08.879 (-583d1h44m29s264ms)
+          Access: [fg-s] 2026-06-19 00:52:03.554 (-152d14h57m34s589ms)
+        ]
+        com.google.android.gms.fido=[
+          Access: [fg-s] 2026-11-16 21:07:10.375 (-1d17h42m27s768ms)
+        ]
+      ACTIVITY_RECOGNITION (allow): 
+        com.google.android.gms.personalsafety=[
+          Access: [top-s] 2025-09-30 10:45:25.432 (-414d5h4m12s711ms) duration=+7s397ms
+          Access: [fgsvc-s] 2026-11-18 12:50:47.429 (-1h58m50s714ms) duration=+1s81ms
+          Running start at: +7m28s254ms
+        ]
+      READ_MEDIA_AUDIO (allow): 
+        com.google.android.gms.ipa=[
+          Access: [fg-s] 2026-11-18 12:51:20.040 (-1h58m18s103ms)
+        ]
+        null=[
+          Access: [fg-s] 2026-11-18 14:42:10.196 (-7m27s947ms)
+        ]
+      WRITE_MEDIA_AUDIO (deny): 
+        null=[
+          Reject: [fg-s]2026-11-18 14:42:10.200 (-7m27s943ms)
+        ]
+      READ_MEDIA_VIDEO (allow): 
+        null=[
+          Access: [fg-s] 2026-11-18 14:42:10.197 (-7m27s946ms)
+        ]
+      WRITE_MEDIA_VIDEO (deny): 
+        null=[
+          Reject: [fg-s]2026-11-18 14:42:10.202 (-7m27s941ms)
+        ]
+      READ_MEDIA_IMAGES (allow): 
+        null=[
+          Access: [fg-s] 2026-11-18 14:42:10.193 (-7m27s950ms)
+        ]
+      WRITE_MEDIA_IMAGES (deny): 
+        null=[
+          Reject: [fg-s]2026-11-18 14:42:10.202 (-7m27s941ms)
+        ]
+      MANAGE_EXTERNAL_STORAGE (default): 
+        com.google.android.gms.ipa=[
+          Reject: [fg-s]2026-11-18 12:51:19.900 (-1h58m18s243ms)
+        ]
+        null=[
+          Reject: [fg-s]2026-11-18 14:42:10.181 (-7m27s962ms)
+        ]
+      NO_ISOLATED_STORAGE (deny): 
+        null=[
+          Reject: [fg-s]2026-11-18 14:42:10.180 (-7m27s963ms)
+        ]
+      USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER (default): 
+        com.google.android.gms.auth_account_base=[
+          Reject: [top-s]2025-04-14 14:04:27.803 (-583d1h45m10s340ms)
+        ]
+        com.google.android.gms.wallet=[
+          Reject: [top-s]2025-04-14 14:05:08.910 (-583d1h44m29s233ms)
+          Reject: [fg-s]2026-06-19 00:52:03.599 (-152d14h57m34s544ms)
+        ]
+        com.google.android.gms.setupservices=[
+          Reject: [top-s]2025-04-14 14:05:13.395 (-583d1h44m24s748ms)
+        ]
+        com.google.android.gms.checkinbase=[
+          Reject: [top-s]2025-09-30 10:45:22.528 (-414d5h4m15s615ms)
+          Reject: [fgsvc-s]2026-11-18 12:50:47.569 (-1h58m50s574ms)
+        ]
+        com.google.android.gms.constellation=[
+          Reject: [top-s]2025-04-14 14:05:09.773 (-583d1h44m28s370ms)
+          Reject: [fgsvc-s]2025-12-02 06:52:46.174 (-351d7h56m51s969ms)
+        ]
+        com.google.android.gms.thunderbird=[
+          Reject: [fg-s]2025-04-16 10:56:45.438 (-581d4h52m52s705ms)
+        ]
+        null=[
+          Reject: [top-s]2025-09-30 10:45:22.529 (-414d5h4m15s614ms)
+          Reject: [fgsvc-s]2026-11-18 12:50:47.570 (-1h58m50s573ms)
+        ]
+        com.google.android.gms.service_entitlement=[
+          Reject: [fg-s]2026-11-18 14:42:04.192 (-7m33s951ms)
+        ]
+        com.google.android.gms.autofill=[
+          Reject: [fg-s]2026-06-03 15:03:40.091 (-168d0h45m58s52ms)
+        ]
+        com.google.android.gms.esim=[
+          Reject: [fg-s]2026-11-18 14:42:08.470 (-7m29s673ms)
+        ]
+        com.google.android.gms.droidguard=[
+          Reject: [top-s]2025-09-30 10:45:22.427 (-414d5h4m15s716ms)
+          Reject: [fgsvc-s]2026-11-18 12:50:47.538 (-1h58m50s605ms)
+        ]
+      FINE_LOCATION_SOURCE (allow / switch FINE_LOCATION=allow): 
+        network_location_provider=[
+          Access: [fgsvc-s] 2025-12-02 11:20:43.574 (-351d3h28m54s569ms)
+          Access: [fg-s] 2026-11-18 14:47:14.431 (-2m23s712ms)
+        ]
+        network_location_calibration=[
+          Access: [fgsvc-s] 2025-12-02 10:48:52.146 (-351d4h0m45s997ms)
+          Access: [fg-s] 2026-11-17 15:43:26.667 (-23h6m11s476ms)
+        ]
+        fused_location_provider=[
+          Access: [fgsvc-s] 2026-06-05 14:40:04.246 (-166d1h9m33s897ms)
+          Access: [fg-s] 2026-11-18 14:47:14.431 (-2m23s712ms)
+        ]
+        geofencer_provider=[
+          Access: [fgsvc-s] 2025-12-02 10:48:42.312 (-351d4h0m55s831ms)
+          Access: [fg-s] 2026-11-16 21:07:05.294 (-1d17h42m32s849ms)
+        ]
+      BLUETOOTH_CONNECT (allow): 
+        nearby_sharing=[
+          Access: [fgsvc-s] 2025-05-19 20:23:30.245 (-547d19h26m7s898ms)
+          Access: [fg-s] 2026-04-08 22:59:17.643 (-223d16h50m20s500ms)
+        ]
+        null=[
+          Access: [top-s] 2025-04-14 14:04:28.077 (-583d1h45m10s66ms)
+          Access: [fgsvc-s] 2025-12-02 06:02:18.330 (-351d8h47m19s813ms)
+        ]
+        apkappcontext=[
+          Access: [fgsvc-s] 2025-12-02 03:47:41.003 (-351d11h1m57s140ms)
+          Access: [fg-s] 2026-11-18 14:42:09.434 (-7m28s709ms)
+        ]
+        nearby_fast_pair=[
+          Access: [top-s] 2025-04-14 14:04:51.075 (-583d1h44m47s68ms)
+          Access: [fgsvc-s] 2025-11-30 22:41:52.803 (-352d16h7m45s340ms)
+        ]
+        nearby_connections=[
+          Access: [top-s] 2025-04-14 14:04:51.325 (-583d1h44m46s818ms)
+          Access: [fgsvc-s] 2025-12-02 06:12:18.894 (-351d8h37m19s249ms)
+        ]
+        com.google.android.gms.findmydevice=[
+          Access: [fgsvc-s] 2025-11-30 22:41:52.804 (-352d16h7m45s339ms)
+          Access: [fg-s] 2026-11-18 14:47:14.987 (-2m23s156ms)
+        ]
+        com.google.android.gms.droidguard=[
+          Access: [top-s] 2025-04-14 14:05:09.262 (-583d1h44m28s881ms)
+          Access: [fg-s] 2026-11-18 14:42:10.314 (-7m27s829ms)
+        ]
+        com.google.android.gms.auth_proximity=[
+          Access: [fg-s] 2026-11-16 17:06:51.854 (-1d21h42m46s289ms)
+        ]
+      ACTIVITY_RECOGNITION_SOURCE (allow / switch ACTIVITY_RECOGNITION=allow): 
+        activity_recognition_provider=[
+          Access: [fg-s] 2025-12-01 20:11:20.191 (-351d18h38m17s952ms) duration=+8ms
+        ]
+        fused_location_provider=[
+          Access: [top-s] 2025-09-30 10:45:25.432 (-414d5h4m12s711ms) duration=+7s397ms
+          Access: [fgsvc-s] 2026-11-18 12:50:47.429 (-1h58m50s714ms) duration=+1s81ms
+          Running start at: +7m32s438ms
+          startNesting=5
+        ]
+      BLUETOOTH_ADVERTISE (allow): 
+        nearby_sharing=[
+          Access: [fgsvc-tpd] 2025-12-02 06:11:26.289 (-351d8h38m11s854ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=nearby_connections]
+          Access: [fg-tpd] 2026-04-08 22:59:18.823 (-223d16h50m19s320ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=nearby_connections]
+        ]
+        nearby_connections=[
+          Access: [fgsvc-s] 2025-12-02 06:11:38.152 (-351d8h37m59s991ms)
+          Access: [fgsvc-tp] 2025-12-02 06:11:26.289 (-351d8h38m11s854ms)
+        ]
+      NEARBY_WIFI_DEVICES (allow): 
+        nearby_connections=[
+          Access: [fgsvc-s] 2025-12-02 06:11:30.172 (-351d8h38m7s971ms)
+          Access: [fg-s] 2026-11-18 14:42:08.848 (-7m29s295ms)
+        ]
+      READ_MEDIA_VISUAL_USER_SELECTED (allow): 
+        null=[
+          Access: [fg-s] 2026-11-18 14:42:10.191 (-7m27s952ms)
+        ]
+
+
+  AppOps policy location tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, network_location_provider, gnss_location_provider, network_location_calibration, current_semantic_location, fused_location_provider, wearable_flp_shim, geofencer_provider]
+    #1: 1000=android[LocationService, GnssService]
+
+  AppOps policy activity recognition tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, current_semantic_location, fused_location_provider, geofencer_provider]
+

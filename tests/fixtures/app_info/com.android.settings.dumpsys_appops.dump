@@ -1,0 +1,69 @@
+Current AppOps Service state:
+  Settings:
+    top_state_settle_time=+5s0ms
+    fg_service_state_settle_time=+5s0ms
+    bg_state_settle_time=+1s0ms
+
+
+  Uid 1000:
+    state=pers
+    capability=LCMNFUA
+    appWidgetVisible=false
+      READ_CALENDAR: mode=ignore
+      WRITE_CALENDAR: mode=ignore
+      READ_SMS: mode=ignore
+      RECEIVE_SMS: mode=ignore
+      RECEIVE_MMS: mode=ignore
+      RECEIVE_WAP_PUSH: mode=ignore
+      CAMERA: mode=foreground
+      RECORD_AUDIO: mode=ignore
+      ADD_VOICEMAIL: mode=ignore
+      USE_SIP: mode=ignore
+      PROCESS_OUTGOING_CALLS: mode=ignore
+      BODY_SENSORS: mode=ignore
+      READ_CELL_BROADCASTS: mode=ignore
+      ANSWER_PHONE_CALLS: mode=ignore
+      ACCEPT_HANDOVER: mode=ignore
+      ACTIVITY_RECOGNITION: mode=ignore
+      ACCESS_MEDIA_LOCATION: mode=ignore
+      UWB_RANGING: mode=ignore
+      NEARBY_WIFI_DEVICES: mode=ignore
+    Package com.android.settings:
+      READ_CONTACTS (allow): 
+        null=[
+          Access: [pers-s] 2025-04-16 15:14:47.256 (-581d0h33m31s665ms)
+        ]
+      READ_CALL_LOG (allow): 
+        null=[
+          Access: [pers-s] 2025-04-16 11:00:00.533 (-581d4h48m18s388ms)
+        ]
+      GET_USAGE_STATS (default): 
+        null=[
+          Access: [pers-s] 2025-12-01 22:42:14.003 (-351d16h6m4s918ms)
+        ]
+      READ_PHONE_STATE (allow): 
+        null=[
+          Access: [pers-s] 2025-04-16 11:00:00.533 (-581d4h48m18s388ms)
+        ]
+      INTERACT_ACROSS_PROFILES (default): 
+      USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER (default): 
+        null=[
+          Access: [pers-s] 2026-11-18 14:42:12.443 (-6m6s478ms)
+        ]
+      BLUETOOTH_CONNECT (allow): 
+        null=[
+          Access: [pers-s] 2026-11-18 14:42:11.969 (-6m6s952ms)
+        ]
+      MEDIA_ROUTING_CONTROL (default): 
+        null=[
+          Access: [pers-s] 2026-11-18 14:42:12.005 (-6m6s916ms)
+        ]
+
+
+  AppOps policy location tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, network_location_provider, gnss_location_provider, network_location_calibration, current_semantic_location, fused_location_provider, wearable_flp_shim, geofencer_provider]
+    #1: 1000=android[LocationService, GnssService]
+
+  AppOps policy activity recognition tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, current_semantic_location, fused_location_provider, geofencer_provider]
+

@@ -179,8 +179,12 @@ SERVICES_API30 = """\
     foregroundServiceType=0x00000002
 """
 
+#: footprint_script output: du CE, du DE, du external, ls CE prefs, ls CE
+#: databases, ls DE prefs, ls DE databases.
 FOOTPRINT_ROOT = f"""\
 51234\t/data/data/{PKG}
+@@SANDROID_SEP@@
+16\t/data/user_de/0/{PKG}
 @@SANDROID_SEP@@
 2048\t/sdcard/Android/data/{PKG}
 @@SANDROID_SEP@@
@@ -192,16 +196,26 @@ app.db
 app.db-journal
 app.db-wal
 cache.db
+@@SANDROID_SEP@@
+ls: /data/user_de/0/{PKG}/shared_prefs: No such file or directory
+@@SANDROID_SEP@@
+ls: /data/user_de/0/{PKG}/databases: No such file or directory
 """
 
 FOOTPRINT_NOROOT = f"""\
 du: /data/data/{PKG}: Permission denied
+@@SANDROID_SEP@@
+du: /data/user_de/0/{PKG}: Permission denied
 @@SANDROID_SEP@@
 du: /sdcard/Android/data/{PKG}: No such file or directory
 @@SANDROID_SEP@@
 ls: /data/data/{PKG}/shared_prefs: Permission denied
 @@SANDROID_SEP@@
 ls: /data/data/{PKG}/databases: Permission denied
+@@SANDROID_SEP@@
+ls: /data/user_de/0/{PKG}/shared_prefs: Permission denied
+@@SANDROID_SEP@@
+ls: /data/user_de/0/{PKG}/databases: Permission denied
 """
 
 
@@ -576,7 +590,8 @@ def test_footprint_with_adb_root(fake_adb):
     result = ais.get_data_footprint(PKG, serial="emulator-5554")
 
     assert result.root_method == "adb root"
-    assert (result.private_kb, result.external_kb) == (51234, 2048)
+    assert (result.private_kb, result.de_kb, result.external_kb) == (51234, 16, 2048)
+    assert result.private_total_kb == 51250
     assert (result.shared_prefs_count, result.databases_count) == (3, 2)
     assert result.private_reason is None
     assert result.reason is None
@@ -597,7 +612,7 @@ def test_footprint_without_root(fake_adb):
     assert result.shared_prefs_count is None
     assert result.databases_count is None
     # Probed plain shell, su -c and su 0 before giving up.
-    probes = [c for c, _s in fake.calls if "du -sk" not in c]
+    probes = [c for c, _s in fake.calls if "du -sk" not in c and "dataDir" not in c]
     assert len(probes) == 3
 
 
@@ -1870,3 +1885,203 @@ def test_insight_offline_default_comes_from_config(monkeypatch, tmp_path):
         lambda: SimpleNamespace(analysis=SimpleNamespace(insight_offline=False)),
     )
     assert analyzer._insight_offline() is False
+
+
+# ---------------------------------------------------------------------------
+# Real API 35 arm64 AVD fixtures (synthetic device data, trimmed)
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "app_info"
+REAL_APPOPS_PACKAGES = [
+    "com.google.android.gms",
+    "com.google.android.dialer",
+    "com.android.settings",
+    "com.google.android.apps.nexuslauncher",
+]
+
+
+def _fx(name: str) -> str:
+    return (FIXTURES / name).read_text()
+
+
+def test_real_gms_running_ops_from_dumpsys():
+    dumpsys = {
+        o.op: o
+        for o in ais.parse_appops(_fx("com.google.android.gms.dumpsys_appops.dump"))
+    }
+    cmd = {
+        o.op: o
+        for o in ais.parse_appops(_fx("com.google.android.gms.cmd_appops_get.dump"))
+    }
+    running = {op for op, o in dumpsys.items() if o.running}
+    assert running == {
+        "MONITOR_LOCATION",
+        "ACTIVITY_RECOGNITION",
+        "ACTIVITY_RECOGNITION_SOURCE",
+    }
+    assert running == {op for op, o in cmd.items() if o.running}
+    monitor = dumpsys["MONITOR_LOCATION"]
+    assert monitor.package_mode == "allow"
+    assert monitor.foreground is True
+
+
+@pytest.mark.parametrize("package", REAL_APPOPS_PACKAGES)
+def test_real_cmd_appops_scopes_match_dumpsys(package):
+    cmd = {o.op: o for o in ais.parse_appops(_fx(f"{package}.cmd_appops_get.dump"))}
+    dumpsys = {o.op: o for o in ais.parse_appops(_fx(f"{package}.dumpsys_appops.dump"))}
+    assert set(cmd) == set(dumpsys)
+    for op, entry in cmd.items():
+        truth = dumpsys[op]
+        assert (entry.uid_mode, entry.package_mode, entry.mode) == (
+            truth.uid_mode,
+            truth.package_mode,
+            truth.mode,
+        ), op
+
+
+def test_real_gms_package_line_after_uid_block_is_package_scope():
+    # Uid block ends with READ_WRITE_HEALTH_DATA (op 126); the next line
+    # "COARSE_LOCATION: allow" has no time fields but op code 0 -> package.
+    ops = {
+        o.op: o
+        for o in ais.parse_appops(_fx("com.google.android.gms.cmd_appops_get.dump"))
+    }
+    assert ops["READ_WRITE_HEALTH_DATA"].uid_mode == "ignore"
+    assert ops["COARSE_LOCATION"].uid_mode is None
+    assert ops["COARSE_LOCATION"].package_mode == "allow"
+    assert ops["CAMERA"].uid_mode == "foreground"
+
+
+def _dumpsys_op_sequences(text: str) -> list[list[str]]:
+    seqs: list[list[str]] = []
+    current = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"(Package \S+|Uid \S+):$", stripped):
+            current = []
+            seqs.append(current)
+            continue
+        match = re.match(r"^([A-Z][A-Z0-9_]+)(?: \(|: mode=)", stripped)
+        indent = len(line) - len(line.lstrip())
+        if match and current is not None and indent == 6:
+            current.append(match.group(1))
+    return seqs
+
+
+@pytest.mark.parametrize("package", REAL_APPOPS_PACKAGES)
+def test_op_code_table_matches_real_dump_order(package):
+    seqs = _dumpsys_op_sequences(_fx(f"{package}.dumpsys_appops.dump"))
+    assert seqs
+    for seq in seqs:
+        assert all(op in ais._OP_CODE for op in seq), seq
+        codes = [ais._OP_CODE[op] for op in seq]
+        assert codes == sorted(codes)
+        assert len(set(codes)) == len(codes)
+
+
+def test_real_shared_uid_settings_grants():
+    state = ais.parse_permission_state(
+        _fx("com.android.settings.dumpsys_package.dump"), "com.android.settings"
+    )
+    by_name = {p.name: p for p in state.permissions}
+    assert state.ok
+    assert state.shared_user == "android.uid.system"
+    for name in (
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+    ):
+        grant = by_name[name]
+        assert (grant.kind, grant.granted) == ("runtime", True), name
+        assert "SYSTEM_FIXED" in grant.flags
+        # RESTRICTION_*_EXEMPT flags mean exempt, not restricted.
+        assert grant.restricted is False, name
+        assert grant.protection == "dangerous"
+    assert by_name["android.permission.WRITE_SETTINGS"].kind == "install"
+    assert by_name["android.permission.WRITE_SETTINGS"].granted is True
+
+
+def test_real_dialer_hash_permission_and_revoked_compat():
+    text = _fx("com.google.android.dialer.dumpsys_package.dump")
+    state = ais.parse_permission_state(text, "com.google.android.dialer")
+    by_name = {p.name: p for p in state.permissions}
+    tycho = "com.google.android.apps.tycho#com.google.android.ims.providers.ACCESS_DATA"
+    assert by_name[tycho].requested is True
+    audio = by_name["android.permission.RECORD_AUDIO"]
+    assert audio.granted is True
+    assert audio.revoked is True
+    assert audio.effective_granted is False
+    assert "REVOKED_COMPAT" in audio.revoked_reason
+    # The real AppOps agree: RECORD_AUDIO is ignored at uid level.
+    appops = ais.AppOpsState(
+        package="com.google.android.dialer",
+        ops=ais.parse_appops(_fx("com.google.android.dialer.cmd_appops_get.dump")),
+    )
+    ais.apply_appops_revocations(state, appops)
+    assert audio.revoked_reason.startswith("REVOKED_COMPAT")  # first reason kept
+
+
+def test_apply_appops_revocations_uid_ignore():
+    state = ais.PermissionState(
+        package=PKG,
+        permissions=[
+            ais.PermissionGrant(
+                "android.permission.CAMERA", kind="runtime", granted=True
+            ),
+            ais.PermissionGrant(
+                "android.permission.ACCESS_FINE_LOCATION", kind="runtime", granted=True
+            ),
+        ],
+    )
+    ops = ais.parse_appops("Uid mode: FINE_LOCATION: foreground\nCAMERA: ignore\n")
+    ais.apply_appops_revocations(state, ais.AppOpsState(package=PKG, ops=ops))
+    camera, fine = state.permissions
+    assert camera.revoked is True
+    assert camera.revoked_reason == "AppOps CAMERA uid mode ignore"
+    assert fine.revoked is False  # foreground = while-in-use, not revoked
+    ais.apply_appops_revocations(state, None)  # tolerated
+
+
+def _real_footprint_output(package: str) -> str:
+    du = {}
+    for line in _fx("du_incl_user_de.dump").splitlines():
+        match = re.match(r"^(\d+)\t(\S+)$", line)
+        if match:
+            du[match.group(2)] = line
+    sep = "\n@@SANDROID_SEP@@\n"
+    return sep.join(
+        [
+            du[f"/data/data/{package}"],
+            du[f"/data/user_de/0/{package}"],
+            f"du: /sdcard/Android/data/{package}: No such file or directory",
+            f"ls: /data/data/{package}/shared_prefs: No such file or directory",
+            f"ls: /data/data/{package}/databases: No such file or directory",
+            "development_settings.xml\nsettings_preferences.xml",
+            f"ls: /data/user_de/0/{package}/databases: No such file or directory",
+        ]
+    )
+
+
+def test_real_settings_footprint_counts_de_storage(fake_adb):
+    settings = "com.android.settings"
+    data_dir_line = next(
+        line
+        for line in _fx("com.android.settings.dumpsys_package.dump").splitlines()
+        if "dataDir=" in line
+    )
+    fake = fake_adb(
+        {
+            "dataDir": data_dir_line,
+            "du -sk": _real_footprint_output(settings),
+            "shell id": "uid=0(root)",
+        }
+    )
+    result = ais.get_data_footprint(settings)
+
+    assert result.data_dir == "/data/user_de/0/com.android.settings"
+    assert (result.private_kb, result.de_kb) == (24, 1048)
+    assert result.private_total_kb == 1072
+    assert result.external_reason == "absent"
+    assert result.shared_prefs_count == 2  # found in DE, not CE
+    assert result.databases_count == 0
+    script = next(c for c, _s in fake.calls if "du -sk" in c)
+    assert "/data/user_de/0/com.android.settings" in script

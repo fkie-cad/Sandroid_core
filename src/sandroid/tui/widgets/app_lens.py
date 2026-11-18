@@ -546,6 +546,10 @@ def _op_evidence(op: Any) -> Table:
 def _grant_cell(g: Any, ops: list[Any]) -> Text:
     if g.granted is None:
         return _t("req → ?", _DIM)
+    if g.granted and getattr(g, "revoked", False):
+        text = Text("req → ", style=_DIM)
+        text.append("✓ revoked", style=_BAD)
+        return text
     if not g.granted:
         text = Text("req → ✗", style=_DIM)
     else:
@@ -585,6 +589,8 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
         notes.append("fixed")
     if g.restricted:
         notes.append("restricted")
+    if getattr(g, "revoked", False):
+        notes.append(f"granted but revoked ({g.revoked_reason})")
     if any(o.last_reject for o in ops):
         notes.append("rejected")
     return ", ".join(notes), style
@@ -601,6 +607,10 @@ def build_permissions(f: AppFacts) -> SectionData:
     for op in ops:
         if op.permission:
             by_perm.setdefault(op.permission, []).append(op)
+    if appops is not None and hasattr(state, "permissions"):
+        from sandroid.services.app_info_service import apply_appops_revocations
+
+        apply_appops_revocations(state, appops)
     grants = list(getattr(state, "permissions", None) or [])
     names = {g.name for g in grants}
     order = {"dangerous": 0, "signature": 2, "normal": 3}
@@ -616,7 +626,7 @@ def build_permissions(f: AppFacts) -> SectionData:
         prot = g.protection or "?"
         if prot == "dangerous":
             dangerous += 1
-            if g.granted:
+            if g.granted and not getattr(g, "revoked", False):
                 granted_dangerous += 1
         if "used recently" in note or "in use now" in note:
             recent += 1
@@ -639,6 +649,10 @@ def build_permissions(f: AppFacts) -> SectionData:
                         ),
                         ("flags", ", ".join(g.flags or []) or "—"),
                         ("restricted", "yes" if g.restricted else "no"),
+                        (
+                            "revoked",
+                            g.revoked_reason if getattr(g, "revoked", False) else "no",
+                        ),
                         (
                             "protection",
                             f"{prot} (from {g.protection_source or '?'})",
@@ -1190,14 +1204,27 @@ def build_data(f: AppFacts) -> SectionData:
             text.append(f"  {reason}", style=_DIM)
         return text
 
+    data_dir = getattr(fp, "data_dir", None)
     rows = [
         _kv(
             "private",
-            "private",
+            "private (CE)",
             size(fp.private_kb, fp.private_reason),
             evidence=[
-                ("", _grid([("path", fp.private_dir or "?")])),
+                (
+                    "",
+                    _grid(
+                        [("path", fp.private_dir or "?"), ("dataDir", data_dir or "?")]
+                    ),
+                ),
             ],
+            raw=raw,
+        ),
+        _kv(
+            "private_de",
+            "private (DE)",
+            size(getattr(fp, "de_kb", None), getattr(fp, "de_reason", None)),
+            evidence=[("", _grid([("path", getattr(fp, "de_dir", "") or "?")]))],
             raw=raw,
         ),
         _kv(

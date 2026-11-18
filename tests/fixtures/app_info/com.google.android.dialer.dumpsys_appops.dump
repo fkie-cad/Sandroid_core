@@ -1,0 +1,117 @@
+Current AppOps Service state:
+  Settings:
+    top_state_settle_time=+5s0ms
+    fg_service_state_settle_time=+5s0ms
+    bg_state_settle_time=+1s0ms
+
+
+  Uid u0a138:
+    state=cch
+    capability=-------
+    appWidgetVisible=false
+      COARSE_LOCATION: mode=foreground
+      FINE_LOCATION: mode=foreground
+      READ_CALENDAR: mode=ignore
+      WRITE_CALENDAR: mode=ignore
+      READ_SMS: mode=ignore
+      RECEIVE_MMS: mode=ignore
+      RECEIVE_WAP_PUSH: mode=ignore
+      CAMERA: mode=foreground
+      RECORD_AUDIO: mode=ignore
+      USE_SIP: mode=ignore
+      PROCESS_OUTGOING_CALLS: mode=ignore
+      BODY_SENSORS: mode=ignore
+      READ_CELL_BROADCASTS: mode=ignore
+      READ_EXTERNAL_STORAGE: mode=ignore
+      WRITE_EXTERNAL_STORAGE: mode=ignore
+      READ_PHONE_NUMBERS: mode=ignore
+      ANSWER_PHONE_CALLS: mode=ignore
+      ACCEPT_HANDOVER: mode=ignore
+      BLUETOOTH_SCAN: mode=ignore
+      ACTIVITY_RECOGNITION: mode=ignore
+      READ_MEDIA_AUDIO: mode=ignore
+      READ_MEDIA_VIDEO: mode=ignore
+      READ_MEDIA_IMAGES: mode=ignore
+      LEGACY_STORAGE: mode=ignore
+      ACCESS_MEDIA_LOCATION: mode=ignore
+      BLUETOOTH_CONNECT: mode=ignore
+      UWB_RANGING: mode=ignore
+      BLUETOOTH_ADVERTISE: mode=ignore
+      NEARBY_WIFI_DEVICES: mode=ignore
+      READ_MEDIA_VISUAL_USER_SELECTED: mode=ignore
+    Package com.google.android.dialer:
+      VIBRATE (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:56:43.019 (-581d4h51m34s239ms) duration=+102ms
+        ]
+      READ_CONTACTS (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:57:13.164 (-581d4h51m4s94ms)
+          Access: [bg-s] 2026-11-18 14:42:04.705 (-6m12s553ms)
+          Access: [cch-s] 2026-06-03 14:23:46.230 (-168d1h24m31s28ms)
+        ]
+      READ_CALL_LOG (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:59:56.115 (-581d4h48m21s143ms)
+          Access: [bg-s] 2026-11-18 14:42:04.663 (-6m12s595ms)
+        ]
+      WRITE_CALL_LOG (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:57:13.106 (-581d4h51m4s152ms)
+        ]
+      CALL_PHONE (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:56:45.198 (-581d4h51m32s60ms)
+        ]
+      SYSTEM_ALERT_WINDOW (allow): 
+        null=[
+          Access: [bg-s] 2026-11-18 14:42:04.126 (-6m13s132ms)
+          Access: [cch-s] 2026-11-18 13:19:50.199 (-1h28m27s59ms)
+        ]
+      CAMERA (allow): 
+      WAKE_LOCK (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:55:24.002 (-581d4h52m53s256ms) duration=+452ms
+          Access: [fg-s] 2026-06-03 15:03:46.962 (-168d0h44m30s296ms) duration=+83ms
+          Access: [bg-s] 2026-11-18 12:54:29.442 (-1h53m47s816ms) duration=+3s365ms
+          Access: [cch-s] 2026-06-18 11:26:59.708 (-153d4h21m17s550ms) duration=+587ms
+        ]
+      READ_PHONE_STATE (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:57:13.122 (-581d4h51m4s136ms)
+          Access: [bg-s] 2026-11-18 14:42:04.664 (-6m12s594ms)
+          Access: [cch-s] 2026-11-18 14:42:03.911 (-6m13s347ms)
+        ]
+      ADD_VOICEMAIL (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:59:56.163 (-581d4h48m21s95ms)
+          Access: [fg-s] 2026-06-03 15:03:47.242 (-168d0h44m30s16ms)
+          Access: [bg-s] 2026-11-18 14:42:08.119 (-6m9s139ms)
+          Access: [cch-s] 2025-05-14 20:07:48.595 (-552d19h40m28s663ms)
+        ]
+      GET_ACCOUNTS (allow): 
+        null=[
+          Access: [fg-tpd] 2026-06-03 15:03:47.276 (-168d0h44m29s982ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=com.google.android.gms.usagereporting]
+          Access: [bg-tpd] 2026-11-18 14:42:08.158 (-6m9s100ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=com.google.android.gms.usagereporting]
+          Access: [cch-tpd] 2026-11-18 14:42:13.667 (-6m3s591ms) proxy[uid=10144, pkg=com.google.android.gms, attributionTag=com.google.android.gms.usagereporting]
+        ]
+      START_FOREGROUND (allow): 
+        null=[
+          Access: [top-s] 2025-04-16 10:56:45.959 (-581d4h51m31s299ms) duration=+3s346ms
+        ]
+      USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER (default): 
+        null=[
+          Reject: [top-s]2025-04-16 10:59:56.860 (-581d4h48m20s398ms)
+          Reject: [fg-s]2026-06-03 15:03:47.265 (-168d0h44m29s993ms)
+          Reject: [bg-s]2026-11-18 14:42:08.102 (-6m9s156ms)
+          Reject: [cch-s]2026-11-18 13:19:50.212 (-1h28m27s46ms)
+        ]
+
+
+  AppOps policy location tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, network_location_provider, gnss_location_provider, network_location_calibration, current_semantic_location, fused_location_provider, wearable_flp_shim, geofencer_provider]
+    #1: 1000=android[LocationService, GnssService]
+
+  AppOps policy activity recognition tags:
+    #0: 10144=com.google.android.gms[awareness_provider, activity_recognition_provider, current_semantic_location, fused_location_provider, geofencer_provider]
+

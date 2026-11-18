@@ -414,11 +414,16 @@ class PermissionGrant(_DictMixin):
             in neither grant section, e.g. not defined on this platform).
         granted: Grant state, ``None`` when dumpsys does not say.
         flags: Runtime permission flags (``USER_SET``, ``USER_FIXED`` ...).
-        restricted: Hard/soft restricted (``restricted=true``).
+        restricted: Hard/soft restricted (``restricted=true`` or the
+            ``APPLY_RESTRICTION`` flag; ``RESTRICTION_*_EXEMPT`` flags mean
+            the opposite and are ignored).
         protection: Base protection level (``dangerous``/``normal``/
             ``signature``...) or ``None`` when unknown.
         protection_source: Where *protection* came from: ``"dumpsys"``,
             ``"manifest"``, ``"pm"``, ``"runtime-section"`` or ``None``.
+        revoked / revoked_reason: ``granted=true`` but effectively denied
+            (``REVOKED_COMPAT`` flag, or a uid AppOps mode ignore/deny via
+            :func:`apply_appops_revocations`).
     """
 
     name: str
@@ -429,20 +434,33 @@ class PermissionGrant(_DictMixin):
     restricted: bool = False
     protection: str | None = None
     protection_source: str | None = None
+    revoked: bool = False
+    revoked_reason: str | None = None
+
+    @property
+    def effective_granted(self) -> bool | None:
+        """``granted`` unless the grant is revoked (``REVOKED_COMPAT``/AppOps)."""
+        return False if self.granted and self.revoked else self.granted
 
 
 @dataclass
 class PermissionState(_DictMixin):
-    """All permissions of one package; ``ok`` False means see ``reason``."""
+    """All permissions of one package; ``ok`` False means see ``reason``.
+
+    ``shared_user`` names the shared uid (``android.uid.system``) whose
+    ``SharedUser`` block holds the grants of a shared-uid package.
+    """
 
     package: str
     permissions: list[PermissionGrant] = field(default_factory=list)
     declared: dict[str, str] = field(default_factory=dict)
+    shared_user: str | None = None
     ok: bool = True
     reason: str | None = None
 
 
-_PERM_LINE_RE = re.compile(r"^([A-Za-z0-9_.\-]+)(?::\s*(.*))?$")
+_PERM_LINE_RE = re.compile(r"^([^\s:]+)(?::\s*(.*))?$")
+_SHARED_USER_RE = re.compile(r"sharedUser=SharedUserSetting\{\S+\s+([^/\s}]+)")
 _GRANTED_RE = re.compile(r"granted=(true|false)")
 _FLAGS_RE = re.compile(r"flags=\[\s*([^\]]*)\]")
 _PROT_RE = re.compile(r"prot=([A-Za-z|]+)")
@@ -485,7 +503,11 @@ def _section(lines: list[str], start: int) -> list[str]:
 
 def _package_block(lines: list[str], package: str) -> list[str]:
     """Lines of the first ``Package [<package>]`` block (or ``[]``)."""
-    marker = f"Package [{package}]"
+    return _named_block(lines, f"Package [{package}]")
+
+
+def _named_block(lines: list[str], marker: str) -> list[str]:
+    """Lines of the first block whose header starts with *marker* (or ``[]``)."""
     for index, line in enumerate(lines):
         if line.strip().startswith(marker):
             indent = _indent(line)
@@ -566,47 +588,63 @@ def parse_permission_state(
             grants[name] = PermissionGrant(name=name)
         return grants[name]
 
-    runtime_seen = False
-    for index, line in enumerate(block):
-        header = line.strip()
-        if header == "requested permissions:":
-            for entry in _section(block, index):
-                match = _PERM_LINE_RE.match(entry)
-                if not match:
-                    continue
-                item = grant(match.group(1))
-                item.requested = True
-                if "restricted=true" in (match.group(2) or ""):
-                    item.restricted = True
-        elif header in ("install permissions:", "runtime permissions:"):
-            if header == "runtime permissions:":
-                if runtime_seen:  # only the first (primary) user
-                    continue
-                runtime_seen = True
-            kind = header.split()[0]
-            for entry in _section(block, index):
-                match = _PERM_LINE_RE.match(entry)
-                if not match:
-                    continue
-                item = grant(match.group(1))
-                attrs = match.group(2) or ""
-                item.kind = kind
-                granted = _GRANTED_RE.search(attrs)
-                item.granted = granted.group(1) == "true" if granted else None
-                flags = _FLAGS_RE.search(attrs)
-                if flags:
-                    item.flags = [f for f in flags.group(1).split("|") if f.strip()]
-                    item.flags = [f.strip() for f in item.flags]
-                if "RESTRICTION" in attrs:
-                    item.restricted = True
-        elif header == "declared permissions:":
-            for entry in _section(block, index):
-                match = _PERM_LINE_RE.match(entry)
-                prot = _PROT_RE.search(entry)
-                if match and prot:
-                    declared.setdefault(
-                        match.group(1), normalize_protection(prot.group(1)) or ""
-                    )
+    def apply_sections(section_block: list[str], *, requested: bool) -> None:
+        runtime_seen = False
+        for index, line in enumerate(section_block):
+            header = line.strip()
+            if header == "requested permissions:" and requested:
+                for entry in _section(section_block, index):
+                    match = _PERM_LINE_RE.match(entry)
+                    if not match:
+                        continue
+                    item = grant(match.group(1))
+                    item.requested = True
+                    if "restricted=true" in (match.group(2) or ""):
+                        item.restricted = True
+            elif header in ("install permissions:", "runtime permissions:"):
+                if header == "runtime permissions:":
+                    if runtime_seen:  # only the first (primary) user
+                        continue
+                    runtime_seen = True
+                kind = header.split()[0]
+                for entry in _section(section_block, index):
+                    match = _PERM_LINE_RE.match(entry)
+                    if not match:
+                        continue
+                    item = grant(match.group(1))
+                    attrs = match.group(2) or ""
+                    item.kind = kind
+                    granted = _GRANTED_RE.search(attrs)
+                    item.granted = granted.group(1) == "true" if granted else None
+                    flags = _FLAGS_RE.search(attrs)
+                    if flags:
+                        item.flags = [
+                            f.strip() for f in flags.group(1).split("|") if f.strip()
+                        ]
+                    if "APPLY_RESTRICTION" in item.flags:
+                        item.restricted = True
+            elif header == "declared permissions:":
+                for entry in _section(section_block, index):
+                    match = _PERM_LINE_RE.match(entry)
+                    prot = _PROT_RE.search(entry)
+                    if match and prot:
+                        declared.setdefault(
+                            match.group(1), normalize_protection(prot.group(1)) or ""
+                        )
+
+    apply_sections(block, requested=True)
+    # Shared-uid packages (e.g. android.uid.system): the uid's grants live in
+    # "Shared users:" -> "SharedUser [<name>]" -> "User 0:" -> runtime/install.
+    shared = _SHARED_USER_RE.search("\n".join(block))
+    if shared:
+        state.shared_user = shared.group(1)
+        shared_block = _named_block(lines, f"SharedUser [{state.shared_user}]")
+        apply_sections(shared_block, requested=False)
+
+    for item in grants.values():
+        if item.granted and "REVOKED_COMPAT" in item.flags:
+            item.revoked = True
+            item.revoked_reason = "REVOKED_COMPAT (legacy app: AppOps denies it)"
 
     dangerous = dangerous or set()
     manifest_protection = _as_dict(manifest_protection)
@@ -667,6 +705,35 @@ def get_permission_state(
         return PermissionState(package=package, ok=False, reason=str(exc))
 
 
+def apply_appops_revocations(state: PermissionState, appops: Any) -> PermissionState:
+    """Mark granted permissions whose AppOps uid mode is ignore/deny as revoked.
+
+    A ``granted=true`` runtime permission is still effectively denied when
+    its op is ignored/denied at uid level (``REVOKED_COMPAT`` and the like).
+    Idempotent; tolerates a missing or failed :class:`AppOpsState`.
+
+    Args:
+        state: Parsed permission state (mutated in place).
+        appops: An :class:`AppOpsState` (or anything with ``ops``).
+
+    Returns:
+        *state*.
+    """
+    by_perm: dict[str, list[Any]] = {}
+    for op in getattr(appops, "ops", None) or []:
+        if getattr(op, "permission", None):
+            by_perm.setdefault(op.permission, []).append(op)
+    for item in state.permissions:
+        if not item.granted or item.revoked:
+            continue
+        for op in by_perm.get(item.name, []):
+            if op.uid_mode in ("ignore", "deny"):
+                item.revoked = True
+                item.revoked_reason = f"AppOps {op.op} uid mode {op.uid_mode}"
+                break
+    return state
+
+
 # ---------------------------------------------------------------------------
 # AppOps
 # ---------------------------------------------------------------------------
@@ -708,7 +775,9 @@ _FG_STATES = {"top", "fg", "fgsvc", "fgsvcl", "pers", "fgs"}
 
 #: AppOps op names in op-code order (``AppOpsManager.OP_*``). AOSP prints
 #: each uid/package block sorted by op code, so in ``cmd appops get`` an op
-#: whose code is not above the previous one starts a new (package) block.
+#: whose code is not above the highest one seen starts a new (package) block.
+#: Verified against a real API 35 dump: 533 uid/package blocks of
+#: ``dumpsys appops`` (17.8k adjacent op pairs) are all in this order.
 _OP_ORDER_TEXT = (
     "COARSE_LOCATION FINE_LOCATION GPS VIBRATE READ_CONTACTS WRITE_CONTACTS "
     "READ_CALL_LOG WRITE_CALL_LOG READ_CALENDAR WRITE_CALENDAR WIFI_SCAN "
@@ -734,7 +803,28 @@ _OP_ORDER_TEXT = (
     "READ_MEDIA_IMAGES WRITE_MEDIA_IMAGES LEGACY_STORAGE ACCESS_ACCESSIBILITY "
     "READ_DEVICE_IDENTIFIERS ACCESS_MEDIA_LOCATION QUERY_ALL_PACKAGES "
     "MANAGE_EXTERNAL_STORAGE INTERACT_ACROSS_PROFILES ACTIVATE_PLATFORM_VPN "
-    "LOADER_USAGE_STATS"
+    "LOADER_USAGE_STATS DEPRECATED_1 AUTO_REVOKE_PERMISSIONS_IF_UNUSED "
+    "AUTO_REVOKE_MANAGED_BY_INSTALLER NO_ISOLATED_STORAGE PHONE_CALL_MICROPHONE "
+    "PHONE_CALL_CAMERA RECORD_AUDIO_HOTWORD MANAGE_ONGOING_CALLS "
+    "MANAGE_CREDENTIALS USE_ICC_AUTH_WITH_DEVICE_IDENTIFIER RECORD_AUDIO_OUTPUT "
+    "SCHEDULE_EXACT_ALARM FINE_LOCATION_SOURCE COARSE_LOCATION_SOURCE "
+    "MANAGE_MEDIA BLUETOOTH_CONNECT UWB_RANGING ACTIVITY_RECOGNITION_SOURCE "
+    "BLUETOOTH_ADVERTISE RECORD_INCOMING_PHONE_AUDIO NEARBY_WIFI_DEVICES "
+    "ESTABLISH_VPN_SERVICE ESTABLISH_VPN_MANAGER ACCESS_RESTRICTED_SETTINGS "
+    "RECEIVE_AMBIENT_TRIGGER_AUDIO RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO "
+    "RUN_USER_INITIATED_JOBS READ_MEDIA_VISUAL_USER_SELECTED "
+    "SYSTEM_EXEMPT_FROM_SUSPENSION SYSTEM_EXEMPT_FROM_DISMISSIBLE_NOTIFICATIONS "
+    "READ_WRITE_HEALTH_DATA FOREGROUND_SERVICE_SPECIAL_USE "
+    "SYSTEM_EXEMPT_FROM_POWER_RESTRICTIONS SYSTEM_EXEMPT_FROM_HIBERNATION "
+    "SYSTEM_EXEMPT_FROM_ACTIVITY_BG_START_RESTRICTION "
+    "CAPTURE_CONSENTLESS_BUGREPORT_ON_USERDEBUG_BUILD "
+    "BODY_SENSORS_WRIST_TEMPERATURE USE_FULL_SCREEN_INTENT CAMERA_SANDBOXED "
+    "RECORD_AUDIO_SANDBOXED RECEIVE_SANDBOX_TRIGGER_AUDIO "
+    "RECEIVE_SANDBOXED_DETECTION_TRAINING_DATA CREATE_ACCESSIBILITY_OVERLAY "
+    "MEDIA_ROUTING_CONTROL ENABLE_MOBILE_DATA_BY_USER RESERVED_FOR_TESTING "
+    "RAPID_CLEAR_NOTIFICATIONS_BY_LISTENER_IMPORTANCE "
+    "READ_SYSTEM_GRAMMATICAL_GENDER RUN_BACKUP_JOBS ARCHIVE_ICON_OVERLAY "
+    "UNARCHIVAL_CONFIRMATION EMERGENCY_LOCATION RECEIVE_SENSITIVE_NOTIFICATIONS"
 )
 _OP_ORDER = _OP_ORDER_TEXT.split()
 _OP_CODE = {name: code for code, name in enumerate(_OP_ORDER)}
@@ -926,7 +1016,7 @@ def parse_appops(text: str) -> list[AppOpEntry]:
     entries: dict[str, AppOpEntry] = {}
     current: AppOpEntry | None = None
     uid_block: set[str] | None = None  # ops seen in the current uid block
-    last_uid_code = -1  # op code of the previous uid-block op (-1 = unknown)
+    last_uid_code = -1  # highest known op code in the uid block (-1 = none)
 
     def get(op: str) -> AppOpEntry:
         if op not in entries:
@@ -975,7 +1065,7 @@ def parse_appops(text: str) -> list[AppOpEntry]:
         entry = get(op)
         if uid_block is not None:
             uid_block.add(op)
-            last_uid_code = code
+            last_uid_code = max(last_uid_code, code)  # unknown ops keep it
             entry.uid_mode = mode
             current = None
         else:
@@ -1049,12 +1139,20 @@ _DB_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 class DataFootprint(_DictMixin):
     """On-device storage used by a package.
 
+    Android keeps two private stores per user: credential-encrypted (CE,
+    ``/data/user/0/<pkg>`` == ``/data/data/<pkg>``) and device-encrypted
+    (DE, ``/data/user_de/0/<pkg>``, used e.g. by Settings as its dataDir).
+    Both are measured, plus external storage.
+
     Attributes:
-        private_dir / external_dir: The measured paths.
-        private_kb / external_kb: ``du -sk`` sizes, ``None`` if unknown.
-        private_reason / external_reason: Why a size is missing or partial.
-        shared_prefs_count: ``*.xml`` files in ``shared_prefs``.
-        databases_count: Databases (``-journal``/``-wal``/``-shm`` excluded).
+        private_dir / private_kb / private_reason: CE store (``du -sk``).
+        de_dir / de_kb / de_reason: DE store.
+        private_total_kb: CE + DE (known parts), ``None`` if neither known.
+        data_dir: The package's actual ``dataDir`` from ``dumpsys package``.
+        external_dir / external_kb / external_reason: External storage.
+        shared_prefs_count: ``*.xml`` files in ``shared_prefs`` (CE + DE).
+        databases_count: Databases in CE + DE (``-journal``/``-wal``/``-shm``
+            excluded).
         root_method: ``"adb root"``, ``"su -c"``, ``"su 0"`` or ``None``.
         reason: Overall reason when nothing could be measured.
     """
@@ -1063,6 +1161,11 @@ class DataFootprint(_DictMixin):
     private_dir: str = ""
     private_kb: int | None = None
     private_reason: str | None = None
+    de_dir: str = ""
+    de_kb: int | None = None
+    de_reason: str | None = None
+    private_total_kb: int | None = None
+    data_dir: str | None = None
     external_dir: str = ""
     external_kb: int | None = None
     external_reason: str | None = None
@@ -1070,6 +1173,15 @@ class DataFootprint(_DictMixin):
     databases_count: int | None = None
     root_method: str | None = None
     reason: str | None = None
+
+
+def _footprint_paths(package: str) -> dict[str, str]:
+    """CE, DE and external directories of *package* (user 0)."""
+    return {
+        "private_dir": f"/data/data/{package}",
+        "de_dir": f"/data/user_de/0/{package}",
+        "external_dir": f"/sdcard/Android/data/{package}",
+    }
 
 
 def _root_wrap(script: str, method: str | None) -> str:
@@ -1134,60 +1246,97 @@ def _count_entries(chunk: str, *, kind: str) -> int | None:
     return sum(1 for n in names if not n.endswith(_DB_SIDECAR_SUFFIXES))
 
 
+def _sum_known(*values: int | None) -> int | None:
+    """Sum of the non-None values, ``None`` if all are None."""
+    known = [v for v in values if v is not None]
+    return sum(known) if known else None
+
+
 def footprint_script(package: str) -> str:
-    """Device shell script measuring *package*'s data dirs (paths quoted)."""
-    private = shlex.quote(f"/data/data/{package}")
-    external = shlex.quote(f"/sdcard/Android/data/{package}")
-    prefs = shlex.quote(f"/data/data/{package}/shared_prefs")
-    dbs = shlex.quote(f"/data/data/{package}/databases")
+    """Device shell script measuring *package*'s data dirs (paths quoted).
+
+    Seven chunks separated by a marker: du CE, du DE, du external, then
+    ``ls`` of CE shared_prefs, CE databases, DE shared_prefs, DE databases.
+    """
+    paths = _footprint_paths(package)
+    ce, de, ext = (
+        shlex.quote(paths[k]) for k in ("private_dir", "de_dir", "external_dir")
+    )
     sep = f"; echo {_FOOTPRINT_SEP}; "
     return sep.join(
         [
-            f"du -sk {private} 2>&1",
-            f"du -sk {external} 2>&1",
-            f"ls -1 {prefs} 2>&1",
-            f"ls -1 {dbs} 2>&1",
+            f"du -sk {ce} 2>&1",
+            f"du -sk {de} 2>&1",
+            f"du -sk {ext} 2>&1",
+            f"ls -1 {ce}/shared_prefs 2>&1",
+            f"ls -1 {ce}/databases 2>&1",
+            f"ls -1 {de}/shared_prefs 2>&1",
+            f"ls -1 {de}/databases 2>&1",
         ]
     )
 
 
 def parse_footprint_output(
-    output: str, package: str, root_method: str | None = None
+    output: str,
+    package: str,
+    root_method: str | None = None,
+    data_dir: str | None = None,
 ) -> DataFootprint:
     """Parse :func:`footprint_script` output into a :class:`DataFootprint`."""
     result = DataFootprint(
         package=package,
-        private_dir=f"/data/data/{package}",
-        external_dir=f"/sdcard/Android/data/{package}",
         root_method=root_method,
+        data_dir=data_dir,
+        **_footprint_paths(package),
     )
     chunks = (output or "").split(_FOOTPRINT_SEP)
-    if len(chunks) < 4:
+    if len(chunks) < 7:
         result.reason = "unexpected output" if output.strip() else "no output"
         return result
-    private, external, prefs, dbs = (c.strip("\n") for c in chunks[:4])
-    result.private_kb, result.private_reason = _parse_du(private)
-    result.external_kb, result.external_reason = _parse_du(external)
-    result.shared_prefs_count = _count_entries(prefs, kind="prefs")
-    result.databases_count = _count_entries(dbs, kind="dbs")
+    ce, de, ext, ce_prefs, ce_dbs, de_prefs, de_dbs = (
+        c.strip("\n") for c in chunks[:7]
+    )
+    result.private_kb, result.private_reason = _parse_du(ce)
+    result.de_kb, result.de_reason = _parse_du(de)
+    result.external_kb, result.external_reason = _parse_du(ext)
+    result.shared_prefs_count = _sum_known(
+        _count_entries(ce_prefs, kind="prefs"), _count_entries(de_prefs, kind="prefs")
+    )
+    result.databases_count = _sum_known(
+        _count_entries(ce_dbs, kind="dbs"), _count_entries(de_dbs, kind="dbs")
+    )
     if root_method is None:
         # Unprivileged toybox du can print "Permission denied" plus a tiny
         # size of the top dir itself -- never report that as the app's size.
-        result.private_kb = None
-        result.private_reason = "root required (enable adb root)"
+        result.private_kb = result.de_kb = None
+        result.private_reason = result.de_reason = "root required (enable adb root)"
         result.shared_prefs_count = result.databases_count = None
+    result.private_total_kb = _sum_known(result.private_kb, result.de_kb)
     return result
 
 
-def get_data_footprint(package: str, serial: str | None = None) -> DataFootprint:
-    """Measure *package*'s private and external data (never raises).
+def _data_dir(package: str, serial: str | None) -> str | None:
+    """The package's ``dataDir`` (first user) from ``dumpsys package``."""
+    command = f"dumpsys package {shlex.quote(package)} | grep dataDir="
+    match = re.search(
+        r"dataDir=(\S+)", _adb_stdout(device_shell_command(command), serial)
+    )
+    return match.group(1) if match else None
 
-    Private data (``/data/data/<pkg>``) needs root; without it only the
-    external size is filled and the private fields carry a reason.
+
+def get_data_footprint(
+    package: str, serial: str | None = None, *, data_dir: str | None = None
+) -> DataFootprint:
+    """Measure *package*'s CE, DE and external data (never raises).
+
+    Private data needs root; without it only the external size is filled and
+    the private fields carry a reason.
 
     Args:
         package: Fully qualified package name.
         serial: Device serial; ``None`` = global target.
+        data_dir: The package's ``dataDir`` if already known (e.g. from
+            :func:`get_package_details`); fetched otherwise.
 
     Returns:
         A :class:`DataFootprint`.
@@ -1196,6 +1345,8 @@ def get_data_footprint(package: str, serial: str | None = None) -> DataFootprint
     if reason:
         return DataFootprint(package=package, reason=reason)
     try:
+        if data_dir is None:
+            data_dir = _data_dir(package, serial)
         method = detect_root_method(serial)
         wrap = None if method in (None, "adb root") else method
         script = _root_wrap(footprint_script(package), wrap)
@@ -1205,12 +1356,12 @@ def get_data_footprint(package: str, serial: str | None = None) -> DataFootprint
         if _FOOTPRINT_SEP not in output and "timed out" in output.lower():
             return DataFootprint(
                 package=package,
-                private_dir=f"/data/data/{package}",
-                external_dir=f"/sdcard/Android/data/{package}",
                 root_method=method,
+                data_dir=data_dir,
                 reason=f"timed out after {FOOTPRINT_TIMEOUT_SECONDS}s (du)",
+                **_footprint_paths(package),
             )
-        return parse_footprint_output(output, package, method)
+        return parse_footprint_output(output, package, method, data_dir)
     except Exception as exc:
         logger.debug("footprint failed for %s: %s", package, exc)
         return DataFootprint(package=package, reason=str(exc))
@@ -3194,9 +3345,9 @@ class AppInfoService:
         """See :func:`get_appops`."""
         return get_appops(package, self.serial)
 
-    def footprint(self, package: str) -> DataFootprint:
+    def footprint(self, package: str, data_dir: str | None = None) -> DataFootprint:
         """See :func:`get_data_footprint`."""
-        return get_data_footprint(package, self.serial)
+        return get_data_footprint(package, self.serial, data_dir=data_dir)
 
     def services(self, package: str) -> ServicesState:
         """See :func:`get_running_services`."""

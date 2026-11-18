@@ -415,6 +415,58 @@ def test_trackers_render_insight_tracker_rows() -> None:
     assert section.summary.startswith("1 tracker · 3 SDKs")
 
 
+def test_revoked_grant_and_de_storage_are_shown() -> None:
+    grants = PermissionState(
+        package=PKG,
+        permissions=[
+            PermissionGrant(
+                "android.permission.RECORD_AUDIO",
+                requested=True,
+                kind="runtime",
+                granted=True,
+                flags=["REVOKED_COMPAT"],
+                protection="dangerous",
+                revoked=True,
+                revoked_reason="REVOKED_COMPAT (legacy app: AppOps denies it)",
+            ),
+            PermissionGrant(
+                "android.permission.CAMERA",
+                requested=True,
+                kind="runtime",
+                granted=True,
+                protection="dangerous",
+            ),
+        ],
+    )
+    ops = AppOpsState(
+        package=PKG,
+        ops=[
+            AppOpEntry(
+                "CAMERA",
+                mode="ignore",
+                uid_mode="ignore",
+                permission="android.permission.CAMERA",
+            )
+        ],
+    )
+    f = AppFacts(package=PKG, permissions=grants, appops=ops)
+    section = build_permissions(f)
+    texts = {r.key: r.text for r in section.rows}
+    assert "revoked" in texts["perm:android.permission.RECORD_AUDIO"]
+    assert "revoked" in texts["perm:android.permission.CAMERA"]  # uid ignore
+    assert "0 granted" in section.summary
+    f.footprint = DataFootprint(
+        package=PKG,
+        private_dir=f"/data/data/{PKG}",
+        private_kb=24,
+        de_dir=f"/data/user_de/0/{PKG}",
+        de_kb=1048,
+        data_dir=f"/data/user_de/0/{PKG}",
+    )
+    data = {r.key: r.text for r in app_lens.build_data(f).rows}
+    assert "1.0 MB" in data["private_de"] or "1048" in data["private_de"]
+
+
 def test_route_text_names_keys_and_marks_missing_digits() -> None:
     assert route_text(["h", "b1", "v"]) == "h friTap · b1 ssl"
     assert route_text(["b6"]) == "b6 emulator (n/a)"
