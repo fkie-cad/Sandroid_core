@@ -145,6 +145,8 @@ class SpotlightService:
         self._auto_resume: bool = True
         #: Why the last spawn_app_paused() failed (None after a success).
         self.last_spawn_error: str | None = None
+        #: Package Sandroid is restarting (⇧R) right now, else None.
+        self._restarting: str | None = None
         self._event_bus = event_bus
         self._job_manager_factory = job_manager_factory
         self._logger = logger
@@ -303,21 +305,59 @@ class SpotlightService:
         if self.get_pid() == pid:
             return False
         self.set_pid(pid)
-        if self._event_bus is not None:
-            from sandroid.core.events import Event, EventType
+        self._publish_pid(effective, pid)
+        return True
 
-            self._event_bus.publish(
+    def _publish_pid(self, package: str | None, pid: int | None) -> None:
+        """Publish ``STATE_CHANGED`` (``spotlight_pid``) for the header/panel.
+
+        Falls back to the process-wide EventBus: the shared instance
+        (``get_spotlight_service``) is built without one, so every
+        ``announce_pid`` was silent and the header kept a dead PID until
+        the lifecycle action ended (13-28 s during ⇧R).
+        """
+        bus = self._event_bus
+        try:
+            from sandroid.core.events import Event, EventBus, EventType
+
+            if bus is None:
+                bus = EventBus.get()
+            bus.publish(
                 Event(
                     type=EventType.STATE_CHANGED,
                     data={
                         "change_type": "spotlight_pid",
-                        "package_name": effective,
+                        "package_name": package,
                         "pid": pid,
+                        "restarting": self._restarting is not None,
                     },
                     source="spotlight_service",
                 )
             )
-        return True
+        except Exception as e:
+            self._logger.debug(f"spotlight PID publish failed: {e}")
+
+    def begin_restart(self, package: str) -> None:
+        """Sandroid killed ``package`` to restart it (⇧R): no PID until the
+        new one is known (:meth:`announce_pid`); the header says
+        "restarting…" meanwhile. Lasts until :meth:`end_restart`.
+        """
+        self._restarting = package
+        self.set_pid(None)
+        self._publish_pid(package, None)
+
+    def end_restart(self) -> None:
+        """The restart action is over (success or failure)."""
+        if self._restarting is None:
+            return
+        package, self._restarting = self._restarting, None
+        self._publish_pid(package, self.get_pid())
+
+    def is_restarting(self, package: str | None = None) -> bool:
+        """True while Sandroid restarts ``package`` (any package if None)."""
+        if self._restarting is None:
+            return False
+        return package is None or package == self._restarting
 
     def has_app(self) -> bool:
         """Check if a spotlight app is currently set.

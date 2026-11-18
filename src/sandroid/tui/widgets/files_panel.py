@@ -89,7 +89,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -240,6 +240,58 @@ def diff_markup(diff: str | list[str]) -> str:
 
 def _fmt_time(when: datetime | None) -> str:
     return when.strftime("%H:%M:%S") if when else ""
+
+
+#: Follow notes this close to the first of a run are one Events line.
+FOLLOW_BURST = timedelta(seconds=10)
+_FOLLOW_NOTE_RE = re.compile(
+    r"^\+ (?P<label>.+?) \(PID \d+\) followed(?: · (?P<gap>.*))?$"
+)
+_GAP_RE = re.compile(r"gap ≈(\d+(?:\.\d+)?) s")
+
+
+def collapse_follow_notes(
+    notes: list[tuple[datetime, str, str]],
+) -> list[tuple[datetime, str, str]]:
+    """One line per burst of ``follow`` notes (sub-processes joining).
+
+    A restart brings 4-5 "+ tab_… (PID n) followed" lines; in a file's
+    Events they pushed the file's own events down. Consecutive follow notes
+    within :data:`FOLLOW_BURST` of the first become "+ N app processes
+    followed · tab_17, gpu, … · gap ≤X s" (each process stays in the log).
+    """
+    out: list[tuple[datetime, str, str]] = []
+    run: list[tuple[datetime, str, str]] = []
+
+    def flush() -> None:
+        if len(run) == 1:
+            out.append(run[0])
+        elif run:
+            labels, gaps = [], []
+            for _when, text, _level in run:
+                m = _FOLLOW_NOTE_RE.match(text)
+                labels.append(m.group("label") if m else text)
+                g = _GAP_RE.search(text)
+                if g:
+                    gaps.append(float(g.group(1)))
+            shown = ", ".join(labels[:4]) + (", …" if len(labels) > 4 else "")
+            text = f"+ {len(run)} app processes followed · {shown}"
+            if gaps:
+                text += f" · gap ≤{max(gaps):.1f} s"
+            out.append((run[0][0], text, "follow"))
+        run.clear()
+
+    for note in sorted(notes, key=lambda n: n[0]):
+        if note[2] == "follow" and (not run or note[0] - run[0][0] <= FOLLOW_BURST):
+            run.append(note)
+            continue
+        flush()
+        if note[2] == "follow":
+            run.append(note)
+        else:
+            out.append(note)
+    flush()
+    return out
 
 
 def _fmt_size(size: int | None) -> str:
@@ -1926,7 +1978,7 @@ class FilesPanel(Widget):
                 f"── {text} ──",
                 _NOTE_WARNING if level == "warning" else "#a3873f",
             )
-            for when, text, level in self._notes()
+            for when, text, level in collapse_follow_notes(self._notes())
         ]
         # Separators newer than an event are printed above it (newest
         # first). The newest mark before the oldest event closes the list;
