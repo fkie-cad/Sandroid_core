@@ -200,6 +200,7 @@ class FakeService:
     no_insight: set[str] = set()
     fail: set[tuple[str, str]] = set()
     footprint_dirs: list[str | None] = []
+    extra_ops: list[AppOpEntry] = []
     gates: dict[tuple[str, str], threading.Event] = {}
     version: dict[str, str] = {PKG: "4.2.0", OTHER: "9.9"}
 
@@ -263,7 +264,9 @@ class FakeService:
 
     def appops(self, package):
         self._note("appops", package)
-        return _appops()
+        state = _appops()
+        state.ops.extend(FakeService.extra_ops)
+        return state
 
     def services(self, package):
         self._note("services", package)
@@ -300,6 +303,7 @@ def fake(monkeypatch):
     FakeService.no_insight = set()
     FakeService.fail = set()
     FakeService.footprint_dirs = []
+    FakeService.extra_ops = []
     FakeService.gates = {}
     state = {"pkg": PKG}
     monkeypatch.setattr(app_lens, "make_service", FakeService)
@@ -993,3 +997,232 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         ms.close_inspector()
         await _settle(pilot)
         assert "⇧K kill" in _screen_text(app)
+
+
+def _bookkeeping_ops() -> list[AppOpEntry]:
+    """What API 35 printed for org.wikipedia: uid ``ignore`` per ungranted op."""
+    ops = [
+        AppOpEntry(name, mode="ignore", uid_mode="ignore", permission=perm)
+        for name, perm in (
+            ("READ_SMS", "android.permission.READ_SMS"),
+            ("READ_CALENDAR", "android.permission.READ_CALENDAR"),
+            ("ACCEPT_HANDOVER", None),
+        )
+    ]
+    ops.append(
+        AppOpEntry("ACCESS_RESTRICTED_SETTINGS", mode="default", package_mode="default")
+    )
+    ops.append(AppOpEntry("SYSTEM_ALERT_WINDOW", mode="deny", package_mode="deny"))
+    return ops
+
+
+def test_bookkeeping_ops_collapse_and_are_counted() -> None:
+    ops = _appops()
+    ops.ops.extend(_bookkeeping_ops())
+    data = build_permissions(AppFacts(package=PKG, permissions=_grants(), appops=ops))
+    keys = [r.key for r in data.rows]
+    assert "op:SYSTEM_ALERT_WINDOW" in keys  # deny: a mode worth a row
+    assert "op:READ_CLIPBOARD" in keys  # recorded access
+    assert {r.key for r in data.hidden_rows} == {
+        "op:READ_SMS",
+        "op:READ_CALENDAR",
+        "op:ACCEPT_HANDOVER",
+        "op:ACCESS_RESTRICTED_SETTINGS",
+    }
+    # FINE_LOCATION (granted, no access) + 5 never-used op-only rows
+    assert data.summary.endswith("2 used recently · 6 no recorded use")
+    noted = [r for r in [*data.rows, *data.hidden_rows] if "no recorded use" in r.text]
+    assert len(noted) == 6
+
+
+async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
+    FakeService.extra_ops = _bookkeeping_ops()
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        await _settle(pilot)
+        perms = sections.section("permissions")
+        keys = [r.key for r in perms.rows_shown]
+        assert keys[-1] == app_lens.MORE_KEY
+        assert "op:READ_SMS" not in keys
+        assert "+4 other ops (no recorded use)" in perms.rows_shown[-1].text
+        perms.focus()
+        perms.move_cursor(row=len(keys) - 1)
+        await _settle(pilot)
+        await pilot.press("z")
+        await _settle(pilot)
+        assert perms.expanded
+        assert not perms.folded
+        assert "op:READ_SMS" in [r.key for r in perms.rows_shown]
+        assert perms.cursor_key() == perms.data.hidden_rows[0].key
+        perms.move_cursor(row=len(perms.rows_shown) - 1)
+        await _settle(pilot)
+        assert perms.cursor_key() == app_lens.LESS_KEY
+        await pilot.press("enter")  # Enter on "hide" collapses, no Inspector
+        await _settle(pilot)
+        assert not perms.expanded
+        assert not ms.inspector_is_open
+        # a filter searches the hidden rows too
+        sections.set_filter("read_sms")
+        await _settle(pilot)
+        assert [r.key for r in perms.rows_shown] == ["op:READ_SMS"]
+
+
+def test_compact_permission_cells_combine_grant_and_use() -> None:
+    data = build_permissions(
+        AppFacts(package=PKG, permissions=_grants(), appops=_appops())
+    )
+    assert data.compact_columns == ("permission", "✓·use", "last use")
+    compact = {
+        r.key: " | ".join(c.plain for c in r.compact) for r in data.rows if r.compact
+    }
+    assert compact["perm:android.permission.CAMERA"] == "CAMERA | ✓● | 5m ago"
+    assert (
+        compact["perm:android.permission.ACCESS_FINE_LOCATION"]
+        == "ACCESS_FINE_LOCATION | ✓○ | —"
+    )
+    assert compact["perm:android.permission.READ_CONTACTS"] == "READ_CONTACTS | ✗ | —"
+    assert compact["perm:android.permission.INTERNET"] == "INTERNET | ✓ | —"
+    assert compact["op:READ_CLIPBOARD"] == "READ_CLIPBOARD | op● | 10s ago"
+
+
+async def test_narrow_lens_shows_the_compact_permission_columns(fake):
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        perms = sections.section("permissions")
+        assert len(perms.columns) == 5
+        app.focused.move_cursor(row=0)
+        await pilot.press("enter")
+        await _wait(pilot, lambda: perms.compact)
+        await _settle(pilot)
+        labels = [str(c.label) for c in perms.columns.values()]
+        assert labels == ["permission", "✓·use", "last use"]
+        cam = next(
+            i for i, r in enumerate(perms.rows_shown) if r.key.endswith("CAMERA")
+        )
+        assert [str(c) for c in perms.get_row_at(cam)] == ["CAMERA", "✓●", "5m ago"]
+        # the whole grant / AppOps detail is still in the Inspector
+        perms.focus()
+        perms.move_cursor(row=cam)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert "AppOps CAMERA" in dict(ms.inspector_content.tabs[0][1])
+        ms.close_inspector()
+        await _wait(pilot, lambda: not perms.compact)
+        assert len(perms.columns) == 5
+
+
+def test_data_says_dash_for_an_absent_external_dir() -> None:
+    fp = DataFootprint(
+        package=PKG,
+        private_dir=f"/data/data/{PKG}",
+        private_kb=13040,
+        external_dir=f"/sdcard/Android/data/{PKG}",
+        external_reason="absent",
+    )
+    data = app_lens.build_data(AppFacts(package=PKG, footprint=fp))
+    assert data.summary == "private 12.7 MB · external —"
+    external = next(r for r in data.rows if r.key == "external")
+    assert external.text.startswith("external —")
+    fp.external_reason = "permission denied"
+    assert app_lens.build_data(AppFacts(package=PKG, footprint=fp)).summary.endswith(
+        "external ?"
+    )
+
+
+async def test_quit_hook_stops_device_work_and_no_new_work_starts(fake, monkeypatch):
+    """No adb work after a quit / unmount; a running worker stops at its
+    next call (TUI exit reported an untracked "ADB Command").
+    """
+    from sandroid.tui.controllers import quit_controller as qc
+
+    killed: list[str | None] = []
+    monkeypatch.setattr(app_lens, "kill_app_lens_adb", killed.append)
+    gate = threading.Event()
+    FakeService.gates[("details", PKG)] = gate
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(
+            pilot, lambda: ("details", PKG) in {c[:2] for c in FakeService.calls}
+        )
+        assert sections.shutdown in [fn for _n, fn in qc._SHUTDOWN_HOOKS]
+        qc.run_shutdown_hooks(timeout=1.0)  # what force_exit does first
+        assert killed == [PKG]  # a worker was in flight
+        before = len(FakeService.calls)
+        gate.set()  # the load goes on: its next call is refused
+        await _wait(pilot, lambda: sections._inflight_workers == 0)
+        await _wait(pilot, lambda: not sections._runtime_inflight)
+        sections.refresh_runtime(static=True, explicit=True)
+        await _settle(pilot)
+        assert FakeService.calls[before:] == []
+    # unmount unregistered the hook
+    assert sections.shutdown not in [fn for _n, fn in qc._SHUTDOWN_HOOKS]
+
+
+def test_kill_app_lens_adb_only_kills_its_own_commands(monkeypatch) -> None:
+    import types
+
+    class Proc:
+        def __init__(self, name, cmd):
+            self._name, self._cmd, self.killed = name, cmd, False
+
+        def name(self):
+            return self._name
+
+        def cmdline(self):
+            return self._cmd.split()
+
+        def kill(self):
+            self.killed = True
+
+    procs = {
+        "du": Proc("adb", "adb -s e shell echo @@SANDROID_SEP@@ du -sk /data/x"),
+        "pull": Proc("adb", "adb pull /data/app/b.apk /tmp/sandroid_app_lens_1/b"),
+        "dumpsys": Proc("adb", f"adb -s e shell dumpsys package {PKG}"),
+        "server": Proc("adb", "adb -L tcp:5037 fork-server server --reply-fd 4"),
+        "other": Proc("adb", "adb -s e shell screencap -p"),
+        "fritap": Proc("python", f"fritap {PKG}"),
+    }
+    fake_psutil = types.SimpleNamespace(
+        Process=lambda: types.SimpleNamespace(
+            children=lambda recursive=True: list(procs.values())
+        )
+    )
+    monkeypatch.setitem(__import__("sys").modules, "psutil", fake_psutil)
+    assert app_lens.kill_app_lens_adb(PKG) == 3
+    assert {k for k, p in procs.items() if p.killed} == {"du", "pull", "dumpsys"}
+
+
+def test_force_exit_runs_the_shutdown_hooks(monkeypatch) -> None:
+    import types
+
+    from sandroid.tui.controllers import quit_controller as qc
+
+    calls: list[str] = []
+    monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: calls.append("net"))
+    monkeypatch.setattr(qc, "_SHUTDOWN_HOOKS", [("lens", lambda: calls.append("hook"))])
+    monkeypatch.setattr(
+        qc.QuitController, "_stop_frida_sessions", staticmethod(lambda: None)
+    )
+    monkeypatch.setattr(qc.QuitController, "_cleanup_rest", staticmethod(lambda: None))
+    from sandroid.core import ui_request_bus
+
+    bus = types.SimpleNamespace(shutdown=lambda: calls.append("bus"))
+    monkeypatch.setattr(ui_request_bus.UIRequestBus, "get", staticmethod(lambda: bus))
+
+    class _Tasks:
+        def stop_all(self):
+            calls.append("tasks")
+
+    from sandroid import services
+
+    monkeypatch.setattr(services, "get_task_service", _Tasks)
+    qc.QuitController().force_exit()
+    assert calls == ["bus", "net", "hook", "tasks"]

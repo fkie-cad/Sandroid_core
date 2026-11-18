@@ -86,6 +86,33 @@ def run_bounded(name: str, fn: Callable[[], Any], timeout: float) -> bool:
     return False
 
 
+#: (name, callable) run early in every quit (``force_exit``), each
+#: time-boxed: widgets whose device work is not a TaskService task (the App
+#: lens's adb reads) stop it here, before the untracked-work check.
+_SHUTDOWN_HOOKS: list[tuple[str, Callable[[], Any]]] = []
+_hooks_lock = threading.Lock()
+
+
+def register_shutdown_hook(name: str, fn: Callable[[], Any]) -> None:
+    """Run ``fn`` (any thread, must not block long) when the app quits."""
+    with _hooks_lock:
+        _SHUTDOWN_HOOKS.append((name, fn))
+
+
+def unregister_shutdown_hook(fn: Callable[[], Any]) -> None:
+    """Forget a hook added with :func:`register_shutdown_hook`."""
+    with _hooks_lock:
+        _SHUTDOWN_HOOKS[:] = [(n, f) for n, f in _SHUTDOWN_HOOKS if f != fn]
+
+
+def run_shutdown_hooks(timeout: float = 3.0) -> None:
+    """Run every registered shutdown hook, each time-boxed."""
+    with _hooks_lock:
+        hooks = list(_SHUTDOWN_HOOKS)
+    for name, fn in hooks:
+        run_bounded(name, fn, timeout)
+
+
 def shutdown_network(timeout: float = 4.0) -> None:
     """Clear the device proxy we set and stop mitmweb (time-boxed).
 
@@ -464,6 +491,10 @@ class QuitController:
         # The device must not stay pointed at a mitmweb that is about to die,
         # and mitmweb must not outlive Sandroid: first, and time-boxed.
         shutdown_network(timeout=5.0)
+
+        # Widgets' own device work (e.g. the App lens's adb reads): stop it
+        # before the tasks and long before the untracked-work check.
+        run_shutdown_hooks(timeout=3.0)
 
         # Stop all background tasks (FriTap, network capture, etc.). A friTap
         # agent that cannot unload must not hold the quit up.

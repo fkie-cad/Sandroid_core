@@ -50,6 +50,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -84,6 +85,14 @@ RUNTIME_KINDS = ("permissions", "appops", "services", "footprint", "details")
 #: Runtime kinds refreshed on STATE_CHANGED / lens activation (cheap ones).
 EVENT_KINDS = ("permissions", "appops", "services")
 
+#: Below this width (the lens next to an open Inspector at 100x30) sections
+#: with ``compact_columns`` switch to them.
+COMPACT_WIDTH = 80
+
+#: Keys of the "+N more" / "hide" toggle rows (``SectionData.hidden_rows``).
+MORE_KEY = "_more"
+LESS_KEY = "_less"
+
 #: (section id, title) in display order.
 SECTIONS: tuple[tuple[str, str], ...] = (
     ("identity", "IDENTITY"),
@@ -116,6 +125,88 @@ def make_service(serial: str | None) -> Any:
     from sandroid.services.app_info_service import AppInfoService
 
     return AppInfoService(serial)
+
+
+class LensClosedError(RuntimeError):
+    """A device call was refused: the App lens closed (unmount / quit)."""
+
+
+class _GuardedService:
+    """Wraps the data facade: every call first checks that the lens is open.
+
+    A worker in the middle of a full load (details, permissions, AppOps,
+    services, then maybe a minute-long APK pull) stops at its next call
+    once the lens closed instead of starting more adb commands.
+    """
+
+    def __init__(self, service: Any, closed: Callable[[], bool]) -> None:
+        self._service = service
+        self._closed = closed
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._service, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            if self._closed():
+                raise LensClosedError(name)
+            return attr(*args, **kwargs)
+
+        return call
+
+
+#: Command-line fingerprints of App-lens adb commands: the footprint
+#: script's chunk separator and the APK pull's temp dir. Other reads are
+#: recognised by the package name plus the command.
+_LENS_ADB_MARKERS = ("@@SANDROID_SEP@@", "sandroid_app_lens_")
+_LENS_ADB_COMMANDS = ("dumpsys", "appops", "sha256sum", "pm path", "du ", "pull")
+
+
+def kill_app_lens_adb(package: str | None) -> int:
+    """Kill this process's adb children that run App-lens commands.
+
+    Never touches the adb server or other tools' adb commands. Returns the
+    number of processes killed (0 without psutil).
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    try:
+        from sandroid.services import app_info_service as ais
+
+        markers = (getattr(ais, "_FOOTPRINT_SEP", _LENS_ADB_MARKERS[0]),)
+        markers += _LENS_ADB_MARKERS[1:]
+    except Exception:
+        markers = _LENS_ADB_MARKERS
+    killed = 0
+    try:
+        children = psutil.Process().children(recursive=True)
+    except Exception:
+        return 0
+    for child in children:
+        try:
+            name = child.name().lower()
+            cmd = " ".join(child.cmdline())
+        except Exception:
+            continue
+        if "adb" not in name:
+            continue
+        lcmd = cmd.lower()
+        if "fork-server" in lcmd or " server" in lcmd:
+            continue  # the shared adb server
+        ours = any(m in cmd for m in markers) or bool(
+            package and package in cmd and any(c in lcmd for c in _LENS_ADB_COMMANDS)
+        )
+        if not ours:
+            continue
+        try:
+            child.kill()
+            killed += 1
+        except Exception:
+            continue
+    return killed
 
 
 def active_serial() -> str | None:
@@ -175,6 +266,8 @@ class Row:
     evidence: list[tuple[str, Any]] = field(default_factory=list)
     raw: Any = None
     inspectable: bool = True
+    #: Cells for ``SectionData.compact_columns`` (narrow lens), if any.
+    compact: tuple[Any, ...] | None = None
 
     @property
     def text(self) -> str:
@@ -192,6 +285,17 @@ class SectionData:
     rows: list[Row]
     summary: str = ""
     show_header: bool = True
+    #: Rows shown only on request (z / ⏎ on the "+N" row) or while filtering.
+    hidden_rows: list[Row] = field(default_factory=list)
+    hidden_label: str = "more"
+    hidden_short: str = "more"
+    #: A narrower column set used below :data:`COMPACT_WIDTH` (rows provide
+    #: ``Row.compact``); the Inspector keeps the full details.
+    compact_columns: tuple[str, ...] | None = None
+
+
+def _plain(cells: tuple[Any, ...]) -> str:
+    return " ".join(c.plain if isinstance(c, Text) else str(c) for c in cells)
 
 
 def _t(text: Any, style: str = "") -> Text:
@@ -596,6 +700,42 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
     return ", ".join(notes), style
 
 
+def _grant_glyph(g: Any) -> Text:
+    if g.granted is None:
+        return _t("?", _DIM)
+    if g.granted and getattr(g, "revoked", False):
+        return _t("✓⊘", _BAD)
+    return _t("✓", _OK) if g.granted else _t("✗", _DIM)
+
+
+def _use_glyph(ops: list[Any]) -> Text:
+    """``●`` used recently / now, dim ``●`` used before, ``○`` no recorded use."""
+    if not ops:
+        return _t("")
+    ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
+    if any(o.running for o in ops) or (ages and min(ages) <= RECENT_SECONDS):
+        return _t("●", _WARN)
+    if any(o.last_access for o in ops):
+        return _t("●", _DIM)
+    return _t("○", _DIM)
+
+
+def _last_use(ops: list[Any]) -> Text:
+    if any(o.running for o in ops):
+        return _t("now", f"bold {_WARN}")
+    ages = [o.last_access_ago_s for o in ops if o.last_access_ago_s is not None]
+    if ages:
+        return _t(ago(min(ages)))
+    raw = next((o.last_access for o in ops if o.last_access), None)
+    return _t(_cut(raw, 12)) if raw else _t("—", _DIM)
+
+
+def _compact_perm(name: str, grant: Text, ops: list[Any]) -> tuple[Any, ...]:
+    glyph = grant.copy()
+    glyph.append_text(_use_glyph(ops))
+    return (_t(_cut(name, 22)), glyph, _last_use(ops))
+
+
 def build_permissions(f: AppFacts) -> SectionData:
     cols = ("permission", "protection", "grant", "AppOps", "note")
     state = f.permissions
@@ -677,6 +817,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                 ),
                 title=_short_perm(g.name),
                 subtitle=escape(g.name),
+                compact=_compact_perm(_short_perm(g.name), _grant_glyph(g), g_ops),
                 evidence=evidence,
                 raw={
                     "grant": _to_dict(g),
@@ -685,7 +826,11 @@ def build_permissions(f: AppFacts) -> SectionData:
             )
         )
     # Ops without a (requested) permission: READ_CLIPBOARD, *_AUDIO_FOCUS...
+    # Most are the platform's own uid-level bookkeeping ("ignore" for every
+    # runtime-permission op the app did not get): only notable ones get a
+    # row, the rest collapse into one "+N other ops" row (z / ⏎ / filter).
     extra = [o for o in ops if not o.permission or o.permission not in names]
+    hidden: list[Row] = []
     for op in sorted(
         extra,
         key=lambda o: (o.last_access_ago_s is None, o.last_access_ago_s or 0, o.op),
@@ -695,8 +840,15 @@ def build_permissions(f: AppFacts) -> SectionData:
         )
         if used:
             recent += 1
-        note = "op only" + (", used recently" if used else "")
-        rows.append(
+        never = not op.running and not op.last_access
+        if never:
+            unused += 1
+        # The protection column already says "op".
+        parts = ["used recently"] if used else []
+        parts += ["no recorded use"] if never else []
+        parts += ["rejected"] if op.last_reject else []
+        note = ", ".join(parts) or "op only"
+        (rows if op_is_notable(op) else hidden).append(
             Row(
                 key=f"op:{op.op}",
                 cells=(
@@ -704,10 +856,11 @@ def build_permissions(f: AppFacts) -> SectionData:
                     _t("op", _DIM),
                     _t("—", _DIM),
                     _op_cell([op]),
-                    _t(note, _WARN if used else _DIM),
+                    _t(_cut(note, 22), _WARN if used else _DIM),
                 ),
                 title=op.op,
                 subtitle="AppOps op without a requested permission",
+                compact=_compact_perm(op.op, _t("op", _DIM), [op]),
                 evidence=[(f"AppOps {op.op}", _op_evidence(op))],
                 raw={"appops": [_to_dict(op)]},
             )
@@ -728,7 +881,30 @@ def build_permissions(f: AppFacts) -> SectionData:
         f"{requested} requested · {dangerous} dangerous ({granted_dangerous} "
         f"granted) · {recent} used recently · {unused} no recorded use"
     )
-    return SectionData(cols, rows, summary)
+    return SectionData(
+        cols,
+        rows,
+        summary,
+        hidden_rows=hidden,
+        hidden_label="other ops (no recorded use)",
+        hidden_short="other ops",
+        compact_columns=("permission", "✓·use", "last use"),
+    )
+
+
+def op_is_notable(op: Any) -> bool:
+    """An op-only AppOps entry worth its own row.
+
+    Recorded access or rejection, running, or a mode the platform does not
+    set on its own: ``deny`` / ``foreground`` / ``errored`` or an explicit
+    package-level mode. A bare uid-level ``ignore`` (every runtime-permission
+    op the app was not granted) or ``default`` is bookkeeping.
+    """
+    if op.running or op.last_access or op.last_reject:
+        return True
+    if op.mode in ("deny", "foreground", "errored"):
+        return True
+    return op.package_mode not in (None, "default", op.uid_mode)
 
 
 # -- EXPOSURE --------------------------------------------------------------
@@ -1199,7 +1375,7 @@ def build_data(f: AppFacts) -> SectionData:
     raw = _to_dict(fp)
 
     def size(kb: int | None, reason: str | None) -> Text:
-        text = _t(human_kb(kb) if kb is not None else "?")
+        text = _t(_size_text(kb, reason))
         if reason:
             text.append(f"  {reason}", style=_DIM)
         return text
@@ -1270,10 +1446,20 @@ def build_data(f: AppFacts) -> SectionData:
             ],
         )
     )
-    summary = f"private {human_kb(fp.private_kb)} · external {human_kb(fp.external_kb)}"
+    summary = (
+        f"private {_size_text(fp.private_kb, fp.private_reason)} · "
+        f"external {_size_text(fp.external_kb, fp.external_reason)}"
+    )
     if fp.reason:
         summary += f" · {fp.reason}"
     return SectionData(cols, rows, summary, show_header=False)
+
+
+def _size_text(kb: int | None, reason: str | None) -> str:
+    """``12.7 MB``; ``—`` for a directory that does not exist; ``?`` unknown."""
+    if kb is not None:
+        return human_kb(kb)
+    return "—" if reason == "absent" else "?"
 
 
 # -- SUSPECTED DEFENCES ----------------------------------------------------
@@ -1457,7 +1643,31 @@ class LensSection(DataTable):
         self._shape: tuple | None = None
         self._column_keys: list[Any] = []
         self._summary = ""
+        self._filter_text = ""
+        #: The section's hidden rows (``SectionData.hidden_rows``) are shown.
+        self.expanded = False
+        #: Narrow column set (``SectionData.compact_columns``) in use.
+        self.compact = False
+        self._shown_cells: list[tuple[Any, ...]] = []
         self.cell_padding = 1
+
+    def toggle_expanded(self) -> None:
+        """Show / hide the section's hidden rows (the "+N" row).
+
+        The cursor goes to the first revealed row, or back to the "+N" row.
+        """
+        data = self.data
+        self.expanded = not self.expanded
+        if data is None:
+            return
+        self.show(data, self._filter_text)
+        target = (
+            data.hidden_rows[0].key if self.expanded and data.hidden_rows else MORE_KEY
+        )
+        for index, row in enumerate(self.rows_shown):
+            if row.key == target:
+                self.move_cursor(row=index, animate=False)
+                break
 
     def set_folded(self, folded: bool) -> None:
         self.folded = folded
@@ -1470,54 +1680,101 @@ class LensSection(DataTable):
         summary = f" · {self._summary}" if self._summary else ""
         self.border_title = Text(f"{arrow} {title}{summary}")
 
-    def show(self, data: SectionData, filter_text: str = "") -> None:
-        """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
-        self.data = data
+    def _visible_rows(self, data: SectionData, filter_text: str) -> list[Row]:
+        """Rows to show: matching ones while filtering (hidden rows too),
+        else the rows plus a "+N" (or "hide") row for the hidden ones.
+        """
         needle = filter_text.lower()
-        rows = [
-            r
-            for r in data.rows
-            if not needle or not r.inspectable or needle in r.text.lower()
-        ]
+        hidden = data.hidden_rows
         if needle:
-            rows = [r for r in rows if r.inspectable] or [
+            rows = [
+                r
+                for r in [*data.rows, *hidden]
+                if r.inspectable and needle in r.text.lower()
+            ] or [
                 _placeholder(
                     "nomatch", f"no rows match “{filter_text}”", len(data.columns)
                 )
             ]
-            total = sum(1 for r in data.rows if r.inspectable)
+            total = sum(1 for r in [*data.rows, *hidden] if r.inspectable)
             shown = sum(1 for r in rows if r.inspectable)
             self._summary = f"{shown} of {total} · {data.summary}"
-        else:
-            self._summary = data.summary
+            return rows
+        self._summary = data.summary
+        if not hidden:
+            return list(data.rows)
+        width = len(data.columns)
+        # Short in compact mode: the text sits in the first (name) column
+        # and would push the narrow columns out of view.
+        label = data.hidden_short if self.compact else data.hidden_label
+        if self.expanded:
+            text = (
+                f"− hide {len(hidden)} (z)"
+                if self.compact
+                else (f"− hide the {len(hidden)} {label} (z)")
+            )
+            toggle = _placeholder(LESS_KEY[1:], text, width)
+            return [*data.rows, *hidden, toggle]
+        text = (
+            f"+{len(hidden)} {label} · z"
+            if self.compact
+            else (f"+{len(hidden)} {label} — z shows them, / filters")
+        )
+        toggle = _placeholder(MORE_KEY[1:], text, width)
+        return [*data.rows, toggle]
+
+    def _columns_for(self, data: SectionData) -> tuple[str, ...]:
+        if self.compact and data.compact_columns:
+            return data.compact_columns
+        return data.columns
+
+    def _cells_for(self, row: Row, columns: tuple[str, ...]) -> tuple[Any, ...]:
+        """The row's cells for ``columns`` (compact cells when in use)."""
+        data = self.data
+        if (
+            row.compact is not None
+            and data is not None
+            and columns is data.compact_columns
+        ):
+            return row.compact
+        cells = tuple(row.cells[: len(columns)])
+        return cells + tuple(_t("") for _ in range(len(columns) - len(cells)))
+
+    def show(self, data: SectionData, filter_text: str = "") -> None:
+        """Render ``data`` (rows matching ``filter_text``); keeps the cursor."""
+        self.data = data
+        self._filter_text = filter_text
+        rows = self._visible_rows(data, filter_text)
         self._update_title()
+        columns = self._columns_for(data)
+        cells = [self._cells_for(r, columns) for r in rows]
         signature = (
-            data.columns,
+            columns,
             data.show_header,
-            tuple((r.key, r.text) for r in rows),
+            tuple((r.key, _plain(c)) for r, c in zip(rows, cells, strict=True)),
         )
         if signature == self._signature:
             # Same text; refresh the renderables (styles) only via rows_shown.
             self.rows_shown = rows
             return
-        shape = (data.columns, data.show_header, tuple(r.key for r in rows))
-        old_rows = self.rows_shown
+        shape = (columns, data.show_header, tuple(r.key for r in rows))
+        old_cells = self._shown_cells
         self._signature = signature
-        if shape == self._shape and len(old_rows) == len(rows):
+        if shape == self._shape and len(old_cells) == len(rows):
             # Same columns and rows (e.g. "5m ago" -> "5m ago" + 10 s): update
             # the changed cells in place; cursor and scroll stay put.
-            self._update_cells(old_rows, rows)
-            self.rows_shown = rows
+            self._update_cells(rows, old_cells, cells)
+            self.rows_shown, self._shown_cells = rows, cells
             return
         self._shape = shape
         cursor_key = self.cursor_key()
         scroll_x, scroll_y = self.scroll_x, self.scroll_y
         self.show_header = data.show_header
         self.clear(columns=True)
-        self._column_keys = list(self.add_columns(*data.columns))
-        for row in rows:
-            self.add_row(*row.cells, key=row.key)
-        self.rows_shown = rows
+        self._column_keys = list(self.add_columns(*columns))
+        for row, row_cells in zip(rows, cells, strict=True):
+            self.add_row(*row_cells, key=row.key)
+        self.rows_shown, self._shown_cells = rows, cells
         if cursor_key is not None:
             for index, row in enumerate(rows):
                 if row.key == cursor_key:
@@ -1528,21 +1785,33 @@ class LensSection(DataTable):
             # size is known (rows added or removed: clamped to the new end).
             self.call_after_refresh(self._restore_scroll, scroll_x, scroll_y)
 
+    def set_compact(self, compact: bool) -> None:
+        """Use the section's narrow column set (if it has one)."""
+        if compact == self.compact:
+            return
+        self.compact = compact
+        data = self.data
+        if data is not None and (data.compact_columns or data.hidden_rows):
+            self.show(data, self._filter_text)
+
     def _restore_scroll(self, x: float, y: float) -> None:
         self.scroll_to(x=x, y=y, animate=False)
 
-    def _update_cells(self, old_rows: list[Row], rows: list[Row]) -> None:
-        for old, new in zip(old_rows, rows, strict=True):
-            if old.text == new.text and old.cells == new.cells:
+    def _update_cells(
+        self,
+        rows: list[Row],
+        old_cells: list[tuple[Any, ...]],
+        new_cells: list[tuple[Any, ...]],
+    ) -> None:
+        for row, old, new in zip(rows, old_cells, new_cells, strict=True):
+            if old == new:
                 continue
-            for column, (before, after) in enumerate(
-                zip(old.cells, new.cells, strict=True)
-            ):
+            for column, (before, after) in enumerate(zip(old, new, strict=True)):
                 if before == after or column >= len(self._column_keys):
                     continue
                 try:
                     self.update_cell(
-                        new.key, self._column_keys[column], after, update_width=True
+                        row.key, self._column_keys[column], after, update_width=True
                     )
                 except Exception:
                     logger.debug("update_cell failed", exc_info=True)
@@ -1564,7 +1833,7 @@ class LensSection(DataTable):
         data = self.data
         if data is None:
             return None
-        return next((r for r in data.rows if r.key == key), None)
+        return next((r for r in [*data.rows, *data.hidden_rows] if r.key == key), None)
 
 
 class AppLensSections(Vertical):
@@ -1600,6 +1869,12 @@ class AppLensSections(Vertical):
         self._poll_timer: Any = None
         self._folded: set[str] = set()
         self._footprint_inflight: tuple[tuple[str | None, int], int] | None = None
+        self._compact = False
+        # Lifecycle: no device work after unmount / quit (see shutdown()).
+        self._lens_closed = False  # not _closed: MessagePump uses that
+        self._workers: set[Any] = set()
+        self._inflight_lock = threading.Lock()
+        self._inflight_workers = 0
 
     # -- compose ---------------------------------------------------------
 
@@ -1611,11 +1886,34 @@ class AppLensSections(Vertical):
         if not self._ui.bound:
             self._ui = UiDispatcher.capture()
         try:
+            from sandroid.tui.controllers.quit_controller import (
+                register_shutdown_hook,
+            )
+
+            register_shutdown_hook("App lens device work", self.shutdown)
+        except Exception:
+            logger.debug("App lens: no quit hook", exc_info=True)
+        try:
             self._poll_timer = self.set_interval(RUNTIME_MIN_INTERVAL, self._poll_tick)
         except Exception:
             self._poll_timer = None
 
     def on_unmount(self) -> None:
+        self.shutdown()
+        try:
+            from sandroid.tui.controllers.quit_controller import (
+                unregister_shutdown_hook,
+            )
+
+            unregister_shutdown_hook(self.shutdown)
+        except Exception:
+            pass
+        for worker in self._workers:
+            try:
+                worker.cancel()  # a thread worker cannot be interrupted
+            except Exception:
+                pass
+        self._workers = set()
         for timer in (self._poll_timer, self._trail_timer):
             if timer is not None:
                 try:
@@ -1653,6 +1951,14 @@ class AppLensSections(Vertical):
         if self._last_section:
             return self.section(self._last_section)
         return None
+
+    def on_resize(self, event: Any) -> None:
+        """Narrow lens (e.g. next to the Inspector): compact column sets."""
+        compact = event.size.width < COMPACT_WIDTH
+        if compact != self._compact:
+            self._compact = compact
+            for section in self.sections():
+                section.set_compact(compact)
 
     def on_descendant_focus(self, event: Any) -> None:
         widget = getattr(event, "widget", None)
@@ -1707,7 +2013,7 @@ class AppLensSections(Vertical):
 
         def work() -> None:
             post = self._ui.post
-            svc = make_service(serial)
+            svc = self._service(serial)
             details = svc.details(package)
             post(self._apply, token, rid, {"details": details})
             # The footprint (own worker, can take a minute) reuses the
@@ -1779,7 +2085,7 @@ class AppLensSections(Vertical):
         self._footprint_inflight = (token, rid)
 
         def work() -> None:
-            footprint = make_service(serial).footprint(package, data_dir=data_dir)
+            footprint = self._service(serial).footprint(package, data_dir=data_dir)
             self._ui.post(self._apply, token, rid, {"footprint": footprint})
             self._ui.post(self._footprint_done, token, rid)
 
@@ -1801,21 +2107,56 @@ class AppLensSections(Vertical):
         ``on_fail`` carries the worker's own token / request id, so a failed
         worker only clears its own in-flight flag, never a newer one's.
         """
+        if self._lens_closed:
+            on_fail()  # unmounted / quitting: no new device work
+            return
         if not self._ui.bound:
             self._ui = UiDispatcher.capture()  # UI thread: bind before posting
 
         def guarded() -> None:
             try:
                 work()
+            except LensClosedError:
+                logger.debug("%s abandoned: the App lens closed", name)
+                self._ui.post(on_fail)  # clear its in-flight flag all the same
             except Exception:
                 logger.debug("%s worker failed", name, exc_info=True)
                 self._ui.post(on_fail)
+            finally:
+                with self._inflight_lock:
+                    self._inflight_workers -= 1
 
+        with self._inflight_lock:
+            self._inflight_workers += 1
         try:
-            self.run_worker(guarded, name=name, thread=True, exclusive=False)
+            worker = self.run_worker(guarded, name=name, thread=True, exclusive=False)
         except Exception:
+            with self._inflight_lock:
+                self._inflight_workers -= 1
             logger.debug("could not start %s", name, exc_info=True)
             on_fail()
+            return
+        self._workers = {w for w in self._workers if not w.is_finished}
+        self._workers.add(worker)
+
+    def _service(self, serial: str | None) -> _GuardedService:
+        """The data facade, refusing new calls once the lens closed."""
+        return _GuardedService(make_service(serial), lambda: self._lens_closed)
+
+    def shutdown(self) -> None:
+        """Stop App-lens device work (quit hook + unmount; any thread).
+
+        No new device call starts after this; adb commands of this lens
+        still running (a minute-long ``du``, an APK pull) are killed, so
+        the quit's untracked-work check finds none of them.
+        """
+        self._lens_closed = True
+        with self._inflight_lock:
+            busy = self._inflight_workers > 0
+        if busy:
+            killed = kill_app_lens_adb(self.package)
+            if killed:
+                logger.debug("App lens: stopped %d adb command(s)", killed)
 
     # -- runtime refresh ---------------------------------------------------
 
@@ -1886,7 +2227,7 @@ class AppLensSections(Vertical):
 
         def work() -> None:
             post = self._ui.post
-            svc = make_service(serial)
+            svc = self._service(serial)
             if "static_cache" in kinds:
                 static = svc.static_overview(package, allow_pull=False)
                 if getattr(static, "overview", None) is not None:
@@ -2071,6 +2412,9 @@ class AppLensSections(Vertical):
             widget = sections[0] if sections else None
         if widget is None:
             return None
+        if not widget.folded and widget.cursor_key() in (MORE_KEY, LESS_KEY):
+            widget.toggle_expanded()  # z on "+N other ops": show / hide them
+            return widget
         widget.set_folded(not widget.folded)
         if widget.folded:
             self._folded.add(widget.section_id)
@@ -2083,6 +2427,9 @@ class AppLensSections(Vertical):
         if widget is None:
             return None
         row = widget.cursor_item()
+        if row is not None and row.key in (MORE_KEY, LESS_KEY):
+            widget.toggle_expanded()  # ⏎ on "+N other ops" shows them
+            return None
         if row is None or not row.inspectable:
             return None
         return row_content(widget.section_id, row)
