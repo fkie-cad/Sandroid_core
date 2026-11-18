@@ -515,6 +515,7 @@ class CAManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
 
             if result.returncode == 0:
@@ -561,6 +562,7 @@ class CAManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
 
             if result.returncode == 0:
@@ -647,6 +649,7 @@ class CAManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 )
                 if result.returncode != 0:
                     error = result.stderr or "Unknown error"
@@ -1073,6 +1076,7 @@ class CAManager:
                 ["openssl", "x509", "-in", str(cert_path), "-pubkey", "-noout"],
                 check=True,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
             )
             der = subprocess.run(
                 ["openssl", "pkey", "-pubin", "-outform", "der"],

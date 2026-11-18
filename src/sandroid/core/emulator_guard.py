@@ -117,6 +117,7 @@ def _lsof_listener_pids(port: int) -> set[int] | None:
             text=True,
             timeout=5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None

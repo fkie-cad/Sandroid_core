@@ -15,6 +15,7 @@ forensic modals with keyboard-first navigation.
 """
 
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -280,6 +281,11 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     proxy_status = reactive(ProxyStatus.NOT_SET)
     current_proxy = reactive(None)
 
+    #: A bare Enter is not an Apply this soon after the dialog opened
+    #: (typed-ahead keys) -- nor while stray typing has just closed another
+    #: dialog: the device's proxy must not change from a stray key.
+    ENTER_ARM_SECONDS = 0.6
+
     def __init__(
         self,
         name: str = None,
@@ -287,6 +293,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         classes: str = None,
     ):
         super().__init__(name=name, id=id, classes=classes)
+        self._opened_at = time.monotonic()
         self._proxy_manager = ProxyManager()
         self._ca_manager = CAManager()
         self._detected_cas: list[CAInfo] = []
@@ -1140,6 +1147,26 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             if 0 <= idx < len(self._app_rows):
                 self._app_rows.pop(idx)
                 self._rebuild_app_list()
+
+    def on_key(self, event) -> None:
+        """Enter does not apply right after opening or after stray typing."""
+        if event.key != "enter" or self._enter_armed():
+            return
+        event.stop()
+        event.prevent_default()
+        self.app.notify(
+            "Proxy Settings: Enter ignored, too soon after the dialog opened "
+            "or after stray typing. Press Enter again (or Ctrl+S) to apply.",
+            severity="warning",
+            timeout=4,
+        )
+
+    def _enter_armed(self) -> bool:
+        from sandroid.tui.modals.confirm_modal import typing_guard_active
+
+        if time.monotonic() - self._opened_at < self.ENTER_ARM_SECONDS:
+            return False
+        return not typing_guard_active(self.app)
 
     def action_cancel(self) -> None:
         """Cancel and close the modal (sync — required for ESC)."""

@@ -5,7 +5,13 @@ import logging
 import os
 from datetime import datetime
 
-from .base import CommandCategory, CommandContext, CommandHandler, CommandResult
+from .base import (
+    CommandCategory,
+    CommandContext,
+    CommandHandler,
+    CommandResult,
+    ui_answer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,11 +94,19 @@ class ExportResultsCommand(CommandHandler):
 
         try:
             if ctx.is_tui_mode and ctx.request_input:
-                filename = await ctx.request_input(
-                    title="Export Results",
-                    message="Enter filename (leave blank for default):",
-                    default=default_filename,
+                filename = await ui_answer(
+                    ctx.request_input(
+                        title="Export Results",
+                        message="Enter filename (leave blank for default):",
+                        default=default_filename,
+                    )
                 )
+                if filename is None:  # Esc / Cancel
+                    return CommandResult(
+                        success=False,
+                        message="Export cancelled",
+                        error="cancelled",
+                    )
             elif ctx.toolbox and hasattr(ctx.toolbox, "safe_input"):
                 logger.info(f"Enter export filename (default: {default_filename}):")
                 filename = ctx.toolbox.safe_input("Filename: ")
@@ -225,7 +239,7 @@ class ImportResultsCommand(CommandHandler):
                     return CommandResult(
                         success=False,
                         message="Import cancelled - no file selected",
-                        error="No file path provided",
+                        error="cancelled",
                     )
 
                 result = ctx.toolbox.import_results(file_path)
@@ -260,11 +274,15 @@ class ImportResultsCommand(CommandHandler):
 
         try:
             if ctx.is_tui_mode and ctx.request_input:
-                file_path = await ctx.request_input(
-                    title="Import Results",
-                    message="Enter path to results file:",
-                    default=default_path,
+                file_path = await ui_answer(
+                    ctx.request_input(
+                        title="Import Results",
+                        message="Enter path to results file:",
+                        default=default_path,
+                    )
                 )
+                if file_path is None:  # Esc / Cancel: no import at all
+                    return None
             elif ctx.toolbox and hasattr(ctx.toolbox, "safe_input"):
                 logger.info(f"Enter path to import (default: {default_path}):")
                 file_path = ctx.toolbox.safe_input("File path: ")
@@ -293,7 +311,7 @@ class ImportResultsCommand(CommandHandler):
             return CommandResult(
                 success=False,
                 message="Import cancelled - no file selected",
-                error="No file path provided",
+                error="cancelled",
             )
 
         # Validate file exists

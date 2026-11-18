@@ -1704,6 +1704,7 @@ class MitmproxyService:
                         **flow_log_env,
                     },
                     start_new_session=os.name == "posix",
+                    stdin=subprocess.DEVNULL,
                 )
                 self._own_group = os.name == "posix"
             except Exception as exc:

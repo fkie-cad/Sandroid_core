@@ -2223,6 +2223,11 @@ class FilesPanel(Widget):
         field.set_class(True, "-shown")
         field.focus()
         field.cursor_position = len(field.value)
+        if mode == "filter" and field.value:
+            # Reopened: the old filter is selected, typing replaces it.
+            from textual.widgets.input import Selection
+
+            field.selection = Selection(0, len(field.value))
 
     def close_input(self, cancel: bool = False) -> None:
         field = self.query_one("#files-input", _LensInput)

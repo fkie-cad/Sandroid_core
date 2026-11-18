@@ -19,6 +19,23 @@ from sandroid.core.kprobe_tracer import KprobeTracer
 from sandroid.services import get_spotlight_service
 from sandroid.tui.controllers.monitor_controller import MonitorConfig
 from sandroid.tui.modals.base import ForensicModal, KeyHintFooter
+from sandroid.tui.modals.confirm_modal import mark_focused_button
+
+
+class _StateRadio(RadioButton):
+    """A radio button whose state reads without colour: ``●`` / blank."""
+
+    @property
+    def BUTTON_INNER(self) -> str:  # Textual reads it per instance
+        return "●" if self.value else " "
+
+
+class _StateCheckbox(Checkbox):
+    """A checkbox whose state reads without colour: ``X`` / blank."""
+
+    @property
+    def BUTTON_INNER(self) -> str:  # Textual reads it per instance
+        return "X" if self.value else " "
 
 
 class MonitorConfigModal(ForensicModal[MonitorConfig]):
@@ -425,18 +442,18 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 if self._has_mode_choice:
                     by_path = MonitorConfigModal._last_mode == "path"
                     with RadioSet(id="mode-select", classes="no-compact"):
-                        yield RadioButton(
+                        yield _StateRadio(
                             self._app_label(self._follow_default),
                             id="mode-pid",
                             value=not by_path,
                         )
-                        yield RadioButton(
+                        yield _StateRadio(
                             "Path · every process writing under the paths below",
                             id="mode-path",
                             value=by_path,
                         )
                     if self._can_follow:
-                        yield Checkbox(
+                        yield _StateCheckbox(
                             "Follow the app: every process, also new and "
                             "restarted ones",
                             value=self._follow_default,
@@ -509,6 +526,13 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
                 path_input.focus()
             except Exception:
                 pass
+
+    def on_descendant_focus(self, _event) -> None:
+        # The theme painted Start as highlighted whatever had focus (E2E L4).
+        mark_focused_button(self)
+
+    def on_descendant_blur(self, _event) -> None:
+        self.call_after_refresh(mark_focused_button, self)
 
     def on_key(self, event: events.Key) -> None:
         """Handle key events, forwarding navigation to RadioSet when focused.

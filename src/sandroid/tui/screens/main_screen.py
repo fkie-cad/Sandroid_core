@@ -373,6 +373,7 @@ class MainScreen(Screen):
         self.call_later(self._subscribe_to_events)
         logger.debug("[MAIN_SCREEN] on_mount: event subscription deferred")
         self._update_lens_frame()
+        self._disable_hidden_lenses()
         try:
             self.query_one("#chat-dock").border_title = "AI chat"
         except Exception:
@@ -519,9 +520,14 @@ class MainScreen(Screen):
             self.close_inspector()
         self._update_lens_frame()
         try:
-            self.query_one(f"#{panel_id}").focus()
+            panel = self.query_one(f"#{panel_id}")
+            panel.disabled = False
+            panel.focus()
         except Exception:
             pass
+        # The other lenses go inert once focus has moved (queued after the
+        # focus above, so disabling never bounces focus around).
+        self.app.call_later(self._disable_hidden_lenses)
         # Let a freshly-activated lens refresh itself immediately.
         try:
             panel_widget = self.query_one(f"#{panel_id}")
@@ -544,6 +550,18 @@ class MainScreen(Screen):
         # goes back to "outer" and stale inner highlights are cleared.
         self._reset_nav_level_to_outer()
         self.refresh_bindings()
+
+    def _disable_hidden_lenses(self) -> None:
+        """Hidden lenses are ``disabled``: they cannot hold focus, so neither
+        their bindings nor their own key handlers can see a key (E2E: keys
+        reached the hidden App lens's ``A`` and similar through focus left
+        in a lens that was no longer shown).
+        """
+        current = self._bottom_current()
+        for spec in LENSES:
+            panel = self.lens_widget(spec.id)
+            if panel is not None:
+                panel.disabled = spec.widget_id != current
 
     def _reset_nav_level_to_outer(self) -> None:
         """Force the active nav level back to "outer" + clear stale highlights."""
@@ -1009,6 +1027,12 @@ class MainScreen(Screen):
 
         self._typing_until = time.monotonic() + self.TYPING_GUARD_SECONDS
         self._typed_ignored = ""
+
+    def typing_guard_active(self) -> bool:
+        """True while letters are treated as stray text (see on_key)."""
+        import time
+
+        return self._typing_until > time.monotonic()
 
     def _lens_binding_for(self, key: str):
         """The active lens's enabled binding for ``key`` (None if it has none)."""

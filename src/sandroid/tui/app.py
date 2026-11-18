@@ -10,9 +10,11 @@ Extracted modules:
 - ``css_resolver`` -- CSS file resolution logic
 """
 
+import collections
 import concurrent.futures
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -281,6 +283,13 @@ class SandroidTUI(App):
         # etc. -- was a no-op, and every theme rendered identically (only
         # each widget's own hardcoded Python `DEFAULT_CSS` ever applied).
         super().__init__(css_path=self._sandroid_css_path, **kwargs)
+
+        # Key serializer (see on_event): the key being handled, when it was
+        # routed, the screen it was routed on, and the keys waiting for it.
+        self._key_in_flight = None
+        self._key_routed_at = 0.0
+        self._key_screen = None
+        self._key_backlog: collections.deque = collections.deque()
 
         # Post-super init
         self._controller = MenuController.get()
@@ -998,8 +1007,117 @@ class SandroidTUI(App):
         except Exception as e:
             logger.warning(f"Deferred setup checks failed: {e}")
 
+    # -- key serializer ---------------------------------------------------------
+    #
+    # E2E (round 2, H2/H3/M1): Textual routes a key to the widget that has
+    # focus when the app *dequeues* it, not after the previous key took
+    # effect. A burst (a typed word, a paste-speed tmux send) is dequeued in
+    # one go, so every key after ``/`` was routed to the table before the
+    # filter's (deferred) focus arrived -- "heise" ran the global h/e/i/s;
+    # a letter typed right after a dialog closed went to the closing dialog
+    # and then ran the main screen's binding (quit-cancel ``y`` -> Proxy) or
+    # was lost with it (M1). So keys are handled one at a time: the next key
+    # is routed only once the previous one has travelled up to the app and
+    # the callbacks it scheduled (focus moves) have run.
+
+    #: Seconds after which a key that never came back no longer holds the
+    #: next ones (a dialog closed with the key still in its queue).
+    KEY_SETTLE_SECONDS = 0.5
+
+    async def on_event(self, event) -> None:
+        from textual import events
+
+        if isinstance(event, events.Key) and not event.is_forwarded:
+            if self._key_in_flight is not None and not self._key_stale():
+                self._key_backlog.append(event)
+                self.set_timer(self.KEY_SETTLE_SECONDS, self._key_unstick)
+                return
+            if self._key_backlog:  # a stale key: keep the order
+                self._key_backlog.append(event)
+                self._key_in_flight = None
+                self._key_next()
+                return
+            await self._route_key(event)
+            return
+        await super().on_event(event)
+
+    async def _route_key(self, event) -> None:
+        """Route one key (priority bindings, else the focused widget)."""
+        self._key_in_flight = event
+        self._key_routed_at = time.monotonic()
+        try:
+            self._key_screen = self.screen
+            target = self.focused or self.screen
+        except Exception:
+            self._key_screen = target = None
+        await super().on_event(event)
+        if target is None or not event.is_forwarded:
+            # Handled by a priority binding (or nowhere to go).
+            self.call_later(self._key_done, event)
+            return
+        if not target.call_later(self._key_hop, event, target, target, 1):
+            self.call_later(self._key_done, event)
+
+    def _key_hop(self, event, node, target, lap: int) -> None:
+        """Runs in ``node``'s queue right after it handled ``event``; follows
+        the key up to the app (where its bindings run).
+
+        Two laps: the second one starts at the key's target again, behind
+        what the key's binding posted there (Enter on a dialog button posts
+        ``Pressed``, which closes the dialog on its way up).
+        """
+        if self._key_in_flight is not event:
+            return
+        parent = None if node is self else getattr(node, "_parent", None)
+        if parent is not None and parent.call_later(
+            self._key_hop, event, parent, target, lap
+        ):
+            return
+        if lap == 1 and target.call_later(self._key_hop, event, target, target, 2):
+            return
+        # Release after what the key's action scheduled on the app (focus).
+        self.call_later(self._key_done, event)
+
+    def _key_done(self, event) -> None:
+        if self._key_in_flight is event:
+            self._key_in_flight = None
+            self._key_screen = None
+        self._key_next()
+
+    def _key_stale(self) -> bool:
+        return time.monotonic() - self._key_routed_at > self.KEY_SETTLE_SECONDS
+
+    def _key_unstick(self) -> None:
+        if self._key_in_flight is not None and self._key_stale():
+            self._key_in_flight = None
+            self._key_next()
+
+    def _key_next(self) -> None:
+        """Route the next waiting key (if no key is in flight)."""
+        if self._key_in_flight is not None or not self._key_backlog:
+            return
+        event = self._key_backlog.popleft()
+        self._key_in_flight = event  # hold the place until it is routed
+        self._key_routed_at = time.monotonic()
+        self.call_next(self._route_key, event)
+
     def on_key(self, event) -> None:
-        """Debug handler to log key presses (only when DEBUG level is enabled)."""
+        """A key that reaches the app after its screen changed is dropped.
+
+        It was routed to a dialog (or the main screen) that has gone away
+        meanwhile; the bindings that would run now belong to a different
+        screen (E2E H3: the quit dialog's stray-typing cancel, then ``y``
+        opened Proxy Settings). Also logs keys at DEBUG level.
+        """
+        if (
+            event is self._key_in_flight
+            and self._key_screen is not None
+            and self._key_screen is not self.screen
+        ):
+            event.stop()
+            event.prevent_default()
+            logger.debug(f"Key {event.key!r} dropped: its screen closed")
+            return
         if not logger.isEnabledFor(logging.DEBUG):
             return
         screen_name = type(self.screen).__name__

@@ -1759,6 +1759,256 @@ async def test_quit_dialog_opened_by_a_stray_q_is_cancelled_by_the_next_letter(
 
 
 # --------------------------------------------------------------------------
+# E2E round 2: keys typed in a burst (H2, H3, M1), hidden lenses, Import Esc
+# --------------------------------------------------------------------------
+
+_CHARS = {"grave_accent": "`", "slash": "/", "enter": "\r", "escape": None}
+
+
+def _burst(app, *keys: str) -> None:
+    """Deliver keys the way a terminal does for fast typing / tmux send-keys:
+    all queued at once, before the first one is handled (``pilot.press``
+    waits for the app to go idle between keys and hides the race).
+    """
+    from textual import events
+
+    for key in keys:
+        char = _CHARS.get(key, key if len(key) == 1 else None)
+        app.post_message(events.Key(key, char))
+
+
+async def _until_idle(pilot, n: int = 10) -> None:
+    for _ in range(n):
+        await pilot.pause(0.05)
+
+
+@pytest.mark.asyncio
+async def test_drawer_toggle_then_typed_filter_word_reaches_the_filter(
+    monkeypatch,
+) -> None:
+    """H2: `` ` `` `` ` `` ``/heise`` typed at once ran the global h (friTap,
+    which also switched to the Network lens), e (Device Info), i (Import),
+    s (Screenshot): Textual routed every key to the table that had focus
+    when the burst was dequeued, before ``/`` moved focus to the filter.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 50)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        ran: list[str] = []
+        real = app.run_action
+
+        async def spy(action, *args, **kwargs):
+            ran.append(str(action))
+            return await real(action, *args, **kwargs)
+
+        monkeypatch.setattr(app, "run_action", spy)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await _until_idle(pilot, 4)
+        _burst(app, "grave_accent", "grave_accent", "slash", *"heise")
+        await _until_idle(pilot)
+        field = panel.query_one("#files-input", Input)
+        assert field.value == "heise"
+        assert app.focused is field
+        assert type(app.screen).__name__ == "MainScreen"
+        assert ms.active_lens == "files"
+        assert ran == ["toggle_log", "toggle_log", "filter"], ran
+
+
+@pytest.mark.asyncio
+async def test_quit_cancelled_as_typing_never_runs_the_next_letter(
+    monkeypatch,
+) -> None:
+    """H3: ``q`` then ``xyz``: "Quit cancelled -- that looked like typing",
+    but the ``y`` (routed to the dialog before it closed) then ran the main
+    screen's global ``y`` = Proxy Settings.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        proxy: list[int] = []
+        exits: list[int] = []
+        monkeypatch.setattr(app, "action_proxy", lambda: proxy.append(1))
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
+        await pilot.press("q")
+        await _until_idle(pilot, 4)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        _burst(app, *"xyz")
+        await _until_idle(pilot)
+        assert proxy == []
+        assert exits == []
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in n.message for n in app._notifications)
+        # Within the guard window the next letters are text, not commands.
+        _burst(app, "y")
+        await _until_idle(pilot, 4)
+        assert proxy == []
+        assert ms.typing_guard_active()
+
+
+@pytest.mark.asyncio
+async def test_first_key_after_declining_play_is_not_lost(monkeypatch) -> None:
+    """M1: Enter declined the Play confirm and the ``p`` typed right behind
+    it was dropped: it went to the closing dialog, which took it for stray
+    typing ("that looked like typing") and swallowed it.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals import ConfirmModal
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        plays: list[int] = []
+        monkeypatch.setattr(app, "action_play", lambda: plays.append(1))
+        app.push_screen(ConfirmModal(title="Play (replay)", guard_typing=True))
+        await _until_idle(pilot, 4)
+        assert app.screen.focused.id == "no"
+        _burst(app, "enter", "p")
+        await _until_idle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert plays == [1]
+        assert not any("looked like typing" in n.message for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_first_key_after_a_lens_switch_reaches_the_new_lens() -> None:
+    """M1: ``3`` then ``/`` at once: the ``/`` went to the lens being left."""
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        await pilot.press("4")
+        await _until_idle(pilot, 4)
+        _burst(app, "3", "slash", *"aid")
+        await _until_idle(pilot)
+        assert ms.active_lens == "files"
+        assert panel.query_one("#files-input", Input).value == "aid"
+
+
+@pytest.mark.asyncio
+async def test_hidden_lenses_cannot_take_focus() -> None:
+    """Structural: a lens that is not shown is disabled, so focus (and with
+    it every key, binding or key handler) can never land inside it.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        await _until_idle(pilot, 4)
+        hidden = [ms.lens_widget(i) for i in ("app", "network", "runs")]
+        assert all(w.disabled for w in hidden)
+        assert not panel.disabled
+        network = ms.lens_widget("network")
+        ms.set_focus(network)
+        for widget in network.query("*"):
+            if widget.can_focus:
+                ms.set_focus(widget)
+        await _until_idle(pilot, 4)
+        assert ms.focused is not None
+        assert panel in ms.focused.ancestors_with_self
+        await pilot.press("2")
+        await _until_idle(pilot, 4)
+        assert not network.disabled
+        assert panel.disabled
+        assert network in ms.focused.ancestors_with_self
+
+
+@pytest.mark.asyncio
+async def test_reopened_filter_selects_the_old_text() -> None:
+    """L7: typing after ``/`` replaced nothing, it appended to the old filter."""
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        _ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        await pilot.press("slash", *"aaid", "enter")
+        await _until_idle(pilot, 4)
+        await pilot.press("slash", *"aid")
+        await _until_idle(pilot, 4)
+        assert panel.query_one("#files-input", Input).value == "aid"
+
+
+@pytest.mark.asyncio
+async def test_proxy_settings_ignore_a_bare_enter_in_the_stray_window(
+    monkeypatch,
+) -> None:
+    """H3: the Proxy Settings opened by stray typing were applied by the
+    next Enter. A bare Enter right after the dialog opened, or while stray
+    typing has just closed a dialog, does not apply.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals.confirm_modal import start_typing_guard
+    from sandroid.tui.modals.proxy_modal import ProxyModal
+
+    applied: list[int] = []
+    monkeypatch.setattr(ProxyModal, "action_apply", lambda self: applied.append(1))
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        await _boot_files(pilot, app)
+        app.push_screen(ProxyModal())
+        _burst(app, "enter")  # typed ahead
+        await _until_idle(pilot, 4)
+        modal = app.screen
+        assert isinstance(modal, ProxyModal)
+        modal.query_one("#device-ext-input", Input).focus()
+        await pilot.pause(ProxyModal.ENTER_ARM_SECONDS)
+        start_typing_guard(app)  # stray typing just closed a dialog
+        await pilot.press("enter")
+        await _until_idle(pilot, 2)
+        assert applied == []
+        assert any("Enter ignored" in n.message for n in app._notifications)
+        ms = app.screen_stack[-2]
+        ms._typing_until = 0.0  # the window is over
+        await pilot.press("enter")
+        await _until_idle(pilot, 2)
+        assert applied == [1]
+
+
+def test_import_results_escape_cancels_without_importing(tmp_path) -> None:
+    """H2 follow-on: Esc on Import Results logged "'NoneType' object can't be
+    awaited" and then imported the default path as if submitted.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from sandroid.commands.io_commands import (
+        ExportResultsCommand,
+        ImportResultsCommand,
+    )
+
+    imported: list[str] = []
+    ctx = SimpleNamespace(
+        action_queue=object(),
+        is_tui_mode=True,
+        request_input=lambda **kw: None,  # synchronous, like the real one
+        toolbox=SimpleNamespace(import_results=imported.append),
+        get_results_path=lambda: str(tmp_path),
+    )
+    result = asyncio.run(ImportResultsCommand().execute(ctx))
+    assert imported == []
+    assert result.success is False
+    assert result.error == "cancelled"
+    result = asyncio.run(ExportResultsCommand().execute(ctx))
+    assert result.error == "cancelled"
+    assert list(tmp_path.iterdir()) == []
+    # A typed path is used as typed (it was always the default before).
+    ctx.request_input = lambda **kw: str(tmp_path / "x.json")
+    asyncio.run(ImportResultsCommand().execute(ctx))
+    assert imported == [str(tmp_path / "x.json")]
+
+
+# --------------------------------------------------------------------------
 # idle ★ rows fold into one row (E2E finding 9 / owner decision A)
 # --------------------------------------------------------------------------
 

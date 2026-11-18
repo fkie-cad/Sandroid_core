@@ -8,6 +8,7 @@ from .base import (
     CommandContext,
     CommandResult,
     ToggleCommand,
+    ui_answer,
 )
 
 # Import config with fallback for standalone usage
@@ -146,14 +147,21 @@ class MonitorCommand(ToggleCommand):
                     f"Monitor by PID ({target_pid} - {app_name})",
                     f"Monitor by path ({monitor_path})",
                 ]
-                choice = await ctx.request_selection(
-                    title="Monitoring Mode",
-                    prompt="Select monitoring mode:",
-                    options=options,
+                choice = await ui_answer(
+                    ctx.request_selection(
+                        title="Monitoring Mode",
+                        message="Select monitoring mode:",
+                        options=options,
+                    )
                 )
-                if choice is not None:
-                    if choice == 1:  # Path monitoring selected
-                        target_pid = None
+                if choice is None:  # Esc / Cancel: do not start
+                    return CommandResult(
+                        success=False,
+                        message="Monitor start cancelled",
+                        error="cancelled",
+                    )
+                if choice == options[1]:  # Path monitoring selected
+                    target_pid = None
             except Exception as e:
                 logger.warning(f"Could not get user selection: {e}")
                 # Continue with default (PID if available)

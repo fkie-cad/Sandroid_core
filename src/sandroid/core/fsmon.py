@@ -338,7 +338,9 @@ class FSMon:
         )
         supported = True
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=4, stdin=subprocess.DEVNULL
+            )
             combined = ((result.stdout or "") + (result.stderr or "")).lower()
             if (
                 cls._FANOTIFY_UNSUPPORTED_SIGNATURE in combined
