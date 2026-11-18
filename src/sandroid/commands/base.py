@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from sandroid.services import ForensicService, SpotlightService, TaskService
 
 
-class CommandCategory(str, Enum):  # noqa: UP042 (StrEnum changes str())
+class CommandCategory(str, Enum):
     """Categories for organizing commands."""
 
     FORENSIC = "forensic"
