@@ -111,7 +111,9 @@ lens focused:
   check this at startup); ``b`` then ``o`` (or ``b`` again) opens
   the Objection shell (elsewhere ``b`` opens it directly). Objection loads no
   bypass hooks of its own: the ``b`` categories (BypassService) are the only
-  source of bypasses. ``Ctrl+P`` toggles SSL unpinning globally.
+  source of bypasses. ``Ctrl+P`` toggles SSL unpinning globally. Dexray
+  Intercept's own *Anti-Analysis Bypass* hook group and the ``b`` categories
+  exclude each other: starting one while the other is on is refused.
 
 .. warning::
 

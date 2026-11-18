@@ -1,7 +1,8 @@
 """BypassService is the only source of detection bypasses.
 
 Covers the consolidation: TrigDroid's bypass wrapper is gone (no module,
-import or key left).
+import or key left), emulator detection is a BypassService category, and
+Dexray Intercept's own bypass group never runs alongside BypassService.
 """
 
 from __future__ import annotations
@@ -331,3 +332,151 @@ def test_emulator_script_never_relabels_a_real_device(tmp_path) -> None:
     result = _run_emulator_harness(tmp_path, "on", device="real")
     assert result["load"]["model"] == "Pixel 6"
     assert result["load"]["tags"] == "release-keys"
+
+
+# -- Dexray bypass group <-> BypassService mutual exclusion ----------------------
+
+#: The user-facing choice both refusals must offer (verbatim from the spec).
+BYPASS_CONFLICT_CHOICE_TEXT = (
+    "choose one: Dexray's bypass group or the Bypass (b) categories"
+)
+
+
+@pytest.fixture
+def bypass_service(monkeypatch):
+    """A fresh BypassService that the Dexray side also sees."""
+    import sandroid.analysis.detection_bypass as db
+
+    svc = db.BypassService()
+    monkeypatch.setattr(db, "get_bypass_service", lambda: svc)
+    monkeypatch.setattr(svc, "_spotlight_running", lambda: False)
+    return svc
+
+
+def _dexray_monitor(bypass_hooks: bool):
+    import types
+
+    from sandroid.analysis.malwaremonitor import MalwareMonitor
+
+    mm = MalwareMonitor.__new__(MalwareMonitor)
+    mm.available = True
+    mm.running = False
+    mm.last_error = None
+    mm._accept_messages = False
+    mm._holds_bypass_claim = False
+    mm._owns_session = False
+    mm._spawned_at = None
+    mm.hook_config = {"aes_hooks": True, "bypass_hooks": bypass_hooks}
+    mm.reached_setup = False
+    toolbox = types.SimpleNamespace(malware_monitor_running=False)
+    mm._get_toolbox = lambda: toolbox
+    mm._check_and_warn_hook_conflicts = lambda: None
+    mm._run_interactive_configuration = lambda: True
+    mm._snapshot_manager = types.SimpleNamespace(discard_snapshot=lambda tb: None)
+
+    def _setup_reached(toolbox):
+        mm.reached_setup = True
+        raise RuntimeError("stop here: no device in tests")
+
+    mm._create_pre_analysis_snapshot = _setup_reached
+    return mm
+
+
+def test_dexray_bypass_group_refused_while_a_b_category_is_armed(
+    bypass_service,
+) -> None:
+    from sandroid.analysis.detection_bypass import BYPASS_CONFLICT_CHOICE
+
+    now_on, _msg = bypass_service.toggle("root")  # app not running: arm only
+    assert now_on is True
+    mm = _dexray_monitor(bypass_hooks=True)
+
+    assert mm.start_monitoring() is False
+    assert BYPASS_CONFLICT_CHOICE in mm.last_error
+    assert "Root" in mm.last_error
+    assert mm.reached_setup is False  # refused before any snapshot/session
+    assert bypass_service.exclusive_conflict() is None  # nothing claimed
+
+
+def test_dexray_without_its_bypass_group_is_not_affected(bypass_service) -> None:
+    bypass_service.toggle("root")
+    mm = _dexray_monitor(bypass_hooks=False)
+
+    assert mm.start_monitoring() is False  # our stub stops it at setup
+    assert mm.reached_setup is True
+    assert "choose one" not in (mm.last_error or "")
+    assert bypass_service.exclusive_conflict() is None
+
+
+def test_b_categories_refused_while_dexray_bypass_group_runs(
+    bypass_service, monkeypatch
+) -> None:
+    import sandroid.analysis.detection_bypass as db
+
+    mm = _dexray_monitor(bypass_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+
+    # Arming (b chord), starting (Ctrl+P / AI), the live path and Start with
+    # armed categories are all refused with the same choice.
+    now_on, msg = bypass_service.toggle("emulator")
+    assert now_on is False
+    assert BYPASS_CONFLICT_CHOICE_TEXT in msg
+    assert bypass_service.armed_categories() == []
+    ok, msg = bypass_service.start("ssl")
+    assert ok is False
+    assert BYPASS_CONFLICT_CHOICE_TEXT in msg
+    ok, msg = bypass_service.start_many(["root", "frida"])
+    assert ok is False
+    assert BYPASS_CONFLICT_CHOICE_TEXT in msg
+
+    class _NoSpawn:
+        def spawn_app_paused(self, package):
+            raise AssertionError("must refuse before spawning")
+
+        def is_spawn_mode(self):
+            return True
+
+    monkeypatch.setattr(db, "get_spotlight_service", _NoSpawn)
+    monkeypatch.setattr("sandroid.services.get_spotlight_service", _NoSpawn)
+    ok, msg = bypass_service.apply_to_fresh_spawn("org.example", ["root"])
+    assert ok is False
+    assert BYPASS_CONFLICT_CHOICE_TEXT in msg
+    ok, msg = bypass_service.apply_to_fresh_spawn_with_retry("org.example", ["root"])
+    assert ok is False
+    assert BYPASS_CONFLICT_CHOICE_TEXT in msg
+    # Turning everything off is never refused (checked before any Frida work).
+    assert bypass_service.exclusive_conflict() is not None
+
+    class _IdleJobManager:
+        def is_paused(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        "sandroid.core.toolbox.Toolbox.get_frida_job_manager", _IdleJobManager
+    )
+    monkeypatch.setattr(bypass_service, "_is_job_live", lambda jm: False)
+    assert bypass_service.set_active(set(), paused=False) == (True, "All bypasses off")
+
+    # Dexray stops (or a failed start aborts): the b categories are free.
+    mm._abort_start(mm._get_toolbox())
+    assert bypass_service.exclusive_conflict() is None
+    now_on, _msg = bypass_service.toggle("emulator")
+    assert now_on is True
+
+
+def test_a_dropped_dexray_monitor_releases_its_claim(bypass_service) -> None:
+    import gc
+
+    mm = _dexray_monitor(bypass_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+    assert bypass_service.exclusive_conflict() is not None
+    del mm
+    gc.collect()
+    assert bypass_service.exclusive_conflict() is None
+
+
+def test_hook_editor_labels_the_dexray_bypass_group_as_conflicting() -> None:
+    from sandroid.analysis.hook_config import HOOK_GROUPS
+
+    assert "Bypass (b)" in HOOK_GROUPS["bypass"]["name"]
+    assert HOOK_GROUPS["bypass"]["hooks"] == ["bypass_hooks"]

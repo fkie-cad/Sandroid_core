@@ -1659,6 +1659,16 @@ class EmulatorDetectionBypassManager(BypassManagerBase):
 #: user-facing name/message carries this tag.
 EXPERIMENTAL_SUFFIX = " (experimental)"
 
+#: Dexray Intercept's own bypass group (``bypass_hooks``: root/frida/
+#: debugger/emulator/hook detection) never runs alongside these categories:
+#: in experiments both together crashed apps (recursion in the File.exists
+#: hooks). Either side refuses to start while the other is on, with this.
+BYPASS_CONFLICT_CHOICE = (
+    "choose one: Dexray's bypass group or the Bypass (b) categories"
+)
+#: Owner name Dexray Intercept claims exclusivity under.
+DEXRAY_BYPASS_OWNER = "Dexray Intercept"
+
 _CATEGORY_DISPLAY = {
     "ssl": "SSL Pinning Bypass",
     "frida": "Frida Detection Bypass",
@@ -1718,6 +1728,70 @@ class BypassService:
         # when unregistered), so _register_task can refresh a changed display
         # without re-registering identically every toggle.
         self._task_display: str | None = None
+        # Another bypass source that holds exclusivity (Dexray's bypass
+        # group): (owner, is_alive). While set, no category may be armed or
+        # started. See claim_exclusive().
+        self._exclusive_owner: tuple[str, Callable[[], bool] | None] | None = None
+
+    # -- mutual exclusion with other bypass sources (Dexray) --------------
+
+    def claim_exclusive(
+        self, owner: str, is_alive: Callable[[], bool] | None = None
+    ) -> tuple[bool, str]:
+        """Claim the device's bypasses for another source (Dexray's group).
+
+        Refused while any category is armed or active, or while a bypass
+        load is in flight. While the claim is held, arming or starting a
+        category is refused in turn. Arming checks under ``_lock`` and a
+        load checks while holding ``_mutate_lock``, so neither side can slip
+        in between.
+
+        Args:
+            owner: User-facing name of the claiming source.
+            is_alive: Optional liveness probe; a claim whose probe returns
+                False (or raises) is dropped the next time it is checked.
+
+        Returns:
+            (ok, message). ``message`` explains a refusal.
+        """
+        with self._lock:
+            on = self._categories_by_priority(self._armed | self._active)
+            if not on and self._mutate_lock.locked():
+                return False, (
+                    f"Not starting {owner} with its bypass group: a Bypass (b) "
+                    f"change is in progress — {BYPASS_CONFLICT_CHOICE}."
+                )
+            if on:
+                names = ", ".join(self._plain_name(c) for c in on)
+                return False, (
+                    f"Not starting {owner} with its bypass group: Bypass (b) "
+                    f"has {names} on — {BYPASS_CONFLICT_CHOICE}."
+                )
+            self._exclusive_owner = (owner, is_alive)
+        return True, f"{owner} holds the bypasses"
+
+    def release_exclusive(self, owner: str) -> None:
+        """Release a claim taken with :meth:`claim_exclusive` (idempotent)."""
+        with self._lock:
+            if self._exclusive_owner and self._exclusive_owner[0] == owner:
+                self._exclusive_owner = None
+
+    def exclusive_conflict(self) -> str | None:
+        """Why a category cannot be armed/started now, or None if it can."""
+        with self._lock:
+            claim = self._exclusive_owner
+        if claim is None:
+            return None
+        owner, is_alive = claim
+        if is_alive is not None:
+            try:
+                alive = bool(is_alive())
+            except Exception:
+                alive = False
+            if not alive:
+                self.release_exclusive(owner)
+                return None
+        return f"{owner} is running with its bypass group — {BYPASS_CONFLICT_CHOICE}."
 
     # -- category metadata (data holders) ---------------------------------
 
@@ -2161,6 +2235,12 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
+            # Checked while holding _mutate_lock: claim_exclusive refuses while
+            # it is held, so a Dexray claim and this load cannot interleave.
+            if target:
+                conflict = self.exclusive_conflict()
+                if conflict:
+                    return False, conflict
             jm = Toolbox.get_frida_job_manager()
             with self._lock:
                 if on_message is not None:
@@ -2249,6 +2329,22 @@ class BypassService:
         with self._lock:
             self._armed.add(category)
 
+    def _arm_unless_claimed(self, category: str) -> str | None:
+        """Arm ``category`` unless another source holds the bypasses.
+
+        Check and arm happen under one lock acquisition, so a concurrent
+        :meth:`claim_exclusive` sees either the armed category or nothing.
+
+        Returns:
+            None when armed, else the refusal message.
+        """
+        with self._lock:
+            conflict = self.exclusive_conflict()
+            if conflict:
+                return conflict
+            self._armed.add(category)
+        return None
+
     def _disarm(self, category: str) -> None:
         with self._lock:
             self._armed.discard(category)
@@ -2277,6 +2373,9 @@ class BypassService:
         cls = self._manager_class(category)
         if cls is None:
             return False, f"Unknown bypass category: {category}"
+        conflict = self.exclusive_conflict()
+        if conflict:
+            return False, conflict
         with self._lock:
             if category in self._active:
                 return True, f"{self.display_name(category)} already active"
@@ -2323,8 +2422,10 @@ class BypassService:
             currently_on = category in self._armed or category in self._active
 
         if not currently_on:
-            # Turning ON.
-            self._arm(category)
+            # Turning ON (arming counts: refused while Dexray holds bypasses).
+            conflict = self._arm_unless_claimed(category)
+            if conflict:
+                return False, conflict
             if self._spotlight_running():
                 with self._lock:
                     target = set(self._active) | {category}
@@ -2490,6 +2591,10 @@ class BypassService:
 
         spotlight = get_spotlight_service()
         cats = set(categories)
+        if cats:
+            conflict = self.exclusive_conflict()
+            if conflict:
+                return False, conflict  # before spawning anything
 
         # A fresh spawn invalidates any prior job (it lives on a now dead/
         # replaced process). Clear script state up front so set_active loads
@@ -2610,6 +2715,10 @@ class BypassService:
 
         spotlight = get_spotlight_service()
         do_spawn = spawn_fn or self.apply_to_fresh_spawn
+        if categories:
+            conflict = self.exclusive_conflict()
+            if conflict:
+                return False, conflict  # not a spawn failure: no retry ladder
 
         # Gate: the ladder only augments spawn mode. Outside it, behave EXACTLY
         # like the pre-change single call.

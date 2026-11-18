@@ -82,10 +82,16 @@ class MonitoringHandler:
         success = monitor.start_monitoring()
 
         if not success:
+            # e.g. Dexray's bypass group refused next to Bypass (b) categories
+            reason = getattr(monitor, "last_error", None)
             return CommandResult(
                 success=False,
-                message="Failed to start malware monitor",
-                error="MalwareMonitor.start_monitoring() returned False",
+                message=(
+                    f"Failed to start malware monitor: {reason}"
+                    if reason
+                    else "Failed to start malware monitor"
+                ),
+                error=reason or "MalwareMonitor.start_monitoring() returned False",
             )
 
         self._api._malware_monitor = monitor
