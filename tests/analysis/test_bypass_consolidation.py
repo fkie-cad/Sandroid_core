@@ -190,7 +190,7 @@ const modules = {app: '/data/app/x/lib/arm64/libapp.so', sys: '/vendor/lib64/lib
                  jdk: '/apex/com.android.art/lib64/libopenjdk.so'};
 globalThis.Process = {
     findModuleByAddress: a => ({path: modules[a]}),
-    getModuleByName: () => ({findExportByName: n => n}),
+    findModuleByName: () => ({findExportByName: n => n}),
 };
 globalThis.Module = {findExportByName: (l, n) => n};
 globalThis.FLAGS = {emulator: process.argv[3] === 'on', root: false};
@@ -253,13 +253,16 @@ def _run_emulator_harness(
     import shutil
     import subprocess
 
-    from sandroid.analysis.detection_bypass import _EMULATOR_DETECTION_SCRIPT
+    from sandroid.analysis.detection_bypass import (
+        _EMULATOR_DETECTION_SCRIPT,
+        _PREAMBLE_HELPERS_JS,
+    )
 
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not installed; JS behaviour check skipped")
     script = tmp_path / "emulator.js"
-    script.write_text(_EMULATOR_DETECTION_SCRIPT)
+    script.write_text(_PREAMBLE_HELPERS_JS + _EMULATOR_DETECTION_SCRIPT)
     harness = tmp_path / "harness.js"
     harness.write_text(_NODE_HARNESS)
     proc = subprocess.run(
@@ -480,3 +483,103 @@ def test_hook_editor_labels_the_dexray_bypass_group_as_conflicting() -> None:
 
     assert "Bypass (b)" in HOOK_GROUPS["bypass"]["name"]
     assert HOOK_GROUPS["bypass"]["hooks"] == ["bypass_hooks"]
+
+
+# -- Frida 17 API guard ------------------------------------------------------------
+
+#: Static APIs Frida 17 removed: a hook using them throws inside its ``try``
+#: and silently never installs (root's native su hiding did, on 17.10).
+_FRIDA16_STATIC_API = re.compile(
+    r"\bModule\.(?:findExportByName|getExportByName|findBaseAddress"
+    r"|getBaseAddress|enumerate\w+)\(|\bMemory\.(?:read|write)\w*\("
+)
+
+
+def _merged_bundle(monkeypatch) -> str:
+    import sandroid.analysis.detection_bypass as db
+
+    monkeypatch.setattr(db, "_java_bridge_prelude", lambda: "")
+    svc = db.BypassService()
+    return svc._assemble_source(dict.fromkeys(svc.categories(), True))
+
+
+def test_merged_bundle_has_no_frida16_static_api_text(monkeypatch) -> None:
+    src = _merged_bundle(monkeypatch)
+    code = "\n".join(line.split("//", 1)[0] for line in src.splitlines())
+    assert not _FRIDA16_STATIC_API.findall(code)
+
+
+_NODE_GUARD = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const banned = [];
+const sent = [];
+function deep(name) {
+    const target = function () {};
+    return new Proxy(target, {
+        get(t, k) {
+            if (k === Symbol.toPrimitive) return () => 0;
+            if (k === 'toString' || k === 'valueOf') return () => '';
+            if (k === 'then') return undefined;
+            if (k === 'length') return 0;
+            if (k === Symbol.iterator) return function* () {};
+            return deep(name + '.' + String(k));
+        },
+        set() { return true; },
+        apply() { return deep(name + '()'); },
+        construct() { return deep('new ' + name); },
+        has() { return true; },
+    });
+}
+function banning(objName, keys) {
+    const real = deep(objName);
+    return new Proxy(real, {
+        get(t, k) {
+            if (keys.includes(String(k))) {
+                return function () { banned.push(objName + '.' + String(k)); throw new Error('banned static API ' + objName + '.' + String(k)); };
+            }
+            return real[k];
+        },
+    });
+}
+globalThis.Module = banning('Module', ['findExportByName', 'getExportByName', 'findBaseAddress', 'getBaseAddress', 'enumerateExports', 'enumerateImports', 'enumerateSymbols', 'ensureInitialized']);
+globalThis.Memory = banning('Memory', ['readUtf8String', 'writeUtf8String', 'readCString', 'readUtf16String', 'writeUtf16String', 'readAnsiString', 'writeAnsiString', 'readPointer', 'writePointer', 'readByteArray', 'writeByteArray', 'readU8', 'readS32', 'readU32', 'writeU8', 'writeS32', 'writeU32']);
+for (const g of ['Process', 'Interceptor', 'Java', 'NativeFunction', 'NativeCallback', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', 'Socket', 'File', 'Kernel', 'ApiResolver', 'ModuleMap', 'CModule', 'Instruction', 'Backtracer', 'hexdump', 'recv', 'Arm64Relocator', 'X86Relocator', 'Arm64Writer', 'X86Writer']) globalThis[g] = deep(g);
+globalThis.Java = new Proxy(deep('Java'), { get(t, k) { if (k === 'perform' || k === 'performNow') return fn => { try { fn(); } catch (e) { sent.push({javaError: '' + e}); } }; if (k === 'available') return true; return t[k]; } });
+globalThis.ptr = () => deep('ptr');
+globalThis.NULL = deep('NULL');
+globalThis.int64 = () => deep('int64'); globalThis.uint64 = () => deep('uint64');
+globalThis.send = m => sent.push(m);
+globalThis.rpc = { exports: {} };
+globalThis.setTimeout = () => 0; globalThis.setInterval = () => 0; globalThis.setImmediate = () => 0;
+globalThis.clearTimeout = () => {}; globalThis.clearInterval = () => {};
+(0, eval)(src);
+if (rpc.exports.setFlags) rpc.exports.setFlags({});
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error)}));
+"""
+
+
+def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> None:
+    """Run every category in node with the removed statics throwing."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed; JS behaviour check skipped")
+    bundle = tmp_path / "merged.js"
+    bundle.write_text(_merged_bundle(monkeypatch))
+    guard = tmp_path / "guard.js"
+    guard.write_text(_NODE_GUARD)
+    proc = subprocess.run(
+        [node, str(guard), str(bundle)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert result["banned"] == []
+    assert result["mergeErrors"] == []

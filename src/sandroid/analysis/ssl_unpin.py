@@ -327,7 +327,7 @@ function _suJavaTier() {
     // so the app's real verify mode stands.
     ['libssl.so', 'libboringssl.so'].forEach(function(lib) {
         try {
-            var set_verify = Module.findExportByName(lib, 'SSL_CTX_set_verify');
+            var set_verify = _findExport(lib, 'SSL_CTX_set_verify');
             if (set_verify) {
                 Interceptor.attach(set_verify, {
                     onEnter: function(args) {

@@ -100,6 +100,26 @@ def _java_bridge_prelude() -> str:
         return ""
 
 
+#: Realm-top helpers every category may use (part of the merged script's
+#: preamble). Frida 17 removed the static ``Module.findExportByName(lib, n)``
+#: and the static ``Memory`` string read/write helpers: a hook
+#: written against them throws inside its ``try`` and silently never
+#: installs. Use these helpers and the NativePointer instance methods
+#: (``p.readUtf8String()``, ``p.writeUtf8String(s)``) instead.
+_PREAMBLE_HELPERS_JS = r"""
+function _findExport(lib, name) {
+    try {
+        var m = Process.findModuleByName(lib);
+        if (m === null) return null;
+        return m.findExportByName(name);
+    } catch (e) {
+        return null;
+    }
+}
+function _libcExport(name) { return _findExport('libc.so', name); }
+"""
+
+
 # ---------------------------------------------------------------------------
 # Spawn-reliability failure taxonomy
 # ---------------------------------------------------------------------------
@@ -233,12 +253,11 @@ _FRIDA_DETECTION_SCRIPT = r"""
 
 // Native: hide /proc/self/maps + /proc/<pid>/status from frida-name scans
 (function () {
-    var libc = 'libc.so';
     var procFds = {};  // fd -> 1 if it's a /proc/{self,N}/maps|status read
 
     function _maybeTrack(pathPtr, fd) {
         try {
-            var path = Memory.readUtf8String(pathPtr);
+            var path = pathPtr.readUtf8String();
             if (!path) return;
             // Only newline-delimited text files. /cmdline is NUL-separated, so
             // readUtf8String would stop at argv[0] and writeUtf8String would
@@ -251,7 +270,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
     }
 
     try {
-        var openat = Module.findExportByName(libc, 'openat');
+        var openat = _libcExport('openat');
         if (openat) {
             Interceptor.attach(openat, {
                 onEnter: function (args) { this._path = args[1]; },
@@ -261,7 +280,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
                 }
             });
         }
-        var openFn = Module.findExportByName(libc, 'open');
+        var openFn = _libcExport('open');
         if (openFn) {
             Interceptor.attach(openFn, {
                 onEnter: function (args) { this._path = args[0]; },
@@ -271,13 +290,13 @@ _FRIDA_DETECTION_SCRIPT = r"""
                 }
             });
         }
-        var closeFn = Module.findExportByName(libc, 'close');
+        var closeFn = _libcExport('close');
         if (closeFn) {
             Interceptor.attach(closeFn, {
                 onEnter: function (args) { delete procFds[args[0].toInt32()]; }
             });
         }
-        var readFn = Module.findExportByName(libc, 'read');
+        var readFn = _libcExport('read');
         if (readFn) {
             Interceptor.attach(readFn, {
                 onEnter: function (args) {
@@ -290,7 +309,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
                     var n = rv.toInt32();
                     if (n <= 0) return;
                     try {
-                        var data = Memory.readUtf8String(this._buf, n);
+                        var data = this._buf.readUtf8String(n);
                         if (!data) return;
                         var filtered = data.split('\n').filter(function (l) {
                             return l.indexOf('frida') === -1 &&
@@ -300,7 +319,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
                                    l.indexOf('gadget') === -1;
                         }).join('\n');
                         if (filtered.length !== data.length) {
-                            Memory.writeUtf8String(this._buf, filtered);
+                            this._buf.writeUtf8String(filtered);
                             rv.replace(ptr(filtered.length));
                         }
                     } catch (e) {}
@@ -314,12 +333,12 @@ _FRIDA_DETECTION_SCRIPT = r"""
 
     // Native: strstr scans for 'frida'/'gum' return NULL
     try {
-        var strstr = Module.findExportByName(libc, 'strstr');
+        var strstr = _libcExport('strstr');
         if (strstr) {
             Interceptor.attach(strstr, {
                 onEnter: function (args) {
                     try {
-                        var needle = Memory.readUtf8String(args[1]);
+                        var needle = args[1].readUtf8String();
                         this._block = needle && (
                             needle.indexOf('frida') !== -1 ||
                             needle.indexOf('gum-js') !== -1 ||
@@ -341,7 +360,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
     // blocking these can crash ART).
     ['_exit', 'exit', 'abort'].forEach(function (sym) {
         try {
-            var p = Module.findExportByName(libc, sym);
+            var p = _libcExport(sym);
             if (!p) return;
             Interceptor.attach(p, {
                 onEnter: function () {
@@ -473,11 +492,11 @@ function _looksLikeRootPath(s) {
 // Native: __system_property_get for ro.debuggable / ro.secure
 (function () {
     try {
-        var sysprop = Module.findExportByName('libc.so', '__system_property_get');
+        var sysprop = _libcExport('__system_property_get');
         if (sysprop) {
             Interceptor.attach(sysprop, {
                 onEnter: function (args) {
-                    try { this._key = Memory.readUtf8String(args[0]); }
+                    try { this._key = args[0].readUtf8String(); }
                     catch (e) { this._key = null; }
                     this._out = args[1];
                 },
@@ -485,11 +504,11 @@ function _looksLikeRootPath(s) {
                     if (!FLAGS.root) return;  // inert when root bypass off
                     try {
                         if (this._key === 'ro.debuggable') {
-                            Memory.writeUtf8String(this._out, '0');
+                            this._out.writeUtf8String('0');
                             rv.replace(ptr(1));
                             send({type: 'info', hook: 'root-bypass:prop:ro.debuggable'});
                         } else if (this._key === 'ro.secure') {
-                            Memory.writeUtf8String(this._out, '1');
+                            this._out.writeUtf8String('1');
                             rv.replace(ptr(1));
                             send({type: 'info', hook: 'root-bypass:prop:ro.secure'});
                         }
@@ -511,19 +530,18 @@ function _looksLikeRootPath(s) {
 // Hermes app at boot. We deliberately do NOT hook open/openat (far too hot —
 // fopen/access cover RootBeer's actual primitives).
 (function () {
-    var libc = 'libc.so';
 
     // access(path, mode): 0 = exists. Force -1 on a su-path so it "doesn't
     // exist".
     try {
-        var accessP = Module.findExportByName(libc, 'access');
+        var accessP = _libcExport('access');
         if (accessP) {
             Interceptor.attach(accessP, {
                 onEnter: function (args) {
                     this._hide = false;
                     if (!FLAGS.root) return;  // skip path matching when off
                     try {
-                        var p = Memory.readUtf8String(args[0]);
+                        var p = args[0].readUtf8String();
                         if (_looksLikeRootPath(p)) {
                             this._hide = true;
                             this._path = p;
@@ -546,14 +564,14 @@ function _looksLikeRootPath(s) {
 
     // faccessat(dirfd, path, mode, flags): path is args[1]. Same as access().
     try {
-        var faccessatP = Module.findExportByName(libc, 'faccessat');
+        var faccessatP = _libcExport('faccessat');
         if (faccessatP) {
             Interceptor.attach(faccessatP, {
                 onEnter: function (args) {
                     this._hide = false;
                     if (!FLAGS.root) return;  // skip path matching when off
                     try {
-                        var p = Memory.readUtf8String(args[1]);
+                        var p = args[1].readUtf8String();
                         if (_looksLikeRootPath(p)) {
                             this._hide = true;
                             this._path = p;
@@ -578,14 +596,14 @@ function _looksLikeRootPath(s) {
     // NULL on a su-path so the open "fails".
     function _hookFopen(sym) {
         try {
-            var p = Module.findExportByName(libc, sym);
+            var p = _libcExport(sym);
             if (!p) return;
             Interceptor.attach(p, {
                 onEnter: function (args) {
                     this._hide = false;
                     if (!FLAGS.root) return;  // skip path matching when off
                     try {
-                        var path = Memory.readUtf8String(args[0]);
+                        var path = args[0].readUtf8String();
                         if (_looksLikeRootPath(path)) {
                             this._hide = true;
                             this._path = path;
@@ -958,18 +976,17 @@ _DEBUG_DETECTION_SCRIPT = r"""
 // checks read 0. Registered under a distinct hook id from the Frida bypass's
 // read filter; the Interceptor.attach stacks cleanly at runtime.
 (function () {
-    var libc = 'libc.so';
     var statusFds = {};
 
     function _trackStatus(pathPtr, fd) {
         try {
-            var path = Memory.readUtf8String(pathPtr);
+            var path = pathPtr.readUtf8String();
             if (path && path.indexOf('/status') !== -1) statusFds[fd] = 1;
         } catch (e) {}
     }
 
     try {
-        var openat = Module.findExportByName(libc, 'openat');
+        var openat = _libcExport('openat');
         if (openat) {
             Interceptor.attach(openat, {
                 onEnter: function (args) { this._p = args[1]; },
@@ -979,13 +996,13 @@ _DEBUG_DETECTION_SCRIPT = r"""
                 }
             });
         }
-        var closeFn = Module.findExportByName(libc, 'close');
+        var closeFn = _libcExport('close');
         if (closeFn) {
             Interceptor.attach(closeFn, {
                 onEnter: function (args) { delete statusFds[args[0].toInt32()]; }
             });
         }
-        var readFn = Module.findExportByName(libc, 'read');
+        var readFn = _libcExport('read');
         if (readFn) {
             Interceptor.attach(readFn, {
                 onEnter: function (args) {
@@ -998,13 +1015,13 @@ _DEBUG_DETECTION_SCRIPT = r"""
                     var n = rv.toInt32();
                     if (n <= 0) return;
                     try {
-                        var data = Memory.readUtf8String(this._buf, n);
+                        var data = this._buf.readUtf8String(n);
                         if (!data || data.indexOf('TracerPid:') === -1) return;
                         var filtered = data.replace(/TracerPid:\s*\d+/g, 'TracerPid:\t0');
                         if (filtered.length === data.length) return;
                         // Rewrite the buffer and shrink the reported byte count
                         // so the caller doesn't see stale trailing bytes.
-                        Memory.writeUtf8String(this._buf, filtered);
+                        this._buf.writeUtf8String(filtered);
                         rv.replace(ptr(filtered.length));
                         send({type: 'info', hook: 'debug-bypass:TracerPid=0'});
                     } catch (e) {}
@@ -1356,16 +1373,6 @@ function _isAppCaller(addr) {
         }
     } catch (e) {}
     return true;
-}
-
-function _libcExport(name) {
-    try {
-        var m = Process.getModuleByName('libc.so');
-        var a = m.findExportByName(name);
-        if (a) return a;
-    } catch (e) {}
-    try { return Module.findExportByName('libc.so', name); } catch (e) {}
-    return null;
 }
 
 // --- system properties ------------------------------------------------------
@@ -2028,8 +2035,7 @@ class BypassService:
             + "var FLAGS = "
             + json.dumps(initial_flags)
             + ";\n"
-            "var FLAG_LISTENERS = [];\n"
-            "rpc.exports = {\n"
+            "var FLAG_LISTENERS = [];\n" + _PREAMBLE_HELPERS_JS + "rpc.exports = {\n"
             "    setFlags: function (f) {\n"
             "        if (f) {\n"
             "            for (var k in f) {\n"
