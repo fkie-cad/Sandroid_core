@@ -2090,7 +2090,10 @@ class FilesPanel(Widget):
         if row.watched is None:
             path = self._absolute(row.key)
             if path is not None and wl.add_path(path) and path in wl.rows:
-                wl.pull([path])
+                # Watching pulls a first version already: no second pull of
+                # the same file on top of it.
+                if not wl.is_pulling(path):
+                    wl.pull([path])
                 return
         self.app.notify("Nothing to pull for this row yet.", severity="warning")
 

@@ -394,7 +394,14 @@ async def test_u_pulls_the_row_and_U_pulls_all(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
-    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull({AAID: "x"}))
+    pulled: list[str] = []
+    fake = _fake_pull({AAID: "x"})
+
+    def _pull(self, remote_path, local_path, compute_hash=False):
+        pulled.append(remote_path)
+        return fake(self, remote_path, local_path, compute_hash)
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", _pull)
     app = _Harness()
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
@@ -406,8 +413,11 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
         await _wait_for(
             pilot,
             lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY,
-            timeout=8.0,  # watch + baseline pull run on a worker; slow under load
         )
+        # Watching pulls the first version; u adds no second pull of the
+        # file on top of it (the two used to race on the staging folder).
+        assert not panel.watchlist.is_pulling(AAID)
+        assert pulled.count(AAID) == 1
 
 
 @pytest.mark.asyncio
