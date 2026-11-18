@@ -50,6 +50,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -124,6 +125,88 @@ def make_service(serial: str | None) -> Any:
     from sandroid.services.app_info_service import AppInfoService
 
     return AppInfoService(serial)
+
+
+class LensClosedError(RuntimeError):
+    """A device call was refused: the App lens closed (unmount / quit)."""
+
+
+class _GuardedService:
+    """Wraps the data facade: every call first checks that the lens is open.
+
+    A worker in the middle of a full load (details, permissions, AppOps,
+    services, then maybe a minute-long APK pull) stops at its next call
+    once the lens closed instead of starting more adb commands.
+    """
+
+    def __init__(self, service: Any, closed: Callable[[], bool]) -> None:
+        self._service = service
+        self._closed = closed
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._service, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            if self._closed():
+                raise LensClosedError(name)
+            return attr(*args, **kwargs)
+
+        return call
+
+
+#: Command-line fingerprints of App-lens adb commands: the footprint
+#: script's chunk separator and the APK pull's temp dir. Other reads are
+#: recognised by the package name plus the command.
+_LENS_ADB_MARKERS = ("@@SANDROID_SEP@@", "sandroid_app_lens_")
+_LENS_ADB_COMMANDS = ("dumpsys", "appops", "sha256sum", "pm path", "du ", "pull")
+
+
+def kill_app_lens_adb(package: str | None) -> int:
+    """Kill this process's adb children that run App-lens commands.
+
+    Never touches the adb server or other tools' adb commands. Returns the
+    number of processes killed (0 without psutil).
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    try:
+        from sandroid.services import app_info_service as ais
+
+        markers = (getattr(ais, "_FOOTPRINT_SEP", _LENS_ADB_MARKERS[0]),)
+        markers += _LENS_ADB_MARKERS[1:]
+    except Exception:
+        markers = _LENS_ADB_MARKERS
+    killed = 0
+    try:
+        children = psutil.Process().children(recursive=True)
+    except Exception:
+        return 0
+    for child in children:
+        try:
+            name = child.name().lower()
+            cmd = " ".join(child.cmdline())
+        except Exception:
+            continue
+        if "adb" not in name:
+            continue
+        lcmd = cmd.lower()
+        if "fork-server" in lcmd or " server" in lcmd:
+            continue  # the shared adb server
+        ours = any(m in cmd for m in markers) or bool(
+            package and package in cmd and any(c in lcmd for c in _LENS_ADB_COMMANDS)
+        )
+        if not ours:
+            continue
+        try:
+            child.kill()
+            killed += 1
+        except Exception:
+            continue
+    return killed
 
 
 def active_serial() -> str | None:
@@ -1787,6 +1870,11 @@ class AppLensSections(Vertical):
         self._folded: set[str] = set()
         self._footprint_inflight: tuple[tuple[str | None, int], int] | None = None
         self._compact = False
+        # Lifecycle: no device work after unmount / quit (see shutdown()).
+        self._lens_closed = False  # not _closed: MessagePump uses that
+        self._workers: set[Any] = set()
+        self._inflight_lock = threading.Lock()
+        self._inflight_workers = 0
 
     # -- compose ---------------------------------------------------------
 
@@ -1798,11 +1886,34 @@ class AppLensSections(Vertical):
         if not self._ui.bound:
             self._ui = UiDispatcher.capture()
         try:
+            from sandroid.tui.controllers.quit_controller import (
+                register_shutdown_hook,
+            )
+
+            register_shutdown_hook("App lens device work", self.shutdown)
+        except Exception:
+            logger.debug("App lens: no quit hook", exc_info=True)
+        try:
             self._poll_timer = self.set_interval(RUNTIME_MIN_INTERVAL, self._poll_tick)
         except Exception:
             self._poll_timer = None
 
     def on_unmount(self) -> None:
+        self.shutdown()
+        try:
+            from sandroid.tui.controllers.quit_controller import (
+                unregister_shutdown_hook,
+            )
+
+            unregister_shutdown_hook(self.shutdown)
+        except Exception:
+            pass
+        for worker in self._workers:
+            try:
+                worker.cancel()  # a thread worker cannot be interrupted
+            except Exception:
+                pass
+        self._workers = set()
         for timer in (self._poll_timer, self._trail_timer):
             if timer is not None:
                 try:
@@ -1902,7 +2013,7 @@ class AppLensSections(Vertical):
 
         def work() -> None:
             post = self._ui.post
-            svc = make_service(serial)
+            svc = self._service(serial)
             details = svc.details(package)
             post(self._apply, token, rid, {"details": details})
             # The footprint (own worker, can take a minute) reuses the
@@ -1974,7 +2085,7 @@ class AppLensSections(Vertical):
         self._footprint_inflight = (token, rid)
 
         def work() -> None:
-            footprint = make_service(serial).footprint(package, data_dir=data_dir)
+            footprint = self._service(serial).footprint(package, data_dir=data_dir)
             self._ui.post(self._apply, token, rid, {"footprint": footprint})
             self._ui.post(self._footprint_done, token, rid)
 
@@ -1996,21 +2107,56 @@ class AppLensSections(Vertical):
         ``on_fail`` carries the worker's own token / request id, so a failed
         worker only clears its own in-flight flag, never a newer one's.
         """
+        if self._lens_closed:
+            on_fail()  # unmounted / quitting: no new device work
+            return
         if not self._ui.bound:
             self._ui = UiDispatcher.capture()  # UI thread: bind before posting
 
         def guarded() -> None:
             try:
                 work()
+            except LensClosedError:
+                logger.debug("%s abandoned: the App lens closed", name)
+                self._ui.post(on_fail)  # clear its in-flight flag all the same
             except Exception:
                 logger.debug("%s worker failed", name, exc_info=True)
                 self._ui.post(on_fail)
+            finally:
+                with self._inflight_lock:
+                    self._inflight_workers -= 1
 
+        with self._inflight_lock:
+            self._inflight_workers += 1
         try:
-            self.run_worker(guarded, name=name, thread=True, exclusive=False)
+            worker = self.run_worker(guarded, name=name, thread=True, exclusive=False)
         except Exception:
+            with self._inflight_lock:
+                self._inflight_workers -= 1
             logger.debug("could not start %s", name, exc_info=True)
             on_fail()
+            return
+        self._workers = {w for w in self._workers if not w.is_finished}
+        self._workers.add(worker)
+
+    def _service(self, serial: str | None) -> _GuardedService:
+        """The data facade, refusing new calls once the lens closed."""
+        return _GuardedService(make_service(serial), lambda: self._lens_closed)
+
+    def shutdown(self) -> None:
+        """Stop App-lens device work (quit hook + unmount; any thread).
+
+        No new device call starts after this; adb commands of this lens
+        still running (a minute-long ``du``, an APK pull) are killed, so
+        the quit's untracked-work check finds none of them.
+        """
+        self._lens_closed = True
+        with self._inflight_lock:
+            busy = self._inflight_workers > 0
+        if busy:
+            killed = kill_app_lens_adb(self.package)
+            if killed:
+                logger.debug("App lens: stopped %d adb command(s)", killed)
 
     # -- runtime refresh ---------------------------------------------------
 
@@ -2081,7 +2227,7 @@ class AppLensSections(Vertical):
 
         def work() -> None:
             post = self._ui.post
-            svc = make_service(serial)
+            svc = self._service(serial)
             if "static_cache" in kinds:
                 static = svc.static_overview(package, allow_pull=False)
                 if getattr(static, "overview", None) is not None:

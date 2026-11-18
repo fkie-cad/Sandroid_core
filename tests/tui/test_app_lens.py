@@ -1130,3 +1130,96 @@ def test_data_says_dash_for_an_absent_external_dir() -> None:
     assert app_lens.build_data(AppFacts(package=PKG, footprint=fp)).summary.endswith(
         "external ?"
     )
+
+
+async def test_quit_hook_stops_device_work_and_no_new_work_starts(fake, monkeypatch):
+    """No adb work after a quit / unmount; a running worker stops at its
+    next call (TUI exit reported an untracked "ADB Command").
+    """
+    from sandroid.tui.controllers import quit_controller as qc
+
+    killed: list[str | None] = []
+    monkeypatch.setattr(app_lens, "kill_app_lens_adb", killed.append)
+    gate = threading.Event()
+    FakeService.gates[("details", PKG)] = gate
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(
+            pilot, lambda: ("details", PKG) in {c[:2] for c in FakeService.calls}
+        )
+        assert sections.shutdown in [fn for _n, fn in qc._SHUTDOWN_HOOKS]
+        qc.run_shutdown_hooks(timeout=1.0)  # what force_exit does first
+        assert killed == [PKG]  # a worker was in flight
+        before = len(FakeService.calls)
+        gate.set()  # the load goes on: its next call is refused
+        await _wait(pilot, lambda: sections._inflight_workers == 0)
+        await _wait(pilot, lambda: not sections._runtime_inflight)
+        sections.refresh_runtime(static=True, explicit=True)
+        await _settle(pilot)
+        assert FakeService.calls[before:] == []
+    # unmount unregistered the hook
+    assert sections.shutdown not in [fn for _n, fn in qc._SHUTDOWN_HOOKS]
+
+
+def test_kill_app_lens_adb_only_kills_its_own_commands(monkeypatch) -> None:
+    import types
+
+    class Proc:
+        def __init__(self, name, cmd):
+            self._name, self._cmd, self.killed = name, cmd, False
+
+        def name(self):
+            return self._name
+
+        def cmdline(self):
+            return self._cmd.split()
+
+        def kill(self):
+            self.killed = True
+
+    procs = {
+        "du": Proc("adb", "adb -s e shell echo @@SANDROID_SEP@@ du -sk /data/x"),
+        "pull": Proc("adb", "adb pull /data/app/b.apk /tmp/sandroid_app_lens_1/b"),
+        "dumpsys": Proc("adb", f"adb -s e shell dumpsys package {PKG}"),
+        "server": Proc("adb", "adb -L tcp:5037 fork-server server --reply-fd 4"),
+        "other": Proc("adb", "adb -s e shell screencap -p"),
+        "fritap": Proc("python", f"fritap {PKG}"),
+    }
+    fake_psutil = types.SimpleNamespace(
+        Process=lambda: types.SimpleNamespace(
+            children=lambda recursive=True: list(procs.values())
+        )
+    )
+    monkeypatch.setitem(__import__("sys").modules, "psutil", fake_psutil)
+    assert app_lens.kill_app_lens_adb(PKG) == 3
+    assert {k for k, p in procs.items() if p.killed} == {"du", "pull", "dumpsys"}
+
+
+def test_force_exit_runs_the_shutdown_hooks(monkeypatch) -> None:
+    import types
+
+    from sandroid.tui.controllers import quit_controller as qc
+
+    calls: list[str] = []
+    monkeypatch.setattr(qc, "shutdown_network", lambda timeout=0: calls.append("net"))
+    monkeypatch.setattr(qc, "_SHUTDOWN_HOOKS", [("lens", lambda: calls.append("hook"))])
+    monkeypatch.setattr(
+        qc.QuitController, "_stop_frida_sessions", staticmethod(lambda: None)
+    )
+    monkeypatch.setattr(qc.QuitController, "_cleanup_rest", staticmethod(lambda: None))
+    from sandroid.core import ui_request_bus
+
+    bus = types.SimpleNamespace(shutdown=lambda: calls.append("bus"))
+    monkeypatch.setattr(ui_request_bus.UIRequestBus, "get", staticmethod(lambda: bus))
+
+    class _Tasks:
+        def stop_all(self):
+            calls.append("tasks")
+
+    from sandroid import services
+
+    monkeypatch.setattr(services, "get_task_service", _Tasks)
+    qc.QuitController().force_exit()
+    assert calls == ["bus", "net", "hook", "tasks"]
