@@ -866,19 +866,6 @@ def test_open_noise_does_not_redate_a_row() -> None:
     assert model.paths[PREFS].last == T0
 
 
-def test_scan_and_stat_findings_are_marked() -> None:
-    from sandroid.tui.controllers.monitor_controller import scan_item
-
-    model = FileActivity()
-    model.ingest([scan_item("FSE_CONTENT_MODIFIED", DB + "-wal", "stat")], now=T0)
-    event = model.paths[DB].events[-1]
-    assert (event.via, event.source) == ("-wal", "stat")
-    # A stop-rescan D for a file already known deleted is not repeated.
-    model.ingest(_items(_fse("FSE_DELETE", AAID)), now=T0)
-    model.ingest([scan_item("FSE_DELETE", AAID, "scan")], now=T0)
-    assert model.paths[AAID].count == 1
-
-
 @pytest.mark.asyncio
 async def test_short_paths_name_the_package_in_review_and_for_other_apps(
     tmp_path,

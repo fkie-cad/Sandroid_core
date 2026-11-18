@@ -94,7 +94,6 @@ from . import file_inspect
 from .lens_shell import InspectorContent, Mark, SessionMarks, is_shown
 from .monitor_view import (
     OPS,
-    SOURCE_TEXT,
     FileActivity,
     NoiseRules,
     PathActivity,
@@ -104,7 +103,6 @@ from .monitor_view import (
     smart_truncate,
 )
 from .watchlist_view import RowState, WatchlistView
-from .watchlist_view import is_database_path as _is_database
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -1643,23 +1641,6 @@ class FilesPanel(Widget):
         else:
             grid.add_row("activity", Text("none seen yet", style=_DIM))
         sections: list = [("", grid)]
-        if not row.pattern and _is_database(row.key):
-            # H2: the probes attribute writes by the file opened under the
-            # monitor; a database the app opened before the start is only
-            # caught by the periodic re-stat (and the stop rescan).
-            sections.append(
-                (
-                    "Note",
-                    Text(
-                        "Databases are usually opened when the app starts. If "
-                        "that was before the monitor, their writes are found by "
-                        "a re-stat every few seconds (events marked “re-stat”), "
-                        "not as they happen. Start the monitor before the app "
-                        "(spawn) to see every write.",
-                        style=_DIM,
-                    ),
-                )
-            )
         wl = self._watchlist_or_none()
         info = wl.rows.get(row.key) if wl is not None else None
         if info is not None:
@@ -1719,8 +1700,6 @@ class FilesPanel(Widget):
                 extra.append(f"directory {app_relative(ev.other)} deleted")
             elif ev.other:
                 extra.append(f"from {app_relative(ev.other)}")
-            if ev.source in SOURCE_TEXT and ev.source != "parent":
-                extra.append(SOURCE_TEXT[ev.source])
             if ev.process:
                 extra.append(ev.process)
             if extra:

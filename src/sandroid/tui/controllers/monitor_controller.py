@@ -506,28 +506,6 @@ _O_TRUNC = 0x200
 _SELF_COMMS = ("sync svc",)
 
 
-def scan_item(fse_token: str, path: str, source: str) -> FileSystemMonitorItem:
-    """An item that did not come from a probe, marked with ``source``.
-
-    The monitor itself no longer produces any (the former re-stat / stop
-    rescan sources ``"stat"``/``"scan"`` are gone: writes through files
-    opened before the start are named by the write probes); kept for the
-    Files lens's handling of such sources.
-    """
-    meta = MONITOR_EVENT_INFO[fse_token]
-    directory, filename = _split_dir_filename(path)
-    return FileSystemMonitorItem(
-        label=meta.label,
-        color=meta.color,
-        category=meta.category,
-        source=source,
-        directory=directory,
-        filename=filename,
-        process="",
-        path=path,
-    )
-
-
 # Kernel ERR_PTR range: the top 4 KiB (MAX_ERRNO) of the 64-bit address space.
 # do_filp_open returns an ERR_PTR (e.g. -ENOENT) on a FAILED open, and its
 # r:dfor return probe reports that value as the "file*". Storing it in the

@@ -302,18 +302,9 @@ class FileEvent:
     process: str = ""
     other: str | None = None  # rename: the other side of the rename
     via: str = ""  # "-wal"/"-journal" when folded onto the database
-    #: How it was seen when not by a probe: "stat" (periodic re-stat of a
-    #: file opened before the monitor started), "scan" (rescan after a stop),
+    #: Set when the event was derived rather than reported for this path:
     #: "parent" (its directory was deleted), "renamed" (moved away).
     source: str = ""
-
-
-#: Readable form of :attr:`FileEvent.source` for the Inspector.
-SOURCE_TEXT = {
-    "stat": "seen by re-stat",
-    "scan": "found by the stop rescan",
-    "parent": "directory deleted",
-}
 
 
 @dataclass
@@ -518,13 +509,8 @@ class FileActivity:
                 continue
             if category == "attrs" and "/" not in key:
                 continue  # an unresolved dentry basename: no orphan rows
-            source = getattr(item, "source", "") or ""
-            source = source if source in ("stat", "scan") else ""
             key, via = split_companion(key)
             row = self.paths.get(key)
-            if source == "scan" and category == "delete" and row is not None:
-                if row.deleted:
-                    continue  # already known (e.g. via its deleted directory)
             if row is None:
                 row = self.paths[key] = PathActivity(key=key)
                 parent = self.paths.get(key.rsplit("/", 1)[0])
@@ -538,7 +524,6 @@ class FileActivity:
                 process=getattr(item, "process", "") or "",
                 other=other,
                 via=via,
-                source=source,
             )
             row.add(event, segment)
             touched.add(key)
@@ -664,7 +649,6 @@ __all__ = [
     "OS_PREFIXES",
     "RULE_ACTIONS",
     "RULE_KINDS",
-    "SOURCE_TEXT",
     "FileActivity",
     "FileEvent",
     "NoiseRule",

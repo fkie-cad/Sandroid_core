@@ -316,6 +316,9 @@ async def test_versions_and_content_tabs_in_the_app(tmp_path):
             "Content",
             "Events",
         ]
+        # No "found by a re-stat" note on database rows any more: the write
+        # probes name writes through files opened before the monitor.
+        assert "re-stat" not in _sections_text(ms.inspector_content.tabs[0][1])
         await pilot.press("right_square_bracket")
         assert inspector.tab_name == "Versions"
         assert "Diff  v3" in _sections_text(ms.inspector_content.tabs[1][1])

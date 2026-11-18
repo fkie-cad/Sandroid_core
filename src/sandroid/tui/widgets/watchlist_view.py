@@ -105,16 +105,6 @@ class _RowInfo:
 #: purpose: it changes on every read.
 SQLITE_COMPANIONS = ("-wal", "-journal")
 
-_DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3")
-
-
-def is_database_path(path: str) -> bool:
-    """A path that is (by name) an SQLite database."""
-    name = path.rsplit("/", 1)[-1].lower()
-    if name.endswith(_DB_SUFFIXES):
-        return True
-    return "/databases/" in path and "." not in name
-
 
 def _file_facts(path: Path) -> tuple[int | None, str | None]:
     """``(size, sha256)`` of a pulled file, ``(None, None)`` if unreadable."""
