@@ -785,7 +785,7 @@ def test_app_and_network_lens_keys_do_not_clash() -> None:
     assert "enter" not in app_lens_keys
     assert "enter" not in net
     assert app_lens_keys["space"] == "primary"
-    assert net["space"] == "start_stop"
+    assert net["space"] == "start_mitm"  # Space never stops mitmproxy
     assert app_lens_keys["slash"] == "filter" == net["slash"]
     assert app_lens_keys["z"] == "fold"
     assert app_lens_keys["u"] == "refresh_facts"

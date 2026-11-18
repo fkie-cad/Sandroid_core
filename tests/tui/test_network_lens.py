@@ -142,9 +142,9 @@ def write_flows(
                     if req and "=" in str(req)
                     else None
                 ),
-                "response_content_type": "application/json"
-                if resp and str(resp).startswith("{")
-                else None,
+                "response_content_type": (
+                    "application/json" if resp and str(resp).startswith("{") else None
+                ),
             }
             f.write(json.dumps(rec) + "\n")
             (flow_dir / "details" / f"flow-{seq}.json").write_text(
@@ -203,6 +203,14 @@ def test_recipient_labels():
         pytest.skip("Dexray Insight >= 2.0 not importable here (fallback table)")
     assert recipient_of("unity3d.com") == ("Unity", True)
     assert recipient_of("unityads.unity3d.com") == ("Unity Ads", True)
+
+
+def test_recipient_labels_fall_through_hosts_insight_does_not_know(monkeypatch):
+    import sandroid.tui.widgets.network_panel as net
+
+    monkeypatch.setattr(net, "_INSIGHT_LABELLER", lambda host: None)
+    assert recipient_of("graph.facebook.com") == ("Meta", True)
+    assert recipient_of("api.fittrack.de") == ("fittrack.de", False)
 
 
 def test_recipient_labels_fall_back_without_insight(monkeypatch):
@@ -373,6 +381,14 @@ async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
         await pilot.press("space")
         await _settle(pilot)
         assert calls == ["toggle"]
+        # Space only starts: with mitmproxy running it stops nothing (M does).
+        monkeypatch.setattr(panel.mitm, "is_running", lambda: True)
+        await pilot.press("space")
+        await _settle(pilot)
+        assert calls == ["toggle"]
+        await pilot.press("M")
+        await _settle(pilot)
+        assert calls == ["toggle", "toggle"]
 
 
 async def test_flows_fill_the_table_noise_hidden(flow_dir):

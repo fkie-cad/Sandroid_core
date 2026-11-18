@@ -60,7 +60,7 @@ class MitmproxyPanel(Widget):
     lens (see ``NetworkPanel.BINDINGS``) and call the ``action_*`` methods
     below:
 
-        Space / M: start / stop mitmweb (bare — touches nothing on the device)
+        Space: start mitmweb · M: start / stop it (bare — touches nothing on the device)
         Ctrl+D: toggle the Device Proxy on/off (our mitmproxy)
         Ctrl+N: install the mitmproxy CA into the system trust store
         Ctrl+R: restart mitmweb and re-apply device + app proxies
@@ -660,10 +660,12 @@ class MitmproxyPanel(Widget):
         rows = [
             (
                 "mitmweb",
-                f"[#4ade80]● running[/]  {st.listen_host}:{st.proxy_port} → "
-                f"web :{st.web_port}"
-                if running
-                else f"[#5b6479]○ stopped[/]  (port {st.proxy_port})",
+                (
+                    f"[#4ade80]● running[/]  {st.listen_host}:{st.proxy_port} → "
+                    f"web :{st.web_port}"
+                    if running
+                    else f"[#5b6479]○ stopped[/]  (port {st.proxy_port})"
+                ),
             )
         ]
         capture = self._capture_tag()
@@ -672,9 +674,11 @@ class MitmproxyPanel(Widget):
         rows.append(
             (
                 "CA",
-                "[#4ade80]✓[/] in the system trust store"
-                if self._ca_ok
-                else "[#5b6479]○ not installed[/]  ^N",
+                (
+                    "[#4ade80]✓[/] in the system trust store"
+                    if self._ca_ok
+                    else "[#5b6479]○ not installed[/]  ^N"
+                ),
             )
         )
         rows.append(
@@ -699,8 +703,15 @@ class MitmproxyPanel(Widget):
             rows.append(("TLS failures", f"[#fb7185]{st.tls_failures}[/]"))
         return rows
 
+    def is_running(self) -> bool:
+        """True while the mitmweb process runs."""
+        try:
+            return bool(self._service.is_running())
+        except Exception:
+            return False
+
     def action_toggle_running(self) -> None:
-        """Enter — bare Start/Stop of the mitmweb process.
+        """M (Space starts only) — bare Start/Stop of the mitmweb process.
 
         Touches NOTHING on the device when starting (a foreign device proxy is
         left alone). Stopping first clears OUR device proxy so we never leave it

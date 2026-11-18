@@ -238,8 +238,9 @@ def recipient_of(host: str) -> tuple[str, bool]:
     """``(label, known)``: a known tracker/vendor name, else the domain.
 
     The name comes from Dexray Insight's tracker database (one source for
-    the App lens's SDK list and these labels); without Insight 2.x the
-    built-in ``_RECIPIENTS`` table is used.
+    the App lens's SDK list and these labels); a host Insight does not
+    know, or no Insight 2.x at all, falls back to the built-in
+    ``_RECIPIENTS`` table before the bare domain.
     """
     h = (host or "").lower()
     labeller = _insight_labeller()
@@ -250,7 +251,7 @@ def recipient_of(host: str) -> tuple[str, bool]:
             match = None
         if match:
             return str(match[0]), True
-        return registrable_domain(h) or "?", False
+        # Not in Insight's database: the built-in table may still know it.
     for suffix, label in _RECIPIENTS:
         if _host_matches(h, suffix):
             return label, True
@@ -679,7 +680,9 @@ class NetworkPanel(Widget):
         # Shown in the footer, which keeps two lens keys: "␣ start mitm" and
         # "^D device proxy" while nothing is captured, then "/" and "T".
         # Space, not Enter: Enter means "inspect" in every lens (MainScreen).
-        Binding("space", "start_stop", "Start/stop mitm", key_display="␣"),
+        # Space only STARTS mitmproxy; stopping it (which also clears our
+        # device proxy) stays on the deliberate M.
+        Binding("space", "start_mitm", "Start mitm", key_display="␣"),
         Binding("slash", "filter", "Filter"),
         Binding("T", "toggle_app_only", "App only"),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
@@ -1838,7 +1841,7 @@ class NetworkPanel(Widget):
     # -- actions ---------------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        if action == "start_stop":
+        if action == "start_mitm":
             # Only while nothing is captured (footer room); M works always.
             return not self.in_review and not self._model()
         if action == "toggle_phases":
@@ -1848,7 +1851,12 @@ class NetworkPanel(Widget):
             return bool(self._model())
         return True
 
-    def action_start_stop(self) -> None:
+    def action_start_mitm(self) -> None:
+        """Space: start mitmproxy; never stops it (M does)."""
+        mitm = self.mitm
+        if mitm is not None and mitm.is_running():
+            self.app.notify("mitmproxy is already running — M stops it", timeout=3)
+            return
         self.action_mitm("toggle_running")
 
     def action_mitm(self, name: str) -> None:
