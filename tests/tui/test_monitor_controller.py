@@ -2708,3 +2708,171 @@ def test_kprobe_items_carry_capture_time_and_the_app_process_pid(monkeypatch):
     )
     (bare,) = plain.feed(_REC_WAL)
     assert bare.pid == 12262
+
+
+# =============================================================================
+# E2E round 2: process attribution (M4), stop (M8), exit detection (L2)
+# =============================================================================
+
+from sandroid.tui.controllers.monitor_controller import (
+    _recent_event_from_item,
+)
+
+#: A thread born after the monitor started (not in the watch's TID table),
+#: as the device prints it with the instance's ``record-tgid`` option.
+_TGID_WAL = _REC_WAL.replace(
+    " PlacesStorageWr-12262   [003]", " Classifier Upda-5656    (   4665) [003]"
+)
+#: The same thread while the kernel's pid->tgid map didn't have it yet.
+_NO_TGID_WAL = _TGID_WAL.replace("(   4665)", "(-------)")
+_TGID_OPEN = (
+    " Classifier Upda-5656    (   4665) [003] ...1. 16650.1: openat2: "
+    '(do_sys_openat2+0x0/0x10c) fname="/data/data/org.mozilla.firefox/files/x.tmp" '
+    "flags=0x241"
+)
+_TGID_DFOR = (
+    " Classifier Upda-5656    (   4665) [003] ...1. 16650.2: dfor: "
+    "(do_sys_openat2+0xd0/0x10c <- do_filp_open) file=0xffffff801d3e9000 "
+    "mode=0x10001f"
+)
+
+
+def _tgid_translator(watch):
+    translator = KprobeStreamTranslator()
+    translator.reset(
+        MonitorConfig(mode="pid", app_name=_PKG, follow=True, target_path=_FF)
+    )
+    translator.set_write_scope(
+        build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+    )
+    translator.set_process_labels(watch.label_for_tid, watch.pid_for_tid)
+    return translator
+
+
+def test_a_thread_born_after_start_is_attributed_to_its_process_by_tgid():
+    """M4: the TID was written as ``pid`` with only the thread's name."""
+    device = _FakeDevice(_procs(main=4665))
+    watch = _watch(device)
+    watch.seed({4665: [4665]}, watch.initial_processes())
+    assert watch.pid_for_tid(5656) is None  # the follow table doesn't know it
+    translator = _tgid_translator(watch)
+
+    (item,) = translator.feed(_TGID_WAL)
+    assert (item.pid, item.tid) == (4665, 5656)
+    assert item.process == "main · Classifier Upda"
+    assert _recent_event_from_item(item)["tid"] == 5656
+    # "(-------)": the kernel didn't know it yet -- an earlier line did.
+    (later,) = translator.feed(_NO_TGID_WAL)
+    assert (later.pid, later.tid, later.process) == (4665, 5656, item.process)
+    # A CREATE is decided on the do_filp_open RETURN line: same label.
+    assert translator.feed(_TGID_OPEN) == []
+    (created,) = translator.feed(_TGID_DFOR)
+    assert created.label == "CREATE"
+    assert (created.pid, created.process) == (4665, "main · Classifier Upda")
+
+
+def test_the_label_is_stable_per_process_and_names_unknown_processes_by_pid():
+    device = _FakeDevice(_procs(main=4665))
+    watch = _watch(device)
+    watch.seed({4665: [4665]}, watch.initial_processes())
+    translator = _tgid_translator(watch)
+    main_thread = _REC_WAL.replace(
+        " PlacesStorageWr-12262   [003]", " mozilla.firefox-4665    (   4665) [003]"
+    )
+    (item,) = translator.feed(main_thread)
+    assert item.process == "main · mozilla.firefox"
+    # A process the watch has no name for (yet): "pid N", never a bare thread.
+    child = _REC_WAL.replace(
+        " PlacesStorageWr-12262   [003]", " GeckoChild-7001    (   7000) [003]"
+    )
+    (other,) = translator.feed(child)
+    assert (other.pid, other.tid) == (7000, 7001)
+    assert other.process == "pid 7000 · GeckoChild"
+    # The follow table still answers for a line without the TGID column.
+    watch.seed({4665: [4665, 4670]}, watch.initial_processes())
+    legacy = _REC_WAL.replace("PlacesStorageWr-12262", "PlacesStorageWr-4670")
+    (old_format,) = translator.feed(legacy)
+    assert (old_format.pid, old_format.tid) == (4665, 4670)
+    assert old_format.process == "main · PlacesStorageWr"
+
+
+def test_the_main_threads_exit_wakes_the_poll_at_once():
+    """L2: after ``am force-stop`` the exit waited for the 5 s poll."""
+    device = _FakeDevice(_procs(main=24310))
+    watch = _watch(device)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    other = (
+        "  mozilla.firefox-9999    [001] d..2. 9876.6: sched_process_exit: "
+        "comm=mozilla.firefox pid=9999 prio=120"
+    )
+    watch.on_rename_line(other)
+    assert not watch._wake.is_set()  # not a followed process
+    watch.on_rename_line(other.replace("9999", "24310"))
+    assert watch._wake.is_set()
+
+
+def test_stop_says_stopping_at_once_and_cleans_up_off_the_ui_thread():
+    """M8: a stop froze the UI for 12-18 s with the old caption up."""
+    deferred: list = []
+    controller = _make_controller(run_off_thread=deferred.append)
+    device = _FakeDevice(_procs(main=24310))
+    watch = _watch(device)
+    watch.seed({24310: [24310]}, watch.initial_processes())
+    stopped: list = []
+    wrapper = type("W", (), {"config": watch.config, "watch": watch})()
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=wrapper,
+        stop_callback=lambda: stopped.append(1),
+        app_name=_PKG,
+    )
+    seen: list = []
+
+    def _cb(event):
+        if event.source == "monitor":
+            seen.append(event.data)
+
+    EventBus.get().subscribe(EventType.TASK_OUTPUT, _cb)
+    try:
+        assert controller.stop() is True
+    finally:
+        EventBus.get().unsubscribe(EventType.TASK_OUTPUT, _cb)
+    assert stopped == []  # nothing slow ran on the calling (UI) thread
+    assert watch.caption() == ("monitor stopping…", [f"App {_PKG}"])
+    assert any(d.get("monitor_status") for d in seen)  # the caption redraws
+    assert controller.can_start() == (
+        False,
+        "Monitor is still stopping — please wait.",
+    )
+    assert controller.stop() is True  # a second o: no second stop
+    assert len(deferred) == 1
+    deferred[0]()
+    assert stopped == [1]
+    assert not controller.is_running()
+    assert controller.can_start() == (True, "")
+
+
+def test_natural_exit_leaves_a_requested_stops_teardown_to_the_stopper():
+    """The reader notices the killed stream first: it must not run the
+    (adb-heavy) teardown on the UI thread while the stopping thread does.
+    """
+    calls: list = []
+
+    class _Wrapper:
+        stop_requested = True
+
+        def run_teardown(self):
+            calls.append("teardown")
+
+    controller = _make_controller()
+    get_task_service().register(
+        name="monitor",
+        display_name="Monitor",
+        instance=_Wrapper(),
+        stop_callback=lambda: None,
+        app_name=_PKG,
+    )
+    controller._monitor_ended()
+    assert calls == []
+    assert not controller.is_running()

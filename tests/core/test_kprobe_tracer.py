@@ -791,23 +791,26 @@ def test_teardown_removes_instance_last(monkeypatch):
 
     KprobeTracer.teardown()
 
-    cmds = fake.commands
-    tracing_off_idx = next(
-        i for i, c in enumerate(cmds) if "tracing_on" in c and "echo 0" in c
-    )
+    # M8 (round 2): the whole teardown is ONE adb round-trip (it was ~30,
+    # 12-18 s per stop); the steps keep their order inside it.
+    assert len(fake.commands) == 1
+    (script,) = fake.commands
+    tracing_off_idx = script.index("echo 0 > /sys/kernel/tracing/instances")
     # Match the INSTANCE rmdir precisely -- "rmdir" is also a probe name.
-    rmdir_idx = next(
-        i for i, c in enumerate(cmds) if "rmdir /sys/kernel/tracing/instances" in c
-    )
-    pid_clear_idx = next(i for i, c in enumerate(cmds) if "set_event_pid" in c)
-    probe_remove_idx = next(i for i, c in enumerate(cmds) if "-:openat2" in c)
+    rmdir_idx = script.index("rmdir /sys/kernel/tracing/instances")
+    pid_clear_idx = script.index("set_event_pid")
+    probe_remove_idx = script.index("-:openat2")
+    buffer_idx = script.index("echo 7 > ")
     assert tracing_off_idx < rmdir_idx
     assert pid_clear_idx < rmdir_idx
     assert probe_remove_idx < rmdir_idx
+    assert buffer_idx < rmdir_idx
     # Instance removal is the LAST tracefs operation.
-    assert rmdir_idx == len(cmds) - 1
-    # Buffer size restored before removal.
-    assert any("buffer_size_kb" in c and "echo 7" in c for c in cmds)
+    assert (
+        script.rstrip("'")
+        .rstrip()
+        .endswith("rmdir /sys/kernel/tracing/instances/sandroid_mon 2>/dev/null")
+    )
 
 
 def test_teardown_is_idempotent_and_swallows_errors(monkeypatch):
@@ -1169,9 +1172,11 @@ def test_kprobe_supported_false_when_the_parent_offset_is_wrong(monkeypatch):
 
 from sandroid.core.kprobe_tracer import (
     android_comm,
+    exit_filter,
     parse_add_output,
     parse_app_listing,
     parse_overruns,
+    parse_process_exit,
     parse_task_rename,
     process_label,
     rename_filter,
@@ -1395,7 +1400,7 @@ def test_rename_watch_falls_back_when_the_filter_is_refused(monkeypatch):
     filters: list[str] = []
 
     def _filter(cmd):
-        if "/filter" in cmd:
+        if "task_rename/filter" in cmd:
             filters.append(cmd)
             return len(filters) >= 2
         return False
@@ -1406,7 +1411,10 @@ def test_rename_watch_falls_back_when_the_filter_is_refused(monkeypatch):
             [
                 (lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", "")),
                 (_filter, ("OK", "")),
-                (lambda c: "/filter" in c, ("", "write error: Invalid argument")),
+                (
+                    lambda c: "task_rename/filter" in c,
+                    ("", "write error: Invalid argument"),
+                ),
             ]
         ),
     )
@@ -1425,3 +1433,57 @@ def test_self_clean_also_removes_a_leaked_follow_instance(monkeypatch):
         "rmdir /sys/kernel/tracing/instances/sandroid_follow" in c
         for c in fake.commands
     )
+
+
+# =============================================================================
+# E2E round 2: TGID per line (M4), one-call teardown (M8), exit hint (L2)
+# =============================================================================
+
+
+def test_session_records_the_tgid_on_every_line(monkeypatch):
+    """M4: threads born after the start carried only their TID."""
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, _captured, _ = _capture_run(monkeypatch)
+    KprobeTracer.run_by_app([4665])
+    opt = "/instances/sandroid_mon/options/record-tgid"
+    assert any(opt in c and "echo 1 > " in c for c in fake.commands)
+
+
+def test_rename_watch_also_watches_the_main_threads_exit(monkeypatch):
+    fake = _install(
+        monkeypatch,
+        _FakeShell(
+            [(lambda c: "mkdir -p" in c and "sandroid_follow" in c, ("OK", ""))]
+        ),
+    )
+    monkeypatch.setattr(KprobeTracer, "_start_process", classmethod(lambda cls, c: "p"))
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    assert KprobeTracer.start_rename_watch(FFX) == "p"
+    (cmd,) = [c for c in fake.commands if "sched_process_exit/filter" in c]
+    assert 'comm == "mozilla.firefox"' in cmd
+    assert 'comm == "org.mozilla.fir"' in cmd
+    # Enabled only once the filter was accepted (&&): never device-wide.
+    assert cmd.index("/filter") < cmd.index("sched_process_exit/enable")
+    assert " && echo 1 > " in cmd
+
+
+def test_exit_filter_and_parse():
+    assert exit_filter(None) is None
+    assert exit_filter("bad pkg;rm") is None
+    assert exit_filter("com.x") == 'comm == "com.x"'
+    line = (
+        "  mozilla.firefox-4665    [001] d..2. 9876.6: sched_process_exit: "
+        "comm=mozilla.firefox pid=4665 prio=120"
+    )
+    assert parse_process_exit(line) == 4665
+    assert parse_process_exit(_REC_RENAME) is None
+
+
+def test_follow_instance_removal_is_one_adb_call(monkeypatch):
+    fake = _install(monkeypatch, _FakeShell([]))
+    KprobeTracer._tracefs = "/sys/kernel/tracing"
+    KprobeTracer.stop_rename_watch()
+    (cmd,) = fake.commands
+    assert "task_rename/enable" in cmd
+    assert "sched_process_exit/enable" in cmd
+    assert cmd.index("tracing_on") < cmd.index("rmdir")

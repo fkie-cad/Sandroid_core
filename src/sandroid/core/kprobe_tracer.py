@@ -843,12 +843,16 @@ class KprobeTracer:
 
     @classmethod
     def _remove_follow_instance(cls, tracefs: str) -> None:
-        """Guarded, idempotent removal of the follow instance."""
+        """Guarded, idempotent removal of the follow instance (ONE adb call)."""
         inst = cls._follow_dir(tracefs)
-        ev = f"{inst}/events/task/task_rename"
-        cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
-        cls._shell(f"[ -e {ev}/enable ] && echo 0 > {ev}/enable")
-        cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+        steps = [f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on"]
+        for ev in (
+            f"{inst}/events/task/task_rename",
+            f"{inst}/events/sched/sched_process_exit",
+        ):
+            steps.append(f"[ -e {ev}/enable ] && echo 0 > {ev}/enable")
+        steps.append(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+        cls._shell(" ; ".join(steps))
 
     @classmethod
     def start_rename_watch(cls, package: str) -> subprocess.Popen | None:
@@ -883,6 +887,17 @@ class KprobeTracer:
             res = cls._shell(f"echo {cls._dq(expr)} > {ev}/filter && echo OK")
             if "OK" in res and "rror" not in res and "nvalid" not in res:
                 break
+        # The app's main thread exiting (force-stop, crash, kill) wakes the
+        # follower's poll at once instead of at its next slow tick. Only
+        # with the in-kernel comm filter accepted: unfiltered, every thread
+        # exit device-wide would wake it.
+        exit_expr = exit_filter(package)
+        if exit_expr:
+            xev = f"{inst}/events/sched/sched_process_exit"
+            cls._shell(
+                f"[ -e {xev}/filter ] && echo {cls._dq(exit_expr)} > {xev}/filter"
+                f" && echo 1 > {xev}/enable"
+            )
         cls._shell(f"echo 1 > {ev}/enable && echo 1 > {inst}/tracing_on")
         return cls._start_process(
             cls._build_adb_cmd("shell", "cat", f"{inst}/trace_pipe")
@@ -970,6 +985,13 @@ class KprobeTracer:
         # restore it (belt-and-suspenders if the instance rmdir later fails).
         cls._orig_buffer_kb = cls._shell(f"cat {inst}/buffer_size_kb").strip() or None
         cls._shell(f"echo {cls._BUFFER_SIZE_KB} > {inst}/buffer_size_kb")
+        # Every line then carries the writer's TGID next to its thread id
+        # ("comm-TID (  TGID) [cpu]"): a thread born after the session
+        # started is attributed to its process without a /proc lookup. The
+        # kernel fills its pid->tgid map at the next context switch, so a
+        # line read before that shows "(-------)" (see KprobeStreamTranslator).
+        tgid_opt = f"{inst}/options/record-tgid"
+        cls._shell(f"[ -e {tgid_opt} ] && echo 1 > {tgid_opt}")
         cmdlines = f"{tracefs}/saved_cmdlines_size"
         if cls._orig_cmdlines is None:
             first = cls._shell(f"cat {cmdlines} 2>/dev/null").strip().split("\n")[0]
@@ -1084,34 +1106,38 @@ class KprobeTracer:
         inst = cls._instance_dir(tracefs)
         events = f"{tracefs}/kprobe_events"
         try:
+            # ONE adb round-trip: the steps run in this order in one device
+            # shell (``;`` -- a failed step never stops the next). As ~30
+            # separate ``adb shell`` calls a stop took 12-18 s.
             # Guarded like _self_clean: in path mode nc/sx are never installed,
             # so their per-probe disable + `-:name` removal would otherwise warn
             # on every stop. Existence tests keep stderr clean.
-            cls._shell(f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on")
+            steps = [f"[ -e {inst}/tracing_on ] && echo 0 > {inst}/tracing_on"]
             for name in cls._PROBE_NAMES:
                 enable = f"{inst}/events/kprobes/{name}/enable"
-                cls._shell(f"[ -e {enable} ] && echo 0 > {enable}")
-            cls._shell(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
+                steps.append(f"[ -e {enable} ] && echo 0 > {enable}")
+            steps.append(f"[ -e {inst}/set_event_pid ] && echo > {inst}/set_event_pid")
             if cls._orig_buffer_kb:
-                cls._shell(
+                steps.append(
                     f"[ -e {inst}/buffer_size_kb ] "
                     f"&& echo {cls._orig_buffer_kb} > {inst}/buffer_size_kb"
                 )
             for name in cls._PROBE_NAMES:
-                cls._shell(
+                steps.append(
                     f'grep -q "kprobes/{name} " {events} 2>/dev/null '
                     f"&& echo {cls._dq('-:' + name)} >> {events}"
+                )
+            if cls._orig_cmdlines:
+                cmdlines = f"{tracefs}/saved_cmdlines_size"
+                steps.append(
+                    f"[ -e {cmdlines} ] && echo {cls._orig_cmdlines} > {cmdlines}"
+                    " 2>/dev/null"
                 )
             # Instance removal LAST (after the pipe is released + probes gone).
             # (The follow instance is removed by MonitorWatch.stop before
             # this runs, and by _self_clean on the next start if it leaked.)
-            cls._shell(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
-            if cls._orig_cmdlines:
-                cmdlines = f"{tracefs}/saved_cmdlines_size"
-                cls._shell(
-                    f"[ -e {cmdlines} ] && echo {cls._orig_cmdlines} > {cmdlines}"
-                    " 2>/dev/null"
-                )
+            steps.append(f"[ -d {inst} ] && rmdir {inst} 2>/dev/null")
+            cls._shell(" ; ".join(steps))
         except Exception:
             cls.logger.debug("kprobe teardown swallowed an error", exc_info=True)
         finally:
@@ -1652,6 +1678,28 @@ def rename_filter(package: str | None) -> str:
             if clause not in clauses:
                 clauses.append(clause)
     return " || ".join(clauses)
+
+
+def exit_filter(package: str | None) -> str | None:
+    """In-kernel filter for ``sched:sched_process_exit`` of the app's main
+    thread (its comm), or ``None`` when the package can't be filtered on.
+    """
+    if not package or not _PACKAGE_RE.match(package):
+        return None
+    clauses = [f'comm == "{android_comm(package)}"']
+    prefix = f'comm == "{package[:COMM_LEN]}"'
+    if prefix not in clauses:
+        clauses.append(prefix)
+    return " || ".join(clauses)
+
+
+_EXIT_RE = re.compile(r"sched_process_exit:\s+comm=.*?\s+pid=(\d+)")
+
+
+def parse_process_exit(line: str) -> int | None:
+    """The pid (TID) of a ``sched_process_exit`` trace line, or None."""
+    m = _EXIT_RE.search(line or "")
+    return int(m.group(1)) if m else None
 
 
 _RENAME_RE = re.compile(

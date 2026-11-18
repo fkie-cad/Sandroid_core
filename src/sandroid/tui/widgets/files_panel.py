@@ -105,7 +105,7 @@ from sandroid.core.file_diff import is_legacy_markup_line
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
-from .lens_shell import InspectorContent, Mark, SessionMarks, is_shown
+from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
 from .monitor_view import (
     OPS,
     FileActivity,
@@ -132,6 +132,8 @@ _REFRESH_INTERVAL = 0.4
 _W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 5, 8
 
 _DIM = "#5b6479"
+#: A monitor note that stands out (restart, exit, lost events).
+_NOTE_WARNING = "#fb923c"
 _STAR = "#7dd3fc"
 _STATE_STAR = {
     RowState.CHANGED: "bold #facc15",
@@ -749,9 +751,11 @@ class FilesPanel(Widget):
         the lens; milliseconds + UTC offset), ``at_source`` (``capture`` /
         ``batch``), ``op``/``category``, ``path`` (+ ``new_path`` of a
         rename), ``pkg`` (the app whose data directory holds the path, when
-        known), ``process`` (fsmon's process / the kernel comm), ``pid``
-        when the backend reports one, ``source`` (fsmon / kprobe) and
-        ``mark`` (the number of the mark whose segment the event is in,
+        known), ``process`` (fsmon's process / the kernel comm, in app
+        scope "<app process> · <thread>"), ``pid`` when the backend reports
+        one (kprobe: the writing thread's process, TGID), ``tid`` (kprobe:
+        the writing thread; ``None`` for fsmon), ``source`` (fsmon / kprobe)
+        and ``mark`` (the number of the mark whose segment the event is in,
         ``None`` before the first).
         """
         if not batch:
@@ -795,6 +799,7 @@ class FilesPanel(Widget):
                         "pkg": pkg,
                         "process": getattr(item, "process", "") or None,
                         "pid": getattr(item, "pid", None),
+                        "tid": getattr(item, "tid", None),
                         "source": getattr(item, "source", None),
                         "mark": mark,
                     }
@@ -931,6 +936,8 @@ class FilesPanel(Widget):
             if watched is not None:
                 row = pinned.setdefault(key, _Row(key=key, watched=watched))
                 row.activity = act
+                if self._hidden_only(stats):
+                    stats = None  # only hidden OPEN events: still idle
                 row.stats = stats
                 row.dim = segment is not None and stats is None
                 continue
@@ -987,6 +994,14 @@ class FilesPanel(Widget):
                     member.depth = 1
                     out.append(member)
         return out
+
+    def _hidden_only(self, stats: SegmentStats | None) -> bool:
+        """Every event in ``stats`` is of a hidden (verbose) kind -- OPEN
+        and the like -- while the raw view (``N``) is off.
+        """
+        if stats is None or not stats.ops or self.activity.show_all:
+            return False
+        return all(self.activity.category_mode(c) == "verbose" for c in stats.ops)
 
     @staticmethod
     def _group_row(folder: str, members: list[_Row]) -> _Row:
@@ -1271,6 +1286,8 @@ class FilesPanel(Widget):
         stats = row.stats
         if stats is None and row.activity is not None and self._segment is None:
             stats = row.activity.stats(None)
+        if self._hidden_only(stats):
+            stats = None  # no empty ops column with a count of hidden events
         ops = Text()
         if stats is not None:
             for letter, color in stats.op_letters():
@@ -1374,7 +1391,11 @@ class FilesPanel(Widget):
             title = self._review_title()
             parts = [f"{len(rows)} files"] if self._review_record is not None else []
         else:
-            title = "LIVE" if self._segment is None else self._segment_title()
+            running, _task = self._monitor_task()
+            if self._segment is not None:
+                title = self._segment_title()
+            else:
+                title = "LIVE" if running else "monitor off"
             wl = self._watchlist_or_none()
             n_groups = sum(1 for r in rows if r.group is not None and not r.fold)
             n_paths = sum(
@@ -1396,7 +1417,6 @@ class FilesPanel(Widget):
                 parts.append(f"by {self._sort}")
             if self._segment is not None:
                 parts.append("A all · </> marks")
-            running, _task = self._monitor_task()
             watching = wl is not None and wl.has_watches
             if not running and watching:
                 parts.append("monitor off — watched files not tracked · o starts it")
@@ -1445,6 +1465,16 @@ class FilesPanel(Widget):
         title, info = self.caption()
         try:
             ms.set_lens_caption("files", title, info)
+        except Exception:
+            pass
+        # The header's "● LIVE" must not claim a recording monitor while
+        # it is blind (the session's app is gone and nothing is followed).
+        blind = None
+        watch = self._monitor_watch()
+        if watch is not None and getattr(watch, "blind_since", None) is not None:
+            blind = "monitor blind"
+        try:
+            ms.query_one("#shell-header", ShellHeader).set_live_note(blind)
         except Exception:
             pass
 
@@ -1827,8 +1857,17 @@ class FilesPanel(Widget):
             grid.add_row("ops", ops)
             grid.add_row("first", _fmt_time(act.first))
             grid.add_row("last", _fmt_time(act.last))
-            if act.processes:
-                # "tab_17 · DOM Worker" (app scope): count per app process.
+            if act.pids:
+                # Per process (pid), never per thread: "main (4665), tab_17
+                # (5395)"; a process without an app label is "PID n".
+                top = sorted(act.pids.items(), key=lambda kv: -kv[1])[:3]
+                names = []
+                for pid, _n in top:
+                    label = act.pid_labels.get(pid)
+                    names.append(f"{label} ({pid})" if label else f"PID {pid}")
+                grid.add_row("by", ", ".join(names))
+            elif act.processes:
+                # No pid reported: "tab_17 · DOM Worker" counts as tab_17.
                 procs: dict[str, int] = {}
                 for name, n in act.processes.items():
                     key = name.split(" · ", 1)[0]
@@ -1882,15 +1921,30 @@ class FilesPanel(Widget):
         ]
         seps += [
             # A restart / exit / loss stands out; a followed sub-process less.
-            _Sep(when, f"── {text} ──", "#fb923c" if level == "warning" else "#a3873f")
+            _Sep(
+                when,
+                f"── {text} ──",
+                _NOTE_WARNING if level == "warning" else "#a3873f",
+            )
             for when, text, level in self._notes()
         ]
         # Separators newer than an event are printed above it (newest
-        # first). The newest mark before the oldest event closes the list.
+        # first). The newest mark before the oldest event closes the list;
+        # a restart / exit / loss between that mark and the oldest event
+        # is in the file's time range too (a file first touched after a
+        # restart still shows the restart).
         pending = sorted(seps, key=lambda m: m.when, reverse=True)
         oldest = act.events[0].when
         older = [m for m in pending if m.when < oldest and m.style == "#facc15"]
-        pending = [m for m in pending if m.when >= oldest] + older[:1]
+        start = older[0].when if older else None
+        notes = [
+            m
+            for m in pending
+            if m.when < oldest
+            and m.style == _NOTE_WARNING
+            and (start is None or m.when >= start)
+        ][: self._MAX_OLDER_NOTES]
+        pending = [m for m in pending if m.when >= oldest] + notes + older[:1]
         for ev in reversed(act.events):
             while pending and pending[0].when > ev.when:
                 mark = pending.pop(0)
@@ -1919,6 +1973,9 @@ class FilesPanel(Widget):
             out.append("\n")
             out.append(mark.text, style=mark.style)
         return out
+
+    #: Restart/exit/loss lines shown before a file's first event (newest).
+    _MAX_OLDER_NOTES = 5
 
     def _notes(self) -> list[tuple[datetime, str, str]]:
         return list(getattr(self, "_monitor_notes", ()))

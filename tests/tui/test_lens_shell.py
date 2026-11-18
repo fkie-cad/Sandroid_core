@@ -1649,3 +1649,64 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
             detail = str(help_screen.query_one("#kb-detail").render())
             assert "Overrides the global key w = " in detail
         await pilot.press("escape")
+
+
+async def test_live_pill_says_monitor_blind_while_it_is() -> None:
+    """L8 (E2E round 2): "● LIVE" stayed up during "monitor blind"."""
+    from datetime import datetime
+
+    from sandroid.core.kprobe_tracer import AddResult, AppListing, AppProcess
+    from sandroid.services import get_task_service
+    from sandroid.tui.controllers.monitor_controller import (
+        MonitorConfig,
+        MonitorWatch,
+    )
+
+    pkg = "com.example.fit"
+    table = {10: AppProcess(10, 10100, pkg)}
+
+    class _Device:
+        def listing(self, package, tracked):
+            return AppListing(10100, dict(table), {}, True)
+
+        def add(self, pids):
+            return AddResult({p: [p] for p in pids}, {}, None)
+
+        def lost(self):
+            return 0
+
+    config = MonitorConfig(mode="pid", app_name=pkg, target_pid=10)
+    watch = MonitorWatch(
+        config, "kprobe", device=_Device(), now=lambda: datetime(2026, 11, 18)
+    )
+    watch.seed({10: []})
+    app = _app()
+    svc = get_task_service()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        header = ms.query_one("#shell-header")
+        panel = ms.lens_widget("files")
+        svc.register(
+            name="monitor",
+            display_name="Monitor",
+            instance=type("W", (), {"config": config, "watch": watch})(),
+            stop_callback=lambda: None,
+            app_name=pkg,
+        )
+        try:
+            table.clear()
+            watch.poll_once()  # the target is gone: blind
+            panel._update_caption()
+            await _settle(pilot)
+            assert header.pill_text == "○ LIVE · monitor blind"
+            assert ms.query_one("#scope-pill").has_class("-blind")
+            ms.refresh_status()  # the screen re-sets "● LIVE": still blind
+            await _settle(pilot)
+            assert header.pill_text == "○ LIVE · monitor blind"
+        finally:
+            svc._tasks.pop("monitor", None)
+        panel._update_caption()
+        await _settle(pilot)
+        assert header.pill_text == "● LIVE"
+        assert ms.query_one("#scope-pill").has_class("-live")

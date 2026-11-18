@@ -403,10 +403,13 @@ class FileSystemMonitorItem(MonitorItem):
     new_path: str | None = field(default=None, compare=False)
     #: When the reader thread captured the line (``time.time()``, the value
     #: ``recent_events`` uses) and the writing process's PID (fsmon: as
-    #: reported; kprobe: the app process the thread belongs to, else the
-    #: thread id). None when unknown.
+    #: reported; kprobe: the thread's TGID -- from the trace line, else the
+    #: follow table -- and only when neither knows it the thread id). None
+    #: when unknown.
     timestamp: float | None = field(default=None, compare=False)
     pid: int | None = field(default=None, compare=False)
+    #: The writing thread's id (kprobe; None for fsmon).
+    tid: int | None = field(default=None, compare=False)
 
 
 def build_monitor_item(
@@ -506,10 +509,13 @@ _KPROBE_EVENT_TO_FSE: dict[str, str] = {
 #
 #   <...>-1234  [000] ...1 12345.678901: openat2: (do_sys_openat2+0x0/0x..) fname="/x" flags=0x241
 #
-# The ``.*?`` after ``[cpu]`` non-greedily absorbs the (kernel-version-varying)
-# latency-flags column(s) up to the timestamp.
+# With the instance's ``record-tgid`` option the thread id is followed by
+# the process id, ``(   1200)``, or ``(-------)`` while the kernel doesn't
+# know it yet. The ``.*?`` after ``[cpu]`` non-greedily absorbs the
+# (kernel-version-varying) latency-flags column(s) up to the timestamp.
 _KPROBE_HEADER_RE = re.compile(
-    r"^\s*(?P<comm>.+?)-(?P<tid>\d+)\s+\[\d+\]\s+.*?\s+[\d.]+:\s+"
+    r"^\s*(?P<comm>.+?)-(?P<tid>\d+)\s+(?:\(\s*(?P<tgid>\d+|-+)\)\s+)?"
+    r"\[\d+\]\s+.*?\s+[\d.]+:\s+"
     r"(?P<event>\w+):\s+(?P<rest>.*)$"
 )
 
@@ -647,7 +653,13 @@ class KprobeStreamTranslator:
         #: the session's MonitorWatch (None: no app scope).
         self._labels: Callable[[int], str | None] | None = None
         self._owner: Callable[[int], int | None] | None = None
+        #: The line being translated: its thread, and its process (TGID;
+        #: None when neither the line nor the follow table knows it).
+        self._tid: int | None = None
         self._pid: int | None = None
+        #: tid -> TGID seen on an earlier line (a later one may print
+        #: "(-------)" until the kernel's pid->tgid map has it).
+        self._tgid: dict[int, int] = {}
         #: The session's MonitorWatch (set by ``_kprobe_setup``).
         self.watch: Any = None
 
@@ -658,7 +670,9 @@ class KprobeStreamTranslator:
     ) -> None:
         """Prefix each event's thread name with its app process's label.
 
-        ``owner`` maps a thread id to its process id (``item.pid``).
+        ``labels`` maps a process (or thread) id to the app process's label;
+        ``owner`` maps a thread id to its process id, used when the trace
+        line carries no TGID.
         """
         self._labels = labels
         self._owner = owner
@@ -702,6 +716,37 @@ class KprobeStreamTranslator:
             return known
         return self._scoped_app or f"tid {tid}"
 
+    def _resolve_tgid(self, tid: int, raw: str | None) -> int | None:
+        """The process (TGID) of thread ``tid``: the line's own ``(tgid)``,
+        else the follow table, else a TGID an earlier line of it carried.
+        """
+        if raw and raw.isdigit() and int(raw) > 0:
+            tgid = int(raw)
+            self._tgid[tid] = tgid
+            return tgid
+        owner = self._owner(tid) if self._owner is not None else None
+        if owner:
+            return owner
+        return self._tgid.get(tid)
+
+    def _process_name(self) -> str:
+        """``"<process> · <thread>"`` in app scope (``"main · Cache2 I/O"``).
+
+        The process part is the watch's label for the event's TGID, or
+        ``pid N`` for a process the watch has no name for yet; the same
+        label for every event of the process, whichever probe reported it.
+        """
+        comm = self._comm
+        if self._labels is None:
+            return comm
+        pid, tid = self._pid, self._tid
+        label = self._labels(pid if pid is not None else tid)
+        if label:
+            return f"{label} · {comm}"
+        if pid is not None:
+            return f"pid {pid} · {comm}"
+        return comm
+
     def _item(
         self, fse_token: str, path: str, new_path: str | None = None
     ) -> FileSystemMonitorItem:
@@ -728,8 +773,9 @@ class KprobeStreamTranslator:
             filename=filename,
             new_directory=new_directory,
             new_filename=new_filename,
-            process=self._comm,
-            pid=self._pid,
+            process=self._process_name(),
+            pid=self._pid if self._pid is not None else self._tid,
+            tid=self._tid,
             path=path,
             new_path=new_path,
         )
@@ -771,8 +817,8 @@ class KprobeStreamTranslator:
         if m is None:
             return []
         tid = int(m.group("tid"))
-        owner = self._owner(tid) if self._owner is not None else None
-        self._pid = owner or tid
+        self._tid = tid
+        self._pid = self._resolve_tgid(tid, m.group("tgid"))
         self._comm = self._process(tid, m.group("comm").strip())
         event = m.group("event")
         fields = _parse_kprobe_fields(m.group("rest"))
@@ -783,11 +829,6 @@ class KprobeStreamTranslator:
             if event == "dfo":
                 self._pending.pop(tid, None)
             return []
-        if self._labels is not None and event not in ("dfo", "dfor", "fput"):
-            label = self._labels(tid)
-            if label:
-                # "tab_17 · DOM Worker": which app process, which thread.
-                self._comm = f"{label} · {self._comm}"
 
         # --- correlation-only events (never emit a row directly) ---
         if event == "dfo":
@@ -1008,6 +1049,7 @@ def _recent_event_from_item(item: FileSystemMonitorItem) -> dict[str, Any]:
         "timestamp": item.timestamp if item.timestamp is not None else time.time(),
         "event_type": item.label,
         "pid": item.pid,
+        "tid": item.tid,
         "process": item.process or None,
         "path": path,
         "new_path": new_path,
@@ -1161,6 +1203,8 @@ class MonitorWatch:
         self._burst_until = 0.0
         self._started = False
         self._stopped = False
+        #: A stop was asked for and is running (the caption says so).
+        self.stopping = False
         self._last_state: tuple = ()
 
     # -- setup (off the UI thread, before tracing starts) ---------------------
@@ -1303,10 +1347,20 @@ class MonitorWatch:
         """A ``task_rename`` line: re-poll soon if it may be a new app process.
 
         The rename itself proves nothing (any zygote child renames from
-        "main"); the next polls check the candidate's UID and name.
+        "main"); the next polls check the candidate's UID and name. A
+        ``sched_process_exit`` of a followed process's main thread (same
+        stream, see ``KprobeTracer.start_rename_watch``) re-polls too: the
+        exit is noticed in a poll's time, not up to
+        :attr:`POLL_SECONDS_WITH_RENAME` later.
         """
-        from sandroid.core.kprobe_tracer import parse_task_rename
+        from sandroid.core.kprobe_tracer import parse_process_exit, parse_task_rename
 
+        exited = parse_process_exit(line)
+        if exited is not None:
+            if exited in self.procs:
+                self._burst_until = time.monotonic() + self.BURST_FOR
+                self._wake.set()
+            return
         parsed = parse_task_rename(line)
         if parsed is None or parsed[0] in self.procs:
             return
@@ -1542,6 +1596,13 @@ class MonitorWatch:
         config = self.config
         parts: list[str] = []
         title = None
+        if self.stopping:
+            # Shown the moment ``o`` is pressed; the device clean-up runs
+            # off the UI thread (MonitorController.stop).
+            title = "monitor stopping…"
+            if self.track:
+                parts.append(f"App {self.package}")
+            return title, parts
         if self.blind_since is not None:
             title = (
                 f"monitor blind since {self.blind_since:%H:%M:%S} · {self.blind_reason}"
@@ -1690,6 +1751,9 @@ class MonitorController:
         # False during that window. Guards against a second 'o' press (or resume)
         # opening the config modal / starting a concurrent session mid-preflight.
         self._start_pending = False
+        #: A stop is running off the UI thread (see :meth:`stop`): no new
+        #: start until the device is cleaned up.
+        self._stop_pending = False
 
     @staticmethod
     def _default_run_off_thread(target: Callable[[], None]) -> None:
@@ -1726,6 +1790,11 @@ class MonitorController:
         Returns:
             Tuple of (can_start, reason_if_not)
         """
+        if self._stop_pending:
+            return (
+                False,
+                "Monitor is still stopping — please wait.",
+            )
         if self.is_running():
             return (
                 False,
@@ -2428,8 +2497,16 @@ class MonitorController:
         def _teardown() -> None:
             # Runs after the trace_pipe reader was killed, before the
             # instance is removed: the overrun counters are still there.
-            watch.stop()
-            watch.check_lost()
+            # The follow instance's removal and the lost-events read are
+            # independent adb round-trips: run side by side.
+            stopper = threading.Thread(
+                target=watch.stop, daemon=True, name="monitor-watch-stop"
+            )
+            stopper.start()
+            try:
+                watch.check_lost()
+            finally:
+                stopper.join(10)
             KprobeTracer.teardown()
 
         wrapper = MonitorProcessWrapper(
@@ -2697,7 +2774,10 @@ class MonitorController:
         try:
             task = task_service.get_task("monitor")
             inst = getattr(task, "instance", None)
-            if inst is not None and hasattr(inst, "run_teardown"):
+            # A requested stop (MonitorController.stop, Play's safety stop)
+            # runs the teardown itself, off the UI thread: never here too.
+            requested = getattr(inst, "stop_requested", False) is True
+            if inst is not None and hasattr(inst, "run_teardown") and not requested:
                 inst.run_teardown()
         except Exception:
             logger.debug("monitor teardown on natural exit failed", exc_info=True)
@@ -2718,12 +2798,42 @@ class MonitorController:
         """
         if not self.is_running():
             return False
+        if self._stop_pending:
+            return True  # already stopping
 
-        self._get_task_service().stop("monitor")
-        self._log_info("Monitor stopped")
+        # Say so at once: the caption shows "monitor stopping…" while the
+        # trace reader is killed and the device cleaned up OFF the UI thread
+        # (on the UI thread a stop froze the TUI for 12-18 s, with the old
+        # caption still up).
+        task_service = self._get_task_service()
+        task = task_service.get_task("monitor")
+        watch = getattr(getattr(task, "instance", None), "watch", None)
+        if isinstance(watch, MonitorWatch):
+            watch.stopping = True
+        self._stop_pending = True
+        _publish_monitor_info({"monitor_status": True})
 
-        if self._force_ui_refresh:
-            self._force_ui_refresh()
+        def _done() -> None:
+            self._stop_pending = False
+            self._log_info("Monitor stopped")
+            if self._force_ui_refresh:
+                self._force_ui_refresh()
+
+        def _work() -> None:
+            try:
+                task_service.stop("monitor")
+            except Exception:
+                logger.debug("monitor stop failed", exc_info=True)
+            finally:
+                self._on_ui(_done)
+
+        try:
+            self._run_off_thread(_work)
+        except Exception:
+            logger.debug("monitor stop thread failed to start", exc_info=True)
+            self._stop_pending = False
+            task_service.stop("monitor")
+            _done()
 
         return True
 
