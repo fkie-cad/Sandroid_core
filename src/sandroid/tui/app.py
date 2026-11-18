@@ -1875,7 +1875,11 @@ class SandroidTUI(App):
             rc.start_playback()
 
         self.push_screen(
-            ConfirmModal(title="Play (replay)", message="\n".join(lines)),
+            # guard_typing: p is one letter; a word typed while no text field
+            # had focus ("places") must not revert the device (E2E finding).
+            ConfirmModal(
+                title="Play (replay)", message="\n".join(lines), guard_typing=True
+            ),
             on_result,
         )
 
@@ -1890,6 +1894,7 @@ class SandroidTUI(App):
         self.push_screen(
             ConfirmModal(
                 title="Stop replay",
+                guard_typing=True,
                 message="A replay is running. Stop it now? The partial run "
                 "is still saved in the Runs lens (4).",
             ),

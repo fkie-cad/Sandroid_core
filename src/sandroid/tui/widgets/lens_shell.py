@@ -64,6 +64,14 @@ Optional duck-typed hooks a lens widget may implement:
 Use ``is_shown(widget)`` (below) instead of querying ``#lens-body`` to gate
 slow polls on visibility.
 
+Focus and keys: ``MainScreen`` gives focus back to the active lens (its
+``focus()``) whenever focus lands on nothing or inside a hidden view -- e.g.
+a lens hid its focused table -- and a key the focus chain does not bind but
+the active lens does runs on the lens. A lens may still hide its own focused
+widget; it does not need to re-home focus itself. ``/`` in a lens without a
+``slash`` binding starts a short typing guard (single-letter app commands
+are swallowed while the word is typed).
+
 Inspector
 ---------
 ``InspectorContent`` (dataclass) describes what the right-hand Inspector

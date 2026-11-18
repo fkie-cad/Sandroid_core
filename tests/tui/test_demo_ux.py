@@ -183,9 +183,30 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         await pilot.press("n")
         await _settle(pilot)
         assert started == []
+        # Stray typing never confirms (E2E: "places" typed while no text
+        # field had focus): No has the focus, so Enter declines ...
         await pilot.press("p")
         await _settle(pilot)
-        await pilot.press("y")
+        assert app.screen.focused.id == "no"
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert started == []
+        assert type(app.screen).__name__ == "MainScreen"
+        # ... the rest of a word closes the dialog as No ...
+        await pilot.press("p", "l", "a")
+        await _settle(pilot)
+        assert started == []
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in m for m in _messages(app))
+        # ... (the rest of the word ran no app command: typing guard) ...
+        await pilot.pause(app.screen.TYPING_GUARD_SECONDS)
+        # ... and a y typed right behind the p is ignored ("py...").
+        await pilot.press("p", "y")
+        await pilot.pause()
+        assert started == []
+        assert type(app.screen).__name__ == "ConfirmModal"
+        await pilot.pause(app.screen.ARM_SECONDS)
+        await pilot.press("y")  # read, then confirmed
         await _settle(pilot)
         assert started == [1]
         assert app.screen.query_one("#lens-body").current == "runs-panel"

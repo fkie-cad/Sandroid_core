@@ -270,6 +270,13 @@ def smart_truncate(path: str, width: int) -> str:
     ``files/a/b/c/d/report.json`` -> ``files/…/d/report.json`` (head kept
     when it fits), ``databases/fittrack.db`` -> ``…/fittrack.db``; only a
     filename longer than ``width`` itself loses its start.
+
+    A directory that does not fit whole is not dropped when there is room
+    for a useful part of it: its middle is elided instead. The per-origin
+    storage of a browser is ``…/storage/default/<origin>/ls/data.sqlite``
+    -- the origin is what tells the rows apart (E2E: every one read
+    ``files/…/ls/data.sqlite``), so at 40 cells it reads
+    ``files/…/688012…,heise.de)/ls/data.sqlite`` (scheme dropped, %XX decoded).
     """
     if width <= 1:
         return "…" if path else ""
@@ -282,13 +289,42 @@ def smart_truncate(path: str, width: int) -> str:
         if not dirs or len(head) + len(name) > width:
             continue
         tail = name
-        for part in reversed(dirs[1:] if head != "…/" else dirs):
-            candidate = f"{part}/{tail}"
+        rest = list(dirs[1:] if head != "…/" else dirs)
+        while rest:
+            candidate = f"{rest[-1]}/{tail}"
             if len(head) + len(candidate) > width:
                 break
             tail = candidate
+            rest.pop()
+        room = width - len(head) - len(tail) - 1
+        if rest and room >= _MIN_PARTIAL:
+            tail = f"{_mid_elide(_readable_dir(rest[-1]), room)}/{tail}"
         return head + tail
     return "…" + path[-(width - 1) :]
+
+
+#: The smallest useful part of an elided directory name (``smart_truncate``).
+_MIN_PARTIAL = 8
+
+
+def _readable_dir(name: str) -> str:
+    """A browser origin directory, shortened for an elided path:
+    ``https+++a.net^partitionKey=%28https%2Cheise.de%29`` ->
+    ``a.net^(https,heise.de)`` (scheme prefix dropped, %XX decoded).
+    """
+    from urllib.parse import unquote
+
+    text = re.sub(r"^[a-z][a-z0-9.+-]*\+\+\+", "", name)
+    return unquote(text.replace("^partitionKey=", "^"))
+
+
+def _mid_elide(text: str, width: int) -> str:
+    """``text`` in ``width`` cells: its start and (a bit more of) its end."""
+    if len(text) <= width:
+        return text
+    left = (width - 1) * 2 // 5
+    right = width - 1 - left
+    return text[:left] + "…" + text[-right:]
 
 
 @dataclass

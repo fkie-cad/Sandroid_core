@@ -1427,6 +1427,13 @@ async def test_rule_editor_applies_at_once_persists_and_resets(monkeypatch) -> N
         await pilot.press("delete")
         await pilot.pause()
         assert len(modal.rules) == len(default_files_noise_rules()) - 1
+        # E2E LOW: the focused button is visibly different from the others.
+        modal.query_one("#rules-reset").focus()
+        await pilot.pause()
+        styles = {b.id: str(b.styles.text_style) for b in modal.query("Button")}
+        assert "reverse" in styles["rules-reset"]
+        assert "reverse" not in styles["rules-add-btn"]
+        assert "reverse" not in styles["rules-close"]
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, NoiseRulesModal)
@@ -1510,3 +1517,303 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
         assert version.parent == (
             watchlist_store.files_root() / PKG / "databases" / "app.db"
         )
+
+
+# --------------------------------------------------------------------------
+# stray keys (E2E Files/Firefox finding 2): focus limbo, routing, typing guard
+# --------------------------------------------------------------------------
+
+
+async def _boot_files(pilot, app):
+    for _ in range(8):
+        await pilot.pause(0.05)
+    if type(app.screen).__name__ != "MainScreen":
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+    ms = app.screen
+    await pilot.press("3")
+    await pilot.pause(0.1)
+    return ms, ms.lens_widget("files")
+
+
+@pytest.mark.asyncio
+async def test_mark_then_help_then_slash_types_into_the_filter(monkeypatch) -> None:
+    """The E2E repro: ``B`` + a name with no activity since → the view is
+    empty for a moment and the lens hid its table while focus was still on
+    its way there; Textual left focus on nothing, closing ``?`` then focused
+    the hidden App lens, ``/`` did nothing and "places" ran p/l/a/c/e/s.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 50)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        played: list[int] = []
+        monkeypatch.setattr(app, "action_play", lambda: played.append(1))
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await pilot.pause()
+        await pilot.press("B", *"open wikipedia", "enter")
+        await pilot.pause(0.3)
+        assert panel.has_class("-empty")  # nothing since the mark yet
+        assert ms.focused is not None
+        assert panel in ms.focused.ancestors_with_self
+        await pilot.press("question_mark")
+        await pilot.pause(0.2)
+        assert type(app.screen).__name__ == "HelpScreen"
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert ms.focused is not None
+        assert panel in ms.focused.ancestors_with_self
+        await pilot.press("slash", *"places")
+        await pilot.pause(0.2)
+        field = panel.query_one("#files-input", Input)
+        assert app.focused is field
+        assert field.value == "places"
+        assert played == []
+        assert type(app.screen).__name__ == "MainScreen"
+
+
+@pytest.mark.asyncio
+async def test_focus_lost_to_nothing_or_a_hidden_lens_comes_back() -> None:
+    """Focus on nothing / inside the hidden App lens returns to the lens."""
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        await pilot.pause()
+        ms.set_focus(None)
+        await pilot.pause(0.1)
+        assert ms.focused is panel.table
+        ms.set_focus(ms.query_one("#spotlight-panel"))  # hidden lens
+        await pilot.pause(0.1)
+        assert ms.focused is panel.table
+        # A modal closing with nothing focused: AUTO_FOCUS is the active lens.
+        assert ms.AUTO_FOCUS == "#files-panel"
+
+
+@pytest.mark.asyncio
+async def test_lens_keys_reach_the_lens_even_when_focus_is_elsewhere(
+    monkeypatch,
+) -> None:
+    """Layer 2: with the re-homing disabled, a key the focus chain does not
+    bind but the active lens does still runs on the lens; the hidden App
+    lens's ``A`` (Attach) never fires from the Files lens.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.screens.main_screen import MainScreen
+    from sandroid.tui.widgets.spotlight_panel import SpotlightPanel
+
+    attached: list[int] = []
+    monkeypatch.setattr(MainScreen, "_rehome_focus", lambda self, *a: None)
+    monkeypatch.setattr(
+        SpotlightPanel, "action_attach_app", lambda self: attached.append(1)
+    )
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.drop_mark("m", T0 + timedelta(seconds=1))
+        await pilot.pause()
+        assert panel.segment == 1
+        ms.set_focus(ms.query_one("#spotlight-panel"))  # limbo: hidden lens
+        await pilot.pause()
+        await pilot.press("A")  # Files: all / since mark -- not App: Attach
+        await pilot.pause()
+        assert panel.segment is None
+        assert attached == []
+        assert ms.focused is not None
+        assert panel in ms.focused.ancestors_with_self
+        ms.set_focus(None)
+        await pilot.pause()
+        await pilot.press("slash")
+        await pilot.pause()
+        assert app.focused is panel.query_one("#files-input", Input)
+
+
+@pytest.mark.asyncio
+async def test_slash_in_a_lens_without_a_filter_swallows_the_typed_word(
+    monkeypatch,
+) -> None:
+    """Layer 3: ``/`` that opens nothing starts the typing guard -- the word
+    typed after it runs no single-letter app command; after a pause the
+    commands work again.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.screens.main_screen import MainScreen
+
+    monkeypatch.setattr(MainScreen, "TYPING_GUARD_SECONDS", 0.4)
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        played: list[int] = []
+        monkeypatch.setattr(app, "action_play", lambda: played.append(1))
+        await pilot.press("4")  # Runs lens: no "/" filter
+        await pilot.pause(0.1)
+        await pilot.press("slash", *"places")
+        await pilot.pause(0.1)
+        assert played == []
+        assert type(app.screen).__name__ == "MainScreen"
+        assert ms._typed_ignored == "places"
+        assert any("no filter" in n.message for n in app._notifications)
+        await pilot.pause(0.5)
+        await pilot.press("p")
+        await pilot.pause()
+        assert played == [1]
+
+
+@pytest.mark.asyncio
+async def test_quit_dialog_opened_by_a_stray_q_is_cancelled_by_the_next_letter(
+    monkeypatch,
+) -> None:
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        exits: list[int] = []
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
+        await pilot.press("4")
+        await pilot.pause(0.1)
+        await pilot.press(*"query", "enter")
+        await pilot.pause(0.3)
+        assert exits == []
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in n.message for n in app._notifications)
+
+
+# --------------------------------------------------------------------------
+# idle ★ rows fold into one row (E2E finding 9 / owner decision A)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(200, 50), (100, 30)])
+async def test_idle_watched_rows_fold_into_one_expandable_row(size) -> None:
+    from sandroid.tui.widgets.files_panel import IDLE_FOLD
+
+    prefs = [f"{ROOT}/shared_prefs/p{i:02d}.xml" for i in range(21)]
+    for path in prefs:
+        get_forensic_service().add_spotlight_file(path)
+    pattern = f"{ROOT}/files/*/cookies.sqlite"
+
+    class _Adb:
+        @staticmethod
+        def send_adb_command(_cmd):
+            return "", ""  # the pattern matches nothing yet
+
+    app = _Harness()
+    async with app.run_test(size=size) as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.watchlist._adb = lambda: _Adb
+        assert panel.watchlist.add_path(pattern)
+        await pilot.pause()
+        # Everything view, no activity at all: 22 never-touched watches
+        # flood the table -> folded there too, and the row says so.
+        keys = _keys(panel)
+        assert keys == [IDLE_FOLD]
+        assert panel._path_cell(_row(panel, IDLE_FOLD)).plain.startswith(
+            "★ 22 watched · idle"
+        )
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", prefs[3])), now=T0)
+        panel.drop_mark("tap login", T0 + timedelta(seconds=10))
+        panel.ingest(
+            _items(
+                _fse("FSE_CONTENT_MODIFIED", prefs[5]),
+                _fse("FSE_CREATE_FILE", AAID),
+            ),
+            now=T0 + timedelta(seconds=20),
+        )
+        # Since the mark: the active ★ row on top, ONE fold row for the 21
+        # idle watches (incl. the pattern and prefs[3], active before the
+        # mark only), then the segment's activity.
+        assert _keys(panel) == [prefs[5], IDLE_FOLD, AAID]
+        fold = _row(panel, IDLE_FOLD)
+        assert len(fold.members) == 21
+        assert pattern in {m.key for m in fold.members}
+        cell = panel._path_cell(fold).plain
+        if size[0] >= 200:
+            assert cell == "★ 21 watched · idle since mark 1"
+        else:
+            assert cell.startswith("★ 21 ")
+        assert str(panel._mark_cell(fold)) == "▸"
+        assert "1 group" not in panel.caption()[1]  # the fold is no cache group
+
+        panel.table.focus()
+        panel.table.move_cursor(row=1)
+        await pilot.press("enter")  # opens the fold, no Inspector
+        await pilot.pause()
+        keys = _keys(panel)
+        assert keys[:2] == [prefs[5], IDLE_FOLD]
+        assert keys[-1] == AAID
+        assert len(keys) == 2 + 21 + 1
+        assert str(panel._mark_cell(_row(panel, IDLE_FOLD))) == "▾"
+        assert panel._path_cell(_row(panel, prefs[0])).plain.startswith("  ")
+        panel.table.move_cursor(row=4)
+        await pilot.press("w")  # a member row: a real ★ row (unwatch works)
+        await pilot.pause()
+        assert len(panel.watchlist.rows) == 20
+        panel.table.move_cursor(row=4)
+        await pilot.press("left")  # folds from a member row
+        await pilot.pause()
+        assert _keys(panel) == [prefs[5], IDLE_FOLD, AAID]
+        assert panel._cursor_key() == IDLE_FOLD
+        await pilot.press("u")  # on the fold row: a hint, no pull
+        await pilot.pause()
+
+        # Everything view (A): prefs[3] and prefs[5] were active this
+        # session, the other 20 never -> still a flood, still folded.
+        await pilot.press("A")
+        await pilot.pause()
+        keys = _keys(panel)
+        assert keys[:2] == [prefs[5], prefs[3]]
+        assert IDLE_FOLD in keys
+        assert panel._path_cell(_row(panel, IDLE_FOLD)).plain.startswith(
+            "★ 19 watched · idle"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_single_idle_watch_is_not_folded() -> None:
+    get_forensic_service().add_spotlight_file(DB)
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        assert set(_keys(panel)) == {DB, PREFS}  # 2 idle in the all view: kept
+        panel.drop_mark("m", T0)
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0)
+        assert _keys(panel) == [DB, PREFS]  # 1 idle in the segment: kept
+        assert _row(panel, PREFS).dim
+
+
+def test_narrow_paths_keep_the_distinguishing_directory() -> None:
+    """E2E: beside the Inspector every per-origin store read
+    ``files/…/ls/data.sqlite``; the origin directory is elided in the middle
+    instead of dropped.
+    """
+    heise = (
+        "files/mozilla/k3m7yjvw.default/storage/default/"
+        "https+++688012155290337.mateti.net^partitionKey=%28https%2Cheise.de%29"
+        "/ls/data.sqlite"
+    )
+    wiki = "files/mozilla/k3m7yjvw.default/storage/default/https+++www.wikipedia.org/ls/data.sqlite"
+    for width in (40, 56):
+        a, b = smart_truncate(heise, width), smart_truncate(wiki, width)
+        assert len(a) <= width
+        assert len(b) <= width
+        assert a.endswith("/ls/data.sqlite")
+        assert b.endswith("/ls/data.sqlite")
+        assert a != b
+        assert "heise.de" in a or "mateti" in a, a
+        assert "wikipedia" in b, b
+    # Too narrow for a useful part: as before.
+    assert smart_truncate(heise, 24) == "files/…/ls/data.sqlite"
+    assert smart_truncate("files/a/b/c/d/report.json", 22) == "files/…/d/report.json"

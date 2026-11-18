@@ -397,3 +397,32 @@ def test_flatten_json_paths():
         "a.b[1].c": ("null", None),
         "e": ("dict", {}),
     }
+
+
+@pytest.mark.parametrize("download_rows", [1, 0])
+def test_content_opens_on_a_data_table_not_android_metadata(
+    tmp_path, download_rows
+) -> None:
+    """E2E (Firefox downloads DB): every table had one row and the Content
+    tab opened on ``android_metadata`` (first by name). Bookkeeping tables
+    come last -- even after an empty data table.
+    """
+    import sqlite3
+
+    db = tmp_path / "mozac_downloads_database"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE android_metadata (locale TEXT)")
+    con.execute("INSERT INTO android_metadata VALUES ('en_US')")
+    con.execute("CREATE TABLE room_master_table (id INTEGER, identity_hash TEXT)")
+    con.execute("INSERT INTO room_master_table VALUES (42, 'abc')")
+    con.execute("CREATE TABLE downloads (id TEXT, url TEXT, file_name TEXT)")
+    for i in range(download_rows):
+        con.execute(
+            "INSERT INTO downloads VALUES (?, ?, ?)",
+            (str(i), "https://example.com/1Mb.dat", "1Mb.dat"),
+        )
+    con.commit()
+    con.close()
+    preview = fi.preview_file(db)
+    assert preview.table == "downloads"
+    assert {t.name for t in preview.tables} >= {"android_metadata", "downloads"}

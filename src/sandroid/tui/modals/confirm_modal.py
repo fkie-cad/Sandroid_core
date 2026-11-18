@@ -1,5 +1,8 @@
 """Confirmation modal dialog."""
 
+import time
+
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -16,6 +19,12 @@ class ConfirmModal(ForensicModal[bool]):
     - Keyboard shortcuts (y/n)
     - Escape defaults to No
     - Returns True for Yes, False for No
+    - ``guard_typing=True`` (Play, stop replay): the dialog guards a
+      destructive single-letter command against stray typing -- a word typed
+      while focus was not in a text field ("places" → ``p`` Play). No has the
+      focus (Enter declines), ``y``/Yes are ignored for ``ARM_SECONDS`` after
+      the dialog opened (typed-ahead keys), and any other letter or digit
+      closes it as No ("that looked like typing").
     """
 
     DEFAULT_CSS = """
@@ -58,6 +67,9 @@ class ConfirmModal(ForensicModal[bool]):
         Binding("n", "no", "No", show=False),
     ]
 
+    #: Seconds a guarded dialog ignores ``y`` / Yes after it opened.
+    ARM_SECONDS = 0.4
+
     def __init__(
         self,
         title: str,
@@ -67,6 +79,7 @@ class ConfirmModal(ForensicModal[bool]):
         name: str = None,
         id: str = None,
         classes: str = None,
+        guard_typing: bool = False,
     ):
         """Initialize the confirmation modal.
 
@@ -78,8 +91,14 @@ class ConfirmModal(ForensicModal[bool]):
             name: Widget name
             id: Widget ID
             classes: CSS classes
+            guard_typing: Guard against stray typing (see the class doc).
         """
         super().__init__(name=name, id=id, classes=classes)
+        self.guard_typing = guard_typing
+        self._opened_at = time.monotonic()
+        self._stray = False
+        if guard_typing:
+            self.AUTO_FOCUS = "#no"  # Enter declines
         self.title_text = title
         self.message_text = message
         self.yes_label = yes_label
@@ -96,14 +115,56 @@ class ConfirmModal(ForensicModal[bool]):
                 yield Button(self.no_label, id="no", classes="-secondary")
             yield KeyHintFooter(hints={"button": "[dim]y=Yes  n=No  Esc=Cancel[/dim]"})
 
+    def _armed(self) -> bool:
+        """False while a guarded dialog is too fresh to accept Yes."""
+        return (
+            not self.guard_typing
+            or time.monotonic() - self._opened_at >= self.ARM_SECONDS
+        )
+
+    def on_key(self, event: events.Key) -> None:
+        """Guarded: a letter/digit other than y/n is stray typing -> No."""
+        if not self.guard_typing:
+            return
+        char = event.character or ""
+        if len(char) == 1 and char.isalnum() and event.key not in ("y", "n"):
+            event.stop()
+            event.prevent_default()
+            if self._stray:
+                return  # the rest of the word, before the dialog is gone
+            self._stray = True
+            self.app.notify(
+                f"{self.title_text}: not started — that looked like typing.",
+                severity="warning",
+                timeout=4,
+            )
+            start_typing_guard(self.app)
+            self._dismiss_with_refresh(False)
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks."""
+        if event.button.id == "yes" and not self._armed():
+            return
         self._dismiss_with_refresh(event.button.id == "yes")
 
     def action_yes(self) -> None:
         """Confirm and close the modal."""
+        if not self._armed() or self._stray:
+            return  # typed ahead: the dialog was not read yet
         self._dismiss_with_refresh(True)
 
     def action_no(self) -> None:
         """Decline and close the modal."""
         self._dismiss_with_refresh(False)
+
+
+def start_typing_guard(app) -> None:
+    """Swallow the rest of a stray word on the main screen (if there is one)."""
+    for screen in reversed(getattr(app, "screen_stack", [])):
+        guard = getattr(screen, "start_typing_guard", None)
+        if guard is not None:
+            try:
+                guard()
+            except Exception:
+                pass
+            return
