@@ -185,7 +185,14 @@ globalThis.Java = {perform: fn => fn(), use: n => classes[n]};
 globalThis.send = m => out.push(m);
 globalThis.ptr = v => ({ptr: String(v)});
 const listeners = {};
-globalThis.Interceptor = {attach: (addr, cb) => { listeners[addr] = cb; }};
+const replaced = {};
+globalThis.Interceptor = {
+    attach: (addr, cb) => { listeners[addr] = cb; },
+    replace: (addr, cb) => { replaced[addr] = cb; },
+};
+globalThis.NativeFunction = function (addr) { return () => 'REAL'; };
+globalThis.NativeCallback = function (fn) { return fn; };
+globalThis.NULL = 'NULL';
 const modules = {app: '/data/app/x/lib/arm64/libapp.so', sys: '/vendor/lib64/libEGL_emu.so',
                  jdk: '/apex/com.android.art/lib64/libopenjdk.so'};
 globalThis.Process = {
@@ -199,14 +206,14 @@ globalThis.FLAG_LISTENERS = [];
 
 function cstr(s) { return {s, readUtf8String() { return this.s; },
                            writeUtf8String(v) { this.s = v; }}; }
+// The path hider replaces the export: [return value, errno] when it hid the
+// path, null when the real function ran.
 function callNative(sym, path, caller) {
-    const cb = listeners[sym];
-    const ctx = {returnAddress: caller};
-    const args = sym === 'faccessat' ? [null, cstr(path)] : [cstr(path)];
-    cb.onEnter.call(ctx, args);
-    let rv = null;
-    cb.onLeave.call(ctx, {replace: v => { rv = v.ptr; }});
-    return rv;
+    const fn = replaced[sym];
+    const ctx = {returnAddress: caller, errno: 0};
+    const args = sym === 'faccessat' ? [-100, cstr(path), 0, 0] : [cstr(path), 0];
+    const ret = fn.apply(ctx, args);
+    return ret === 'REAL' ? null : [ret, ctx.errno];
 }
 function callProp(key, caller) {
     const cb = listeners['__system_property_get'];
@@ -287,10 +294,10 @@ _SPOOFED = {
     "other": "y",
     "qemu_def": "d",
     "line1": "+15551234567",
-    "pipe_app": "-1",
-    "pipe_java": "-1",  # File.exists() via libopenjdk counts as the app
+    "pipe_app": [-1, 2],  # -1 with errno ENOENT, like a missing file
+    "pipe_java": [-1, 2],  # File.exists() via libopenjdk counts as the app
     "pipe_sys": None,  # the emulator's own graphics stack keeps its pipe
-    "rc_app": "0",
+    "rc_app": ["NULL", 2],
     "plain_app": None,
     "prop_app": ["", "0"],
     "prop_sys": ["1", None],
@@ -544,10 +551,24 @@ function banning(objName, keys) {
 }
 globalThis.Module = banning('Module', ['findExportByName', 'getExportByName', 'findBaseAddress', 'getBaseAddress', 'enumerateExports', 'enumerateImports', 'enumerateSymbols', 'ensureInitialized']);
 globalThis.Memory = banning('Memory', ['readUtf8String', 'writeUtf8String', 'readCString', 'readUtf16String', 'writeUtf16String', 'readAnsiString', 'writeAnsiString', 'readPointer', 'writePointer', 'readByteArray', 'writeByteArray', 'readU8', 'readS32', 'readU32', 'writeU8', 'writeS32', 'writeU32']);
-for (const g of ['Process', 'Interceptor', 'Java', 'NativeFunction', 'NativeCallback', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', 'Socket', 'File', 'Kernel', 'ApiResolver', 'ModuleMap', 'CModule', 'Instruction', 'Backtracer', 'hexdump', 'recv', 'Arm64Relocator', 'X86Relocator', 'Arm64Writer', 'X86Writer']) globalThis[g] = deep(g);
+for (const g of ['Java', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', 'Socket', 'File', 'Kernel', 'ApiResolver', 'ModuleMap', 'CModule', 'Instruction', 'Backtracer', 'hexdump', 'recv', 'Arm64Relocator', 'X86Relocator', 'Arm64Writer', 'X86Writer']) globalThis[g] = deep(g);
 globalThis.Java = new Proxy(deep('Java'), { get(t, k) { if (k === 'perform' || k === 'performNow') return fn => { try { fn(); } catch (e) { sent.push({javaError: '' + e}); } }; if (k === 'available') return true; return t[k]; } });
 globalThis.ptr = () => deep('ptr');
-globalThis.NULL = deep('NULL');
+globalThis.NULL = 'NULL';
+// Exports resolve to their names; replacements are recorded so the shared
+// path hider can be driven below.
+const replaced = {};
+globalThis.Process = new Proxy(deep('Process'), { get(t, k) {
+    if (k === 'findModuleByName') return () => ({ findExportByName: n => n });
+    if (k === 'findModuleByAddress') return () => ({ path: '/data/app/x/lib/arm64/libapp.so' });
+    return t[k];
+} });
+globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
+    if (k === 'replace') return (addr, cb) => { replaced[addr] = cb; };
+    return t[k];
+} });
+globalThis.NativeFunction = function () { return () => 'REAL'; };
+globalThis.NativeCallback = function (fn) { return fn; };
 globalThis.int64 = () => deep('int64'); globalThis.uint64 = () => deep('uint64');
 globalThis.send = m => sent.push(m);
 globalThis.rpc = { exports: {} };
@@ -555,7 +576,21 @@ globalThis.setTimeout = () => 0; globalThis.setInterval = () => 0; globalThis.se
 globalThis.clearTimeout = () => {}; globalThis.clearInterval = () => {};
 (0, eval)(src);
 if (rpc.exports.setFlags) rpc.exports.setFlags({});
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error)}));
+function probe(sym, path) {
+    const ctx = { returnAddress: 'app', errno: 0 };
+    const p = { readUtf8String: () => path };
+    const args = sym === 'faccessat' ? [-100, p, 0, 0] : [p, 0];
+    const ret = replaced[sym].apply(ctx, args);
+    return ret === 'REAL' ? 'REAL' : [ret, ctx.errno];
+}
+const probes = {};
+for (const flag of [true, false]) {
+    rpc.exports.setFlags({ root: flag, emulator: false });
+    for (const sym of ['access', 'faccessat', 'fopen', 'fopen64']) {
+        probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
+    }
+}
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes}));
 """
 
 
@@ -583,3 +618,8 @@ def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> Non
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["banned"] == []
     assert result["mergeErrors"] == []
+    # Root's native su hiding is installed (one replacement per probe):
+    # a su path fails like a missing file, everything else runs for real.
+    for sym, fail in (("access", -1), ("faccessat", -1), ("fopen", "NULL")):
+        assert result["probes"][f"{sym}:true"] == [[fail, 2], "REAL"], sym
+        assert result["probes"][f"{sym}:false"] == ["REAL", "REAL"], sym

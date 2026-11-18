@@ -117,6 +117,72 @@ function _findExport(lib, name) {
     }
 }
 function _libcExport(name) { return _findExport('libc.so', name); }
+
+// Shared path hider: ONE Interceptor.replace per libc probe (access,
+// faccessat, fopen, fopen64) for every category that hides files (root,
+// emulator). A hidden path gets -1 / NULL with errno = ENOENT, like a missing
+// file, and the real call never runs (no leaked FILE*). Two categories
+// cannot each replace the same export, hence the registry.
+var PATH_HIDERS = [];  // {cat, test(path, returnAddress)}
+var _pathHiderInstalled = false;
+var _ENOENT = 2;
+
+function _anyPathHiderOn() {
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        if (FLAGS[PATH_HIDERS[i].cat]) return true;
+    }
+    return false;
+}
+
+function _hiddenBy(path, returnAddress) {
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        var h = PATH_HIDERS[i];
+        try {
+            if (FLAGS[h.cat] && h.test(path, returnAddress)) return h.cat;
+        } catch (e) {}
+    }
+    return null;
+}
+
+function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
+    var addr = _libcExport(sym);
+    if (addr === null) return;
+    var original = new NativeFunction(addr, retType, argTypes);
+    Interceptor.replace(addr, new NativeCallback(function () {
+        if (_anyPathHiderOn()) {
+            var path = null;
+            try { path = arguments[pathIndex].readUtf8String(); } catch (e) {}
+            var cat = path === null ? null : _hiddenBy(path, this.returnAddress);
+            if (cat !== null) {
+                try { this.errno = _ENOENT; } catch (e) {}
+                send({type: 'info', hook: cat + '-bypass:' + sym + '(' + path + ')'});
+                return failValue;
+            }
+        }
+        // A NativeFunction call from inside the replacement reaches the
+        // original implementation, not this callback again.
+        return original.apply(null, arguments);
+    }, retType, argTypes));
+}
+
+function hidePaths(category, test) {
+    PATH_HIDERS.push({cat: category, test: test});
+    if (_pathHiderInstalled) return;
+    _pathHiderInstalled = true;
+    var probes = [
+        ['access', 'int', ['pointer', 'int'], 0, -1],
+        ['faccessat', 'int', ['int', 'pointer', 'int', 'int'], 1, -1],
+        ['fopen', 'pointer', ['pointer', 'pointer'], 0, NULL],
+        ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL]
+    ];
+    probes.forEach(function (p) {
+        try {
+            _replacePathProbe(p[0], p[1], p[2], p[3], p[4]);
+        } catch (e) {
+            send({type: 'debug', hook: 'path-hider:' + p[0], error: e.message});
+        }
+    });
+}
 """
 
 
@@ -525,107 +591,17 @@ function _looksLikeRootPath(s) {
 // Native: hide su/magisk/busybox paths from RootBeer's *native* probes.
 // RootBeer (wrapped by JailMonkey in Doctolib's React Native build) checks the
 // filesystem via libc access()/faccessat()/fopen() rather than java.io.File,
-// so the Java File.exists hook never sees them. We intervene ONLY on a
-// root-path match (rare) and keep onEnter lean so this never throttles a
-// Hermes app at boot. We deliberately do NOT hook open/openat (far too hot —
-// fopen/access cover RootBeer's actual primitives).
-(function () {
-
-    // access(path, mode): 0 = exists. Force -1 on a su-path so it "doesn't
-    // exist".
-    try {
-        var accessP = _libcExport('access');
-        if (accessP) {
-            Interceptor.attach(accessP, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var p = args[0].readUtf8String();
-                        if (_looksLikeRootPath(p)) {
-                            this._hide = true;
-                            this._path = p;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('-1'));
-                        send({type: 'info', hook: 'root-bypass:access(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:access'});
-        }
-    } catch (e) {
-        send({type: 'debug', hook: 'root-bypass:access', error: e.message});
-    }
-
-    // faccessat(dirfd, path, mode, flags): path is args[1]. Same as access().
-    try {
-        var faccessatP = _libcExport('faccessat');
-        if (faccessatP) {
-            Interceptor.attach(faccessatP, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var p = args[1].readUtf8String();
-                        if (_looksLikeRootPath(p)) {
-                            this._hide = true;
-                            this._path = p;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('-1'));
-                        send({type: 'info', hook: 'root-bypass:faccessat(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:faccessat'});
-        }
-    } catch (e) {
-        send({type: 'debug', hook: 'root-bypass:faccessat', error: e.message});
-    }
-
-    // fopen(path, mode) / fopen64(path, mode): non-NULL FILE* = opened. Force
-    // NULL on a su-path so the open "fails".
-    function _hookFopen(sym) {
-        try {
-            var p = _libcExport(sym);
-            if (!p) return;
-            Interceptor.attach(p, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var path = args[0].readUtf8String();
-                        if (_looksLikeRootPath(path)) {
-                            this._hide = true;
-                            this._path = path;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('0'));
-                        send({type: 'info', hook: 'root-bypass:' + sym + '(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:' + sym});
-        } catch (e) {
-            send({type: 'debug', hook: 'root-bypass:' + sym, error: e.message});
-        }
-    }
-    _hookFopen('fopen');
-    _hookFopen('fopen64');
-})();
+// so the Java File.exists hook never sees them. The shared path hider
+// (preamble ``hidePaths``) answers a root path with -1/NULL + ENOENT without
+// running the real call, and only reads the path while a hiding category is
+// on, so this never throttles a Hermes app at boot. We deliberately do NOT
+// hook open/openat (far too hot — fopen/access cover RootBeer's primitives).
+try {
+    hidePaths('root', function (path) { return _looksLikeRootPath(path); });
+    send({type: 'info', hook: 'root-bypass:access/faccessat/fopen'});
+} catch (e) {
+    send({type: 'debug', hook: 'root-bypass:path-hider', error: e.message});
+}
 
 Java.perform(function () {
     // Command check: any whitespace-separated token is a su binary or a known
@@ -1454,40 +1430,14 @@ function _spoofProp(key, value) {
 })();
 
 // Native: hide emulator files and pipes from access/faccessat/fopen probes
-// (listeners stack with the root category's on the same exports).
-(function () {
-    function _hidePath(sym, argIndex, failValue) {
-        try {
-            var p = _libcExport(sym);
-            if (!p) return;
-            Interceptor.attach(p, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.emulator) return;
-                    try {
-                        var path = args[argIndex].readUtf8String();
-                        if (_isEmuPath(path) && _isAppCaller(this.returnAddress)) {
-                            this._hide = true;
-                            this._path = path;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.emulator || !this._hide) return;
-                    rv.replace(ptr(failValue));
-                    send({type: 'info', hook: 'emulator-bypass:' + sym + '(' + this._path + ')'});
-                }
-            });
-            send({type: 'info', hook: 'emulator-bypass:' + sym});
-        } catch (e) {
-            send({type: 'debug', hook: 'emulator-bypass:' + sym, error: e.message});
-        }
-    }
-    _hidePath('access', 0, '-1');
-    _hidePath('faccessat', 1, '-1');
-    _hidePath('fopen', 0, '0');
-    _hidePath('fopen64', 0, '0');
-})();
+// through the shared path hider (one replacement per export, see preamble).
+try {
+    hidePaths('emulator', function (path, returnAddress) {
+        return _isEmuPath(path) && _isAppCaller(returnAddress);
+    });
+} catch (e) {
+    send({type: 'debug', hook: 'emulator-bypass:path-hider', error: e.message});
+}
 
 // Build.* fields: one coherent device profile, written (not hooked).
 var _emuBuildOriginal = null;
@@ -1633,8 +1583,9 @@ EMULATOR_DETECTION_HOOKS = [
     "android.telephony.TelephonyManager.getNetworkOperator",
     "android.telephony.TelephonyManager.getPhoneType",
     "android.telephony.TelephonyManager.getSimState",
-    # Native listeners stacked on exports the root category also attaches to
-    # (distinct ids, like the debug category's ``libc:read:tracerpid``).
+    # Native hooks shared with the root category: one path-hider replacement
+    # per file probe, a stacked listener on __system_property_get (distinct
+    # ids, like the debug category's ``libc:read:tracerpid``).
     "libc:__system_property_get:emulator",
     "libc:access:emulator",
     "libc:faccessat:emulator",
