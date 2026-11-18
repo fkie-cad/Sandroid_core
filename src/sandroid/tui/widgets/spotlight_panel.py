@@ -73,6 +73,28 @@ _POLL_INTERVAL = 4.0
 _HIDDEN_POLL_EVERY = 2
 
 
+def _is_static_analysis_end(event) -> bool:
+    """True for the event that ends a static analysis (``a``).
+
+    ``StaticAnalysis`` publishes ``AnalysisCompleted`` (a STATE_CHANGED with
+    source ``static_analysis``) after recording the Insight result in the
+    APK cache; a task-runner TASK_STOPPED of a static-analysis task counts
+    too.
+    """
+    try:
+        from sandroid.core.events import EventType
+
+        if getattr(event, "type", None) == EventType.TASK_STARTED:
+            return False
+        if getattr(event, "source", None) == "static_analysis":
+            return True
+        data = getattr(event, "data", None) or {}
+        name = str(data.get("task_name") or "") if isinstance(data, dict) else ""
+        return "static" in name.lower() and "analysis" in name.lower()
+    except Exception:
+        return False
+
+
 class SpotlightPanel(Widget):
     """Bottom-left panel: spotlight app status + live state + actions.
 
@@ -264,12 +286,14 @@ class SpotlightPanel(Widget):
             bus = EventBus.get()
 
             def _make_cb(state_changed: bool):
-                def _cb(_event) -> None:
+                def _cb(event) -> None:
                     # Fire-and-forget onto the main loop; never blocks the
                     # publisher's thread (avoids the call_from_thread deadlock).
                     self._ui.post(self.refresh_panel)
                     if state_changed:
                         self._ui.post(self._facts_state_changed)
+                    if _is_static_analysis_end(event):
+                        self._ui.post(self._static_analysis_finished)
 
                 return _cb
 
@@ -482,6 +506,11 @@ class SpotlightPanel(Widget):
         if sections is not None:
             sections.note_state_changed()
 
+    def _static_analysis_finished(self) -> None:
+        sections = self._sections()
+        if sections is not None:
+            sections.static_analysis_finished()
+
     def focus(self, scroll_visible: bool = True):
         """Focus the last-used section table when an app is shown.
 
@@ -523,10 +552,12 @@ class SpotlightPanel(Widget):
         sections = self._sections()
         if sections is None:
             return
-        if sections.refresh_runtime(static=True):
+        if sections.refresh_runtime(static=True, explicit=True):
             self._notify("Refreshing app facts…", "information")
         else:
-            self._notify("App facts refresh queued (one is running)", "information")
+            self._notify(
+                "Refreshing app facts right after the running fetch…", "information"
+            )
 
     def action_filter(self) -> None:
         try:

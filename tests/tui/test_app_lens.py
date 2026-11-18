@@ -197,6 +197,9 @@ class FakeService:
     calls: list[tuple[str, str, str]] = []
     cached: set[str] = {PKG}
     unhashable: set[str] = set()
+    no_insight: set[str] = set()
+    fail: set[tuple[str, str]] = set()
+    footprint_dirs: list[str | None] = []
     gates: dict[tuple[str, str], threading.Event] = {}
     version: dict[str, str] = {PKG: "4.2.0", OTHER: "9.9"}
 
@@ -208,6 +211,8 @@ class FakeService:
         gate = FakeService.gates.get((method, package))
         if gate is not None:
             gate.wait(5)
+        if (method, package) in FakeService.fail:
+            raise RuntimeError(f"{method} failed")
 
     def details(self, package):
         self._note("details", package)
@@ -222,6 +227,7 @@ class FakeService:
                 "install_source": None,
                 "install_date": "2026-11-01 10:00:00",
                 "last_update": "2026-11-17 09:00:00",
+                "data_dir": f"/data/user/0/{package}",
             }
         )
 
@@ -238,7 +244,11 @@ class FakeService:
                 key="k" * 64,
                 overview=dict(OVERVIEW, package=package),
                 meta=META,
-                insight=INSIGHT if package == PKG else None,
+                insight=(
+                    INSIGHT
+                    if package == PKG and package not in FakeService.no_insight
+                    else None
+                ),
                 from_cache=not allow_pull,
             )
         return StaticOverview(package=package, ok=False, reason="not cached yet")
@@ -266,7 +276,8 @@ class FakeService:
             ],
         )
 
-    def footprint(self, package):
+    def footprint(self, package, data_dir=None):
+        FakeService.footprint_dirs.append(data_dir)
         self._note("footprint", package)
         return DataFootprint(
             package=package,
@@ -286,6 +297,9 @@ def fake(monkeypatch):
     FakeService.calls = []
     FakeService.cached = {PKG}
     FakeService.unhashable = set()
+    FakeService.no_insight = set()
+    FakeService.fail = set()
+    FakeService.footprint_dirs = []
     FakeService.gates = {}
     state = {"pkg": PKG}
     monkeypatch.setattr(app_lens, "make_service", FakeService)
@@ -834,3 +848,99 @@ async def test_a_poll_keeps_the_scroll_position_and_the_cursor() -> None:
         await _settle(pilot)
         assert section.scroll_y == 150
         assert section.cursor_row == 160
+
+
+async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
+    """'press a' must go away once ``a`` recorded an Insight result."""
+    from sandroid.core.events.events import AnalysisCompleted
+
+    FakeService.no_insight = {PKG}
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        await _settle(pilot)
+        assert _texts(sections.section("trackers"))[0] == ANALYSIS_HINT
+        FakeService.no_insight = set()  # the analysis wrote meta.json
+        AnalysisCompleted(source="static_analysis").publish()
+        await _wait(
+            pilot,
+            lambda: any(
+                "Firebase Analytics" in t for t in _texts(sections.section("trackers"))
+            ),
+        )
+
+
+async def test_lens_activation_re_reads_a_cache_without_insight(fake):
+    FakeService.no_insight = {PKG}
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        await pilot.press("2")
+        await _settle(pilot)
+        FakeService.no_insight = set()
+        before = len(FakeService.calls)
+        await pilot.press("1")
+        await _wait(
+            pilot,
+            lambda: "static_cache" in {m for m, _p, _t in FakeService.calls[before:]},
+        )
+        await _wait(pilot, lambda: sections.facts.static.insight is not None)
+
+
+async def test_a_failed_worker_clears_only_its_own_flags(fake):
+    FakeService.fail = {("footprint", PKG)}
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: sections.facts and sections.facts.services)
+        await _wait(pilot, lambda: sections._footprint_inflight is None)
+        # a failed runtime worker of another generation / request is ignored
+        token = sections._token()
+        sections._runtime_rid = 99
+        sections._runtime_done((token[0], token[1] - 1), 99)
+        sections._runtime_done(token, 98)
+        assert sections._runtime_rid == 99
+        sections._runtime_done(token, 99)
+        assert sections._runtime_rid is None
+        # a failing appops refresh still ends its in-flight state
+        FakeService.fail = {("appops", PKG)}
+        assert sections.refresh_runtime(("appops",))
+        await _wait(pilot, lambda: not sections._runtime_inflight)
+
+
+async def test_u_during_a_running_poll_runs_right_after_it(fake):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        gate = threading.Event()
+        FakeService.gates[("appops", PKG)] = gate
+        sections._last_runtime = sections.facts.appops_at = 0.0
+        sections._poll_tick()  # the 10 s AppOps poll, held at the gate
+        assert sections._runtime_inflight
+        before = len(FakeService.calls)
+        await pilot.press("u")
+        await _settle(pilot)
+        gate.set()
+        start = time.monotonic()
+        await _wait(
+            pilot,
+            lambda: "static_cache" in {m for m, _p, _t in FakeService.calls[before:]},
+            timeout=3.0,
+        )
+        assert time.monotonic() - start < 3.0  # not the 10 s throttle
+
+
+async def test_footprint_gets_the_known_data_dir(fake):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        assert FakeService.footprint_dirs == [f"/data/user/0/{PKG}"]

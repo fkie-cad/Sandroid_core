@@ -47,6 +47,7 @@ Threading
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import time
@@ -1588,8 +1589,9 @@ class AppLensSections(Vertical):
         self._serial: str | None = None
         self._rid = 0
         self._applied: dict[str, int] = {}
-        self._runtime_inflight = False
+        self._runtime_rid: int | None = None
         self._pending: set[str] = set()
+        self._explicit: set[str] = set()
         self._last_runtime = 0.0
         self._trail_timer: Any = None
         self._stale = False
@@ -1597,7 +1599,7 @@ class AppLensSections(Vertical):
         self._last_section: str | None = None
         self._poll_timer: Any = None
         self._folded: set[str] = set()
-        self._footprint_inflight: tuple[str | None, int] | None = None
+        self._footprint_inflight: tuple[tuple[str | None, int], int] | None = None
 
     # -- compose ---------------------------------------------------------
 
@@ -1672,7 +1674,9 @@ class AppLensSections(Vertical):
         self._serial = serial
         self._applied = {}
         self._pending = set()
-        self._runtime_inflight = False
+        self._explicit = set()
+        self._runtime_rid = None
+        self._footprint_inflight = None
         self._stale = False
         if not package:
             self.facts = None
@@ -1687,13 +1691,18 @@ class AppLensSections(Vertical):
         self._rid += 1
         return self._rid
 
+    @property
+    def _runtime_inflight(self) -> bool:
+        """A runtime fetch (full load or refresh) of this generation runs."""
+        return self._runtime_rid is not None
+
     def _start_full_load(self) -> None:
         token = self._token()
         package, serial = token[0], self._serial
         if package is None:
             return
         rid = self._next_rid()
-        self._runtime_inflight = True
+        self._runtime_rid = rid
         self._last_runtime = time.monotonic()
 
         def work() -> None:
@@ -1701,6 +1710,9 @@ class AppLensSections(Vertical):
             svc = make_service(serial)
             details = svc.details(package)
             post(self._apply, token, rid, {"details": details})
+            # The footprint (own worker, can take a minute) reuses the
+            # dataDir dumpsys just printed: one adb call less.
+            post(self._start_footprint_for, token, _data_dir_of(details))
             static = svc.static_overview(package, allow_pull=False)
             cached = getattr(static, "overview", None) is not None
             # Only a plain cache miss is worth a pull (not a failed hash).
@@ -1725,7 +1737,7 @@ class AppLensSections(Vertical):
             )
             post(self._apply, token, rid, {"appops": svc.appops(package)})
             post(self._apply, token, rid, {"services": svc.services(package)})
-            post(self._runtime_done, token)
+            post(self._runtime_done, token, rid)
             if not pull:
                 return
             pulled = svc.static_overview(package, allow_pull=True)
@@ -1741,30 +1753,54 @@ class AppLensSections(Vertical):
                 },
             )
 
-        self._run(work, "app-lens-load")
-        self._start_footprint()
+        self._run(
+            work, "app-lens-load", functools.partial(self._runtime_done, token, rid)
+        )
 
-    def _start_footprint(self) -> None:
+    def _start_footprint_for(
+        self, token: tuple[str | None, int], data_dir: str | None
+    ) -> None:
+        if token == self._token():
+            self._start_footprint(data_dir)
+
+    def _start_footprint(self, data_dir: str | None = None) -> None:
         """``du`` of the data dirs: own worker (it can take a minute)."""
         token = self._token()
         package, serial = token[0], self._serial
-        if package is None or self._footprint_inflight == token:
+        if package is None:
             return
+        if self._footprint_inflight is not None and (
+            self._footprint_inflight[0] == token
+        ):
+            return
+        if data_dir is None and self.facts is not None:
+            data_dir = _data_dir_of(self.facts.details)
         rid = self._next_rid()
-        self._footprint_inflight = token
+        self._footprint_inflight = (token, rid)
 
         def work() -> None:
-            footprint = make_service(serial).footprint(package)
+            footprint = make_service(serial).footprint(package, data_dir=data_dir)
             self._ui.post(self._apply, token, rid, {"footprint": footprint})
-            self._ui.post(self._footprint_done, token)
+            self._ui.post(self._footprint_done, token, rid)
 
-        self._run(work, "app-lens-footprint")
+        self._run(
+            work,
+            "app-lens-footprint",
+            functools.partial(self._footprint_done, token, rid),
+        )
 
-    def _footprint_done(self, token: tuple[str | None, int]) -> None:
-        if self._footprint_inflight == token:
+    def _footprint_done(self, token: tuple[str | None, int], rid: int) -> None:
+        if self._footprint_inflight == (token, rid):
             self._footprint_inflight = None
 
-    def _run(self, work: Callable[[], None], name: str) -> None:
+    def _run(
+        self, work: Callable[[], None], name: str, on_fail: Callable[[], None]
+    ) -> None:
+        """Run ``work`` in a thread worker; ``on_fail`` (UI thread) if it raises.
+
+        ``on_fail`` carries the worker's own token / request id, so a failed
+        worker only clears its own in-flight flag, never a newer one's.
+        """
         if not self._ui.bound:
             self._ui = UiDispatcher.capture()  # UI thread: bind before posting
 
@@ -1773,13 +1809,13 @@ class AppLensSections(Vertical):
                 work()
             except Exception:
                 logger.debug("%s worker failed", name, exc_info=True)
-                self._ui.post(self._runtime_done, None)
+                self._ui.post(on_fail)
 
         try:
             self.run_worker(guarded, name=name, thread=True, exclusive=False)
         except Exception:
             logger.debug("could not start %s", name, exc_info=True)
-            self._runtime_inflight = False
+            on_fail()
 
     # -- runtime refresh ---------------------------------------------------
 
@@ -1789,12 +1825,15 @@ class AppLensSections(Vertical):
         *,
         throttle: bool = False,
         static: bool = False,
+        explicit: bool = False,
     ) -> bool:
-        """Re-fetch runtime facts off-thread. Returns False if nothing ran.
+        """Re-fetch runtime facts off-thread. Returns False if nothing ran now.
 
         ``throttle``: at most one fetch per :data:`RUNTIME_MIN_INTERVAL`
         seconds; a request inside that window runs once at its end.
         ``static``: also re-read the static cache (Insight may have run).
+        ``explicit``: the user asked (``u``) -- never throttled; while a
+        fetch is in flight it runs right after that one, not 10 s later.
         """
         if self.facts is None:
             return False
@@ -1811,7 +1850,10 @@ class AppLensSections(Vertical):
                         self._trail_timer = None
                 return False
         if self._runtime_inflight:
-            self._pending |= wanted
+            if explicit:
+                self._explicit |= wanted
+            else:
+                self._pending |= wanted
             return False
         self._start_runtime(wanted)
         return True
@@ -1838,7 +1880,7 @@ class AppLensSections(Vertical):
             kinds = kinds - {"footprint"}
             self._start_footprint()
         rid = self._next_rid()
-        self._runtime_inflight = True
+        self._runtime_rid = rid
         self._last_runtime = time.monotonic()
         overview = _overview(self.facts) if self.facts else {}
 
@@ -1867,17 +1909,33 @@ class AppLensSections(Vertical):
             for kind in RUNTIME_KINDS:
                 if kind in kinds and kind in fetch:
                     post(self._apply, token, rid, {kind: fetch[kind]()})
-            post(self._runtime_done, token)
+            post(self._runtime_done, token, rid)
 
-        self._run(work, "app-lens-refresh")
+        self._run(
+            work, "app-lens-refresh", functools.partial(self._runtime_done, token, rid)
+        )
 
-    def _runtime_done(self, token: tuple[str | None, int] | None) -> None:
-        if token is not None and token != self._token():
+    def _runtime_done(self, token: tuple[str | None, int], rid: int) -> None:
+        """A runtime fetch ended (or failed): clear only its own flag."""
+        if token != self._token() or self._runtime_rid != rid:
             return
-        self._runtime_inflight = False
-        if self._pending:
+        self._runtime_rid = None
+        if self._explicit:
+            kinds, self._explicit = self._explicit | self._pending, set()
+            self._pending = set()
+            self.refresh_runtime(kinds, throttle=False)
+        elif self._pending:
             kinds, self._pending = self._pending, set()
             self.refresh_runtime(kinds, throttle=True)
+
+    def static_analysis_finished(self) -> None:
+        """Static analysis (``a``) recorded Insight results: re-read the cache."""
+        if self.facts is None:
+            return
+        if not is_shown(self):
+            self._stale = True  # on_lens_activated re-reads (no insight yet)
+            return
+        self.refresh_runtime((), static=True, explicit=True)
 
     def note_state_changed(self) -> None:
         """STATE_CHANGED (or a new PID): refresh grants/AppOps/services."""
@@ -1893,9 +1951,20 @@ class AppLensSections(Vertical):
         if self.facts is None:
             return
         age = time.monotonic() - self._last_runtime
+        # Static analysis may have finished elsewhere: no Insight yet means
+        # the TRACKERS section still says "press a" -- re-read the cache.
+        static = self._insight_missing()
         if self._stale or age >= RUNTIME_MIN_INTERVAL:
             self._stale = False
-            self.refresh_runtime(EVENT_KINDS, throttle=False)
+            self.refresh_runtime(EVENT_KINDS, static=static, explicit=static)
+        elif static:
+            self.refresh_runtime((), static=True, explicit=True)
+
+    def _insight_missing(self) -> bool:
+        facts = self.facts
+        if facts is None or facts.static_state in ("checking", "analysing"):
+            return False
+        return not getattr(facts.static, "insight", None)
 
     def _poll_tick(self) -> None:
         """AppOps poll: only while visible, at most every 10 s."""
@@ -2027,6 +2096,13 @@ class AppLensSections(Vertical):
             return False
         widget.focus()
         return True
+
+
+def _data_dir_of(details: Any) -> str | None:
+    """``dataDir`` from a ``details`` Fact (``None`` when unknown)."""
+    value = getattr(details, "value", None) if details is not None else None
+    data_dir = value.get("data_dir") if isinstance(value, dict) else None
+    return str(data_dir) if data_dir else None
 
 
 def _affected(kinds: set[str]) -> set[str]:
