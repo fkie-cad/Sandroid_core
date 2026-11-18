@@ -210,18 +210,9 @@ class ConfigurationService:
             device_path = os.path.join(session_path, device_name)
             raw_path = os.path.join(device_path, "raw")
 
-            # Create folder structure
-            os.makedirs(device_path, exist_ok=True)
+            # Device and raw folders only: each subfolder (FOLDERS_FOR_RAW,
+            # FOLDERS_FOR_RESULT, TOOL_FOLDERS) is created by its writer.
             os.makedirs(raw_path, exist_ok=True)
-
-            # Create all subfolders: raw subfolders, result subfolders, tool folders
-            for parent, folders in [
-                (raw_path, self.FOLDERS_FOR_RAW),
-                (device_path, self.FOLDERS_FOR_RESULT),
-                (device_path, self.TOOL_FOLDERS),
-            ]:
-                for folder in folders:
-                    os.makedirs(os.path.join(parent, folder), exist_ok=True)
 
             # Update environment variables
             os.environ["RESULTS_PATH"] = os.path.join(device_path, "")

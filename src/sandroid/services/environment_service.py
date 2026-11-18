@@ -250,6 +250,7 @@ class EnvironmentService:
         self._logger.info("adb root enabled successfully")
 
         # Check SELinux permissive mode
+        before, _ = adb.send_adb_command("shell getenforce")
         stdout, stderr = adb.send_adb_command("shell setenforce 0")
         if stderr:
             result.selinux_permissive = False
@@ -261,7 +262,7 @@ class EnvironmentService:
             from sandroid.services.setup_checks import log_selinux_change
 
             result.selinux_permissive = True
-            log_selinux_change(None, "permissive", "environment validation")
+            log_selinux_change(before, "permissive", "environment validation")
 
         # Check optional binaries
         result.sqldiff_available = self.is_sqldiff_available()
@@ -315,11 +316,12 @@ class EnvironmentService:
             True if SELinux was set to permissive successfully.
         """
         adb = self._get_adb()
+        before, _ = adb.send_adb_command("shell getenforce")
         _stdout, stderr = adb.send_adb_command("shell setenforce 0")
         if not stderr:
             from sandroid.services.setup_checks import log_selinux_change
 
-            log_selinux_change(None, "permissive", "SELinux check")
+            log_selinux_change(before, "permissive", "SELinux check")
         return not stderr
 
     def is_sqldiff_available(self) -> bool:

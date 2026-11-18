@@ -647,15 +647,43 @@ class SpotlightPanel(Widget):
             self._run_frida_action(self._work_start, "start", "Spawning an app")
 
     def action_restart_app(self) -> None:
+        # No dialog (used often), but never inside the stray-typing window:
+        # an R in a typed word must not restart the app.
+        from sandroid.tui.modals.confirm_modal import typing_guard_active
+
+        if typing_guard_active(self.app):
+            self.stray_key_swallowed("R")
+            return
         if not self._require_package():
             return
         self._run_frida_action(self._work_restart, "restart", "Restarting an app")
 
+    def stray_key_swallowed(self, key: str) -> None:
+        """The main screen swallowed ``key`` as stray typing (notice for R)."""
+        if key == "R":
+            self._notify("Restart not run — that looked like typing.", "warning")
+
     def action_kill_app(self) -> None:
         if not self._require_package():
             return
-        # Kill only force-stops + tears down; it does not need frida-server.
-        self._run_action_bg(self._work_kill, "kill")
+        from sandroid.tui.modals import ConfirmModal
+
+        def on_result(yes: bool | None) -> None:
+            if yes:
+                # Kill only force-stops + tears down; no frida-server needed.
+                self._run_action_bg(self._work_kill, "kill")
+
+        # guard_typing: No focused, a typed-ahead y ignored, other letters
+        # cancel (as Play).
+        self.app.push_screen(
+            ConfirmModal(
+                title="Kill app",
+                message=f"Force-stop {self._current_package()} and tear down "
+                "its hooks?",
+                guard_typing=True,
+            ),
+            on_result,
+        )
 
     def action_attach_app(self) -> None:
         if not self._require_package():

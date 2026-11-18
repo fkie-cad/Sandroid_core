@@ -25,6 +25,11 @@ class QuitConfirmModal(DangerModal[bool]):
       meanwhile cannot reach the screens below (e.g. ``y`` = Proxy Settings).
     """
 
+    # Cancel has the focus (safer default; Enter still quits, see BINDINGS).
+    # Via AUTO_FOCUS: an own on_mount ran before SandroidModal's, whose
+    # auto-focus then moved the focus to the first button (Quit).
+    AUTO_FOCUS = "#btn-cancel"
+
     BINDINGS = [
         # Keep modal-specific bindings (y/n/q/enter) - ESC inherited from SandroidModal
         Binding("q", "cancel", "Cancel", show=False, priority=True),
@@ -91,13 +96,6 @@ class QuitConfirmModal(DangerModal[bool]):
                 hints={"button": "[dim]y/Enter=Quit  n/q/Esc=Cancel[/dim]"},
                 id="quit-hints",
             )
-
-    def on_mount(self) -> None:
-        """Focus the Cancel button on mount (safer default)."""
-        try:
-            self.query_one("#btn-cancel", Button).focus()
-        except NoMatches:
-            pass
 
     def on_descendant_focus(self, _event) -> None:
         from .confirm_modal import mark_focused_button
