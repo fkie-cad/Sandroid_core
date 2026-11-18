@@ -787,3 +787,50 @@ def test_app_and_network_lens_keys_do_not_clash() -> None:
     assert not {"space", "slash", "z", "u", "b"} & widget_keys
     assert MainScreen.BINDINGS
     assert keys(MainScreen)["enter"] == "inspect"
+
+
+# --------------------------------------------------------------------------
+# review fixes
+# --------------------------------------------------------------------------
+
+
+def _many_rows(n: int, stamp: str, extra: int = 0) -> app_lens.SectionData:
+    rows = [
+        app_lens.Row(
+            key=f"r{i}",
+            cells=(app_lens._t(f"op {i}"), app_lens._t(f"allow · {stamp}")),
+        )
+        for i in range(n + extra)
+    ]
+    return app_lens.SectionData(("op", "AppOps"), rows, f"{n} ops")
+
+
+async def test_a_poll_keeps_the_scroll_position_and_the_cursor() -> None:
+    """300 rows scrolled to 150: a changed "Ns ago" must not snap back."""
+    from textual.app import App
+
+    class Harness(App):
+        def compose(self):
+            yield LensSection("permissions")
+
+    app = Harness()
+    async with app.run_test(size=(100, 30)) as pilot:
+        section = app.query_one(LensSection)
+        section.show(_many_rows(300, "5s ago"))
+        section.focus()
+        await _settle(pilot)
+        section.move_cursor(row=160, animate=False)
+        section.scroll_to(y=150, animate=False)
+        await _settle(pilot)
+        assert section.scroll_y == 150
+        # same rows, new text: cells update in place
+        section.show(_many_rows(300, "15s ago"))
+        await _settle(pilot)
+        assert section.scroll_y == 150
+        assert section.cursor_row == 160
+        assert "15s ago" in str(section.get_row("r10")[1])
+        # a row more: the table is rebuilt, the view is restored
+        section.show(_many_rows(300, "25s ago", extra=1))
+        await _settle(pilot)
+        assert section.scroll_y == 150
+        assert section.cursor_row == 160

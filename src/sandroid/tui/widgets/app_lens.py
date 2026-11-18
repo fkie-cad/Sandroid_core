@@ -480,12 +480,11 @@ def _op_cell(ops: list[Any]) -> Text:
     """``allow · 5m ago ✗2h`` -- effective mode, last access, last reject."""
     if not ops:
         return _t("—", _DIM)
-    op = max(
-        ops,
-        key=lambda o: -(
-            o.last_access_ago_s if o.last_access_ago_s is not None else 1e12
-        ),
-    )
+
+    def age(o: Any) -> float:
+        return o.last_access_ago_s if o.last_access_ago_s is not None else 1e12
+
+    op = min(ops, key=age)  # the most recent access
     mode = op.mode or "?"
     style = _OK if mode in _LOOSE else (_BAD if mode in ("deny", "ignore") else "")
     text = Text(mode, style=style)
@@ -1454,6 +1453,8 @@ class LensSection(DataTable):
         self.data: SectionData | None = None
         self.rows_shown: list[Row] = []
         self._signature: tuple | None = None
+        self._shape: tuple | None = None
+        self._column_keys: list[Any] = []
         self._summary = ""
         self.cell_padding = 1
 
@@ -1498,19 +1499,52 @@ class LensSection(DataTable):
             # Same text; refresh the renderables (styles) only via rows_shown.
             self.rows_shown = rows
             return
+        shape = (data.columns, data.show_header, tuple(r.key for r in rows))
+        old_rows = self.rows_shown
         self._signature = signature
+        if shape == self._shape and len(old_rows) == len(rows):
+            # Same columns and rows (e.g. "5m ago" -> "5m ago" + 10 s): update
+            # the changed cells in place; cursor and scroll stay put.
+            self._update_cells(old_rows, rows)
+            self.rows_shown = rows
+            return
+        self._shape = shape
         cursor_key = self.cursor_key()
+        scroll_x, scroll_y = self.scroll_x, self.scroll_y
         self.show_header = data.show_header
         self.clear(columns=True)
-        self.add_columns(*data.columns)
+        self._column_keys = list(self.add_columns(*data.columns))
         for row in rows:
             self.add_row(*row.cells, key=row.key)
         self.rows_shown = rows
         if cursor_key is not None:
             for index, row in enumerate(rows):
                 if row.key == cursor_key:
-                    self.move_cursor(row=index, animate=False)
+                    self.move_cursor(row=index, animate=False, scroll=False)
                     break
+        if scroll_x or scroll_y:
+            # clear() scrolled home; put the view back once the new virtual
+            # size is known (rows added or removed: clamped to the new end).
+            self.call_after_refresh(self._restore_scroll, scroll_x, scroll_y)
+
+    def _restore_scroll(self, x: float, y: float) -> None:
+        self.scroll_to(x=x, y=y, animate=False)
+
+    def _update_cells(self, old_rows: list[Row], rows: list[Row]) -> None:
+        for old, new in zip(old_rows, rows, strict=True):
+            if old.text == new.text and old.cells == new.cells:
+                continue
+            for column, (before, after) in enumerate(
+                zip(old.cells, new.cells, strict=True)
+            ):
+                if before == after or column >= len(self._column_keys):
+                    continue
+                try:
+                    self.update_cell(
+                        new.key, self._column_keys[column], after, update_width=True
+                    )
+                except Exception:
+                    logger.debug("update_cell failed", exc_info=True)
 
     def cursor_key(self) -> str | None:
         rows = self.rows_shown
