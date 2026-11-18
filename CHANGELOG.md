@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Dependencies:** Textual is pinned to `>=6.2,<9` (the suite runs on 6.2.1 and 8.2.8).
 - **TUI: Lenses + Inspector shell.** The tool tabs and the half-screen "Background Activity" log are replaced by full-width **lenses** — `1` App (was Spotlight), `2` Network, `3` Files, `4` Runs (was Files → Diffs) — with `Shift+←/→` still cycling them. `Enter` on a row opens an on-demand **Inspector** on the right where a lens offers details; `Esc` closes it (before anything else, never quits). The header shows a device ▸ app breadcrumb, the last loaded snapshot and a `● LIVE` / `● REC` / `◆ REVIEW Run …` scope pill; the status band is condensed to one or two rows; the footer shows at most seven keys.
 - **Activity log → log drawer**: a one-row ticker shows the newest log line; `` ` `` (backtick) toggles a bottom drawer with the full log. **AI Chat** (`Ctrl+Y`) opens in the right-hand slot shared with the Inspector.
 - **Snapshots are a picker, not a tab**: `S` (or `0`) opens it — list, create, load / delete with confirm, assign to slot, `1`–`8` load a slot (confirmed), `s` then a digit saves into a slot. `Ctrl+1`–`Ctrl+8` still save directly.
