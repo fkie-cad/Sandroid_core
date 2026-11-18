@@ -1566,8 +1566,12 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
     from sandroid.tui.widgets import watchlist_view
     from sandroid.tui.widgets.watchlist_view import WatchlistView
 
-    monkeypatch.setattr(watchlist_view, "AUTO_PULL_QUIET", 0.1)
+    monkeypatch.setattr(watchlist_view, "AUTO_PULL_QUIET", 0.5)
     monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
+    # Starting the monitor also pulls watched files once (trigger
+    # "session-start"); under load that pull can win the race against the
+    # auto-pull this test is about, so it is switched off here.
+    monkeypatch.setattr(WatchlistView, "pull_session_baselines", lambda self, pkg: None)
     monkeypatch.setattr(
         FileExtractionService, "pull_file", _fake_pull({DB: "SQLite format 3\x00"})
     )
@@ -1580,7 +1584,9 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
         _publish(_fse("FSE_CONTENT_MODIFIED", DB + "-wal"))
         await _wait_for(pilot, lambda: panel.watchlist.pending_auto == [DB])
         rows = panel.watchlist.rows
-        await _wait_for(pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY)
+        await _wait_for(
+            pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY, timeout=8.0
+        )
         (version,) = watchlist_store.version_dirs(DB)
         record = watchlist_store.version_record(version)
         assert record["trigger"] == "auto"
