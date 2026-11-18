@@ -738,7 +738,14 @@ class EmulatorService:
                     self._logger.debug(f"{command!r} after snapshot load failed: {exc}")
                     break
             if mode() == "permissive":
-                self._logger.info("SELinux set back to Permissive after snapshot load")
+                from sandroid.services.setup_checks import log_selinux_change
+
+                log_selinux_change(
+                    "enforcing",
+                    "permissive",
+                    "snapshot load had restored Enforcing",
+                    serial,
+                )
                 return True
         self._logger.warning(
             "SELinux is Enforcing after the snapshot load and could not be set "

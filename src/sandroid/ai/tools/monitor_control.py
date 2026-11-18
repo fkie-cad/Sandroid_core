@@ -371,10 +371,20 @@ def get_file_diff(path: str) -> dict[str, Any]:
 
     from sandroid.core import watchlist_store
     from sandroid.core.adb import Adb
-    from sandroid.services import get_file_extraction_service, get_forensic_service
-    from sandroid.services.file_extraction_service import is_sqlite_file
+    from sandroid.services import get_forensic_service
 
     get_forensic_service().add_spotlight_file(path, adb=Adb)
+
+    # One pull of a file at a time: the Files lens may be pulling it too.
+    with watchlist_store.pull_lock(path):
+        return _pull_and_keep(path)
+
+
+def _pull_and_keep(path: str) -> dict:
+    """The locked part of the pull above (staging -> kept version)."""
+    from sandroid.core import watchlist_store
+    from sandroid.services import get_file_extraction_service
+    from sandroid.services.file_extraction_service import is_sqlite_file
 
     had_previous = watchlist_store.has_baseline(path)
     current_dir = watchlist_store.reset_current(path)

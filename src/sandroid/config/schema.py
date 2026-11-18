@@ -68,9 +68,12 @@ class EmulatorConfig(BaseModel):
         default=10.0,
         ge=0,
         description=(
-            "Host memory limit (resident GB) for the active emulator's qemu "
-            "process. Above it the emulator is stopped to protect the host "
-            "(see memory_guard_action). 0 disables the guard."
+            "Host memory limit (GB) for the active emulator's qemu process: "
+            "physical footprint on macOS, resident memory elsewhere. The "
+            "enforced limit is never below the AVD's RAM + 4 GB (2 x RAM + "
+            "4 GB when measuring resident memory). Above it on two readings "
+            "the emulator is stopped to protect the host (see "
+            "memory_guard_action). 0 disables the guard."
         ),
     )
     memory_guard_action: Literal["kill", "warn"] = Field(

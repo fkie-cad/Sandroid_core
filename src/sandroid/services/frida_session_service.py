@@ -280,6 +280,9 @@ class FridaSessionService:
                 try:
                     from AndroidFridaManager import FridaManager
 
+                    from sandroid.core.frida_manager import install_zygote_pid_fix
+
+                    install_zygote_pid_fix()
                     self._frida_manager = FridaManager(
                         verbose=True,
                         frida_install_dst="/data/local/tmp/",

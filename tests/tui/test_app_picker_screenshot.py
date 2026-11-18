@@ -200,6 +200,54 @@ async def test_ctrl_r_refreshes_and_keeps_filter() -> None:
         ]
 
 
+async def test_typing_during_the_open_refresh_keeps_the_filter() -> None:
+    """E2E L9: text typed while the title said "(refreshing…)" was lost."""
+    import threading
+
+    release = threading.Event()
+
+    def loader(include_system: bool) -> list[dict]:
+        release.wait(5)
+        return [dict(FIREFOX), *OLD]
+
+    modal = AppSelectionModal(
+        packages=[dict(p) for p in OLD],
+        package_loader=loader,
+        initial_loader=lambda on_status=None: loader(False),
+    )
+    async with _Host(modal).run_test(size=(120, 40)) as pilot:
+        await pilot.pause(0.05)
+        assert "refreshing" in str(modal.query_one(".modal-title").render())
+        await pilot.press("f", "i", "r")
+        release.set()
+        await _wait_for(pilot, lambda: len(modal.all_packages) == 3)
+        assert modal.query_one("#filter-input", Input).value == "fir"
+        assert _names(modal.filtered_packages) == ["org.mozilla.firefox"]
+
+
+def test_adb_commands_never_read_the_terminal(monkeypatch) -> None:
+    """E2E L9 root cause: ``adb shell`` forwards its stdin to the device. With
+    the TUI's terminal as stdin it consumed keys typed while the picker's
+    refresh ran its adb commands, so they never reached the filter.
+    """
+    import subprocess
+
+    from sandroid.core import adb as adb_mod
+    from sandroid.core.adb import Adb
+
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs.get("stdin"))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(adb_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(Adb, "ADB_PATH", "/x/adb")
+    Adb.send_adb_command("shell pm list packages -3")
+    Adb.send_adb_exec_out_command("cat /x")
+    assert seen == [subprocess.DEVNULL, subprocess.DEVNULL]
+
+
 # --------------------------------------------------------------------------
 # Filter text is visible (every stylesheet)
 # --------------------------------------------------------------------------

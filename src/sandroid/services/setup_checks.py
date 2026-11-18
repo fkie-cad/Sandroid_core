@@ -279,6 +279,35 @@ def check_and_enable_root(adb: Any) -> SetupCheckResult:
     return check
 
 
+#: Why Sandroid switches SELinux to Permissive.
+SELINUX_PERMISSIVE_REASON = (
+    "binder calls from root (APK install, Frida) are denied under Enforcing"
+)
+
+
+def log_selinux_change(
+    before: str | None, after: str | None, when: str, serial: str | None = None
+) -> None:
+    """Log, at INFO, an SELinux mode change Sandroid made, with the reason.
+
+    Nothing is logged when the mode did not change. ``before`` may be None
+    when it was not read; ``when`` names the occasion (e.g. "startup").
+    """
+    old = (before or "").strip().capitalize()
+    new = (after or "").strip().capitalize()
+    if not new or old == new:
+        return
+    device = f" on {serial}" if serial else ""
+    logger.info(
+        "SELinux mode changed%s: %s -> %s (setenforce 0, %s; reason: %s)",
+        device,
+        old or "unknown",
+        new,
+        when,
+        SELINUX_PERMISSIVE_REASON,
+    )
+
+
 def check_and_set_selinux(adb: Any) -> SetupCheckResult:
     """Check and set SELinux to permissive mode.
 
@@ -291,6 +320,7 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
     check = _make_check(name="selinux", display_name="SELinux Permissive")
 
     try:
+        before, _ = adb.send_adb_command("shell getenforce")
         _stdout, stderr = adb.send_adb_command("shell setenforce 0")
         if stderr:
             # adbd not running as root (e.g. Magisk-rooted device): retry
@@ -305,6 +335,7 @@ def check_and_set_selinux(adb: Any) -> SetupCheckResult:
         stdout, _ = adb.send_adb_command("shell getenforce")
         mode = (stdout or "").strip()
         check.details["mode"] = mode
+        log_selinux_change(before, mode, "device preparation")
         if "permissive" in mode.lower():
             check.status = SetupCheckStatus.PASSED
             check.message = "SELinux set to permissive mode"
@@ -412,6 +443,7 @@ def check_frida() -> SetupCheckResult:
 
 
 __all__ = [
+    "SELINUX_PERMISSIVE_REASON",
     "adb_binary_missing",
     "check_adb_availability",
     "check_and_enable_root",
@@ -421,6 +453,7 @@ __all__ = [
     "check_objection",
     "check_sqldiff",
     "list_adb_devices",
+    "log_selinux_change",
     "make_skipped_check",
     "missing_device_serial",
 ]

@@ -99,6 +99,16 @@ class QuitConfirmModal(DangerModal[bool]):
         except NoMatches:
             pass
 
+    def on_descendant_focus(self, _event) -> None:
+        from .confirm_modal import mark_focused_button
+
+        mark_focused_button(self)
+
+    def on_descendant_blur(self, _event) -> None:
+        from .confirm_modal import mark_focused_button
+
+        self.call_after_refresh(mark_focused_button, self)
+
     def on_key(self, event) -> None:
         """A letter/digit other than y/n/q is stray typing: cancel the quit.
 
@@ -107,12 +117,16 @@ class QuitConfirmModal(DangerModal[bool]):
         """
         if self.quitting:
             return
+        if self._stray:
+            # Cancelled as typing: the rest of the word (y included) is
+            # neither a Yes here nor a command below.
+            event.stop()
+            event.prevent_default()
+            return
         char = event.character or ""
         if len(char) == 1 and char.isalnum() and event.key not in ("y", "n", "q"):
             event.stop()
             event.prevent_default()
-            if self._stray:
-                return  # the rest of the word, before the dialog is gone
             self._stray = True
             self.app.notify(
                 "Quit cancelled — that looked like typing.", severity="warning"

@@ -341,6 +341,11 @@ class FileEvent:
     #: Set when the event was derived rather than reported for this path:
     #: "parent" (its directory was deleted), "renamed" (moved away).
     source: str = ""
+    #: The writing process (kprobe: its TGID; fsmon: as reported) and
+    #: thread (kprobe only: ``process`` is then "<process> · <thread>" or
+    #: the thread's name; fsmon's ``process`` is the process's name).
+    pid: int | None = None
+    tid: int | None = None
 
 
 @dataclass
@@ -375,6 +380,10 @@ class PathActivity:
     first: datetime | None = None
     last: datetime | None = None
     processes: dict[str, int] = field(default_factory=dict)
+    #: Events per writing process (pid), and the app-process label each
+    #: pid was seen with ("main", "tab_17"; "" when none).
+    pids: dict[int, int] = field(default_factory=dict)
+    pid_labels: dict[int, str] = field(default_factory=dict)
     events: deque[FileEvent] = field(
         default_factory=lambda: deque(maxlen=EVENTS_PER_PATH)
     )
@@ -396,9 +405,14 @@ class PathActivity:
 
     @property
     def deleted(self) -> bool:
-        """The last real (non-noise) event deleted it."""
+        """The last real (non-noise) event on the file itself deleted it.
+
+        Companion events (``-wal``/``-journal`` folded onto the database)
+        never decide: SQLite deletes its rollback journal at the end of
+        every transaction while the database stays.
+        """
         for event in reversed(self.events):
-            if event.category != "noise":
+            if event.category != "noise" and not event.via:
                 return event.category == "delete"
         return False
 
@@ -424,6 +438,15 @@ class PathActivity:
             self.last = event.when
         if event.process:
             self.processes[event.process] = self.processes.get(event.process, 0) + 1
+        if event.pid is not None:
+            self.pids[event.pid] = self.pids.get(event.pid, 0) + 1
+            head, sep, _thread = event.process.partition(" · ")
+            if sep and not head.startswith("pid "):
+                self.pid_labels[event.pid] = head
+            elif event.tid is None and event.process:
+                self.pid_labels[event.pid] = event.process  # fsmon
+            else:
+                self.pid_labels.setdefault(event.pid, "")
         if event.source != "renamed" and cat != "noise":
             self.moved_to = None
         if event.label == "CREATE DIR":
@@ -560,6 +583,8 @@ class FileActivity:
                 process=getattr(item, "process", "") or "",
                 other=other,
                 via=via,
+                pid=getattr(item, "pid", None),
+                tid=getattr(item, "tid", None),
             )
             row.add(event, segment)
             touched.add(key)
@@ -590,6 +615,8 @@ class FileActivity:
                 process=event.process,
                 other=new,
                 source="renamed",
+                pid=event.pid,
+                tid=event.tid,
             ),
             segment,
         )
@@ -617,6 +644,8 @@ class FileActivity:
                         process=event.process,
                         other=row.key,
                         source="parent",
+                        pid=event.pid,
+                        tid=event.tid,
                     ),
                     segment,
                 )

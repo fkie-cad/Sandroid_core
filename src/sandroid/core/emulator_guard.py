@@ -11,9 +11,17 @@ This module provides
 * :data:`SAFE_EMULATOR_ARGS` / :func:`emulator_launch_args` -- the flags every
   Sandroid-launched emulator uses (guest Vulkan off, host GPU), and
 * :class:`EmulatorMemoryGuard` -- a daemon thread that watches the qemu process
-  behind the active ADB serial and stops the emulator once its resident memory
-  exceeds ``emulator.max_host_memory_gb``. It also warns once when the
-  emulator was started *without* ``-feature -Vulkan`` (e.g. by hand).
+  behind the active ADB serial and stops the emulator once its host memory
+  stays above the limit (see :func:`effective_limit_bytes`). It also warns
+  once when the emulator was started *without* ``-feature -Vulkan`` (e.g. by
+  hand).
+
+What is measured (:func:`measure_host_memory`): on macOS the *physical
+footprint* reported by ``footprint -p <pid>`` (dirty memory, what the leak
+grows), elsewhere -- or when ``footprint`` is unavailable -- the resident set
+size. macOS RSS is not usable on its own: it also counts resident guest-RAM
+pages a second time, so a healthy 8 GB AVD read 8.5-15.0 GB RSS while its
+footprint was 6.5-9.3 GB.
 
 macOS has no cgroups, so polling is the only portable way to cap the process.
 """
@@ -21,10 +29,14 @@ macOS has no cgroups, so polling is the only portable way to cap the process.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -105,6 +117,7 @@ def _lsof_listener_pids(port: int) -> set[int] | None:
             text=True,
             timeout=5,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except Exception:
         return None
@@ -199,6 +212,159 @@ def find_emulator_process(serial: str | None) -> Any | None:
     return None
 
 
+# -- measuring ---------------------------------------------------------------
+
+_UNIT_BYTES = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": _GB, "TB": 1024**4}
+
+
+def parse_footprint_output(text: str) -> int | None:
+    """Bytes from ``footprint -p`` output ("... Footprint: 6434 MB (16384 ...").
+
+    Returns ``None`` when the output has no ``Footprint:`` figure.
+    """
+    match = re.search(r"Footprint:\s*([\d.]+)\s*([KMGT]?B)\b", text or "")
+    if not match:
+        return None
+    try:
+        return int(float(match.group(1)) * _UNIT_BYTES[match.group(2)])
+    except (KeyError, ValueError):
+        return None
+
+
+def footprint_bytes(pid: int) -> int | None:
+    """Physical footprint of *pid* via macOS ``footprint``; None if unavailable.
+
+    ``psutil.Process.memory_full_info()`` needs task_for_pid (AccessDenied
+    for the user's own qemu) and the kernel's ``ri_phys_footprint`` ledger
+    (``proc_pid_rusage``, Activity Monitor's "Memory") read 12.3 GB on the
+    same healthy 8 GB AVD -- both unusable here, hence the subprocess
+    (~0.4 s CPU per call).
+    """
+    if sys.platform != "darwin":
+        return None
+    exe = shutil.which("footprint") or (
+        "/usr/bin/footprint" if os.path.exists("/usr/bin/footprint") else None
+    )
+    if exe is None:
+        return None
+    try:
+        result = subprocess.run(
+            [exe, "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+    return parse_footprint_output(result.stdout)
+
+
+def measure_host_memory(proc: Any) -> tuple[int, str] | None:
+    """``(bytes, metric)`` for an emulator process; None if it is gone.
+
+    ``metric`` is ``"footprint"`` (macOS physical footprint) or ``"rss"``.
+    """
+    value = footprint_bytes(proc.pid)
+    if value:
+        return value, "footprint"
+    try:
+        return int(proc.memory_info().rss), "rss"
+    except Exception:
+        return None
+
+
+# -- the guest's RAM -----------------------------------------------------------
+
+#: Headroom over the guest RAM for qemu itself (GPU buffers, caches). A
+#: healthy 8 GB AVD measured at most 9.3 GB footprint (guest + 1.3 GB), even
+#: after two snapshot loads.
+GUEST_RAM_MARGIN_GB = 4.0
+
+
+def parse_ram_size(value: str) -> int | None:
+    """Bytes of an ``hw.ramSize`` / ``-memory`` value (MB unless suffixed)."""
+    match = re.fullmatch(
+        r"\s*(\d+(?:\.\d+)?)\s*([KMGT]?)i?B?\s*", str(value or ""), re.IGNORECASE
+    )
+    if not match:
+        return None
+    unit = match.group(2).upper() or "M"
+    return int(float(match.group(1)) * _UNIT_BYTES[unit + "B"]) or None
+
+
+def _avd_dir(name: str) -> Path | None:
+    """Directory of AVD *name* (honours ``ANDROID_AVD_HOME`` and ``path=``)."""
+    try:
+        from sandroid.config.android_env import find_existing_avd_home
+
+        home = find_existing_avd_home()
+    except Exception:
+        home = None
+    home = home or Path("~/.android/avd").expanduser()
+    try:
+        for line in (home / f"{name}.ini").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "path" and Path(value.strip()).is_dir():
+                return Path(value.strip())
+    except OSError:
+        pass
+    default = home / f"{name}.avd"
+    return default if default.is_dir() else None
+
+
+def guest_ram_bytes(cmdline: list[str]) -> int | None:
+    """Guest RAM of an emulator: ``-memory`` or the AVD's ``hw.ramSize``.
+
+    ``hardware-qemu.ini`` (what the running emulator resolved) wins over
+    ``config.ini``. Returns ``None`` when neither can be read.
+    """
+    avd = None
+    for i, arg in enumerate(cmdline[:-1]):
+        if arg == "-memory":
+            size = parse_ram_size(cmdline[i + 1])
+            if size:
+                return size
+        elif arg == "-avd":
+            avd = cmdline[i + 1]
+    if not avd:
+        return None
+    avd_dir = _avd_dir(avd)
+    if avd_dir is None:
+        return None
+    for name in ("hardware-qemu.ini", "config.ini"):
+        try:
+            text = (avd_dir / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "hw.ramSize":
+                size = parse_ram_size(value)
+                if size:
+                    return size
+    return None
+
+
+def effective_limit_bytes(
+    configured: int, guest_ram: int | None, metric: str = "footprint"
+) -> int:
+    """The limit the guard enforces: never below what a healthy AVD needs.
+
+    ``max(emulator.max_host_memory_gb, guest RAM + 4 GB)`` for the macOS
+    footprint. RSS (Linux, or macOS without ``footprint``) can count the
+    guest RAM twice on macOS (15.0 GB RSS on a healthy 8 GB AVD), so the RSS
+    floor is ``2 x guest RAM + 4 GB``. A configured limit of 0 disables the
+    guard; an unknown guest RAM leaves the configured limit as is.
+    """
+    if configured <= 0 or not guest_ram:
+        return configured
+    factor = 1 if metric == "footprint" else 2
+    floor = factor * guest_ram + int(GUEST_RAM_MARGIN_GB * _GB)
+    return max(configured, floor)
+
+
 class EmulatorMemoryGuard:
     """Watch the active emulator's host memory and stop it above a limit."""
 
@@ -208,20 +374,26 @@ class EmulatorMemoryGuard:
         *,
         limit_gb: float = 10.0,
         action: str = "kill",
-        interval: float = 5.0,
+        interval: float = 10.0,
+        confirm_delay: float | None = None,
         adb_path_getter: Callable[[], str] | None = None,
         notify: Callable[[str, int], None] | None = None,
     ) -> None:
         self._serial_getter = serial_getter
+        #: The configured limit (emulator.max_host_memory_gb); the enforced
+        #: one is scaled by the guest RAM, see effective_limit_bytes().
         self.limit_bytes = int(limit_gb * _GB)
         self.action = action
         self.interval = interval
+        #: Pause before the confirming re-measurement of an over-limit reading.
+        self.confirm_delay = interval if confirm_delay is None else confirm_delay
         self._adb_path_getter = adb_path_getter or (lambda: "adb")
         self._notify = notify or (lambda msg, level: logger.log(level, msg))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._warned_pids: set[int] = set()
         self._near_limit_pids: set[int] = set()
+        self._guest_ram: dict[int, int | None] = {}
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -252,9 +424,12 @@ class EmulatorMemoryGuard:
             return None
         try:
             cmdline = proc.cmdline()
-            rss = proc.memory_info().rss
         except Exception:
             return None
+        measured = measure_host_memory(proc)
+        if measured is None:
+            return None
+        used, metric = measured
 
         if proc.pid not in self._warned_pids and not vulkan_disabled(cmdline):
             self._warned_pids.add(proc.pid)
@@ -267,19 +442,43 @@ class EmulatorMemoryGuard:
 
         if self.limit_bytes <= 0:
             return None
-        if rss >= 0.75 * self.limit_bytes and proc.pid not in self._near_limit_pids:
+        if proc.pid not in self._guest_ram:
+            self._guest_ram[proc.pid] = guest_ram_bytes(cmdline)
+        guest = self._guest_ram[proc.pid]
+        limit = effective_limit_bytes(self.limit_bytes, guest, metric)
+        if used >= 0.75 * limit and proc.pid not in self._near_limit_pids:
             self._near_limit_pids.add(proc.pid)
             self._notify(
-                f"Emulator {serial} uses {rss / _GB:.1f} GB host memory "
-                f"(limit {self.limit_bytes / _GB:.0f} GB, emulator.max_host_memory_gb).",
+                f"Emulator {serial} uses {used / _GB:.1f} GB host memory "
+                f"({metric}; {self._limit_text(limit, guest, metric)}).",
                 logging.WARNING,
             )
-        if rss < self.limit_bytes:
+        if used < limit:
+            return None
+
+        # Confirm before acting: a single reading (start-up, snapshot load)
+        # must not stop the emulator.
+        if self._stop.wait(self.confirm_delay):
+            return None
+        confirmed = measure_host_memory(proc)
+        if confirmed is None:
+            return None
+        used, metric = confirmed
+        limit = effective_limit_bytes(self.limit_bytes, guest, metric)
+        if used < limit:
+            logger.info(
+                "Emulator %s host memory back to %.1f GB (%s) on re-check; "
+                "not over the %.0f GB limit",
+                serial,
+                used / _GB,
+                metric,
+                limit / _GB,
+            )
             return None
 
         msg = (
-            f"Emulator {serial} uses {rss / _GB:.1f} GB host memory, above the "
-            f"{self.limit_bytes / _GB:.0f} GB limit (emulator.max_host_memory_gb)."
+            f"Emulator {serial} uses {used / _GB:.1f} GB host memory ({metric}), "
+            f"above its limit on two readings ({self._limit_text(limit, guest, metric)})."
         )
         if self.action != "kill":
             self._notify(msg, logging.ERROR)
@@ -290,6 +489,16 @@ class EmulatorMemoryGuard:
         self._shutdown(serial, proc)
         return "killed"
 
+    def _limit_text(self, limit: int, guest: int | None, metric: str) -> str:
+        configured = f"emulator.max_host_memory_gb = {self.limit_bytes / _GB:g}"
+        if limit == self.limit_bytes or not guest:
+            return f"limit {limit / _GB:.0f} GB, {configured}"
+        times = "" if metric == "footprint" else "2 x "
+        return (
+            f"limit {limit / _GB:.0f} GB = {times}{guest / _GB:g} GB guest RAM "
+            f"+ {GUEST_RAM_MARGIN_GB:g} GB, above {configured}"
+        )
+
     def _shutdown(self, serial: str | None, proc: Any) -> None:
         try:
             subprocess.run(
@@ -297,6 +506,7 @@ class EmulatorMemoryGuard:
                 capture_output=True,
                 timeout=10,
                 check=False,
+                stdin=subprocess.DEVNULL,
             )
         except Exception:
             logger.debug("adb emu kill failed", exc_info=True)

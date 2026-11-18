@@ -624,3 +624,53 @@ class TestComputeDiffDispatch:
         diff, changed = _compute_diff(old_path, new_path)
 
         assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_two_pulls_of_one_file_at_once_run_one_after_the_other(
+    monkeypatch,
+) -> None:
+    """Two pulls of one path used to share ``.current/``: the second cleared
+    it while the first moved it to v001 ("No such file ... .current ->
+    v001"). They are serialised now; the second sees the first's version.
+    """
+    fake = _fake_pull_file({PATH_A: "same\n"})
+    active: list[int] = []
+    overlap: list[int] = []
+
+    def _slow_pull(self, remote_path, local_path, compute_hash=False):
+        active.append(1)
+        if len(active) > 1:
+            overlap.append(1)
+        time.sleep(0.2)  # long enough for the other pull to start meanwhile
+        try:
+            return fake(self, remote_path, local_path, compute_hash)
+        finally:
+            active.pop()
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", _slow_pull)
+    get_forensic_service().add_spotlight_file(PATH_A)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "sandroid.tui.widgets.watchlist_view.logger.warning",
+        lambda msg, *a, **k: warnings.append(str(msg)),
+    )
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        view.pull([PATH_A])
+        view.pull([PATH_A])  # e.g. the watch's first version + a manual u
+        await _wait_for(
+            pilot,
+            lambda: (
+                not view.is_pulling(PATH_A)
+                and len(watchlist_store.version_checks(PATH_A)) == 1
+            ),
+        )
+        assert warnings == []
+        assert overlap == []  # never two pulls of the file at once
+        assert view.rows[PATH_A].state is not RowState.ERROR
+        assert len(watchlist_store.version_dirs(PATH_A)) == 1
+        (check,) = watchlist_store.version_checks(PATH_A)
+        assert check["same_as"] == "v001"

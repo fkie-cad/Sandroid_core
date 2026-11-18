@@ -788,6 +788,9 @@ class InitializationService:
         try:
             from AndroidFridaManager import FridaManager
 
+            from sandroid.core.frida_manager import install_zygote_pid_fix
+
+            install_zygote_pid_fix()
             return FridaManager(
                 verbose=True,
                 frida_install_dst=frida_install_dst,

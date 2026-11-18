@@ -10,6 +10,7 @@ from .base import (
     CommandContext,
     CommandHandler,
     CommandResult,
+    ui_answer,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,11 +58,14 @@ class DeviceSelectorCommand(CommandHandler):
 
             # Multiple devices - use selection modal in TUI or prompt in CLI
             if ctx.is_tui_mode and ctx.request_selection:
-                options = {d.serial: d.name or d.serial for d in devices}
-                selected = await ctx.request_selection(
-                    title="Select Device",
-                    options=options,
-                    message="Choose a device for analysis:",
+                # A list: the selection dialog indexes its options.
+                options = [d.serial for d in devices]
+                selected = await ui_answer(
+                    ctx.request_selection(
+                        title="Select Device",
+                        options=options,
+                        message="Choose a device for analysis:",
+                    )
                 )
                 if selected:
                     device_service.set_active_device(selected)
@@ -71,7 +75,9 @@ class DeviceSelectorCommand(CommandHandler):
                         data={"device": selected},
                     )
                 return CommandResult(
-                    success=False, message="Device selection cancelled"
+                    success=False,
+                    message="Device selection cancelled",
+                    error="cancelled",
                 )
             # CLI mode - just list devices and use first
             device_list = ", ".join(d.serial for d in devices)

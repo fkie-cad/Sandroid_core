@@ -9,6 +9,7 @@ import pytest
 from sandroid.core import emulator_guard as eg
 
 GB = 1024**3
+_REAL_FOOTPRINT_BYTES = eg.footprint_bytes
 
 
 class FakeProc:
@@ -47,6 +48,16 @@ SAFE = [
 UNSAFE = ["qemu-system-aarch64", "-avd", "X", "-port", "5556", "-no-boot-anim"]
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_measurements(monkeypatch, tmp_path):
+    """No real ``footprint`` runs and no real AVD configs are read."""
+    monkeypatch.setattr(eg, "footprint_bytes", lambda pid: None)
+    avd_home = tmp_path / "avd"
+    avd_home.mkdir()
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(avd_home))
+    return avd_home
+
+
 def _guard(proc, monkeypatch, *, limit_gb=8, action="kill"):
     msgs: list[tuple[str, int]] = []
     adb_calls: list[list[str]] = []
@@ -57,6 +68,7 @@ def _guard(proc, monkeypatch, *, limit_gb=8, action="kill"):
         lambda: "emulator-5556",
         limit_gb=limit_gb,
         action=action,
+        confirm_delay=0,
         adb_path_getter=lambda: "/x/adb",
         notify=lambda m, lvl: msgs.append((m, lvl)),
     )
@@ -255,3 +267,163 @@ def test_guard_never_kills_the_wrong_emulator(procs, monkeypatch):
     )
     assert g.check_once() is None
     assert killed == []
+
+
+# -- H1: physical footprint, RAM-scaled limit, confirm before kill -----------
+
+FOOTPRINT_OUT = (
+    "======================================================================\n"
+    "qemu-system-aarch64 [39418]: 64-bit    Footprint: 9059 MB "
+    "(16384 bytes per page)\n"
+    "======================================================================\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (FOOTPRINT_OUT, 9059 * 1024**2),
+        ("Footprint: 6434 MB (16384 bytes per page)", 6434 * 1024**2),
+        ("proc [1]: 64-bit    Footprint: 12 GB (16384 bytes per page)", 12 * GB),
+        ("Footprint: 512 KB (16384 bytes per page)", 512 * 1024),
+        ("footprint: cannot examine process 1: (os/kern) failure", None),
+        ("", None),
+    ],
+)
+def test_parse_footprint_output(text, expected):
+    assert eg.parse_footprint_output(text) == expected
+
+
+def test_footprint_bytes_runs_footprint_on_macos(monkeypatch):
+    monkeypatch.setattr(eg, "footprint_bytes", _REAL_FOOTPRINT_BYTES)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append((argv, kw.get("stdin")))
+        return type("R", (), {"stdout": FOOTPRINT_OUT})()
+
+    monkeypatch.setattr(eg.sys, "platform", "darwin")
+    monkeypatch.setattr(eg.shutil, "which", lambda name: "/usr/bin/footprint")
+    monkeypatch.setattr(eg.subprocess, "run", run)
+    assert eg.footprint_bytes(39418) == 9059 * 1024**2
+    assert calls == [(["/usr/bin/footprint", "-p", "39418"], eg.subprocess.DEVNULL)]
+    monkeypatch.setattr(eg.sys, "platform", "linux")
+    assert eg.footprint_bytes(39418) is None
+
+
+def test_measure_prefers_footprint_and_falls_back_to_rss(monkeypatch):
+    proc = FakeProc(SAFE, 15 * GB)
+    assert eg.measure_host_memory(proc) == (15 * GB, "rss")
+    monkeypatch.setattr(eg, "footprint_bytes", lambda pid: int(9.3 * GB))
+    assert eg.measure_host_memory(proc) == (int(9.3 * GB), "footprint")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("8192", 8 * GB),
+        (" 8192 ", 8 * GB),
+        ("2048M", 2 * GB),
+        ("8G", 8 * GB),
+        ("4GB", 4 * GB),
+        ("junk", None),
+        ("", None),
+    ],
+)
+def test_parse_ram_size(value, expected):
+    assert eg.parse_ram_size(value) == expected
+
+
+def test_guest_ram_from_avd_config(_hermetic_measurements):
+    avd = _hermetic_measurements / "Demo8G.avd"
+    avd.mkdir()
+    (avd / "config.ini").write_text("hw.ramSize=4096\nvm.heapSize=512\n")
+    cmd = ["qemu-system-aarch64", "-avd", "Demo8G", "-port", "5554"]
+    assert eg.guest_ram_bytes(cmd) == 4 * GB  # config.ini only
+    # hardware-qemu.ini is what the running emulator resolved: it wins.
+    (avd / "hardware-qemu.ini").write_text("hw.ramSize = 8192\n")
+    assert eg.guest_ram_bytes(cmd) == 8 * GB
+    # An explicit -memory beats both.
+    assert eg.guest_ram_bytes([*cmd, "-memory", "6144"]) == 6 * GB
+    assert eg.guest_ram_bytes(["qemu", "-avd", "Missing"]) is None
+
+
+def test_guest_ram_follows_avd_ini_path_redirect(_hermetic_measurements, tmp_path):
+    elsewhere = tmp_path / "disk" / "Big.avd"
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "config.ini").write_text("hw.ramSize=2048\n")
+    (_hermetic_measurements / "Big.ini").write_text(f"path={elsewhere}\n")
+    assert eg.guest_ram_bytes(["qemu", "-avd", "Big"]) == 2 * GB
+
+
+def test_effective_limit_scales_with_guest_ram():
+    ten = 10 * GB
+    # Measured on this host: 8 GB AVD footprint 6.5-9.3 GB, RSS up to 15.0 GB.
+    assert eg.effective_limit_bytes(ten, 8 * GB, "footprint") == 12 * GB
+    assert eg.effective_limit_bytes(ten, 8 * GB, "rss") == 20 * GB
+    # Small AVDs keep the configured limit; a larger configured one wins.
+    assert eg.effective_limit_bytes(ten, 2 * GB, "footprint") == ten
+    assert eg.effective_limit_bytes(32 * GB, 8 * GB, "rss") == 32 * GB
+    assert eg.effective_limit_bytes(ten, None, "rss") == ten  # RAM unknown
+    assert eg.effective_limit_bytes(0, 8 * GB, "footprint") == 0  # disabled
+
+
+def _avd8g(home):
+    avd = home / "Demo8G.avd"
+    avd.mkdir()
+    (avd / "hardware-qemu.ini").write_text("hw.ramSize = 8192\n")
+    return [*SAFE[:2], "Demo8G", *SAFE[3:]]
+
+
+def test_h1_healthy_8g_avd_is_not_killed(monkeypatch, _hermetic_measurements):
+    """H1 repro: 15.0 GB RSS / 9.3 GB footprint on an 8 GB AVD, 10 GB config."""
+    proc = FakeProc(_avd8g(_hermetic_measurements), 15 * GB)
+    monkeypatch.setattr(eg, "footprint_bytes", lambda pid: int(9.3 * GB))
+    g, msgs, adb = _guard(proc, monkeypatch, limit_gb=10)
+    assert g.check_once() is None
+    assert adb == []
+    assert not proc.killed
+    # 9.3 GB is above 75 % of the 12 GB limit: one warning naming the rule.
+    assert [lvl for _, lvl in msgs] == [logging.WARNING]
+    assert "8 GB guest RAM + 4 GB" in msgs[0][0]
+
+
+def test_h1_rss_fallback_does_not_kill_healthy_8g_avd(
+    monkeypatch, _hermetic_measurements
+):
+    proc = FakeProc(_avd8g(_hermetic_measurements), 15 * GB)
+    g, _, adb = _guard(proc, monkeypatch, limit_gb=10)
+    assert g.check_once() is None  # RSS limit 2 x 8 + 4 = 20 GB
+    assert adb == []
+
+
+def test_real_leak_on_8g_avd_is_still_killed(monkeypatch, _hermetic_measurements):
+    proc = FakeProc(_avd8g(_hermetic_measurements), 40 * GB)
+    monkeypatch.setattr(eg, "footprint_bytes", lambda pid: 25 * GB)
+    g, msgs, adb = _guard(proc, monkeypatch, limit_gb=10)
+    assert g.check_once() == "killed"
+    assert adb == [["/x/adb", "-s", "emulator-5556", "emu", "kill"]]
+    assert any("two readings" in m for m, lvl in msgs if lvl == logging.ERROR)
+
+
+def test_transient_spike_is_not_killed(monkeypatch):
+    """Only a reading confirmed by a second one stops the emulator."""
+    readings = iter([9 * GB, 3 * GB])
+    monkeypatch.setattr(eg, "footprint_bytes", lambda pid: next(readings))
+    proc = FakeProc(SAFE, 0)
+    g, msgs, adb = _guard(proc, monkeypatch)
+    assert g.check_once() is None
+    assert adb == []
+    assert not proc.killed
+    assert not any(lvl == logging.ERROR for _, lvl in msgs)
+
+
+def test_confirm_waits_the_confirm_delay_and_stops_cleanly(monkeypatch):
+    proc = FakeProc(SAFE, 9 * GB)
+    g, _, adb = _guard(proc, monkeypatch)
+    waits = []
+    g._stop = type("E", (), {"wait": lambda self, t: waits.append(t) or True})()
+    g.confirm_delay = 7.5
+    assert g.check_once() is None  # guard stopped while confirming: no kill
+    assert waits == [7.5]
+    assert adb == []

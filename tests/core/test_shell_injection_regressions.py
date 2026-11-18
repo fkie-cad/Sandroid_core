@@ -351,3 +351,53 @@ def test_snapshot_console_ko_reply_is_a_failure(verb):
     svc = EmulatorService(adb=_Adb())
     assert getattr(svc, f"{verb}_snapshot")("sandroid_x") is False
     assert sent == [f"avd snapshot {_SNAPSHOT_VERBS[verb]} sandroid_x"]
+
+
+# ---------------------------------------------------------------------------
+# Child processes must not read the TUI's terminal (E2E round 2, M1)
+# ---------------------------------------------------------------------------
+
+#: (file under src/sandroid, enclosing function) allowed to inherit stdin.
+_STDIN_ALLOWED = {
+    # ``stty sane`` acts on the terminal on its stdin: it needs the tty.
+    ("tui/terminal_reset.py", "_run_stty_sane"),
+}
+
+
+def test_child_processes_do_not_inherit_the_terminal_stdin():
+    """A child that inherits stdin reads the TUI's terminal (``adb shell``
+    forwards what it reads to the device): typed keys went missing. Every
+    ``subprocess`` call passes ``stdin=`` (``DEVNULL`` unless it feeds the
+    child) or ``input=``.
+    """
+    import ast
+    from pathlib import Path
+
+    import sandroid
+
+    names = {"run", "Popen", "check_output", "check_call", "call"}
+    root = Path(sandroid.__file__).parent
+    offenders = set()
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), rel)
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(func):
+                f = getattr(node, "func", None)
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(f, ast.Attribute)
+                    and isinstance(f.value, ast.Name)
+                    and (
+                        (f.value.id == "subprocess" and f.attr in names)
+                        or (f.value.id == "asyncio" and "subprocess" in f.attr)
+                    )
+                ):
+                    continue
+                if {k.arg for k in node.keywords} & {"stdin", "input", None}:
+                    continue
+                if (rel, func.name) not in _STDIN_ALLOWED:
+                    offenders.add(f"{rel}:{node.lineno} ({func.name})")
+    assert sorted(offenders) == [], "pass stdin=subprocess.DEVNULL"

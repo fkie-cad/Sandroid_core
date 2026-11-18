@@ -75,6 +75,7 @@ def extract_package_name_with_aapt(aapt_path: str, apk_path: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=10,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             match = re.search(r"package: name='([^']+)'", result.stdout)

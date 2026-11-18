@@ -536,6 +536,70 @@ def daemonize_afm_job_threads() -> bool:
     return True
 
 
+#: AFM's launcher takes zygote's environment from ``/proc/$ZPID/environ``.
+#: ``pidof zygote64`` prints *every* process of that name, and a child that
+#: zygote forked for an app keeps the name until it specializes (e.g. a spawn
+#: frida-server timed out on). ``ZPID`` then was "744 13955", the launcher read
+#: ``/proc/744 13955/environ``, got no BOOTCLASSPATH and frida-server aborted.
+_AFM_ZPID_LINE = "ZPID=$(pidof zygote64 || pidof zygote)\n"
+
+#: Replacement: the zygote whose parent is init (PPID 1), else the first PID.
+ZYGOTE_PID_SNIPPET = (
+    "ZPID=\n"
+    "for p in $(pidof zygote64 || pidof zygote); do\n"
+    "  pp=\n"
+    "  read -r _ _ _ pp _ 2>/dev/null </proc/$p/stat\n"
+    '  if [ "$pp" = 1 ]; then ZPID=$p; break; fi\n'
+    '  [ -n "$ZPID" ] || ZPID=$p\n'
+    "done\n"
+)
+
+
+def fix_launcher_zygote_pid(command: str) -> str:
+    """Rewrite AFM's base64 launcher command to read ONE zygote's environment.
+
+    ``command`` is ``echo <b64> | base64 -d | sh`` as built by AFM's
+    ``FridaManager._build_frida_server_launcher``. Returned unchanged when it
+    has another shape or no longer contains the multi-PID line.
+    """
+    import base64
+
+    match = re.fullmatch(r"echo (\S+) \| base64 -d \| sh", command.strip())
+    if not match:
+        return command
+    try:
+        script = base64.b64decode(match.group(1)).decode()
+    except Exception:
+        return command
+    if _AFM_ZPID_LINE not in script:
+        return command
+    script = script.replace(_AFM_ZPID_LINE, ZYGOTE_PID_SNIPPET, 1)
+    return f"echo {base64.b64encode(script.encode()).decode()} | base64 -d | sh"
+
+
+def install_zygote_pid_fix() -> bool:
+    """Patch AFM's frida-server launcher to use a single zygote PID.
+
+    Idempotent; returns False if AFM has no launcher builder to wrap.
+    """
+    try:
+        from AndroidFridaManager import FridaManager as AfmFridaManager
+    except Exception:
+        return False
+    if getattr(AfmFridaManager, "_sandroid_zygote_pid_fix", False):
+        return True
+    original = getattr(AfmFridaManager, "_build_frida_server_launcher", None)
+    if original is None:
+        return False
+
+    def _build_frida_server_launcher(self, frida_bin: str) -> str:
+        return fix_launcher_zygote_pid(original(self, frida_bin))
+
+    AfmFridaManager._build_frida_server_launcher = _build_frida_server_launcher
+    AfmFridaManager._sandroid_zygote_pid_fix = True
+    return True
+
+
 def install_stale_detach_guard(job_manager) -> bool:
     """Make the JobManager ignore ``detached`` signals of its *previous* sessions.
 
@@ -1079,6 +1143,7 @@ class FridaManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 )
             else:
                 output = subprocess.run(
@@ -1086,6 +1151,7 @@ class FridaManager:
                     check=False,
                     capture_output=True,
                     text=True,
+                    stdin=subprocess.DEVNULL,
                 )
 
             return output
@@ -1104,6 +1170,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return output
         except OSError as e:
@@ -1121,6 +1188,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return output
         except OSError as e:
@@ -1160,6 +1228,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             if bool(result.stdout):
                 self.is_magisk_mode = True
@@ -1170,6 +1239,7 @@ class FridaManager:
                 check=False,
                 capture_output=True,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
             return bool(result.stdout)
         except OSError as e:

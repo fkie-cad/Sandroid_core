@@ -274,6 +274,10 @@ class Adb:
                 cls._build_shell_command(full_command),
                 check=False,
                 capture_output=True,
+                # Never the TUI's terminal: "adb shell" forwards its stdin to
+                # the device, so it swallowed keys typed meanwhile (the app
+                # picker lost its filter text during a refresh).
+                stdin=subprocess.DEVNULL,
                 text=True,
                 errors="surrogateescape",
                 shell=True,
@@ -361,6 +365,7 @@ class Adb:
                 cls._build_shell_command(full_command),
                 check=False,
                 capture_output=True,
+                stdin=subprocess.DEVNULL,  # see send_adb_command
                 text=True,
                 shell=True,
             )

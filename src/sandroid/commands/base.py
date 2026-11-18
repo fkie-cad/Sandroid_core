@@ -19,6 +19,7 @@ Usage:
             return CommandResult(success=True, message="Screenshot saved")
 """
 
+import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -63,6 +64,20 @@ class CommandResult:
     data: dict[str, Any] | None = None
     error: str | None = None
     should_return_to_menu: bool = True
+
+
+async def ui_answer(value: Any) -> Any:
+    """The answer of a ``ctx.request_*`` dialog.
+
+    The TUI's ``request_input`` / ``request_selection`` are synchronous: they
+    block the command's worker thread until the dialog closes and return
+    ``None`` on Esc / Cancel. Commands used to ``await`` that value, which
+    raised for every answer (E2E round 2: Esc on Import Results then ran the
+    import as if submitted). Awaitables (test doubles) are still awaited.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class UIBusProtocol(Protocol):

@@ -453,3 +453,38 @@ async def test_fsmon_offers_no_follow_and_no_app_mode_without_a_pid(
         assert len(modal.query("#mode-select")) == 0
         assert len(modal.query("#follow-app")) == 0
         assert modal._get_selected_mode() == "path"
+
+
+@pytest.mark.asyncio
+async def test_enter_on_the_follow_checkbox_starts_and_space_toggles(
+    monkeypatch,
+) -> None:
+    """E2E round 3 N7: the hint says "Enter=Start", but Enter on the Follow
+    checkbox toggled it. Enter starts (as on the mode choice and the path
+    field); Space toggles.
+    """
+    from textual.widgets import Checkbox
+
+    monkeypatch.setattr(monitor_modal, "get_spotlight_service", _PidSpotlight)
+    monkeypatch.setattr(MonitorConfigModal, "_last_mode", None)
+    _patch_backend(monkeypatch, "kprobe", availability=True)
+    app = _ModalHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = app.screen
+        started: list[bool] = []
+        monkeypatch.setattr(
+            modal, "_start", lambda: started.append(modal._follow_selected())
+        )
+        follow = modal.query_one("#follow-app", Checkbox)
+        follow.focus()
+        await pilot.pause()
+        before = follow.value
+        await pilot.press("space")
+        await pilot.pause()
+        assert follow.value is (not before)
+        assert started == []
+        await pilot.press("enter")
+        await pilot.pause()
+        assert follow.value is (not before)
+        assert started == [not before]

@@ -13,8 +13,10 @@ device_name = "Pixel_6_Pro_API_31"
 # android_emulator_path = "~/Android/Sdk/emulator/emulator"  # Optional: auto-detected if not provided
 # sdk_path = "~/Android/Sdk"  # Optional: auto-detected if not provided
 # adb_path = "~/Android/Sdk/platform-tools/adb"  # Optional: auto-detected if not provided
-# Host-memory cap for the active emulator (qemu resident GB). Above it Sandroid
-# stops the emulator ("kill") or only warns ("warn"). 0 disables the guard.
+# Host-memory cap for the active emulator's qemu (GB; physical footprint on
+# macOS, resident memory elsewhere). The enforced cap is never below the AVD's
+# RAM + 4 GB (2 x RAM + 4 GB for resident memory). Above it on two readings
+# Sandroid stops the emulator ("kill") or only warns ("warn"). 0 disables it.
 max_host_memory_gb = 10
 memory_guard_action = "kill"
 

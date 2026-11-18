@@ -399,3 +399,105 @@ def test_ca_injection_restarts_frida_after_killing_zygote(monkeypatch):
     monkeypatch.setattr(mgr, "_inject_bind_mount", lambda n, p: (False, "nope"))
     mgr.inject_ca_into_zygote()
     assert restarts == [1]
+
+
+# -- M6: frida-server relaunch took two zygote PIDs ------------------------
+
+
+def _decoded(command: str) -> str:
+    import base64
+
+    return base64.b64decode(command.split()[1]).decode()
+
+
+def _zpid(tmp_path, pidof_out: str, stats: dict[int, str]) -> str:
+    """Run the launcher's ZPID snippet in a local sh with a fake pidof/proc."""
+    import subprocess
+
+    from sandroid.core.frida_manager import ZYGOTE_PID_SNIPPET
+
+    proc = tmp_path / "proc"
+    proc.mkdir(exist_ok=True)
+    for pid, stat in stats.items():
+        (proc / str(pid)).mkdir()
+        (proc / str(pid) / "stat").write_text(stat)
+    script = (
+        f"pidof() {{ [ \"$1\" = zygote64 ] && echo '{pidof_out}'; }}\n"
+        + ZYGOTE_PID_SNIPPET.replace("/proc/", f"{proc}/")
+        + 'echo "[$ZPID]"\n'
+    )
+    out = subprocess.run(
+        ["/bin/sh", "-c", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return out.stdout.strip()
+
+
+ZYGOTE_STATS = {
+    744: "744 (zygote64) S 1 744 0 0 -1 4210944",
+    13955: "13955 (zygote64) t 744 744 0 0 -1 4210944",
+}
+
+
+@pytest.mark.parametrize("pidof_out", ["744 13955", "13955 744", "744"])
+def test_zygote_pid_picks_the_init_child_not_a_forked_app(tmp_path, pidof_out):
+    """E2E M6: ``pidof zygote64`` said "744 13955" (13955: an app zygote had
+    forked but not yet specialized); "/proc/744 13955/environ" broke the
+    launch. Only zygote's own PID (parent: init) may be used.
+    """
+    assert _zpid(tmp_path, pidof_out, ZYGOTE_STATS) == "[744]"
+
+
+def test_zygote_pid_falls_back_to_the_first_pid(tmp_path):
+    # Unreadable /proc/<pid>/stat: still exactly one PID, never "a b".
+    assert _zpid(tmp_path, "900 901", {}) == "[900]"
+    assert _zpid(tmp_path, "", {}) == "[]"
+
+
+def test_afm_launcher_is_patched_to_a_single_zygote_pid():
+    from AndroidFridaManager import FridaManager as AfmFridaManager
+
+    from sandroid.core.frida_manager import (
+        ZYGOTE_PID_SNIPPET,
+        fix_launcher_zygote_pid,
+        install_zygote_pid_fix,
+    )
+
+    bin_path = "/data/local/tmp/frida-server"
+    original = AfmFridaManager._build_frida_server_launcher
+    fm = AfmFridaManager.__new__(AfmFridaManager)
+    before = _decoded(original(fm, bin_path))
+    assert "ZPID=$(pidof zygote64 || pidof zygote)\n" in before
+    try:
+        assert install_zygote_pid_fix()
+        assert install_zygote_pid_fix()  # idempotent
+        after = _decoded(fm._build_frida_server_launcher(bin_path))
+    finally:
+        AfmFridaManager._build_frida_server_launcher = original
+        AfmFridaManager._sandroid_zygote_pid_fix = False
+    assert ZYGOTE_PID_SNIPPET in after
+    assert "ZPID=$(pidof" not in after
+    # The rest of AFM's launcher is untouched.
+    assert after.replace(ZYGOTE_PID_SNIPPET, "") == before.replace(
+        "ZPID=$(pidof zygote64 || pidof zygote)\n", ""
+    )
+    # Unknown shapes pass through unchanged.
+    assert fix_launcher_zygote_pid("frida-server &") == "frida-server &"
+
+
+def test_frida_server_pid_parsing_never_matches_zygote():
+    """The stop/kill path matches frida-server processes only."""
+    from AndroidFridaManager import FridaManager as AfmFridaManager
+
+    ps = (
+        "  PID NAME\n"
+        "  744 zygote64\n"
+        "13955 zygote64\n"
+        " 9117 org.mozilla.firefox\n"
+        " 4321 /data/local/tmp/frida-server\n"
+        " 4400 frida-server-17.27.0-android-arm64\n"
+    )
+    assert AfmFridaManager._parse_frida_server_pids(ps) == [4321, 4400]

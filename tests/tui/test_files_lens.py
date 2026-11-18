@@ -275,7 +275,8 @@ async def test_empty_state_is_one_calm_line() -> None:
         assert panel.has_class("-empty")
         empty = str(panel.query_one("#files-empty").render())
         assert empty == "Monitor off — press o to watch file activity"
-        assert panel.caption() == ("LIVE", "")
+        # L8 (round 2): no "LIVE" title while the monitor is off.
+        assert panel.caption() == ("monitor off", "")
 
 
 @pytest.mark.asyncio
@@ -393,7 +394,14 @@ async def test_u_pulls_the_row_and_U_pulls_all(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
-    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull({AAID: "x"}))
+    pulled: list[str] = []
+    fake = _fake_pull({AAID: "x"})
+
+    def _pull(self, remote_path, local_path, compute_hash=False):
+        pulled.append(remote_path)
+        return fake(self, remote_path, local_path, compute_hash)
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", _pull)
     app = _Harness()
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
@@ -405,8 +413,11 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
         await _wait_for(
             pilot,
             lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY,
-            timeout=8.0,  # watch + baseline pull run on a worker; slow under load
         )
+        # Watching pulls the first version; u adds no second pull of the
+        # file on top of it (the two used to race on the staging folder).
+        assert not panel.watchlist.is_pulling(AAID)
+        assert pulled.count(AAID) == 1
 
 
 @pytest.mark.asyncio
@@ -735,7 +746,7 @@ async def test_review_scope_shows_the_runs_files_and_live_comes_back(
         panel.post_message(ScopeChanged(None))
         await pilot.pause()
         assert [r.key for r in panel._rows] == [f"{ROOT}/files/live"]
-        assert panel.caption()[0] == "LIVE"
+        assert panel.caption()[0] == "monitor off"  # back to live, monitor off
 
 
 @pytest.mark.asyncio
@@ -771,7 +782,7 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         await pilot.pause(0.1)
         panel = ms.lens_widget("files")
         assert isinstance(panel, FilesPanel)
-        assert ms.query_one("#lens-host").border_title == "Files · LIVE"
+        assert ms.query_one("#lens-host").border_title == "Files · monitor off"
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.ingest(_items(_fse("FSE_CREATE_FILE", PREFS)), now=T0)
         panel.refresh_rows()
@@ -1198,7 +1209,7 @@ async def test_marks_show_only_activity_since_and_step_through_segments() -> Non
         await pilot.pause()
         assert set(_keys(panel)) == {DB, new, PREFS, AAID}
         assert _row(panel, PREFS).stats.count == 2
-        assert panel.caption()[0] == "LIVE"
+        assert panel.caption()[0] == "monitor off"
         await pilot.press("A")
         await pilot.pause()
         assert panel.segment == 1
@@ -1748,6 +1759,323 @@ async def test_quit_dialog_opened_by_a_stray_q_is_cancelled_by_the_next_letter(
 
 
 # --------------------------------------------------------------------------
+# E2E round 2: keys typed in a burst (H2, H3, M1), hidden lenses, Import Esc
+# --------------------------------------------------------------------------
+
+_CHARS = {"grave_accent": "`", "slash": "/", "enter": "\r", "escape": None}
+
+
+def _burst(app, *keys: str) -> None:
+    """Deliver keys the way a terminal does for fast typing / tmux send-keys:
+    all queued at once, before the first one is handled (``pilot.press``
+    waits for the app to go idle between keys and hides the race).
+    """
+    from textual import events
+
+    for key in keys:
+        char = _CHARS.get(key, key if len(key) == 1 else None)
+        app.post_message(events.Key(key, char))
+
+
+async def _until_idle(pilot, n: int = 10) -> None:
+    for _ in range(n):
+        await pilot.pause(0.05)
+
+
+@pytest.mark.asyncio
+async def test_drawer_toggle_then_typed_filter_word_reaches_the_filter(
+    monkeypatch,
+) -> None:
+    """H2: `` ` `` `` ` `` ``/heise`` typed at once ran the global h (friTap,
+    which also switched to the Network lens), e (Device Info), i (Import),
+    s (Screenshot): Textual routed every key to the table that had focus
+    when the burst was dequeued, before ``/`` moved focus to the filter.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(200, 50)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        ran: list[str] = []
+        real = app.run_action
+
+        async def spy(action, *args, **kwargs):
+            ran.append(str(action))
+            return await real(action, *args, **kwargs)
+
+        monkeypatch.setattr(app, "run_action", spy)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        await _until_idle(pilot, 4)
+        _burst(app, "grave_accent", "grave_accent", "slash", *"heise")
+        await _until_idle(pilot)
+        field = panel.query_one("#files-input", Input)
+        assert field.value == "heise"
+        assert app.focused is field
+        assert type(app.screen).__name__ == "MainScreen"
+        assert ms.active_lens == "files"
+        assert ran == ["toggle_log", "toggle_log", "filter"], ran
+
+
+@pytest.mark.asyncio
+async def test_quit_cancelled_as_typing_never_runs_the_next_letter(
+    monkeypatch,
+) -> None:
+    """H3: ``q`` then ``xyz``: "Quit cancelled -- that looked like typing",
+    but the ``y`` (routed to the dialog before it closed) then ran the main
+    screen's global ``y`` = Proxy Settings.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        proxy: list[int] = []
+        exits: list[int] = []
+        monkeypatch.setattr(app, "action_proxy", lambda: proxy.append(1))
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
+        await pilot.press("q")
+        await _until_idle(pilot, 4)
+        assert type(app.screen).__name__ == "QuitConfirmModal"
+        _burst(app, *"xyz")
+        await _until_idle(pilot)
+        assert proxy == []
+        assert exits == []
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in n.message for n in app._notifications)
+        # Within the guard window the next letters are text, not commands.
+        _burst(app, "y")
+        await _until_idle(pilot, 4)
+        assert proxy == []
+        assert ms.typing_guard_active()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("opener", "lens_key", "action"),
+    [("q", "w", "toggle_watch"), ("p", "z", "zoom")],
+)
+async def test_lens_key_after_a_stray_typing_cancel_never_runs(
+    monkeypatch, opener: str, lens_key: str, action: str
+) -> None:
+    """E2E round 3 N1: ``q x w`` cancelled the quit as typing, then ``w``
+    added a watch and pulled the file; ``p x z`` opened the zoom diff. The
+    stray window swallowed only app/screen bindings, not the lens's own.
+    One burst, as typed.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        ran: list[str] = []
+        exits: list[int] = []
+        monkeypatch.setattr(panel, f"action_{action}", lambda: ran.append(action))
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
+        # p: the Play confirm (a recording present), not a device revert.
+        monkeypatch.setattr(app, "action_play", app._confirm_play)
+        await _until_idle(pilot, 4)
+        _burst(app, opener, "x", lens_key)
+        await _until_idle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in n.message for n in app._notifications)
+        assert ran == []
+        assert exits == []
+        assert ms._typed_ignored == lens_key
+        # The window is over: the lens key works again.
+        ms._typing_until = 0.0
+        await pilot.press(lens_key)
+        await _until_idle(pilot, 4)
+        assert ran == [action]
+
+
+@pytest.mark.asyncio
+async def test_stray_window_passes_keys_that_are_not_typing(monkeypatch) -> None:
+    """Only printable keys are swallowed: arrows (and Esc, Enter, Tab) still
+    work right after a stray-typing cancel.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", AAID), _fse("FSE_CREATE_FILE", PREFS)),
+            now=T0,
+        )
+        panel.refresh_rows()
+        panel.table.focus()
+        await _until_idle(pilot, 4)
+        row = panel.table.cursor_row
+        _burst(app, "q", "x", "3", "down")
+        await _until_idle(pilot)
+        assert ms.typing_guard_active()
+        assert ms._typed_ignored == "3"
+        assert panel.table.cursor_row == row + 1
+
+
+@pytest.mark.asyncio
+async def test_first_key_after_declining_play_is_not_lost(monkeypatch) -> None:
+    """M1: Enter declined the Play confirm and the ``p`` typed right behind
+    it was dropped: it went to the closing dialog, which took it for stray
+    typing ("that looked like typing") and swallowed it.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals import ConfirmModal
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, _panel = await _boot_files(pilot, app)
+        plays: list[int] = []
+        monkeypatch.setattr(app, "action_play", lambda: plays.append(1))
+        app.push_screen(ConfirmModal(title="Play (replay)", guard_typing=True))
+        await _until_idle(pilot, 4)
+        assert app.screen.focused.id == "no"
+        _burst(app, "enter", "p")
+        await _until_idle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert plays == [1]
+        assert not any("looked like typing" in n.message for n in app._notifications)
+
+
+@pytest.mark.asyncio
+async def test_first_key_after_a_lens_switch_reaches_the_new_lens() -> None:
+    """M1: ``3`` then ``/`` at once: the ``/`` went to the lens being left."""
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        await pilot.press("4")
+        await _until_idle(pilot, 4)
+        _burst(app, "3", "slash", *"aid")
+        await _until_idle(pilot)
+        assert ms.active_lens == "files"
+        assert panel.query_one("#files-input", Input).value == "aid"
+
+
+@pytest.mark.asyncio
+async def test_hidden_lenses_cannot_take_focus() -> None:
+    """Structural: a lens that is not shown is disabled, so focus (and with
+    it every key, binding or key handler) can never land inside it.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        await _until_idle(pilot, 4)
+        hidden = [ms.lens_widget(i) for i in ("app", "network", "runs")]
+        assert all(w.disabled for w in hidden)
+        assert not panel.disabled
+        network = ms.lens_widget("network")
+        ms.set_focus(network)
+        for widget in network.query("*"):
+            if widget.can_focus:
+                ms.set_focus(widget)
+        await _until_idle(pilot, 4)
+        assert ms.focused is not None
+        assert panel in ms.focused.ancestors_with_self
+        await pilot.press("2")
+        await _until_idle(pilot, 4)
+        assert not network.disabled
+        assert panel.disabled
+        assert network in ms.focused.ancestors_with_self
+
+
+@pytest.mark.asyncio
+async def test_reopened_filter_selects_the_old_text() -> None:
+    """L7: typing after ``/`` replaced nothing, it appended to the old filter."""
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        _ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        await pilot.press("slash", *"aaid", "enter")
+        await _until_idle(pilot, 4)
+        await pilot.press("slash", *"aid")
+        await _until_idle(pilot, 4)
+        assert panel.query_one("#files-input", Input).value == "aid"
+
+
+@pytest.mark.asyncio
+async def test_proxy_settings_ignore_a_bare_enter_in_the_stray_window(
+    monkeypatch,
+) -> None:
+    """H3: the Proxy Settings opened by stray typing were applied by the
+    next Enter. A bare Enter right after the dialog opened, or while stray
+    typing has just closed a dialog, does not apply.
+    """
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals.confirm_modal import start_typing_guard
+    from sandroid.tui.modals.proxy_modal import ProxyModal
+
+    applied: list[int] = []
+    monkeypatch.setattr(ProxyModal, "action_apply", lambda self: applied.append(1))
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        await _boot_files(pilot, app)
+        app.push_screen(ProxyModal())
+        _burst(app, "enter")  # typed ahead
+        await _until_idle(pilot, 4)
+        modal = app.screen
+        assert isinstance(modal, ProxyModal)
+        modal.query_one("#device-ext-input", Input).focus()
+        await pilot.pause(ProxyModal.ENTER_ARM_SECONDS)
+        start_typing_guard(app)  # stray typing just closed a dialog
+        await pilot.press("enter")
+        await _until_idle(pilot, 2)
+        assert applied == []
+        assert any("Enter ignored" in n.message for n in app._notifications)
+        ms = app.screen_stack[-2]
+        ms._typing_until = 0.0  # the window is over
+        await pilot.press("enter")
+        await _until_idle(pilot, 2)
+        assert applied == [1]
+
+
+def test_import_results_escape_cancels_without_importing(tmp_path) -> None:
+    """H2 follow-on: Esc on Import Results logged "'NoneType' object can't be
+    awaited" and then imported the default path as if submitted.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from sandroid.commands.io_commands import (
+        ExportResultsCommand,
+        ImportResultsCommand,
+    )
+
+    imported: list[str] = []
+    ctx = SimpleNamespace(
+        action_queue=object(),
+        is_tui_mode=True,
+        request_input=lambda **kw: None,  # synchronous, like the real one
+        toolbox=SimpleNamespace(import_results=imported.append),
+        get_results_path=lambda: str(tmp_path),
+    )
+    result = asyncio.run(ImportResultsCommand().execute(ctx))
+    assert imported == []
+    assert result.success is False
+    assert result.error == "cancelled"
+    result = asyncio.run(ExportResultsCommand().execute(ctx))
+    assert result.error == "cancelled"
+    assert list(tmp_path.iterdir()) == []
+    # A typed path is used as typed (it was always the default before).
+    ctx.request_input = lambda **kw: str(tmp_path / "x.json")
+    asyncio.run(ImportResultsCommand().execute(ctx))
+    assert imported == [str(tmp_path / "x.json")]
+
+
+# --------------------------------------------------------------------------
 # idle ★ rows fold into one row (E2E finding 9 / owner decision A)
 # --------------------------------------------------------------------------
 
@@ -1984,8 +2312,8 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
             _fse("FSE_CONTENT_MODIFIED", DB), _fse("FSE_CONTENT_MODIFIED", DB)
         )
         items = [
-            replace(items[0], process="main · mozStorage #1"),
-            replace(items[1], process="tab_17 · DOM Worker"),
+            replace(items[0], process="main · mozStorage #1", pid=4665),
+            replace(items[1], process="tab_17 · DOM Worker", pid=5395),
         ]
         panel.ingest(items[:1], now=T0)
         text = f"{PKG} restarted 10:40:05 · new PID 25983 · gap ≈0.3 s"
@@ -2016,4 +2344,174 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
         assert "tab_17 · DOM Worker" in events[idx - 1]
         assert "main · mozStorage #1" in events[idx + 1]
         summary = _plain(_tab(inspected, "Summary"))
-        assert "main, tab_17" in summary or "tab_17, main" in summary
+        assert (
+            "main (4665), tab_17 (5395)" in summary
+            or "tab_17 (5395), main (4665)" in summary
+        )
+
+
+# --------------------------------------------------------------------------
+# E2E round 2: companion delete (M5), separators (L1), OPEN-only idle (L3),
+# no LIVE while off / stopping (L8, M8), tid in the timeline (M4)
+# --------------------------------------------------------------------------
+
+
+def test_a_journal_delete_does_not_mark_its_database_deleted() -> None:
+    """M5: SQLite deletes ``-journal`` after every transaction; the
+    database stays (the Summary said "now deleted" for live DBs).
+    """
+    activity = FileActivity()
+    activity.ingest(
+        _items(
+            _fse("FSE_CONTENT_MODIFIED", DB),
+            _fse("FSE_CREATE_FILE", DB + "-journal"),
+            _fse("FSE_DELETE", DB + "-journal"),
+        ),
+        now=T0,
+    )
+    row = activity.paths[DB]
+    assert row.ops.get("delete") == 1  # still shown, as a -journal event
+    assert row.events[-1].via == "-journal"
+    assert not row.deleted
+    activity.ingest(_items(_fse("FSE_DELETE", DB)), now=T0 + timedelta(seconds=1))
+    assert row.deleted  # the database's own delete does
+
+
+@pytest.mark.asyncio
+async def test_a_live_database_with_a_deleted_journal_is_not_now_deleted() -> None:
+    get_forensic_service().add_spotlight_file(DB)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        writes: list = []
+        panel.watchlist.note_write = lambda key, when: writes.append(key)
+        panel.ingest(
+            _items(
+                _fse("FSE_CONTENT_MODIFIED", DB),
+                _fse("FSE_DELETE", DB + "-journal"),
+            ),
+            now=T0,
+        )
+        assert writes == [DB]  # the write still auto-pulls
+        panel.refresh_rows()
+        summary = _plain(panel._live_summary(_row(panel, DB)))
+        assert "deleted" not in summary
+        assert "strike" not in str(panel._path_cell(_row(panel, DB)).spans)
+
+
+@pytest.mark.asyncio
+async def test_a_restart_before_a_files_first_event_shows_in_its_events() -> None:
+    """L1: ``places.sqlite-shm`` first touched after a restart showed the
+    mark before it but not the restart line.
+    """
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.drop_mark("search", T0)
+        panel.ingest(_items(_fse("FSE_CONTENT_MODIFIED", PREFS)), now=T0)
+        old = f"{PKG} restarted 10:39:00 · new PID 7000 · gap ≈2.0 s"
+        panel.add_monitor_note(old, T0 - timedelta(seconds=60), "warning")
+        text = f"{PKG} restarted 10:40:05 · new PID 7592 · gap ≈2.6 s"
+        panel.add_monitor_note(f"{PKG} exited · PID 4665", T0 + timedelta(seconds=4))
+        panel.add_monitor_note(text, T0 + timedelta(seconds=5), "warning")
+        panel.add_monitor_note(
+            "+ tab_3 (PID 7700) followed", T0 + timedelta(seconds=6), "info"
+        )
+        panel.ingest(
+            _items(_fse("FSE_CONTENT_MODIFIED", DB)), now=T0 + timedelta(seconds=9)
+        )
+        panel.refresh_rows()
+        lines = panel._events_text(_row(panel, DB)).plain.splitlines()
+        assert lines[0].startswith("10:40:09")
+        assert lines[1:] == [
+            f"── {text} ──",
+            f"── {PKG} exited · PID 4665 ──",
+            "── mark 1 'search' · 10:40:00 ──",
+        ]  # the follow note (info) and the restart before the mark are not
+
+
+@pytest.mark.asyncio
+async def test_watched_rows_with_only_open_events_stay_in_the_idle_fold() -> None:
+    """L3: OPEN-only (hidden) activity took a ★ row out of the fold and
+    showed an empty ops column with a count ("2x").
+    """
+    from sandroid.tui.widgets.files_panel import IDLE_FOLD
+
+    prefs = [f"{ROOT}/shared_prefs/p{i}.xml" for i in range(5)]
+    for path in prefs:
+        get_forensic_service().add_spotlight_file(path)
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        panel.drop_mark("restart", T0)
+        panel.ingest(
+            _items(
+                _fse("FSE_OPEN", prefs[0]),
+                _fse("FSE_OPEN", prefs[0]),
+                _fse("FSE_OPEN", prefs[1]),
+                _fse("FSE_CONTENT_MODIFIED", prefs[2]),
+            ),
+            now=T0 + timedelta(seconds=1),
+        )
+        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        assert len(_row(panel, IDLE_FOLD).members) == 4
+        panel.table.focus()
+        await pilot.press("A")  # everything: still 4 idle -> still folded
+        await pilot.pause()
+        assert _keys(panel) == [prefs[2], IDLE_FOLD]
+        # Unfolded, an OPEN-only row shows no ops and no count.
+        panel._expanded.add(IDLE_FOLD)
+        panel.refresh_rows()
+        member = _row(panel, prefs[0])
+        _mark, _path, ops, count, last = panel._cells(member)
+        assert (ops.plain, count.plain, last.plain) == ("", "", "")
+        # N (raw view) shows them as activity again.
+        panel.activity.show_all = True
+        assert prefs[0] in _keys(panel)[:3]
+
+
+@pytest.mark.asyncio
+async def test_title_is_not_live_while_the_monitor_is_off_or_stopping() -> None:
+    from sandroid.core.kprobe_tracer import AppProcess
+
+    app = _Harness()
+    async with app.run_test() as pilot:
+        panel = app.query_one(FilesPanel)
+        await pilot.pause()
+        assert panel.caption()[0] == "monitor off"
+        device = _Device({10: AppProcess(10, 10100, PKG)})
+        watch = _register_watched_monitor(device, mode="pid", follow=True)
+        watch.seed({10: [10]}, watch.initial_processes())
+        panel.refresh_rows()
+        assert panel.caption()[0] == "LIVE"
+        watch.stopping = True  # o pressed: at once, before the device work
+        panel.refresh_rows()
+        title, info = panel.caption()
+        assert title == "monitor stopping…"
+        assert "o stops" not in info
+
+
+def test_timeline_rows_carry_the_thread_next_to_the_process() -> None:
+    from types import SimpleNamespace
+
+    from sandroid.core import watchlist_store
+
+    item = SimpleNamespace(
+        label="MODIFY",
+        category="modify",
+        path=DB,
+        new_path=None,
+        process="main · Classifier Upda",
+        source="kprobe",
+        pid=4665,
+        tid=5656,
+    )
+    fsmon = SimpleNamespace(label="MODIFY", category="modify", path=DB, pid=42)
+    FilesPanel._export_events(SimpleNamespace(_marks=[]), [item, fsmon], T0)
+    first, second = watchlist_store.read_jsonl(watchlist_store.timeline_file())
+    assert (first["pid"], first["tid"]) == (4665, 5656)
+    assert first["process"] == "main · Classifier Upda"
+    assert (second["pid"], second["tid"]) == (42, None)

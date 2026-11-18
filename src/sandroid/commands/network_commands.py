@@ -16,6 +16,7 @@ from .base import (
     CommandResult,
     RequiresSpotlightApp,
     ToggleCommand,
+    ui_answer,
 )
 
 logger = logging.getLogger(__name__)
@@ -446,10 +447,13 @@ class ProxyConfigCommand(CommandHandler):
             default_config = proxy_manager.get_default_config()
 
             if ctx.request_input:
-                user_input = await ctx.request_input(
-                    title="Proxy Configuration",
-                    prompt="Enter proxy address (IP:PORT) or leave blank to clear:",
-                    placeholder=f"{default_config.ip}:{default_config.port}",
+                user_input = await ui_answer(
+                    ctx.request_input(
+                        title="Proxy Configuration",
+                        message="Enter proxy address (IP:PORT) or leave blank "
+                        f"to clear (e.g. {default_config.ip}:{default_config.port}):",
+                        default="",
+                    )
                 )
             else:
                 user_input = ctx.toolbox.safe_input(
@@ -462,6 +466,7 @@ class ProxyConfigCommand(CommandHandler):
                     success=True,
                     message="Proxy configuration cancelled",
                     data={"action": "cancelled"},
+                    error="cancelled",
                 )
 
             user_input = user_input.strip()

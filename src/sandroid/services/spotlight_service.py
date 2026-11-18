@@ -143,6 +143,8 @@ class SpotlightService:
         self._spawn_pid: int | None = None
         self._spawn_mode: bool = False
         self._auto_resume: bool = True
+        #: Why the last spawn_app_paused() failed (None after a success).
+        self.last_spawn_error: str | None = None
         self._event_bus = event_bus
         self._job_manager_factory = job_manager_factory
         self._logger = logger
@@ -513,10 +515,12 @@ class SpotlightService:
         try:
             job_manager = self._get_job_manager()
             if job_manager is None:
+                self.last_spawn_error = "No JobManager available"
                 self._logger.error("No JobManager available")
                 return None, -1
 
             pid = job_manager.spawn_paused(package_name)
+            self.last_spawn_error = None
             self._spawn_mode = True
             self._auto_resume = False
             self._spawn_package = package_name
@@ -530,6 +534,7 @@ class SpotlightService:
             )
             return job_manager, pid
         except Exception as e:
+            self.last_spawn_error = str(e)
             self._logger.error(f"Failed to spawn {package_name} paused: {e}")
             return None, -1
 

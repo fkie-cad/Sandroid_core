@@ -17,7 +17,13 @@ import time
 
 from sandroid.core.adb_utils import quote_host_arg
 
-from .base import CommandCategory, CommandContext, CommandHandler, CommandResult
+from .base import (
+    CommandCategory,
+    CommandContext,
+    CommandHandler,
+    CommandResult,
+    ui_answer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +304,7 @@ class PullSpotlightFileCommand(CommandHandler):
                         capture_output=True,
                         text=True,
                         timeout=30,
+                        stdin=subprocess.DEVNULL,
                     )
                     if result.returncode == 0:
                         if result.stdout.strip():
@@ -366,10 +373,13 @@ class AddSpotlightFileCommand(CommandHandler):
         try:
             if ctx.is_tui_mode and ctx.request_input:
                 # TUI mode - use async input modal
-                file_path = await ctx.request_input(
-                    title="Add Spotlight File",
-                    prompt="Enter file path on device (supports wildcards):",
-                    placeholder="/data/data/com.app/databases/*.db",
+                file_path = await ui_answer(
+                    ctx.request_input(
+                        title="Add Spotlight File",
+                        message="Enter file path on device (supports wildcards), "
+                        "e.g. /data/data/com.app/databases/*.db:",
+                        default="",
+                    )
                 )
             elif ctx.toolbox and hasattr(ctx.toolbox, "safe_input"):
                 # Rich console mode - use safe_input
@@ -390,7 +400,7 @@ class AddSpotlightFileCommand(CommandHandler):
         # Check if input was cancelled or empty
         if file_path is None:
             return CommandResult(
-                success=False, message="Input cancelled", error="User cancelled input"
+                success=False, message="Input cancelled", error="cancelled"
             )
 
         file_path = file_path.strip()
@@ -569,13 +579,16 @@ class RemoveSpotlightFileCommand(CommandHandler):
                 # TUI mode - use selection modal
                 # Format options with indices for clarity
                 options = [f"[{i + 1}] {f}" for i, f in enumerate(files)]
-                selected = await ctx.request_selection(
-                    title="Remove Spotlight File",
-                    prompt="Select file to remove:",
-                    options=options,
+                selected = await ui_answer(
+                    ctx.request_selection(
+                        title="Remove Spotlight File",
+                        message="Select file to remove:",
+                        options=options,
+                    )
                 )
-                if selected is not None and 0 <= selected < len(files):
-                    return files[selected]
+                # The dialog answers with the option itself (None on Esc).
+                if selected in options:
+                    return files[options.index(selected)]
             elif ctx.toolbox and hasattr(ctx.toolbox, "safe_input"):
                 # Console mode - show numbered list
                 logger.info("Current spotlight files:")
@@ -662,11 +675,18 @@ class PullAllSpotlightFilesCommand(CommandHandler):
 
         try:
             if ctx.is_tui_mode and ctx.request_input:
-                description = await ctx.request_input(
-                    title="Pull Description",
-                    prompt="Enter optional description for this pull (leave blank for none):",
-                    placeholder="before_trigger",
+                description = await ui_answer(
+                    ctx.request_input(
+                        title="Pull Description",
+                        message="Enter optional description for this pull "
+                        "(leave blank for none), e.g. before_trigger:",
+                        default="",
+                    )
                 )
+                if description is None:  # Esc / Cancel: no pull at all
+                    return CommandResult(
+                        success=False, message="Pull cancelled", error="cancelled"
+                    )
             elif ctx.toolbox and hasattr(ctx.toolbox, "safe_input"):
                 logger.info(
                     "Enter optional description for this pull (leave blank for none):"

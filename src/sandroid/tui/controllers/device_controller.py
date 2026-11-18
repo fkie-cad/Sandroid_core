@@ -528,6 +528,7 @@ class DeviceController:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         start_new_session=True,
+                        stdin=subprocess.DEVNULL,
                     )
                 except FileNotFoundError as e:
                     logger.error(

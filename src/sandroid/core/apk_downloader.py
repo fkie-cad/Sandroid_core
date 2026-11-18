@@ -358,7 +358,8 @@ class ApkDownloader_Old:
                     data["download_link"],
                     "-O",
                     f"{bundle_identifier}-{app_version}.apk",
-                ]
+                ],
+                stdin=subprocess.DEVNULL,
             )
         except OSError as e:
             logger.error(f"Failed to start wget process: {e}")

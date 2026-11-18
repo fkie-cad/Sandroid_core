@@ -192,6 +192,7 @@ class Emulator:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                stdin=subprocess.DEVNULL,
             )
 
             if result.returncode == 0:

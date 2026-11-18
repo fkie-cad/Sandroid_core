@@ -1013,7 +1013,19 @@ _DIRTY_MARKERS = (
     # ("device is gone"); a fresh device handle / server restart recovers.
     "device is gone",
     "device has been lost",
+    "frida-server not running",
 )
+
+#: Shown instead of frida-core's "need Gadget to attach on jailed Android",
+#: which means the client fell back to jailed mode: no frida-server answers.
+FRIDA_SERVER_DOWN_MSG = "frida-server not running — reload snapshot or restart frida"
+
+
+def frida_server_down(message: str | None) -> bool:
+    """True if a spawn failure means frida-server is not running at all."""
+    text = (message or "").lower()
+    return "need gadget" in text or FRIDA_SERVER_DOWN_MSG.lower() in text
+
 
 # Substrings that mark the *target process* dying (anti-Frida self-kill, hook
 # load crash) — the remedy is a fresh re-spawn.
@@ -3501,6 +3513,9 @@ class BypassService:
         # 1. Spawn paused.
         jm, pid = spotlight.spawn_app_paused(package)
         if not pid or pid <= 0:
+            reason = getattr(spotlight, "last_spawn_error", None)
+            if isinstance(reason, str) and frida_server_down(reason):
+                return False, f"{FRIDA_SERVER_DOWN_MSG} (spawn of {package})"
             return False, (
                 f"Failed to spawn {package} (no PID — is frida-server running?)"
             )
@@ -3654,13 +3669,22 @@ class BypassService:
                     msg,
                 )
                 self._teardown_failed_spawn(spotlight, package)
+                if restarted_server and frida_server_down(msg):
+                    # Still no server after the one restart: more attempts
+                    # only repeat the same failure.
+                    return False, f"{FRIDA_SERVER_DOWN_MSG} (spawn of {package})"
                 if klass == "dirty" and not restarted_server:
                     logger.warning(
                         "[Bypass] frida-server looks wedged; restarting it "
                         "once before re-spawn"
                     )
-                    self._recover_frida_server()
+                    ready = self._recover_frida_server()
                     restarted_server = True
+                    if ready is False:
+                        return False, (
+                            f"{FRIDA_SERVER_DOWN_MSG} (its restart failed; "
+                            f"spawn of {package}: {msg})"
+                        )
                 time.sleep(retry_sleep)
                 continue
 
@@ -3708,14 +3732,19 @@ class BypassService:
             "instead of spawning."
         )
 
-    def _recover_frida_server(self) -> None:
+    def _recover_frida_server(self) -> bool | None:
         """Restart a wedged frida-server and drop the stale device handle.
 
         Fires at most once per ladder run (the caller guards that). Uses the
         AFM recovery primitive, then invalidates the cached frida device so the
         next spawn resolves a fresh, ready one — the same pattern the TUI uses
         after a manual frida install/start.
+
+        Returns:
+            True/False whether the restarted server is ready, or None when
+            no restart could be attempted (no frida manager, error).
         """
+        ok: bool | None = None
         try:
             from sandroid.services import get_frida_session_service
 
@@ -3730,6 +3759,7 @@ class BypassService:
                 pass
         except Exception as exc:
             logger.warning("[Bypass] frida-server recovery failed: %s", exc)
+        return ok
 
     def _poll_liveness(self, device: Any, pid: int, window: float) -> bool:
         """Poll the SPECIFIC spawned *pid* for liveness over *window* seconds.
@@ -3872,9 +3902,14 @@ class BypassService:
         except Exception as exc:
             logger.warning("force_stop during teardown failed: %s", exc)
         try:
-            spotlight.set_pid(None)
+            # Publishing: the header/panel must stop showing the dead PID now,
+            # not when the whole spawn ladder ends.
+            spotlight.announce_pid(None, package)
         except Exception:
-            pass
+            try:
+                spotlight.set_pid(None)
+            except Exception:
+                pass
 
 
 _INSTANCE: BypassService | None = None

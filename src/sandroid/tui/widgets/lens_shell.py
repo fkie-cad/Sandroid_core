@@ -401,6 +401,9 @@ class ShellHeader(Header):
     ShellHeader #scope-pill.-rec {
         color: #fb7185;
     }
+    ShellHeader #scope-pill.-blind {
+        color: #fb923c;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -408,6 +411,9 @@ class ShellHeader(Header):
         self._crumb = ""
         self._snapshot = ""
         self._pill = ("● LIVE", "")
+        #: Why LIVE is not quite live ("monitor blind"), set by the Files
+        #: lens; shown instead of the plain "● LIVE" pill.
+        self._live_note: str | None = None
 
     def compose(self) -> ComposeResult:
         yield HeaderTitle()
@@ -454,14 +460,27 @@ class ShellHeader(Header):
             pill = self.query_one("#scope-pill", Static)
         except Exception:
             return
-        pill.update(Text(text))  # a label may contain "[", never markup
-        pill.set_class(kind == "", "-live")
+        blind = kind == "" and bool(self._live_note)
+        shown = f"○ LIVE · {self._live_note}" if blind else text
+        pill.update(Text(shown))  # a label may contain "[", never markup
+        pill.set_class(kind == "" and not blind, "-live")
+        pill.set_class(blind, "-blind")
         pill.set_class(kind == "review", "-review")
         pill.set_class(kind == "rec", "-rec")
 
+    def set_live_note(self, note: str | None) -> None:
+        """Qualify the LIVE pill (``"monitor blind"``); ``None`` clears it."""
+        note = note or None
+        if note != self._live_note:
+            self._live_note = note
+            self.set_pill(*self._pill)
+
     @property
     def pill_text(self) -> str:
-        return self._pill[0]
+        text, kind = self._pill
+        if kind == "" and self._live_note:
+            return f"○ LIVE · {self._live_note}"
+        return text
 
 
 # ---------------------------------------------------------------------------
