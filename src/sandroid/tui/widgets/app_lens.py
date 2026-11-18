@@ -1292,7 +1292,7 @@ def build_data(f: AppFacts) -> SectionData:
     raw = _to_dict(fp)
 
     def size(kb: int | None, reason: str | None) -> Text:
-        text = _t(human_kb(kb) if kb is not None else "?")
+        text = _t(_size_text(kb, reason))
         if reason:
             text.append(f"  {reason}", style=_DIM)
         return text
@@ -1363,10 +1363,20 @@ def build_data(f: AppFacts) -> SectionData:
             ],
         )
     )
-    summary = f"private {human_kb(fp.private_kb)} · external {human_kb(fp.external_kb)}"
+    summary = (
+        f"private {_size_text(fp.private_kb, fp.private_reason)} · "
+        f"external {_size_text(fp.external_kb, fp.external_reason)}"
+    )
     if fp.reason:
         summary += f" · {fp.reason}"
     return SectionData(cols, rows, summary, show_header=False)
+
+
+def _size_text(kb: int | None, reason: str | None) -> str:
+    """``12.7 MB``; ``—`` for a directory that does not exist; ``?`` unknown."""
+    if kb is not None:
+        return human_kb(kb)
+    return "—" if reason == "absent" else "?"
 
 
 # -- SUSPECTED DEFENCES ----------------------------------------------------

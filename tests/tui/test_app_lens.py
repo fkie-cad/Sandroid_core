@@ -1112,3 +1112,21 @@ async def test_narrow_lens_shows_the_compact_permission_columns(fake):
         ms.close_inspector()
         await _wait(pilot, lambda: not perms.compact)
         assert len(perms.columns) == 5
+
+
+def test_data_says_dash_for_an_absent_external_dir() -> None:
+    fp = DataFootprint(
+        package=PKG,
+        private_dir=f"/data/data/{PKG}",
+        private_kb=13040,
+        external_dir=f"/sdcard/Android/data/{PKG}",
+        external_reason="absent",
+    )
+    data = app_lens.build_data(AppFacts(package=PKG, footprint=fp))
+    assert data.summary == "private 12.7 MB · external —"
+    external = next(r for r in data.rows if r.key == "external")
+    assert external.text.startswith("external —")
+    fp.external_reason = "permission denied"
+    assert app_lens.build_data(AppFacts(package=PKG, footprint=fp)).summary.endswith(
+        "external ?"
+    )
