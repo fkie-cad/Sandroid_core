@@ -1,25 +1,19 @@
 """IO commands for import/export of results."""
 
-import inspect
 import json
 import logging
 import os
 from datetime import datetime
 
-from .base import CommandCategory, CommandContext, CommandHandler, CommandResult
+from .base import (
+    CommandCategory,
+    CommandContext,
+    CommandHandler,
+    CommandResult,
+    ui_answer,
+)
 
 logger = logging.getLogger(__name__)
-
-
-async def _answer(value):
-    """The dialog's answer: ``ctx.request_input`` is synchronous (it blocks
-    this worker thread until the dialog closes) and returns ``None`` on
-    Esc / Cancel; awaiting that ``None`` raised, and the import then ran
-    with the default path as if submitted (E2E H2).
-    """
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 class ExportResultsCommand(CommandHandler):
@@ -100,7 +94,7 @@ class ExportResultsCommand(CommandHandler):
 
         try:
             if ctx.is_tui_mode and ctx.request_input:
-                filename = await _answer(
+                filename = await ui_answer(
                     ctx.request_input(
                         title="Export Results",
                         message="Enter filename (leave blank for default):",
@@ -280,7 +274,7 @@ class ImportResultsCommand(CommandHandler):
 
         try:
             if ctx.is_tui_mode and ctx.request_input:
-                file_path = await _answer(
+                file_path = await ui_answer(
                     ctx.request_input(
                         title="Import Results",
                         message="Enter path to results file:",
