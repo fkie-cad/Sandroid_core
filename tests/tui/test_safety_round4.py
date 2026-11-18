@@ -70,7 +70,9 @@ async def test_kill_asks_first_and_a_typed_ahead_y_is_ignored(app_lens) -> None:
     app = SandroidTUI()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
         await _boot(app, pilot)
-        assert app.focused.id == "spotlight-panel"
+        # Focus is on the App lens or one of its section tables (K bubbles up).
+        panel = app.screen.query_one("#spotlight-panel")
+        assert app.focused is panel or panel in app.focused.ancestors
         _burst(app, "K", "y")
         await _settle(pilot)
         modal = app.screen
