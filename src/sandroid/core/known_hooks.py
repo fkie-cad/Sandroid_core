@@ -266,6 +266,14 @@ ROOT_DETECTION_BYPASS_TOOL = ToolHookInfo(
     categories=[HookCategory.ROOT_DETECTION, HookCategory.BUILD_PROPERTIES],
     native_hooks=[
         "__system_property_get",
+        # path hider (shared with the emulator bypass): -1/NULL + ENOENT
+        "access",
+        "faccessat",
+        "fopen",
+        "fopen64",
+        "stat",
+        "lstat",
+        "fstatat",
     ],
     java_hooks=[
         "java.io.File.exists",
@@ -306,12 +314,16 @@ EMULATOR_DETECTION_BYPASS_TOOL = ToolHookInfo(
         HookCategory.BUILD_PROPERTIES,
     ],
     native_hooks=[
-        # Listeners stack with the root bypass's on the same exports.
+        # A listener stacked on __system_property_get; the file probes are
+        # the path hider's replacements, shared with the root bypass.
         "__system_property_get",
         "access",
         "faccessat",
         "fopen",
         "fopen64",
+        "stat",
+        "lstat",
+        "fstatat",
     ],
     java_hooks=[
         "android.os.Build.FINGERPRINT",

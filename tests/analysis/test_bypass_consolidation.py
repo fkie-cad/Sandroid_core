@@ -401,12 +401,13 @@ _REAL = {
 def test_emulator_script_applies_at_load_and_restores_on_flag_off(tmp_path) -> None:
     """Armed before Start: baked FLAGS.emulator spoofs from the first read."""
     result = _run_emulator_harness(tmp_path, "on")
-    assert result["installedAtLoad"] == {"natives": 5, "java": 5}
+    # 1 property listener + the path hider's 10 probe replacements.
+    assert result["installedAtLoad"] == {"natives": 11, "java": 5}
     assert result["load"] == _SPOOFED
     assert result["flipped"] == _REAL
     # Flip-off reverts the Java replacements and detaches the property
     # listener; only the shared path-hider replacements stay (flag-gated).
-    assert result["installedAfterFlip"] == {"natives": 4, "java": 0}
+    assert result["installedAfterFlip"] == {"natives": 10, "java": 0}
 
 
 def test_emulator_script_is_inert_until_flag_flips_on(tmp_path) -> None:
@@ -646,17 +647,22 @@ for (const g of ['Java', 'Stalker', 'Thread', 'DebugSymbol', 'ObjC', 'Script', '
 globalThis.Java = new Proxy(deep('Java'), { get(t, k) { if (k === 'perform' || k === 'performNow') return fn => { try { fn(); } catch (e) { sent.push({javaError: '' + e}); } }; if (k === 'available') return true; return t[k]; } });
 globalThis.ptr = () => deep('ptr');
 globalThis.NULL = 'NULL';
-// Exports resolve to their names; replacements are recorded so the shared
-// path hider can be driven below.
+// Exports resolve to their names (the 64 aliases to the same function, as
+// on 64-bit bionic); replacements are recorded so the shared path hider can
+// be driven below, and a second replace of one address throws like Frida.
+const ALIASES = { fopen64: 'fopen', stat64: 'stat', lstat64: 'lstat', fstatat64: 'fstatat' };
 const replaced = {};
 const attached = [];
 globalThis.Process = new Proxy(deep('Process'), { get(t, k) {
-    if (k === 'findModuleByName') return () => ({ findExportByName: n => n });
+    if (k === 'findModuleByName') return () => ({ findExportByName: n => ALIASES[n] || n });
     if (k === 'findModuleByAddress') return () => ({ path: '/data/app/x/lib/arm64/libapp.so' });
     return t[k];
 } });
 globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
-    if (k === 'replace') return (addr, cb) => { replaced[addr] = cb; };
+    if (k === 'replace') return (addr, cb) => {
+        if (addr in replaced) throw new Error('already replaced');
+        replaced[addr] = cb;
+    };
     if (k === 'attach') return (addr, cb) => { attached.push(String(addr)); return deep('listener'); };
     return t[k];
 } });
@@ -673,7 +679,7 @@ if (rpc.exports.setFlags) rpc.exports.setFlags({});
 function probe(sym, path) {
     const ctx = { returnAddress: 'app', errno: 0 };
     const p = { readUtf8String: () => path };
-    const args = sym === 'faccessat' ? [-100, p, 0, 0] : [p, 0];
+    const args = (sym === 'faccessat' || sym === 'fstatat') ? [-100, p, 0, 0] : [p, 0];
     const ret = replaced[sym].apply(ctx, args);
     if (ret === 'REAL') return ctx.errno === 13 ? 'REAL' : 'errno lost: ' + ctx.errno;
     return [ret, ctx.errno];
@@ -683,11 +689,12 @@ const atLoad = { attached: attached.slice(), replaced: Object.keys(replaced) };
 const probes = {};
 for (const flag of (replaced.access ? [true, false] : [])) {
     rpc.exports.setFlags({ root: flag, emulator: false });
-    for (const sym of ['access', 'faccessat', 'fopen', 'fopen64']) {
+    for (const sym of ['access', 'faccessat', 'fopen', 'stat', 'lstat', 'fstatat']) {
         probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
     }
 }
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached}));
+const hiderErrors = sent.filter(m => m && m.type === 'debug' && ('' + m.hook).indexOf('path-hider') === 0);
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached, hiderErrors}));
 """
 
 
@@ -722,9 +729,18 @@ def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> Non
     assert result["mergeErrors"] == []
     # Root's native su hiding is installed (one replacement per probe):
     # a su path fails like a missing file, everything else runs for real.
-    for sym, fail in (("access", -1), ("faccessat", -1), ("fopen", "NULL")):
+    for sym, fail in (
+        ("access", -1),
+        ("faccessat", -1),
+        ("fopen", "NULL"),
+        ("stat", -1),  # stat("/system/bin/su") was still 0 on the device
+        ("lstat", -1),
+        ("fstatat", -1),
+    ):
         assert result["probes"][f"{sym}:true"] == [[fail, 2], "REAL"], sym
         assert result["probes"][f"{sym}:false"] == ["REAL", "REAL"], sym
+    # fopen64/stat64/... alias fopen/stat: replaced once, no "already replaced".
+    assert result["hiderErrors"] == []
 
 
 #: The telephony refusal (Dexray's telephony_hooks vs the emulator category).

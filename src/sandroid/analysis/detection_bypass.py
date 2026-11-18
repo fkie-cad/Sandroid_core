@@ -154,8 +154,8 @@ function _findExport(lib, name) {
 function _libcExport(name) { return _findExport('libc.so', name); }
 
 // Shared path hider: ONE Interceptor.replace per libc probe (access,
-// faccessat, fopen, fopen64) for every category that hides files (root,
-// emulator). A hidden path gets -1 / NULL with errno = ENOENT, like a missing
+// faccessat, fopen/fopen64, stat/lstat/fstatat and their 64 aliases) for
+// every category that hides files (root, emulator). A hidden path gets -1 / NULL with errno = ENOENT, like a missing
 // file, and the real call never runs (no leaked FILE*). Two categories
 // cannot each replace the same export, hence the registry.
 var PATH_HIDERS = [];  // {cat, test(path, returnAddress)}
@@ -179,9 +179,15 @@ function _hiddenBy(path, returnAddress) {
     return null;
 }
 
+var _pathProbeAddrs = {};  // one replacement per address (aliases share one)
+
 function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
     var addr = _libcExport(sym);
     if (addr === null) return;
+    // fopen64/stat64/... are the same function as fopen/stat on 64-bit
+    // bionic: replacing it twice throws "already replaced".
+    if (_pathProbeAddrs[addr.toString()]) return;
+    _pathProbeAddrs[addr.toString()] = sym;
     // SystemFunction (not NativeFunction): its result carries the errno the
     // real call set, which the pass-through must hand back to the caller.
     var original = new SystemFunction(addr, retType, argTypes);
@@ -213,7 +219,14 @@ function hidePaths(category, test) {
         ['access', 'int', ['pointer', 'int'], 0, -1],
         ['faccessat', 'int', ['int', 'pointer', 'int', 'int'], 1, -1],
         ['fopen', 'pointer', ['pointer', 'pointer'], 0, NULL],
-        ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL]
+        ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL],
+        // stat("/system/bin/su") == 0 was a tell the access/fopen hiding missed.
+        ['stat', 'int', ['pointer', 'pointer'], 0, -1],
+        ['stat64', 'int', ['pointer', 'pointer'], 0, -1],
+        ['lstat', 'int', ['pointer', 'pointer'], 0, -1],
+        ['lstat64', 'int', ['pointer', 'pointer'], 0, -1],
+        ['fstatat', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1],
+        ['fstatat64', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1]
     ];
     probes.forEach(function (p) {
         try {
@@ -1063,6 +1076,9 @@ ROOT_DETECTION_HOOKS = [
     "libc:access",
     "libc:faccessat",
     "libc:fopen",
+    "libc:stat",
+    "libc:lstat",
+    "libc:fstatat",
     "com.gantix.JailMonkey.Rooted.RootedCheck.isJailBroken",
     "com.scottyab.rootbeer.RootBeer.isRooted",
     "com.scottyab.rootbeer.RootBeerNative.checkForRoot",
@@ -1854,11 +1870,14 @@ EMULATOR_DETECTION_HOOKS = [
     "android.telephony.TelephonyManager.getSimState",
     # Native hooks shared with the root category: one path-hider replacement
     # per file probe, a stacked listener on __system_property_get (distinct
-    # ids, like the debug category's ``libc:read:tracerpid``).
+    # ids, like the debug category's ``libc:openat:tracerpid``).
     "libc:__system_property_get:emulator",
     "libc:access:emulator",
     "libc:faccessat:emulator",
     "libc:fopen:emulator",
+    "libc:stat:emulator",
+    "libc:lstat:emulator",
+    "libc:fstatat:emulator",
 ]
 
 
