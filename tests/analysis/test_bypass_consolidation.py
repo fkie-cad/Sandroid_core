@@ -1358,7 +1358,7 @@ def test_cmodule_candidates_cover_every_hidden_path(tmp_path) -> None:
     (tmp_path / "gum" / "guminterceptor.h").write_text(_GUM_STUB)
     (tmp_path / "m.c").write_text(db._PATH_HIDER_C)
     paths = ",\n".join('"' + p + '"' for p in hidden)
-    (tmp_path / "t.c").write_text("""
+    harness_c = """
 #include <stdio.h>
 #include <gum/guminterceptor.h>
 volatile int sandroid_path_flags = 3;
@@ -1388,7 +1388,8 @@ int main (void)
   { printf ("false positive\\n"); missed++; }
   return missed;
 }
-""".replace("PATHS", paths))
+"""
+    (tmp_path / "t.c").write_text(harness_c.replace("PATHS", paths))
     exe = tmp_path / "t"
     build = subprocess.run(
         [cc, f"-I{tmp_path}", "-o", str(exe), str(tmp_path / "t.c")],

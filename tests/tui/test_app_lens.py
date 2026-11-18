@@ -384,7 +384,7 @@ def test_permission_rows_join_appops_and_list_op_only_rows() -> None:
     assert "used recently" in by_key["perm:android.permission.CAMERA"]
     assert "req → ✗" in by_key["perm:android.permission.READ_CONTACTS"]
     assert data.summary == (
-        "4 requested · 3 dangerous (2 granted) · 2 used recently · " "1 no recorded use"
+        "4 requested · 3 dangerous (2 granted) · 2 used recently · 1 no recorded use"
     )
 
 
@@ -652,8 +652,10 @@ async def test_u_refreshes_runtime_facts_off_thread(fake):
         await pilot.press("u")
         await _wait(
             pilot,
-            lambda: {"footprint", "static_cache"}
-            <= {m for m, _p, _t in FakeService.calls[before:]},
+            lambda: (
+                {"footprint", "static_cache"}
+                <= {m for m, _p, _t in FakeService.calls[before:]}
+            ),
         )
         assert all(
             name != threading.main_thread().name
