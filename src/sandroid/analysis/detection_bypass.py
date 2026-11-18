@@ -109,6 +109,39 @@ def _java_bridge_prelude() -> str:
 #: installs. Use these helpers and the NativePointer instance methods
 #: (``p.readUtf8String()``, ``p.writeUtf8String(s)``) instead.
 _PREAMBLE_HELPERS_JS = r"""
+// Lazy categories: every category body is registered here and only runs
+// (installs its native and Java hooks) the first time its flag is on --
+// baked in at load or flipped by setFlags. An SSL-only session installs only
+// SSL's hooks; nothing a category does not need is in the process. Hooks
+// stay installed (flag-gated) after a flag goes off; the emulator category
+// removes its own (see FLAG_LISTENERS).
+var CATEGORY_INSTALLERS = [];  // [category, installer], in priority order
+var INSTALLED = {};
+var INSTALL_FAILED = [];
+
+function _installCategory(category, installer) {
+    if (INSTALLED[category]) return;
+    INSTALLED[category] = true;
+    try {
+        installer();
+    } catch (e) {
+        INSTALL_FAILED.push(category);
+        send({merge_error: category, error: '' + e});
+    }
+}
+
+function registerCategory(category, installer) {
+    CATEGORY_INSTALLERS.push([category, installer]);
+    if (FLAGS[category]) _installCategory(category, installer);
+}
+
+function _installEnabledCategories() {
+    for (var i = 0; i < CATEGORY_INSTALLERS.length; i++) {
+        var c = CATEGORY_INSTALLERS[i];
+        if (FLAGS[c[0]]) _installCategory(c[0], c[1]);
+    }
+}
+
 function _findExport(lib, name) {
     try {
         var m = Process.findModuleByName(lib);
@@ -2202,15 +2235,16 @@ class BypassService:
           field writes -- and returns FLAGS; ``getFlags`` returns it).
           ``json.dumps`` is used everywhere — category names are never
           string-interpolated.
-        - Each category source wrapped in a ``try``/``catch`` IIFE (reusing AFM's
-          ``_build_merged_source`` shape for ``var`` isolation + failure
-          reporting via ``send({merge_error: <label>})``), ordered by priority so
-          the anti-anti-Frida prelude installs first.
+        - Each category source wrapped in a function handed to
+          ``registerCategory`` (``var`` isolation), ordered by priority so the
+          anti-anti-Frida prelude installs first. The function runs -- and the
+          category's hooks install -- only once its flag is on (at load, or on
+          the ``setFlags`` that turns it on); a throw is reported via
+          ``send({merge_error: <label>})`` and ``installFailures()``.
 
         Category bodies read the shared ``FLAGS`` via closure over this
         realm-top declaration and must NOT re-declare ``var FLAGS``. Each source
-        keeps its own leading ``'use strict';`` which is a harmless no-op string
-        once nested inside the IIFE's ``try`` block.
+        keeps its own leading ``'use strict';`` (a directive for its function).
         """
         # 'use strict' MUST stay first (it is only a directive at the very top).
         # The Java bridge prelude runs next so globalThis.Java exists before any
@@ -2231,12 +2265,14 @@ class BypassService:
             "                }\n"
             "            }\n"
             "        }\n"
+            "        _installEnabledCategories();\n"
             "        for (var i = 0; i < FLAG_LISTENERS.length; i++) {\n"
             "            try { FLAG_LISTENERS[i](FLAGS); } catch (e) {}\n"
             "        }\n"
             "        return FLAGS;\n"
             "    },\n"
-            "    getFlags: function () { return FLAGS; }\n"
+            "    getFlags: function () { return FLAGS; },\n"
+            "    installFailures: function () { return INSTALL_FAILED; }\n"
             "};\n"
         )
         parts = [preamble]
@@ -2246,13 +2282,7 @@ class BypassService:
                 continue
             label = json.dumps(category)
             parts.append(
-                "(function () {\ntry {\n"
-                + src
-                + "\n} catch (e) {\n"
-                + "send({merge_error: "
-                + label
-                + ", error: '' + e});\n"
-                + "}\n})();\n"
+                "registerCategory(" + label + ", function () {\n" + src + "\n});\n"
             )
         return "".join(parts)
 
@@ -2490,6 +2520,7 @@ class BypassService:
                     return False, "Bypass script unavailable"
                 try:
                     script.exports_sync.set_flags(flags)
+                    self._note_install_failures(script)
                 except Exception as exc:
                     logger.warning("[Bypass] set_flags failed: %s — reloading", exc)
                     self._reset_script_state()
@@ -2504,6 +2535,20 @@ class BypassService:
             with self._lock:
                 self._mutating = frozenset()
             self._mutate_lock.release()
+
+    def _note_install_failures(self, script) -> None:
+        """Count categories whose lazy install (on a live flip) threw.
+
+        At load a failure arrives as a ``merge_error`` message while we wait
+        for readiness; a category first turned on by ``set_flags`` installs
+        inside that RPC, so ask the script instead of racing the message.
+        """
+        try:
+            failed = script.exports_sync.install_failures() or []
+        except Exception:
+            return
+        with self._lock:
+            self._merge_errors.update(str(c) for c in failed)
 
     def _reconcile_and_register(self, target) -> tuple[bool, str]:
         """Reconcile ``_active`` against merge errors and update TaskService."""

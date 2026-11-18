@@ -101,7 +101,7 @@ def test_emulator_script_is_merged_into_the_one_flag_gated_script() -> None:
     src = svc._assemble_source(flags)
     # Exactly one script: the emulator body sits in its own guarded IIFE...
     assert src.count(_EMULATOR_DETECTION_SCRIPT) == 1
-    assert 'send({merge_error: "emulator"' in src
+    assert 'registerCategory("emulator", function () {' in src
     # ...with the flag baked in at load (the paused-spawn path) and a
     # set_flags listener hook for the live flip.
     assert "var FLAGS = " + json.dumps(flags) in src
@@ -591,12 +591,14 @@ _FRIDA16_STATIC_API = re.compile(
 )
 
 
-def _merged_bundle(monkeypatch) -> str:
+def _merged_bundle(monkeypatch, on=None) -> str:
+    """The merged script with ``on`` (default: every category) baked in."""
     import sandroid.analysis.detection_bypass as db
 
     monkeypatch.setattr(db, "_java_bridge_prelude", lambda: "")
     svc = db.BypassService()
-    return svc._assemble_source(dict.fromkeys(svc.categories(), True))
+    on = svc.categories() if on is None else on
+    return svc._assemble_source(svc._flag_dict(on))
 
 
 def test_merged_bundle_has_no_frida16_static_api_text(monkeypatch) -> None:
@@ -647,6 +649,7 @@ globalThis.NULL = 'NULL';
 // Exports resolve to their names; replacements are recorded so the shared
 // path hider can be driven below.
 const replaced = {};
+const attached = [];
 globalThis.Process = new Proxy(deep('Process'), { get(t, k) {
     if (k === 'findModuleByName') return () => ({ findExportByName: n => n });
     if (k === 'findModuleByAddress') return () => ({ path: '/data/app/x/lib/arm64/libapp.so' });
@@ -654,6 +657,7 @@ globalThis.Process = new Proxy(deep('Process'), { get(t, k) {
 } });
 globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
     if (k === 'replace') return (addr, cb) => { replaced[addr] = cb; };
+    if (k === 'attach') return (addr, cb) => { attached.push(String(addr)); return deep('listener'); };
     return t[k];
 } });
 globalThis.NativeFunction = function () { return () => 'REAL'; };
@@ -674,19 +678,21 @@ function probe(sym, path) {
     if (ret === 'REAL') return ctx.errno === 13 ? 'REAL' : 'errno lost: ' + ctx.errno;
     return [ret, ctx.errno];
 }
+// Native hooks the load itself installed (before any setFlags).
+const atLoad = { attached: attached.slice(), replaced: Object.keys(replaced) };
 const probes = {};
-for (const flag of [true, false]) {
+for (const flag of (replaced.access ? [true, false] : [])) {
     rpc.exports.setFlags({ root: flag, emulator: false });
     for (const sym of ['access', 'faccessat', 'fopen', 'fopen64']) {
         probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
     }
 }
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes}));
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad}));
 """
 
 
-def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> None:
-    """Run every category in node with the removed statics throwing."""
+def _run_guard(tmp_path: Path, monkeypatch, on=None) -> dict:
+    """Run the merged bundle in node (Frida/Java mocked) and report."""
     import json
     import shutil
     import subprocess
@@ -695,7 +701,7 @@ def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> Non
     if node is None:
         pytest.skip("node not installed; JS behaviour check skipped")
     bundle = tmp_path / "merged.js"
-    bundle.write_text(_merged_bundle(monkeypatch))
+    bundle.write_text(_merged_bundle(monkeypatch, on))
     guard = tmp_path / "guard.js"
     guard.write_text(_NODE_GUARD)
     proc = subprocess.run(
@@ -706,7 +712,12 @@ def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> Non
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_merged_bundle_calls_no_frida16_static_api(tmp_path, monkeypatch) -> None:
+    """Run every category in node with the removed statics throwing."""
+    result = _run_guard(tmp_path, monkeypatch)
     assert result["banned"] == []
     assert result["mergeErrors"] == []
     # Root's native su hiding is installed (one replacement per probe):
@@ -892,3 +903,40 @@ def test_stopping_dexray_frees_b_before_the_result_export(bypass_service) -> Non
 
     mm.stop_monitoring()
     assert seen == [None]
+
+
+#: libc exports only non-SSL categories hook.
+_NON_SSL_NATIVE = {
+    "read",
+    "open",
+    "openat",
+    "close",
+    "strstr",
+    "exit",
+    "_exit",
+    "abort",
+    "access",
+    "faccessat",
+    "fopen",
+    "fopen64",
+    "stat",
+    "lstat",
+    "fstatat",
+    "__system_property_get",
+}
+
+
+def test_ssl_only_session_installs_only_ssl_hooks(tmp_path, monkeypatch) -> None:
+    """A paused SSL-only spawn crashed in perfetto_hprof: the merged script
+    installed every category's native hooks (frida/debug ``read``) although
+    only SSL was on. Categories install only when their flag is on.
+    """
+    result = _run_guard(tmp_path, monkeypatch, on=["ssl"])
+    hooked = set(result["atLoad"]["attached"]) | set(result["atLoad"]["replaced"])
+    assert not hooked & _NON_SSL_NATIVE, hooked & _NON_SSL_NATIVE
+    assert result["mergeErrors"] == []
+
+
+def test_nothing_on_installs_nothing(tmp_path, monkeypatch) -> None:
+    result = _run_guard(tmp_path, monkeypatch, on=[])
+    assert result["atLoad"] == {"attached": [], "replaced": []}
