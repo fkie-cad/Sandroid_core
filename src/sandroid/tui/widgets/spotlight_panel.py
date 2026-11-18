@@ -65,6 +65,20 @@ _ACTION_CELLS = {
     "act-clear": "action_clear_spotlight",
 }
 
+# Action-row cell id -> (label, label below _NARROW_WIDTH columns).
+_ACTION_LABELS = {
+    "act-restart": ("⇧R restart", "⇧R"),
+    "act-attach": ("⇧A attach", "⇧A"),
+    "act-paused": ("⇧P pause", "⇧P"),
+    "act-kill": ("⇧K kill", "⇧K"),
+    "act-clear": ("⇧X clear", "⇧X"),
+}
+# Below this panel width the action row shows the keys only.
+_NARROW_WIDTH = 60
+# Below this width the bypass toggles collapse to one "b bypass: ..." line
+# (the full row is ~95 columns).
+_COMPACT_WIDTH = 98
+
 # How often the slow fallback poll re-checks the app's PID (seconds).
 _POLL_INTERVAL = 4.0
 # While another tab is shown, poll only every Nth tick: the header's App row
@@ -212,6 +226,9 @@ class SpotlightPanel(Widget):
         # Guard against overlapping blocking actions (spawn/kill/restart).
         self._action_inflight = False
         self._filter_timer = None
+        # Layout mode from the panel width (on_resize).
+        self._compact = False
+        self._narrow = False
 
     # -- services (lazy) --------------------------------------------------
 
@@ -247,11 +264,22 @@ class SpotlightPanel(Widget):
             yield Static(self._primary_label(), id="act-primary", classes="act-cell")
             # Shift-letters, shown as ⇧X so they never read like the global
             # lower-case r/p/a/k/x keys.
-            yield Static("⇧R restart", id="act-restart", classes="act-cell")
-            yield Static("⇧A attach", id="act-attach", classes="act-cell")
-            yield Static("⇧P pause", id="act-paused", classes="act-cell")
-            yield Static("⇧K kill", id="act-kill", classes="act-cell")
-            yield Static("⇧X clear", id="act-clear", classes="act-cell")
+            for cell_id, (wide, _short) in _ACTION_LABELS.items():
+                yield Static(wide, id=cell_id, classes="act-cell")
+
+    def on_resize(self, event) -> None:
+        """Compact bypass row / key-only action row on a narrow lens."""
+        width = event.size.width
+        compact, narrow = width < _COMPACT_WIDTH, width < _NARROW_WIDTH
+        if (compact, narrow) == (self._compact, self._narrow):
+            return
+        self._compact, self._narrow = compact, narrow
+        for cell_id, (wide, short) in _ACTION_LABELS.items():
+            try:
+                self.query_one(f"#{cell_id}", Static).update(short if narrow else wide)
+            except Exception:
+                pass
+        self.refresh_panel()
 
     def on_mount(self) -> None:
         self._subscribe_events()
@@ -431,6 +459,12 @@ class SpotlightPanel(Widget):
 
         # 3. Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
+        if self._compact:
+            # Narrow lens (e.g. 100x30 with the Inspector open): one line.
+            names = [c for _k, c, _l in _BYPASS_TOGGLES if c in on]
+            state = f"[#4ade80]{','.join(names)}[/]" if names else "[#5b6479]none[/]"
+            lines.append(f"[#7dd3fc bold]b bypass:[/] {state} [#5b6479](b then 1-5)[/]")
+            return "\n".join(lines)
         lines.append(
             "[#7dd3fc bold]Bypass[/] [#5b6479](b then 1-5 · armed applies on Start)[/]"
         )

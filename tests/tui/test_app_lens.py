@@ -962,3 +962,31 @@ async def test_caption_offers_space_only_when_it_does_something(fake, monkeypatc
         monkeypatch.setattr(SpotlightPanel, "_safe_pid", lambda self: 4242)
         monkeypatch.setattr(SpotlightPanel, "_is_paused", lambda self: True)
         assert caption().endswith("· ␣ resume")
+
+
+async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
+    """100x30 with the Inspector open: the lens is ~44 columns wide."""
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        ms = await _boot(app, pilot)
+        sections = _sections(ms)
+        await _wait(pilot, lambda: _loaded(sections))
+        await _settle(pilot)
+        wide = _screen_text(app)
+        assert "⇧K kill" in wide
+        assert "1 ○ SSL" in wide  # the full toggle row fits
+        app.focused.move_cursor(row=0)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert ms.inspector_is_open
+        panel = ms.query_one(SpotlightPanel)
+        assert panel.size.width < 60
+        text = _screen_text(app)
+        assert "b bypass: none" in text
+        assert "1 ○ SSL" not in text
+        actions = next(line for line in text.splitlines() if "⇧R" in line)
+        for key in ("⇧R", "⇧A", "⇧P", "⇧K", "⇧X"):
+            assert key in actions
+        ms.close_inspector()
+        await _settle(pilot)
+        assert "⇧K kill" in _screen_text(app)
