@@ -687,7 +687,7 @@ for (const flag of (replaced.access ? [true, false] : [])) {
         probes[sym + ':' + flag] = [probe(sym, '/system/xbin/su'), probe(sym, '/data/local/tmp/x')];
     }
 }
-console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad}));
+console.log(JSON.stringify({banned, mergeErrors: sent.filter(m => m && m.merge_error), probes, atLoad, attachedAll: attached}));
 """
 
 
@@ -940,3 +940,129 @@ def test_ssl_only_session_installs_only_ssl_hooks(tmp_path, monkeypatch) -> None
 def test_nothing_on_installs_nothing(tmp_path, monkeypatch) -> None:
     result = _run_guard(tmp_path, monkeypatch, on=[])
     assert result["atLoad"] == {"attached": [], "replaced": []}
+
+
+def test_no_category_ever_hooks_libc_read(tmp_path, monkeypatch) -> None:
+    """A libc read hook before resume crashed paused spawns (perfetto_hprof_):
+    frida/debug filter /proc via open/openat instead, at load and later.
+    """
+    result = _run_guard(tmp_path, monkeypatch)  # every category on at load
+    assert "read" not in result["attachedAll"]
+    assert "read" not in result["atLoad"]["replaced"]
+    assert {"open", "openat"} <= set(result["atLoad"]["attached"])
+
+
+_NODE_PROC = r"""
+const fs = require('fs');
+const helpers = fs.readFileSync(process.argv[2], 'utf8');
+const sent = [];
+globalThis.send = m => sent.push(m);
+globalThis.FLAGS = {frida: true, debug: true};
+globalThis.ptr = v => ({ptr: Number(v)});
+// A fake process: files, fds with offsets, and pointers into JS strings.
+const OWN = 4242;
+const files = {
+    '/proc/self/maps': '7f00-7f10 r-xp 0 00:00 0 /system/lib64/libc.so\n' +
+        '7f20-7f30 r-xp 0 00:00 0 /data/local/tmp/re.frida.server/frida-agent-64.so\n',
+    '/proc/self/smaps': '7f00-7f10 r-xp 0 00:00 0 /system/lib64/libc.so\nSize: 4 kB\n' +
+        '7f20-7f30 r-xp 0 00:00 0 /memfd:frida-agent-64.so (deleted)\nSize: 8 kB\n',
+    '/proc/self/status': 'Name:\tapp\nTracerPid:\t1234\n',
+    '/proc/self/task/77/status': 'Name:\tgum-js-loop\nTracerPid:\t0\n',
+    '/proc/999/maps': 'frida everywhere\n',
+    '/proc/self/task/78/status': 'Name:\tapp\nTracerPid:\t0\n',
+    '/proc/self/cmdline': 'app',
+};
+const fds = {};
+let nextFd = 10;
+function mem(text) { return {store: {text}, off: 0, add(n) { return {store: this.store, off: this.off + n, add: this.add, readUtf8String: this.readUtf8String}; },
+                            readUtf8String(n) { return this.store.text.slice(this.off, n === undefined ? undefined : this.off + n); }}; }
+globalThis.Memory = {
+    alloc: () => mem(''),
+    allocUtf8String: t => mem(t),
+    copy: (dst, src, n) => { dst.store.text = src.store.text.slice(0, n); },
+};
+const natives = {
+    read: (fd, p, n) => { const f = fds[fd]; const chunk = f.data.slice(f.pos, f.pos + Number(n));
+                          f.pos += chunk.length; p.store.text = p.store.text.slice(0, p.off) + chunk; return chunk.length; },
+    write: (fd, p, n) => { fds[fd].data += p.store.text.slice(p.off, p.off + Number(n)); return Number(n); },
+    lseek: (fd, off) => { fds[fd].pos = Number(off); return 0; },
+    close: fd => { fds[fd].closed = true; return 0; },
+    memfd_create: () => { const fd = nextFd++; fds[fd] = {data: '', pos: 0, path: '/memfd:proc'}; return fd; },
+};
+globalThis.NativeFunction = function (addr) { return natives[addr]; };
+globalThis.Process = {id: OWN, arch: 'arm64',
+                      findModuleByName: () => ({findExportByName: n => n})};
+const listeners = {};
+const attached = [];
+globalThis.Interceptor = {attach: (addr, cb) => { attached.push(addr); listeners[addr] = cb; }};
+(0, eval)(helpers);
+filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaInProc);
+filterProcFiles('debug', ['status'], zeroTracerPid);
+
+function open(path, sym) {
+    sym = sym || 'openat';
+    const cb = listeners[sym];
+    const ctx = {};
+    const arg = {readUtf8String: () => path};
+    cb.onEnter.call(ctx, sym === 'openat' ? [-100, arg] : [arg]);
+    const fd = nextFd++;
+    fds[fd] = {data: files[path], pos: 0, path};
+    let out = fd;
+    cb.onLeave.call(ctx, {toInt32: () => fd, replace: v => { out = v.ptr; }});
+    const f = fds[out];
+    return {swapped: out !== fd, closedReal: !!fds[fd].closed,
+            text: f.data.slice(f.pos)};
+}
+const r = {attached};
+for (const path of Object.keys(files)) r[path] = open(path);
+r.viaOpen = open('/proc/self/maps', 'open');
+FLAGS.frida = false; FLAGS.debug = false;
+r.off = open('/proc/self/status');
+console.log(JSON.stringify(r));
+"""
+
+
+def test_proc_filter_answers_with_a_filtered_memfd(tmp_path) -> None:
+    import json
+    import shutil
+    import subprocess
+
+    from sandroid.analysis.detection_bypass import _PREAMBLE_HELPERS_JS
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed; JS behaviour check skipped")
+    (tmp_path / "helpers.js").write_text(_PREAMBLE_HELPERS_JS)
+    (tmp_path / "proc.js").write_text(_NODE_PROC)
+    proc = subprocess.run(
+        [node, str(tmp_path / "proc.js"), str(tmp_path / "helpers.js")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    r = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert "read" not in r["attached"]
+    maps = r["/proc/self/maps"]
+    assert maps["swapped"]
+    assert maps["closedReal"]
+    assert "frida" not in maps["text"]
+    assert "libc.so" in maps["text"]
+    smaps = r["/proc/self/smaps"]["text"]
+    assert "frida" not in smaps
+    assert "Size: 8 kB" not in smaps  # the whole frida entry is gone
+    assert "Size: 4 kB" in smaps
+    status = r["/proc/self/status"]
+    assert status["text"] == "Name:\tapp\nTracerPid:\t0\n"
+    task = r["/proc/self/task/77/status"]
+    assert task["text"] == "Name:\tThread-2\nTracerPid:\t0\n"
+    # Not ours / not a filtered file / nothing to hide: the real fd, rewound.
+    unchanged = "/proc/self/task/78/status"
+    for path in ("/proc/999/maps", "/proc/self/cmdline", unchanged):
+        assert r[path]["swapped"] is False
+    assert r[unchanged]["text"] == "Name:\tapp\nTracerPid:\t0\n"  # rewound
+    assert r["viaOpen"]["swapped"] is True
+    off = r["off"]
+    assert off["swapped"] is False
+    assert off["text"] == "Name:\tapp\nTracerPid:\t1234\n"

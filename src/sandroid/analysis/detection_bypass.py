@@ -223,6 +223,179 @@ function hidePaths(category, test) {
         }
     });
 }
+
+// Shared /proc filter for the frida and debug categories. It replaces the old
+// libc `read` hooks: an Interceptor.attach on `read` installed before resume
+// crashed every paused spawn of a real app (SIGSEGV in perfetto_hprof_,
+// API 35). Instead the open/openat that opens one of this process's own
+// /proc/{self,thread-self,<pid>}[/task/<tid>]/{maps,smaps,status} files is
+// answered with a memfd holding the filtered text (only when a filter
+// changed something; otherwise the real fd, rewound, is kept). `read` is
+// never hooked. A caller that readlink()s the fd sees "/memfd:proc".
+var PROC_FILTERS = [];  // {cat, kinds, filter(text, kind) -> text}
+var _procFilterInstalled = false;
+var _PROC_RE = /^\/proc\/(self|thread-self|\d+)(?:\/task\/\d+)?\/(maps|smaps|status)$/;
+var _procIo = null;
+
+function _procKind(path) {
+    var m = _PROC_RE.exec(path);
+    if (m === null) return null;
+    if (/^\d+$/.test(m[1]) && parseInt(m[1], 10) !== Process.id) return null;
+    return m[2];
+}
+
+function _procFiltersFor(kind) {
+    var out = [];
+    for (var i = 0; i < PROC_FILTERS.length; i++) {
+        var f = PROC_FILTERS[i];
+        if (FLAGS[f.cat] && f.kinds.indexOf(kind) !== -1) out.push(f);
+    }
+    return out;
+}
+
+function _procNative() {
+    if (_procIo !== null) return _procIo;
+    var memfd = _libcExport('memfd_create');
+    var syscall = _libcExport('syscall');
+    var nr = {arm64: 279, x64: 319, arm: 385, ia32: 356}[Process.arch];
+    _procIo = {
+        read: new NativeFunction(_libcExport('read'), 'long', ['int', 'pointer', 'ulong']),
+        write: new NativeFunction(_libcExport('write'), 'long', ['int', 'pointer', 'ulong']),
+        lseek: new NativeFunction(_libcExport('lseek'), 'long', ['int', 'long', 'int']),
+        close: new NativeFunction(_libcExport('close'), 'int', ['int']),
+        memfd: memfd !== null
+            ? new NativeFunction(memfd, 'int', ['pointer', 'uint'])
+            : (syscall !== null && nr !== undefined
+                ? (function (fn) {
+                    return function (name, flags) { return fn(nr, name, flags); };
+                })(new NativeFunction(syscall, 'long', ['long', 'pointer', 'uint']))
+                : null)
+    };
+    return _procIo;
+}
+
+function _procReadAll(io, fd) {
+    var cap = 256 * 1024;
+    var buf = Memory.alloc(cap);
+    var total = 0;
+    for (;;) {
+        var n = Number(io.read(fd, buf.add(total), cap - total));
+        if (n < 0) return null;
+        if (n === 0) break;
+        total += n;
+        if (total === cap) {
+            if (cap >= 16 * 1024 * 1024) return null;  // not a /proc text file
+            var bigger = Memory.alloc(cap * 2);
+            Memory.copy(bigger, buf, total);
+            buf = bigger;
+            cap *= 2;
+        }
+    }
+    return total === 0 ? '' : buf.readUtf8String(total);
+}
+
+// The filtered memfd for the just-opened /proc `fd`, or -1 to keep `fd`.
+function _procFilteredFd(fd, kind, filters) {
+    var io = _procNative();
+    if (io.memfd === null) return -1;
+    var text = _procReadAll(io, fd);
+    var out = text;
+    if (text !== null) {
+        for (var i = 0; i < filters.length; i++) out = filters[i].filter(out, kind);
+    }
+    if (text === null || out === text) {
+        io.lseek(fd, 0, 0);  // SEEK_SET: the caller reads it from the start
+        return -1;
+    }
+    var mfd = Number(io.memfd(Memory.allocUtf8String('proc'), 1));  // MFD_CLOEXEC
+    if (mfd < 0) {
+        io.lseek(fd, 0, 0);
+        return -1;
+    }
+    var bytes = Memory.allocUtf8String(out);
+    var len = unescape(encodeURIComponent(out)).length;  // UTF-8 byte length
+    var done = 0;
+    while (done < len) {
+        var w = Number(io.write(mfd, bytes.add(done), len - done));
+        if (w <= 0) break;
+        done += w;
+    }
+    io.lseek(mfd, 0, 0);
+    io.close(fd);
+    return mfd;
+}
+
+function filterProcFiles(category, kinds, filter) {
+    PROC_FILTERS.push({cat: category, kinds: kinds, filter: filter});
+    if (_procFilterInstalled) return;
+    _procFilterInstalled = true;
+    var seen = {};
+    // [export, path argument]; fortified callers use __open_2/__openat_2.
+    [['open', 0], ['openat', 1], ['__open_2', 0], ['__openat_2', 1]].forEach(function (e) {
+        var addr = _libcExport(e[0]);
+        if (addr === null || seen[addr.toString()]) return;
+        seen[addr.toString()] = true;
+        var pathIndex = e[1];
+        try {
+            Interceptor.attach(addr, {
+                onEnter: function (args) {
+                    this._kind = null;
+                    if (PROC_FILTERS.length === 0) return;
+                    try {
+                        var kind = _procKind(args[pathIndex].readUtf8String());
+                        if (kind !== null && _procFiltersFor(kind).length) this._kind = kind;
+                    } catch (e) {}
+                },
+                onLeave: function (rv) {
+                    if (this._kind === null) return;
+                    var fd = rv.toInt32();
+                    if (fd < 0) return;
+                    try {
+                        var mfd = _procFilteredFd(fd, this._kind, _procFiltersFor(this._kind));
+                        if (mfd >= 0) rv.replace(ptr(mfd));
+                    } catch (e) {}
+                }
+            });
+        } catch (e) {
+            send({type: 'debug', hook: 'proc-filter:' + e[0], error: e.message});
+        }
+    });
+}
+
+// Frida's traces in /proc: maps/smaps entries of its agent and thread names.
+var FRIDA_TOKENS = ['frida', 'gum-js-loop', 'gmain', 'gdbus', 'linjector', 'gadget'];
+
+function _hasFridaToken(line) {
+    for (var i = 0; i < FRIDA_TOKENS.length; i++) {
+        if (line.indexOf(FRIDA_TOKENS[i]) !== -1) return true;
+    }
+    return false;
+}
+
+function hideFridaInProc(text, kind) {
+    var lines = text.split('\n');
+    if (kind === 'status') {
+        // Keep the line (a status without Name: is a tell), rename the thread.
+        return lines.map(function (l) {
+            return (l.indexOf('Name:') === 0 && _hasFridaToken(l)) ? 'Name:\tThread-2' : l;
+        }).join('\n');
+    }
+    if (kind === 'smaps') {
+        // Drop whole entries: a header line plus its attribute lines.
+        var out = [];
+        var skip = false;
+        lines.forEach(function (l) {
+            if (/^[0-9a-f]+-[0-9a-f]+ /.test(l)) skip = _hasFridaToken(l);
+            if (!skip) out.push(l);
+        });
+        return out.join('\n');
+    }
+    return lines.filter(function (l) { return !_hasFridaToken(l); }).join('\n');
+}
+
+function zeroTracerPid(text) {
+    return text.replace(/TracerPid:[ \t]*\d+/g, 'TracerPid:\t0');
+}
 """
 
 
@@ -357,84 +530,14 @@ _FRIDA_DETECTION_SCRIPT = r"""
 // on Frida presence. Deliberately does NOT hook Debug.isDebuggerConnected —
 // that lives in the Debug detection bypass.
 
-// Native: hide /proc/self/maps + /proc/<pid>/status from frida-name scans
+// Native: hide frida from this process's /proc maps/smaps/status (shared
+// open/openat filter in the preamble -- no libc read hook).
 (function () {
-    var procFds = {};  // fd -> 1 if it's a /proc/{self,N}/maps|status read
-
-    function _maybeTrack(pathPtr, fd) {
-        try {
-            var path = pathPtr.readUtf8String();
-            if (!path) return;
-            // Only newline-delimited text files. /cmdline is NUL-separated, so
-            // readUtf8String would stop at argv[0] and writeUtf8String would
-            // truncate the whole buffer — skip it.
-            if (path.indexOf('/maps') !== -1 ||
-                path.indexOf('/status') !== -1) {
-                procFds[fd] = 1;
-            }
-        } catch (e) {}
-    }
-
     try {
-        var openat = _libcExport('openat');
-        if (openat) {
-            Interceptor.attach(openat, {
-                onEnter: function (args) { this._path = args[1]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _maybeTrack(this._path, fd);
-                }
-            });
-        }
-        var openFn = _libcExport('open');
-        if (openFn) {
-            Interceptor.attach(openFn, {
-                onEnter: function (args) { this._path = args[0]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _maybeTrack(this._path, fd);
-                }
-            });
-        }
-        var closeFn = _libcExport('close');
-        if (closeFn) {
-            Interceptor.attach(closeFn, {
-                onEnter: function (args) { delete procFds[args[0].toInt32()]; }
-            });
-        }
-        var readFn = _libcExport('read');
-        if (readFn) {
-            Interceptor.attach(readFn, {
-                onEnter: function (args) {
-                    this._fd = args[0].toInt32();
-                    this._buf = args[1];
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.frida) return;  // inert when frida bypass off
-                    if (!(this._fd in procFds)) return;
-                    var n = rv.toInt32();
-                    if (n <= 0) return;
-                    try {
-                        var data = this._buf.readUtf8String(n);
-                        if (!data) return;
-                        var filtered = data.split('\n').filter(function (l) {
-                            return l.indexOf('frida') === -1 &&
-                                   l.indexOf('gum-js-loop') === -1 &&
-                                   l.indexOf('gmain') === -1 &&
-                                   l.indexOf('linjector') === -1 &&
-                                   l.indexOf('gadget') === -1;
-                        }).join('\n');
-                        if (filtered.length !== data.length) {
-                            this._buf.writeUtf8String(filtered);
-                            rv.replace(ptr(filtered.length));
-                        }
-                    } catch (e) {}
-                }
-            });
-        }
-        send({type: 'info', hook: 'frida-bypass:proc-maps-filter'});
+        filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaInProc);
+        send({type: 'info', hook: 'frida-bypass:proc-filter'});
     } catch (e) {
-        send({type: 'debug', hook: 'frida-bypass:proc-maps-filter', error: e.message});
+        send({type: 'debug', hook: 'frida-bypass:proc-filter', error: e.message});
     }
 
     // Native: strstr scans for 'frida'/'gum' return NULL
@@ -518,8 +621,6 @@ Java.perform(function () {
 FRIDA_DETECTION_HOOKS = [
     "libc:open",
     "libc:openat",
-    "libc:read",
-    "libc:close",
     "libc:strstr",
     "libc:exit",
     "libc:_exit",
@@ -988,67 +1089,15 @@ class RootDetectionBypassManager(BypassManagerBase):
 _DEBUG_DETECTION_SCRIPT = r"""
 'use strict';
 
-// Native: filter 'TracerPid:' in /proc/self/status so ptrace-based debugger
-// checks read 0. Registered under a distinct hook id from the Frida bypass's
-// read filter; the Interceptor.attach stacks cleanly at runtime.
-(function () {
-    var statusFds = {};
-
-    function _trackStatus(pathPtr, fd) {
-        try {
-            var path = pathPtr.readUtf8String();
-            if (path && path.indexOf('/status') !== -1) statusFds[fd] = 1;
-        } catch (e) {}
-    }
-
-    try {
-        var openat = _libcExport('openat');
-        if (openat) {
-            Interceptor.attach(openat, {
-                onEnter: function (args) { this._p = args[1]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _trackStatus(this._p, fd);
-                }
-            });
-        }
-        var closeFn = _libcExport('close');
-        if (closeFn) {
-            Interceptor.attach(closeFn, {
-                onEnter: function (args) { delete statusFds[args[0].toInt32()]; }
-            });
-        }
-        var readFn = _libcExport('read');
-        if (readFn) {
-            Interceptor.attach(readFn, {
-                onEnter: function (args) {
-                    this._fd = args[0].toInt32();
-                    this._buf = args[1];
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.debug) return;  // inert when debug bypass off
-                    if (!(this._fd in statusFds)) return;
-                    var n = rv.toInt32();
-                    if (n <= 0) return;
-                    try {
-                        var data = this._buf.readUtf8String(n);
-                        if (!data || data.indexOf('TracerPid:') === -1) return;
-                        var filtered = data.replace(/TracerPid:\s*\d+/g, 'TracerPid:\t0');
-                        if (filtered.length === data.length) return;
-                        // Rewrite the buffer and shrink the reported byte count
-                        // so the caller doesn't see stale trailing bytes.
-                        this._buf.writeUtf8String(filtered);
-                        rv.replace(ptr(filtered.length));
-                        send({type: 'info', hook: 'debug-bypass:TracerPid=0'});
-                    } catch (e) {}
-                }
-            });
-        }
-        send({type: 'info', hook: 'debug-bypass:tracerpid-filter'});
-    } catch (e) {
-        send({type: 'debug', hook: 'debug-bypass:tracerpid-filter', error: e.message});
-    }
-})();
+// Native: TracerPid reads 0 in this process's /proc status files, so
+// ptrace-based debugger checks pass (shared open/openat filter in the
+// preamble -- no libc read hook).
+try {
+    filterProcFiles('debug', ['status'], zeroTracerPid);
+    send({type: 'info', hook: 'debug-bypass:tracerpid-filter'});
+} catch (e) {
+    send({type: 'debug', hook: 'debug-bypass:tracerpid-filter', error: e.message});
+}
 
 Java.perform(function () {
     try {
@@ -1074,7 +1123,7 @@ Java.perform(function () {
 DEBUG_DETECTION_HOOKS = [
     "android.os.Debug.isDebuggerConnected",
     "android.os.Debug.waitingForDebugger",
-    "libc:read:tracerpid",
+    "libc:openat:tracerpid",
 ]
 
 

@@ -239,10 +239,9 @@ FRIDA_DETECTION_BYPASS_TOOL = ToolHookInfo(
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.FRIDA_DETECTION, HookCategory.PROCESS],
     native_hooks=[
+        # /proc maps/smaps/status answered with a filtered memfd (no read hook)
         "open",
         "openat",
-        "read",
-        "close",
         "strstr",
         "exit",
         "_exit",
@@ -287,7 +286,7 @@ DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.DEBUG_DETECTION],
     native_hooks=[
-        "read",  # /proc/self/status TracerPid filter (stacks with frida bypass)
+        "openat",  # /proc status TracerPid filter (shared with the frida bypass)
     ],
     java_hooks=[
         "android.os.Debug.isDebuggerConnected",
