@@ -854,11 +854,33 @@ def test_translator_skips_err_ptr_file_pointer():
     assert [i.filename for i in ok] == ["ok.txt"]
 
 
+def _created(tid: int, path: str, flags: str, mode: str) -> list:
+    """openat2 + do_filp_open entry/return for one O_CREAT open."""
+    t_items = []
+    t_items.append(_kp("openat2", tid, f'fname="{path}" flags={flags}'))
+    t_items.append(_kp("dfo", tid, f'path="{path}"'))
+    t_items.append(_kp("dfor", tid, f"file=0xffff8000{tid:04x} mode={mode}"))
+    return t_items
+
+
+#: f_mode of a recorded open that created its file / of a reopen (0x100000
+#: is FMODE_CREATED; recorded on emulator-5554, 6.6.30).
+_MODE_CREATED = "0x495d801e"
+_MODE_EXISTING = "0x494d801e"
+
+
+def _feed_all(t: KprobeStreamTranslator, lines: list[str]) -> list:
+    out: list = []
+    for line in lines:
+        out.extend(t.feed(line))
+    return out
+
+
 def test_translator_openat2_create_vs_open():
     t = KprobeStreamTranslator()
     t.reset(None)
 
-    created = t.feed(_kp("openat2", 5, 'fname="/data/new.txt" flags=0x241'))
+    created = _feed_all(t, _created(5, "/data/new.txt", "0x241", _MODE_CREATED))
     opened = t.feed(_kp("openat2", 5, 'fname="/data/ro.txt" flags=0x0'))
 
     assert created[0].category == "create"
@@ -870,7 +892,8 @@ def test_translator_metadata_and_rename_events():
     t = KprobeStreamTranslator()
     t.reset(None)
 
-    mkdir = t.feed(_kp("mkdir", 5, 'name="/data/sub"'))
+    assert t.feed(_kp("mkdir", 5, 'name="/data/sub"')) == []  # waits for its result
+    mkdir = t.feed(_kp("mkdirr", 5, "ret=0"))
     unlink = t.feed(_kp("unlink", 5, 'name="/data/gone"'))
     rename = t.feed(_kp("rename", 5, 'from="/data/old" to="/data/new"'))
 
@@ -927,43 +950,54 @@ def test_translator_canonicalises_user0_paths_and_trailing_slash():
     t.feed(_kp("dfo", 7, 'path="/data/user/0/org.w/shared_prefs/p.xml"'))
     t.feed(_kp("dfor", 7, "file=0xaaa"))
     write = t.feed(_kp("vw", 7, "file=0xaaa count=0x10"))
-    mkdir = t.feed(_kp("mkdir", 7, 'name="/data/user/0/org.w/databases/"'))
+    t.feed(_kp("mkdir", 7, 'name="/data/user/0/org.w/databases/"'))
+    mkdir = t.feed(_kp("mkdirr", 7, "ret=0"))
     assert write[0].path == "/data/data/org.w/shared_prefs/p.xml"
     assert mkdir[0].path == "/data/data/org.w/databases"
 
 
-def test_translator_o_creat_on_an_existing_file_is_not_a_create():
-    """M1: SQLite reopening its db and every ">>" append pass O_CREAT. Only a
-    path not known to exist (baseline scan / earlier in the session) is C.
+def test_translator_o_creat_is_decided_by_the_kernel():
+    """M1: SQLite reopening its db and every ">>" append pass O_CREAT. The
+    kernel says whether the open created the file (FMODE_CREATED in the
+    returned file's f_mode) -- no scan of the targets needed.
     """
     t = KprobeStreamTranslator()
     t.reset(None)
-    t.seed_existing(["/data/data/org.w/databases/w.db"])
-    reopen = t.feed(
-        _kp("openat2", 5, 'fname="/data/data/org.w/databases/w.db" flags=0x80042')
+    db = "/data/data/org.w/databases/w.db"
+    f = "/data/data/org.w/files/f"
+    reopen = _feed_all(t, _created(5, db, "0x80042", _MODE_EXISTING))
+    first = _feed_all(t, _created(6, f, "0x441", _MODE_CREATED))
+    append = _feed_all(t, _created(7, f, "0x441", _MODE_EXISTING))
+    trunc = _feed_all(t, _created(8, f, "0x241", _MODE_EXISTING))
+    failed = _feed_all(
+        t,
+        [
+            _kp("openat2", 9, f'fname="{f}x" flags=0x241'),
+            _kp("dfo", 9, f'path="{f}x"'),
+            _kp("dfor", 9, "file=0xfffffffffffffffe mode=0x0"),
+        ],
     )
-    first = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x441'))
-    append = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x441'))
-    trunc = t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/files/f" flags=0x241'))
-    assert (reopen[0].label, reopen[0].category) == ("OPEN W", "noise")
-    assert first[0].category == "create"
-    assert (append[0].label, append[0].category) == ("OPEN W", "noise")
-    assert trunc[0].category == "modify"  # O_TRUNC on an existing file
+    assert [(i.label, i.category) for i in reopen] == [("OPEN W", "noise")]
+    assert [i.category for i in first] == ["create"]
+    assert [(i.label, i.category) for i in append] == [("OPEN W", "noise")]
+    assert [i.category for i in trunc] == ["modify"]  # O_TRUNC, existing file
+    assert failed == []  # the open failed: nothing happened
 
 
 def test_translator_mkdir_p_on_an_existing_directory_is_dropped():
-    """M1: do_mkdirat fires before the outcome; EEXIST is not a creation."""
+    """M1: do_mkdirat fires before the outcome; its return (mkdirr) decides:
+    -EEXIST is not a creation.
+    """
     t = KprobeStreamTranslator()
     t.reset(None)
-    t.seed_existing(["/data/data/org.w/files"])
-    assert t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files"')) == []
-    new = t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
-    again = t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files"'))
+    assert t.feed(_kp("mkdirr", 5, "ret=-17")) == []
+    t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    new = t.feed(_kp("mkdirr", 5, "ret=0"))
     assert new[0].label == "CREATE DIR"
-    assert again == []
-    # Deleted, then created again: a real creation again.
-    t.feed(_kp("rmdir", 5, 'name="/data/data/org.w/files/bulk"'))
-    assert t.feed(_kp("mkdir", 5, 'name="/data/data/org.w/files/bulk"'))
+    assert new[0].path == "/data/data/org.w/files/bulk"
+    # A result without a pending mkdir of that tid (other process, path mode).
+    assert t.feed(_kp("mkdirr", 6, "ret=0")) == []
 
 
 def test_translator_ignores_sandroids_own_adb_pulls():
@@ -978,13 +1012,13 @@ def test_translator_ignores_sandroids_own_adb_pulls():
 
 
 def test_translator_resolves_attr_basenames_and_unknown_comms():
-    """M8: notify_change only names the dentry; it is resolved to the full path
-    seen with that name (unknown basenames are dropped, not orphan rows).
+    """M8: an attr line without a dentry chain is resolved by the basename
+    seen earlier (unknown basenames are dropped, not orphan rows).
     ``<...>`` actors become the tid's earlier comm, or the app in PID mode.
     """
     t = KprobeStreamTranslator()
     t.reset(MonitorConfig(mode="pid", target_pid=3676, app_name="org.w"))
-    t.seed_existing(["/data/data/org.w/databases/w.db"])
+    t.feed(_kp("openat2", 5, 'fname="/data/data/org.w/databases/w.db" flags=0x0'))
     attr = t.feed(_kp("nc", 5, 'dentry="w.db" ia_valid=0x1'))
     assert attr[0].path == "/data/data/org.w/databases/w.db"
     assert t.feed(_kp("nc", 5, 'dentry="nobody.tmp" ia_valid=0x1')) == []
@@ -1006,11 +1040,123 @@ def test_translator_resolves_attr_basenames_and_unknown_comms():
     assert later[0].process == "RxIo"
 
 
-def test_translator_records_probe_changes_for_the_scan_fallback():
+# -- writes through files opened BEFORE the monitor started ----------------
+# Lines recorded on emulator-5554 (API 35, kernel 6.6.30) while Firefox was
+# attached; places.sqlite-wal had been open since app start.
+
+_FF = "/data/data/org.mozilla.firefox"
+_DATA_DEV = 266338348
+_RECORDED_MOUNTS = (
+    "254:0 / /\n254:44 / /data\n254:44 /data /data/user/0\n0:80 / /storage/emulated\n"
+)
+_REC_WAL = (
+    " PlacesStorageWr-12262   [003] d.... 16650.023074: vw: (vfs_write+0x0/0x2e4) "
+    'file=0xffffff801d3e8c80 count=24 dev=266338348 n0="places.sqlite-wal" '
+    'n1="files" n2="org.mozilla.firefox" n3="data" n4="/" n5="/" n6="/" n7="/"'
+)
+_REC_SOCKET = (
+    " AutoSave-thread-12030   [002] d.... 14741.676522: diw: (do_iter_write+0x0/0x338)"
+    ' file=0xffffff800c4a9a40 dev=8 n0="UNIX" n1="UNIX" n2="UNIX" n3="UNIX"'
+    ' n4="UNIX" n5="UNIX" n6="UNIX" n7="UNIX"'
+)
+_REC_EVENTFD = (
+    "           Gecko-11966   [001] d.... 14823.018801: vw: (vfs_write+0x0/0x2e4) "
+    'file=0xffffff803579d400 count=1 dev=15 n0="" n1="" n2="" n3="" n4="" n5=""'
+    ' n6="" n7=""'
+)
+_REC_IDB = (
+    " IndexedDB IO #5-14706   [000] d.... 14829.037772: vw: (vfs_write+0x0/0x2e4) "
+    "file=0xffffff8066a6d2c0 count=1 dev=266338348 "
+    'n0="3870112724rsegmnoittet-es.sqlite-shm" n1="idb" n2="chrome" '
+    'n3="permanent" n4="storage" n5="k3m7yjvw.default" n6="mozilla" n7="files"'
+)
+_REC_NC = (
+    " queued-work-loo-11951   [003] d.... 16649.960457: nc: (notify_change+0x0/0x2f4)"
+    ' dentry="fenix_preferences.xml" ia_valid=0x41 dev=266338348'
+    ' n1="shared_prefs" n2="org.mozilla.firefox" n3="data" n4="/" n5="/" n6="/"'
+    ' n7="/"'
+)
+
+
+def _ff_translator(*, resolved: bool = True) -> KprobeStreamTranslator:
+    from sandroid.core.kprobe_tracer import (
+        build_write_scope,
+        parse_mounts,
+        scope_aliases,
+    )
+
     t = KprobeStreamTranslator()
-    t.reset(None)
-    t.feed(_kp("unlink", 5, 'name="/data/data/org.w/files/a"'))
-    assert "/data/data/org.w/files/a" in t.last_change
+    t.reset(
+        MonitorConfig(
+            mode="pid",
+            target_path=_FF,
+            target_paths=[_FF],
+            target_pid=11929,
+            app_name="org.mozilla.firefox",
+        )
+    )
+    if resolved:
+        t.set_write_scope(
+            build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+        )
+    return t
+
+
+def test_translator_names_writes_through_files_opened_before_the_start():
+    """The write's own dentry chain names places.sqlite-wal although no open
+    of it was ever seen -- as a live MODIFY by its writer, not a rescan row.
+    """
+    t = _ff_translator()
+    items = t.feed(_REC_WAL)
+    assert [(i.label, i.path, i.process, i.source) for i in items] == [
+        ("MODIFY", f"{_FF}/files/places.sqlite-wal", "PlacesStorageWr", "kprobe")
+    ]
+    # Without the device's view the targets' own path components still match.
+    guessed = _ff_translator(resolved=False).feed(_REC_WAL)
+    assert [i.path for i in guessed] == [f"{_FF}/files/places.sqlite-wal"]
+
+
+def test_translator_drops_socket_and_anonymous_writes():
+    t = _ff_translator()
+    assert t.feed(_REC_SOCKET) == []
+    assert t.feed(_REC_EVENTFD) == []
+
+
+def test_translator_falls_back_to_the_open_time_map_for_deep_files():
+    """The recorded IndexedDB file is 9 directories below the package: its
+    chain can't reach the app directory, the open-time map names it.
+    """
+    t = _ff_translator()
+    assert t.feed(_REC_IDB) == []  # opened before the start: not nameable
+    idb = (
+        f"{_FF}/files/mozilla/k3m7yjvw.default/storage/permanent/chrome/idb/"
+        "3870112724rsegmnoittet-es.sqlite-shm"
+    )
+    t.feed(_kp("dfo", 14706, f'path="{idb}"'))
+    t.feed(_kp("dfor", 14706, f"file=0xffffff8066a6d2c0 mode={_MODE_EXISTING}"))
+    assert [i.path for i in t.feed(_REC_IDB)] == [idb]
+
+
+def test_translator_prefers_the_chain_over_a_stale_file_pointer():
+    """A lost __fput leaves a stale file* entry; the chain is the kernel's
+    name at write time and wins.
+    """
+    t = _ff_translator()
+    t.feed(_kp("dfo", 1, f'path="{_FF}/files/old.json"'))
+    t.feed(_kp("dfor", 1, "file=0xffffff801d3e8c80"))
+    assert [i.path for i in t.feed(_REC_WAL)] == [f"{_FF}/files/places.sqlite-wal"]
+
+
+def test_translator_names_attr_changes_from_the_chain():
+    t = _ff_translator()
+    items = t.feed(_REC_NC)
+    assert [(i.label, i.path) for i in items] == [
+        ("ATTRS", f"{_FF}/shared_prefs/fenix_preferences.xml")
+    ]
+    # A complete chain outside the targets is dropped, even with a known name.
+    t.feed(_REC_WAL)
+    outside = _REC_NC.replace('n2="org.mozilla.firefox"', 'n2="com.other"')
+    assert t.feed(outside) == []
 
 
 def test_kprobe_setup_mode_desc_counts_the_extra_paths(monkeypatch):
@@ -1026,10 +1172,16 @@ def test_kprobe_setup_mode_desc_counts_the_extra_paths(monkeypatch):
     assert desc.endswith("(+1 path)")
 
 
-def test_kprobe_setup_scans_before_tracing_and_seeds_the_translator(monkeypatch):
-    """H2/M1: the baseline scan runs BEFORE tracing (find opens directories)
-    and tells the translator which files already exist.
+def test_kprobe_setup_reads_the_write_scope_before_tracing(monkeypatch):
+    """The device's view of the targets is read BEFORE tracing (the tracer
+    filters the write probes by it) and handed to the translator; no scan.
     """
+    from sandroid.core.kprobe_tracer import (
+        build_write_scope,
+        parse_mounts,
+        scope_aliases,
+    )
+
     order: list[str] = []
     monkeypatch.setattr(
         KprobeTracer,
@@ -1037,156 +1189,31 @@ def test_kprobe_setup_scans_before_tracing_and_seeds_the_translator(monkeypatch)
         classmethod(lambda cls, pid, path=None: order.append("trace") or object()),
     )
     controller = _make_controller()
+    scope = build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
     monkeypatch.setattr(
-        controller,
-        "_baseline_scan",
-        lambda paths: order.append("scan")
-        or {"/data/data/org.w/databases/w.db": (1, 10)},
+        controller, "_write_scope", lambda paths: order.append("scope") or scope
     )
     config = MonitorConfig(
-        mode="pid", target_pid=42, target_path="/data/data/org.w", app_name="org.w"
+        mode="pid", target_pid=42, target_path=_FF, app_name="org.mozilla.firefox"
     )
     _process, translator, _desc = controller._kprobe_setup(config)
-    assert order == ["scan", "trace"]
-    assert translator.baseline == {"/data/data/org.w/databases/w.db": (1, 10)}
-    item = translator.feed(
-        _kp("openat2", 1, 'fname="/data/user/0/org.w/databases/w.db" flags=0x42')
-    )
-    assert item[0].label == "OPEN W"
+    assert order == ["scope", "trace"]
+    assert translator._scope is scope
+    assert not hasattr(controller, "_start_scan_watcher")
+    assert [i.path for i in translator.feed(_REC_WAL)] == [
+        f"{_FF}/files/places.sqlite-wal"
+    ]
 
 
-class _ScanWrapper:
-    """Minimal MonitorProcessWrapper stand-in for the scan watcher."""
+def test_user_stop_runs_no_rescan(monkeypatch):
+    """The stop rescan is gone: a user stop just stops the task."""
 
-    def __init__(self) -> None:
-        self.running = True
-        self.final_scan = False
-        self._torn_down = False
-        self.events: list[dict] = []
+    class _Wrapper:
+        final_scan = False
+        is_running = True
 
-    @property
-    def is_running(self) -> bool:
-        return self.running
-
-    def record_event(self, event: dict) -> None:
-        self.events.append(event)
-
-
-def test_scan_watcher_restat_reports_writes_through_preopened_files(monkeypatch):
-    """H2a: the db/-wal opened before the monitor started are re-stat-ed; a
-    change the probes did not report shows up as MODIFY via stat. A path the
-    probes did report is not reported twice.
-    """
-    import time as _time
-
-    published: list = []
-    monkeypatch.setattr(
-        "sandroid.tui.controllers.monitor_controller._publish_monitor_batch",
-        lambda items: published.extend(items),
-    )
     controller = _make_controller()
-    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0.01)
-    db = "/data/data/org.w/databases/w.db"
-    wal = db + "-wal"
-    prefs = "/data/data/org.w/shared_prefs/p.xml"
-    stats = iter([{db: (1, 10), wal: (5, 99)}] * 1000)
-    monkeypatch.setattr(controller, "_restat", lambda paths: next(stats))
-    translator = KprobeStreamTranslator()
-    translator.reset(None)
-    translator.baseline = {db: (1, 10), wal: (1, 0), prefs: (1, 5)}
-    wrapper = _ScanWrapper()
-    threads: list = []
-    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
-    controller._start_scan_watcher(wrapper, translator)
-    loop = threads[0]
-
-    import threading
-
-    worker = threading.Thread(target=loop)
-    worker.start()
-    deadline = _time.monotonic() + 3
-    while not published and _time.monotonic() < deadline:
-        _time.sleep(0.02)
-    wrapper.running = False
-    worker.join(2)
-    assert [(i.path, i.label, i.source) for i in published] == [(wal, "MODIFY", "stat")]
-    assert wrapper.events
-    assert wrapper.events[0]["path"] == wal
-
-
-def test_scan_watcher_stop_rescan_fills_the_gaps(monkeypatch):
-    """H2: after a user stop, one rescan reports what the probes missed
-    (relative-path writes, rm -r children, files created by adb shell).
-    """
-    published: list = []
-    monkeypatch.setattr(
-        "sandroid.tui.controllers.monitor_controller._publish_monitor_batch",
-        lambda items: published.extend(items),
-    )
-    controller = _make_controller()
-    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0)
-    root = "/data/data/org.w"
-    seen = f"{root}/files/seen.txt"
-    monkeypatch.setattr(
-        controller,
-        "_rescan",
-        lambda paths: {
-            root: (9, -1),
-            f"{root}/files/changed.txt": (9, 2),
-            f"{root}/files/new.txt": (9, 1),
-            seen: (9, 9),
-        },
-    )
-    translator = KprobeStreamTranslator()
-    translator.reset(None)
-    translator.scan_paths = [root]
-    translator.baseline = {
-        root: (1, -1),
-        f"{root}/files/changed.txt": (1, 1),
-        f"{root}/files/gone.txt": (1, 1),
-        seen: (1, 1),
-    }
-    wrapper = _ScanWrapper()
-    threads: list = []
-    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
-    controller._start_scan_watcher(wrapper, translator)
-    # The probes saw this one rewritten during the session: not repeated.
-    translator.feed(_kp("openat2", 1, f'fname="{seen}" flags=0x241'))
-    wrapper.running = False
-    wrapper.final_scan = True
-    wrapper._torn_down = True
-    threads[0]()
-    got = {(i.path.rsplit("/", 1)[-1], i.label, i.source) for i in published}
-    assert got == {
-        ("changed.txt", "MODIFY", "scan"),
-        ("new.txt", "CREATE", "scan"),
-        ("gone.txt", "DELETE", "scan"),
-    }
-
-
-def test_scan_watcher_skips_the_rescan_without_a_user_stop(monkeypatch):
-    """Play's safety stop (a snapshot revert follows) must not rescan."""
-    controller = _make_controller()
-    monkeypatch.setattr(controller, "_get_stat_interval", lambda: 0)
-    calls: list = []
-    monkeypatch.setattr(controller, "_rescan", lambda paths: calls.append(paths))
-    translator = KprobeStreamTranslator()
-    translator.reset(None)
-    translator.scan_paths = ["/data/data/org.w"]
-    translator.baseline = {"/data/data/org.w": (1, -1)}
-    wrapper = _ScanWrapper()
-    threads: list = []
-    monkeypatch.setattr(controller, "_run_scan_thread", threads.append)
-    controller._start_scan_watcher(wrapper, translator)
-    wrapper.running = False
-    wrapper._torn_down = True
-    threads[0]()
-    assert calls == []
-
-
-def test_user_stop_flags_the_rescan(monkeypatch):
-    controller = _make_controller()
-    wrapper = _ScanWrapper()
+    wrapper = _Wrapper()
     get_task_service().register(
         name="monitor",
         display_name="Monitor",
@@ -1195,7 +1222,7 @@ def test_user_stop_flags_the_rescan(monkeypatch):
         app_name="org.w",
     )
     assert controller.stop() is True
-    assert wrapper.final_scan is True
+    assert wrapper.final_scan is False
 
 
 # =============================================================================

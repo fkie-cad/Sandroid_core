@@ -20,22 +20,44 @@ per-instance ``trace_pipe`` streaming) were verified live on emulator-5556
 (API 35, kernel 6.6.30) and emulator-5554 (API 36, kernel 6.6.66); offsets
 matched exactly on both.
 
+Naming writes through files opened BEFORE the monitor started (an attached
+app's SQLite db and ``-wal``): ``vfs_write``/``do_iter_write`` only carry the
+``struct file*``, and the ``file* -> path`` map is learned from
+``do_filp_open`` at open time. So the write probes additionally fetch the
+file's dentry chain -- ``f_path.dentry`` (+0xb0), then ``d_parent`` (+0x18)
+seven times, each ``d_name.name`` (+0x28) as ``n0`` (the file) .. ``n7`` --
+plus the filesystem's ``d_sb->s_dev`` (+0x68, +0x10) as ``dev``. A
+filesystem root names itself ``/`` and is its own parent, so a chain that
+reaches ``/`` is the file's complete path inside its filesystem; the
+session's :class:`WriteScope` (``/proc/1/mountinfo`` + the targets'
+real paths, read once at start) maps that onto the watched directory, e.g.
+``places.sqlite-wal`` < ``files`` < ``org.mozilla.firefox`` < ``data`` <
+``/`` on the /data filesystem is ``/data/data/org.mozilla.firefox/files/
+places.sqlite-wal``. Eight names is the most tracefs accepts (a longer fetch
+expression is rejected as "Argument expression is too long"); a deeper
+chain is matched by the target's own path components (see
+:func:`resolve_chain`). Verified live on emulator-5554 (API 35, 6.6.30)
+against Firefox's pre-opened ``places.sqlite``/``-wal``.
+
+Creation is the kernel's verdict too: ``r:dfor`` also reads the opened
+file's ``f_mode`` (+0x14) -- ``FMODE_CREATED`` is set only when this open
+created the file -- and ``r:mkdirr`` reports ``do_mkdirat``'s result, so an
+``O_CREAT`` reopen or ``mkdir -p`` on an existing directory is no creation
+without any scan of the targets.
+
 Documented caveats (not v1 blockers -- diff mode covers global completeness):
-- Files opened BEFORE the monitor starts aren't in the ``file*`` map, so their
-  writes are unattributed (both modes; typical for an app's SQLite db and
-  ``-wal``, opened at app start). The monitor therefore records a baseline
-  :meth:`scan_tree` before tracing starts, re-``stat``\\ s the database-like
-  files of that baseline periodically (:meth:`stat_files`) and rescans once
-  more after a stop; changes found that way are shown "via stat" / "via
-  scan" (see ``MonitorController``). Starting the monitor before the app
-  (spawn) avoids the gap.
+- A write is named from the dentry chain when it is under a target; files
+  more than seven directories below a target's filesystem root are named
+  only if the chain still contains the target's directory, or from the
+  open-time ``file*`` map.
 - The probes see the path *string* a process passes in. Android reaches app
   data as ``/data/data/<pkg>`` AND ``/data/user/0/<pkg>`` (what
   ``getFilesDir()`` returns), so :meth:`_apply_path_filter` watches every
   alias (``adb_utils.expand_monitor_paths``). Relative names (``openat`` on a
   directory fd, ``cd dir && echo > f``, toybox ``rm -r``) don't match an
-  absolute path filter: a deleted directory marks its known files deleted and
-  the stop-time rescan reports the rest.
+  absolute path filter: such creations and deletions are not reported (a
+  deleted directory marks its known files deleted); writes to such files
+  are, named by the write.
 - On ``/sdcard`` the MediaProvider FUSE daemon co-writes the same paths in its
   own process; PID scoping will attribute those to the daemon, not the app.
 - PID/tree scoping deliberately misses content-provider processes (e.g.
@@ -53,9 +75,12 @@ instead of being expanded or stripped by either shell.
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import subprocess
 import threading
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 
 from .adb import Adb
 from .adb_utils import (
@@ -65,6 +90,42 @@ from .adb_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Kernel struct offsets (arm64 GKI 6.6, verified live -- see module docstring).
+_F_DENTRY = 0xB0  # struct file: f_path.dentry
+_F_MODE = 0x14  # struct file: f_mode
+_D_PARENT = 0x18  # struct dentry: d_parent
+_D_NAME = 0x28  # struct dentry: d_name.name
+_D_SB = 0x68  # struct dentry: d_sb
+_S_DEV = 0x10  # struct super_block: s_dev
+
+#: ``f_mode`` bit the kernel sets only when this open created the file.
+FMODE_CREATED = 0x100000
+
+#: Dentry names fetched per write (``n0`` = the file .. ``n7``). tracefs
+#: rejects a longer fetch expression ("Argument expression is too long").
+CHAIN_DEPTH = 8
+
+#: ``kdev_t`` minor bits (``MKDEV(ma, mi) = ma << 20 | mi``).
+_MINORBITS = 20
+
+
+def _chain_args(dentry: str, first: int = 0) -> str:
+    """``dev=`` + ``n<first>``..``n7`` fetch args for a dentry expression.
+
+    Offsets are written in decimal: the fetch expression length is capped
+    and ``+24(`` is shorter than ``+0x18(``.
+    """
+    args = [f"dev=+{_S_DEV}(+{_D_SB}({dentry})):u32"]
+    for i in range(first, CHAIN_DEPTH):
+        expr = dentry
+        for _ in range(i):
+            expr = f"+{_D_PARENT}({expr})"
+        args.append(f"n{i}=+0(+{_D_NAME}({expr})):string")
+    return " ".join(args)
+
+
+_FILE_DENTRY = f"+{_F_DENTRY}($arg1)"
 
 
 class KprobeTracer:
@@ -109,30 +170,35 @@ class KprobeTracer:
     # resolve -- the "bogus symbol" test-attach signature.
     _BOGUS_SYMBOL_SIGNATURE = "Invalid probed address or symbol"
 
-    # Verified probe set (do NOT edit the offsets/args -- confirmed live on two
-    # kernels). ``name=+0(...)`` reads a null-terminated string at the innermost
+    # Verified probe set (do NOT edit the offsets/args -- the path/name probes
+    # were confirmed live on two kernels, the dentry chain, ``dev`` and
+    # ``f_mode`` on 6.6.30). ``name=+0(...)`` reads a null-terminated string at the innermost
     # dereferenced address; ``:ustring`` reads a userspace string. Names double
     # as the trace event names the translator keys on.
     #
-    #   p:openat2 fname + flags   -> CREATE (O_CREAT 0x40) vs OPEN (noise)
-    #   p:mkdir/unlink/rmdir/rename                metadata paths, emitted directly
-    #   p:vw/diw                  vfs_write / do_iter_write, correlated via file*
-    #   p:nc                      notify_change (attrs)
-    #   p:sx                      vfs_setxattr (xattr)
-    #   p:dfo (entry) / r:dfor    do_filp_open path + returned file* -> file* map
+    #   p:openat2 fname + flags   -> O_CREAT opens are decided at dfor
+    #   p:mkdir (entry) / r:mkdirr do_mkdirat path + result -> real creations only
+    #   p:unlink/rmdir/rename     metadata paths, emitted directly
+    #   p:vw/diw                  vfs_write / do_iter_write: file* + dentry chain
+    #   p:nc                      notify_change (attrs) + dentry chain
+    #   p:sx                      vfs_setxattr (xattr) + dentry chain
+    #   p:dfo (entry) / r:dfor    do_filp_open path + returned file* (+ f_mode)
     #   p:fput                    __fput -> MANDATORY file* map invalidation
     _PROBE_DEFS = (
         "p:openat2 do_sys_openat2 fname=+0($arg2):ustring flags=+0($arg3):x64",
         "p:mkdir do_mkdirat name=+0(+0($arg2)):string",
+        "r:mkdirr do_mkdirat ret=$retval:s32",
         "p:unlink do_unlinkat name=+0(+0($arg2)):string",
         "p:rmdir do_rmdir name=+0(+0($arg2)):string",
         "p:rename do_renameat2 from=+0(+0($arg2)):string to=+0(+0($arg4)):string",
-        "p:vw vfs_write file=$arg1:x64 count=$arg3:u64",
-        "p:diw do_iter_write file=$arg1:x64",
-        "p:nc notify_change dentry=+0(+0x28($arg2)):string ia_valid=+0($arg3):x32",
-        "p:sx vfs_setxattr dentry=+0(+0x28($arg2)):string xname=+0($arg3):string",
+        f"p:vw vfs_write file=$arg1:x64 count=$arg3:u64 {_chain_args(_FILE_DENTRY)}",
+        f"p:diw do_iter_write file=$arg1:x64 {_chain_args(_FILE_DENTRY)}",
+        "p:nc notify_change dentry=+0(+0x28($arg2)):string ia_valid=+0($arg3):x32 "
+        + _chain_args("$arg2", first=1),
+        "p:sx vfs_setxattr dentry=+0(+0x28($arg2)):string xname=+0($arg3):string "
+        + _chain_args("$arg2", first=1),
         "p:dfo do_filp_open path=+0(+0($arg2)):string",
-        "r:dfor do_filp_open file=$retval:x64",
+        f"r:dfor do_filp_open file=$retval:x64 mode=+{_F_MODE}($retval):x32",
         "p:fput __fput file=$arg1:x64",
     )
 
@@ -141,6 +207,7 @@ class KprobeTracer:
     _PROBE_NAMES = (
         "openat2",
         "mkdir",
+        "mkdirr",
         "unlink",
         "rmdir",
         "rename",
@@ -153,8 +220,8 @@ class KprobeTracer:
         "fput",
     )
 
-    # ATTRS/XATTR probes (notify_change / vfs_setxattr) capture only a
-    # *basename* (dentry name), never a full path -- so they are absent from
+    # ATTRS/XATTR probes (notify_change / vfs_setxattr) capture a dentry
+    # chain, never the path string -- so they are absent from
     # _PATH_FILTER_FIELDS and CANNOT be in-kernel path-glob-filtered. In pure
     # PATH mode they are therefore NOT installed/enabled: otherwise ANY
     # process's chmod/chown/truncate/utimes/setxattr device-wide would surface
@@ -203,9 +270,6 @@ class KprobeTracer:
     #: small: a busy app's threads overflow it and lines show ``<...>`` instead
     #: of the process name. Raised for the session, restored on teardown.
     _CMDLINES_SIZE = 4096
-
-    #: Upper bound on entries a baseline scan keeps (huge caches stay cheap).
-    _SCAN_MAX_LINES = 20000
 
     # =========================================================================
     # adb plumbing (mirrors FSMon)
@@ -400,7 +464,12 @@ class KprobeTracer:
 
         _cleanup()  # scrub any leaked prior check
 
-        vw_def = "p:kpck_vw vfs_write name=+0(+0x28(+0xb0($arg1))):string"
+        # name = f_path.dentry->d_name.name; parent = d_parent's name (the
+        # write probes' dentry chain depends on the d_parent offset too).
+        vw_def = (
+            "p:kpck_vw vfs_write name=+0(+0x28(+0xb0($arg1))):string "
+            f"parent=+0(+{_D_NAME}(+{_D_PARENT}({_FILE_DENTRY}))):string"
+        )
         dfo_def = "p:kpck_dfo do_filp_open path=+0(+0($arg2)):string"
         install_out = cls._shell(f"echo {cls._dq(vw_def)} >> {events}")
         install_out += cls._shell(f"echo {cls._dq(dfo_def)} >> {events}")
@@ -471,12 +540,14 @@ class KprobeTracer:
         _cleanup()
 
         # The vfs_write probe's name= field must recover the basename (proves
-        # both +0xb0 and +0x28), and the do_filp_open canary must recover the
-        # path (proves the write-attribution hot-path we actually depend on).
+        # both +0xb0 and +0x28) and parent= its directory (proves d_parent
+        # +0x18, which the write probes' dentry chain walks), and the
+        # do_filp_open canary must recover the path (the open-time hot-path).
+        parent_name = cls._CHECK_FILE.rsplit("/", 2)[-2]
         name_ok = any(
             val.rstrip("/").rsplit("/", 1)[-1] == basename
             for val in _extract_field_values(trace, "name")
-        )
+        ) and parent_name in _extract_field_values(trace, "parent")
         path_ok = any(basename in val for val in _extract_field_values(trace, "path"))
         if name_ok and path_ok:
             return True
@@ -672,6 +743,7 @@ class KprobeTracer:
         for name, field in cls._PATH_FILTER_FIELDS.items():
             expr = " || ".join(f'{field} ~ "{g}"' for g in globs)
             cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
+        cls._apply_write_filter(tracefs, paths)
 
     @classmethod
     def _seed_pid_tree(cls, tracefs: str, pid: int) -> None:
@@ -757,15 +829,17 @@ class KprobeTracer:
           capture only a basename, can't be path-glob-filtered, and are omitted
           to avoid leaking device-wide attribute/xattr rows (see
           ``_GLOBAL_ONLY_PROBES``). Use PID mode or capture-all for those.
-        * WRITE FIREHOSE: writes (``vfs_write``/``do_iter_write``) and the
-          ``do_filp_open``-return / ``__fput`` correlation lines can't be
-          path-filtered in-kernel, so they fire system-wide. Under heavy system
-          write load the kernel ring buffer can drop the sparse ``dfor``/``fput``
-          control lines -- upstream of the Python deque, so the translator's
-          translate-ahead-of-deque design can't recover them -- corrupting the
-          file* map. The 64 MB/CPU buffer mitigates this. When a target PID is
-          known, prefer ``run_by_pid(pid, path)`` (PID+path): ``set_event_pid``
-          bounds the firehose to the target's task tree.
+        * WRITE FIREHOSE: writes (``vfs_write``/``do_iter_write``) are only
+          filtered by the targets' filesystem and directory name (with a
+          resolved :class:`WriteScope`), after their dentry chain was fetched
+          -- every write device-wide pays that fetch. The ``do_filp_open``
+          -return / ``__fput`` correlation lines can't be filtered and fire
+          system-wide; under heavy write load the kernel ring buffer can drop
+          them (upstream of the Python deque) and corrupt the file* map --
+          writes still carry their own name. The 64 MB/CPU buffer mitigates
+          this. When a target PID is known, prefer ``run_by_pid(pid, path)``
+          (PID+path): ``set_event_pid`` is checked before any fetch and bounds
+          the firehose to the target's task tree.
         """
         if not path:
             cls.logger.error("kprobe run_by_path: empty path")
@@ -841,87 +915,341 @@ class KprobeTracer:
         finally:
             cls._orig_buffer_kb = None
             cls._orig_cmdlines = None
+            cls._write_scope = None
 
     # =========================================================================
-    # Baseline scan / re-stat (covers writes the probes can't attribute)
+    # Write scope (names writes from the dentry chain; see module docstring)
     # =========================================================================
 
-    @staticmethod
-    def scan_roots(paths: str | list[str] | None) -> list[str]:
-        """Canonical, de-duplicated scan roots (no alias is scanned twice).
+    #: Set by :meth:`resolve_write_scope` for the next session; the path
+    #: filter adds the in-kernel write filter from it. Cleared on teardown.
+    _write_scope: WriteScope | None = None
 
-        ``/data/user/0/<pkg>`` and ``/data/data/<pkg>`` are the same
-        directory, so only the canonical form is scanned;
-        ``/data/user_de/0/<pkg>`` is a different directory and is kept.
-        """
-        roots: list[str] = []
-        for p in expand_monitor_paths(paths or []):
-            c = canonical_device_path(p)
-            if c and c != "/" and c not in roots:
-                roots.append(c)
-        return roots
+    _SCOPE_SEP = "--sandroid-scope--"
 
     @classmethod
-    def scan_tree(cls, paths: str | list[str] | None) -> dict[str, tuple[int, int]]:
-        """``{canonical path: (mtime, size)}`` for every file/dir under ``paths``.
+    def resolve_write_scope(cls, paths: str | list[str] | None) -> WriteScope | None:
+        """Read the mount table and the targets' real paths (ONE adb call).
 
-        One ``find ... -exec stat`` over adb (root). Directories get size -1
-        (only their existence matters). Run it BEFORE tracing starts or after
-        it stopped: ``find`` opens directories, which path-mode probes would
-        otherwise report as activity. Never raises; ``{}`` on any failure.
+        ``/proc/1/mountinfo`` says where each filesystem (``dev``) and which
+        directory of it is mounted; ``readlink -f`` resolves symlinked
+        targets (``/sdcard``). Run off the UI thread, before the session
+        starts; the result is kept for :meth:`_apply_write_filter` and
+        handed to the translator. ``None`` on any failure (the translator
+        then matches chains by the targets' path components alone and the
+        write probes stay unfiltered).
         """
-        roots = cls.scan_roots(paths)
-        if not roots:
-            return {}
-        # "<root>/" makes find descend into a symlinked root.
-        quoted = " ".join(shlex.quote(r.rstrip("/") + "/") for r in roots)
+        cls._write_scope = None
+        pairs = scope_aliases(paths)
+        if not pairs:
+            return None
+        quoted = " ".join(shlex.quote(alias) for alias, _ in pairs)
         cmd = (
-            f"find {quoted} -exec stat -c '%Y %s %F|%n' {{}} + 2>/dev/null"
-            f" | head -n {cls._SCAN_MAX_LINES}"
+            "awk '{print $3, $4, $5}' /proc/1/mountinfo 2>/dev/null; "
+            f"echo {cls._SCOPE_SEP}; "
+            f"for p in {quoted}; do "
+            'echo "$p|$(readlink -f "$p" 2>/dev/null)"; done'
         )
         try:
             out = cls._shell(cmd)
         except Exception:
-            cls.logger.debug("kprobe baseline scan failed", exc_info=True)
-            return {}
-        return parse_scan_output(out)
+            cls.logger.debug("kprobe write-scope read failed", exc_info=True)
+            return None
+        head, sep, tail = out.partition(cls._SCOPE_SEP)
+        mounts = parse_mounts(head)
+        if not sep or not mounts:
+            return None
+        real: dict[str, str] = {}
+        for line in tail.splitlines():
+            alias, bar, resolved = line.strip().partition("|")
+            if bar and resolved.startswith("/"):
+                real[alias] = resolved
+        scope = build_write_scope(pairs, mounts, real)
+        cls._write_scope = scope
+        return scope
 
     @classmethod
-    def stat_files(cls, paths: list[str]) -> dict[str, tuple[int, int]]:
-        """``{path: (mtime, size)}`` for those of ``paths`` that exist.
+    def _apply_write_filter(cls, tracefs: str, paths: str | list[str]) -> None:
+        """Scope vw/diw in-kernel by the targets' filesystem + directory name.
 
-        ``stat`` opens nothing, so it never shows up as monitored activity.
+        Only with a complete :class:`WriteScope` resolved for exactly these
+        paths -- otherwise the write probes stay unfiltered (the translator
+        still matches every write against the targets). Drops socket, pipe
+        and eventfd writes and writes to other filesystems before they reach
+        the ring buffer. The filter runs after the fetch, so it saves buffer
+        space, adb bandwidth and parsing, not the fetch itself.
         """
-        result: dict[str, tuple[int, int]] = {}
-        for i in range(0, len(paths), 200):
-            chunk = " ".join(shlex.quote(p) for p in paths[i : i + 200])
-            try:
-                out = cls._shell(f"stat -c '%Y %s %F|%n' {chunk} 2>/dev/null")
-            except Exception:
-                cls.logger.debug("kprobe re-stat failed", exc_info=True)
-                return result
-            result.update(parse_scan_output(out))
-        return result
+        scope = cls._write_scope
+        if scope is None or scope.paths != tuple(scope_aliases(paths)):
+            return
+        expr = write_filter(scope)
+        if not expr:
+            return
+        inst = cls._instance_dir(tracefs)
+        for name in ("vw", "diw"):
+            cls._shell(f"echo {cls._dq(expr)} > {inst}/events/kprobes/{name}/filter")
 
 
-def parse_scan_output(out: str) -> dict[str, tuple[int, int]]:
-    """Parse ``stat -c '%Y %s %F|%n'`` lines; directories get size -1."""
-    result: dict[str, tuple[int, int]] = {}
-    for line in (out or "").splitlines():
-        head, sep, name = line.strip().partition("|")
-        if not sep or not name.startswith("/"):
+# =============================================================================
+# Write scope: dentry chain -> watched path (pure, unit-tested)
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class WriteTarget:
+    """One watched directory as the kernel sees it.
+
+    ``path`` is the canonical device path rows are keyed by; ``fs_path`` is
+    the same directory inside its filesystem (``dev``; ``None`` = unknown,
+    any filesystem): ``/data/data/<pkg>`` is ``/data/<pkg>`` on the /data
+    filesystem, ``/sdcard`` is ``/0`` on the FUSE one.
+    """
+
+    path: str
+    dev: int | None
+    fs_path: str
+
+
+@dataclass(frozen=True)
+class WriteScope:
+    """Targets resolved for one session (see ``resolve_write_scope``)."""
+
+    #: ``(alias, canonical path)`` pairs this scope was resolved for.
+    paths: tuple[tuple[str, str], ...]
+    targets: tuple[WriteTarget, ...]
+    #: True when every alias resolved to a filesystem (the in-kernel write
+    #: filter is only installed then).
+    complete: bool = True
+    mounts: tuple[tuple[int, str, str], ...] = dc_field(default=(), compare=False)
+
+
+def kernel_dev(major_minor: str) -> int | None:
+    """``"254:44"`` (mountinfo) -> the kernel's ``dev_t`` (``s_dev``)."""
+    major, sep, minor = major_minor.partition(":")
+    if not sep or not major.isdigit() or not minor.isdigit():
+        return None
+    return (int(major) << _MINORBITS) | int(minor)
+
+
+def _unescape_mount(value: str) -> str:
+    """Undo mountinfo's octal escapes (space, tab, newline, backslash)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), value)
+
+
+def parse_mounts(text: str) -> list[tuple[int, str, str]]:
+    """``"maj:min root mountpoint"`` lines -> ``[(dev, root, mountpoint)]``."""
+    mounts: list[tuple[int, str, str]] = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) != 3:
             continue
-        parts = head.split(None, 2)
-        if len(parts) < 3:
+        dev = kernel_dev(parts[0])
+        root, point = _unescape_mount(parts[1]), _unescape_mount(parts[2])
+        if dev is None or not root.startswith("/") or not point.startswith("/"):
             continue
-        try:
-            mtime, size = int(parts[0]), int(parts[1])
-        except ValueError:
+        mounts.append((dev, root, point))
+    return mounts
+
+
+def _under(path: str, base: str) -> bool:
+    """``path`` is ``base`` or below it (component-wise)."""
+    return base == "/" or path == base or path.startswith(base.rstrip("/") + "/")
+
+
+def _rel(path: str, base: str) -> str:
+    """``path`` relative to ``base`` (``""`` or starting with ``/``)."""
+    return path if base == "/" else path[len(base.rstrip("/")) :]
+
+
+def _join(base: str, rest: str) -> str:
+    """``base`` + a relative part from :func:`_rel`."""
+    if base == "/":
+        return rest or "/"
+    return base.rstrip("/") + rest
+
+
+def scope_aliases(paths: str | list[str] | None) -> list[tuple[str, str]]:
+    """``(alias to resolve, canonical path)`` for every name of the targets.
+
+    Every alias the path filter watches, plus ``/data/media/0`` for
+    ``/sdcard`` (the FUSE lower filesystem, which apps reach directly for
+    ``Android/data``).
+    """
+    out: list[tuple[str, str]] = []
+    for alias in expand_monitor_paths(paths or []):
+        canonical = canonical_device_path(alias)
+        pairs = [(alias.rstrip("/") or "/", canonical)]
+        if _under(canonical, "/sdcard"):
+            pairs.append(("/data/media/0" + _rel(canonical, "/sdcard"), canonical))
+        for pair in pairs:
+            if pair not in out:
+                out.append(pair)
+    return out
+
+
+def _mount_of(
+    path: str, mounts: list[tuple[int, str, str]]
+) -> tuple[int, str, str] | None:
+    """The mount ``path`` lies on (longest mount point; a later one wins)."""
+    best = None
+    for mount in mounts:
+        if _under(path, mount[2]) and (best is None or len(mount[2]) >= len(best[2])):
+            best = mount
+    return best
+
+
+def build_write_scope(
+    pairs: list[tuple[str, str]],
+    mounts: list[tuple[int, str, str]],
+    real: dict[str, str],
+) -> WriteScope:
+    """Resolve each alias to ``(dev, fs_path)``; mounts inside it are added."""
+    targets: list[WriteTarget] = []
+    complete = True
+
+    def add(target: WriteTarget) -> None:
+        if target not in targets:
+            targets.append(target)
+
+    for alias, canonical in pairs:
+        resolved = real.get(alias) or alias
+        mount = _mount_of(resolved, mounts)
+        if mount is None:
+            complete = False
             continue
-        if "directory" in parts[2]:
-            size = -1
-        result[canonical_device_path(name)] = (mtime, size)
-    return result
+        dev, root, point = mount
+        add(WriteTarget(canonical, dev, _join(root, _rel(resolved, point))))
+        # A filesystem mounted inside the target (e.g. FUSE under /storage).
+        for sub_dev, sub_root, sub_point in mounts:
+            if sub_point != resolved and _under(sub_point, resolved):
+                add(
+                    WriteTarget(
+                        _join(canonical, _rel(sub_point, resolved)), sub_dev, sub_root
+                    )
+                )
+    return WriteScope(tuple(pairs), tuple(targets), complete, tuple(mounts))
+
+
+def guess_write_scope(paths: str | list[str] | None) -> WriteScope:
+    """A scope without device information (mount table unreadable, tests).
+
+    The filesystem is unknown, so each target is tried as every tail of its
+    path with at least two components (``/data/data/<pkg>`` as
+    ``/data/data/<pkg>`` and ``/data/<pkg>``). A target that is a mount
+    point itself (``/data``) can't be guessed and stays unnamed rather than
+    misnamed.
+    """
+    pairs = scope_aliases(paths)
+    targets: list[WriteTarget] = []
+    for alias, canonical in pairs:
+        parts = [p for p in alias.split("/") if p]
+        for start in range(len(parts) - 1):
+            target = WriteTarget(canonical, None, "/" + "/".join(parts[start:]))
+            if target not in targets:
+                targets.append(target)
+    return WriteScope(tuple(pairs), tuple(targets), False)
+
+
+def chain_names(fields: dict[str, str]) -> list[str] | None:
+    """A trace line's dentry names, leaf first (``n0``/``dentry`` .. ``n7``)."""
+    first = fields.get("n0", fields.get("dentry"))
+    if first is None or "n1" not in fields:
+        return None
+    return [first] + [fields.get(f"n{i}", "") for i in range(1, CHAIN_DEPTH)]
+
+
+def resolve_chain(
+    names: list[str] | None, dev: int | None, scope: WriteScope | None
+) -> str | None:
+    """The watched path a dentry chain names, or ``None``.
+
+    ``names`` is leaf first. A chain that reaches ``/`` (a filesystem root)
+    is the complete path inside that filesystem and must lie below a
+    target's ``fs_path`` on the same ``dev``. A chain cut after eight names
+    is accepted when it contains the target's trailing path components
+    (``.../data/<pkg>/...``) or begins inside them (``<pkg>/a/.../x``); the
+    longest match wins.
+    """
+    if not names or scope is None or not scope.targets:
+        return None
+    comps: list[str] = []
+    complete = False
+    for name in names:
+        if name == "/":
+            complete = True
+            break
+        if not name or "/" in name:
+            return None  # unreadable name / anonymous inode
+        comps.append(name)
+    if not comps:
+        return None
+    comps.reverse()
+    candidates = [t for t in scope.targets if dev is None or t.dev in (None, dev)]
+    if complete:
+        fs_path = "/" + "/".join(comps)
+        below = [
+            t for t in candidates if _under(fs_path, t.fs_path) and fs_path != t.fs_path
+        ]
+        if not below:
+            return None
+        best = max(below, key=lambda t: len(t.fs_path))
+        return canonical_device_path(_join(best.path, _rel(fs_path, best.fs_path)))
+    found, found_len = None, 0
+    for t in candidates:
+        tail = [p for p in t.fs_path.split("/") if p]
+        if not tail:
+            continue  # a filesystem root: the depth can't be known
+        # The whole tail inside the chain ...
+        for i in range(len(comps) - len(tail)):
+            if comps[i : i + len(tail)] == tail:
+                if len(tail) > found_len:
+                    rest = "/" + "/".join(comps[i + len(tail) :])
+                    found, found_len = _join(t.path, rest), len(tail)
+                break
+        # ... or the chain starts inside it (cut within the target's path).
+        weakest = 1 if t.dev is not None else 2
+        for j in range(min(len(tail), len(comps) - 1), weakest - 1, -1):
+            if comps[:j] == tail[-j:]:
+                if j > found_len:
+                    found, found_len = _join(t.path, "/" + "/".join(comps[j:])), j
+                break
+    return canonical_device_path(found) if found else None
+
+
+def write_filter(scope: WriteScope, max_clauses: int = 16) -> str | None:
+    """The in-kernel vw/diw filter for a complete scope (``None``: none).
+
+    Per target filesystem: ``dev == D`` and, unless the target is that
+    filesystem's root, one of ``n1``..``n7`` names the target's directory
+    -- or the chain is longer than eight names (``n7 != "/"``), which the
+    translator matches itself.
+    """
+    if not scope.complete or not scope.targets:
+        return None
+    whole: set[int] = set()
+    named: dict[int, list[str]] = {}
+    for t in scope.targets:
+        if t.dev is None:
+            return None
+        leaf = t.fs_path.rstrip("/").rsplit("/", 1)[-1]
+        if not leaf:
+            whole.add(t.dev)
+            continue
+        if any(c in leaf for c in '"\\'):
+            return None
+        leaves = named.setdefault(t.dev, [])
+        if leaf not in leaves:
+            leaves.append(leaf)
+    clauses = [f"dev == {d}" for d in sorted(whole)]
+    for dev, leaves in named.items():
+        if dev in whole:
+            continue
+        tests = [f'n{i} == "{leaf}"' for leaf in leaves for i in range(1, CHAIN_DEPTH)]
+        tests.append(f'n{CHAIN_DEPTH - 1} != "/"')
+        clauses.append(f"(dev == {dev} && ({' || '.join(tests)}))")
+    if not clauses or len(clauses) > max_clauses:
+        return None
+    return " || ".join(clauses)
 
 
 def _extract_field_values(trace: str, field: str) -> list[str]:

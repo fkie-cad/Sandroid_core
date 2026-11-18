@@ -35,11 +35,13 @@ def _clean_kprobe_state():
     KprobeTracer._tracefs = None
     KprobeTracer._orig_buffer_kb = None
     KprobeTracer._orig_cmdlines = None
+    KprobeTracer._write_scope = None
     yield
     KprobeTracer._kprobe_cache.clear()
     KprobeTracer._tracefs = None
     KprobeTracer._orig_buffer_kb = None
     KprobeTracer._orig_cmdlines = None
+    KprobeTracer._write_scope = None
 
 
 @pytest.fixture(autouse=True)
@@ -112,7 +114,7 @@ def _make_success_fake(basename="sandroid_kpcheck", *, present_symbols=None):
         f"   sh-999   [000] ...1 1.1: kpck_dfo: (do_filp_open+0x0/0x1) "
         f'path="/data/local/tmp/{basename}"\n'
         f"   sh-999   [000] ...1 1.2: kpck_vw: (vfs_write+0x0/0x1) "
-        f'name="{basename}"\n'
+        f'name="{basename}" parent="tmp"\n'
     )
     return _FakeShell(
         [
@@ -363,7 +365,7 @@ def test_kprobe_supported_serializes_concurrent_probes_for_same_serial(monkeypat
                     "   sh-999 [000] ...1 1.1: kpck_dfo: (do_filp_open+0x0/0x1) "
                     'path="/data/local/tmp/sandroid_kpcheck"\n'
                     "   sh-999 [000] ...1 1.2: kpck_vw: (vfs_write+0x0/0x1) "
-                    'name="sandroid_kpcheck"\n',
+                    'name="sandroid_kpcheck" parent="tmp"\n',
                     "",
                 ),
             ),
@@ -718,28 +720,6 @@ def test_session_raises_and_restores_saved_cmdlines(monkeypatch):
     assert any("saved_cmdlines_size" in c and "echo 128 " in c for c in fake.commands)
 
 
-def test_scan_tree_parses_stat_output_and_canonicalises(monkeypatch):
-    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
-    out = (
-        "1700000000 4096 directory|/data/data/com.x/\n"
-        "1700000001 12 regular file|/data/data/com.x//files/a b.txt\n"
-        "1700000002 0 regular empty file|/data/data/com.x/databases/x.db-wal\n"
-        "garbage line\n"
-    )
-    fake = _FakeShell([(lambda cmd: "find " in cmd, (out, ""))])
-    monkeypatch.setattr(Adb, "send_adb_command", fake)
-    tree = KprobeTracer.scan_tree(["/data/user/0/com.x"])
-    # Only the canonical root is scanned (user/0 is the same directory).
-    find_cmd = next(c for c in fake.commands if "find " in c)
-    assert "/data/data/com.x/" in find_cmd
-    assert "/data/user/0/com.x" not in find_cmd
-    assert tree == {
-        "/data/data/com.x": (1700000000, -1),
-        "/data/data/com.x/files/a b.txt": (1700000001, 12),
-        "/data/data/com.x/databases/x.db-wal": (1700000002, 0),
-    }
-
-
 def test_run_capture_all_has_no_pid_or_path_filter(monkeypatch):
     monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
     fake, captured, _ = _capture_run(monkeypatch)
@@ -918,3 +898,265 @@ def test_device_path_helpers():
     assert "absolute" in watch_path_problem("shared_prefs/x.xml")
     for bad in ("/x;touch y", "/x`id`", "/x$(id)", "/x|y", "/x&y"):
         assert "metacharacters" in watch_path_problem(bad)
+
+
+# =============================================================================
+# Write scope: dentry chains name writes through files opened before the start
+# (recorded on emulator-5554, API 35, kernel 6.6.30, Firefox attached)
+# =============================================================================
+
+#: ``awk '{print $3, $4, $5}' /proc/1/mountinfo`` (the relevant lines).
+RECORDED_MOUNTS = (
+    "254:0 / /\n"
+    "0:23 /user/0 /storage\n"
+    "254:44 / /data\n"
+    "254:44 /storage_area /data_mirror/storage_area\n"
+    "254:44 /data /data/user/0\n"
+    "0:80 / /mnt/user/0/emulated\n"
+    "0:80 / /storage/emulated\n"
+)
+DATA_DEV = 266338348  # (254 << 20) | 44, as the probes print d_sb->s_dev
+FUSE_DEV = 80
+FF = "/data/data/org.mozilla.firefox"
+#: The on-device vw filter for FF (read back from events/kprobes/.../filter).
+RECORDED_FF_FILTER = (
+    '(dev == 266338348 && (n1 == "org.mozilla.firefox" || '
+    'n2 == "org.mozilla.firefox" || n3 == "org.mozilla.firefox" || '
+    'n4 == "org.mozilla.firefox" || n5 == "org.mozilla.firefox" || '
+    'n6 == "org.mozilla.firefox" || n7 == "org.mozilla.firefox" || n7 != "/"))'
+)
+
+
+def _ff_scope():
+    from sandroid.core.kprobe_tracer import (
+        build_write_scope,
+        parse_mounts,
+        scope_aliases,
+    )
+
+    return build_write_scope(scope_aliases(FF), parse_mounts(RECORDED_MOUNTS), {})
+
+
+def test_write_probes_fetch_the_dentry_chain_within_the_tracefs_limit():
+    """vw/diw carry dev + n0..n7; tracefs rejected a fetch expression one
+    d_parent deeper than n7 ("Argument expression is too long", 67 chars)
+    and accepted n7 (62).
+    """
+    defs = dict(zip(KprobeTracer._PROBE_NAMES, KprobeTracer._PROBE_DEFS, strict=True))
+    for name in ("vw", "diw"):
+        args = dict(a.split("=", 1) for a in defs[name].split()[2:])
+        assert args["file"] == "$arg1:x64"
+        assert args["dev"] == "+16(+104(+176($arg1))):u32"
+        assert args["n0"] == "+0(+40(+176($arg1))):string"
+        assert args["n7"] == (
+            "+0(+40(+24(+24(+24(+24(+24(+24(+24(+176($arg1)))))))))):string"
+        )
+        assert all(len(v) <= 63 for v in args.values())
+    for name in ("nc", "sx"):
+        assert "n1=+0(+40(+24($arg2))):string" in defs[name]
+        assert "dev=+16(+104($arg2)):u32" in defs[name]
+    assert defs["dfor"] == "r:dfor do_filp_open file=$retval:x64 mode=+20($retval):x32"
+    assert defs["mkdirr"] == "r:mkdirr do_mkdirat ret=$retval:s32"
+
+
+def test_parse_mounts_and_kernel_dev():
+    from sandroid.core.kprobe_tracer import kernel_dev, parse_mounts
+
+    assert kernel_dev("254:44") == DATA_DEV
+    assert kernel_dev("garbage") is None
+    mounts = parse_mounts(RECORDED_MOUNTS + "0:99 /a\\040b /mnt/x\\040y\nbad line\n")
+    assert (DATA_DEV, "/", "/data") in mounts
+    assert (DATA_DEV, "/data", "/data/user/0") in mounts
+    assert (99, "/a b", "/mnt/x y") in mounts
+
+
+def test_write_scope_resolves_the_app_dir_on_the_data_filesystem():
+    from sandroid.core.kprobe_tracer import WriteTarget, write_filter
+
+    scope = _ff_scope()
+    assert scope.complete
+    # /data/user/0/<pkg> is a bind mount of /data/data: the same directory.
+    assert scope.targets == (
+        WriteTarget(FF, DATA_DEV, "/data/org.mozilla.firefox"),
+        WriteTarget(
+            "/data/user_de/0/org.mozilla.firefox",
+            DATA_DEV,
+            "/user_de/0/org.mozilla.firefox",
+        ),
+    )
+    assert write_filter(scope) == RECORDED_FF_FILTER
+
+
+def test_write_scope_follows_symlinks_and_nested_mounts():
+    """/sdcard is a symlink to the FUSE mount; apps also reach Android/data on
+    the lower filesystem (/data/media/0). A target containing a mount point
+    covers that filesystem too.
+    """
+    from sandroid.core.kprobe_tracer import (
+        WriteTarget,
+        build_write_scope,
+        parse_mounts,
+        resolve_chain,
+        scope_aliases,
+        write_filter,
+    )
+
+    mounts = parse_mounts(RECORDED_MOUNTS)
+    real = {
+        "/sdcard": "/storage/emulated/0",
+        "/storage/emulated/0": "/storage/emulated/0",
+        "/storage/self/primary": "/storage/emulated/0",
+    }
+    scope = build_write_scope(scope_aliases("/sdcard"), mounts, real)
+    assert WriteTarget("/sdcard", FUSE_DEV, "/0") in scope.targets
+    assert WriteTarget("/sdcard", DATA_DEV, "/media/0") in scope.targets
+    names = ["x.jpg", "Download", "0", "/", "/", "/", "/", "/"]
+    assert resolve_chain(names, FUSE_DEV, scope) == "/sdcard/Download/x.jpg"
+    lower = ["x.jpg", "Download", "0", "media", "/", "/", "/", "/"]
+    assert resolve_chain(lower, DATA_DEV, scope) == "/sdcard/Download/x.jpg"
+    expr = write_filter(scope)
+    assert f'(dev == {FUSE_DEV} && (n1 == "0"' in expr
+    assert f'(dev == {DATA_DEV} && (n1 == "0"' in expr
+
+    # /storage (a tmpfs showing its /user/0) contains the FUSE mount, whose
+    # whole filesystem is then in scope.
+    wide = build_write_scope(scope_aliases("/storage"), mounts, {})
+    assert WriteTarget("/storage", 23, "/user/0") in wide.targets
+    assert WriteTarget("/storage/emulated", FUSE_DEV, "/") in wide.targets
+    expr = write_filter(wide)
+    assert expr.startswith(f'dev == {FUSE_DEV} || (dev == 23 && (n1 == "0"')
+
+
+def test_resolve_chain_with_recorded_firefox_writes():
+    from sandroid.core.kprobe_tracer import resolve_chain
+
+    scope = _ff_scope()
+    # files/places.sqlite-wal: opened at 10:56, long before any probe.
+    wal = ["places.sqlite-wal", "files", "org.mozilla.firefox", "data"] + ["/"] * 4
+    assert resolve_chain(wal, DATA_DEV, scope) == f"{FF}/files/places.sqlite-wal"
+    # Same chain on another filesystem: not the target.
+    assert resolve_chain(wal, 11, scope) is None
+    # Sockets / eventfd / anonymous inodes / a /dev node: never a target.
+    assert resolve_chain(["UNIX"] * 8, 8, scope) is None
+    assert resolve_chain(["[eventfd]"] * 8, 15, scope) is None
+    assert resolve_chain([""] * 8, 15, scope) is None
+    assert resolve_chain(["goldfish_pipe_dprctd"] + ["/"] * 7, 6, scope) is None
+    # Another app on the same filesystem.
+    other = ["a.db", "databases", "com.other", "data"] + ["/"] * 4
+    assert resolve_chain(other, DATA_DEV, scope) is None
+    # The app directory itself is not a file under it.
+    pkg_dir = ["org.mozilla.firefox", "data"] + ["/"] * 6
+    assert resolve_chain(pkg_dir, DATA_DEV, scope) is None
+
+
+def test_resolve_chain_longer_than_eight_names():
+    """Cut chains: named when they still contain the app directory (or start
+    inside the target's own path); the recorded IndexedDB file (9 deep below
+    the package) is not -- the open-time map has to name it.
+    """
+    from sandroid.core.kprobe_tracer import resolve_chain
+
+    scope = _ff_scope()
+    six_deep = ["x", "e", "d", "c", "b", "a", "org.mozilla.firefox", "data"]
+    assert resolve_chain(six_deep, DATA_DEV, scope) == f"{FF}/a/b/c/d/e/x"
+    seven_deep = ["x", "f", "e", "d", "c", "b", "a", "org.mozilla.firefox"]
+    assert resolve_chain(seven_deep, DATA_DEV, scope) == f"{FF}/a/b/c/d/e/f/x"
+    idb = [
+        "3870112724rsegmnoittet-es.sqlite-shm",
+        "idb",
+        "chrome",
+        "permanent",
+        "storage",
+        "k3m7yjvw.default",
+        "mozilla",
+        "files",
+    ]
+    assert resolve_chain(idb, DATA_DEV, scope) is None
+
+
+def test_guessed_scope_without_device_information():
+    """Without the mount table the filesystem is unknown: /data/data/<pkg>
+    chains still resolve by path components; a mount-point target (/data)
+    stays unnamed instead of misnamed.
+    """
+    from sandroid.core.kprobe_tracer import (
+        guess_write_scope,
+        resolve_chain,
+        write_filter,
+    )
+
+    wal = ["places.sqlite-wal", "files", "org.mozilla.firefox", "data"] + ["/"] * 4
+    guessed = guess_write_scope(FF)
+    assert resolve_chain(wal, DATA_DEV, guessed) == f"{FF}/files/places.sqlite-wal"
+    assert resolve_chain(wal, None, guessed) == f"{FF}/files/places.sqlite-wal"
+    assert write_filter(guessed) is None  # never filter in-kernel on a guess
+    assert resolve_chain(wal, DATA_DEV, guess_write_scope("/data")) is None
+
+
+def test_resolve_write_scope_is_one_adb_call_and_filters_the_write_probes(
+    monkeypatch,
+):
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+
+    def _scope_read(cmd):
+        return "mountinfo" in cmd
+
+    out = (
+        RECORDED_MOUNTS
+        + "--sandroid-scope--\n"
+        + f"{FF}|{FF}\n"
+        + "/data/user/0/org.mozilla.firefox|/data/user/0/org.mozilla.firefox\n"
+        + "/data/user_de/0/org.mozilla.firefox|\n"
+    )
+    fake, _captured, _ = _capture_run(
+        monkeypatch, extra_rules=[(_scope_read, (out, ""))]
+    )
+    scope = KprobeTracer.resolve_write_scope(FF)
+    assert scope is not None
+    assert scope.complete
+    assert sum("mountinfo" in c for c in fake.commands) == 1
+    assert "readlink -f" in fake.commands[-1]
+
+    KprobeTracer.run_by_pid(1234, FF)
+    for name in ("vw", "diw"):
+        cmd = next(c for c in fake.commands if f"kprobes/{name}/filter" in c)
+        assert RECORDED_FF_FILTER in cmd
+    KprobeTracer.teardown()
+    assert KprobeTracer._write_scope is None
+
+
+def test_write_probes_stay_unfiltered_without_a_matching_scope(monkeypatch):
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    fake, _captured, _ = _capture_run(monkeypatch)
+    # No scope (mount table unreadable): unfiltered.
+    assert KprobeTracer.resolve_write_scope(FF) is None
+    KprobeTracer.run_by_path(FF)
+    assert not any("kprobes/vw/filter" in c for c in fake.commands)
+    # A scope resolved for other paths is not applied.
+    KprobeTracer._write_scope = _ff_scope()
+    KprobeTracer.run_by_path("/data/data/com.other")
+    assert not any("kprobes/vw/filter" in c for c in fake.commands)
+
+
+def test_kprobe_supported_false_when_the_parent_offset_is_wrong(monkeypatch):
+    """The self-check also reads d_parent's name (the chain walks it)."""
+    monkeypatch.setattr(Adb, "_target_device", "emulator-5556")
+    trace = (
+        "   sh-999 [000] ...1 1.1: kpck_dfo: (do_filp_open+0x0/0x1) "
+        'path="/data/local/tmp/sandroid_kpcheck"\n'
+        "   sh-999 [000] ...1 1.2: kpck_vw: (vfs_write+0x0/0x1) "
+        'name="sandroid_kpcheck" parent="\\x01"\n'
+    )
+    fake = _FakeShell(
+        [
+            (_root_ok, ("restarting adbd as root", "")),
+            (_id_ok, ("uid=0(root)", "")),
+            (_tracefs_probe, ("OK", "")),
+            (_symbol_loop, ("\n".join(_SYMBOLS), "")),
+            (_trace_read, (trace, "")),
+        ]
+    )
+    _install(monkeypatch, fake)
+    assert KprobeTracer.kprobe_supported() is False
+    vw_def = next(c for c in fake.commands if "p:kpck_vw" in c)
+    assert "parent=+0(+40(+24(+176($arg1)))):string" in vw_def

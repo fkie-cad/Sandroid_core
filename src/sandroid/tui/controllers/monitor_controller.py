@@ -38,6 +38,13 @@ from typing import Any
 from rich.markup import escape
 
 from sandroid.core.adb_utils import canonical_device_path
+from sandroid.core.kprobe_tracer import (
+    FMODE_CREATED,
+    WriteScope,
+    chain_names,
+    guess_write_scope,
+    resolve_chain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -498,20 +505,14 @@ _O_TRUNC = 0x200
 #: file-sync threads "sync svc <n>" (every ``adb pull`` of a watched file).
 _SELF_COMMS = ("sync svc",)
 
-#: Files the periodic re-stat watches: SQLite databases and their companions
-#: (opened once at app start, so their writes escape the file* map).
-_DB_LIKE_SUFFIXES = (".db", ".sqlite", ".sqlite3", "-wal", "-journal")
-_STAT_MAX_FILES = 300
-
-
-def _is_db_like(path: str) -> bool:
-    name = path.rsplit("/", 1)[-1].lower()
-    return name.endswith(_DB_LIKE_SUFFIXES) or "/databases/" in path
-
 
 def scan_item(fse_token: str, path: str, source: str) -> FileSystemMonitorItem:
-    """A change found by the re-stat (``source="stat"``) or the stop rescan
-    (``"scan"``) rather than by a probe.
+    """An item that did not come from a probe, marked with ``source``.
+
+    The monitor itself no longer produces any (the former re-stat / stop
+    rescan sources ``"stat"``/``"scan"`` are gone: writes through files
+    opened before the start are named by the write probes); kept for the
+    Files lens's handling of such sources.
     """
     meta = MONITOR_EVENT_INFO[fse_token]
     directory, filename = _split_dir_filename(path)
@@ -565,25 +566,35 @@ class KprobeStreamTranslator:
 
     Correlation:
       * ``dfo`` (do_filp_open entry)  -> ``pending[tid] = path``
-      * ``dfor`` (do_filp_open return)-> ``filemap[file] = (pending.pop(tid), tid)``
+      * ``dfor`` (do_filp_open return)-> ``filemap[file] = (pending.pop(tid), tid)``;
+        its ``mode`` (``f_mode``) decides a pending ``O_CREAT`` open:
+        ``FMODE_CREATED`` -> CREATE, else OPEN W (or MODIFY with ``O_TRUNC``)
       * ``fput`` (__fput)             -> ``del filemap[file]`` (MANDATORY: file*
         values are reused by the kernel, so without this a later write to a
         recycled ``file*`` would be mis-attributed to the old path)
-      * ``vw`` / ``diw`` (writes)     -> look up ``filemap[file]`` for the path
+      * ``vw`` / ``diw`` (writes)     -> the path from the line's dentry chain
+        (``n0``..``n7`` + ``dev``, see ``kprobe_tracer.resolve_chain``) --
+        the kernel's own name for the file at write time, so it also names
+        files opened BEFORE the monitor started and is preferred over the
+        open-time map (which goes stale if a ``__fput`` line is lost);
+        ``filemap[file]`` names what the chain can't (too deep)
+      * ``mkdir`` + ``mkdirr``        -> CREATE DIR only when do_mkdirat
+        returned 0 (``mkdir -p`` on an existing directory is ``-EEXIST``)
 
     Reuses ``_strip_prefix`` / ``_split_dir_filename`` and MONITOR_EVENT_INFO
     for display parity with fsmon. Emits ``FileSystemMonitorItem(source=
     "kprobe")``. MonitorView is unchanged.
 
     PATH-MODE WRITE-FIREHOSE LIMITATION: in pure path mode the write path
-    (vfs_write/do_iter_write) and the do_filp_open-return/__fput correlation
-    lines can't be path-filtered in-kernel, so they fire system-wide. Under
+    (vfs_write/do_iter_write) is only filtered in-kernel by the targets'
+    filesystem and directory name (when the write scope resolved), and the
+    do_filp_open-return/__fput correlation lines fire system-wide. Under
     heavy system write load the KERNEL ring buffer can drop the sparse
     ``dfor``/``fput`` control lines *before* this correlator ever sees them --
     that loss is upstream of the reader-thread deque, so the
-    translate-ahead-of-deque design here cannot recover it, and the file* map
-    can be corrupted (writes mis-attributed or dropped). The 64 MB/CPU buffer
-    mitigates it; when a target PID is known, ``KprobeTracer.run_by_pid(pid,
+    translate-ahead-of-deque design here cannot recover it. Writes still
+    carry their own name (the chain); the 64 MB/CPU buffer mitigates the
+    rest, and when a target PID is known ``KprobeTracer.run_by_pid(pid,
     path)`` bounds the firehose via ``set_event_pid`` and is strongly
     preferred over pure path mode.
     """
@@ -596,17 +607,20 @@ class KprobeStreamTranslator:
 
         Called on each session start. ``config`` (an ``MonitorConfig`` or
         None) drives the redundant-prefix stripping so kprobe paths display
-        exactly like fsmon paths.
+        exactly like fsmon paths, and gives the targets that write chains
+        are matched against (until :meth:`set_write_scope` provides the
+        device's view).
         """
         self._pending: dict[int, str] = {}
         self._filemap: dict[str, tuple[str, int]] = {}
         self._prefix = _resolve_prefix_candidates(config) if config is not None else ()
         self._comm = ""  # comm of the trace line being translated (see _feed)
-        #: Paths known to exist (baseline scan + creates seen this session):
-        #: an O_CREAT open / mkdir of one of them is NOT a creation.
-        self._existing: set[str] = set()
-        #: basename -> the full path last seen with it (attr probes only
-        #: report a dentry basename; see _resolve_basename).
+        #: tid -> (path, flags) of an O_CREAT open waiting for its dfor.
+        self._pending_create: dict[int, tuple[str, int]] = {}
+        #: tid -> path of a mkdir waiting for its result (mkdirr).
+        self._pending_mkdir: dict[int, str] = {}
+        #: basename -> the full path last seen with it (fallback for attr
+        #: lines without a usable dentry chain; see _resolve_basename).
         self._by_name: dict[str, str] = {}
         #: tid -> comm seen on an earlier line (ftrace prints "<...>" once a
         #: tid falls out of its comm cache).
@@ -615,46 +629,44 @@ class KprobeStreamTranslator:
         #: an unresolvable comm is attributed to the app.
         pid_scoped = config is not None and bool(getattr(config, "target_pid", None))
         self._scoped_app = (getattr(config, "app_name", "") or "") if pid_scoped else ""
-        #: path -> monotonic time of the last C/M/R/D the probes reported
-        #: (read by the stat/scan fallback so it never double-reports).
-        self.last_change: dict[str, float] = {}
-        #: Baseline scan of the targets (set by ``_kprobe_setup``) and the
-        #: roots it covered; the scan watcher compares against them.
-        self.baseline: dict[str, tuple[int, int]] = {}
-        self.scan_paths: list[str] = []
+        targets: list[str] = []
+        if config is not None:
+            targets = list(getattr(config, "target_paths", None) or [])
+            if not targets and getattr(config, "target_path", ""):
+                targets = [config.target_path]
+        #: What dentry chains are matched against (a guess from the targets'
+        #: path components until the session's resolved scope arrives).
+        self._scope: WriteScope | None = guess_write_scope(targets) if targets else None
 
-    # -- known-existing bookkeeping (C only for real creations) ---------------
-
-    def seed_existing(self, paths) -> None:
-        """Mark ``paths`` (a baseline scan) as already existing."""
-        for p in paths:
-            c = canonical_device_path(p)
-            self._existing.add(c)
-            self._by_name.setdefault(c.rsplit("/", 1)[-1], c)
+    def set_write_scope(self, scope: WriteScope | None) -> None:
+        """Use the device's view of the targets (mounts + real paths)."""
+        if scope is not None and scope.targets:
+            self._scope = scope
 
     def _note(self, path: str) -> None:
         if path.startswith("/"):
             self._by_name[path.rsplit("/", 1)[-1]] = path
 
-    def _forget(self, path: str) -> None:
-        """``path`` (and, for a directory, everything below it) is gone."""
-        self._existing.discard(path)
-        prefix = path.rstrip("/") + "/"
-        stale = [p for p in self._existing if p.startswith(prefix)]
-        for p in stale:
-            self._existing.discard(p)
-
     def _resolve_basename(self, name: str) -> str | None:
         """Full path for a dentry basename (attr probes), or None.
 
-        notify_change/vfs_setxattr only expose the dentry name. It is mapped
-        to the most recent full path seen with that basename this session
-        (or in the baseline scan); an unknown basename is dropped rather
-        than shown as an orphan row.
+        Only for attr lines whose dentry chain names nothing under the
+        targets: the basename is mapped to the most recent full path seen
+        with it this session; an unknown basename is dropped rather than
+        shown as an orphan row.
         """
         if name.startswith("/"):
             return name
         return self._by_name.get(name.rsplit("/", 1)[-1])
+
+    def _chain_path(self, fields: dict[str, str]) -> str | None:
+        """The watched path a line's dentry chain names (None: not one)."""
+        names = chain_names(fields)
+        if names is None:
+            return None
+        dev_raw = fields.get("dev")
+        dev = int(dev_raw) if dev_raw and dev_raw.isdigit() else None
+        return resolve_chain(names, dev, self._scope)
 
     def _process(self, tid: int, comm: str) -> str:
         if comm and comm != "<...>":
@@ -672,16 +684,6 @@ class KprobeStreamTranslator:
         if new_path is not None:
             new_path = canonical_device_path(new_path)
         meta = MONITOR_EVENT_INFO.get(fse_token)
-        if meta is not None and meta.category in (
-            "create",
-            "modify",
-            "delete",
-            "rename",
-        ):
-            now = time.monotonic()
-            self.last_change[path] = now
-            if new_path is not None:
-                self.last_change[new_path] = now
         label = meta.label if meta is not None else fse_token
         color = meta.color if meta is not None else None
         category = meta.category if meta is not None else None
@@ -718,6 +720,26 @@ class KprobeStreamTranslator:
             logger.debug("KprobeStreamTranslator failed on a line", exc_info=True)
             return []
 
+    def _open_result(self, tid: int, fields: dict[str, str]) -> list:
+        """Decide a pending O_CREAT open of ``tid`` from its dfor line."""
+        pending = self._pending_create.pop(tid, None)
+        if pending is None:
+            return []
+        path, flags = pending
+        file_ptr = fields.get("file")
+        if not file_ptr or _is_err_ptr(file_ptr):
+            return []  # the open failed: nothing was created or opened
+        mode_raw = fields.get("mode")
+        try:
+            mode = int(mode_raw, 16) if mode_raw is not None else None
+        except ValueError:
+            mode = None
+        if mode is None or mode & FMODE_CREATED:
+            return [self._item("FSE_CREATE_FILE", path)]
+        # O_CREAT on an existing file: SQLite reopening its db, a ">>" append.
+        token = "FSE_CONTENT_MODIFIED" if flags & _O_TRUNC else "FSE_OPEN_WRITE"
+        return [self._item(token, path)]
+
     def _feed(self, line: str) -> list[FileSystemMonitorItem]:
         m = _KPROBE_HEADER_RE.match(line)
         if m is None:
@@ -748,29 +770,29 @@ class KprobeStreamTranslator:
             # popped above -- the open attempt is over either way.
             if file_ptr and path is not None and not _is_err_ptr(file_ptr):
                 self._filemap[file_ptr] = (path, tid)
-            return []
+            return self._open_result(tid, fields)
         if event == "fput":
             file_ptr = fields.get("file")
             if file_ptr:
                 self._filemap.pop(file_ptr, None)
             return []
 
-        # --- write events: resolve the full path via the file* map ---
+        # --- write events: the dentry chain, else the file* map ---
         if event in ("vw", "diw"):
-            file_ptr = fields.get("file")
-            entry = self._filemap.get(file_ptr) if file_ptr else None
-            if entry is None:
-                # Pre-existing fd (opened before the monitor started) or a
-                # dropped control line -> unattributed; skip rather than emit a
-                # pathless row (path mode covers only files we saw opened).
-                # The monitor's periodic re-stat reports such writes.
-                return []
-            path = canonical_device_path(entry[0])
-            self._existing.add(path)
+            path = self._chain_path(fields)
+            if path is None:
+                file_ptr = fields.get("file")
+                entry = self._filemap.get(file_ptr) if file_ptr else None
+                if entry is None:
+                    # Not under a target (a socket, pipe, another app's
+                    # file), or deeper than the chain reaches and opened
+                    # before the monitor started (or a dropped control line).
+                    return []
+                path = canonical_device_path(entry[0])
             self._note(path)
             return [self._item("FSE_CONTENT_MODIFIED", path)]
 
-        # --- openat2: CREATE (O_CREAT on a new file) vs OPEN (noise) ---
+        # --- openat2: OPEN (noise); an O_CREAT open waits for its dfor ---
         if event == "openat2":
             fname = fields.get("fname")
             if not fname:
@@ -787,13 +809,22 @@ class KprobeStreamTranslator:
             if not flags & _O_CREAT:
                 return [self._item("FSE_OPEN", path)]
             # O_CREAT means "create if missing": SQLite reopening its db and
-            # every ">>" append pass it too. Only a path not known to exist
-            # (baseline scan, or seen this session) is a creation.
-            if path in self._existing:
-                token = "FSE_CONTENT_MODIFIED" if flags & _O_TRUNC else "FSE_OPEN_WRITE"
-                return [self._item(token, path)]
-            self._existing.add(path)
-            return [self._item("FSE_CREATE_FILE", path)]
+            # every ">>" append pass it too. do_filp_open's result says which.
+            self._pending_create[tid] = (path, flags)
+            return []
+
+        # --- mkdir: a creation only if do_mkdirat succeeded ---
+        if event == "mkdir":
+            name = fields.get("name")
+            if name:
+                self._pending_mkdir[tid] = canonical_device_path(name)
+            return []
+        if event == "mkdirr":
+            path = self._pending_mkdir.pop(tid, None)
+            if path is None or fields.get("ret") != "0":
+                return []  # -EEXIST (mkdir -p) or another failure
+            self._note(path)
+            return [self._item("FSE_CREATE_DIR", path)]
 
         # --- rename: old + new path ---
         if event == "rename":
@@ -802,10 +833,8 @@ class KprobeStreamTranslator:
                 return []
             frm = canonical_device_path(frm)
             to = fields.get("to")
-            self._forget(frm)
             if to:
                 to = canonical_device_path(to)
-                self._existing.add(to)
                 self._note(to)
             return [self._item("FSE_RENAME", frm, new_path=to)]
 
@@ -817,20 +846,20 @@ class KprobeStreamTranslator:
         if not value:
             return []
         if event in ("nc", "sx"):
-            # Basename only: resolve it to a known full path, else drop it.
-            resolved = self._resolve_basename(value)
-            return [self._item(token, resolved)] if resolved else []
-        path = canonical_device_path(value)
-        if event == "mkdir":
-            # do_mkdirat fires before the outcome: "mkdir -p" on an existing
-            # directory is EEXIST, not a creation.
-            if path in self._existing:
+            # The dentry chain names the file. Without a complete chain (none,
+            # or deeper than eight names) the basename seen earlier this
+            # session is used; anything else is dropped.
+            names = chain_names(fields)
+            resolved = self._chain_path(fields)
+            if resolved is None and (
+                names is None or "/" not in names or self._scope is None
+            ):
+                resolved = self._resolve_basename(value)
+            if resolved is None:
                 return []
-            self._existing.add(path)
-            self._note(path)
-        elif event in ("unlink", "rmdir"):
-            self._forget(path)
-        return [self._item(token, path)]
+            self._note(resolved)
+            return [self._item(token, resolved)]
+        return [self._item(token, canonical_device_path(value))]
 
 
 def _publish_monitor_batch(items: list[FileSystemMonitorItem]) -> None:
@@ -1619,16 +1648,17 @@ class MonitorController:
         # single-path (``_launch_fsmon`` consumes only ``target_path``).
         paths = config.target_paths or config.target_path
 
-        # Baseline scan BEFORE tracing starts (find opens directories, which
-        # path-mode probes would report): it tells real creations from
-        # reopens, and is what the periodic re-stat / stop rescan compare
-        # against for writes the probes can't attribute.
-        baseline: dict[str, tuple[int, int]] = {}
+        # The device's view of the targets (mount table + real paths, one adb
+        # call) BEFORE tracing starts: the write probes' dentry chains are
+        # matched against it -- which names writes through files opened
+        # before the monitor started -- and the tracer filters the write
+        # probes in-kernel by it.
+        scope = None
         if paths:
             try:
-                baseline = self._baseline_scan(paths)
+                scope = self._write_scope(paths)
             except Exception:
-                logger.debug("monitor baseline scan failed", exc_info=True)
+                logger.debug("monitor write-scope read failed", exc_info=True)
 
         if config.target_pid:
             process = KprobeTracer.run_by_pid(config.target_pid, paths or None)
@@ -1658,149 +1688,18 @@ class MonitorController:
         # runs it AHEAD of its ring buffer (see _start_output_reader).
         translator = KprobeStreamTranslator()
         translator.reset(config)
-        translator.seed_existing(baseline)
-        translator.baseline = baseline
-        translator.scan_paths = list(
-            config.target_paths or ([config.target_path] if paths else [])
-        )
+        translator.set_write_scope(scope)
         return process, translator, mode_desc
 
-    # -- baseline scan / periodic re-stat (writes the probes can't attribute) --
-
-    def _baseline_scan(self, paths) -> dict[str, tuple[int, int]]:
-        """``KprobeTracer.scan_tree`` -- only on a device whose kprobe
-        preflight passed (adb root is on there); a seam for tests.
+    def _write_scope(self, paths) -> Any:
+        """``KprobeTracer.resolve_write_scope`` -- only on a device whose
+        kprobe preflight passed (adb root is on there); a seam for tests.
         """
         from sandroid.core.kprobe_tracer import KprobeTracer
 
         if KprobeTracer.cached_availability() is not True:
-            return {}
-        return KprobeTracer.scan_tree(paths)
-
-    def _restat(self, paths: list[str]) -> dict[str, tuple[int, int]]:
-        """``KprobeTracer.stat_files`` (a seam for tests)."""
-        from sandroid.core.kprobe_tracer import KprobeTracer
-
-        return KprobeTracer.stat_files(paths)
-
-    def _rescan(self, paths: list[str]) -> dict[str, tuple[int, int]]:
-        """``KprobeTracer.scan_tree`` after a stop (a seam for tests)."""
-        from sandroid.core.kprobe_tracer import KprobeTracer
-
-        return KprobeTracer.scan_tree(paths)
-
-    def _get_stat_interval(self) -> float:
-        """``tui.monitor_stat_interval`` (0 = no periodic re-stat)."""
-        try:
-            from sandroid.config.loader import ConfigLoader
-
-            return float(ConfigLoader().load().tui.monitor_stat_interval)
-        except Exception:
-            return 10.0
-
-    def _publish_scan_items(self, wrapper: Any, items: list) -> None:
-        if not items:
-            return
-        for item in items:
-            try:
-                wrapper.record_event(_recent_event_from_item(item))
-            except Exception:
-                logger.debug("Failed to record scan event", exc_info=True)
-        try:
-            self._call_from_thread(_publish_monitor_batch, items)
-        except Exception:
-            logger.debug("Failed to publish scan events", exc_info=True)
-
-    def _start_scan_watcher(self, wrapper: Any, translator: Any) -> None:
-        """Re-stat the baseline's database files while the monitor runs, and
-        rescan everything once after a user stop.
-
-        Covers what the probes can't attribute: writes through files opened
-        before the monitor started (an app's SQLite db/-wal), relative-path
-        operations (``rm -r``), adb shell writes outside the filter. Findings
-        are published like monitor events with ``source`` ``"stat"`` /
-        ``"scan"``; anything the probes already reported is skipped.
-        """
-        baseline: dict = dict(getattr(translator, "baseline", None) or {})
-        if not baseline:
-            return
-        interval = self._get_stat_interval()
-        watch = [p for p, sig in baseline.items() if sig[1] >= 0 and _is_db_like(p)][
-            :_STAT_MAX_FILES
-        ]
-        roots = list(getattr(translator, "scan_paths", None) or [])
-        start = time.monotonic()
-        state = dict(baseline)  # last signature known per path
-        seen_at = dict.fromkeys(baseline, start)
-
-        def probes_saw(path: str, since: float) -> bool:
-            return translator.last_change.get(path, 0.0) >= since
-
-        def periodic() -> None:
-            tick = time.monotonic()
-            now = self._restat(watch)
-            items = []
-            for path in watch:
-                sig = now.get(path)
-                if sig is None or sig == state.get(path):
-                    continue
-                if not probes_saw(path, seen_at.get(path, start)):
-                    items.append(scan_item("FSE_CONTENT_MODIFIED", path, "stat"))
-                state[path], seen_at[path] = sig, tick
-            self._publish_scan_items(wrapper, items)
-
-        def final() -> None:
-            after = self._rescan(roots) if roots else {}
-            if not after:
-                return  # scan failed (device gone?): claim nothing
-            items = []
-            for path, sig in after.items():
-                old = state.get(path)
-                if old is None:
-                    if path not in translator.last_change:
-                        token = "FSE_CREATE_DIR" if sig[1] < 0 else "FSE_CREATE_FILE"
-                        items.append(scan_item(token, path, "scan"))
-                elif sig != old and sig[1] >= 0 and old[1] >= 0:
-                    if not probes_saw(path, seen_at.get(path, start)):
-                        items.append(scan_item("FSE_CONTENT_MODIFIED", path, "scan"))
-            for path in state:
-                if path not in after and not probes_saw(path, start):
-                    items.append(scan_item("FSE_DELETE", path, "scan"))
-            if items:
-                # Their rows carry the stop time, not when the file changed.
-                logger.info(
-                    "Monitor stop rescan: %d change(s) the probes did not see "
-                    "(timed at the stop)",
-                    len(items),
-                )
-            self._publish_scan_items(wrapper, items)
-
-        def loop() -> None:
-            next_tick = time.monotonic() + interval
-            while wrapper.is_running:
-                time.sleep(0.25)
-                if interval > 0 and watch and time.monotonic() >= next_tick:
-                    next_tick = time.monotonic() + interval
-                    try:
-                        periodic()
-                    except Exception:
-                        logger.debug("monitor re-stat failed", exc_info=True)
-            if not getattr(wrapper, "final_scan", False):
-                return
-            deadline = time.monotonic() + 15
-            while not getattr(wrapper, "_torn_down", True):
-                if time.monotonic() > deadline:
-                    return
-                time.sleep(0.1)
-            try:
-                final()
-            except Exception:
-                logger.debug("monitor stop rescan failed", exc_info=True)
-
-        self._run_scan_thread(loop)
-
-    def _run_scan_thread(self, target: Callable[[], None]) -> None:
-        threading.Thread(target=target, daemon=True, name="monitor-scan").start()
+            return None
+        return KprobeTracer.resolve_write_scope(paths)
 
     def _finish_kprobe_launch(
         self, config: MonitorConfig, setup: tuple[Any, Any, str] | None
@@ -1825,13 +1724,7 @@ class MonitorController:
             teardown=KprobeTracer.teardown,
             translator=translator,
         )
-        started = self._register_and_start(config, wrapper, mode_desc)
-        if started:
-            try:
-                self._start_scan_watcher(wrapper, translator)
-            except Exception:
-                logger.debug("monitor scan watcher failed to start", exc_info=True)
-        return started
+        return self._register_and_start(config, wrapper, mode_desc)
 
     def _launch_kprobe(self, config: MonitorConfig) -> bool:
         """Synchronous kprobe launch: device-heavy setup THEN cheap finalize.
@@ -2104,18 +1997,6 @@ class MonitorController:
         """
         if not self.is_running():
             return False
-
-        # A user stop rescans the targets once (after the probes are gone) to
-        # report changes the probes could not attribute; Play's safety stop
-        # goes through TaskService directly and skips it (a snapshot revert
-        # follows, which would read as a flood of changes).
-        try:
-            task = self._get_task_service().get_task("monitor")
-            inst = getattr(task, "instance", None)
-            if inst is not None:
-                inst.final_scan = True
-        except Exception:
-            logger.debug("could not flag the stop rescan", exc_info=True)
 
         self._get_task_service().stop("monitor")
         self._log_info("Monitor stopped")

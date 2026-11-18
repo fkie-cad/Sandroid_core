@@ -414,10 +414,6 @@ TUI (``[tui]``)
    # kprobe, auto-fall-back to fsmon when the kernel lacks support) or 'fsmon'
    # (the fsmon binary).
    monitor_backend = "kprobe"
-   # kprobe monitor: seconds between re-stats of the app's database files,
-   # whose writes go through files opened before the monitor started
-   # (0 = off; the stop-time rescan still runs)
-   monitor_stat_interval = 10.0
    # Files lens: pull a watched (★) file when the monitor sees a write to it
    # (debounced ~1.5 s; a database and its -wal/-journal are one group)
    auto_pull_on_change = true
