@@ -151,8 +151,13 @@ async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
 
 async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
     from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals.confirm_modal import ConfirmModal
 
     monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
+    # The "y typed right behind p" check below is timing-based: under a loaded
+    # suite the y can arrive after the real 0.4 s window, where accepting it
+    # is correct. A wide window keeps the check about the behaviour.
+    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 2.0)
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
         await _boot(app, pilot)
