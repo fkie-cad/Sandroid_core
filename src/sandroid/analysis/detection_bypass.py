@@ -16,17 +16,21 @@ This module provides:
   blocking, root-app package hiding, ``release-keys`` build tags.
 - :class:`DebugDetectionBypassManager` — ``Debug.isDebuggerConnected`` /
   ``waitingForDebugger`` and ``TracerPid`` filtering.
+- :class:`IntegrityBypassManager` — PairIP license-check / Play gate.
+- :class:`EmulatorDetectionBypassManager` — one coherent device profile for
+  ``Build.*``, qemu/goldfish/ranchu property hiding, emulator file/pipe hiding
+  and TelephonyManager fakes (ported from TrigDroid and Dexray Intercept).
 - :class:`BypassService` — process-wide singleton that owns the armed/active
   category sets and one persistent flag-gated Frida script (toggled via the
   ``set_flags`` RPC — instant, gap-free, one Java bridge).
 
-Emulator detection has no native manager: incoherent field spoofing gives
-false confidence and can trip heuristics harder, so that one category stays on
-TrigDroid's RPC device-profile path.
+BypassService is the only source of bypasses in Sandroid (TrigDroid's bypass
+wrapper is gone; Dexray Intercept's own bypass group is mutually exclusive
+with it).
 
 **EXPERIMENTAL.** All bypass categories (SSL unpinning incl. the native
-cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug
-detection) are experimental, off by default, and only applied after an
+cronet/BoringSSL and mbedTLS/MNS tiers, PairIP/integrity, root/Frida/debug/
+emulator detection) are experimental, off by default, and only applied after an
 explicit analyst toggle. Results must be verified; a bypass can silently miss.
 
 For authorized security testing, forensic analysis, and research only.
@@ -41,6 +45,8 @@ import os
 import tempfile
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import frida
@@ -94,6 +100,893 @@ def _java_bridge_prelude() -> str:
             exc,
         )
         return ""
+
+
+#: Realm-top helpers every category may use (part of the merged script's
+#: preamble). Frida 17 removed the static ``Module.findExportByName(lib, n)``
+#: and the static ``Memory`` string read/write helpers: a hook
+#: written against them throws inside its ``try`` and silently never
+#: installs. Use these helpers and the NativePointer instance methods
+#: (``p.readUtf8String()``, ``p.writeUtf8String(s)``) instead.
+_PREAMBLE_HEAD_JS = r"""
+// Lazy categories: every category body is registered here and only runs
+// (installs its native and Java hooks) the first time its flag is on --
+// baked in at load or flipped by setFlags. An SSL-only session installs only
+// SSL's hooks; nothing a category does not need is in the process. Hooks
+// stay installed (flag-gated) after a flag goes off; the emulator category
+// removes its own (see FLAG_LISTENERS).
+var CATEGORY_INSTALLERS = [];  // [category, installer], in priority order
+var INSTALLED = {};
+var INSTALL_FAILED = [];
+
+function _installFailed(category, e) {
+    if (INSTALL_FAILED.indexOf(category) === -1) INSTALL_FAILED.push(category);
+    send({merge_error: category, error: '' + e});
+}
+
+// Java.perform bodies often run later (after resume on a paused spawn);
+// while a category installs, wrap them so a throw inside one is recorded
+// for that category too, not lost as an unhandled script error.
+function _installCategory(category, installer) {
+    if (INSTALLED[category]) return;
+    INSTALLED[category] = true;
+    var hasJava = typeof Java !== 'undefined' && Java !== null &&
+        typeof Java.perform === 'function';
+    var perform = hasJava ? Java.perform : null;
+    if (hasJava) {
+        try {
+            Java.perform = function (fn) {
+                return perform.call(Java, function () {
+                    try {
+                        return fn.apply(this, arguments);
+                    } catch (e) {
+                        _installFailed(category, e);
+                    }
+                });
+            };
+        } catch (e) {
+            hasJava = false;
+        }
+    }
+    try {
+        installer();
+    } catch (e) {
+        _installFailed(category, e);
+    } finally {
+        if (hasJava) {
+            try { Java.perform = perform; } catch (e) {}
+        }
+    }
+}
+
+function registerCategory(category, installer) {
+    CATEGORY_INSTALLERS.push([category, installer]);
+    if (FLAGS[category]) _installCategory(category, installer);
+}
+
+function _installEnabledCategories() {
+    for (var i = 0; i < CATEGORY_INSTALLERS.length; i++) {
+        var c = CATEGORY_INSTALLERS[i];
+        if (FLAGS[c[0]]) _installCategory(c[0], c[1]);
+    }
+}
+
+function _findExport(lib, name) {
+    try {
+        var m = Process.findModuleByName(lib);
+        if (m === null) return null;
+        return m.findExportByName(name);
+    } catch (e) {
+        return null;
+    }
+}
+function _libcExport(name) { return _findExport('libc.so', name); }
+
+"""
+
+#: C fast path of the shared path hider (CModule; see the preamble's
+#: ``hidePaths``). Compiled in the target by Frida's TinyCC.
+_PATH_HIDER_C = r"""
+/* Sandroid path hider: C fast path for the libc file probes.
+ *
+ * Every access/faccessat/fopen/stat/lstat/fstatat call lands here. Only a
+ * path that a cheap, case-insensitive name check marks as a candidate for an
+ * enabled hiding class calls into JS (sandroid_path_decide), which makes the
+ * exact decision; every other call goes straight to the original without
+ * touching the JS runtime. The real errno is handed back to the caller.
+ */
+#include <gum/guminterceptor.h>
+
+#ifndef NULL
+# define NULL ((void *) 0)
+#endif
+
+/* bit 1: root names on, bit 2: emulator names on (JS keeps it current). */
+extern volatile int sandroid_path_flags;
+extern int sandroid_path_decide (const char * path, void * return_address);
+extern int * sandroid_errno (void);
+
+extern int real_access (const char * path, int mode);
+extern int real_faccessat (int dirfd, const char * path, int mode, int flags);
+extern void * real_fopen (const char * path, const char * mode);
+extern int real_stat (const char * path, void * st);
+extern int real_lstat (const char * path, void * st);
+extern int real_fstatat (int dirfd, const char * path, void * st, int flags);
+
+static int
+lower (int c)
+{
+  return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+static int
+contains (const char * s, const char * needle)
+{
+  for (; *s != '\0'; s++)
+  {
+    const char * a = s;
+    const char * b = needle;
+    while (*b != '\0' && lower (*a) == *b)
+    {
+      a++;
+      b++;
+    }
+    if (*b == '\0')
+      return 1;
+  }
+  return 0;
+}
+
+static int
+equals (const char * a, const char * b)
+{
+  while (*a != '\0' && *b != '\0' && lower (*a) == *b)
+  {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static const char *
+base_name (const char * p)
+{
+  const char * b = p;
+  for (; *p != '\0'; p++)
+  {
+    if (*p == '/')
+      b = p + 1;
+  }
+  return b;
+}
+
+/* Superset of the root category's _looksLikeRootPath(). */
+static int
+root_candidate (const char * p)
+{
+  const char * b = base_name (p);
+  return equals (b, "su") || equals (b, "busybox") || equals (b, "supersu") ||
+      equals (b, "daemonsu") || contains (b, "magisk") ||
+      contains (b, "superuser") || contains (p, "/data/adb/");
+}
+
+/* Superset of the emulator category's _isEmuPath(). */
+static int
+emu_candidate (const char * p)
+{
+  static const char * needles[] = {
+    "qemu", "goldfish", "ranchu", "genyd", "vbox", "nox", "ttvm", "microvirt",
+    "windroyed", "droid4x", "andy", "x86.prop", "android_x86", NULL
+  };
+  int i;
+  for (i = 0; needles[i] != NULL; i++)
+  {
+    if (contains (p, needles[i]))
+      return 1;
+  }
+  return 0;
+}
+
+static int
+candidate (const char * p)
+{
+  int f = sandroid_path_flags;
+  if (f == 0 || p == NULL)
+    return 0;
+  return ((f & 1) != 0 && root_candidate (p)) ||
+      ((f & 2) != 0 && emu_candidate (p));
+}
+
+/* Ask JS; on "hide" the caller sees errno ENOENT. */
+static int
+hide (const char * p)
+{
+  GumInvocationContext * ic = gum_interceptor_get_current_invocation ();
+  if (!sandroid_path_decide (p, gum_invocation_context_get_return_address (ic)))
+    return 0;
+  ic->system_error = 2;
+  return 1;
+}
+
+/* The interceptor restores errno from system_error on return: copy the
+ * original call's errno there, or every real failure reads as errno 0. */
+static void
+keep_errno (void)
+{
+  gum_interceptor_get_current_invocation ()->system_error = *sandroid_errno ();
+}
+
+int
+replace_access (const char * path, int mode)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_access (path, mode);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_faccessat (int dirfd, const char * path, int mode, int flags)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_faccessat (dirfd, path, mode, flags);
+  keep_errno ();
+  return r;
+}
+
+void *
+replace_fopen (const char * path, const char * mode)
+{
+  void * r;
+  if (candidate (path) && hide (path))
+    return NULL;
+  r = real_fopen (path, mode);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_stat (const char * path, void * st)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_stat (path, st);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_lstat (const char * path, void * st)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_lstat (path, st);
+  keep_errno ();
+  return r;
+}
+
+int
+replace_fstatat (int dirfd, const char * path, void * st, int flags)
+{
+  int r;
+  if (candidate (path) && hide (path))
+    return -1;
+  r = real_fstatat (dirfd, path, st, flags);
+  keep_errno ();
+  return r;
+}
+"""
+
+#: C fast path of the shared /proc filter (CModule attach listener; see the
+#: preamble's ``filterProcFiles``).
+_PROC_FILTER_C = r"""
+/* Sandroid /proc filter: C fast path for the open family (attach listener).
+ *
+ * Only an open of this process's own /proc/{self,thread-self,<pid>}
+ * [/task/<tid>]/{maps,smaps,status}, while a /proc filter is on, calls into
+ * JS (sandroid_proc_swap) to answer with a filtered memfd; every other open
+ * returns without touching the JS runtime.
+ */
+#include <gum/guminterceptor.h>
+
+#ifndef NULL
+# define NULL ((void *) 0)
+#endif
+
+extern volatile int sandroid_proc_flags;
+extern volatile int sandroid_own_pid;
+extern int sandroid_proc_swap (int fd, int kind, int oflags);
+
+typedef struct _ProcState ProcState;
+struct _ProcState
+{
+  int kind;
+  int oflags;
+};
+
+static int
+starts (const char * s, const char * prefix)
+{
+  while (*prefix != '\0')
+  {
+    if (*s != *prefix)
+      return 0;
+    s++;
+    prefix++;
+  }
+  return 1;
+}
+
+static int
+same (const char * a, const char * b)
+{
+  while (*a != '\0' && *a == *b)
+  {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+/* 1 maps, 2 smaps, 3 status, 0 anything else. */
+static int
+proc_kind (const char * p)
+{
+  int value = 0;
+  int n = 0;
+  if (p == NULL || !starts (p, "/proc/"))
+    return 0;
+  p += 6;
+  if (starts (p, "self/"))
+    p += 5;
+  else if (starts (p, "thread-self/"))
+    p += 12;
+  else
+  {
+    while (*p >= '0' && *p <= '9')
+    {
+      value = value * 10 + (*p - '0');
+      p++;
+      n++;
+    }
+    if (n == 0 || *p != '/' || value != sandroid_own_pid)
+      return 0;
+    p++;
+  }
+  if (starts (p, "task/"))
+  {
+    p += 5;
+    n = 0;
+    while (*p >= '0' && *p <= '9')
+    {
+      p++;
+      n++;
+    }
+    if (n == 0 || *p != '/')
+      return 0;
+    p++;
+  }
+  if (same (p, "maps"))
+    return 1;
+  if (same (p, "smaps"))
+    return 2;
+  if (same (p, "status"))
+    return 3;
+  return 0;
+}
+
+void
+onEnter (GumInvocationContext * ic)
+{
+  ProcState * s = GUM_IC_GET_INVOCATION_DATA (ic, ProcState);
+  int path_index = (int) (gsize) gum_invocation_context_get_listener_function_data (ic);
+  s->kind = 0;
+  if (sandroid_proc_flags == 0)
+    return;
+  s->kind = proc_kind (
+      (const char *) gum_invocation_context_get_nth_argument (ic, path_index));
+  if (s->kind != 0)
+    s->oflags = (int) (gsize) gum_invocation_context_get_nth_argument (ic,
+        path_index + 1);
+}
+
+void
+onLeave (GumInvocationContext * ic)
+{
+  ProcState * s = GUM_IC_GET_INVOCATION_DATA (ic, ProcState);
+  int fd;
+  int swapped;
+  if (s->kind == 0)
+    return;
+  fd = (int) (gsize) gum_invocation_context_get_return_value (ic);
+  if (fd < 0)
+    return;
+  swapped = sandroid_proc_swap (fd, s->kind, s->oflags);
+  if (swapped >= 0)
+    gum_invocation_context_replace_return_value (ic, (gpointer) (gsize) swapped);
+}
+"""
+
+_PREAMBLE_TAIL_JS = r"""
+// Shared path hider: ONE Interceptor.replace per libc probe (access,
+// faccessat, fopen, stat, lstat, fstatat; the 64 names are aliases on
+// bionic) for every category that hides files (root, emulator). A hidden
+// path gets -1 / NULL with errno = ENOENT, like a missing file, and the real
+// call never runs (no leaked FILE*). Two categories cannot each replace the
+// same export, hence the registry.
+//
+// Fast path: the replacements are C (PATH_HIDER_C, a CModule). stat and
+// friends are among the hottest calls at ART boot, so a call only enters
+// JS when a cheap name check marks the path as a candidate of an enabled
+// class (bits in _pathFlags, kept current on every setFlags); all others go
+// straight to the original. If the CModule cannot be built, the same
+// replacements run in JS (checking FLAGS before touching the path).
+// PATH_HIDER_MODE says which one is active ('cmodule' / 'js').
+var PATH_HIDERS = [];  // {cat, test(path, returnAddress), cls}
+var _pathHiderInstalled = false;
+var _ENOENT = 2;
+var PATH_HIDER_MODE = null;
+var _pathFlags = null;  // int the C fast path reads
+var _pathKeep = [];     // CModule + NativeCallbacks, kept alive
+
+function _anyPathHiderOn() {
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        if (FLAGS[PATH_HIDERS[i].cat]) return true;
+    }
+    return false;
+}
+
+function _pathHiderBits() {
+    var bits = 0;
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        if (FLAGS[PATH_HIDERS[i].cat]) bits |= PATH_HIDERS[i].cls;
+    }
+    return bits;
+}
+
+function _syncPathFlags() {
+    if (_pathFlags !== null) _pathFlags.writeS32(_pathHiderBits());
+}
+
+function _hiddenBy(path, returnAddress) {
+    for (var i = 0; i < PATH_HIDERS.length; i++) {
+        var h = PATH_HIDERS[i];
+        try {
+            if (FLAGS[h.cat] && h.test(path, returnAddress)) return h.cat;
+        } catch (e) {}
+    }
+    return null;
+}
+
+// Tolerant C-string read: never throws (a name cut mid-UTF-8 throws in
+// readUtf8String on Frida 17).
+function _readPath(p) {
+    try { return p.readUtf8String(); } catch (e) {}
+    try { return p.readCString(); } catch (e) {}
+    return null;
+}
+
+var _pathProbeAddrs = {};  // one replacement per address (aliases share one)
+
+// [export, return type, argument types, path argument, value when hidden]
+var PATH_PROBES = [
+    ['access', 'int', ['pointer', 'int'], 0, -1],
+    ['faccessat', 'int', ['int', 'pointer', 'int', 'int'], 1, -1],
+    ['fopen', 'pointer', ['pointer', 'pointer'], 0, NULL],
+    ['stat', 'int', ['pointer', 'pointer'], 0, -1],
+    ['lstat', 'int', ['pointer', 'pointer'], 0, -1],
+    ['fstatat', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1],
+    ['fopen64', 'pointer', ['pointer', 'pointer'], 0, NULL],
+    ['stat64', 'int', ['pointer', 'pointer'], 0, -1],
+    ['lstat64', 'int', ['pointer', 'pointer'], 0, -1],
+    ['fstatat64', 'int', ['int', 'pointer', 'pointer', 'int'], 1, -1]
+];
+
+function _replacePathProbeJs(sym, retType, argTypes, pathIndex, failValue) {
+    var addr = _libcExport(sym);
+    if (addr === null || _pathProbeAddrs[addr.toString()]) return;
+    _pathProbeAddrs[addr.toString()] = sym;
+    // SystemFunction (not NativeFunction): its result carries the errno the
+    // real call set, which the pass-through must hand back to the caller.
+    var original = new SystemFunction(addr, retType, argTypes);
+    Interceptor.replace(addr, new NativeCallback(function () {
+        if (_anyPathHiderOn()) {
+            var path = _readPath(arguments[pathIndex]);
+            var cat = path === null ? null : _hiddenBy(path, this.returnAddress);
+            if (cat !== null) {
+                try { this.errno = _ENOENT; } catch (e) {}
+                send({type: 'info', hook: cat + '-bypass:' + sym + '(' + path + ')'});
+                return failValue;
+            }
+        }
+        // A SystemFunction call from inside the replacement reaches the
+        // original implementation, not this callback again. Without passing
+        // its errno on, every real failure (ENOENT, EACCES) read as errno 0.
+        var r = original.apply(null, arguments);
+        this.errno = r.errno;
+        return r.value;
+    }, retType, argTypes));
+}
+
+// The C fast path for the base probes; throws when CModule is unavailable.
+function _installPathHiderC() {
+    if (typeof CModule === 'undefined') throw new Error('no CModule');
+    var errnoFn = _libcExport('__errno');
+    if (errnoFn === null) throw new Error('no __errno');
+    var flags = Memory.alloc(4);
+    var decide = new NativeCallback(function (pathPtr, returnAddress) {
+        var path = _readPath(pathPtr);
+        var cat = path === null ? null : _hiddenBy(path, returnAddress);
+        if (cat === null) return 0;
+        send({type: 'info', hook: cat + '-bypass:' + path});
+        return 1;
+    }, 'int', ['pointer', 'pointer']);
+    var symbols = {
+        sandroid_path_flags: flags,
+        sandroid_path_decide: decide,
+        sandroid_errno: errnoFn
+    };
+    var base = ['access', 'faccessat', 'fopen', 'stat', 'lstat', 'fstatat'];
+    var addrs = {};
+    base.forEach(function (sym) {
+        var a = _libcExport(sym);
+        if (a === null) throw new Error('no ' + sym);
+        addrs[sym] = a;
+        symbols['real_' + sym] = a;
+    });
+    var cm = new CModule(PATH_HIDER_C, symbols);
+    _pathKeep.push(cm, decide);
+    _pathFlags = flags;
+    _syncPathFlags();
+    base.forEach(function (sym) {
+        Interceptor.replace(addrs[sym], cm['replace_' + sym]);
+        _pathProbeAddrs[addrs[sym].toString()] = sym;
+    });
+}
+
+function hidePaths(category, test, cls) {
+    PATH_HIDERS.push({cat: category, test: test, cls: cls});
+    if (_pathHiderInstalled) {
+        _syncPathFlags();
+        return;
+    }
+    _pathHiderInstalled = true;
+    FLAG_LISTENERS.push(_syncPathFlags);
+    try {
+        _installPathHiderC();
+        PATH_HIDER_MODE = 'cmodule';
+    } catch (e) {
+        PATH_HIDER_MODE = 'js';
+        send({type: 'info', hook: 'path-hider:js-fallback', error: '' + e});
+    }
+    // Remaining probes (all of them in JS mode; distinct 64 aliases in C
+    // mode -- on bionic they are the same address and skipped).
+    PATH_PROBES.forEach(function (p) {
+        try {
+            _replacePathProbeJs(p[0], p[1], p[2], p[3], p[4]);
+        } catch (e) {
+            send({type: 'debug', hook: 'path-hider:' + p[0], error: e.message});
+        }
+    });
+    send({type: 'info', hook: 'path-hider:' + PATH_HIDER_MODE});
+}
+
+// Shared /proc filter for the frida and debug categories. It replaces the old
+// libc `read` hooks: an Interceptor.attach on `read` installed before resume
+// crashed every paused spawn of a real app (SIGSEGV in perfetto_hprof_,
+// API 35). Instead the open/openat that opens one of this process's own
+// /proc/{self,thread-self,<pid>}[/task/<tid>]/{maps,smaps,status} files is
+// answered with a memfd holding the filtered text (only when a filter
+// changed something; otherwise the real fd, rewound, is kept). `read` is
+// never hooked.
+//
+// Fast path: the open-family listener is C (PROC_FILTER_C); it only enters
+// JS for those few files while a filter is on. JS fallback otherwise
+// (PROC_FILTER_MODE). The text is streamed in 64 KiB chunks, decoded
+// byte-wise (latin1: never throws, bytes survive exactly) and filtered line
+// by line; a file over PROC_FILTER_MAX_BYTES passes through unfiltered (a
+// missed hide, never a crash or an empty read). Any failure closes the memfd
+// and rewinds the real fd, so the app always reads the real file at worst.
+//
+// Remaining tells of a swapped fd: readlink(/proc/self/fd/N) shows
+// "/memfd:proc (deleted)", and fstat() shows a non-zero st_size and a tmpfs
+// device where a /proc file has size 0. The memfd is close-on-exec only if
+// the app opened the file with O_CLOEXEC.
+var PROC_FILTERS = [];  // {cat, kinds, line(line, kind, state) -> line|null}
+var _procFilterInstalled = false;
+var PROC_FILTER_MODE = null;
+var PROC_FILTER_MAX_BYTES = 8 * 1024 * 1024;
+var _PROC_CHUNK = 64 * 1024;
+var _PROC_KINDS = [null, 'maps', 'smaps', 'status'];
+var _O_CLOEXEC = 0x80000;
+var _MFD_CLOEXEC = 1;
+var _EINTR = 4;
+var _PROC_RE = /^\/proc\/(self|thread-self|\d+)(?:\/task\/\d+)?\/(maps|smaps|status)$/;
+var _procIo = null;
+var _procFlags = null;  // int the C fast path reads
+var _procKeep = [];
+
+function _procKind(path) {
+    if (path === null || path.indexOf('/proc/') !== 0) return null;
+    var m = _PROC_RE.exec(path);
+    if (m === null) return null;
+    if (/^\d+$/.test(m[1]) && parseInt(m[1], 10) !== Process.id) return null;
+    return m[2];
+}
+
+function _anyProcFilterOn() {
+    for (var i = 0; i < PROC_FILTERS.length; i++) {
+        if (FLAGS[PROC_FILTERS[i].cat]) return true;
+    }
+    return false;
+}
+
+function _syncProcFlags() {
+    if (_procFlags !== null) _procFlags.writeS32(_anyProcFilterOn() ? 1 : 0);
+}
+
+function _procFiltersFor(kind) {
+    var out = [];
+    for (var i = 0; i < PROC_FILTERS.length; i++) {
+        var f = PROC_FILTERS[i];
+        if (FLAGS[f.cat] && f.kinds.indexOf(kind) !== -1) out.push(f);
+    }
+    return out;
+}
+
+function _procNative() {
+    if (_procIo !== null) return _procIo;
+    var memfd = _libcExport('memfd_create');
+    var syscall = _libcExport('syscall');
+    var nr = {arm64: 279, x64: 319, arm: 385, ia32: 356}[Process.arch];
+    _procIo = {
+        read: new NativeFunction(_libcExport('read'), 'long', ['int', 'pointer', 'ulong']),
+        // SystemFunction: a failed write's errno tells EINTR (retry) apart.
+        write: new SystemFunction(_libcExport('write'), 'long', ['int', 'pointer', 'ulong']),
+        lseek: new NativeFunction(_libcExport('lseek'), 'long', ['int', 'long', 'int']),
+        close: new NativeFunction(_libcExport('close'), 'int', ['int']),
+        memfd: memfd !== null
+            ? new NativeFunction(memfd, 'int', ['pointer', 'uint'])
+            : (syscall !== null && nr !== undefined
+                ? (function (fn) {
+                    return function (name, flags) { return fn(nr, name, flags); };
+                })(new NativeFunction(syscall, 'long', ['long', 'pointer', 'uint']))
+                : null)
+    };
+    return _procIo;
+}
+
+function _latin1(bytes) {
+    var u = new Uint8Array(bytes);
+    var s = '';
+    for (var i = 0; i < u.length; i += 4096) {
+        s += String.fromCharCode.apply(null, u.subarray(i, i + 4096));
+    }
+    return s;
+}
+
+// Write every byte of `text` (latin1, as decoded) to `fd`; retries partial
+// writes and EINTR. False on any other failure.
+function _procWriteAll(io, fd, text) {
+    if (text.length === 0) return true;
+    var u = new Uint8Array(text.length);
+    for (var i = 0; i < text.length; i++) u[i] = text.charCodeAt(i) & 0xff;
+    var mem = Memory.alloc(u.length);
+    mem.writeByteArray(u.buffer);
+    var done = 0;
+    var interrupted = 0;
+    while (done < u.length) {
+        var r = io.write(fd, mem.add(done), u.length - done);
+        var n = Number(r.value);
+        if (n > 0) {
+            done += n;
+        } else if (n < 0 && r.errno === _EINTR && ++interrupted < 100) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Filter complete lines; `last` is a final line without its newline.
+function _procFilterLines(lines, kind, filters, state, last) {
+    var out = '';
+    var changed = false;
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        for (var j = 0; j < filters.length && line !== null; j++) {
+            line = filters[j].line(line, kind, state);
+        }
+        if (line !== lines[i]) changed = true;
+        if (line !== null) out += (last && i === lines.length - 1) ? line : line + '\n';
+    }
+    return {text: out, changed: changed};
+}
+
+// The filtered memfd for the just-opened /proc `fd`, or -1 to keep `fd`
+// (always rewound to the start then).
+function _procFilteredFd(fd, kind, filters, oflags) {
+    var io = _procNative();
+    if (io.memfd === null) return -1;
+    var mfd = -1;
+    var handed = false;
+    try {
+        var mfdFlags = (oflags & _O_CLOEXEC) ? _MFD_CLOEXEC : 0;
+        mfd = Number(io.memfd(Memory.allocUtf8String('proc'), mfdFlags));
+        if (mfd < 0) return -1;
+        var buf = Memory.alloc(_PROC_CHUNK);
+        var total = 0;
+        var carry = '';
+        var changed = false;
+        var state = {};
+        for (;;) {
+            var n = Number(io.read(fd, buf, _PROC_CHUNK));
+            if (n < 0) return -1;
+            if (n === 0) break;
+            total += n;
+            if (total > PROC_FILTER_MAX_BYTES) return -1;  // missed hide
+            var lines = (carry + _latin1(buf.readByteArray(n))).split('\n');
+            carry = lines.pop();
+            var part = _procFilterLines(lines, kind, filters, state, false);
+            changed = changed || part.changed;
+            if (!_procWriteAll(io, mfd, part.text)) return -1;
+        }
+        if (carry.length) {
+            var tail = _procFilterLines([carry], kind, filters, state, true);
+            changed = changed || tail.changed;
+            if (!_procWriteAll(io, mfd, tail.text)) return -1;
+        }
+        if (!changed) return -1;
+        io.lseek(mfd, 0, 0);  // SEEK_SET
+        handed = true;
+        return mfd;
+    } catch (e) {
+        return -1;
+    } finally {
+        if (handed) {
+            io.close(fd);
+        } else {
+            if (mfd >= 0) io.close(mfd);
+            io.lseek(fd, 0, 0);  // the caller reads the real file from the start
+        }
+    }
+}
+
+function _procSwap(fd, kind, oflags) {
+    if (kind === null) return -1;
+    var filters = _procFiltersFor(kind);
+    if (filters.length === 0) return -1;
+    try {
+        return _procFilteredFd(fd, kind, filters, oflags);
+    } catch (e) {
+        return -1;
+    }
+}
+
+// [export, path argument]; fortified callers use __open_2/__openat_2.
+var PROC_OPENS = [['open', 0], ['openat', 1], ['__open_2', 0], ['__openat_2', 1]];
+
+function _installProcFilterC() {
+    if (typeof CModule === 'undefined') throw new Error('no CModule');
+    var flags = Memory.alloc(4);
+    var pid = Memory.alloc(4);
+    pid.writeS32(Process.id);
+    var swap = new NativeCallback(function (fd, kind, oflags) {
+        return _procSwap(fd, _PROC_KINDS[kind] || null, oflags);
+    }, 'int', ['int', 'int', 'int']);
+    var cm = new CModule(PROC_FILTER_C, {
+        sandroid_proc_flags: flags,
+        sandroid_own_pid: pid,
+        sandroid_proc_swap: swap
+    });
+    _procKeep.push(cm, swap);
+    _procFlags = flags;
+    _syncProcFlags();
+    var seen = {};
+    PROC_OPENS.forEach(function (e) {
+        var addr = _libcExport(e[0]);
+        if (addr === null || seen[addr.toString()]) return;
+        seen[addr.toString()] = true;
+        Interceptor.attach(addr, cm, ptr(e[1]));
+    });
+}
+
+function _installProcFilterJs() {
+    var seen = {};
+    PROC_OPENS.forEach(function (e) {
+        var addr = _libcExport(e[0]);
+        if (addr === null || seen[addr.toString()]) return;
+        seen[addr.toString()] = true;
+        var pathIndex = e[1];
+        try {
+            Interceptor.attach(addr, {
+                onEnter: function (args) {
+                    this._kind = null;
+                    if (!_anyProcFilterOn()) return;  // flags before any work
+                    var kind = _procKind(_readPath(args[pathIndex]));
+                    if (kind !== null && _procFiltersFor(kind).length) {
+                        this._kind = kind;
+                        this._oflags = args[pathIndex + 1].toInt32();
+                    }
+                },
+                onLeave: function (rv) {
+                    if (this._kind === null) return;
+                    var fd = rv.toInt32();
+                    if (fd < 0) return;
+                    var mfd = _procSwap(fd, this._kind, this._oflags);
+                    if (mfd >= 0) rv.replace(ptr(mfd));
+                }
+            });
+        } catch (err) {
+            send({type: 'debug', hook: 'proc-filter:' + e[0], error: err.message});
+        }
+    });
+}
+
+function filterProcFiles(category, kinds, line) {
+    PROC_FILTERS.push({cat: category, kinds: kinds, line: line});
+    if (_procFilterInstalled) {
+        _syncProcFlags();
+        return;
+    }
+    _procFilterInstalled = true;
+    FLAG_LISTENERS.push(_syncProcFlags);
+    try {
+        _installProcFilterC();
+        PROC_FILTER_MODE = 'cmodule';
+    } catch (e) {
+        PROC_FILTER_MODE = 'js';
+        send({type: 'info', hook: 'proc-filter:js-fallback', error: '' + e});
+        _installProcFilterJs();
+    }
+    send({type: 'info', hook: 'proc-filter:' + PROC_FILTER_MODE});
+}
+
+// Frida's traces in /proc: maps/smaps entries of its agent and thread names.
+var FRIDA_TOKENS = ['frida', 'gum-js-loop', 'gmain', 'gdbus', 'linjector', 'gadget'];
+
+function _hasFridaToken(line) {
+    for (var i = 0; i < FRIDA_TOKENS.length; i++) {
+        if (line.indexOf(FRIDA_TOKENS[i]) !== -1) return true;
+    }
+    return false;
+}
+
+// Line filter (null drops the line). status: keep the Name: line (a status
+// without one is a tell) and rename the thread; smaps: drop whole entries (a
+// header line plus its attribute lines); maps: drop the line.
+function hideFridaLine(line, kind, state) {
+    if (kind === 'status') {
+        return (line.indexOf('Name:') === 0 && _hasFridaToken(line)) ? 'Name:\tThread-2' : line;
+    }
+    if (kind === 'smaps') {
+        if (/^[0-9a-f]+-[0-9a-f]+ /.test(line)) state.fridaSkip = _hasFridaToken(line);
+        return state.fridaSkip ? null : line;
+    }
+    return _hasFridaToken(line) ? null : line;
+}
+
+function zeroTracerPidLine(line) {
+    return /^TracerPid:[ \t]*\d+$/.test(line) ? 'TracerPid:\t0' : line;
+}
+"""
+
+_PREAMBLE_HELPERS_JS = (
+    _PREAMBLE_HEAD_JS
+    + "var PATH_HIDER_C = "
+    + json.dumps(_PATH_HIDER_C)
+    + ";\nvar PROC_FILTER_C = "
+    + json.dumps(_PROC_FILTER_C)
+    + ";\n"
+    + _PREAMBLE_TAIL_JS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +1095,9 @@ class BypassManagerBase:
     - ``FRIDA_SCRIPT`` — the Frida JS payload.
     - ``PRIORITY`` — load order (lower installs earlier in the merged script,
       so the anti-anti-Frida prelude can land before root/debug/SSL).
+    - ``APPLY_AT_SPAWN`` — True when the app reads what the bypass changes
+      at startup (Build fields), so turning it on live is only complete after
+      a restart; the toggle message says so.
     """
 
     TOOL_NAME: str = "bypass"
@@ -209,6 +1105,7 @@ class BypassManagerBase:
     HOOKS_REGISTRY: list[str] = []
     FRIDA_SCRIPT: str = ""
     PRIORITY: int = 10
+    APPLY_AT_SPAWN: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -223,95 +1120,26 @@ _FRIDA_DETECTION_SCRIPT = r"""
 // on Frida presence. Deliberately does NOT hook Debug.isDebuggerConnected —
 // that lives in the Debug detection bypass.
 
-// Native: hide /proc/self/maps + /proc/<pid>/status from frida-name scans
+// Native: hide frida from this process's /proc maps/smaps/status (shared
+// open/openat filter in the preamble -- no libc read hook).
 (function () {
-    var libc = 'libc.so';
-    var procFds = {};  // fd -> 1 if it's a /proc/{self,N}/maps|status read
-
-    function _maybeTrack(pathPtr, fd) {
-        try {
-            var path = Memory.readUtf8String(pathPtr);
-            if (!path) return;
-            // Only newline-delimited text files. /cmdline is NUL-separated, so
-            // readUtf8String would stop at argv[0] and writeUtf8String would
-            // truncate the whole buffer — skip it.
-            if (path.indexOf('/maps') !== -1 ||
-                path.indexOf('/status') !== -1) {
-                procFds[fd] = 1;
-            }
-        } catch (e) {}
-    }
-
     try {
-        var openat = Module.findExportByName(libc, 'openat');
-        if (openat) {
-            Interceptor.attach(openat, {
-                onEnter: function (args) { this._path = args[1]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _maybeTrack(this._path, fd);
-                }
-            });
-        }
-        var openFn = Module.findExportByName(libc, 'open');
-        if (openFn) {
-            Interceptor.attach(openFn, {
-                onEnter: function (args) { this._path = args[0]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _maybeTrack(this._path, fd);
-                }
-            });
-        }
-        var closeFn = Module.findExportByName(libc, 'close');
-        if (closeFn) {
-            Interceptor.attach(closeFn, {
-                onEnter: function (args) { delete procFds[args[0].toInt32()]; }
-            });
-        }
-        var readFn = Module.findExportByName(libc, 'read');
-        if (readFn) {
-            Interceptor.attach(readFn, {
-                onEnter: function (args) {
-                    this._fd = args[0].toInt32();
-                    this._buf = args[1];
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.frida) return;  // inert when frida bypass off
-                    if (!(this._fd in procFds)) return;
-                    var n = rv.toInt32();
-                    if (n <= 0) return;
-                    try {
-                        var data = Memory.readUtf8String(this._buf, n);
-                        if (!data) return;
-                        var filtered = data.split('\n').filter(function (l) {
-                            return l.indexOf('frida') === -1 &&
-                                   l.indexOf('gum-js-loop') === -1 &&
-                                   l.indexOf('gmain') === -1 &&
-                                   l.indexOf('linjector') === -1 &&
-                                   l.indexOf('gadget') === -1;
-                        }).join('\n');
-                        if (filtered.length !== data.length) {
-                            Memory.writeUtf8String(this._buf, filtered);
-                            rv.replace(ptr(filtered.length));
-                        }
-                    } catch (e) {}
-                }
-            });
-        }
-        send({type: 'info', hook: 'frida-bypass:proc-maps-filter'});
+        filterProcFiles('frida', ['maps', 'smaps', 'status'], hideFridaLine);
+        send({type: 'info', hook: 'frida-bypass:proc-filter'});
     } catch (e) {
-        send({type: 'debug', hook: 'frida-bypass:proc-maps-filter', error: e.message});
+        send({type: 'debug', hook: 'frida-bypass:proc-filter', error: e.message});
     }
 
     // Native: strstr scans for 'frida'/'gum' return NULL
     try {
-        var strstr = Module.findExportByName(libc, 'strstr');
+        var strstr = _libcExport('strstr');
         if (strstr) {
             Interceptor.attach(strstr, {
                 onEnter: function (args) {
+                    this._block = false;
+                    if (!FLAGS.frida) return;  // flag before any work
                     try {
-                        var needle = Memory.readUtf8String(args[1]);
+                        var needle = args[1].readUtf8String();
                         this._block = needle && (
                             needle.indexOf('frida') !== -1 ||
                             needle.indexOf('gum-js') !== -1 ||
@@ -333,7 +1161,7 @@ _FRIDA_DETECTION_SCRIPT = r"""
     // blocking these can crash ART).
     ['_exit', 'exit', 'abort'].forEach(function (sym) {
         try {
-            var p = Module.findExportByName(libc, sym);
+            var p = _libcExport(sym);
             if (!p) return;
             Interceptor.attach(p, {
                 onEnter: function () {
@@ -385,8 +1213,6 @@ Java.perform(function () {
 FRIDA_DETECTION_HOOKS = [
     "libc:open",
     "libc:openat",
-    "libc:read",
-    "libc:close",
     "libc:strstr",
     "libc:exit",
     "libc:_exit",
@@ -465,26 +1291,30 @@ function _looksLikeRootPath(s) {
 // Native: __system_property_get for ro.debuggable / ro.secure
 (function () {
     try {
-        var sysprop = Module.findExportByName('libc.so', '__system_property_get');
+        var sysprop = _libcExport('__system_property_get');
         if (sysprop) {
             Interceptor.attach(sysprop, {
                 onEnter: function (args) {
-                    try { this._key = Memory.readUtf8String(args[0]); }
+                    this._key = null;
+                    if (!FLAGS.root) return;
+                    try { this._key = args[0].readUtf8String(); }
                     catch (e) { this._key = null; }
                     this._out = args[1];
                 },
                 onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // inert when root bypass off
+                    if (!FLAGS.root || this._key === null) return;
                     try {
-                        if (this._key === 'ro.debuggable') {
-                            Memory.writeUtf8String(this._out, '0');
-                            rv.replace(ptr(1));
-                            send({type: 'info', hook: 'root-bypass:prop:ro.debuggable'});
-                        } else if (this._key === 'ro.secure') {
-                            Memory.writeUtf8String(this._out, '1');
-                            rv.replace(ptr(1));
-                            send({type: 'info', hook: 'root-bypass:prop:ro.secure'});
-                        }
+                        // Only a present, revealing value changes. A device
+                        // that does not set the property gives every app "",
+                        // and a spoofed "0"/"1" there is itself the tell.
+                        var cur = this._out.readUtf8String();
+                        var want = null;
+                        if (this._key === 'ro.debuggable' && cur === '1') want = '0';
+                        else if (this._key === 'ro.secure' && cur === '0') want = '1';
+                        if (want === null) return;
+                        this._out.writeUtf8String(want);
+                        rv.replace(ptr(1));
+                        send({type: 'info', hook: 'root-bypass:prop:' + this._key});
                     } catch (e) {}
                 }
             });
@@ -498,108 +1328,17 @@ function _looksLikeRootPath(s) {
 // Native: hide su/magisk/busybox paths from RootBeer's *native* probes.
 // RootBeer (wrapped by JailMonkey in Doctolib's React Native build) checks the
 // filesystem via libc access()/faccessat()/fopen() rather than java.io.File,
-// so the Java File.exists hook never sees them. We intervene ONLY on a
-// root-path match (rare) and keep onEnter lean so this never throttles a
-// Hermes app at boot. We deliberately do NOT hook open/openat (far too hot —
-// fopen/access cover RootBeer's actual primitives).
-(function () {
-    var libc = 'libc.so';
-
-    // access(path, mode): 0 = exists. Force -1 on a su-path so it "doesn't
-    // exist".
-    try {
-        var accessP = Module.findExportByName(libc, 'access');
-        if (accessP) {
-            Interceptor.attach(accessP, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var p = Memory.readUtf8String(args[0]);
-                        if (_looksLikeRootPath(p)) {
-                            this._hide = true;
-                            this._path = p;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('-1'));
-                        send({type: 'info', hook: 'root-bypass:access(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:access'});
-        }
-    } catch (e) {
-        send({type: 'debug', hook: 'root-bypass:access', error: e.message});
-    }
-
-    // faccessat(dirfd, path, mode, flags): path is args[1]. Same as access().
-    try {
-        var faccessatP = Module.findExportByName(libc, 'faccessat');
-        if (faccessatP) {
-            Interceptor.attach(faccessatP, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var p = Memory.readUtf8String(args[1]);
-                        if (_looksLikeRootPath(p)) {
-                            this._hide = true;
-                            this._path = p;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('-1'));
-                        send({type: 'info', hook: 'root-bypass:faccessat(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:faccessat'});
-        }
-    } catch (e) {
-        send({type: 'debug', hook: 'root-bypass:faccessat', error: e.message});
-    }
-
-    // fopen(path, mode) / fopen64(path, mode): non-NULL FILE* = opened. Force
-    // NULL on a su-path so the open "fails".
-    function _hookFopen(sym) {
-        try {
-            var p = Module.findExportByName(libc, sym);
-            if (!p) return;
-            Interceptor.attach(p, {
-                onEnter: function (args) {
-                    this._hide = false;
-                    if (!FLAGS.root) return;  // skip path matching when off
-                    try {
-                        var path = Memory.readUtf8String(args[0]);
-                        if (_looksLikeRootPath(path)) {
-                            this._hide = true;
-                            this._path = path;
-                        }
-                    } catch (e) {}
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.root) return;  // leave rv untouched when off
-                    if (this._hide) {
-                        rv.replace(ptr('0'));
-                        send({type: 'info', hook: 'root-bypass:' + sym + '(' + this._path + ')'});
-                    }
-                }
-            });
-            send({type: 'info', hook: 'root-bypass:' + sym});
-        } catch (e) {
-            send({type: 'debug', hook: 'root-bypass:' + sym, error: e.message});
-        }
-    }
-    _hookFopen('fopen');
-    _hookFopen('fopen64');
-})();
+// so the Java File.exists hook never sees them. The shared path hider
+// (preamble ``hidePaths``) answers a root path with -1/NULL + ENOENT without
+// running the real call, and only reads the path while a hiding category is
+// on, so this never throttles a Hermes app at boot. We deliberately do NOT
+// hook open/openat (far too hot — fopen/access cover RootBeer's primitives).
+try {
+    hidePaths('root', function (path) { return _looksLikeRootPath(path); }, 1);
+    send({type: 'info', hook: 'root-bypass:access/faccessat/fopen'});
+} catch (e) {
+    send({type: 'debug', hook: 'root-bypass:path-hider', error: e.message});
+}
 
 Java.perform(function () {
     // Command check: any whitespace-separated token is a su binary or a known
@@ -700,12 +1439,13 @@ Java.perform(function () {
         send({type: 'info', hook: 'root-bypass:PackageManager'});
     } catch (e) {}
 
-    // Build.TAGS -> release-keys. This is a field write performed once at load,
-    // NOT a runtime-reversible method body — so flag-gating can only honour the
-    // *baked* initial flag. If root is armed at load it is applied; it is sticky
-    // for the session thereafter (toggling root off later won't restore the real
-    // TAGS, and toggling root on later won't set them). Acceptable fidelity
-    // caveat — TAGS is rarely the sole root signal.
+    // Build.TAGS -> release-keys. A field write, NOT a flag-gated method
+    // body: it happens once, when the root category installs -- at load if
+    // root is armed for the spawn, or on the live flip that first turns root
+    // on. It is sticky for the session (turning root off does not restore the
+    // real TAGS; the emulator category leaves TAGS alone on its own flip-off
+    // while root is on). Acceptable fidelity caveat — TAGS is rarely the sole
+    // root signal.
     try {
         if (FLAGS.root) {
             var Build = Java.use('android.os.Build');
@@ -920,6 +1660,9 @@ ROOT_DETECTION_HOOKS = [
     "libc:access",
     "libc:faccessat",
     "libc:fopen",
+    "libc:stat",
+    "libc:lstat",
+    "libc:fstatat",
     "com.gantix.JailMonkey.Rooted.RootedCheck.isJailBroken",
     "com.scottyab.rootbeer.RootBeer.isRooted",
     "com.scottyab.rootbeer.RootBeerNative.checkForRoot",
@@ -946,68 +1689,15 @@ class RootDetectionBypassManager(BypassManagerBase):
 _DEBUG_DETECTION_SCRIPT = r"""
 'use strict';
 
-// Native: filter 'TracerPid:' in /proc/self/status so ptrace-based debugger
-// checks read 0. Registered under a distinct hook id from the Frida bypass's
-// read filter; the Interceptor.attach stacks cleanly at runtime.
-(function () {
-    var libc = 'libc.so';
-    var statusFds = {};
-
-    function _trackStatus(pathPtr, fd) {
-        try {
-            var path = Memory.readUtf8String(pathPtr);
-            if (path && path.indexOf('/status') !== -1) statusFds[fd] = 1;
-        } catch (e) {}
-    }
-
-    try {
-        var openat = Module.findExportByName(libc, 'openat');
-        if (openat) {
-            Interceptor.attach(openat, {
-                onEnter: function (args) { this._p = args[1]; },
-                onLeave: function (rv) {
-                    var fd = rv.toInt32();
-                    if (fd >= 0) _trackStatus(this._p, fd);
-                }
-            });
-        }
-        var closeFn = Module.findExportByName(libc, 'close');
-        if (closeFn) {
-            Interceptor.attach(closeFn, {
-                onEnter: function (args) { delete statusFds[args[0].toInt32()]; }
-            });
-        }
-        var readFn = Module.findExportByName(libc, 'read');
-        if (readFn) {
-            Interceptor.attach(readFn, {
-                onEnter: function (args) {
-                    this._fd = args[0].toInt32();
-                    this._buf = args[1];
-                },
-                onLeave: function (rv) {
-                    if (!FLAGS.debug) return;  // inert when debug bypass off
-                    if (!(this._fd in statusFds)) return;
-                    var n = rv.toInt32();
-                    if (n <= 0) return;
-                    try {
-                        var data = Memory.readUtf8String(this._buf, n);
-                        if (!data || data.indexOf('TracerPid:') === -1) return;
-                        var filtered = data.replace(/TracerPid:\s*\d+/g, 'TracerPid:\t0');
-                        if (filtered.length === data.length) return;
-                        // Rewrite the buffer and shrink the reported byte count
-                        // so the caller doesn't see stale trailing bytes.
-                        Memory.writeUtf8String(this._buf, filtered);
-                        rv.replace(ptr(filtered.length));
-                        send({type: 'info', hook: 'debug-bypass:TracerPid=0'});
-                    } catch (e) {}
-                }
-            });
-        }
-        send({type: 'info', hook: 'debug-bypass:tracerpid-filter'});
-    } catch (e) {
-        send({type: 'debug', hook: 'debug-bypass:tracerpid-filter', error: e.message});
-    }
-})();
+// Native: TracerPid reads 0 in this process's /proc status files, so
+// ptrace-based debugger checks pass (shared open/openat filter in the
+// preamble -- no libc read hook).
+try {
+    filterProcFiles('debug', ['status'], zeroTracerPidLine);
+    send({type: 'info', hook: 'debug-bypass:tracerpid-filter'});
+} catch (e) {
+    send({type: 'debug', hook: 'debug-bypass:tracerpid-filter', error: e.message});
+}
 
 Java.perform(function () {
     try {
@@ -1033,7 +1723,7 @@ Java.perform(function () {
 DEBUG_DETECTION_HOOKS = [
     "android.os.Debug.isDebuggerConnected",
     "android.os.Debug.waitingForDebugger",
-    "libc:read:tracerpid",
+    "libc:openat:tracerpid",
 ]
 
 
@@ -1225,11 +1915,573 @@ class IntegrityBypassManager(BypassManagerBase):
 
 
 # ---------------------------------------------------------------------------
+# Emulator detection bypass
+# ---------------------------------------------------------------------------
+
+# Ported from TrigDroid's emulator-detection hook set (trigdroid/scripts/hooks/
+# emulator-detection.js: device profile -> Build.* fields, ro.* / qemu system
+# properties via __system_property_get, Build.getSerial, TelephonyManager
+# fakes) and Dexray Intercept's install_emulator_detection_bypass
+# (profiling.js: emulator-valued Build.* fields, SystemProperties.get for
+# ro.kernel.qemu / ro.product.model). Neither source hides emulator files, so
+# the /dev/qemu_pipe, qemud socket and goldfish/ranchu file hiding is new,
+# modelled on the root category's access/faccessat/fopen probes. Neither
+# source fakes sensors or the battery, so this category does not either.
+#
+# Coherence instead of blind spoofing (the reason this category was missing):
+#
+# - Build.* is replaced as ONE device profile and only when at least one
+#   identity field shows an emulator value, so a real device is never
+#   relabelled and no half-spoofed mix is left behind. The Pixel is picked by
+#   the device's real API level (one that really ran that Android version);
+#   FINGERPRINT, DISPLAY, ro.build.flavor/display.id/description are built
+#   from the device's own release / build ID / incremental; the hidden
+#   Build.IS_EMULATOR is cleared. SUPPORTED_ABIS / cpu.abi stay real (faking
+#   them breaks native library loading): x86_64 AVDs keep that tell.
+# - Native property spoofing and file hiding only answer *app* callers: a
+#   caller inside /system, /apex, /vendor, ..., updatable system code under
+#   /data (WebView/Trichrome, GMS/GSF modules) or a non-file module (memfd,
+#   e.g. the frida agent) keeps the truth, so the emulator's own graphics
+#   stack (goldfish pipe, ro.kernel.qemu.gles, ro.hardware) keeps working in
+#   the hooked process. Java's File I/O (libopenjdk/libjavacore) counts as an
+#   app caller, which is how File.exists() probes are covered without a
+#   second File.exists hook (the root category owns that one). The Java
+#   SystemProperties.get hook has no caller filter and answers only a fixed
+#   list of emulator-revealing keys; framework code in the process that reads
+#   one of them sees the spoof too.
+# - Device identifiers (IMEI, IMSI, ICCID, serial) call through first: where a
+#   real non-privileged app gets a SecurityException (API 29+), so does this
+#   one; only an entitled caller gets a (non-emulator) value.
+#
+# Nothing is hooked until the category is on: the hooks install the first
+# time FLAGS.emulator is set -- baked in at load (the armed-then-Start path,
+# before the app's first instruction) or flipped live via FLAG_LISTENERS --
+# and the Java replacements and the property listener are removed again on
+# flip-off. So SSL-only sessions carry none of them, and Dexray's
+# telephony_hooks only collide while emulator is on (BypassService refuses
+# that pairing). Build fields are static finals zygote set before the app
+# existed, so they are written, not hooked, and restored on flip-off. Checks
+# an app ran at startup are only fooled on the spawn path (APPLY_AT_SPAWN).
+_EMULATOR_DETECTION_SCRIPT = r"""
+'use strict';
+
+// Device profiles, picked by the device's real API level so the claimed
+// Pixel really shipped (or was updated to) that Android version: Pixel
+// (sailfish) 7.1-10, Pixel 3 (blueline) 9-12, Pixel 4 XL (coral) 10-13,
+// Pixel 8 Pro (husky) 14+. Below API 25 no profile is coherent; sailfish is
+// the closest. Release / build ID / incremental always stay the device's own.
+var EMU_PROFILES = [
+    {maxSdk: 27, MODEL: 'Pixel', DEVICE: 'sailfish', BOARD: 'sailfish'},
+    {maxSdk: 28, MODEL: 'Pixel 3', DEVICE: 'blueline', BOARD: 'blueline'},
+    {maxSdk: 33, MODEL: 'Pixel 4 XL', DEVICE: 'coral', BOARD: 'coral'},
+    {maxSdk: 9999, MODEL: 'Pixel 8 Pro', DEVICE: 'husky', BOARD: 'husky'}
+];
+// The active profile: every spoofed value, filled by _emuInitProfile().
+var EMU_PROFILE = null;
+// Pixel-style serial, for an app that is allowed to read the serial at all.
+var EMU_SERIAL = '2B111FDH2004QG';
+var EMU_BUILD_FIELDS = [
+    'FINGERPRINT', 'MODEL', 'MANUFACTURER', 'BRAND', 'DEVICE', 'PRODUCT',
+    'HARDWARE', 'BOARD', 'TAGS', 'TYPE', 'DISPLAY'
+];
+// TAGS/TYPE/DISPLAY are replaced along with the identity fields but never
+// decide whether this is an emulator (EMU_IDENTITY_PROPS does; a userdebug
+// phone is no emulator).
+// NOT spoofed: Build.SUPPORTED_ABIS / ro.product.cpu.abi*. Faking them would
+// break native library loading. An x86_64 AVD therefore still shows an x86
+// ABI (rare on phones) -- arm64 AVDs on Apple silicon do not have that tell.
+
+// Identity properties that decide (once, for Build AND properties alike)
+// whether this device is an emulator at all; tags/type never decide.
+var EMU_IDENTITY_PROPS = [
+    'ro.build.fingerprint', 'ro.product.model', 'ro.product.manufacturer',
+    'ro.product.brand', 'ro.product.device', 'ro.product.name', 'ro.hardware',
+    'ro.product.board'
+];
+
+// Fill EMU_PROFILE from the device's real API level / release / build ID.
+// `real(key)` reads a real property ('' when unknown).
+function _emuInitProfile(real) {
+    var emulated = false;
+    for (var k = 0; k < EMU_IDENTITY_PROPS.length; k++) {
+        if (_emuValue(real(EMU_IDENTITY_PROPS[k]))) { emulated = true; break; }
+    }
+    var sdk = parseInt(real('ro.build.version.sdk'), 10);
+    if (isNaN(sdk)) sdk = 9999;
+    var base = EMU_PROFILES[EMU_PROFILES.length - 1];
+    for (var i = 0; i < EMU_PROFILES.length; i++) {
+        if (sdk <= EMU_PROFILES[i].maxSdk) { base = EMU_PROFILES[i]; break; }
+    }
+    var release = real('ro.build.version.release');
+    var id = real('ro.build.id');
+    var incremental = real('ro.build.version.incremental');
+    var d = base.DEVICE;
+    EMU_PROFILE = {
+        emulated: emulated,
+        MODEL: base.MODEL, MANUFACTURER: 'Google', BRAND: 'google',
+        DEVICE: d, PRODUCT: d, HARDWARE: d, BOARD: base.BOARD,
+        TAGS: 'release-keys', TYPE: 'user', DISPLAY: id,
+        FINGERPRINT: 'google/' + d + '/' + d + ':' + release + '/' + id + '/' +
+            incremental + ':user/release-keys',
+        FLAVOR: d + '-user',
+        DESCRIPTION: d + '-user ' + release + ' ' + id + ' ' + incremental +
+            ' release-keys'
+    };
+}
+
+// Real property values, read before any emulator listener is attached.
+function _emuRealProp(key) {
+    try {
+        var addr = _libcExport('__system_property_get');
+        if (addr === null) return '';
+        var get = new NativeFunction(addr, 'int', ['pointer', 'pointer']);
+        var buf = Memory.alloc(92);  // PROP_VALUE_MAX
+        get(Memory.allocUtf8String(key), buf);
+        return buf.readUtf8String();
+    } catch (e) {
+        return '';
+    }
+}
+// Value tokens that mark an emulator (TrigDroid's EMULATOR_INDICATORS +
+// Dexray's emulatorIndicators + the current sdk_gphone/emu64 images).
+var EMU_VALUE_TOKENS = [
+    'generic', 'google_sdk', 'sdk_gphone', 'sdk_x86', 'sdk_google',
+    'android sdk built for', 'emulator', 'emu64', 'genymotion', 'goldfish',
+    'ranchu', 'vbox86'
+];
+var EMU_EXACT_VALUES = ['sdk', 'unknown'];
+// Build tags/type of a debug image (emulator images are userdebug/dev-keys).
+var EMU_DEBUG_VALUES = ['test-keys', 'dev-keys', 'userdebug', 'eng'];
+
+function _emuValue(v) {
+    if (v === null || v === undefined) return false;
+    var s = ('' + v).toLowerCase();
+    if (EMU_EXACT_VALUES.indexOf(s) !== -1) return true;
+    for (var i = 0; i < EMU_VALUE_TOKENS.length; i++) {
+        if (s.indexOf(EMU_VALUE_TOKENS[i]) !== -1) return true;
+    }
+    return false;
+}
+
+// --- emulator files / pipes ---------------------------------------------
+var EMU_PATHS = [
+    '/dev/qemu_pipe', '/dev/goldfish_pipe', '/dev/socket/qemud',
+    '/dev/socket/genyd', '/dev/socket/baseband_genyd', '/sys/qemu_trace',
+    '/system/bin/qemu-props', '/system/bin/qemud',
+    '/system/lib/libc_malloc_debug_qemu.so',
+    '/system/lib64/libc_malloc_debug_qemu.so',
+    '/dev/vboxguest', '/dev/vboxuser', '/system/bin/nox-prop',
+    '/system/bin/ttVM-prop', '/system/bin/microvirt-prop',
+    '/system/bin/windroyed', '/system/lib/libdroid4x.so'
+];
+// Basename tokens: fstab.ranchu, init.goldfish.rc, ueventd.vbox86.rc, ...
+var EMU_NAME_TOKENS = [
+    'goldfish', 'ranchu', 'qemu', 'vbox86', 'ttvm_x86', 'android_x86', 'genyd'
+];
+var EMU_NAMES = [
+    'fstab.nox', 'init.nox.rc', 'ueventd.nox.rc', 'fstab.andy',
+    'ueventd.andy.rc', 'x86.prop'
+];
+
+function _isEmuPath(p) {
+    if (!p) return false;
+    var v = '' + p;
+    if (EMU_PATHS.indexOf(v) !== -1) return true;
+    var i = v.lastIndexOf('/');
+    var base = (i === -1 ? v : v.substring(i + 1)).toLowerCase();
+    if (EMU_NAMES.indexOf(base) !== -1) return true;
+    for (var j = 0; j < EMU_NAME_TOKENS.length; j++) {
+        if (base.indexOf(EMU_NAME_TOKENS[j]) !== -1) return true;
+    }
+    return false;
+}
+
+// --- caller scoping (see the Python comment above) ------------------------
+var EMU_SYSTEM_PREFIXES = [
+    '/system/', '/apex/', '/vendor/', '/product/', '/system_ext/', '/odm/'
+];
+// Updatable system code that lives under /data (app or GMS module dirs) and
+// is loaded into the app process: WebView/Trichrome, Play services (incl.
+// its dynamite modules), Google services framework.
+var EMU_UPDATABLE_SYSTEM = [
+    'webview', 'trichrome', 'com.google.android.gms', 'com.google.android.gsf'
+];
+var EMU_JAVA_IO_LIBS = ['libopenjdk.so', 'libjavacore.so'];
+
+function _isAppCaller(addr) {
+    try {
+        var m = Process.findModuleByAddress(addr);
+        // Anonymous / JIT / unpacked code: the app (packers unpack there).
+        if (!m) return true;
+        var p = '' + m.path;
+        // Not a file on disk (memfd: the frida agent, ...): never the app.
+        if (p.charAt(0) !== '/' || p.indexOf('memfd:') !== -1) return false;
+        for (var i = 0; i < EMU_JAVA_IO_LIBS.length; i++) {
+            if (p.indexOf('/' + EMU_JAVA_IO_LIBS[i]) !== -1) return true;
+        }
+        for (var j = 0; j < EMU_SYSTEM_PREFIXES.length; j++) {
+            if (p.indexOf(EMU_SYSTEM_PREFIXES[j]) === 0) return false;
+        }
+        var pl = p.toLowerCase();
+        for (var k = 0; k < EMU_UPDATABLE_SYSTEM.length; k++) {
+            if (pl.indexOf(EMU_UPDATABLE_SYSTEM[k]) !== -1) return false;
+        }
+    } catch (e) {}
+    return true;
+}
+
+// --- system properties ------------------------------------------------------
+// The keys the Java SystemProperties.get hook answers. It has no caller
+// filter (a Java stack walk per read is too costly), so framework Java code
+// in the app process that reads one of these sees the spoof as well; the
+// list is kept to keys that only reveal the emulator.
+var EMU_JAVA_PROP_KEYS = [
+    'ro.kernel.qemu', 'ro.kernel.qemu.gles', 'ro.boot.qemu',
+    'ro.boot.qemu.avd_name', 'ro.kernel.android.qemud', 'init.svc.qemud',
+    'init.svc.qemu-props', 'init.svc.goldfish-logcat', 'init.svc.goldfish-setup',
+    'qemu.hw.mainkeys', 'qemu.sf.fake_camera', 'qemu.sf.lcd_density',
+    'ro.hardware', 'ro.boot.hardware', 'ro.product.model',
+    'ro.product.manufacturer', 'ro.product.brand', 'ro.product.device',
+    'ro.product.name', 'ro.product.board', 'ro.build.product',
+    'ro.build.fingerprint', 'ro.build.tags', 'ro.build.type',
+    'ro.build.flavor', 'ro.build.display.id', 'ro.build.description',
+    'ro.build.characteristics'
+];
+
+// Replacement for property `key` whose current value is `value`, or null to
+// leave it alone. ro.debuggable / ro.secure stay with the root category.
+function _spoofProp(key, value) {
+    // Not an emulator (e.g. a userdebug phone): spoof no property, exactly as
+    // _emuApplyBuild leaves Build alone, so Build.TAGS/TYPE and
+    // ro.build.tags/type always agree.
+    if (!key || EMU_PROFILE === null || !EMU_PROFILE.emulated) return null;
+    var k = '' + key;
+    var kl = k.toLowerCase();
+    // qemu / goldfish / ranchu markers are unset on a real device.
+    if (kl.indexOf('qemu') !== -1 || kl.indexOf('goldfish') !== -1 ||
+        kl.indexOf('ranchu') !== -1) {
+        return (value === null || value === '') ? null : '';
+    }
+    var dot = k.lastIndexOf('.');
+    var leaf = dot === -1 ? k : k.substring(dot + 1);
+    if (value !== null && EMU_DEBUG_VALUES.indexOf(('' + value).toLowerCase()) !== -1) {
+        if (leaf === 'tags') return EMU_PROFILE.TAGS;
+        if (leaf === 'type') return EMU_PROFILE.TYPE;
+    }
+    if (!_emuValue(value)) return null;
+    if (k === 'ro.hardware' || k === 'ro.boot.hardware') return EMU_PROFILE.HARDWARE;
+    if (k === 'ro.build.product') return EMU_PROFILE.PRODUCT;
+    if (k === 'ro.build.characteristics') return 'nosdcard';
+    if (k === 'ro.build.flavor') return EMU_PROFILE.FLAVOR;
+    if (k === 'ro.build.display.id') return EMU_PROFILE.DISPLAY;
+    if (k === 'ro.build.description') return EMU_PROFILE.DESCRIPTION;
+    if (k.indexOf('ro.product.') === 0 || k.indexOf('ro.build.') === 0 ||
+        k.indexOf('ro.vendor.') === 0 || k.indexOf('ro.system.') === 0 ||
+        k.indexOf('ro.bootimage.') === 0 || k.indexOf('ro.odm.') === 0) {
+        if (leaf === 'model') return EMU_PROFILE.MODEL;
+        if (leaf === 'manufacturer') return EMU_PROFILE.MANUFACTURER;
+        if (leaf === 'brand') return EMU_PROFILE.BRAND;
+        if (leaf === 'device') return EMU_PROFILE.DEVICE;
+        if (leaf === 'name') return EMU_PROFILE.PRODUCT;
+        if (leaf === 'board') return EMU_PROFILE.BOARD;
+        if (leaf === 'fingerprint') return EMU_PROFILE.FINGERPRINT;
+    }
+    return null;
+}
+
+// Everything below installs lazily, the first time FLAGS.emulator turns on
+// (baked in at load, or a set_flags flip via FLAG_LISTENERS), and the Java
+// replacements are reverted when it turns off. An SSL-only session never
+// carries them, and Dexray's telephony_hooks (which replace the same
+// TelephonyManager methods from a second script) only collide while the
+// emulator category is on, which BypassService refuses.
+var _emuInstalled = false;
+var _emuPropListener = null;
+var _emuPathsRegistered = false;
+var _emuJavaHooks = [];  // replaced Java methods, reverted on flip-off
+
+// Native: __system_property_get (TrigDroid's mapping). Stacks with the root
+// category's listener on the same export; that one owns ro.debuggable /
+// ro.secure, this one only the emulator keys.
+function _emuInstallPropHook() {
+    var propGet = _libcExport('__system_property_get');
+    if (!propGet) return;
+    _emuPropListener = Interceptor.attach(propGet, {
+        onEnter: function (args) {
+            this._out = null;
+            if (!FLAGS.emulator) return;
+            try {
+                this._key = args[0].readUtf8String();
+                this._out = args[1];
+                this._ra = this.returnAddress;
+            } catch (e) { this._out = null; }
+        },
+        onLeave: function (rv) {
+            if (!FLAGS.emulator || !this._out) return;
+            try {
+                var cur = this._out.readUtf8String();
+                var s = _spoofProp(this._key, cur);
+                if (s === null || !_isAppCaller(this._ra)) return;
+                this._out.writeUtf8String(s);
+                rv.replace(ptr(s.length));
+                send({type: 'info', hook: 'emulator-bypass:prop:' + this._key});
+            } catch (e) {}
+        }
+    });
+    send({type: 'info', hook: 'emulator-bypass:__system_property_get'});
+}
+
+// Build.* fields: one coherent device profile, written (not hooked).
+var _emuBuildOriginal = null;
+
+function _emuApplyBuild(on) {
+    Java.perform(function () {
+        var Build = Java.use('android.os.Build');
+        if (on) {
+            if (_emuBuildOriginal) return;
+            var orig = {};
+            EMU_BUILD_FIELDS.forEach(function (f) {
+                try { orig[f] = '' + Build[f].value; } catch (e) {}
+            });
+            if (EMU_PROFILE === null || !EMU_PROFILE.DISPLAY) {
+                // Native property read failed: take the real values from
+                // Java instead (same keys, same emulator decision).
+                var Version = Java.use('android.os.Build$VERSION');
+                var fromBuild = {
+                    'ro.build.fingerprint': 'FINGERPRINT', 'ro.product.model': 'MODEL',
+                    'ro.product.manufacturer': 'MANUFACTURER',
+                    'ro.product.brand': 'BRAND', 'ro.product.device': 'DEVICE',
+                    'ro.product.name': 'PRODUCT', 'ro.hardware': 'HARDWARE',
+                    'ro.product.board': 'BOARD', 'ro.build.id': 'ID'
+                };
+                _emuInitProfile(function (key) {
+                    try {
+                        if (key in fromBuild) return '' + Build[fromBuild[key]].value;
+                        if (key === 'ro.build.version.sdk') return '' + Version.SDK_INT.value;
+                        if (key === 'ro.build.version.release') {
+                            return '' + Version.RELEASE.value;
+                        }
+                        if (key === 'ro.build.version.incremental') {
+                            return '' + Version.INCREMENTAL.value;
+                        }
+                    } catch (e) {}
+                    return '';
+                });
+            }
+            if (!EMU_PROFILE.emulated) {
+                send({type: 'info', hook: 'emulator-bypass:Build(no emulator values)'});
+                return;
+            }
+            EMU_BUILD_FIELDS.forEach(function (f) {
+                try { Build[f].value = EMU_PROFILE[f]; } catch (e) {}
+            });
+            // Hidden Build.IS_EMULATOR (ro.boot.qemu == "1"), where present.
+            try {
+                orig.IS_EMULATOR = Build.IS_EMULATOR.value;
+                Build.IS_EMULATOR.value = false;
+            } catch (e) {}
+            _emuBuildOriginal = orig;
+            send({type: 'info', hook: 'emulator-bypass:Build=' + EMU_PROFILE.MODEL});
+        } else {
+            if (!_emuBuildOriginal) return;
+            var saved = _emuBuildOriginal;
+            _emuBuildOriginal = null;
+            EMU_BUILD_FIELDS.concat(['IS_EMULATOR']).forEach(function (f) {
+                // TAGS is also the root category's (sticky) field.
+                if (f === 'TAGS' && FLAGS.root) return;
+                try {
+                    if (f in saved) Build[f].value = saved[f];
+                } catch (e) {}
+            });
+            send({type: 'info', hook: 'emulator-bypass:Build restored'});
+        }
+    });
+}
+
+function _emuHook(method, impl) {
+    method.implementation = impl;
+    _emuJavaHooks.push(method);
+}
+
+function _emuInstallJavaHooks() {
+    // Build.getSerial (TrigDroid).
+    try {
+        var BuildCls = Java.use('android.os.Build');
+        // Call through first: on API 29+ a normal app gets the real
+        // SecurityException (as on a phone); only a caller entitled to the
+        // serial gets one, and then a Pixel-style one.
+        _emuHook(BuildCls.getSerial, function () {
+            var real = this.getSerial();
+            if (!FLAGS.emulator || real === null) return real;
+            send({type: 'info', hook: 'emulator-bypass:Build.getSerial'});
+            return EMU_SERIAL;
+        });
+    } catch (e) {}
+
+    // SystemProperties.get (Dexray): Java-level reads skip __system_property_get
+    // on current Android (they use __system_property_read_callback).
+    try {
+        var SP = Java.use('android.os.SystemProperties');
+        _emuHook(SP.get.overload('java.lang.String'), function (key) {
+            var v = this.get(key);
+            if (!FLAGS.emulator || EMU_JAVA_PROP_KEYS.indexOf('' + key) === -1) return v;
+            var s = _spoofProp(key, v);
+            if (s === null) return v;
+            send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
+            return s;
+        });
+        _emuHook(SP.get.overload('java.lang.String', 'java.lang.String'), function (key, def) {
+            var v = this.get(key, def);
+            if (!FLAGS.emulator || EMU_JAVA_PROP_KEYS.indexOf('' + key) === -1) return v;
+            var s = _spoofProp(key, v);
+            if (s === null) return v;
+            send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
+            return s === '' ? def : s;
+        });
+        send({type: 'info', hook: 'emulator-bypass:SystemProperties.get'});
+    } catch (e) {}
+
+    // TelephonyManager (TrigDroid's bypassTelephonyChecks set). TrigDroid's
+    // IMEI/IMSI/ICCID fakes were the emulator's OWN defaults
+    // (358240051111110, 310260000000000, 89014103211118510720), so these are
+    // other, checksum-valid values; line 1 is empty, as on many real SIMs
+    // (the emulator answers 15555215554). Identifier getters call through
+    // first: on API 29+ a normal app gets the real SecurityException.
+    var TELEPHONY = [
+        ['getDeviceId', [], '358813084172653', true],
+        ['getDeviceId', ['int'], '358813084172653', true],
+        ['getSubscriberId', [], '310260518374921', true],
+        ['getLine1Number', [], '', true],
+        ['getSimSerialNumber', [], '89012604173859201844', true],
+        ['getNetworkOperatorName', [], 'T-Mobile', false],
+        ['getNetworkOperator', [], '310260', false],
+        ['getPhoneType', [], 1, false],   // PHONE_TYPE_GSM
+        ['getSimState', [], 5, false]     // SIM_STATE_READY
+    ];
+    try {
+        var TM = Java.use('android.telephony.TelephonyManager');
+        TELEPHONY.forEach(function (row) {
+            var name = row[0], sig = row[1], fake = row[2], callThrough = row[3];
+            try {
+                var m = TM[name].overload.apply(TM[name], sig);
+                _emuHook(m, function () {
+                    if (!FLAGS.emulator) return m.apply(this, arguments);
+                    if (callThrough) {
+                        // Throws where a real phone throws (permissions).
+                        var real = m.apply(this, arguments);
+                        if (real === null) return real;
+                    }
+                    send({type: 'info', hook: 'emulator-bypass:TelephonyManager.' + name});
+                    return fake;
+                });
+            } catch (e) {}
+        });
+        send({type: 'info', hook: 'emulator-bypass:TelephonyManager'});
+    } catch (e) {}
+
+}
+
+function _emuInstall() {
+    if (_emuInstalled) return;
+    _emuInstalled = true;
+    if (EMU_PROFILE === null) _emuInitProfile(_emuRealProp);
+    try { _emuInstallPropHook(); } catch (e) {
+        send({type: 'debug', hook: 'emulator-bypass:__system_property_get', error: e.message});
+    }
+    // Emulator files and pipes go through the shared path hider (one
+    // replacement per export, see preamble); registered once, flag-gated.
+    if (!_emuPathsRegistered) {
+        _emuPathsRegistered = true;
+        try {
+            hidePaths('emulator', function (path, returnAddress) {
+                return _isEmuPath(path) && _isAppCaller(returnAddress);
+            }, 2);
+        } catch (e) {
+            send({type: 'debug', hook: 'emulator-bypass:path-hider', error: e.message});
+        }
+    }
+    Java.perform(_emuInstallJavaHooks);
+    _emuApplyBuild(true);
+}
+
+function _emuUninstall() {
+    if (!_emuInstalled) return;
+    _emuInstalled = false;
+    _emuApplyBuild(false);
+    Java.perform(function () {
+        _emuJavaHooks.forEach(function (m) {
+            try { m.implementation = null; } catch (e) {}
+        });
+        _emuJavaHooks = [];
+    });
+    if (_emuPropListener !== null) {
+        try { _emuPropListener.detach(); } catch (e) {}
+        _emuPropListener = null;
+    }
+    send({type: 'info', hook: 'emulator-bypass:uninstalled'});
+}
+
+if (FLAGS.emulator) _emuInstall();
+FLAG_LISTENERS.push(function (flags) {
+    if (flags.emulator) _emuInstall(); else _emuUninstall();
+});
+
+send({type: 'ready', message: 'Emulator detection bypass ready (installs on enable)'});
+"""
+
+EMULATOR_DETECTION_HOOKS = [
+    "android.os.Build.FINGERPRINT",
+    "android.os.Build.MODEL",
+    "android.os.Build.MANUFACTURER",
+    "android.os.Build.BRAND",
+    "android.os.Build.DEVICE",
+    "android.os.Build.PRODUCT",
+    "android.os.Build.HARDWARE",
+    "android.os.Build.BOARD",
+    "android.os.Build.TAGS",
+    "android.os.Build.TYPE",
+    "android.os.Build.DISPLAY",
+    "android.os.Build.IS_EMULATOR",
+    "android.os.Build.getSerial",
+    "android.os.SystemProperties.get",
+    "android.telephony.TelephonyManager.getDeviceId",
+    "android.telephony.TelephonyManager.getSubscriberId",
+    "android.telephony.TelephonyManager.getLine1Number",
+    "android.telephony.TelephonyManager.getSimSerialNumber",
+    "android.telephony.TelephonyManager.getNetworkOperatorName",
+    "android.telephony.TelephonyManager.getNetworkOperator",
+    "android.telephony.TelephonyManager.getPhoneType",
+    "android.telephony.TelephonyManager.getSimState",
+    # Native hooks shared with the root category: one path-hider replacement
+    # per file probe, a stacked listener on __system_property_get (distinct
+    # ids, like the debug category's ``libc:openat:tracerpid``).
+    "libc:__system_property_get:emulator",
+    "libc:access:emulator",
+    "libc:faccessat:emulator",
+    "libc:fopen:emulator",
+    "libc:stat:emulator",
+    "libc:lstat:emulator",
+    "libc:fstatat:emulator",
+]
+
+
+class EmulatorDetectionBypassManager(BypassManagerBase):
+    """Hide emulator markers (Build.*, qemu props, emulator files, telephony)."""
+
+    TOOL_NAME = "emulator_detection_bypass"
+    DISPLAY_NAME = "Emulator Detection Bypass (experimental)"
+    HOOKS_REGISTRY = EMULATOR_DETECTION_HOOKS
+    FRIDA_SCRIPT = _EMULATOR_DETECTION_SCRIPT
+    PRIORITY = 8  # before root/debug (10): Build/props must be in place early
+    APPLY_AT_SPAWN = True
+
+
+# ---------------------------------------------------------------------------
 # Bypass service (singleton owning all managers)
 # ---------------------------------------------------------------------------
 
-# Category keys are the stable identifiers used by the panel, MitmproxyService,
-# and TrigDroid delegation. "ssl" maps to SSLUnpinManager (imported lazily to
+# Category keys are the stable identifiers used by the panel and
+# MitmproxyService. "ssl" maps to SSLUnpinManager (imported lazily to
 # avoid a circular import: ssl_unpin imports this module's base class).
 #: Every bypass category is EXPERIMENTAL: hooks target specific library
 #: versions/obfuscations and can silently miss (or crash) an app. All are OFF
@@ -1237,12 +2489,42 @@ class IntegrityBypassManager(BypassManagerBase):
 #: user-facing name/message carries this tag.
 EXPERIMENTAL_SUFFIX = " (experimental)"
 
+#: Dexray Intercept's own bypass group (``bypass_hooks``: root/frida/
+#: debugger/emulator/hook detection) never runs alongside these categories:
+#: in experiments both together crashed apps (recursion in the File.exists
+#: hooks). Either side refuses to start while the other is on, with this.
+BYPASS_CONFLICT_CHOICE = (
+    "choose one: Dexray's bypass group or the Bypass (b) categories"
+)
+#: Dexray's ``telephony_hooks`` replace the same TelephonyManager methods as
+#: the emulator category, from a second script (the same two-bridge
+#: double-replace that crashed File.exists), so that pair excludes too.
+TELEPHONY_CONFLICT_CHOICE = (
+    "choose one: Dexray's telephony hooks or the Emulator bypass (b 6)"
+)
+#: Owner name Dexray Intercept claims exclusivity under.
+DEXRAY_BYPASS_OWNER = "Dexray Intercept"
+
+
+@dataclass(frozen=True)
+class _ExclusiveClaim:
+    """Another bypass source holding some categories (see claim_exclusive)."""
+
+    owner: str
+    what: str
+    categories: frozenset[str]
+    choice: str
+    is_alive: Callable[[], bool] | None
+    resolve: str = ""
+
+
 _CATEGORY_DISPLAY = {
     "ssl": "SSL Pinning Bypass",
     "frida": "Frida Detection Bypass",
     "root": "Root Detection Bypass",
     "debug": "Debug Detection Bypass",
     "integrity": "Integrity / Attestation Bypass",
+    "emulator": "Emulator Detection Bypass",
 }
 
 
@@ -1256,8 +2538,8 @@ class BypassService:
     **One persistent flag-gated script.** Instead of loading/unloading a script
     per category (a fresh ``script.load`` each time = a new frida-java-bridge on
     the contended JS thread, which is slow and causes a no-hooks gap on
-    off-toggle), this assembles ONE combined script (preamble + all four
-    category sources, each hook body early-checking its ``FLAGS[category]``) and
+    off-toggle), this assembles ONE combined script (preamble + every
+    category's source, each hook body early-checking its ``FLAGS[category]``) and
     loads it once per session. Toggling a category is then an instant
     ``set_flags`` RPC — no reload, no gap, and exactly one Java bridge (so the
     paused-spawn #218 crash is moot: one combined script = one ``create_script``
@@ -1295,6 +2577,100 @@ class BypassService:
         # when unregistered), so _register_task can refresh a changed display
         # without re-registering identically every toggle.
         self._task_display: str | None = None
+        # Other bypass sources holding categories (Dexray's bypass group or
+        # telephony hooks), by claim token. While a claim covers a category,
+        # it may not be armed or started. See claim_exclusive().
+        self._claims: dict[str, _ExclusiveClaim] = {}
+        # Categories the in-flight set_active (under _mutate_lock) turns on;
+        # a claim on any of them waits for it, unrelated claims do not.
+        self._mutating: frozenset[str] = frozenset()
+
+    # -- mutual exclusion with other bypass sources (Dexray) --------------
+
+    def claim_exclusive(
+        self,
+        owner: str,
+        *,
+        what: str = "its bypass group",
+        categories=None,
+        choice: str = BYPASS_CONFLICT_CHOICE,
+        is_alive: Callable[[], bool] | None = None,
+        resolve: str = "",
+    ) -> tuple[str | None, str]:
+        """Claim bypass categories for another source (e.g. Dexray's group).
+
+        Refused while any claimed category is armed or active, or while a
+        bypass load turning one of them on is in flight. While the claim is held, arming or starting
+        a claimed category is refused in turn. Arming checks under ``_lock``
+        and a load checks while holding ``_mutate_lock``, so neither side can
+        slip in between.
+
+        Args:
+            owner: User-facing name of the claiming source.
+            what: What of the owner conflicts (``"its telephony hooks"``).
+            categories: Categories claimed; None claims every category.
+            choice: The "choose one: ..." sentence both refusals end with.
+            is_alive: Optional liveness probe; a claim whose probe returns
+                False (or raises) is dropped the next time it is checked
+                (e.g. the owner's job died with the app).
+            resolve: How the user frees the categories, appended to this
+                side's refusal (``"stop Dexray Intercept (m) first"``).
+
+        Returns:
+            ``(token, message)``: the token releases this claim (and only this
+            one) via :meth:`release_exclusive`; ``token`` is None when refused,
+            and ``message`` says why.
+        """
+        cats = frozenset(self.categories() if categories is None else categories)
+        with self._lock:
+            on = [
+                c
+                for c in self._categories_by_priority(self._armed | self._active)
+                if c in cats
+            ]
+            if not on and self._mutating & cats:
+                return None, (
+                    f"Not starting {owner} with {what}: a Bypass (b) change "
+                    f"is in progress — {choice}."
+                )
+            if on:
+                names = ", ".join(self._plain_name(c) for c in on)
+                return None, (
+                    f"Not starting {owner} with {what}: Bypass (b) has "
+                    f"{names} on — {choice}; turn them off with b first."
+                )
+            token = uuid.uuid4().hex
+            self._claims[token] = _ExclusiveClaim(
+                owner, what, cats, choice, is_alive, resolve
+            )
+        return token, f"{owner} holds {', '.join(sorted(cats))}"
+
+    def release_exclusive(self, token: str | None) -> None:
+        """Release the claim ``token`` names (idempotent; others are kept)."""
+        if token is None:
+            return
+        with self._lock:
+            self._claims.pop(token, None)
+
+    def exclusive_conflict(self, categories=None) -> str | None:
+        """Why ``categories`` (default: any) cannot be armed/started, or None."""
+        wanted = set(self.categories() if categories is None else categories)
+        with self._lock:
+            claims = list(self._claims.items())
+        for token, claim in claims:
+            if not claim.categories & wanted:
+                continue
+            if claim.is_alive is not None:
+                try:
+                    alive = bool(claim.is_alive())
+                except Exception:
+                    alive = False
+                if not alive:
+                    self.release_exclusive(token)
+                    continue
+            hint = f"; {claim.resolve}" if claim.resolve else ""
+            return f"{claim.owner} is running with {claim.what} — {claim.choice}{hint}."
+        return None
 
     # -- category metadata (data holders) ---------------------------------
 
@@ -1308,11 +2684,12 @@ class BypassService:
             "root": RootDetectionBypassManager,
             "debug": DebugDetectionBypassManager,
             "integrity": IntegrityBypassManager,
+            "emulator": EmulatorDetectionBypassManager,
         }.get(category)
 
     def categories(self) -> list[str]:
         """All known category keys, in display order."""
-        return ["ssl", "root", "frida", "debug", "integrity"]
+        return ["ssl", "root", "frida", "debug", "integrity", "emulator"]
 
     def _plain_name(self, category: str) -> str:
         return _CATEGORY_DISPLAY.get(category, category)
@@ -1354,9 +2731,9 @@ class BypassService:
     def _flag_dict(self, target) -> dict[str, bool]:
         """Map a target category set to the full ``{category: bool}`` flag dict.
 
-        Always carries all four keys so the baked ``FLAGS`` object and every
-        ``set_flags`` RPC are complete (the JS preamble's ``setFlags`` merges,
-        but a complete dict keeps state unambiguous).
+        Always carries every category key so the baked ``FLAGS`` object and
+        every ``set_flags`` RPC are complete (the JS preamble's ``setFlags``
+        merges, but a complete dict keeps state unambiguous).
         """
         target = set(target)
         return {cat: (cat in target) for cat in self.categories()}
@@ -1503,19 +2880,23 @@ class BypassService:
 
         Layout (realm-top scope):
 
-        - Preamble: ``'use strict';`` + ``var FLAGS = <json>;`` + ``rpc.exports``
-          (``setFlags`` merges a partial dict and returns FLAGS; ``getFlags``
-          returns it). ``json.dumps`` is used everywhere — category names are
-          never string-interpolated.
-        - Each category source wrapped in a ``try``/``catch`` IIFE (reusing AFM's
-          ``_build_merged_source`` shape for ``var`` isolation + failure
-          reporting via ``send({merge_error: <label>})``), ordered by priority so
-          the anti-anti-Frida prelude installs first.
+        - Preamble: ``'use strict';`` + ``var FLAGS = <json>;`` +
+          ``var FLAG_LISTENERS = [];`` + ``rpc.exports`` (``setFlags`` merges a
+          partial dict, calls every ``FLAG_LISTENERS`` entry with FLAGS -- for
+          state a hook body cannot gate, like the emulator category's Build
+          field writes -- and returns FLAGS; ``getFlags`` returns it).
+          ``json.dumps`` is used everywhere — category names are never
+          string-interpolated.
+        - Each category source wrapped in a function handed to
+          ``registerCategory`` (``var`` isolation), ordered by priority so the
+          anti-anti-Frida prelude installs first. The function runs -- and the
+          category's hooks install -- only once its flag is on (at load, or on
+          the ``setFlags`` that turns it on); a throw is reported via
+          ``send({merge_error: <label>})`` and ``installFailures()``.
 
         Category bodies read the shared ``FLAGS`` via closure over this
         realm-top declaration and must NOT re-declare ``var FLAGS``. Each source
-        keeps its own leading ``'use strict';`` which is a harmless no-op string
-        once nested inside the IIFE's ``try`` block.
+        keeps its own leading ``'use strict';`` (a directive for its function).
         """
         # 'use strict' MUST stay first (it is only a directive at the very top).
         # The Java bridge prelude runs next so globalThis.Java exists before any
@@ -1527,7 +2908,7 @@ class BypassService:
             + "var FLAGS = "
             + json.dumps(initial_flags)
             + ";\n"
-            "rpc.exports = {\n"
+            "var FLAG_LISTENERS = [];\n" + _PREAMBLE_HELPERS_JS + "rpc.exports = {\n"
             "    setFlags: function (f) {\n"
             "        if (f) {\n"
             "            for (var k in f) {\n"
@@ -1536,9 +2917,14 @@ class BypassService:
             "                }\n"
             "            }\n"
             "        }\n"
+            "        _installEnabledCategories();\n"
+            "        for (var i = 0; i < FLAG_LISTENERS.length; i++) {\n"
+            "            try { FLAG_LISTENERS[i](FLAGS); } catch (e) {}\n"
+            "        }\n"
             "        return FLAGS;\n"
             "    },\n"
-            "    getFlags: function () { return FLAGS; }\n"
+            "    getFlags: function () { return FLAGS; },\n"
+            "    installFailures: function () { return INSTALL_FAILED; }\n"
             "};\n"
         )
         parts = [preamble]
@@ -1548,13 +2934,7 @@ class BypassService:
                 continue
             label = json.dumps(category)
             parts.append(
-                "(function () {\ntry {\n"
-                + src
-                + "\n} catch (e) {\n"
-                + "send({merge_error: "
-                + label
-                + ", error: '' + e});\n"
-                + "}\n})();\n"
+                "registerCategory(" + label + ", function () {\n" + src + "\n});\n"
             )
         return "".join(parts)
 
@@ -1730,6 +3110,15 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
+            # Published under _lock before the claim check: claim_exclusive
+            # refuses a claim on any category in _mutating, so a Dexray claim
+            # and this load cannot interleave (unrelated claims still can).
+            with self._lock:
+                self._mutating = frozenset(target)
+            if target:
+                conflict = self.exclusive_conflict(target)
+                if conflict:
+                    return False, conflict
             jm = Toolbox.get_frida_job_manager()
             with self._lock:
                 if on_message is not None:
@@ -1783,6 +3172,7 @@ class BypassService:
                     return False, "Bypass script unavailable"
                 try:
                     script.exports_sync.set_flags(flags)
+                    self._note_install_failures(script)
                 except Exception as exc:
                     logger.warning("[Bypass] set_flags failed: %s — reloading", exc)
                     self._reset_script_state()
@@ -1794,7 +3184,23 @@ class BypassService:
 
             return self._reconcile_and_register(target)
         finally:
+            with self._lock:
+                self._mutating = frozenset()
             self._mutate_lock.release()
+
+    def _note_install_failures(self, script) -> None:
+        """Count categories whose lazy install (on a live flip) threw.
+
+        At load a failure arrives as a ``merge_error`` message while we wait
+        for readiness; a category first turned on by ``set_flags`` installs
+        inside that RPC, so ask the script instead of racing the message.
+        """
+        try:
+            failed = script.exports_sync.install_failures() or []
+        except Exception:
+            return
+        with self._lock:
+            self._merge_errors.update(str(c) for c in failed)
 
     def _reconcile_and_register(self, target) -> tuple[bool, str]:
         """Reconcile ``_active`` against merge errors and update TaskService."""
@@ -1817,6 +3223,22 @@ class BypassService:
     def _arm(self, category: str) -> None:
         with self._lock:
             self._armed.add(category)
+
+    def _arm_unless_claimed(self, category: str) -> str | None:
+        """Arm ``category`` unless another source holds the bypasses.
+
+        Check and arm happen under one lock acquisition, so a concurrent
+        :meth:`claim_exclusive` sees either the armed category or nothing.
+
+        Returns:
+            None when armed, else the refusal message.
+        """
+        with self._lock:
+            conflict = self.exclusive_conflict([category])
+            if conflict:
+                return conflict
+            self._armed.add(category)
+        return None
 
     def _disarm(self, category: str) -> None:
         with self._lock:
@@ -1846,6 +3268,9 @@ class BypassService:
         cls = self._manager_class(category)
         if cls is None:
             return False, f"Unknown bypass category: {category}"
+        conflict = self.exclusive_conflict([category])
+        if conflict:
+            return False, conflict
         with self._lock:
             if category in self._active:
                 return True, f"{self.display_name(category)} already active"
@@ -1892,8 +3317,10 @@ class BypassService:
             currently_on = category in self._armed or category in self._active
 
         if not currently_on:
-            # Turning ON.
-            self._arm(category)
+            # Turning ON (arming counts: refused while Dexray holds bypasses).
+            conflict = self._arm_unless_claimed(category)
+            if conflict:
+                return False, conflict
             if self._spotlight_running():
                 with self._lock:
                     target = set(self._active) | {category}
@@ -1901,6 +3328,11 @@ class BypassService:
                 if not ok:
                     self._disarm(category)
                     return False, msg
+                if getattr(self._manager_class(category), "APPLY_AT_SPAWN", False):
+                    return True, (
+                        f"{name} active — restart the app (R) so checks it "
+                        "ran at startup see it too"
+                    )
                 return True, f"{name} active"
             return True, f"{name} armed — Start to apply"
 
@@ -2054,6 +3486,10 @@ class BypassService:
 
         spotlight = get_spotlight_service()
         cats = set(categories)
+        if cats:
+            conflict = self.exclusive_conflict(cats)
+            if conflict:
+                return False, conflict  # before spawning anything
 
         # A fresh spawn invalidates any prior job (it lives on a now dead/
         # replaced process). Clear script state up front so set_active loads
@@ -2174,6 +3610,10 @@ class BypassService:
 
         spotlight = get_spotlight_service()
         do_spawn = spawn_fn or self.apply_to_fresh_spawn
+        if categories:
+            conflict = self.exclusive_conflict(categories)
+            if conflict:
+                return False, conflict  # not a spawn failure: no retry ladder
 
         # Gate: the ladder only augments spawn mode. Outside it, behave EXACTLY
         # like the pre-change single call.

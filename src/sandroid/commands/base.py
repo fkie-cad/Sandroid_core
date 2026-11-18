@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from sandroid.services import ForensicService, SpotlightService, TaskService
 
 
-class CommandCategory(str, Enum):
+class CommandCategory(str, Enum):  # noqa: UP042 (StrEnum changes str())
     """Categories for organizing commands."""
 
     FORENSIC = "forensic"
@@ -137,8 +137,8 @@ class CommandContext:
         app: Reference to the running ``SandroidTUI`` app instance, if reachable.
             Only populated on the TUI's live worker-thread key-dispatch path
             (``MainScreen._execute_action_sync``); headless/API/test contexts
-            leave this ``None``. A handful of commands (recorder/player/
-            trigdroid) use it to drive the real ``action_*`` methods via
+            leave this ``None``. A handful of commands (recorder/player)
+            use it to drive the real ``action_*`` methods via
             ``app.call_from_thread`` instead of returning an inert message.
     """
 

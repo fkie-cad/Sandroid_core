@@ -123,7 +123,6 @@ _SERVICE_PROPERTY_TABLE: list[tuple[str, str, str | None, str | None]] = [
         "set_changed_files_cache",
     ),
     # ---- TrigDroidConfigService ----
-    ("trigdroid_bypass_config", "get_trigdroid_config_service", "bypass_config", None),
     ("trigdroid_spawn_mode", "get_trigdroid_config_service", "spawn_mode", None),
     ("trigdroid_auto_resume", "get_trigdroid_config_service", "auto_resume", None),
 ]
@@ -184,7 +183,7 @@ class Toolbox(metaclass=_ToolboxMeta):
     - baseline, noise_files, _timestamps_shadow_dict_list, noise_processes,
       other_output_data_collector, file_paths_whitelist -> ForensicService
     - changed_files_cache -> ActionWindowService
-    - trigdroid_bypass_config, trigdroid_spawn_mode, trigdroid_auto_resume -> TrigDroidConfigService
+    - trigdroid_spawn_mode, trigdroid_auto_resume -> TrigDroidConfigService
 
     Method delegation (via classmethod one-liners):
     - Frida operations -> FridaSessionService

@@ -4,7 +4,8 @@ This package provides Textual-native modal dialogs that replace
 Rich-based dialogs when running in TUI mode.
 """
 
-# MonitorConfig is canonically defined in the controller; re-export for convenience
+# Canonically defined elsewhere; re-exported for convenience.
+from sandroid.core.enums import SpawnMode
 from sandroid.tui.controllers.monitor_controller import MonitorConfig
 
 from .apk_install_modal import APKInstallModal, APKInstallResult
@@ -67,7 +68,6 @@ from .snapshot_save_choice_modal import (
 from .spawn_mode_modal import SpawnModeModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
 from .tool_selection_modal import ToolSelectionModal
-from .trigdroid_modal import SpawnMode, TrigDroidConfig, TrigDroidModal
 
 __all__ = [
     "APKInstallModal",
@@ -142,8 +142,6 @@ __all__ = [
     "SpawnModeModal",
     "ToggleConfigModal",
     "ToolSelectionModal",
-    "TrigDroidConfig",
-    "TrigDroidModal",
     "build_objection_command",
     "ensure_frida_running",
     "get_default_forensic_apks_folder",

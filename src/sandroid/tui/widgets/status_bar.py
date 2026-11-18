@@ -85,7 +85,8 @@ class StatusBar(Static):
         self.spotlight_pid: int | None = None
         self.spotlight_paused = False
         self.hook_count = 0  # running hook tasks for the spotlight app
-        self.bypass_categories: list[str] = []  # 0-5 of ssl/root/frida/debug/integrity
+        # Armed/active bypass categories, in BypassService display order.
+        self.bypass_categories: list[str] = []
         self.tools_checking = True
         self.sqldiff_available = False
         self.objection_available = False
@@ -258,8 +259,7 @@ class StatusBar(Static):
         segs.append(f"[{muted}]Frida[/] {frida}")
 
         # Hooks + bypass, only when something is active.
-        active = set(self.bypass_categories)
-        on = [c for c in ("ssl", "root", "frida", "debug", "integrity") if c in active]
+        on = list(self.bypass_categories)
         if self.hook_count or on:
             bypass = f" [{muted}]· bypass[/] [{run}]{' '.join(on)}[/]" if on else ""
             segs.append(f"[{muted}]Hooks[/] [b]{self.hook_count}[/]{bypass}")
@@ -424,12 +424,15 @@ class StatusBar(Static):
         except Exception:
             pass
 
-        # Bypass categories armed/active (0-5 of ssl/root/frida/debug/integrity).
-        # In-process read — NOT the hook count above.
+        # Bypass categories armed/active, in display order (every category
+        # BypassService knows, emulator included). In-process read — NOT the
+        # hook count above.
         try:
             from sandroid.analysis.detection_bypass import get_bypass_service
 
-            self.bypass_categories = list(get_bypass_service().on_categories())
+            svc = get_bypass_service()
+            on = set(svc.on_categories())
+            self.bypass_categories = [c for c in svc.categories() if c in on]
         except Exception:
             self.bypass_categories = []
 

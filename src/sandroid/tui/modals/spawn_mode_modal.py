@@ -114,7 +114,7 @@ class SpawnModeModal(FridaModal[str | None]):
             yield Static(
                 "[bold class=mode-key][A][/] [bold class=mode-title]Multi-tool Mode[/] (Spawn + Pause)\n"
                 "[dim]App spawns but stays paused. Add multiple tools[/]\n"
-                "[dim](FriTap, Dexray, TrigDroid bypass) before resume.[/]",
+                "[dim](FriTap, Dexray, bypasses) before resume.[/]",
                 classes="mode-option",
                 id="option-multi",
             )

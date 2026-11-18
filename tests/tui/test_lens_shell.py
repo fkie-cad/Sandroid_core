@@ -468,6 +468,14 @@ async def test_b_then_digit_toggles_bypass(monkeypatch) -> None:
         await _settle(pilot)
         assert toggles == ["root"]
         assert type(app.screen).__name__ == "MainScreen"
+        await pilot.press("b", "6")
+        await _settle(pilot)
+        assert toggles == ["root", "emulator"]
+        assert app.screen.active_lens == "app"
+        await pilot.press("t")  # retired TrigDroid key: opens nothing
+        await _settle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert toggles == ["root", "emulator"]
 
 
 async def test_zero_and_s_open_the_snapshot_picker() -> None:
@@ -907,33 +915,23 @@ async def test_lens_switch_closes_the_inspector_of_another_lens() -> None:
         assert ms.inspector_is_open
 
 
-def test_bypass_digits_mean_the_same_in_chord_and_objection() -> None:
-    """M3: ``b`` 3 was Frida but Objection's [3] was Emulator."""
-    from sandroid.tui.modals.objection_modal import (
-        _OBJECTION_OPTIONS,
-        BYPASS_KEYS,
-        ObjectionModal,
-    )
+def test_bypass_chord_reads_the_one_digit_table() -> None:
+    """The ``b`` chord's digits come from the one ``BYPASS_KEYS`` table."""
+    from sandroid.tui.modals.objection_modal import BYPASS_KEYS
     from sandroid.tui.widgets.spotlight_panel import _BYPASS_TOGGLES
 
     chord = {key: cat for key, cat, _label in _BYPASS_TOGGLES}
     assert chord == {key: cat for key, cat, _label in BYPASS_KEYS}
-    objection = {
-        b.key: b.action.removeprefix("toggle_")
-        for b in ObjectionModal.BINDINGS
-        if b.action.startswith("toggle_") and b.action != "toggle_spawn"
-    }
-    for key, category in objection.items():
-        if key.isdigit():
-            assert chord[key] == category, key
-        assert category in _OBJECTION_OPTIONS
-    assert objection["e"] == "emulator"
 
 
-async def test_objection_modal_digits_toggle_the_chord_categories() -> None:
+async def test_objection_modal_offers_no_bypass_toggles() -> None:
+    """Objection no longer loads TrigDroid's bypass script: no digit toggles."""
     from textual.app import App
 
-    from sandroid.tui.modals.objection_modal import ObjectionModal
+    from sandroid.tui.modals.objection_modal import ObjectionConfig, ObjectionModal
+
+    assert not [b for b in ObjectionModal.BINDINGS if b.key.isdigit()]
+    assert set(ObjectionConfig.__dataclass_fields__) == {"spawn_mode"}
 
     class Harness(App):
         def on_mount(self) -> None:
@@ -944,14 +942,9 @@ async def test_objection_modal_digits_toggle_the_chord_categories() -> None:
         await _settle(pilot)
         modal = app.screen
         assert isinstance(modal, ObjectionModal)
-        await pilot.press("3")  # Frida, as in the b chord
-        assert modal.config.frida_detection is True
-        assert modal.config.emulator_detection is False
-        await pilot.press("e")
-        assert modal.config.emulator_detection is True
-        text = str(modal.query_one("#option-frida").render())
-        assert "●" in text
-        assert "3" in text
+        await pilot.press("s")
+        assert modal.config.spawn_mode is False
+        assert not modal.query(".bypass-option")
 
 
 @pytest.mark.parametrize("size", [(80, 24), (160, 45)])
@@ -993,7 +986,7 @@ async def test_help_fits_small_terminals_and_lists_every_global_key(size) -> Non
         nav = [r for r in rows if re.match(r"(App|Network|Files|Runs) lens ", r)]
         assert [n.split()[0] for n in nav[:4]] == ["App", "Network", "Files", "Runs"]
         bypass = rows.index(next(r for r in rows if "b bypass" in r))
-        section = rows[bypass + 1 : bypass + 7]
+        section = rows[bypass + 1 : bypass + 8]
         assert sum("Objection" in r for r in section) == 1
         await pilot.press("escape")
 
@@ -1187,7 +1180,7 @@ def test_force_exit_stops_mitmweb_first_and_bounds_hung_steps(monkeypatch):
 
     from sandroid import services
 
-    monkeypatch.setattr(services, "get_task_service", lambda: _Tasks())
+    monkeypatch.setattr(services, "get_task_service", _Tasks)
     real_bounded = qc.run_bounded
     monkeypatch.setattr(
         qc, "run_bounded", lambda name, fn, timeout: real_bounded(name, fn, 0.2)

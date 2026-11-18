@@ -16,7 +16,6 @@ Controllers:
     - RecordingController: Input recording and playback
     - ScreenshotController: Screenshot operations
     - SpotlightController: Spotlight files management
-    - TrigDroidController: TrigDroid bypass management
     - WidgetRefreshController: Widget refresh operations
 
 Usage:
@@ -32,7 +31,6 @@ Usage:
         QuitController,
         ScreenshotController,
         SpotlightController,
-        TrigDroidController,
         ForensicAPKController,
         WidgetRefreshController,
     )
@@ -65,7 +63,6 @@ from .screenshot_controller import ScreenshotController
 from .settings_controller import SettingsController
 from .spotlight_controller import SpotlightController, SpotlightFilesAction
 from .spotlight_selection_ui import SpotlightSelectionUI
-from .trigdroid_controller import TrigDroidConfig, TrigDroidController
 from .widget_refresh_controller import WidgetRefreshController
 
 __all__ = [
@@ -104,9 +101,6 @@ __all__ = [
     "SpotlightController",
     "SpotlightFilesAction",
     "SpotlightSelectionUI",
-    "TrigDroidConfig",
-    # TrigDroid
-    "TrigDroidController",
     # Widget Refresh
     "WidgetRefreshController",
 ]

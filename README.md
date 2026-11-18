@@ -59,7 +59,7 @@ Sandroid's default interface is an interactive terminal UI (Textual) built aroun
 
 | Key | Lens | What it shows |
 |---|---|---|
-| `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`5` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity), `b` `o` opens Objection. |
+| `1` | **App** | The app under investigation: start / resume (`Enter`), attach (`A`), start paused (`P`), restart (`R`), kill (`K`), clear (`X`); `b` then `1`–`6` toggles the Frida bypass categories (SSL, Root, Frida, Debug, Integrity, Emulator), `b` `o` opens Objection. |
 | `2` | **Network** | Who the app talks to and what it sent: one flow table (time · recipient · request · status · size) from the embedded `mitmweb`, `Enter` for Summary / Request / Response in the Inspector; TLS failures show as ✗ rows. `/` filters (host, path, app or status; `Esc` clears it), `T` shows the spotlight (target) app only, `N` shows OS noise (hidden by default; the caption says how many flows it hides). `Home`/`End` jump to the first/last flow. Proxy state sits in the frame caption; `I` opens the Capture status page (mitmproxy + friTap). See below. |
 | `3` | **Files** | One table of live file activity per file; watched files (★, `w`) are pinned on top and pulled/diffed with `u`/`U`. `N` shows the hidden noise (caches, temp files, OS paths), as in the Network lens. |
 | `4` | **Runs** | Record → Play run history with the changed / new / deleted diffs (see below). |

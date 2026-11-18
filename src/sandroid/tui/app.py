@@ -46,7 +46,6 @@ from sandroid.tui.controllers import (
     RecordingController,
     ScreenshotController,
     SpotlightController,
-    TrigDroidController,
     WidgetRefreshController,
 )
 from sandroid.tui.css_resolver import (
@@ -178,7 +177,6 @@ class SandroidTUI(App):
         Binding("g", "action_key('g')", "Screen Record", show=False, id="screenrecord"),
         # Analysis
         Binding("m", "action_key('m')", "Dexray", show=False, id="dexray"),
-        Binding("t", "trigdroid", "TrigDroid", show=False, id="trigdroid"),
         Binding(
             "k", "action_key('k')", "Reconfigure Hooks", show=False,
             id="reconfigure_hooks",
@@ -367,15 +365,6 @@ class SandroidTUI(App):
             log_success=cb.log_success,
             push_modal=cb.push_modal,
             get_current_view=cb.get_current_view,
-        )
-
-        self._trigdroid_controller = TrigDroidController(
-            log_info=cb.log_info,
-            log_warning=cb.log_warning,
-            log_error=cb.log_error,
-            log_success=cb.log_success,
-            push_modal=cb.push_modal,
-            force_ui_refresh=cb.force_ui_refresh,
         )
 
         self._forensic_apk_controller = ForensicAPKController(
@@ -1706,10 +1695,7 @@ class SandroidTUI(App):
         def on_config(config):
             if config is None:
                 return
-            bypass_script = (
-                self._find_bypass_script() if config.use_bypass_script else None
-            )
-            cmd = build_objection_command(package_name, config, bypass_script)
+            cmd = build_objection_command(package_name, config)
             self.push_screen(
                 ObjectionTerminalScreen(
                     cmd=cmd, package_name=package_name, spawn_mode=config.spawn_mode
@@ -1717,23 +1703,6 @@ class SandroidTUI(App):
             )
 
         self.push_screen(ObjectionModal(package_name=package_name), on_config)
-
-    @staticmethod
-    def _find_bypass_script() -> str | None:
-        """Locate the TrigDroid bypass RPC script."""
-        try:
-            import importlib.resources as pkg_resources
-
-            ref = (
-                pkg_resources.files("trigdroid") / "scripts" / "trigdroid_bypass_rpc.js"
-            )
-            path = str(ref)
-            if Path(path).exists():
-                return path
-        except Exception:
-            pass
-        local = Path(__file__).parent.parent / "analysis" / "trigdroid_bypass_rpc.js"
-        return str(local) if local.exists() else None
 
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()
@@ -2037,9 +2006,6 @@ class SandroidTUI(App):
 
     def action_network_capture(self) -> None:
         self._network_capture_controller.toggle_or_show_modal()
-
-    def action_trigdroid(self) -> bool:
-        return self._trigdroid_controller.toggle_trigdroid()
 
     def _refresh_status_bar(self) -> None:
         try:

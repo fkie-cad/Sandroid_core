@@ -220,7 +220,12 @@ class HookConfiguration:
         },
         "services": {
             "name": "Service Hooks",
-            "description": "Bluetooth, camera, clipboard, location, telephony",
+            # telephony_hooks replace the TelephonyManager methods the
+            # Bypass (b) emulator category replaces: the two exclude each other.
+            "description": (
+                "Bluetooth, camera, clipboard, location, telephony "
+                "(telephony conflicts with the Emulator bypass, b 6)"
+            ),
             "hooks": [
                 "bluetooth_hooks",
                 "camera_hooks",
@@ -229,9 +234,12 @@ class HookConfiguration:
                 "telephony_hooks",
             ],
         },
+        # Dexray's own bypass group. Never runs alongside BypassService (the
+        # App lens's Bypass (b) categories): MalwareMonitor refuses to start
+        # with it while a b category is on, and vice versa.
         "bypass": {
-            "name": "Anti-Analysis Bypass Hooks",
-            "description": "Root, frida, debugger, emulator detection",
+            "name": "Anti-Analysis Bypass Hooks (conflicts with Bypass (b))",
+            "description": "Root, frida, debugger, emulator, hook detection",
             "hooks": ["bypass_hooks"],
         },
     }

@@ -15,42 +15,17 @@ if TYPE_CHECKING:
     from textual.app import ComposeResult
 
 
-#: The ONE digit -> bypass category table. The App lens's ``b`` chord
-#: (``spotlight_panel.BypassChordModal``) and this Objection modal both read
-#: it, so the same digit never toggles a different hook in the two menus.
-#: (key, category, short label)
+#: The ONE digit -> bypass category table for the App lens's ``b`` chord
+#: (``spotlight_panel.BypassChordModal``). Kept here so existing imports keep
+#: working; every bypass comes from ``BypassService`` (key, category, label).
 BYPASS_KEYS: tuple[tuple[str, str, str], ...] = (
     ("1", "ssl", "SSL"),
     ("2", "root", "Root"),
     ("3", "frida", "Frida"),
     ("4", "debug", "Debug"),
     ("5", "integrity", "Integrity"),
+    ("6", "emulator", "Emulator"),
 )
-
-#: Objection's TrigDroid script has no integrity hooks but an emulator one:
-#: emulator detection gets its own letter (``e``) instead of a digit, so the
-#: digits keep the meaning they have in the ``b`` chord.
-_EMULATOR_KEY = "e"
-
-#: Bypass category -> (ObjectionConfig field, row label, note).
-_OBJECTION_OPTIONS: dict[str, tuple[str, str, str]] = {
-    "ssl": ("ssl_unpinning", "SSL/TLS Unpinning", ""),
-    "root": ("root_detection", "Root Detection Bypass", ""),
-    "frida": (
-        "frida_detection",
-        "Frida Detection Bypass",
-        " [dim](requires SPAWN)[/dim]",
-    ),
-    "debug": ("debug_detection", "Debug Detection Bypass", ""),
-    "emulator": ("emulator_detection", "Emulator Detection Bypass", ""),
-}
-
-
-def objection_option_keys() -> list[tuple[str, str]]:
-    """``[(key, category)]`` the Objection modal offers, in display order."""
-    keys = [(k, c) for k, c, _label in BYPASS_KEYS if c in _OBJECTION_OPTIONS]
-    keys.append((_EMULATOR_KEY, "emulator"))
-    return keys
 
 
 @dataclass
@@ -58,20 +33,15 @@ class ObjectionConfig:
     """Configuration for objection launch."""
 
     spawn_mode: bool = True  # True for spawn (-s), False for attach
-    ssl_unpinning: bool = True
-    root_detection: bool = True
-    emulator_detection: bool = False
-    frida_detection: bool = False
-    debug_detection: bool = False
-    use_bypass_script: bool = True  # Load trigdroid_bypass_rpc.js (start -S)
 
 
 class ObjectionModal(FridaModal[ObjectionConfig | None]):
-    """Modal for configuring objection launch with bypass hooks.
+    """Modal for configuring an objection launch (spawn or attach).
 
-    Objection creates its own Frida session, so it cannot use JobManager.
-    Instead, the TrigDroid bypass script can be loaded via the -s flag:
-        objection -n com.example.app start -S trigdroid_bypass_rpc.js
+    Objection creates its own Frida session, so it cannot use JobManager or
+    the BypassService script. Detection bypasses come from the App lens's
+    ``b`` chord (BypassService) only; this modal no longer loads TrigDroid's
+    bypass script.
 
     Returns:
         ObjectionConfig with selected options, or None if cancelled.
@@ -96,35 +66,6 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         height: 1;
     }
 
-    ObjectionModal .bypass-section {
-        width: 100%;
-        padding: 0;
-        margin: 0;
-    }
-
-    ObjectionModal .bypass-section-title {
-        color: $success;
-        text-style: bold;
-        height: 1;
-        margin-top: 1;
-    }
-
-    ObjectionModal .bypass-option {
-        width: 100%;
-        height: 1;
-        padding: 0 2;
-        margin: 0;
-        background: $panel;
-    }
-
-    ObjectionModal .bypass-option.enabled {
-        color: $success;
-    }
-
-    ObjectionModal .bypass-option.disabled {
-        color: $text-muted;
-    }
-
     ObjectionModal #spawn-mode-option {
         width: 100%;
         height: 1;
@@ -133,20 +74,19 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         background: $panel;
         color: $foreground;
     }
+
+    ObjectionModal #objection-bypass-note {
+        width: 100%;
+        height: auto;
+        padding: 0 2;
+        margin-top: 1;
+        color: $text-muted;
+    }
     """
 
     BINDINGS = [
         Binding("enter", "confirm", "Launch", priority=True),
         Binding("s", "toggle_spawn", "Spawn Mode", show=False),
-        *[
-            Binding(
-                key,
-                f"toggle_{category}",
-                _OBJECTION_OPTIONS[category][1],
-                show=False,
-            )
-            for key, category in objection_option_keys()
-        ],
     ]
 
     AUTO_FOCUS = ".modal-container"
@@ -181,19 +121,15 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
             )
 
             yield Static(self._spawn_text(), id="spawn-mode-option")
+            yield Static(
+                "[dim]Objection loads no bypass hooks: detection bypasses "
+                "come only from the App lens's b chord.[/dim]",
+                id="objection-bypass-note",
+            )
 
-            # Bypass options section (same digits as the App lens's b chord)
-            with Vertical(classes="bypass-section"):
-                yield Label("TrigDroid Bypass Hooks:", classes="bypass-section-title")
-                for key, category in objection_option_keys():
-                    yield Static("", id=f"option-{category}", classes="bypass-option")
-
-            keys = "/".join(k for k, _c in objection_option_keys())
             yield KeyHintFooter(
                 hints={
-                    "default": (
-                        f"[dim]s mode · {keys} toggle · Enter launch · Esc cancel[/dim]"
-                    ),
+                    "default": "[dim]s mode · Enter launch · Esc cancel[/dim]",
                 }
             )
 
@@ -210,86 +146,21 @@ class ObjectionModal(FridaModal[ObjectionConfig | None]):
         return "[b]s[/] Mode: [bold $success]● ATTACH[/] - Attach to running app"
 
     def _update_display(self) -> None:
-        """Update the visual state of all options."""
+        """Update the spawn-mode row."""
         try:
             spawn_option = self.query_one("#spawn-mode-option", Static)
         except Exception:
             return
         spawn_option.update(self._spawn_text())
         spawn_option.set_class(self.config.spawn_mode, "spawn-enabled")
-        for key, category in objection_option_keys():
-            field_name, label, note = _OBJECTION_OPTIONS[category]
-            self._update_bypass_option(
-                f"option-{category}",
-                key,
-                bool(getattr(self.config, field_name)),
-                label + note,
-            )
-
-    def _update_bypass_option(
-        self, option_id: str, key: str, enabled: bool, label: str
-    ) -> None:
-        """Update a single bypass option's display and CSS classes."""
-        option = self.query_one(f"#{option_id}", Static)
-        mark = "[$success]● on [/]" if enabled else "[dim]○ off[/]"
-        option.update(f"[b]{key}[/]  {mark}  {label}")
-        if enabled:
-            option.remove_class("disabled")
-            option.add_class("enabled")
-        else:
-            option.remove_class("enabled")
-            option.add_class("disabled")
 
     def action_toggle_spawn(self) -> None:
         """Toggle spawn mode."""
         self.config.spawn_mode = not self.config.spawn_mode
-        # Frida bypass works best in spawn mode
-        if not self.config.spawn_mode and self.config.frida_detection:
-            self.config.frida_detection = False
-        self._update_display()
-
-    def action_toggle_integrity(self) -> None:
-        """No Objection equivalent (kept so a stray binding is harmless)."""
-
-    def action_toggle_ssl(self) -> None:
-        """Toggle SSL unpinning."""
-        self.config.ssl_unpinning = not self.config.ssl_unpinning
-        self._update_display()
-
-    def action_toggle_root(self) -> None:
-        """Toggle root detection bypass."""
-        self.config.root_detection = not self.config.root_detection
-        self._update_display()
-
-    def action_toggle_emulator(self) -> None:
-        """Toggle emulator detection bypass."""
-        self.config.emulator_detection = not self.config.emulator_detection
-        self._update_display()
-
-    def action_toggle_frida(self) -> None:
-        """Toggle Frida detection bypass."""
-        self.config.frida_detection = not self.config.frida_detection
-        # Frida bypass requires spawn mode
-        if self.config.frida_detection and not self.config.spawn_mode:
-            self.config.spawn_mode = True
-        self._update_display()
-
-    def action_toggle_debug(self) -> None:
-        """Toggle debug detection bypass."""
-        self.config.debug_detection = not self.config.debug_detection
         self._update_display()
 
     def action_confirm(self) -> None:
         """Confirm and close modal."""
-        self.config.use_bypass_script = any(
-            (
-                self.config.ssl_unpinning,
-                self.config.root_detection,
-                self.config.emulator_detection,
-                self.config.frida_detection,
-                self.config.debug_detection,
-            )
-        )
         self._dismiss_with_refresh(self.config)
 
 
@@ -313,7 +184,6 @@ def _objection_executable() -> str:
 def build_objection_command(
     package_name: str,
     config: ObjectionConfig,
-    bypass_script_path: str | None = None,
     serial: str | None = None,
 ) -> list:
     """Build the objection (>= 1.12) command line.
@@ -333,7 +203,6 @@ def build_objection_command(
     Args:
         package_name: Target package name
         config: Objection configuration
-        bypass_script_path: Path to the trigdroid_bypass_rpc.js script
         serial: adb serial of the target device; defaults to the active
             Sandroid device (objection would otherwise pick the first USB
             device)
@@ -357,9 +226,4 @@ def build_objection_command(
         cmd.extend(["-s", "-p"])
 
     cmd.append("start")
-
-    # start's -S/--startup-script must come AFTER the subcommand
-    if config.use_bypass_script and bypass_script_path:
-        cmd.extend(["-S", bypass_script_path])
-
     return cmd

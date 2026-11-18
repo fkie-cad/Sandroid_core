@@ -172,10 +172,6 @@ TRIGDROID_HOOKS = ToolHookInfo(
     categories=[
         HookCategory.SENSORS,
         HookCategory.BUILD_PROPERTIES,
-        HookCategory.ROOT_DETECTION,
-        HookCategory.EMULATOR_DETECTION,
-        HookCategory.FRIDA_DETECTION,
-        HookCategory.DEBUG_DETECTION,
     ],
     native_hooks=[],
     java_hooks=[
@@ -189,17 +185,11 @@ TRIGDROID_HOOKS = ToolHookInfo(
         "android.os.Build.BRAND",
         "android.os.Build.DEVICE",
         "android.os.Build.FINGERPRINT",
-        # Root Detection Bypass (if enabled)
-        "java.io.File.exists",
-        "java.lang.Runtime.exec",
-        "android.app.ApplicationPackageManager.getPackageInfo",
-        # Debug Detection Bypass (if enabled)
-        "android.os.Debug.isDebuggerConnected",
     ],
     description="Automated malware trigger execution and analysis",
     dynamic_hooks=True,
-    notes="TrigDroid has its own API and session management. "
-    "SSL unpinning delegated to SSLUnpinManager (ssl_unpin).",
+    notes="TrigDroid has its own API and session management. Sandroid passes "
+    "it no bypass config: detection bypasses come only from BypassService.",
 )
 
 # ============================================================================
@@ -231,15 +221,15 @@ SSL_UNPIN_TOOL = ToolHookInfo(
     ],
     description="Comprehensive SSL/TLS pinning bypass for mitmproxy interception",
     dynamic_hooks=False,
-    notes="Used by mitmproxy panel (Ctrl+P) and TrigDroid (ssl_unpinning). "
+    notes="Used by mitmproxy panel (Ctrl+P) and the App lens's b chord. "
     "Shares session with other JobManager-based tools.",
 )
 
 # ============================================================================
 # NATIVE DETECTION BYPASSES (Sandroid built-in, BypassService)
 # ============================================================================
-# Self-contained Frida bypasses owned by BypassService — no trigdroid bundle
-# required. Hook scopes are disjoint *among these three* so the AFM runtime
+# Self-contained Frida bypasses owned by BypassService (the only source of
+# bypasses in Sandroid). Hook scopes are disjoint *among these three* so the AFM runtime
 # registry does not flag false intra-set conflicts. Native libc hooks may
 # still stack with Dexray/MalwareMonitor (Frida tolerates that); those
 # overlaps are advisory, not fatal.
@@ -249,10 +239,9 @@ FRIDA_DETECTION_BYPASS_TOOL = ToolHookInfo(
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.FRIDA_DETECTION, HookCategory.PROCESS],
     native_hooks=[
+        # /proc maps/smaps/status answered with a filtered memfd (no read hook)
         "open",
         "openat",
-        "read",
-        "close",
         "strstr",
         "exit",
         "_exit",
@@ -277,6 +266,14 @@ ROOT_DETECTION_BYPASS_TOOL = ToolHookInfo(
     categories=[HookCategory.ROOT_DETECTION, HookCategory.BUILD_PROPERTIES],
     native_hooks=[
         "__system_property_get",
+        # path hider (shared with the emulator bypass): -1/NULL + ENOENT
+        "access",
+        "faccessat",
+        "fopen",
+        "fopen64",
+        "stat",
+        "lstat",
+        "fstatat",
     ],
     java_hooks=[
         "java.io.File.exists",
@@ -297,7 +294,7 @@ DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
     session_type=SessionType.JOB_MANAGER,
     categories=[HookCategory.DEBUG_DETECTION],
     native_hooks=[
-        "read",  # /proc/self/status TracerPid filter (stacks with frida bypass)
+        "openat",  # /proc status TracerPid filter (shared with the frida bypass)
     ],
     java_hooks=[
         "android.os.Debug.isDebuggerConnected",
@@ -306,6 +303,58 @@ DEBUG_DETECTION_BYPASS_TOOL = ToolHookInfo(
     description="Defeat debugger-attached checks: isDebuggerConnected, "
     "waitingForDebugger, TracerPid filtering",
     dynamic_hooks=False,
+)
+
+EMULATOR_DETECTION_BYPASS_TOOL = ToolHookInfo(
+    name="emulator_detection_bypass",
+    display_name="Emulator Detection Bypass (exp.)",
+    session_type=SessionType.JOB_MANAGER,
+    categories=[
+        HookCategory.EMULATOR_DETECTION,
+        HookCategory.BUILD_PROPERTIES,
+    ],
+    native_hooks=[
+        # A listener stacked on __system_property_get; the file probes are
+        # the path hider's replacements, shared with the root bypass.
+        "__system_property_get",
+        "access",
+        "faccessat",
+        "fopen",
+        "fopen64",
+        "stat",
+        "lstat",
+        "fstatat",
+    ],
+    java_hooks=[
+        "android.os.Build.FINGERPRINT",
+        "android.os.Build.MODEL",
+        "android.os.Build.MANUFACTURER",
+        "android.os.Build.BRAND",
+        "android.os.Build.DEVICE",
+        "android.os.Build.PRODUCT",
+        "android.os.Build.HARDWARE",
+        "android.os.Build.BOARD",
+        "android.os.Build.TAGS",
+        "android.os.Build.TYPE",
+        "android.os.Build.DISPLAY",
+        "android.os.Build.IS_EMULATOR",
+        "android.os.Build.getSerial",
+        "android.os.SystemProperties.get",
+        "android.telephony.TelephonyManager.getDeviceId",
+        "android.telephony.TelephonyManager.getSubscriberId",
+        "android.telephony.TelephonyManager.getLine1Number",
+        "android.telephony.TelephonyManager.getSimSerialNumber",
+        "android.telephony.TelephonyManager.getNetworkOperatorName",
+        "android.telephony.TelephonyManager.getNetworkOperator",
+        "android.telephony.TelephonyManager.getPhoneType",
+        "android.telephony.TelephonyManager.getSimState",
+    ],
+    description="One coherent device profile for Build.*, qemu/goldfish/ranchu "
+    "property hiding, emulator file/pipe hiding, TelephonyManager fakes",
+    dynamic_hooks=False,
+    notes="Ported from TrigDroid's emulator-detection hooks and Dexray "
+    "Intercept's emulator bypass. Native spoofing answers app callers only. "
+    "Arm before Start: apps check this at startup.",
 )
 
 # ============================================================================
@@ -512,6 +561,7 @@ KNOWN_TOOLS: dict[str, ToolHookInfo] = {
     "frida_detection_bypass": FRIDA_DETECTION_BYPASS_TOOL,
     "root_detection_bypass": ROOT_DETECTION_BYPASS_TOOL,
     "debug_detection_bypass": DEBUG_DETECTION_BYPASS_TOOL,
+    "emulator_detection_bypass": EMULATOR_DETECTION_BYPASS_TOOL,
     "malwaremonitor": MALWARE_MONITOR_HOOKS,
 }
 
