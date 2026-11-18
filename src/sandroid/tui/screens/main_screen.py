@@ -950,12 +950,13 @@ class MainScreen(Screen):
     # 2. ``on_key`` routing: a key the focus chain does not handle but the
     #    active lens binds runs on the lens (lens keys never fall through to a
     #    dead end because focus wandered off).
-    # 3. Typing guard: ``/`` that finds no filter to open (the lens has none)
-    #    starts a short window in which single-letter app commands are not
-    #    run -- the word typed after it is text, not commands.
+    # 3. Typing guard: ``/`` that finds no filter to open (the lens has none),
+    #    or a stray-typing cancel of the Quit / Play confirm, starts a short
+    #    window in which every printable key is swallowed -- the word typed
+    #    after it is text, not commands (see ``swallow_stray_key``).
 
-    #: Seconds after an unhandled ``/`` (and after each further typed key)
-    #: during which single-letter app commands are swallowed.
+    #: Seconds after an unhandled ``/`` or a stray-typing cancel (and after
+    #: each further swallowed key) during which printable keys are swallowed.
     TYPING_GUARD_SECONDS = 1.5
 
     @property
@@ -1034,6 +1035,39 @@ class MainScreen(Screen):
 
         return self._typing_until > time.monotonic()
 
+    def swallow_stray_key(self, event) -> bool:
+        """Swallow ``event`` if it is the rest of a stray word (True if so).
+
+        Called by the app's key router before the key is routed at all, so
+        no binding can run it: not the app's or this screen's (``y`` Proxy),
+        not the active lens's (``w`` watch + pull, ``z`` zoom diff; E2E round
+        3 N1), not a priority one (``D``, ``?``), not a key handler.
+
+        Swallowed: every printable key -- letters, digits (a stray word may
+        hold one, "sqlite3"; a lens switch would leave the lens), punctuation
+        and space. Passed: keys that are not typing -- Escape, Enter, Tab,
+        arrows, paging, F-keys, Ctrl/Alt combos -- and anything typed into a
+        text field. Each swallowed key extends the window, so a word of any
+        length is swallowed; a pause of ``TYPING_GUARD_SECONDS`` ends it.
+        """
+        import time
+
+        from textual.widgets import Input, TextArea
+
+        now = time.monotonic()
+        if self._typing_until <= now:
+            if self._typing_until:
+                self._typing_until = 0.0
+                self._typed_ignored = ""
+            return False
+        if self.app.screen is not self or not event.is_printable:
+            return False
+        if isinstance(self.focused, Input | TextArea):
+            return False
+        self._typing_until = now + self.TYPING_GUARD_SECONDS
+        self._typed_ignored += event.character or ""
+        return True
+
     def _lens_binding_for(self, key: str):
         """The active lens's enabled binding for ``key`` (None if it has none)."""
         lens = self.lens_widget()
@@ -1076,20 +1110,8 @@ class MainScreen(Screen):
             await self.app.run_action(lens_binding.action, lens)
             return
 
+        # The typed word itself is swallowed before routing (swallow_stray_key).
         now = time.monotonic()
-        single = event.character is not None and len(key) == 1 and key.isalnum()
-        if (
-            self._typing_until > now
-            and single
-            and active is not None
-            and active.node in (self, self.app)
-        ):
-            # Part of a word typed after a "/" that opened nothing.
-            event.stop()
-            event.prevent_default()
-            self._typing_until = now + self.TYPING_GUARD_SECONDS
-            self._typed_ignored += event.character or ""
-            return
         if self._typing_until and self._typing_until <= now:
             self._typing_until = 0.0
             self._typed_ignored = ""

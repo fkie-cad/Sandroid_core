@@ -506,7 +506,9 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
 
             yield KeyHintFooter(
                 hints={
-                    "default": "[dim]Enter=Start  Esc=Cancel  Tab=Navigate[/dim]",
+                    # Shown on the Follow checkbox: Enter starts there too.
+                    "default": "[dim]Enter=Start  Space=Toggle  Esc=Cancel  "
+                    "Tab=Navigate[/dim]",
                     "input": "[dim]Enter=Start  Tab=Next  Esc=Cancel[/dim]",
                     "radioset": "[dim]↑↓=Select Mode  Space=Toggle  Tab=Next  Esc=Cancel[/dim]",
                 }
@@ -541,6 +543,16 @@ class MonitorConfigModal(ForensicModal[MonitorConfig]):
         navigation and toggle since Textual's binding system may not
         properly route events through modal inheritance.
         """
+        # Enter on the Follow checkbox starts, as on the mode choice and the
+        # path field ("Enter=Start"); Space toggles it (E2E round 3 N7: the
+        # checkbox's own Enter binding toggled it).
+        focused = self.app.focused
+        if event.key == "enter" and isinstance(focused, Checkbox):
+            event.stop()
+            event.prevent_default()
+            self._start()
+            return
+
         # Only handle RadioSet keys if the mode choice (RadioSet) exists
         if self._has_mode_choice:
             key = event.key.lower() if event.key else ""

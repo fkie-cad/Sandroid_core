@@ -1050,6 +1050,13 @@ class SandroidTUI(App):
             target = self.focused or self.screen
         except Exception:
             self._key_screen = target = None
+        swallow = getattr(self._key_screen, "swallow_stray_key", None)
+        if swallow is not None and swallow(event):
+            # The rest of a stray word (E2E round 3 N1): no binding at all,
+            # the active lens's included, may run it.
+            logger.debug(f"Key {event.key!r} swallowed: stray typing")
+            self.call_later(self._key_done, event)
+            return
         await super().on_event(event)
         if target is None or not event.is_forwarded:
             # Handled by a priority binding (or nowhere to go).

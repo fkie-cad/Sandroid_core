@@ -1852,6 +1852,73 @@ async def test_quit_cancelled_as_typing_never_runs_the_next_letter(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("opener", "lens_key", "action"),
+    [("q", "w", "toggle_watch"), ("p", "z", "zoom")],
+)
+async def test_lens_key_after_a_stray_typing_cancel_never_runs(
+    monkeypatch, opener: str, lens_key: str, action: str
+) -> None:
+    """E2E round 3 N1: ``q x w`` cancelled the quit as typing, then ``w``
+    added a watch and pulled the file; ``p x z`` opened the zoom diff. The
+    stray window swallowed only app/screen bindings, not the lens's own.
+    One burst, as typed.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
+        panel.refresh_rows()
+        panel.table.focus()
+        ran: list[str] = []
+        exits: list[int] = []
+        monkeypatch.setattr(panel, f"action_{action}", lambda: ran.append(action))
+        monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
+        # p: the Play confirm (a recording present), not a device revert.
+        monkeypatch.setattr(app, "action_play", app._confirm_play)
+        await _until_idle(pilot, 4)
+        _burst(app, opener, "x", lens_key)
+        await _until_idle(pilot)
+        assert type(app.screen).__name__ == "MainScreen"
+        assert any("looked like typing" in n.message for n in app._notifications)
+        assert ran == []
+        assert exits == []
+        assert ms._typed_ignored == lens_key
+        # The window is over: the lens key works again.
+        ms._typing_until = 0.0
+        await pilot.press(lens_key)
+        await _until_idle(pilot, 4)
+        assert ran == [action]
+
+
+@pytest.mark.asyncio
+async def test_stray_window_passes_keys_that_are_not_typing(monkeypatch) -> None:
+    """Only printable keys are swallowed: arrows (and Esc, Enter, Tab) still
+    work right after a stray-typing cancel.
+    """
+    from sandroid.tui.app import SandroidTUI
+
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        ms, panel = await _boot_files(pilot, app)
+        panel.ingest(
+            _items(_fse("FSE_CREATE_FILE", AAID), _fse("FSE_CREATE_FILE", PREFS)),
+            now=T0,
+        )
+        panel.refresh_rows()
+        panel.table.focus()
+        await _until_idle(pilot, 4)
+        row = panel.table.cursor_row
+        _burst(app, "q", "x", "3", "down")
+        await _until_idle(pilot)
+        assert ms.typing_guard_active()
+        assert ms._typed_ignored == "3"
+        assert panel.table.cursor_row == row + 1
+
+
+@pytest.mark.asyncio
 async def test_first_key_after_declining_play_is_not_lost(monkeypatch) -> None:
     """M1: Enter declined the Play confirm and the ``p`` typed right behind
     it was dropped: it went to the closing dialog, which took it for stray
