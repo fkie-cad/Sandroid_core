@@ -34,6 +34,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from sandroid.core.adb_utils import quote_host_arg, validate_snapshot_name
@@ -186,16 +187,20 @@ class EmulatorService:
     def take_screenshot(self, filename: str | None = None) -> str | None:
         """Take a screenshot of the Android device.
 
-        Uses the emulator's telnet screenrecord command to capture.
+        Captures via the emulator console (``screenrecord screenshot``); when
+        that leaves no file -- the console answers ``OK`` even when it could
+        not write, it splits paths on spaces, and it doesn't exist on a
+        physical device -- falls back to ``screencap`` on the device + pull.
 
         Args:
             filename: Optional custom filename. If None, generates timestamped name.
 
         Returns:
-            Path to the saved screenshot file, or None if failed.
+            Absolute path to the saved screenshot file, or None if failed.
         """
-        # Get screenshots directory
-        screenshots_dir = self._get_screenshots_dir()
+        # Absolute: the emulator console resolves a relative path against
+        # the emulator process's working directory, not Sandroid's.
+        screenshots_dir = os.path.abspath(self._get_screenshots_dir())
         os.makedirs(screenshots_dir, exist_ok=True)
 
         # Generate filename if not provided
@@ -207,19 +212,26 @@ class EmulatorService:
         if not filename.endswith(".png"):
             filename += ".png"
 
-        full_path = os.path.join(screenshots_dir, filename)
+        full_path = os.path.join(screenshots_dir, os.path.basename(filename))
 
-        # Take screenshot via telnet
         self._logger.info(f"Taking screenshot: {full_path}")
         adb = self._get_adb()
+        # A file of the same name may already exist: only a newer one counts.
+        target = Path(full_path)
+        before = target.stat().st_mtime if target.exists() else None
 
         try:
-            _stdout, stderr = adb.send_telnet_command(
-                f"screenrecord screenshot {full_path}"
-            )
-
-            if stderr:
-                self._logger.error(f"Failed to capture screenshot: {stderr}")
+            if " " not in full_path:
+                _stdout, stderr = adb.send_telnet_command(
+                    f"screenrecord screenshot {full_path}"
+                )
+                if stderr:
+                    self._logger.debug(f"Console screenshot failed: {stderr}")
+            if not self._wait_for_file(full_path, before, timeout=1.0):
+                self._logger.debug("No console screenshot; trying screencap")
+                self._screencap_and_pull(adb, full_path)
+            if not self._wait_for_file(full_path, before, timeout=0):
+                self._logger.error(f"Failed to capture screenshot to {full_path}")
                 return None
 
             self._logger.info(f"Screenshot saved to {full_path}")
@@ -231,6 +243,35 @@ class EmulatorService:
         except Exception as e:
             self._logger.error(f"Screenshot failed: {e}")
             return None
+
+    @staticmethod
+    def _wait_for_file(
+        path: str, older_mtime: float | None, timeout: float = 1.0
+    ) -> bool:
+        """Return True once a non-empty *path* newer than *older_mtime* exists."""
+        deadline = time.monotonic() + timeout
+        while True:
+            target = Path(path)
+            if target.is_file():
+                stat = target.stat()
+                if stat.st_size > 0 and (
+                    older_mtime is None or stat.st_mtime > older_mtime
+                ):
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+    def _screencap_and_pull(self, adb: Any, local_path: str) -> None:
+        """Capture with ``screencap`` on the device and pull it to *local_path*."""
+        remote = "/data/local/tmp/sandroid_screenshot.png"
+        _out, err = adb.send_adb_command(f"shell screencap -p {remote}")
+        if err:
+            self._logger.debug(f"screencap: {err}")
+        _out, err = adb.send_adb_command(f"pull {remote} {quote_host_arg(local_path)}")
+        if err:
+            self._logger.debug(f"pull screenshot: {err}")
+        adb.send_adb_command(f"shell rm -f {remote}")
 
     # =========================================================================
     # Screen Recording Methods

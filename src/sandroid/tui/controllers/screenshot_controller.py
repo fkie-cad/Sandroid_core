@@ -80,21 +80,24 @@ class ScreenshotController:
         """
         from sandroid.tui.modals import ScreenshotModal, ScreenshotResult
 
-        def on_screenshot_result(result: ScreenshotResult) -> None:
-            if result is None:
-                self._log_error("Screenshot result is None")
-                return
-
-            if result.cancelled:
+        def on_screenshot_result(result: ScreenshotResult | None) -> None:
+            # Esc / Cancel dismisses the modal with None (SandroidModal's
+            # action_cancel) -- a cancel, not an error.
+            if result is None or result.cancelled:
                 self._log_info("Screenshot cancelled")
                 return
 
             try:
                 from sandroid.services import get_emulator_service
 
-                filename = get_emulator_service().take_screenshot(result.filename)
-                if not filename:
-                    self._log_error("Failed to take screenshot - no filename returned")
+                path = get_emulator_service().take_screenshot(result.filename)
+                if path:
+                    self._log_success(f"Screenshot saved to {path}")
+                else:
+                    self._log_error(
+                        "Screenshot failed - no image was captured "
+                        "(is a device connected?)"
+                    )
             except Exception as e:
                 self._log_error(f"Screenshot error: {type(e).__name__}: {e}")
 

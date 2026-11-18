@@ -5,11 +5,13 @@ Provides a modal for selecting Android applications with options to:
 - Include system apps
 - Filter by name
 - Auto-select a default package
+- Refresh from the device (on open and with Ctrl+R); running apps marked ●
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -40,6 +42,9 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
 
     Features:
     - Toggle to include system apps (click or press Ctrl+S)
+    - Opens on a cached list and refreshes it in the background; Ctrl+R
+      refreshes again (apps installed outside Sandroid show up)
+    - Running apps are marked with ●
     - Real-time filter as you type
     - Keyboard navigation (j/k or arrow keys)
     - Enter to select, Escape to cancel
@@ -106,6 +111,7 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         # ctrl+s (not bare "s") so the shortcut still works while the filter
         # Input is focused — a literal "s" is consumed as filter text.
         Binding("ctrl+s", "toggle_system", "System Apps", show=False, priority=True),
+        Binding("ctrl+r", "refresh", "Refresh", show=False, priority=True),
         Binding("j", "next", "Next", show=False),
         Binding("k", "prev", "Previous", show=False),
         Binding("down", "next", "Next", show=False),
@@ -137,8 +143,10 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             include_system_apps: Initial state of the system apps toggle.
             initial_loader: Optional callback to load packages asynchronously on mount.
                            When provided and packages is empty, the modal shows a loading
-                           indicator and calls this to populate the list.
-                           Signature: () -> List[dict]
+                           indicator and calls this to populate the list. When packages
+                           are given (a cached list), they show at once and this
+                           refreshes them in the background.
+                           Signature: (on_status=None) -> List[dict]
             name: Widget name.
             id: Widget ID.
             classes: CSS classes.
@@ -175,7 +183,14 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
                     ),
                 )
 
-            yield Input(placeholder="Type to filter...", id="filter-input")
+            # no-compact: the themes border #filter-input, and that app-level
+            # rule beat compact mode's borderless style -- a 1-row box with
+            # no text row, so typed filter text was invisible.
+            yield Input(
+                placeholder="Type to filter...",
+                id="filter-input",
+                classes="no-compact",
+            )
 
             yield OptionList(
                 *self._create_options(),
@@ -187,14 +202,16 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             yield KeyHintFooter(
                 hints={
                     "input": (
-                        "[dim]Click/Ctrl+S=System apps  Enter=Select  Esc=Cancel[/dim]"
+                        "[dim]Ctrl+S=System apps  Ctrl+R=Refresh  ●=running  "
+                        "Enter=Select  Esc=Cancel[/dim]"
                     ),
                     "list": (
-                        "[dim]Ctrl+S=System apps  Enter=Select  Esc=Cancel  "
-                        "j/k=Navigate[/dim]"
+                        "[dim]Ctrl+S=System apps  Ctrl+R=Refresh  Enter=Select  "
+                        "Esc=Cancel  j/k=Navigate[/dim]"
                     ),
                     "default": (
-                        "[dim]Click/Ctrl+S=System apps  Enter=Select  Esc=Cancel[/dim]"
+                        "[dim]Ctrl+S=System apps  Ctrl+R=Refresh  ●=running  "
+                        "Enter=Select  Esc=Cancel[/dim]"
                     ),
                 }
             )
@@ -214,14 +231,22 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             options.append(Option(display_text))
         return options
 
-    def _format_package(self, pkg: dict) -> str:
-        """Format a package for display."""
-        name = pkg.get("package_name", "Unknown")
+    def _format_package(self, pkg: dict) -> Text:
+        """Format a package for display: ``● name  2025-12-03 12:00:00``.
+
+        Built as ``Text`` (not markup) so the date's brackets and odd
+        package names can't be parsed as markup.
+        """
+        text = Text()
+        if pkg.get("running"):
+            text.append("\u25cf ", style="green")
+        else:
+            text.append("  ")
+        text.append(pkg.get("package_name", "Unknown"))
         install_date = pkg.get("install_date", "")
         if install_date:
-            # Format: package.name [2025-12-03 12:00:00]
-            return f"{name} [{install_date}]"
-        return name
+            text.append(f"  {install_date}", style="dim")
+        return text
 
     def on_mount(self) -> None:
         """Focus the filter input and select default on mount.
@@ -241,11 +266,14 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
             spinner.update_message("Enumerating installed apps on device...")
             spinner.update_hint(
                 "This may take a moment on first run.\n"
-                "Results will be cached for this session."
+                "Later opens show this list at once and refresh it."
             )
             self.run_worker(self._initial_load_async, exclusive=True)
         else:
             self._highlight_default_or_first()
+            if self.initial_loader:
+                # Cached list on screen; refresh it from the device.
+                self._start_background_refresh()
 
     def _highlight_default_or_first(self) -> None:
         """Highlight the default package or first option."""
@@ -299,8 +327,12 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         """Handle filter input changes."""
         if event.input.id != "filter-input":
             return
+        self._apply_filter(event.value)
+        self._update_option_list()
 
-        query = event.value.lower().strip()
+    def _apply_filter(self, value: str) -> None:
+        """Set ``filtered_packages`` from ``all_packages`` and the filter text."""
+        query = value.lower().strip()
         if query:
             self.filtered_packages = [
                 p
@@ -310,7 +342,63 @@ class AppSelectionModal(ForensicModal[AppSelectionResult]):
         else:
             self.filtered_packages = self.all_packages.copy()
 
-        self._update_option_list()
+    def action_refresh(self) -> None:
+        """Re-read the installed apps from the device (Ctrl+R)."""
+        if self._is_loading:
+            return
+        self._start_background_refresh()
+
+    def _start_background_refresh(self) -> None:
+        """Refresh the list in a worker while the current list stays usable."""
+        loader = self.package_loader
+        if loader is None and self.initial_loader is None:
+            return
+        self.query_one(".modal-title", Label).update(
+            f"{self.title_text}  [dim](refreshing…)[/dim]"
+        )
+        self.run_worker(self._refresh_async, exclusive=True)
+
+    async def _refresh_async(self) -> None:
+        """Load a fresh list off the event loop and swap it in.
+
+        Keeps the filter text and the highlighted package, so a refresh that
+        lands while the user is typing doesn't disturb them.
+        """
+        import asyncio
+
+        try:
+            if self.package_loader is not None:
+                new_packages = await asyncio.to_thread(
+                    self.package_loader, self.include_system_apps
+                )
+            else:
+                new_packages = await asyncio.to_thread(self.initial_loader)
+        except Exception as exc:
+            self.notify(f"Could not refresh apps: {exc}", severity="warning")
+            new_packages = None
+        finally:
+            self.query_one(".modal-title", Label).update(self.title_text)
+        if new_packages is None:
+            return
+
+        app_list = self.query_one("#app-list", OptionList)
+        highlighted = app_list.highlighted
+        keep = None
+        # A row the user moved to stays highlighted; the top row (newest,
+        # or the default) gets the newest of the fresh list instead.
+        if highlighted and highlighted < len(self.filtered_packages):
+            keep = self.filtered_packages[highlighted].get("package_name")
+
+        self.all_packages = list(new_packages)
+        self._apply_filter(self.query_one("#filter-input", Input).value)
+        app_list.clear_options()
+        for pkg in self.filtered_packages:
+            app_list.add_option(Option(self._format_package(pkg)))
+        names = [p.get("package_name") for p in self.filtered_packages]
+        if keep in names:
+            app_list.highlighted = names.index(keep)
+        else:
+            self._highlight_default_or_first()
 
     def _update_option_list(self) -> None:
         """Update the option list with filtered packages."""
