@@ -149,7 +149,9 @@ function _hiddenBy(path, returnAddress) {
 function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
     var addr = _libcExport(sym);
     if (addr === null) return;
-    var original = new NativeFunction(addr, retType, argTypes);
+    // SystemFunction (not NativeFunction): its result carries the errno the
+    // real call set, which the pass-through must hand back to the caller.
+    var original = new SystemFunction(addr, retType, argTypes);
     Interceptor.replace(addr, new NativeCallback(function () {
         if (_anyPathHiderOn()) {
             var path = null;
@@ -161,9 +163,12 @@ function _replacePathProbe(sym, retType, argTypes, pathIndex, failValue) {
                 return failValue;
             }
         }
-        // A NativeFunction call from inside the replacement reaches the
-        // original implementation, not this callback again.
-        return original.apply(null, arguments);
+        // A SystemFunction call from inside the replacement reaches the
+        // original implementation, not this callback again. Without passing
+        // its errno on, every real failure (ENOENT, EACCES) read as errno 0.
+        var r = original.apply(null, arguments);
+        this.errno = r.errno;
+        return r.value;
     }, retType, argTypes));
 }
 
@@ -1297,19 +1302,28 @@ var EMU_BUILD_FIELDS = [
     'FINGERPRINT', 'MODEL', 'MANUFACTURER', 'BRAND', 'DEVICE', 'PRODUCT',
     'HARDWARE', 'BOARD', 'TAGS', 'TYPE', 'DISPLAY'
 ];
-// Identity fields decide whether this is an emulator at all; TAGS/TYPE/
-// DISPLAY are replaced along with them but never decide (a userdebug phone is
-// no emulator).
-var EMU_IDENTITY_FIELDS = EMU_BUILD_FIELDS.filter(function (f) {
-    return f !== 'TAGS' && f !== 'TYPE' && f !== 'DISPLAY';
-});
+// TAGS/TYPE/DISPLAY are replaced along with the identity fields but never
+// decide whether this is an emulator (EMU_IDENTITY_PROPS does; a userdebug
+// phone is no emulator).
 // NOT spoofed: Build.SUPPORTED_ABIS / ro.product.cpu.abi*. Faking them would
 // break native library loading. An x86_64 AVD therefore still shows an x86
 // ABI (rare on phones) -- arm64 AVDs on Apple silicon do not have that tell.
 
+// Identity properties that decide (once, for Build AND properties alike)
+// whether this device is an emulator at all; tags/type never decide.
+var EMU_IDENTITY_PROPS = [
+    'ro.build.fingerprint', 'ro.product.model', 'ro.product.manufacturer',
+    'ro.product.brand', 'ro.product.device', 'ro.product.name', 'ro.hardware',
+    'ro.product.board'
+];
+
 // Fill EMU_PROFILE from the device's real API level / release / build ID.
 // `real(key)` reads a real property ('' when unknown).
 function _emuInitProfile(real) {
+    var emulated = false;
+    for (var k = 0; k < EMU_IDENTITY_PROPS.length; k++) {
+        if (_emuValue(real(EMU_IDENTITY_PROPS[k]))) { emulated = true; break; }
+    }
     var sdk = parseInt(real('ro.build.version.sdk'), 10);
     if (isNaN(sdk)) sdk = 9999;
     var base = EMU_PROFILES[EMU_PROFILES.length - 1];
@@ -1321,6 +1335,7 @@ function _emuInitProfile(real) {
     var incremental = real('ro.build.version.incremental');
     var d = base.DEVICE;
     EMU_PROFILE = {
+        emulated: emulated,
         MODEL: base.MODEL, MANUFACTURER: 'Google', BRAND: 'google',
         DEVICE: d, PRODUCT: d, HARDWARE: d, BOARD: base.BOARD,
         TAGS: 'release-keys', TYPE: 'user', DISPLAY: id,
@@ -1454,7 +1469,10 @@ var EMU_JAVA_PROP_KEYS = [
 // Replacement for property `key` whose current value is `value`, or null to
 // leave it alone. ro.debuggable / ro.secure stay with the root category.
 function _spoofProp(key, value) {
-    if (!key || EMU_PROFILE === null) return null;
+    // Not an emulator (e.g. a userdebug phone): spoof no property, exactly as
+    // _emuApplyBuild leaves Build alone, so Build.TAGS/TYPE and
+    // ro.build.tags/type always agree.
+    if (!key || EMU_PROFILE === null || !EMU_PROFILE.emulated) return null;
     var k = '' + key;
     var kl = k.toLowerCase();
     // qemu / goldfish / ranchu markers are unset on a real device.
@@ -1540,37 +1558,37 @@ function _emuApplyBuild(on) {
         if (on) {
             if (_emuBuildOriginal) return;
             var orig = {};
-            var emulated = false;
             EMU_BUILD_FIELDS.forEach(function (f) {
-                try {
-                    var v = '' + Build[f].value;
-                    orig[f] = v;
-                    if (EMU_IDENTITY_FIELDS.indexOf(f) !== -1 && _emuValue(v)) {
-                        emulated = true;
-                    }
-                } catch (e) {}
+                try { orig[f] = '' + Build[f].value; } catch (e) {}
             });
-            if (!emulated) {
-                send({type: 'info', hook: 'emulator-bypass:Build(no emulator values)'});
-                return;
-            }
             if (EMU_PROFILE === null || !EMU_PROFILE.DISPLAY) {
-                // Native property read failed: take the real release/ID
-                // from Java instead.
+                // Native property read failed: take the real values from
+                // Java instead (same keys, same emulator decision).
                 var Version = Java.use('android.os.Build$VERSION');
+                var fromBuild = {
+                    'ro.build.fingerprint': 'FINGERPRINT', 'ro.product.model': 'MODEL',
+                    'ro.product.manufacturer': 'MANUFACTURER',
+                    'ro.product.brand': 'BRAND', 'ro.product.device': 'DEVICE',
+                    'ro.product.name': 'PRODUCT', 'ro.hardware': 'HARDWARE',
+                    'ro.product.board': 'BOARD', 'ro.build.id': 'ID'
+                };
                 _emuInitProfile(function (key) {
                     try {
+                        if (key in fromBuild) return '' + Build[fromBuild[key]].value;
                         if (key === 'ro.build.version.sdk') return '' + Version.SDK_INT.value;
                         if (key === 'ro.build.version.release') {
                             return '' + Version.RELEASE.value;
                         }
-                        if (key === 'ro.build.id') return '' + Build.ID.value;
                         if (key === 'ro.build.version.incremental') {
                             return '' + Version.INCREMENTAL.value;
                         }
                     } catch (e) {}
                     return '';
                 });
+            }
+            if (!EMU_PROFILE.emulated) {
+                send({type: 'info', hook: 'emulator-bypass:Build(no emulator values)'});
+                return;
             }
             EMU_BUILD_FIELDS.forEach(function (f) {
                 try { Build[f].value = EMU_PROFILE[f]; } catch (e) {}
@@ -1878,6 +1896,9 @@ class BypassService:
         # telephony hooks), by claim token. While a claim covers a category,
         # it may not be armed or started. See claim_exclusive().
         self._claims: dict[str, _ExclusiveClaim] = {}
+        # Categories the in-flight set_active (under _mutate_lock) turns on;
+        # a claim on any of them waits for it, unrelated claims do not.
+        self._mutating: frozenset[str] = frozenset()
 
     # -- mutual exclusion with other bypass sources (Dexray) --------------
 
@@ -1894,7 +1915,7 @@ class BypassService:
         """Claim bypass categories for another source (e.g. Dexray's group).
 
         Refused while any claimed category is armed or active, or while a
-        bypass load is in flight. While the claim is held, arming or starting
+        bypass load turning one of them on is in flight. While the claim is held, arming or starting
         a claimed category is refused in turn. Arming checks under ``_lock``
         and a load checks while holding ``_mutate_lock``, so neither side can
         slip in between.
@@ -1922,7 +1943,7 @@ class BypassService:
                 for c in self._categories_by_priority(self._armed | self._active)
                 if c in cats
             ]
-            if not on and self._mutate_lock.locked():
+            if not on and self._mutating & cats:
                 return None, (
                     f"Not starting {owner} with {what}: a Bypass (b) change "
                     f"is in progress — {choice}."
@@ -2407,8 +2428,11 @@ class BypassService:
         if not self._mutate_lock.acquire(blocking=False):
             return False, "Bypass change already in progress"
         try:
-            # Checked while holding _mutate_lock: claim_exclusive refuses while
-            # it is held, so a Dexray claim and this load cannot interleave.
+            # Published under _lock before the claim check: claim_exclusive
+            # refuses a claim on any category in _mutating, so a Dexray claim
+            # and this load cannot interleave (unrelated claims still can).
+            with self._lock:
+                self._mutating = frozenset(target)
             if target:
                 conflict = self.exclusive_conflict(target)
                 if conflict:
@@ -2477,6 +2501,8 @@ class BypassService:
 
             return self._reconcile_and_register(target)
         finally:
+            with self._lock:
+                self._mutating = frozenset()
             self._mutate_lock.release()
 
     def _reconcile_and_register(self, target) -> tuple[bool, str]:

@@ -178,7 +178,12 @@ const props = {'ro.kernel.qemu': '1', 'ro.product.model': 'sdk_gphone64_x86_64',
                'ro.build.version.sdk': process.argv[5] || '36',
                'ro.build.version.release': '16', 'ro.build.id': 'BP22.250325.006',
                'ro.build.version.incremental': '13',
-               'ro.build.flavor': 'sdk_gphone64_x86_64-userdebug'};
+               'ro.build.flavor': 'sdk_gphone64_x86_64-userdebug',
+               'ro.build.type': 'userdebug'};
+if (process.argv[4] === 'real') {  // the same phone, as properties
+    Object.assign(props, {'ro.product.model': 'Pixel 6', 'ro.hardware': 'oriole',
+                          'ro.build.flavor': 'oriole-userdebug', 'ro.kernel.qemu': ''});
+}
 const sysprops = {get: method((k, d) => (k in props ? props[k] : (d === undefined ? '' : d)))};
 const tm = {};
 ['getDeviceId', 'getSubscriberId', 'getLine1Number', 'getSimSerialNumber',
@@ -213,6 +218,8 @@ globalThis.NativeFunction = function (addr) {
 };
 globalThis.Memory = {alloc: () => cstr(''), allocUtf8String: v => cstr(v)};
 globalThis.NativeCallback = function (fn) { return fn; };
+// The real probes fail with EACCES (13); a pass-through must hand that on.
+globalThis.SystemFunction = function () { return () => ({value: 'REAL', errno: 13}); };
 globalThis.NULL = 'NULL';
 const modules = {app: '/data/app/x/lib/arm64/libapp.so', sys: '/vendor/lib64/libEGL_emu.so',
                  jdk: '/apex/com.android.art/lib64/libopenjdk.so',
@@ -238,7 +245,8 @@ function callNative(sym, path, caller) {
     const ctx = {returnAddress: caller, errno: 0};
     const args = sym === 'faccessat' ? [-100, cstr(path), 0, 0] : [cstr(path), 0];
     const ret = fn.apply(ctx, args);
-    return ret === 'REAL' ? null : [ret, ctx.errno];
+    if (ret === 'REAL') return ctx.errno === 13 ? null : 'errno lost: ' + ctx.errno;
+    return [ret, ctx.errno];
 }
 function callProp(key, caller) {
     const cb = listeners['__system_property_get'];
@@ -268,6 +276,8 @@ function snapshot() {
         imsi: (() => { try { return impl(tm.getSubscriberId.sig()).call(tm); }
                        catch (e) { return '' + e.message; } })(),
         display: build.DISPLAY.value,
+        type_build: build.TYPE.value,
+        type_prop: impl(get1).call(sysprops, 'ro.build.type'),
         is_emulator: build.IS_EMULATOR.value,
         flavor_prop: callProp('ro.build.flavor', 'app'),
         pipe_webview: callNative('access', '/dev/qemu_pipe', 'webview'),
@@ -342,6 +352,8 @@ _SPOOFED = {
     "imei": "358813084172653",
     "imsi": "SecurityException",  # what a real phone does on API 29+
     "display": "BP22.250325.006",
+    "type_build": "user",
+    "type_prop": "user",
     "is_emulator": False,
     "flavor_prop": ["husky-user", "10"],
     "pipe_webview": None,  # updatable system code is not the app
@@ -369,6 +381,8 @@ _REAL = {
     "imei": "REAL-getDeviceId",
     "imsi": "SecurityException",
     "display": "sdk_gphone64_x86_64-userdebug 16 BP22.250325.006 13 dev-keys",
+    "type_build": "userdebug",
+    "type_prop": "userdebug",
     "is_emulator": True,
     "flavor_prop": ["sdk_gphone64_x86_64-userdebug", None],
     "pipe_webview": None,
@@ -409,6 +423,10 @@ def test_emulator_script_never_relabels_a_real_device(tmp_path) -> None:
     result = _run_emulator_harness(tmp_path, "on", device="real")
     assert result["load"]["model"] == "Pixel 6"
     assert result["load"]["tags"] == "release-keys"
+    # A userdebug phone: Build.TYPE and ro.build.type agree (both untouched).
+    assert result["load"]["type_build"] == "userdebug"
+    assert result["load"]["type_prop"] == "userdebug"
+    assert result["load"]["flavor_prop"] == ["oriole-userdebug", None]
 
 
 # -- Dexray bypass group <-> BypassService mutual exclusion ----------------------
@@ -640,6 +658,7 @@ globalThis.Interceptor = new Proxy(deep('Interceptor'), { get(t, k) {
 } });
 globalThis.NativeFunction = function () { return () => 'REAL'; };
 globalThis.NativeCallback = function (fn) { return fn; };
+globalThis.SystemFunction = function () { return () => ({ value: 'REAL', errno: 13 }); };
 globalThis.int64 = () => deep('int64'); globalThis.uint64 = () => deep('uint64');
 globalThis.send = m => sent.push(m);
 globalThis.rpc = { exports: {} };
@@ -652,7 +671,8 @@ function probe(sym, path) {
     const p = { readUtf8String: () => path };
     const args = sym === 'faccessat' ? [-100, p, 0, 0] : [p, 0];
     const ret = replaced[sym].apply(ctx, args);
-    return ret === 'REAL' ? 'REAL' : [ret, ctx.errno];
+    if (ret === 'REAL') return ctx.errno === 13 ? 'REAL' : 'errno lost: ' + ctx.errno;
+    return [ret, ctx.errno];
 }
 const probes = {};
 for (const flag of [true, false]) {
@@ -807,9 +827,68 @@ def test_status_bar_shows_every_category_including_emulator(
 
     bypass_service.toggle("emulator")
     bypass_service.toggle("root")
+    import types
+
+    from sandroid.core.toolbox import Toolbox
+
+    # No device layer: no device manager (adb devices / getprop) or APK list.
+    no_devices = types.SimpleNamespace(active_device=None, device_count=0)
+    monkeypatch.setattr(Toolbox, "get_device_manager", lambda: no_devices)
+    monkeypatch.setattr(Toolbox, "get_forensic_apks", list)
+    # No spotlight app (its PID/paused reads would ask for a JobManager).
+    nothing = lambda *a: None  # noqa: E731
+    no_app = types.SimpleNamespace(
+        get_app_tuple=nothing,
+        get_spawn_package=nothing,
+        is_spawn_mode=lambda: False,
+        get_pid=nothing,
+        is_app_paused=lambda: False,
+        get_effective_package=nothing,
+    )
+    monkeypatch.setattr(
+        "sandroid.tui.widgets.status_bar.get_spotlight_service", lambda: no_app
+    )
     bar = StatusBar()
     monkeypatch.setattr(bar, "_schedule_frida_check", lambda: None)
+    # Mitmproxy host-IP lookup asks the device whether it is an emulator.
+    monkeypatch.setattr(bar, "_read_capture_state", lambda: None)
     monkeypatch.setattr(bar, "_schedule_frida_version_check", lambda: None)
     bar.update_from_toolbox()
     assert bar.bypass_categories == ["root", "emulator"]  # display order
     assert any("bypass root emulator" in str(t) for t in bar._segments())
+
+
+def test_unrelated_bypass_load_does_not_block_a_dexray_claim(bypass_service) -> None:
+    """Only an in-flight load of a claimed category refuses the claim."""
+    assert bypass_service._mutate_lock.acquire(blocking=False)
+    try:
+        bypass_service._mutating = frozenset({"ssl"})
+        telephony = _dexray_monitor(bypass_hooks=False, telephony_hooks=True)
+        assert telephony._claim_bypass_exclusivity() is True  # emulator only
+        group = _dexray_monitor(bypass_hooks=True)
+        assert group._claim_bypass_exclusivity() is False  # ssl is in flight
+        assert "in progress" in group.last_error
+    finally:
+        bypass_service._mutating = frozenset()
+        bypass_service._mutate_lock.release()
+
+
+def test_stopping_dexray_frees_b_before_the_result_export(bypass_service) -> None:
+    """Bypass (b) works during the export / revert prompt after m stops."""
+    import types
+
+    mm = _dexray_monitor(bypass_hooks=True)
+    assert mm._claim_bypass_exclusivity() is True
+    seen = []
+    mm.running = True
+    mm._unregister_hooks_from_toolbox = lambda: None
+    mm._cleanup_frida_job = lambda: None
+    mm.profiler = object()
+    mm._collect_and_export_results = lambda tb: seen.append(
+        bypass_service.exclusive_conflict(["root"])
+    )
+    mm._prompt_snapshot_revert = lambda tb: None
+    mm._snapshot_manager = types.SimpleNamespace(discard_snapshot=lambda tb: None)
+
+    mm.stop_monitoring()
+    assert seen == [None]
