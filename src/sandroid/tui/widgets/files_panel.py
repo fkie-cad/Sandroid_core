@@ -16,11 +16,15 @@ watchlist owned by the hidden
 :class:`~sandroid.tui.widgets.watchlist_view.WatchlistView` engine -- carry
 ★ and are pinned on top, also before they saw any activity (wildcard
 patterns included). Details live in the Inspector only (Enter): Summary
-(full path, ops with times, processes, watch + last pull), Diff (the last
-pull against the one before it), History (every pulled version with its
-diff, see ``watchlist_store``) and Events (with the marks as separator
-lines). The Inspector forwards the lens keys it advertises while it has
-focus (``lens_shell.Inspector.on_key``).
+(full path, ops with times, processes, watch + last pull), Versions (every
+kept pull, newest first; the selected one's structured diff against the
+version before it or a marked base), Content (a first look inside the
+selected version's local copy) and Events (with the marks as separator
+lines) -- see ``file_inspect``. In the Inspector ``{``/``}`` pick an older/
+newer version (or the previous/next table on Content) and ``*`` sets the
+diff base; these are MainScreen keys bound nowhere else, so they never clash
+with the lens's ``<``/``>``/``B`` marks. The Inspector forwards the lens keys
+it advertises while it has focus (``lens_shell.Inspector.on_key``).
 
 **Marks** (shell-level, ``MainScreen.marks``): ``B`` drops a timestamped
 mark ("bookmark"; the time is taken when the key is pressed) and asks for an
@@ -86,6 +90,7 @@ from textual.widgets import Button, DataTable, Input, Static
 from sandroid.core.adb_utils import watch_path_problem
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
+from . import file_inspect
 from .lens_shell import InspectorContent, Mark, SessionMarks, is_shown
 from .monitor_view import (
     OPS,
@@ -1402,81 +1407,193 @@ class FilesPanel(Widget):
     def _inspector_for(self, row: _Row) -> InspectorContent:
         title = app_relative(row.key).rpartition("/")[2] or row.key
         key = self._inspector_key(row.key)
+        keys = {
+            # { } * (MainScreen): never a lens key -- < > B are the marks.
+            "left_curly_bracket": lambda tab: self._inspect_step(row, tab, -1),
+            "right_curly_bracket": lambda tab: self._inspect_step(row, tab, 1),
+            "asterisk": lambda tab: self._inspect_base(row, tab),
+        }
+        click = lambda tab, y: self._inspect_click(row, tab, y)  # noqa: E731
         if row.review_kind is not None:
+            tabs = [
+                ("Summary", self._review_summary(row)),
+                ("Diff", [("", self._review_diff(row))]),
+            ]
+            content = file_inspect.review_content_sections(
+                self._scope, row.key, row.review_kind, self._inspect_notify
+            )
+            if content is not None:
+                tabs.append(("Content", content))
             return InspectorContent(
                 title=title,
                 subtitle=row.key,
-                tabs=[
-                    ("Summary", self._review_summary(row)),
-                    ("Diff", [("", self._review_diff(row))]),
-                ],
+                tabs=tabs,
                 footer="z zoom",
                 key=key,
+                keys=keys,
+                click=click,
             )
         return InspectorContent(
             title=title,
             subtitle=row.key,
             tabs=[
                 ("Summary", self._live_summary(row)),
-                ("Diff", [("", self._live_diff(row))]),
-                ("History", [("", self._history_text(row))]),
+                ("Versions", self._versions_tab(row)),
+                ("Content", self._content_tab(row)),
                 ("Events", [("", self._events_text(row))]),
             ],
             footer="w watch  u pull  z zoom",
             key=key,
+            keys=keys,
+            click=click,
         )
 
-    def _history_text(self, row: _Row) -> Text:
-        """Every kept pull of the file, newest first, each with its diff
-        against the pull before it (stored on disk, so it survives the next
-        pull and a restart).
-        """
-        from sandroid.core import watchlist_store
+    # Versions / Content tabs: rendering and state live in file_inspect.
 
+    def _inspect_notify(self) -> None:
+        """A background diff/preview finished (worker thread): redraw."""
+        self._post(self._refresh_inspector)
+
+    def _unpulled_text(self, row: _Row) -> Text | None:
+        """Why a row has no versions (not watched / a pattern), else None."""
         wl = self._watchlist_or_none()
-        if wl is None or row.key not in wl.rows:
-            return Text("Pulls of watched files are kept here (u pulls).", style=_DIM)
-        try:
-            versions = watchlist_store.version_dirs(row.key)
-        except Exception:
-            versions = []
-        if not versions:
-            return Text("Not pulled yet — u pulls a first version.", style=_DIM)
-        out = Text()
-        total = len(versions)
-        for n, version in enumerate(reversed(versions)):
-            if n:
-                out.append("\n\n")
-            when = watchlist_store.version_time(version)
-            stamp = when.strftime("%Y-%m-%d %H:%M:%S") if when else version.name
-            files = [
-                f
-                for f in version.iterdir()
-                if f.is_file() and f.name not in ("diff.txt", "acquisition.json")
-            ]
-            size = sum(f.stat().st_size for f in files)
-            out.append(f"#{total - n}  {stamp}", style="bold")
-            out.append(f"  {_fmt_size(size)}", style=_DIM)
-            diff = watchlist_store.version_diff(version)
-            if n == total - 1:
-                out.append("\n  first pull", style=_DIM)
-            elif diff is None:
-                out.append("\n  (no diff stored)", style=_DIM)
-            elif not diff.strip():
-                out.append("\n  no change since the pull before", style=_DIM)
-            else:
-                lines = diff.splitlines()
-                for line in lines[:12]:
-                    out.append("\n")
-                    out.append_text(diff_line_text(line.replace("\t", "  ")))
-                if len(lines) > 12:
-                    out.append(f"\n  … {len(lines)} lines", style=_DIM)
-        out.append(
-            f"\n\n{total} version{'s' if total != 1 else ''} in "
-            f"{versions[-1].parent} (nothing is deleted).",
-            style=_DIM,
+        if wl is not None and row.key in wl.rows:
+            return None
+        if row.pattern:
+            return Text("Pull a matching file to see its versions.", style=_DIM)
+        return Text.assemble(
+            ("Watch (", _DIM), ("w", "bold"), (") and pull (", _DIM),
+            ("u", "bold"), (") to diff this file — every pull is kept as a version.", _DIM),
+        )  # fmt: skip
+
+    def _versions_tab(self, row: _Row) -> list:
+        reason = self._unpulled_text(row)
+        if reason is not None:
+            return [("", reason)]
+        wl = self._watchlist_or_none()
+        info = wl.rows.get(row.key) if wl is not None else None
+        status = None
+        if info is not None and info.state is RowState.ERROR:
+            status = Text(
+                f"✕ {info.detail or 'The last pull failed.'}", style="#ef4444"
+            )
+        elif info is not None and info.state is RowState.SETTLING:
+            status = Text(
+                "◇ A change is settling; auto-pull keeps it as a new version.",
+                style="#a3873f",
+            )
+        return file_inspect.versions_sections(row.key, self._inspect_notify, status)
+
+    def _content_tab(self, row: _Row) -> list:
+        reason = self._unpulled_text(row)
+        if reason is not None:
+            return [("", reason)]
+        return file_inspect.content_sections(row.key, self._inspect_notify)
+
+    def _content_target(self, row: _Row) -> tuple[str, Path | None, str]:
+        """``(state key, local file, label)`` the Content tab shows."""
+        if row.review_kind is None:
+            if self._unpulled_text(row) is not None:
+                return row.key, None, ""  # not watched: no versions to read
+            file = file_inspect.content_file(row.key)
+            return row.key, file, file_inspect.content_label(row.key)
+        before, after = file_inspect.run_copies(self._scope, row.key)
+        file = before if row.review_kind == "deleted" else after
+        label = "before the run" if file is before else "after the run"
+        return f"{self._scope}|{row.key}", file, label
+
+    def _reinspect(self, row: _Row) -> None:
+        ms = self._main_screen()
+        if ms is not None and getattr(ms, "inspector_is_open", False):
+            ms.update_inspector(self._inspector_for(row))
+
+    def _inspect_step(self, row: _Row, tab: str | None, delta: int) -> None:
+        if tab == "Content":
+            state_key, file, _label = self._content_target(row)
+            moved = file_inspect.step_table(state_key, file, delta)
+        elif tab == "Versions" and self._unpulled_text(row) is None:
+            moved = file_inspect.step_version(row.key, delta)
+        else:
+            return
+        if moved:
+            self._reinspect(row)
+
+    def _inspect_base(self, row: _Row, tab: str | None) -> None:
+        if row.review_kind is not None or tab not in ("Versions", "Content"):
+            return
+        if self._unpulled_text(row) is not None:
+            return
+        notice = file_inspect.toggle_base(row.key)
+        if notice:
+            self.app.notify(notice, timeout=4)
+        self._reinspect(row)
+
+    def _inspect_click(self, row: _Row, tab: str | None, line: int) -> bool:
+        if tab == "Versions" and row.review_kind is None:
+            if self._unpulled_text(row) is not None:
+                return False
+            done = file_inspect.select_version_row(row.key, line)
+        elif tab == "Content":
+            state_key, file, _label = self._content_target(row)
+            done = file_inspect.select_table_row(state_key, file, line)
+        else:
+            return False
+        if done:
+            self._reinspect(row)
+        return done
+
+    def _zoom_inspected(self, row: _Row) -> bool:
+        """``z`` on the Versions / Content / (review) Diff tab: the structured
+        view full-screen. False when there is nothing structured to show.
+        """
+        from rich.console import Group
+
+        tab = None
+        ms = self._main_screen()
+        content = getattr(ms, "inspector_content", None) if ms is not None else None
+        if (
+            ms is not None
+            and getattr(ms, "inspector_is_open", False)
+            and getattr(content, "key", None) == self._inspector_key(row.key)
+        ):
+            try:
+                tab = ms.query_one("#inspector").tab_name
+            except Exception:
+                tab = None
+        if tab == "Content":
+            state_key, file, label = self._content_target(row)
+            zoom = file_inspect.zoom_content(state_key, file, label)
+            if zoom is None:
+                return False
+            title, body, wide = zoom
+            self.app.push_screen(file_inspect.InspectZoomModal(title, body, wide))
+            return True
+        if row.review_kind is not None:
+            body = file_inspect.review_diff_body(
+                self._scope, row.key, row.review_diff, full=True
+            )
+            if body is None:
+                return False
+            title = Path(row.key).name or row.key
+            self.app.push_screen(
+                file_inspect.InspectZoomModal(f"{title} · run diff", body)
+            )
+            return True
+        zoom = (
+            file_inspect.zoom_versions(row.key)
+            if self._unpulled_text(row) is None
+            else None
         )
-        return out
+        if zoom is None:
+            return False
+        heading, body = zoom
+        self.app.push_screen(
+            file_inspect.InspectZoomModal(
+                Path(row.key).name or row.key,
+                Group(Text(heading, style="bold #8f9bb3"), body),
+            )
+        )
+        return True
 
     @staticmethod
     def _grid() -> Table:
@@ -1569,28 +1686,6 @@ class FilesPanel(Widget):
             RowState.SETTLING: Text("◇ change detected, settling", style="#a3873f"),
         }[state]
 
-    def _live_diff(self, row: _Row) -> Text:
-        wl = self._watchlist_or_none()
-        info = wl.rows.get(row.key) if wl is not None else None
-        if info is None:
-            if row.pattern:
-                return Text("Pull a matching file to see its diff.", style=_DIM)
-            return Text.assemble(
-                ("Watch (", _DIM), ("w", "bold"), (") and pull (", _DIM),
-                ("u", "bold"), (") to diff this file.", _DIM),
-            )  # fmt: skip
-        if info.state is RowState.CHANGED and info.diff_text is not None:
-            return render_diff(info.diff_text)
-        messages = {
-            RowState.NEVER_PULLED: "Not pulled yet — u pulls a baseline.",
-            RowState.BASELINE_ONLY: "Baseline captured — pull again (u) to see what changed.",
-            RowState.UNCHANGED: "No changes since the pull before.",
-            RowState.CHANGED: "Changed in an earlier session — pull again (u) for a diff.",
-            RowState.ERROR: info.detail or "The last pull failed.",
-            RowState.SETTLING: "A change is settling; auto-pull will diff it.",
-        }
-        return Text(messages[info.state], style=_DIM)
-
     def _events_text(self, row: _Row) -> Text:
         act = row.activity
         if act is None or not act.events:
@@ -1655,7 +1750,12 @@ class FilesPanel(Widget):
         grid.add_row("watch", self._watch_text(row))
         return [("", grid)]
 
-    def _review_diff(self, row: _Row) -> Text:
+    def _review_diff(self, row: _Row):
+        body = file_inspect.review_diff_body(
+            self._scope, row.key, row.review_diff, self._inspect_notify
+        )
+        if body is not None:
+            return body
         if row.review_diff:
             return render_diff(row.review_diff)
         return Text(
@@ -1812,6 +1912,8 @@ class FilesPanel(Widget):
 
     def action_zoom(self) -> None:
         row = self.current_row()
+        if row is not None and self._zoom_inspected(row):
+            return
         diff: Any = None
         if row is not None and row.review_diff:
             diff = row.review_diff

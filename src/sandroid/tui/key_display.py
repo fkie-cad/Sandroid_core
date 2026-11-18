@@ -39,6 +39,8 @@ _NAMED: dict[str, tuple[str, str]] = {
     "less_than_sign": ("<", "<"),
     "greater_than_sign": (">", ">"),
     "right_square_bracket": ("]", "]"),
+    "left_curly_bracket": ("{", "{"),
+    "right_curly_bracket": ("}", "}"),
     "up": ("↑", "↑"),
     "down": ("↓", "↓"),
     "left": ("←", "←"),
