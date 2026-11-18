@@ -306,6 +306,32 @@ def _sandroid_tmp_cwd(request):
         os.chdir(old)
 
 
+class _NoDeviceShell:
+    """``device_clock.SHELL_FACTORY`` for the suite: there is no device."""
+
+    def __init__(self, serial):
+        from sandroid.core.device_clock import ShellDeadError
+
+        raise ShellDeadError("no device in tests")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_device_clock():
+    """Device clock samples (``core/device_clock.py``) run on background
+    threads (device connect, the header's 60 s sample) that can outlive the
+    test that started them and run adb inside a later test's subprocess
+    mock. For the whole session they find no device; tests that need a
+    clock install a fake shell with ``monkeypatch`` (restored to this).
+    """
+    from sandroid.core import device_clock
+
+    saved = device_clock.SHELL_FACTORY, device_clock._default_send
+    device_clock.SHELL_FACTORY = _NoDeviceShell
+    device_clock._default_send = lambda serial: lambda command: ("", "")
+    yield
+    device_clock.SHELL_FACTORY, device_clock._default_send = saved
+
+
 @pytest.fixture(autouse=True)
 def _isolated_watchlist_dir(tmp_path, monkeypatch):
     """Give every test its own Files-lens watchlist + pulled-files directory.

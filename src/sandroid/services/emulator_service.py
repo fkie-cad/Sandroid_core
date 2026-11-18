@@ -638,8 +638,9 @@ class EmulatorService:
             # A snapshot restores the guest clock to the moment it was saved,
             # so every revert rewinds device time (minutes after a few
             # replays), skewing file timestamps / the timeline against the
-            # host. Re-sync it to the host clock.
-            self._resync_guest_clock(adb, serial)
+            # host. Record the offset in clock.jsonl and, with
+            # ``emulator.sync_clock_after_snapshot`` on, set it to host time.
+            self._record_device_clock(adb, name, serial)
             # The snapshot also restores the kernel's SELinux mode. One saved
             # before startup's ``setenforce 0`` comes back Enforcing, and then
             # root binder calls (settings, dumpsys, screencap, frida) fail with
@@ -657,35 +658,23 @@ class EmulatorService:
             self._logger.error(f"Failed to load snapshot: {e}")
             return False
 
-    def _resync_guest_clock(self, adb: AdbProtocol, serial: str | None) -> bool:
-        """Best-effort: set the guest's wall clock to the host's (UTC epoch).
-
-        Tries a plain root shell first (adbd as root), then Magisk/su
-        variants. Never raises; returns whether the device accepted a value
-        within 2 s of the host clock.
+    def _record_device_clock(
+        self, adb: AdbProtocol, name: str, serial: str | None
+    ) -> None:
+        """Best-effort: :func:`sandroid.core.device_clock.after_snapshot_load`
+        (``snapshot-load`` sample, the optional clock sync, the warnings).
+        Never raises.
         """
-        epoch = int(time.time())
-        commands = (
-            f"shell date -u @{epoch}",
-            f"shell su 0 date -u @{epoch}",
-            f"shell su -c 'date -u @{epoch}'",
-        )
-        for command in commands:
-            try:
-                adb.send_adb_command(command, serial=serial)
-                stdout, _stderr = adb.send_adb_command("shell date +%s", serial=serial)
-                guest = int(str(stdout).strip().splitlines()[-1])
-            except Exception as exc:
-                self._logger.debug(f"Guest clock resync via {command!r} failed: {exc}")
-                continue
-            if abs(guest - int(time.time())) <= 2:
-                self._logger.debug(f"Guest clock resynced to host ({command})")
-                return True
-        self._logger.warning(
-            "Could not resync the guest clock after snapshot load "
-            "(needs root); device timestamps may lag the host"
-        )
-        return False
+        try:
+            from sandroid.core import device_clock
+
+            device_clock.after_snapshot_load(
+                name,
+                serial,
+                send=lambda command: adb.send_adb_command(command, serial=serial),
+            )
+        except Exception as exc:
+            self._logger.debug(f"Device clock after snapshot load failed: {exc}")
 
     def _restore_device_proxy(self, serial: str | None) -> str:
         """Best-effort: re-apply mitmproxy's device proxy after a load.

@@ -169,6 +169,7 @@ toggles the drawer: ``MainScreen.toggle_log_drawer()`` /
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -403,7 +404,19 @@ class ShellHeader(Header):
     ShellHeader #scope-pill.-blind {
         color: #fb923c;
     }
+    ShellHeader #device-clock {
+        display: none;
+        width: auto;
+        padding: 0 1 0 0;
+        color: #fbbf24;
+    }
+    ShellHeader #device-clock.-off {
+        display: block;
+    }
     """
+
+    #: Seconds between background device clock samples while a device is set.
+    DEVICE_CLOCK_EVERY = 60.0
 
     def __init__(self, **kwargs) -> None:
         super().__init__(show_clock=True, **kwargs)
@@ -413,11 +426,49 @@ class ShellHeader(Header):
         #: Why LIVE is not quite live ("monitor blind"), set by the Files
         #: lens; shown instead of the plain "● LIVE" pill.
         self._live_note: str | None = None
+        #: Host time of the last background device clock sample (0: none).
+        self._clock_sampled = 0.0
 
     def compose(self) -> ComposeResult:
         yield HeaderTitle()
         yield Static(self._pill[0], id="scope-pill", classes="-live")
+        yield Static("", id="device-clock")
         yield HeaderClock().data_bind(Header.time_format)
+
+    def on_mount(self) -> None:
+        self.set_interval(1.0, self.update_device_clock, name="device clock")
+
+    def update_device_clock(self, now: float | None = None) -> str:
+        """The device's wall time beside the host clock, in amber, only while
+        the last device clock sample is more than 1 s off the host:
+        ``device 17:16:02 -75 min ⚠``. Computed as host now - ``off_wall``
+        (no adb call); every ``DEVICE_CLOCK_EVERY`` s a sample is taken in
+        the background while a device is selected. Returns the text shown.
+        """
+        from sandroid.core import device_clock
+        from sandroid.core.adb import Adb
+
+        now = time.time() if now is None else now
+        serial = Adb.get_target_device()
+        if serial and now - self._clock_sampled >= self.DEVICE_CLOCK_EVERY:
+            if self._clock_sampled:  # the first sample is the connect one
+                device_clock.record_async(
+                    "periodic", serial, samples=device_clock.SAMPLES_QUICK
+                )
+            self._clock_sampled = now
+        sample = device_clock.last_sample(serial) if serial else None
+        text = ""
+        if device_clock.notable(sample):
+            when = datetime.fromtimestamp(now - sample["off_wall"])
+            offset = device_clock.format_offset(device_clock.device_minus_host(sample))
+            text = f"device {when:%H:%M:%S} {offset} ⚠"
+        try:
+            label = self.query_one("#device-clock", Static)
+            label.update(text)
+            label.set_class(bool(text), "-off")
+        except Exception:
+            pass
+        return text
 
     def _on_click(self) -> None:  # no tall toggle
         return
