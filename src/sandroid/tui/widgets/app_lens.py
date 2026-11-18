@@ -581,7 +581,7 @@ def _perm_note(g: Any, ops: list[Any]) -> tuple[str, str]:
         and ops
         and not any(o.last_access for o in ops)
     ):
-        notes.append("granted, unused")
+        notes.append("no recorded use")
     flags = set(g.flags or [])
     if "USER_FIXED" in flags:
         notes.append("user-fixed")
@@ -630,7 +630,7 @@ def build_permissions(f: AppFacts) -> SectionData:
                 granted_dangerous += 1
         if "used recently" in note or "in use now" in note:
             recent += 1
-        if "granted, unused" in note:
+        if "no recorded use" in note:
             unused += 1
         prot_style = (
             _WARN if prot == "dangerous" else (_DIM if prot == "normal" else "")
@@ -726,7 +726,7 @@ def build_permissions(f: AppFacts) -> SectionData:
     requested = sum(1 for g in grants if g.requested)
     summary = (
         f"{requested} requested · {dangerous} dangerous ({granted_dangerous} "
-        f"granted) · {recent} used recently · {unused} granted-but-unused"
+        f"granted) · {recent} used recently · {unused} no recorded use"
     )
     return SectionData(cols, rows, summary)
 
@@ -1059,7 +1059,7 @@ def build_manifest(f: AppFacts) -> SectionData:
     if tls:
         tls_text = _t(", ".join(d.title for d in tls), _WARN)
     else:
-        tls_text = _t("platform only (no bundled TLS lib)", _DIM)
+        tls_text = _t("no bundled native TLS lib found", _DIM)
     libs = list(ov.get("native_libs") or [])
     rows.append(
         _kv(

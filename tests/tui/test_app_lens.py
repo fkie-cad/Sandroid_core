@@ -380,8 +380,7 @@ def test_permission_rows_join_appops_and_list_op_only_rows() -> None:
     assert "used recently" in by_key["perm:android.permission.CAMERA"]
     assert "req → ✗" in by_key["perm:android.permission.READ_CONTACTS"]
     assert data.summary == (
-        "4 requested · 3 dangerous (2 granted) · 2 used recently · "
-        "1 granted-but-unused"
+        "4 requested · 3 dangerous (2 granted) · 2 used recently · " "1 no recorded use"
     )
 
 
@@ -944,3 +943,22 @@ async def test_footprint_gets_the_known_data_dir(fake):
         sections = _sections(ms)
         await _wait(pilot, lambda: _loaded(sections))
         assert FakeService.footprint_dirs == [f"/data/user/0/{PKG}"]
+
+
+async def test_caption_offers_space_only_when_it_does_something(fake, monkeypatch):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        await _wait(pilot, lambda: _sections(ms).facts is not None)
+        panel = ms.query_one(SpotlightPanel)
+
+        def caption() -> str:
+            panel._update_caption()
+            return ms._lens_captions["app"][1] or ""
+
+        assert "␣" not in caption()  # running (PID 4242): Space does nothing
+        monkeypatch.setattr(SpotlightPanel, "_safe_pid", lambda self: None)
+        assert caption().endswith("· ␣ start")
+        monkeypatch.setattr(SpotlightPanel, "_safe_pid", lambda self: 4242)
+        monkeypatch.setattr(SpotlightPanel, "_is_paused", lambda self: True)
+        assert caption().endswith("· ␣ resume")

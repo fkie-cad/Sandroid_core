@@ -995,7 +995,12 @@ async def test_help_fits_small_terminals_and_lists_every_global_key(size) -> Non
         assert max(len(r) for r in rows) <= width
         # Lenses in key order; one row per action within a section.
         nav = [r for r in rows if re.match(r"(App|Network|Files|Sessions) lens ", r)]
-        assert [n.split()[0] for n in nav[:4]] == ["App", "Network", "Files", "Sessions"]
+        assert [n.split()[0] for n in nav[:4]] == [
+            "App",
+            "Network",
+            "Files",
+            "Sessions",
+        ]
         bypass = rows.index(next(r for r in rows if "b bypass" in r))
         section = rows[bypass + 1 : bypass + 7]
         assert sum("Objection" in r for r in section) == 1
@@ -1191,7 +1196,7 @@ def test_force_exit_stops_mitmweb_first_and_bounds_hung_steps(monkeypatch):
 
     from sandroid import services
 
-    monkeypatch.setattr(services, "get_task_service", lambda: _Tasks())
+    monkeypatch.setattr(services, "get_task_service", _Tasks)
     real_bounded = qc.run_bounded
     monkeypatch.setattr(
         qc, "run_bounded", lambda name, fn, timeout: real_bounded(name, fn, 0.2)

@@ -493,13 +493,24 @@ class SpotlightPanel(Widget):
         info = None
         if self._has_sections():
             sections = self._sections()
-            info = "⏎ inspect · / filter · z fold · u refresh · ␣ start"
+            info = "⏎ inspect · / filter · z fold · u refresh"
+            primary = self._primary_hint()
+            if primary:
+                info += f" · {primary}"
             if sections is not None and sections.filter_text:
                 info = f"“{sections.filter_text}” · " + info
         try:
             self.screen.set_lens_caption(LENS_ID, info=info)
         except Exception:
             pass
+
+    def _primary_hint(self) -> str:
+        """``␣ start`` / ``␣ resume`` / ``""`` (running: Space does nothing)."""
+        if self._is_paused():
+            return "␣ resume"
+        if self._safe_pid():
+            return ""
+        return "␣ start"
 
     def _facts_state_changed(self) -> None:
         sections = self._sections()
