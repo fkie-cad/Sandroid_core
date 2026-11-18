@@ -161,6 +161,8 @@ const build = {
     PRODUCT: {value: 'sdk_gphone64_x86_64'}, HARDWARE: {value: 'ranchu'},
     BOARD: {value: 'goldfish_x86_64'}, TAGS: {value: 'dev-keys'},
     TYPE: {value: 'userdebug'}, ID: {value: 'BP22.250325.006'},
+    DISPLAY: {value: 'sdk_gphone64_x86_64-userdebug 16 BP22.250325.006 13 dev-keys'},
+    IS_EMULATOR: {value: true},
     getSerial: method(() => 'EMULATOR36X'),
 };
 if (process.argv[4] === 'real') {  // a real (userdebug) phone
@@ -172,15 +174,22 @@ if (process.argv[4] === 'real') {  // a real (userdebug) phone
     });
 }
 const props = {'ro.kernel.qemu': '1', 'ro.product.model': 'sdk_gphone64_x86_64',
-               'ro.build.tags': 'dev-keys', 'ro.debuggable': '1', 'persist.x': 'y'};
+               'ro.build.tags': 'dev-keys', 'ro.debuggable': '1', 'persist.x': 'y',
+               'ro.build.version.sdk': process.argv[5] || '36',
+               'ro.build.version.release': '16', 'ro.build.id': 'BP22.250325.006',
+               'ro.build.version.incremental': '13',
+               'ro.build.flavor': 'sdk_gphone64_x86_64-userdebug'};
 const sysprops = {get: method((k, d) => (k in props ? props[k] : (d === undefined ? '' : d)))};
 const tm = {};
 ['getDeviceId', 'getSubscriberId', 'getLine1Number', 'getSimSerialNumber',
  'getNetworkOperatorName', 'getNetworkOperator', 'getPhoneType', 'getSimState']
     .forEach(n => { tm[n] = method(() => 'REAL-' + n); });
+// A normal app on API 29+: identifier getters throw.
+tm.getSubscriberId = method(() => { throw new Error('SecurityException'); });
 const classes = {
     'android.os.Build': build,
-    'android.os.Build$VERSION': {RELEASE: {value: '16'}, INCREMENTAL: {value: '13'}},
+    'android.os.Build$VERSION': {RELEASE: {value: '16'}, INCREMENTAL: {value: '13'},
+                                 SDK_INT: {value: 36}},
     'android.os.SystemProperties': sysprops,
     'android.telephony.TelephonyManager': tm,
 };
@@ -196,11 +205,20 @@ globalThis.Interceptor = {
     },
     replace: (addr, cb) => { replaced[addr] = cb; },
 };
-globalThis.NativeFunction = function (addr) { return () => 'REAL'; };
+globalThis.NativeFunction = function (addr) {
+    if (addr === '__system_property_get') {
+        return (key, buf) => { buf.writeUtf8String(props[key.s] || ''); return 0; };
+    }
+    return () => 'REAL';
+};
+globalThis.Memory = {alloc: () => cstr(''), allocUtf8String: v => cstr(v)};
 globalThis.NativeCallback = function (fn) { return fn; };
 globalThis.NULL = 'NULL';
 const modules = {app: '/data/app/x/lib/arm64/libapp.so', sys: '/vendor/lib64/libEGL_emu.so',
-                 jdk: '/apex/com.android.art/lib64/libopenjdk.so'};
+                 jdk: '/apex/com.android.art/lib64/libopenjdk.so',
+                 webview: '/data/app/~~a/com.google.android.trichromelibrary_6/base.apk',
+                 gms: '/data/user_de/0/com.google.android.gms/app_chimera/m/x/libm.so',
+                 agent: '/memfd:frida-agent-64.so (deleted)'};
 globalThis.Process = {
     findModuleByAddress: a => ({path: modules[a]}),
     findModuleByName: () => ({findExportByName: n => n}),
@@ -246,6 +264,15 @@ function snapshot() {
         other: impl(get2).call(sysprops, 'persist.x', 'd'),
         qemu_def: impl(get2).call(sysprops, 'ro.kernel.qemu', 'd'),
         line1: impl(tm.getLine1Number.sig()).call(tm),
+        imei: impl(tm.getDeviceId.sig()).call(tm),
+        imsi: (() => { try { return impl(tm.getSubscriberId.sig()).call(tm); }
+                       catch (e) { return '' + e.message; } })(),
+        display: build.DISPLAY.value,
+        is_emulator: build.IS_EMULATOR.value,
+        flavor_prop: callProp('ro.build.flavor', 'app'),
+        pipe_webview: callNative('access', '/dev/qemu_pipe', 'webview'),
+        pipe_gms: callNative('access', '/dev/qemu_pipe', 'gms'),
+        pipe_agent: callNative('access', '/dev/qemu_pipe', 'agent'),
         pipe_app: callNative('access', '/dev/qemu_pipe', 'app'),
         pipe_java: callNative('faccessat', '/dev/socket/qemud', 'jdk'),
         pipe_sys: callNative('access', '/dev/goldfish_pipe', 'sys'),
@@ -272,7 +299,7 @@ console.log(JSON.stringify(result));
 
 
 def _run_emulator_harness(
-    tmp_path: Path, flag_at_load: str, device: str = "emulator"
+    tmp_path: Path, flag_at_load: str, device: str = "emulator", sdk: str = "36"
 ) -> dict:
     import json
     import shutil
@@ -291,7 +318,7 @@ def _run_emulator_harness(
     harness = tmp_path / "harness.js"
     harness.write_text(_NODE_HARNESS)
     proc = subprocess.run(
-        [node, str(harness), str(script), flag_at_load, device],
+        [node, str(harness), str(script), flag_at_load, device, sdk],
         capture_output=True,
         text=True,
         timeout=30,
@@ -302,16 +329,24 @@ def _run_emulator_harness(
 
 
 _SPOOFED = {
-    "model": "Pixel 4 XL",
-    "fp": "google/coral/coral:16/BP22.250325.006/13:user/release-keys",
+    "model": "Pixel 8 Pro",  # API 36: a Pixel that really runs Android 16
+    "fp": "google/husky/husky:16/BP22.250325.006/13:user/release-keys",
     "tags": "release-keys",
-    "serial": "RF8M33XXXXX",
+    "serial": "2B111FDH2004QG",
     "qemu": "",
-    "model_prop": "Pixel 4 XL",
+    "model_prop": "Pixel 8 Pro",
     "debuggable": "1",  # ro.debuggable is the root category's, not ours
     "other": "y",
     "qemu_def": "d",
-    "line1": "+15551234567",
+    "line1": "",
+    "imei": "358813084172653",
+    "imsi": "SecurityException",  # what a real phone does on API 29+
+    "display": "BP22.250325.006",
+    "is_emulator": False,
+    "flavor_prop": ["husky-user", "10"],
+    "pipe_webview": None,  # updatable system code is not the app
+    "pipe_gms": None,
+    "pipe_agent": None,  # nor is a memfd module (the frida agent)
     "pipe_app": [-1, 2],  # -1 with errno ENOENT, like a missing file
     "pipe_java": [-1, 2],  # File.exists() via libopenjdk counts as the app
     "pipe_sys": None,  # the emulator's own graphics stack keeps its pipe
@@ -331,6 +366,14 @@ _REAL = {
     "other": "y",
     "qemu_def": "1",
     "line1": "REAL-getLine1Number",
+    "imei": "REAL-getDeviceId",
+    "imsi": "SecurityException",
+    "display": "sdk_gphone64_x86_64-userdebug 16 BP22.250325.006 13 dev-keys",
+    "is_emulator": True,
+    "flavor_prop": ["sdk_gphone64_x86_64-userdebug", None],
+    "pipe_webview": None,
+    "pipe_gms": None,
+    "pipe_agent": None,
     "pipe_app": None,
     "pipe_java": None,
     "pipe_sys": None,
@@ -702,3 +745,22 @@ def test_claims_are_per_token_not_per_owner(bypass_service) -> None:
     assert bypass_service.exclusive_conflict(["root"]) is not None  # tui's
     tui._release_bypass_exclusivity()
     assert bypass_service.exclusive_conflict(["root"]) is None
+
+
+@pytest.mark.parametrize(
+    ("sdk", "model", "device"),
+    [
+        ("25", "Pixel", "sailfish"),
+        ("28", "Pixel 3", "blueline"),
+        ("33", "Pixel 4 XL", "coral"),
+        ("34", "Pixel 8 Pro", "husky"),
+    ],
+)
+def test_emulator_profile_matches_the_real_api_level(
+    tmp_path, sdk, model, device
+) -> None:
+    """No coral on Android 14+: the Pixel really ran that Android version."""
+    result = _run_emulator_harness(tmp_path, "on", sdk=sdk)
+    assert result["load"]["model"] == model
+    assert result["load"]["fp"].startswith(f"google/{device}/{device}:16/")
+    assert result["load"]["flavor_prop"][0] == f"{device}-user"

@@ -325,6 +325,8 @@ EMULATOR_DETECTION_BYPASS_TOOL = ToolHookInfo(
         "android.os.Build.BOARD",
         "android.os.Build.TAGS",
         "android.os.Build.TYPE",
+        "android.os.Build.DISPLAY",
+        "android.os.Build.IS_EMULATOR",
         "android.os.Build.getSerial",
         "android.os.SystemProperties.get",
         "android.telephony.TelephonyManager.getDeviceId",

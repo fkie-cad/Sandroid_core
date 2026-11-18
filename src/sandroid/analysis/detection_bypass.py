@@ -1243,18 +1243,28 @@ class IntegrityBypassManager(BypassManagerBase):
 #
 # Coherence instead of blind spoofing (the reason this category was missing):
 #
-# - Build.* is replaced as ONE device profile (Pixel 4 XL, TrigDroid's default)
-#   and only when at least one field shows an emulator value, so a real device
-#   is never relabelled and no half-spoofed mix is left behind. FINGERPRINT is
-#   built from the device's own Build.VERSION.RELEASE / Build.ID /
-#   VERSION.INCREMENTAL, so it agrees with the Android version the app sees.
+# - Build.* is replaced as ONE device profile and only when at least one
+#   identity field shows an emulator value, so a real device is never
+#   relabelled and no half-spoofed mix is left behind. The Pixel is picked by
+#   the device's real API level (one that really ran that Android version);
+#   FINGERPRINT, DISPLAY, ro.build.flavor/display.id/description are built
+#   from the device's own release / build ID / incremental; the hidden
+#   Build.IS_EMULATOR is cleared. SUPPORTED_ABIS / cpu.abi stay real (faking
+#   them breaks native library loading): x86_64 AVDs keep that tell.
 # - Native property spoofing and file hiding only answer *app* callers: a
-#   caller inside /system, /apex, /vendor, ... keeps the truth, so the
-#   emulator's own graphics stack (goldfish pipe, ro.kernel.qemu.gles,
-#   ro.hardware) keeps working inside the hooked process. Java's File I/O
-#   (libopenjdk/libjavacore) counts as an app caller, which is how
-#   File.exists() probes are covered without a second File.exists hook (one
-#   Java method has one implementation; the root category owns that one).
+#   caller inside /system, /apex, /vendor, ..., updatable system code under
+#   /data (WebView/Trichrome, GMS/GSF modules) or a non-file module (memfd,
+#   e.g. the frida agent) keeps the truth, so the emulator's own graphics
+#   stack (goldfish pipe, ro.kernel.qemu.gles, ro.hardware) keeps working in
+#   the hooked process. Java's File I/O (libopenjdk/libjavacore) counts as an
+#   app caller, which is how File.exists() probes are covered without a
+#   second File.exists hook (the root category owns that one). The Java
+#   SystemProperties.get hook has no caller filter and answers only a fixed
+#   list of emulator-revealing keys; framework code in the process that reads
+#   one of them sees the spoof too.
+# - Device identifiers (IMEI, IMSI, ICCID, serial) call through first: where a
+#   real non-privileged app gets a SecurityException (API 29+), so does this
+#   one; only an entitled caller gets a (non-emulator) value.
 #
 # Nothing is hooked until the category is on: the hooks install the first
 # time FLAGS.emulator is set -- baked in at load (the armed-then-Start path,
@@ -1268,20 +1278,73 @@ class IntegrityBypassManager(BypassManagerBase):
 _EMULATOR_DETECTION_SCRIPT = r"""
 'use strict';
 
-var EMU_PROFILE = {
-    MODEL: 'Pixel 4 XL', MANUFACTURER: 'Google', BRAND: 'google',
-    DEVICE: 'coral', PRODUCT: 'coral', HARDWARE: 'coral', BOARD: 'coral',
-    TAGS: 'release-keys', TYPE: 'user'
-};
+// Device profiles, picked by the device's real API level so the claimed
+// Pixel really shipped (or was updated to) that Android version: Pixel
+// (sailfish) 7.1-10, Pixel 3 (blueline) 9-12, Pixel 4 XL (coral) 10-13,
+// Pixel 8 Pro (husky) 14+. Below API 25 no profile is coherent; sailfish is
+// the closest. Release / build ID / incremental always stay the device's own.
+var EMU_PROFILES = [
+    {maxSdk: 27, MODEL: 'Pixel', DEVICE: 'sailfish', BOARD: 'sailfish'},
+    {maxSdk: 28, MODEL: 'Pixel 3', DEVICE: 'blueline', BOARD: 'blueline'},
+    {maxSdk: 33, MODEL: 'Pixel 4 XL', DEVICE: 'coral', BOARD: 'coral'},
+    {maxSdk: 9999, MODEL: 'Pixel 8 Pro', DEVICE: 'husky', BOARD: 'husky'}
+];
+// The active profile: every spoofed value, filled by _emuInitProfile().
+var EMU_PROFILE = null;
+// Pixel-style serial, for an app that is allowed to read the serial at all.
+var EMU_SERIAL = '2B111FDH2004QG';
 var EMU_BUILD_FIELDS = [
     'FINGERPRINT', 'MODEL', 'MANUFACTURER', 'BRAND', 'DEVICE', 'PRODUCT',
-    'HARDWARE', 'BOARD', 'TAGS', 'TYPE'
+    'HARDWARE', 'BOARD', 'TAGS', 'TYPE', 'DISPLAY'
 ];
-// Identity fields decide whether this is an emulator at all; TAGS/TYPE are
-// replaced along with them but never decide (a userdebug phone is no emulator).
+// Identity fields decide whether this is an emulator at all; TAGS/TYPE/
+// DISPLAY are replaced along with them but never decide (a userdebug phone is
+// no emulator).
 var EMU_IDENTITY_FIELDS = EMU_BUILD_FIELDS.filter(function (f) {
-    return f !== 'TAGS' && f !== 'TYPE';
+    return f !== 'TAGS' && f !== 'TYPE' && f !== 'DISPLAY';
 });
+// NOT spoofed: Build.SUPPORTED_ABIS / ro.product.cpu.abi*. Faking them would
+// break native library loading. An x86_64 AVD therefore still shows an x86
+// ABI (rare on phones) -- arm64 AVDs on Apple silicon do not have that tell.
+
+// Fill EMU_PROFILE from the device's real API level / release / build ID.
+// `real(key)` reads a real property ('' when unknown).
+function _emuInitProfile(real) {
+    var sdk = parseInt(real('ro.build.version.sdk'), 10);
+    if (isNaN(sdk)) sdk = 9999;
+    var base = EMU_PROFILES[EMU_PROFILES.length - 1];
+    for (var i = 0; i < EMU_PROFILES.length; i++) {
+        if (sdk <= EMU_PROFILES[i].maxSdk) { base = EMU_PROFILES[i]; break; }
+    }
+    var release = real('ro.build.version.release');
+    var id = real('ro.build.id');
+    var incremental = real('ro.build.version.incremental');
+    var d = base.DEVICE;
+    EMU_PROFILE = {
+        MODEL: base.MODEL, MANUFACTURER: 'Google', BRAND: 'google',
+        DEVICE: d, PRODUCT: d, HARDWARE: d, BOARD: base.BOARD,
+        TAGS: 'release-keys', TYPE: 'user', DISPLAY: id,
+        FINGERPRINT: 'google/' + d + '/' + d + ':' + release + '/' + id + '/' +
+            incremental + ':user/release-keys',
+        FLAVOR: d + '-user',
+        DESCRIPTION: d + '-user ' + release + ' ' + id + ' ' + incremental +
+            ' release-keys'
+    };
+}
+
+// Real property values, read before any emulator listener is attached.
+function _emuRealProp(key) {
+    try {
+        var addr = _libcExport('__system_property_get');
+        if (addr === null) return '';
+        var get = new NativeFunction(addr, 'int', ['pointer', 'pointer']);
+        var buf = Memory.alloc(92);  // PROP_VALUE_MAX
+        get(Memory.allocUtf8String(key), buf);
+        return buf.readUtf8String();
+    } catch (e) {
+        return '';
+    }
+}
 // Value tokens that mark an emulator (TrigDroid's EMULATOR_INDICATORS +
 // Dexray's emulatorIndicators + the current sdk_gphone/emu64 images).
 var EMU_VALUE_TOKENS = [
@@ -1340,35 +1403,58 @@ function _isEmuPath(p) {
 var EMU_SYSTEM_PREFIXES = [
     '/system/', '/apex/', '/vendor/', '/product/', '/system_ext/', '/odm/'
 ];
+// Updatable system code that lives under /data (app or GMS module dirs) and
+// is loaded into the app process: WebView/Trichrome, Play services (incl.
+// its dynamite modules), Google services framework.
+var EMU_UPDATABLE_SYSTEM = [
+    'webview', 'trichrome', 'com.google.android.gms', 'com.google.android.gsf'
+];
 var EMU_JAVA_IO_LIBS = ['libopenjdk.so', 'libjavacore.so'];
 
 function _isAppCaller(addr) {
     try {
         var m = Process.findModuleByAddress(addr);
-        if (!m) return true;  // anonymous / JIT / unpacked code: the app
+        // Anonymous / JIT / unpacked code: the app (packers unpack there).
+        if (!m) return true;
         var p = '' + m.path;
+        // Not a file on disk (memfd: the frida agent, ...): never the app.
+        if (p.charAt(0) !== '/' || p.indexOf('memfd:') !== -1) return false;
         for (var i = 0; i < EMU_JAVA_IO_LIBS.length; i++) {
             if (p.indexOf('/' + EMU_JAVA_IO_LIBS[i]) !== -1) return true;
         }
         for (var j = 0; j < EMU_SYSTEM_PREFIXES.length; j++) {
             if (p.indexOf(EMU_SYSTEM_PREFIXES[j]) === 0) return false;
         }
+        var pl = p.toLowerCase();
+        for (var k = 0; k < EMU_UPDATABLE_SYSTEM.length; k++) {
+            if (pl.indexOf(EMU_UPDATABLE_SYSTEM[k]) !== -1) return false;
+        }
     } catch (e) {}
     return true;
 }
 
 // --- system properties ------------------------------------------------------
-var _emuFingerprint = null;  // set once the Build profile is computed
-
-function _profileFingerprint() {
-    if (_emuFingerprint) return _emuFingerprint;
-    return 'google/coral/coral:12/SP1A.210812.016.C1/7676683:user/release-keys';
-}
+// The keys the Java SystemProperties.get hook answers. It has no caller
+// filter (a Java stack walk per read is too costly), so framework Java code
+// in the app process that reads one of these sees the spoof as well; the
+// list is kept to keys that only reveal the emulator.
+var EMU_JAVA_PROP_KEYS = [
+    'ro.kernel.qemu', 'ro.kernel.qemu.gles', 'ro.boot.qemu',
+    'ro.boot.qemu.avd_name', 'ro.kernel.android.qemud', 'init.svc.qemud',
+    'init.svc.qemu-props', 'init.svc.goldfish-logcat', 'init.svc.goldfish-setup',
+    'qemu.hw.mainkeys', 'qemu.sf.fake_camera', 'qemu.sf.lcd_density',
+    'ro.hardware', 'ro.boot.hardware', 'ro.product.model',
+    'ro.product.manufacturer', 'ro.product.brand', 'ro.product.device',
+    'ro.product.name', 'ro.product.board', 'ro.build.product',
+    'ro.build.fingerprint', 'ro.build.tags', 'ro.build.type',
+    'ro.build.flavor', 'ro.build.display.id', 'ro.build.description',
+    'ro.build.characteristics'
+];
 
 // Replacement for property `key` whose current value is `value`, or null to
 // leave it alone. ro.debuggable / ro.secure stay with the root category.
 function _spoofProp(key, value) {
-    if (!key) return null;
+    if (!key || EMU_PROFILE === null) return null;
     var k = '' + key;
     var kl = k.toLowerCase();
     // qemu / goldfish / ranchu markers are unset on a real device.
@@ -1386,6 +1472,9 @@ function _spoofProp(key, value) {
     if (k === 'ro.hardware' || k === 'ro.boot.hardware') return EMU_PROFILE.HARDWARE;
     if (k === 'ro.build.product') return EMU_PROFILE.PRODUCT;
     if (k === 'ro.build.characteristics') return 'nosdcard';
+    if (k === 'ro.build.flavor') return EMU_PROFILE.FLAVOR;
+    if (k === 'ro.build.display.id') return EMU_PROFILE.DISPLAY;
+    if (k === 'ro.build.description') return EMU_PROFILE.DESCRIPTION;
     if (k.indexOf('ro.product.') === 0 || k.indexOf('ro.build.') === 0 ||
         k.indexOf('ro.vendor.') === 0 || k.indexOf('ro.system.') === 0 ||
         k.indexOf('ro.bootimage.') === 0 || k.indexOf('ro.odm.') === 0) {
@@ -1395,7 +1484,7 @@ function _spoofProp(key, value) {
         if (leaf === 'device') return EMU_PROFILE.DEVICE;
         if (leaf === 'name') return EMU_PROFILE.PRODUCT;
         if (leaf === 'board') return EMU_PROFILE.BOARD;
-        if (leaf === 'fingerprint') return _profileFingerprint();
+        if (leaf === 'fingerprint') return EMU_PROFILE.FINGERPRINT;
     }
     return null;
 }
@@ -1465,26 +1554,39 @@ function _emuApplyBuild(on) {
                 send({type: 'info', hook: 'emulator-bypass:Build(no emulator values)'});
                 return;
             }
-            try {
+            if (EMU_PROFILE === null || !EMU_PROFILE.DISPLAY) {
+                // Native property read failed: take the real release/ID
+                // from Java instead.
                 var Version = Java.use('android.os.Build$VERSION');
-                _emuFingerprint = 'google/coral/coral:' + Version.RELEASE.value +
-                    '/' + Build.ID.value + '/' + Version.INCREMENTAL.value +
-                    ':user/release-keys';
-            } catch (e) {
-                _emuFingerprint = _profileFingerprint();
+                _emuInitProfile(function (key) {
+                    try {
+                        if (key === 'ro.build.version.sdk') return '' + Version.SDK_INT.value;
+                        if (key === 'ro.build.version.release') {
+                            return '' + Version.RELEASE.value;
+                        }
+                        if (key === 'ro.build.id') return '' + Build.ID.value;
+                        if (key === 'ro.build.version.incremental') {
+                            return '' + Version.INCREMENTAL.value;
+                        }
+                    } catch (e) {}
+                    return '';
+                });
             }
             EMU_BUILD_FIELDS.forEach(function (f) {
-                try {
-                    Build[f].value = f === 'FINGERPRINT' ? _emuFingerprint : EMU_PROFILE[f];
-                } catch (e) {}
+                try { Build[f].value = EMU_PROFILE[f]; } catch (e) {}
             });
+            // Hidden Build.IS_EMULATOR (ro.boot.qemu == "1"), where present.
+            try {
+                orig.IS_EMULATOR = Build.IS_EMULATOR.value;
+                Build.IS_EMULATOR.value = false;
+            } catch (e) {}
             _emuBuildOriginal = orig;
             send({type: 'info', hook: 'emulator-bypass:Build=' + EMU_PROFILE.MODEL});
         } else {
             if (!_emuBuildOriginal) return;
             var saved = _emuBuildOriginal;
             _emuBuildOriginal = null;
-            EMU_BUILD_FIELDS.forEach(function (f) {
+            EMU_BUILD_FIELDS.concat(['IS_EMULATOR']).forEach(function (f) {
                 // TAGS is also the root category's (sticky) field.
                 if (f === 'TAGS' && FLAGS.root) return;
                 try {
@@ -1505,10 +1607,14 @@ function _emuInstallJavaHooks() {
     // Build.getSerial (TrigDroid).
     try {
         var BuildCls = Java.use('android.os.Build');
+        // Call through first: on API 29+ a normal app gets the real
+        // SecurityException (as on a phone); only a caller entitled to the
+        // serial gets one, and then a Pixel-style one.
         _emuHook(BuildCls.getSerial, function () {
-            if (!FLAGS.emulator) return this.getSerial();
+            var real = this.getSerial();
+            if (!FLAGS.emulator || real === null) return real;
             send({type: 'info', hook: 'emulator-bypass:Build.getSerial'});
-            return 'RF8M33XXXXX';
+            return EMU_SERIAL;
         });
     } catch (e) {}
 
@@ -1518,7 +1624,7 @@ function _emuInstallJavaHooks() {
         var SP = Java.use('android.os.SystemProperties');
         _emuHook(SP.get.overload('java.lang.String'), function (key) {
             var v = this.get(key);
-            if (!FLAGS.emulator) return v;
+            if (!FLAGS.emulator || EMU_JAVA_PROP_KEYS.indexOf('' + key) === -1) return v;
             var s = _spoofProp(key, v);
             if (s === null) return v;
             send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
@@ -1526,7 +1632,7 @@ function _emuInstallJavaHooks() {
         });
         _emuHook(SP.get.overload('java.lang.String', 'java.lang.String'), function (key, def) {
             var v = this.get(key, def);
-            if (!FLAGS.emulator) return v;
+            if (!FLAGS.emulator || EMU_JAVA_PROP_KEYS.indexOf('' + key) === -1) return v;
             var s = _spoofProp(key, v);
             if (s === null) return v;
             send({type: 'info', hook: 'emulator-bypass:SystemProperties.get(' + key + ')'});
@@ -1535,26 +1641,36 @@ function _emuInstallJavaHooks() {
         send({type: 'info', hook: 'emulator-bypass:SystemProperties.get'});
     } catch (e) {}
 
-    // TelephonyManager fakes (TrigDroid's bypassTelephonyChecks values).
+    // TelephonyManager (TrigDroid's bypassTelephonyChecks set). TrigDroid's
+    // IMEI/IMSI/ICCID fakes were the emulator's OWN defaults
+    // (358240051111110, 310260000000000, 89014103211118510720), so these are
+    // other, checksum-valid values; line 1 is empty, as on many real SIMs
+    // (the emulator answers 15555215554). Identifier getters call through
+    // first: on API 29+ a normal app gets the real SecurityException.
     var TELEPHONY = [
-        ['getDeviceId', [], '358240051111110'],
-        ['getDeviceId', ['int'], '358240051111110'],
-        ['getSubscriberId', [], '310260000000000'],
-        ['getLine1Number', [], '+15551234567'],
-        ['getSimSerialNumber', [], '89014103211118510720'],
-        ['getNetworkOperatorName', [], 'T-Mobile'],
-        ['getNetworkOperator', [], '310260'],
-        ['getPhoneType', [], 1],   // PHONE_TYPE_GSM
-        ['getSimState', [], 5]     // SIM_STATE_READY
+        ['getDeviceId', [], '358813084172653', true],
+        ['getDeviceId', ['int'], '358813084172653', true],
+        ['getSubscriberId', [], '310260518374921', true],
+        ['getLine1Number', [], '', true],
+        ['getSimSerialNumber', [], '89012604173859201844', true],
+        ['getNetworkOperatorName', [], 'T-Mobile', false],
+        ['getNetworkOperator', [], '310260', false],
+        ['getPhoneType', [], 1, false],   // PHONE_TYPE_GSM
+        ['getSimState', [], 5, false]     // SIM_STATE_READY
     ];
     try {
         var TM = Java.use('android.telephony.TelephonyManager');
         TELEPHONY.forEach(function (row) {
-            var name = row[0], sig = row[1], fake = row[2];
+            var name = row[0], sig = row[1], fake = row[2], callThrough = row[3];
             try {
                 var m = TM[name].overload.apply(TM[name], sig);
                 _emuHook(m, function () {
                     if (!FLAGS.emulator) return m.apply(this, arguments);
+                    if (callThrough) {
+                        // Throws where a real phone throws (permissions).
+                        var real = m.apply(this, arguments);
+                        if (real === null) return real;
+                    }
                     send({type: 'info', hook: 'emulator-bypass:TelephonyManager.' + name});
                     return fake;
                 });
@@ -1568,6 +1684,7 @@ function _emuInstallJavaHooks() {
 function _emuInstall() {
     if (_emuInstalled) return;
     _emuInstalled = true;
+    if (EMU_PROFILE === null) _emuInitProfile(_emuRealProp);
     try { _emuInstallPropHook(); } catch (e) {
         send({type: 'debug', hook: 'emulator-bypass:__system_property_get', error: e.message});
     }
@@ -1623,6 +1740,8 @@ EMULATOR_DETECTION_HOOKS = [
     "android.os.Build.BOARD",
     "android.os.Build.TAGS",
     "android.os.Build.TYPE",
+    "android.os.Build.DISPLAY",
+    "android.os.Build.IS_EMULATOR",
     "android.os.Build.getSerial",
     "android.os.SystemProperties.get",
     "android.telephony.TelephonyManager.getDeviceId",
