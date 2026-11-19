@@ -999,11 +999,21 @@ class PrivacyScanService:
         except Exception:
             logger.warning("privacy scan: app-data sweep failed", exc_info=True)
             return
+        from sandroid.core.adb_utils import canonical_device_path
+
         now = time.monotonic()
+        # The app-data roots include aliases of one folder (/data/data/<pkg>
+        # and /data/user/0/<pkg>): scan each file once, under its canonical path.
+        seen: set[str] = set()
         for result in results:
             if not getattr(result, "success", False):
                 continue
-            remote = str(result.source_path)
+            remote = canonical_device_path(str(result.source_path))
+            if remote in seen:
+                with contextlib.suppress(OSError):
+                    Path(result.local_path).unlink()
+                continue
+            seen.add(remote)
             main = remote
             for suffix in (*_COMPANIONS, "-shm"):
                 if remote.endswith(suffix):

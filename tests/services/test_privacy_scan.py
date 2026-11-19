@@ -643,18 +643,21 @@ def test_sweep_keeps_only_files_with_hits(svc, folder, monkeypatch):
 
     class FakeFx:
         def pull_all_for_package(self, package, output_dir=None):
-            base = Path(output_dir) / "stamp" / "data_data_pkg"
-            base.mkdir(parents=True)
             out = []
-            for name, data in (("prefs.xml", EMAIL.encode()), ("cache.bin", b"0")):
-                (base / name).write_bytes(data)
-                out.append(
-                    ExtractionResult(
-                        source_path=f"/data/data/{package}/{name}",
-                        local_path=str(base / name),
-                        success=True,
+            # /data/user/0/<pkg> is the same folder as /data/data/<pkg>: the
+            # extraction service pulls it twice.
+            for root, sub in (("/data/data", "data_data_pkg"), ("/data/user/0", "u0")):
+                base = Path(output_dir) / "stamp" / sub
+                base.mkdir(parents=True)
+                for name, data in (("prefs.xml", EMAIL.encode()), ("cache.bin", b"0")):
+                    (base / name).write_bytes(data)
+                    out.append(
+                        ExtractionResult(
+                            source_path=f"{root}/{package}/{name}",
+                            local_path=str(base / name),
+                            success=True,
+                        )
                     )
-                )
             return out
 
     monkeypatch.setattr(services, "get_file_extraction_service", FakeFx)
