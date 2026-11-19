@@ -8,6 +8,7 @@ double.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from types import SimpleNamespace
 
@@ -683,6 +684,40 @@ async def test_options_box_follows_the_cursor() -> None:
         assert screen.query_one("#opt-snap").disabled  # no snapshots
 
 
+async def test_snapshot_select_lists_the_snapshots_in_quick_boot(saved) -> None:
+    """Quick boot: the Select lists the AVD's snapshots (disabled) and never
+    claims "no snapshots" for an AVD that has some.
+    """
+    from textual.widgets import Select
+
+    quick = dataclasses.replace(IDLE, options=AvdLaunchOptions())
+    app, screen = _hub(avds=[quick, OTHER])
+    async with app.run_test(size=SIZE) as pilot:
+        await _shown(pilot, screen)
+        assert screen.current_row().name == "Idle_AVD"
+        select = screen.query_one("#opt-snapshot", Select)
+        assert _box(screen)["boot"] == "normal"
+        assert select.prompt == "2 snapshots"
+        assert [v for _p, v in select._options if v != Select.NULL] == [
+            "default_boot",
+            "s1",
+        ]
+        assert select.disabled  # pickable only for a Snapshot boot
+        assert not screen.query_one("#opt-snap").disabled
+        await pilot.click("#opt-snap")  # Snapshot boot: the Select opens up
+        await until(pilot, lambda: _box(screen)["boot"] == "snapshot")
+        assert _box(screen)["snapshot"] == "default_boot"
+        assert not select.disabled
+        assert saved[-1][:2] == (
+            "Idle_AVD",
+            AvdLaunchOptions(boot="snapshot", snapshot="default_boot"),
+        )
+        await pilot.press("down")  # OTHER really has none
+        await until(pilot, lambda: screen.current_row().name == "Other")
+        assert select.prompt == "no snapshots"
+        assert select.disabled
+
+
 async def test_option_keys_persist_per_avd_and_keep_the_focus(saved) -> None:
     app, screen = _hub(avds=[IDLE, OTHER])
     async with app.run_test(size=SIZE) as pilot:
@@ -979,7 +1014,8 @@ async def test_escape_closes_an_open_snapshot_list_first() -> None:
     """The app's priority Esc calls action_cancel: it must not close Devices
     while the snapshot list is open (or focused after a click).
     """
-    app, screen = _hub(avds=[IDLE])
+    snap_boot = AvdLaunchOptions(boot="snapshot", snapshot="s1")
+    app, screen = _hub(avds=[dataclasses.replace(IDLE, options=snap_boot)])
     async with app.run_test(size=SIZE) as pilot:
         await _shown(pilot, screen)
         select = screen.query_one("#opt-snapshot")

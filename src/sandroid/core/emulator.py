@@ -1030,11 +1030,16 @@ def _our_ports() -> set[int]:
     } | _RESERVED_PORTS
 
 
-def _reserve_port(taken: set[int], port: int | None, avd: str | None = None) -> int:
+def _reserve_port(
+    taken: set[int], port: int | None, avd: str | None = None
+) -> tuple[int, PortReason | Literal["explicit"]]:
     """Choose (or claim *port*) and reserve it, under the registry lock.
 
     With *avd* the choice follows :func:`preferred_console_port` (pinned,
     then last-used port); without it, the first free port.
+
+    Returns:
+        ``(port, reason)``; reason is ``"explicit"`` for a given *port*.
 
     Raises:
         EmulatorLaunchError: *port* is already reserved / used by our live
@@ -1042,19 +1047,20 @@ def _reserve_port(taken: set[int], port: int | None, avd: str | None = None) -> 
     """
     with _LAUNCH_LOCK:
         ours = _our_ports()
+        reason: PortReason | Literal["explicit"]
         if port is not None:
             if port in ours:
                 raise EmulatorLaunchError(
                     f"Console port {port} is already used by another launch"
                 )
-            chosen = port
+            chosen, reason = port, "explicit"
         elif avd is not None:
             chosen, reason = preferred_console_port(avd, taken | ours)
             logger.info(f"Console port {chosen} for '{avd}' ({reason})")
         else:
-            chosen = free_console_port(taken | ours)
+            chosen, reason = free_console_port(taken | ours), "auto"
         _RESERVED_PORTS.add(chosen)
-        return chosen
+        return chosen, reason
 
 
 def _release_port(port: int) -> None:
@@ -1073,8 +1079,9 @@ def launch_avd(
 
     The emulator is detached and logs to :func:`emulator_log_path`. Returns
     once the process survived its first seconds; the boot continues in the
-    background (see :func:`wait_until_ready`). If the automatically chosen
-    port was grabbed in the meantime, retries once on the next free port.
+    background (see :func:`wait_until_ready`). If an ``auto`` port was
+    grabbed in the meantime, retries once on the next free port; a pinned or
+    last-used port is never swapped for an arbitrary one (the launch fails).
 
     Args:
         avd: AVD name.
@@ -1127,9 +1134,8 @@ def _launch_reserved(
     avd: str, opts: AvdLaunchOptions, binary: Path, adb: Any, port: int | None
 ) -> EmulatorLaunch:
     """:func:`launch_avd` once *avd* is marked as starting."""
-    explicit = port is not None
     taken = _listed_ports(adb)
-    chosen = _reserve_port(taken, port, avd)
+    chosen, reason = _reserve_port(taken, port, avd)
     try:
         for attempt in (1, 2):
             launch = _spawn_launch(binary, avd, chosen, opts)
@@ -1142,15 +1148,24 @@ def _launch_reserved(
                 )
                 return launch
             _forget_launch(launch.serial)
-            if attempt == 1 and not explicit and not _ports_free(chosen):
+            log_path = launch.log_path
+            if reason in ("pinned", "last used") and not _ports_free(chosen):
+                # Never fall back to an arbitrary port: in a shared lab the
+                # next free one may be another session's.
+                hint = "free it or unpin" if reason == "pinned" else "free it"
+                raise EmulatorLaunchError(
+                    f"Console port {chosen} ({reason}) is taken — {hint}"
+                    + (f" (log: {log_path})" if log_path else ""),
+                    log_path=log_path,
+                )
+            if attempt == 1 and reason == "auto" and not _ports_free(chosen):
                 logger.warning(
                     f"Console port {chosen} was taken during startup; retrying"
                 )
                 taken.add(chosen)
                 _release_port(chosen)
-                chosen = _reserve_port(taken, None)
+                chosen, reason = _reserve_port(taken, None)
                 continue
-            log_path = launch.log_path
             raise EmulatorLaunchError(
                 f"Emulator '{avd}' crashed during startup: {error}"
                 + (f" (log: {log_path})" if log_path else ""),

@@ -2,7 +2,8 @@
 
 Covers: detached output never goes to an undrained pipe; launches use an
 explicit ``-port`` and the safe flags; crash -> EmulatorLaunchError naming the
-log; one retry when the chosen port is grabbed; ``stop_emulator`` sends
+log; one retry when an auto port is grabbed (never for a pinned / last-used
+port); ``stop_emulator`` sends
 ``emu kill`` to exactly one serial; ``restart_emulator`` keeps AVD, port and
 options; ``wait_until_ready`` needs boot_completed AND the package manager;
 EmulatorService / DeviceController delegate with the right serial.
@@ -316,6 +317,39 @@ def test_launch_avd_retries_once_on_next_port_when_taken(env):
     launch = emu.launch_avd("Pixel")
     assert [_port_of(c) for c in env["spawned"]] == [5554, 5556]
     assert launch.serial == "emulator-5556"
+
+
+def test_pinned_port_taken_during_startup_fails_without_fallback(env, monkeypatch):
+    """A grabbed pinned port must not fall back to another session's port."""
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    env["on_spawn"] = lambda command: env["busy"].add(_port_of(command))
+    env["startup"] = [(False, "ERROR: port in use")]
+    with pytest.raises(EmulatorLaunchError) as info:
+        emu.launch_avd("Pixel")
+    assert "Console port 5562 (pinned) is taken" in str(info.value)
+    assert "unpin" in str(info.value)
+    assert [_port_of(c) for c in env["spawned"]] == [5562]
+    assert emu.remembered_port("Pixel") is None
+    assert not emu._RESERVED_PORTS
+
+
+def test_remembered_port_taken_during_startup_fails_without_fallback(env):
+    emu._remember_port("Pixel", 5570)
+    env["on_spawn"] = lambda command: env["busy"].add(_port_of(command))
+    env["startup"] = [(False, "ERROR: port in use")]
+    with pytest.raises(EmulatorLaunchError, match=r"5570 \(last used\) is taken"):
+        emu.launch_avd("Pixel")
+    assert [_port_of(c) for c in env["spawned"]] == [5570]
+    assert emu.remembered_port("Pixel") == 5570
+    assert not emu._RESERVED_PORTS
+
+
+def test_pinned_port_crash_with_port_still_free_reports_the_crash(env, monkeypatch):
+    monkeypatch.setenv("ANDROID_SERIAL", "emulator-5562")
+    env["startup"] = [(False, "PANIC: Missing AVD")]
+    with pytest.raises(EmulatorLaunchError, match="crashed during startup"):
+        emu.launch_avd("Pixel")
+    assert len(env["spawned"]) == 1
 
 
 def test_launch_avd_explicit_port_is_not_retried(env):

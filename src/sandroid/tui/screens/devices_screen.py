@@ -852,6 +852,20 @@ class _Option(Checkbox, can_focus=False):
         return Content.assemble(("[" + ("x" if self.value else " ") + "]", style))
 
 
+def _snapshot_prompt(row: DeviceRow | AvdRow) -> str:
+    """What the snapshot Select shows while no snapshot is chosen.
+
+    "no snapshots" only for an AVD that really has none; a running device
+    row does not know its AVD's snapshots, so it claims nothing.
+    """
+    if not isinstance(row, AvdRow):
+        return "snapshot"
+    count = row.snapshot_count or len(row.snapshots)
+    if not count:
+        return "no snapshots"
+    return f"{count} snapshot{'s' if count != 1 else ''}"
+
+
 class DevicesScreen(ModalScreen[str | None]):
     """Full-screen live list of devices and AVDs plus the launch options.
 
@@ -1433,9 +1447,10 @@ class DevicesScreen(ModalScreen[str | None]):
 
     def _set_controls(self, row: Any, options: Any, editable: bool) -> None:
         names = row.snapshots if isinstance(row, AvdRow) else ()
+        select = self.query_one("#opt-snapshot", Select)
+        select.prompt = _snapshot_prompt(row)
         if options.boot == "snapshot" and options.snapshot not in names:
             names = (*names, options.snapshot) if options.snapshot else names
-        select = self.query_one("#opt-snapshot", Select)
         with self.prevent(
             RadioButton.Changed, RadioSet.Changed, Checkbox.Changed, Select.Changed
         ):
@@ -1461,7 +1476,9 @@ class DevicesScreen(ModalScreen[str | None]):
             widget.disabled = not editable
         self.query_one("#opt-boot").disabled = not editable
         self.query_one("#opt-snap", RadioButton).disabled = not editable or not names
-        select.disabled = not editable or not names
+        # Lists the AVD's snapshots in every boot mode; pickable only for a
+        # Snapshot boot (the Snapshot radio / ``n`` switch to it).
+        select.disabled = not editable or not names or options.boot != "snapshot"
 
     def _facts_text(self, row: DeviceRow | AvdRow) -> Text:
         text = Text()
