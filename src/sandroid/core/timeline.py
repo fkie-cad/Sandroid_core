@@ -620,6 +620,8 @@ class TimelineService:
         self._policy = Policy()
         self._policy_doc = _policy_sections()
         self._coalesce: dict[tuple, _Coalesced] = {}
+        #: (dev, path) -> pending coalescer keys of that path (any pid).
+        self._coalesce_paths: dict[tuple, set[tuple]] = {}
         self._warned: set[str] = set()
         self._labels = Labels(self)
 
@@ -1044,9 +1046,7 @@ class TimelineService:
             key_dev = fields.get("dev") or sink.serial
             # Another op on a path with a pending modify: that modify first.
             if kind != "modify":
-                for key in [
-                    k for k in self._coalesce if k[1] == path and k[0] == key_dev
-                ]:
+                for key in list(self._coalesce_paths.get((key_dev, path), ())):
                     self._emit_coalesced(key)
             window = self._policy.coalesce_s
             if kind == "modify" and window > 0 and sink.state in ("open", "capture"):
@@ -1057,6 +1057,7 @@ class TimelineService:
                     pending.last = max(pending.last, fields["t"])
                     return None
                 self._coalesce[key] = _Coalesced(fields["t"], fields["t"], 1, fields)
+                self._coalesce_paths.setdefault((key_dev, path), set()).add(key)
                 return None
             return self._accept(sink, fields, t_rx)
 
@@ -1065,6 +1066,11 @@ class TimelineService:
         pending = self._coalesce.pop(key, None)
         if pending is None:
             return
+        keys = self._coalesce_paths.get(key[:2])
+        if keys is not None:
+            keys.discard(key)
+            if not keys:
+                del self._coalesce_paths[key[:2]]
         fields = pending.kw
         data = dict(fields.get("data") or {})
         data.update(n=pending.n, first=_iso(pending.first), last=_iso(pending.last))
