@@ -1069,7 +1069,20 @@ def abort_owned_spawn(opened: Opened | None) -> None:
             liveness, live = probe_liveness(opened.package)
         except Exception:
             liveness, live = Liveness.UNKNOWN, None
-        ours = live == opened.pid or (live is None and spid == opened.pid)
+        # A held spawn has no name pidof can find; if its session is gone too
+        # (died on its own, e.g. an anti-Frida self-kill), it is still ours
+        # unless another start holds the lifecycle lock (its new process
+        # would be just as nameless). Never act on an adb error.
+        nameless_and_sessionless = (
+            liveness is Liveness.NOT_RUNNING
+            and spid is None
+            and not _LIFECYCLE.busy_for_caller()
+        )
+        ours = (
+            live == opened.pid
+            or (live is None and spid == opened.pid)
+            or nameless_and_sessionless
+        )
         if not ours:
             logger.info(
                 "Not stopping %s: pid %s is no longer the failed spawn %s",

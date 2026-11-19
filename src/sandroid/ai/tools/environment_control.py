@@ -499,7 +499,16 @@ def stop_ssl_unpin() -> dict[str, Any]:
     if not was_active:
         is_on = getattr(service, "ssl_unpin_is_on", None)
         if callable(is_on) and is_on():
-            service.stop_ssl_unpin()  # disarms an armed-only bypass
+            try:
+                service.stop_ssl_unpin()  # disarms an armed-only bypass
+            except Exception as exc:
+                return {"stopped": False, "was_active": False, "error": str(exc)}
+            if is_on():
+                return {
+                    "stopped": False,
+                    "was_active": False,
+                    "error": "SSL unpin is still armed after the disarm call",
+                }
             return {"stopped": False, "was_active": False, "disarmed": True}
         return {"stopped": False, "was_active": False}
 

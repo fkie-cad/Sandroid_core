@@ -803,10 +803,17 @@ def test_get_ssl_unpin_status_inactive(monkeypatch):
 
 def test_stop_ssl_unpin_disarms_an_armed_only_bypass(monkeypatch):
     calls = []
+    armed = {"on": True}
+
+    def _stop():
+        calls.append("stop")
+        armed["on"] = False
+        return False
+
     service = SimpleNamespace(
         ssl_unpin_is_active=lambda: False,
-        ssl_unpin_is_on=lambda: True,
-        stop_ssl_unpin=lambda: calls.append("stop") or False,
+        ssl_unpin_is_on=lambda: armed["on"],
+        stop_ssl_unpin=_stop,
     )
     _patch_mitmproxy_service(monkeypatch, service)
 
@@ -814,3 +821,17 @@ def test_stop_ssl_unpin_disarms_an_armed_only_bypass(monkeypatch):
 
     assert result == {"stopped": False, "was_active": False, "disarmed": True}
     assert calls == ["stop"]
+
+
+def test_stop_ssl_unpin_reports_a_disarm_that_did_not_take(monkeypatch):
+    service = SimpleNamespace(
+        ssl_unpin_is_active=lambda: False,
+        ssl_unpin_is_on=lambda: True,
+        stop_ssl_unpin=lambda: False,
+    )
+    _patch_mitmproxy_service(monkeypatch, service)
+
+    result = ec.stop_ssl_unpin()
+
+    assert "disarmed" not in result
+    assert "still armed" in result["error"]

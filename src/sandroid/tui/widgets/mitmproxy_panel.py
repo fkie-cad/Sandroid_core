@@ -1594,7 +1594,7 @@ class MitmproxyPanel(Widget):
         was_active = self._service.ssl_unpin_is_on()
 
         def _job() -> None:
-            ok, msg = False, ""
+            ok, msg, failed = False, "", False
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
                 future = executor.submit(
@@ -1603,19 +1603,21 @@ class MitmproxyPanel(Widget):
                 try:
                     ok, msg = future.result(timeout=self._SSL_UNPIN_TIMEOUT)
                 except concurrent.futures.TimeoutError:
-                    ok, msg = False, "SSL unpin timed out — see logs"
+                    ok, msg, failed = False, "SSL unpin timed out — see logs", True
                     logger.error(
                         "SSL unpin toggle exceeded %.0fs watchdog; abandoning",
                         self._SSL_UNPIN_TIMEOUT,
                     )
             except Exception as exc:
-                ok, msg = False, str(exc)
+                ok, msg, failed = False, str(exc), True
                 logger.warning("SSL unpin toggle failed: %s", exc)
             finally:
                 executor.shutdown(wait=False)
 
             def _report() -> None:
-                if was_active:
+                if failed:
+                    self._append_line(f"[ERROR] SSL unpin failed: {msg}")
+                elif was_active:
                     self._append_line(f"[INFO] {msg or 'SSL pinning bypass stopped'}")
                 elif ok:
                     self._append_line(f"[INFO] {msg}")

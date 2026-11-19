@@ -1368,3 +1368,27 @@ def test_trigdroid_fresh_joins_a_held_spawn(env, monkeypatch):
     env.live = (Liveness.NOT_RUNNING, None)
 
     assert _in_worker(lambda: Trigdroid._resolve_spawn(PKG, True)) is False
+
+
+def test_abort_cleans_up_a_nameless_spawn_whose_session_is_gone(env, monkeypatch):
+    """A held spawn has no pidof name; with its session gone too (e.g. an
+    anti-Frida self-kill) it is still the tool's, so the header is cleared.
+    An adb error, or another start holding the lock, leaves it alone.
+    """
+    from sandroid.core.adb import Adb
+
+    killed: list = []
+    monkeypatch.setattr(Adb, "force_stop", staticmethod(killed.append))
+    env.jm = FakeJM()  # session gone
+    env.live = (Liveness.NOT_RUNNING, None)
+    env.spotlight.announce_pid(4321, PKG)
+
+    app_start.abort_owned_spawn(Opened(4321, True, True, None, PKG, "friTap"))
+
+    assert killed == [PKG]
+    assert env.spotlight.get_pid() is None
+
+    killed.clear()
+    env.live = (Liveness.UNKNOWN, None)
+    app_start.abort_owned_spawn(Opened(4321, True, True, None, PKG, "friTap"))
+    assert killed == []

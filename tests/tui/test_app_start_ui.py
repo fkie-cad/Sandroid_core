@@ -221,3 +221,17 @@ def test_am_parser_matches_whole_pids_and_record_boundaries() -> None:
             "    thread=android.app.IApplicationThread$Stub$Proxy@1\n"
         )
         assert parse(dump, 873) is False, header
+
+
+def test_a_record_sub_header_does_not_end_the_record() -> None:
+    """AOSP prints ``processInfo:`` (indent 4) before ``thread=`` for apps
+    that declare ``<processes>``; it is part of the record, not a title.
+    """
+    dump = (
+        "  *APP* UID 10219 ProcessRecord{9075a3 8735:org.mozilla.firefox/u0a219}\n"
+        "    processInfo:\n"
+        "      name=org.mozilla.firefox\n"
+        "    thread=android.app.IApplicationThread$Stub$Proxy@c72926e\n"
+        "  PID mappings:\n"
+    )
+    assert SpotlightPanel._parse_am_process_attached(dump, 8735) is True

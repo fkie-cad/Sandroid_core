@@ -831,13 +831,16 @@ class SpotlightPanel(Widget):
         in_record = False
         for line in dump.splitlines():
             stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
             record = _AM_RECORD.search(stripped)
             # Every record header ends the previous record: *APP* / *PERS* /
-            # *IMP* ..., "Isolated #n:", "PID #n:" and section titles.
+            # *IMP* ..., "Isolated #n:", "PID #n:" and section titles. Titles
+            # sit at indent <= 2; a record's own sub-headers (``processInfo:``,
+            # indent 4) are inside the record and must not end it.
             if (
                 record
                 or stripped.startswith(("*", "Isolated #"))
-                or (stripped.endswith(":") and "=" not in stripped)
+                or (indent <= 2 and stripped.endswith(":") and "=" not in stripped)
             ):
                 in_record = bool(record) and int(record.group(1)) == pid
                 continue
