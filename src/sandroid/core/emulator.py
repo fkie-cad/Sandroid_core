@@ -32,7 +32,7 @@ import socket
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from logging import getLogger
 from pathlib import Path
@@ -65,7 +65,7 @@ DEFAULT_BOOT_TIMEOUT = 240.0
 #: A launch older than this is no longer reported as booting even if nobody
 #: confirmed it ready, so auto-selection is never blocked forever by a launch
 #: whose waiter died.
-_BOOTING_MAX_AGE = 600.0
+BOOTING_MAX_AGE = 600.0
 
 #: Timeout of every adb call made from this module.
 _ADB_TIMEOUT = 10.0
@@ -564,17 +564,82 @@ def avd_snapshots(name: str) -> list[AvdSnapshot]:
 _AVD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
 
 
+#: Lock files that exist whether or not the AVD runs (the emulator only
+#: ``flock``s it), so their presence says nothing.
+_PERSISTENT_LOCKS = frozenset({"multiinstance.lock"})
+
+
+def _stale_lock(path: Path) -> bool:
+    """True if lock *path* names a process that no longer exists.
+
+    The emulator writes its PID into ``hardware-qemu.ini.lock`` (a file on
+    POSIX, a directory with a ``pid`` file on Windows). Anything unreadable
+    or not a PID counts as a live lock. Windows is never checked:
+    ``os.kill(pid, 0)`` would terminate the process there.
+    """
+    if os.name == "nt":
+        return False
+    target = path / "pid" if path.is_dir() else path
+    try:
+        text = target.read_text(encoding="utf-8", errors="ignore").strip()[:32]
+    except OSError:
+        return False
+    if not text.isdigit() or int(text) <= 0:
+        return False
+    try:
+        os.kill(int(text), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def avd_lock_files(name: str) -> list[Path]:
+    """Lock files a running emulator holds in AVD *name*'s directory.
+
+    Every ``*.lock`` entry (file or directory) counts except
+    ``multiinstance.lock``, which stays behind after a clean exit, and locks
+    naming a dead PID (left by a crash). Non-empty means some emulator --
+    possibly another session's, or one adb does not list -- runs this AVD.
+    """
+    directory = avd_dir(name)
+    if directory is None:
+        return []
+    try:
+        entries = list(directory.glob("*.lock"))
+    except OSError:
+        return []
+    return sorted(
+        path
+        for path in entries
+        if path.name not in _PERSISTENT_LOCKS and not _stale_lock(path)
+    )
+
+
 def rename_avd(old_name: str, new_name: str) -> tuple[bool, str]:
     """Rename a stopped AVD.
 
     Renames ``<old>.ini`` and, when the AVD lives in the AVD home as
     ``<old>.avd``, that directory too (rewriting ``path=``/``path.rel=``).
     An AVD redirected elsewhere keeps its directory. Remembered launch
-    options move to the new name.
+    options move to the new name. Refused while the AVD runs (our launch is
+    alive, or its directory holds emulator lock files).
 
     Returns:
         ``(success, message)``.
     """
+    with _LAUNCH_LOCK:
+        ours = [x for x in _LAUNCHES.values() if x.avd == old_name and x.alive]
+    if ours:
+        return False, f"AVD '{old_name}' is running as {ours[0].serial}; stop it first"
+    locks = avd_lock_files(old_name)
+    if locks:
+        names = ", ".join(path.name for path in locks)
+        return (
+            False,
+            f"AVD '{old_name}' is in use by an emulator ({names}); stop it first",
+        )
     home = avd_home()
     if home is None:
         return False, "AVD home directory not found"
@@ -625,8 +690,8 @@ def avd_name_of(serial: str, adb: Any = None) -> str | None:
     """AVD name of the running emulator *serial*.
 
     Our own (live) launch record first, then the ``ro.boot.qemu.avd_name`` /
-    ``ro.kernel.qemu.avd_name`` property (one adb round-trip), then the slow
-    console ``emu avd name``.
+    ``ro.kernel.qemu.avd_name`` property (one adb round-trip), then the
+    console's ``emu avd name``. Every adb call has a short timeout.
     """
     launch = get_launch(serial)
     if launch is not None and launch.alive:
@@ -636,10 +701,11 @@ def avd_name_of(serial: str, adb: Any = None) -> str | None:
         name = _adb_call(adb, f"shell getprop {prop}", serial).strip()
         if name:
             return name
-    try:
-        return adb.get_current_avd_name(serial=serial) or None
-    except Exception:
-        return None
+    for line in _adb_call(adb, "emu avd name", serial).splitlines():
+        line = line.strip()
+        if line and line != "OK" and not line.startswith("KO"):
+            return line
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -688,7 +754,16 @@ def build_emulator_command(
 
 
 def _port_bindable(port: int) -> bool:
+    """True if nothing listens on ``127.0.0.1:<port>``.
+
+    ``SO_REUSEADDR`` (POSIX only) lets the bind ignore sockets in TIME_WAIT:
+    right after ``emu kill`` the old console/adb connections linger there for
+    30-60 s although the port is free for a new emulator. On Windows the
+    option would let us bind a port that is really in use, so it stays off.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        if os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("127.0.0.1", port))
         except OSError:
@@ -738,6 +813,9 @@ class EmulatorLaunch:
         log_path: Its log file (``None`` when output is discarded).
         started_at: ``time.monotonic()`` of the launch.
         ready: True once its boot completed (see :func:`boot_state`).
+        cancel: Set when this launch was stopped or restarted: whoever waits
+            for its boot gives up quietly (a restart's new launch on the same
+            port has its own event).
     """
 
     avd: str
@@ -748,6 +826,9 @@ class EmulatorLaunch:
     log_path: Path | None
     started_at: float
     ready: bool = False
+    cancel: threading.Event = field(
+        default_factory=threading.Event, compare=False, repr=False
+    )
 
     @property
     def alive(self) -> bool:
@@ -760,6 +841,12 @@ class EmulatorLaunch:
 
 _LAUNCHES: dict[str, EmulatorLaunch] = {}
 _LAUNCH_LOCK = threading.RLock()
+#: Console ports chosen by a launch whose process is not registered yet
+#: (guarded by ``_LAUNCH_LOCK``): two near-simultaneous launches never pick
+#: the same port.
+_RESERVED_PORTS: set[int] = set()
+#: AVDs a :func:`launch_avd` call is starting right now (``_LAUNCH_LOCK``).
+_STARTING_AVDS: set[str] = set()
 
 
 def get_launch(serial: str) -> EmulatorLaunch | None:
@@ -783,7 +870,7 @@ def booting_serials() -> list[str]:
             for serial, launch in _LAUNCHES.items()
             if not launch.ready
             and launch.alive
-            and now - launch.started_at < _BOOTING_MAX_AGE
+            and now - launch.started_at < BOOTING_MAX_AGE
         ]
 
 
@@ -792,7 +879,13 @@ def _forget_launch(serial: str) -> None:
         _LAUNCHES.pop(serial, None)
 
 
-def _mark_ready(serial: str) -> None:
+def mark_ready(serial: str) -> None:
+    """Record that our launch of *serial* finished booting.
+
+    Called by :func:`boot_state` and by the Devices screen once its probe
+    sees ``sys.boot_completed=1``, so a launch never stays "booting" (and
+    excluded from auto-selection) only because its boot waiter gave up.
+    """
     with _LAUNCH_LOCK:
         launch = _LAUNCHES.get(serial)
         if launch is not None:
@@ -809,15 +902,46 @@ def _list_entries(adb: Any) -> list | None:
     return parse_adb_devices(out)
 
 
-def _taken_ports(adb: Any) -> set[int]:
-    taken = {
+def _listed_ports(adb: Any) -> set[int]:
+    """Console ports of the emulators ``adb devices`` lists."""
+    return {
         port
         for entry in _list_entries(adb) or []
         if (port := serial_port(entry.serial)) is not None
     }
+
+
+def _our_ports() -> set[int]:
+    """Ports of our live launches and reserved ports (hold ``_LAUNCH_LOCK``)."""
+    return {
+        launch.port for launch in _LAUNCHES.values() if launch.alive
+    } | _RESERVED_PORTS
+
+
+def _reserve_port(taken: set[int], port: int | None) -> int:
+    """Choose (or claim *port*) and reserve it, under the registry lock.
+
+    Raises:
+        EmulatorLaunchError: *port* is already reserved / used by our live
+            launch, or no port is free.
+    """
     with _LAUNCH_LOCK:
-        taken |= {launch.port for launch in _LAUNCHES.values() if launch.alive}
-    return taken
+        ours = _our_ports()
+        if port is not None:
+            if port in ours:
+                raise EmulatorLaunchError(
+                    f"Console port {port} is already used by another launch"
+                )
+            chosen = port
+        else:
+            chosen = free_console_port(taken | ours)
+        _RESERVED_PORTS.add(chosen)
+        return chosen
+
+
+def _release_port(port: int) -> None:
+    with _LAUNCH_LOCK:
+        _RESERVED_PORTS.discard(port)
 
 
 def launch_avd(
@@ -845,9 +969,9 @@ def launch_avd(
         ``emulator-<port>``).
 
     Raises:
-        EmulatorLaunchError: No emulator binary / free port, the process
-            could not start, or it crashed during startup (the message names
-            the log file).
+        EmulatorLaunchError: No emulator binary / free port, our launch of
+            *avd* is still running, the process could not start, or it
+            crashed during startup (the message names the log file).
     """
     opts = options or AvdLaunchOptions()
     if not avd:
@@ -858,47 +982,84 @@ def launch_avd(
             "Emulator executable not found (set emulator.android_emulator_path "
             "or ANDROID_SDK_ROOT)"
         )
-    adb = _adb(adb)
-    explicit = port is not None
-    taken = _taken_ports(adb)
-    chosen = port if port is not None else free_console_port(taken)
-    for attempt in (1, 2):
-        command = build_emulator_command(binary, avd, chosen, opts)
-        logger.info(f"Starting emulator '{avd}': {' '.join(command)}")
-        try:
-            process, log_path = spawn_emulator(command, avd, emulator_env())
-        except (OSError, subprocess.SubprocessError) as e:
-            raise EmulatorLaunchError(f"Could not start emulator '{avd}': {e}") from e
-        launch = EmulatorLaunch(
-            avd=avd,
-            serial=f"emulator-{chosen}",
-            port=chosen,
-            options=opts,
-            process=process,
-            log_path=log_path,
-            started_at=time.monotonic(),
+    with _LAUNCH_LOCK:
+        running = next(
+            (x for x in _LAUNCHES.values() if x.avd == avd and x.alive), None
         )
-        with _LAUNCH_LOCK:
-            _LAUNCHES[launch.serial] = launch
-        ok, error = check_emulator_startup(process, log_path)
-        if ok:
-            logger.info(
-                f"Emulator '{avd}' is booting as {launch.serial} "
-                f"(PID {getattr(process, 'pid', '?')}, log {log_path})"
+        if running is not None:
+            raise EmulatorLaunchError(
+                f"AVD '{avd}' is already running as {running.serial}"
             )
-            return launch
-        _forget_launch(launch.serial)
-        if attempt == 1 and not explicit and not _ports_free(chosen):
-            logger.warning(f"Console port {chosen} was taken during startup; retrying")
-            taken.add(chosen)
-            chosen = free_console_port(taken)
-            continue
-        raise EmulatorLaunchError(
-            f"Emulator '{avd}' crashed during startup: {error}"
-            + (f" (log: {log_path})" if log_path else ""),
-            log_path=log_path,
-        )
-    raise AssertionError("unreachable")  # pragma: no cover
+        if avd in _STARTING_AVDS:
+            raise EmulatorLaunchError(f"AVD '{avd}' is already being started")
+        _STARTING_AVDS.add(avd)
+    try:
+        return _launch_reserved(avd, opts, binary, _adb(adb), port)
+    finally:
+        with _LAUNCH_LOCK:
+            _STARTING_AVDS.discard(avd)
+
+
+def _launch_reserved(
+    avd: str, opts: AvdLaunchOptions, binary: Path, adb: Any, port: int | None
+) -> EmulatorLaunch:
+    """:func:`launch_avd` once *avd* is marked as starting."""
+    explicit = port is not None
+    taken = _listed_ports(adb)
+    chosen = _reserve_port(taken, port)
+    try:
+        for attempt in (1, 2):
+            launch = _spawn_launch(binary, avd, chosen, opts)
+            ok, error = check_emulator_startup(launch.process, launch.log_path)
+            if ok:
+                logger.info(
+                    f"Emulator '{avd}' is booting as {launch.serial} "
+                    f"(PID {getattr(launch.process, 'pid', '?')}, "
+                    f"log {launch.log_path})"
+                )
+                return launch
+            _forget_launch(launch.serial)
+            if attempt == 1 and not explicit and not _ports_free(chosen):
+                logger.warning(
+                    f"Console port {chosen} was taken during startup; retrying"
+                )
+                taken.add(chosen)
+                _release_port(chosen)
+                chosen = _reserve_port(taken, None)
+                continue
+            log_path = launch.log_path
+            raise EmulatorLaunchError(
+                f"Emulator '{avd}' crashed during startup: {error}"
+                + (f" (log: {log_path})" if log_path else ""),
+                log_path=log_path,
+            )
+        raise AssertionError("unreachable")  # pragma: no cover
+    finally:
+        _release_port(chosen)
+
+
+def _spawn_launch(
+    binary: Path, avd: str, port: int, opts: AvdLaunchOptions
+) -> EmulatorLaunch:
+    """Start the emulator process and register its launch record."""
+    command = build_emulator_command(binary, avd, port, opts)
+    logger.info(f"Starting emulator '{avd}': {' '.join(command)}")
+    try:
+        process, log_path = spawn_emulator(command, avd, emulator_env())
+    except (OSError, subprocess.SubprocessError) as e:
+        raise EmulatorLaunchError(f"Could not start emulator '{avd}': {e}") from e
+    launch = EmulatorLaunch(
+        avd=avd,
+        serial=f"emulator-{port}",
+        port=port,
+        options=opts,
+        process=process,
+        log_path=log_path,
+        started_at=time.monotonic(),
+    )
+    with _LAUNCH_LOCK:
+        _LAUNCHES[launch.serial] = launch
+    return launch
 
 
 # ---------------------------------------------------------------------------
@@ -927,7 +1088,7 @@ def boot_state(serial: str, adb: Any = None) -> BootState:
         return "booting"
     if "package:" not in _adb_call(adb, "shell pm path android", serial):
         return "booting"
-    _mark_ready(serial)
+    mark_ready(serial)
     return "ready"
 
 
@@ -990,22 +1151,67 @@ def wait_until_ready(
         time.sleep(interval)
 
 
+def _console_kill(adb: Any, serial: str) -> bool:
+    """``adb -s <serial> emu kill``; False if adb or the console refused."""
+    try:
+        out, err = adb.send_telnet_command("kill", serial=serial)
+    except Exception as e:
+        logger.debug(f"emu kill {serial} failed: {e}")
+        return False
+    text = f"{out or ''}\n{err or ''}".lower()
+    failed = "error" in text or "not found" in text or "\nko" in f"\n{text}"
+    if failed:
+        logger.debug(f"emu kill {serial} failed: {' '.join(text.split())}")
+    return not failed
+
+
+def _terminate(process: Any, grace: float = 10.0) -> None:
+    """Terminate our emulator *process*: SIGTERM, wait *grace* s, then kill."""
+    try:
+        process.terminate()
+    except Exception:
+        logger.debug("terminate failed", exc_info=True)
+    try:
+        process.wait(timeout=grace)
+        return
+    except Exception:
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=5.0)
+    except Exception:
+        logger.warning(f"Emulator process {getattr(process, 'pid', '?')} did not exit")
+
+
 def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
     """Stop emulator *serial* via its console (``adb -s <serial> emu kill``).
 
     Never kills processes by name: other sessions' emulators stay untouched.
+    Our own launch is also stopped while adb cannot reach its console yet
+    (not listed, or ``emu kill`` refused): its process is terminated, so a
+    stop during the early boot really stops it. Whoever waits for the boot
+    of our launch gives up (its ``cancel`` event is set).
 
     Returns:
-        True once *serial* left ``adb devices`` within *timeout*.
+        True once *serial* left ``adb devices`` (and our process, if it was
+        terminated, exited) within *timeout*.
     """
     if serial_port(serial) is None:
         logger.warning(f"{serial} is not an emulator; not stopping it")
         return False
     adb = _adb(adb)
-    try:
-        adb.send_telnet_command("kill", serial=serial)
-    except Exception as e:
-        logger.debug(f"emu kill {serial} failed: {e}")
+    launch = get_launch(serial)
+    if launch is not None:
+        launch.cancel.set()
+    entries = _list_entries(adb)
+    listed = entries is not None and any(e.serial == serial for e in entries)
+    killed = _console_kill(adb, serial)
+    if launch is not None and launch.alive and not (killed and listed):
+        logger.info(
+            f"Emulator {serial} is not reachable over its console yet; "
+            f"terminating our process (PID {getattr(launch.process, 'pid', '?')})"
+        )
+        _terminate(launch.process)
     deadline = time.monotonic() + timeout
     while True:
         entries = _list_entries(adb)
@@ -1047,6 +1253,8 @@ def restart_emulator(
         options = replace(options, boot="normal")
     if not stop_emulator(serial, adb):
         raise EmulatorLaunchError(f"Emulator {serial} did not stop")
+    # Bindable ignores TIME_WAIT (see _port_bindable): this only waits for
+    # the old emulator to really let go of its ports.
     deadline = time.monotonic() + 15.0
     while not _ports_free(port):
         if time.monotonic() >= deadline:
@@ -1065,7 +1273,8 @@ def ensure_avd_running(
 ) -> str:
     """Serial of a ready emulator running AVD *avd*, starting it if needed.
 
-    Reuses an emulator of that AVD that is already running (any session's);
+    Reuses an emulator of that AVD that is already running (any session's;
+    only online ones -- an offline emulator cannot be asked for its AVD);
     otherwise launches it with *options* (default: the remembered options),
     remembers them and waits for the boot.
 
@@ -1074,10 +1283,7 @@ def ensure_avd_running(
     """
     adb = _adb(adb)
     for entry in _list_entries(adb) or []:
-        if serial_port(entry.serial) is None or entry.state not in (
-            "device",
-            "offline",
-        ):
+        if serial_port(entry.serial) is None or entry.state != "device":
             continue
         if avd_name_of(entry.serial, adb) != avd:
             continue

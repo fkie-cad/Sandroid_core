@@ -8,6 +8,7 @@ double.
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,7 @@ class _Launch:
         self.alive = alive
         self.log_path = log_path
         self.options = AvdLaunchOptions()
+        self.cancel = threading.Event()
 
 
 def _entries(text: str) -> list[AdbDeviceEntry]:
@@ -67,7 +69,9 @@ def _entries(text: str) -> list[AdbDeviceEntry]:
         ("device", None, False, RowState.READY),
         ("device", SerialProbe(booted=True), False, RowState.READY),
         ("device", SerialProbe(booted=False), False, RowState.BOOTING),
-        ("device", SerialProbe(booted=True), True, RowState.BOOTING),
+        # A probe that saw the boot complete wins over our launch record.
+        ("device", SerialProbe(booted=True), True, RowState.READY),
+        ("device", None, True, RowState.BOOTING),
         ("offline", None, True, RowState.BOOTING),
         ("offline", None, False, RowState.OFFLINE),
         ("unauthorized", None, False, RowState.UNAUTHORIZED),
@@ -174,6 +178,34 @@ def test_running_avds_are_not_available_and_options_are_remembered() -> None:
     assert not snap.avds[1].last_used
 
 
+def test_locked_avds_are_listed_last_as_running_elsewhere() -> None:
+    avds = [AvdInfo(name="Busy_AVD"), AvdInfo(name="Idle_AVD")]
+    snap = build_snapshot([], {}, {}, avds, {}, [], None, 0.0, locked_avds={"Busy_AVD"})
+    assert [(a.name, a.running_elsewhere) for a in snap.avds] == [
+        ("Idle_AVD", False),
+        ("Busy_AVD", True),
+    ]
+
+
+def test_a_booted_probe_ends_booting_even_if_the_waiter_gave_up() -> None:
+    entries = _entries("emulator-5560\tdevice\n")
+    launch = _Launch("Pixel_7", "emulator-5560", started_at=0.0)  # not ready
+    snap = build_snapshot(
+        entries,
+        {"emulator-5560": SerialProbe(booted=True)},
+        {},
+        [],
+        {},
+        [launch],
+        None,
+        300.0,  # past the waiter's 240 s
+    )
+    (row,) = snap.devices
+    assert row.state is RowState.READY
+    assert row.boot_elapsed is None
+    assert not snap.booting
+
+
 def test_formatting_helpers() -> None:
     assert format_elapsed(None) == ""
     assert format_elapsed(42.7) == "0:42"
@@ -270,6 +302,74 @@ def test_collector_readiness_is_sticky(collector_env) -> None:
     adb.calls.clear()
     collector.collect()
     assert _probed(adb) == {"emulator-5554"}  # it went away: probe again
+
+
+def test_collector_marks_our_booted_launch_ready(collector_env, monkeypatch) -> None:
+    """The boot waiter gives up after 240 s; the hub's probe still ends the
+    launch's "booting" state, so auto-selection may take it again.
+    """
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    launch = emulator.EmulatorLaunch(
+        "Slow", "emulator-5560", 5560, AvdLaunchOptions(), _Alive(), None, 0.0
+    )
+    launch.started_at = __import__("time").monotonic()
+    monkeypatch.setattr(emulator, "_LAUNCHES", {launch.serial: launch})
+    monkeypatch.setattr(emulator, "launches", lambda: [launch])
+    assert emulator.booting_serials() == ["emulator-5560"]
+    adb = _FakeAdb("emulator-5560\tdevice\n")
+    snap = hub.HubCollector(adb).collect()
+    assert snap.devices[0].state is RowState.READY
+    assert launch.ready
+    assert emulator.booting_serials() == []
+
+
+def test_collector_forgets_avd_names_of_vanished_serials(collector_env) -> None:
+    """A later emulator on the same port may run another AVD."""
+
+    class _Adb(_FakeAdb):
+        avd = "Old_AVD"
+
+        def send_adb_command(self, command, serial=None, timeout=30):
+            self.calls.append((command, serial))
+            if command == "devices -l":
+                return "List of devices attached\n" + self.devices, ""
+            if "getprop sys.boot_completed" in command:
+                prop = self.avd if self.avd == "Old_AVD" else ""
+                return f"1\n35\n{prop}\n\n", ""
+            if command == "emu avd name":
+                return f"{self.avd}\r\nOK\r\n", ""
+            return "", ""
+
+    adb = _Adb("emulator-5554\tdevice\n")
+    collector = hub.HubCollector(adb)
+    assert collector.collect().devices[0].avd_name == "Old_AVD"
+    adb.devices = "emulator-5554\toffline\n"
+    collector.collect()
+    adb.devices = ""
+    collector.collect()
+    adb.avd = "New_AVD"  # its image has no avd_name property
+    adb.devices = "emulator-5554\tdevice\n"
+    assert collector.collect().devices[0].avd_name == "New_AVD"
+
+
+def test_collector_reports_locked_avds(collector_env, monkeypatch) -> None:
+    monkeypatch.setattr(emulator, "emulator_binary", lambda: "/sdk/emulator")
+    monkeypatch.setattr(emulator, "list_avds", lambda timeout=15.0: ["A", "B"])
+    monkeypatch.setattr(emulator, "avd_info", lambda name: AvdInfo(name=name))
+    monkeypatch.setattr(
+        emulator,
+        "avd_lock_files",
+        lambda name: ["hardware-qemu.ini.lock"] if name == "B" else [],
+    )
+    snap = hub.HubCollector(_FakeAdb("")).collect()
+    assert {(a.name, a.running_elsewhere) for a in snap.avds} == {
+        ("A", False),
+        ("B", True),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -555,7 +655,7 @@ def test_start_avd_uses_remembered_options_and_reports_ready(
         lambda name, opts: launched.append((name, opts)) or launch,
     )
     monkeypatch.setattr(emulator, "remember_launch", lambda *a, **k: None)
-    monkeypatch.setattr(emulator, "wait_until_ready", lambda serial: True)
+    monkeypatch.setattr(emulator, "wait_until_ready", lambda serial, **kw: True)
     ready: list = []
     done: list = []
     ctl = _controller(on_emulator_ready=lambda s, a: ready.append((s, a)))
@@ -611,8 +711,77 @@ async def _boot(app, pilot) -> None:
     assert type(app.screen).__name__ == "MainScreen"
 
 
+class FakeAdbTransport:
+    """adb as the whole app sees it: a table of booted emulators.
+
+    Replaces ``Adb.send_adb_command`` (the one way Sandroid runs adb), so the
+    real DeviceManager, HubCollector and device poll run against it.
+    """
+
+    def __init__(self) -> None:
+        self.devices: dict[str, str] = {}  # serial -> AVD name
+        self.calls: list[tuple[str, str | None]] = []
+
+    def send(self, command, serial=None, timeout=30):
+        from sandroid.core.adb import Adb
+
+        self.calls.append((command, serial))
+        if command.startswith("devices"):
+            rows = "".join(
+                f"{s}\tdevice product:sdk model:sdk_gphone64\n" for s in self.devices
+            )
+            return f"List of devices attached\n{rows}\n", ""
+        target = serial or Adb.get_target_device()
+        if target not in self.devices:
+            return "", f"error: device '{target}' not found"
+        avd = self.devices[target]
+        replies = {
+            "shell getprop sys.boot_completed": "1\n",
+            "shell getprop ro.build.version.release": "15\n",
+            "shell getprop ro.build.version.sdk": "35\n",
+            "shell id -u": "0\n",
+            "shell pm path android": "package:/system/framework/framework-res.apk\n",
+            "emu avd name": f"{avd}\r\nOK\r\n",
+        }
+        if command == hub._PROBE_SCRIPT:
+            return f"1\n35\n{avd}\n\n", ""
+        if "qemu.avd_name" in command:
+            return f"{avd}\n", ""
+        return replies.get(command, ""), ""
+
+
+class _NoMonitor:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
 @pytest.fixture
-def tui(monkeypatch):
+def fake_adb(monkeypatch):
+    """Route all adb traffic of the app to a :class:`FakeAdbTransport`."""
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_manager import DeviceManager
+    from sandroid.tui import app as app_module
+
+    transport = FakeAdbTransport()
+    monkeypatch.setattr(Adb, "send_adb_command", transport.send)
+    monkeypatch.setattr(app_module, "AdbDeviceMonitor", _NoMonitor)
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
+    monkeypatch.setattr(emulator, "_LAUNCHES", {})
+    DeviceManager.reset()
+    Adb.set_target_device(None)
+    yield transport
+    DeviceManager.reset()
+    Adb.set_target_device(None)
+
+
+@pytest.fixture
+def tui(monkeypatch, fake_adb):
     monkeypatch.setattr(
         hub.HubCollector, "collect", lambda self, force_avds=False: HubSnapshot()
     )
@@ -819,3 +988,189 @@ async def test_devices_opened_with_d_stays_open_on_reconnect(detached) -> None:
         callback(detached.state.device)
         await _settle(pilot)
         assert len(_hubs(app)) == 1
+
+
+# --------------------------------------------------------------------------
+# guards: stray clicks, double starts, AVDs running elsewhere, restart
+# --------------------------------------------------------------------------
+
+BUSY_AVD = AvdRow(name="Busy_AVD", options=AvdLaunchOptions(), running_elsewhere=True)
+
+
+async def test_a_single_click_never_starts_an_avd() -> None:
+    actions = FakeActions()
+    other = AvdRow(name="Other", options=AvdLaunchOptions())
+    app, screen = _hub(avds=[IDLE, other], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _settle(pilot)
+        table = screen.query_one("#hub-avds")
+        assert table.cursor_row == 0  # the screen highlighted IDLE itself
+        y = 2  # border-top, header, first row
+        await pilot.click(table, offset=(1, y))  # exactly the highlighted cell
+        await _settle(pilot)
+        await pilot.click(table, offset=(10, y + 1))  # another row
+        await _settle(pilot)
+        assert table.cursor_row == 1
+        assert actions.calls == []
+        await pilot.click(table, offset=(10, y + 1))  # second click: start
+        await _settle(pilot)
+        assert actions.calls == [("start_avd", "Other", other.options)]
+
+
+async def test_a_second_start_while_the_first_runs_is_ignored() -> None:
+    actions = FakeActions()
+    app, screen = _hub(avds=[IDLE], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await pilot.press("c")
+        await _settle(pilot)
+        assert screen._busy == {IDLE.key: "starting…"}
+    assert actions.calls == [("start_avd", "Idle_AVD", IDLE.options)]
+
+
+async def test_an_avd_running_elsewhere_cannot_be_started_or_renamed() -> None:
+    actions = FakeActions()
+    app, screen = _hub(avds=[BUSY_AVD], actions=actions)
+    async with app.run_test(size=SIZE) as pilot:
+        await _settle(pilot)
+        assert screen.current_row() == BUSY_AVD
+        for action in ("start", "cold", "wipe", "rename"):
+            assert not screen.check_action(action, ())
+        assert screen.check_action("headless", ()) is True
+        for key in ("enter", "c", "w", "e"):
+            await pilot.press(key)
+            await _settle(pilot, 2)
+            assert app.screen is screen  # no confirm / rename dialog
+        detail = str(screen.query_one("#hub-detail").render())
+        assert "Running elsewhere" in detail
+        assert "running elsewhere" in str(screen._avd_cells(BUSY_AVD)[-1])
+    assert actions.calls == []
+
+
+@pytest.mark.parametrize(("busy", "confirm"), [(False, False), (True, True)])
+async def test_restart_of_the_active_device_asks_while_tasks_run(busy, confirm) -> None:
+    actions = FakeActions()
+    app, screen = _hub(devices=[ACTIVE], actions=actions)
+    app._has_active_session = lambda: busy
+    async with app.run_test(size=SIZE) as pilot:
+        await _settle(pilot)
+        await pilot.press("R")
+        await _settle(pilot)
+        if confirm:
+            assert type(app.screen).__name__ == "ConfirmModal"
+            assert actions.calls == []
+            await pilot.press("y")
+            await _settle(pilot)
+        assert app.screen is screen
+    assert actions.calls == [("restart_emulator", "emulator-5556")]
+
+
+# --------------------------------------------------------------------------
+# the whole app on a fake adb: real DeviceManager, poll and HubCollector
+# --------------------------------------------------------------------------
+
+
+async def _until(pilot, predicate, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not reached"
+        await pilot.pause(0.05)
+
+
+@pytest.fixture
+def live_app(fake_adb, monkeypatch):
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.services import get_device_service, get_frida_session_service
+    from sandroid.tui import app as app_module
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.controllers import recording_controller
+
+    monkeypatch.setattr(
+        get_frida_session_service(), "update_device_serial", lambda serial: None
+    )
+    monkeypatch.setattr(recording_controller, "drop_stale_frida_device", lambda: 0)
+    monkeypatch.setattr(app_module, "DETACHED_DEVICES_DELAY", 0.05)
+    app = SandroidTUI()
+    for name in (
+        "_auto_start_frida_server",
+        "_warm_kprobe_cache_on_device_change",
+        "_warm_kprobe_cache_on_startup",
+    ):
+        monkeypatch.setattr(app, name, lambda: None)
+    fake_adb.devices = {"emulator-5554": "Mine"}
+    # Startup's core init creates the device manager before the app mounts,
+    # so every device-change hook the app registers is attached to it.
+    get_device_service().get_device_manager()
+    return SimpleNamespace(app=app, adb=fake_adb, dm=Toolbox.get_device_manager)
+
+
+def _active_serial(live) -> str | None:
+    device = live.dm().active_device
+    return device.serial if device is not None else None
+
+
+async def _poll(app, pilot) -> None:
+    """One device poll (the 10 s timer / adb track-devices edge)."""
+    await _until(pilot, lambda: not app._device_poll_in_flight)
+    app._poll_device_state()
+    await _until(pilot, lambda: not app._device_poll_in_flight)
+    await _settle(pilot)
+
+
+async def test_lost_device_never_moves_the_session_and_comes_back(
+    live_app,
+) -> None:
+    app, adb = live_app.app, live_app.adb
+    async with app.run_test(size=(160, 45), notifications=True) as pilot:
+        await _boot(app, pilot)
+        # First start: the only ready device is attached.
+        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
+        adb.devices["emulator-5556"] = "Theirs"
+        await _poll(app, pilot)
+        assert _active_serial(live_app) == "emulator-5554"
+
+        del adb.devices["emulator-5554"]  # stopped / crashed
+        await _poll(app, pilot)
+        assert _active_serial(live_app) is None  # not emulator-5556
+        await _until(pilot, lambda: isinstance(app.screen, DevicesScreen))
+        screen = app.screen
+        assert "disconnected" in screen.reason
+        # The real collector lists the other device as ready to attach.
+        await _until(pilot, lambda: screen.snapshot is not None)
+        rows = {row.serial: row for row in screen.snapshot.devices}
+        assert rows["emulator-5556"].state is RowState.READY
+        assert rows["emulator-5556"].avd_name == "Theirs"
+        await _poll(app, pilot)  # the poll keeps running under Devices
+        assert _active_serial(live_app) is None
+
+        adb.devices["emulator-5554"] = "Mine"  # back (same serial)
+        await _poll(app, pilot)
+        assert _active_serial(live_app) == "emulator-5554"
+        await _until(pilot, lambda: not isinstance(app.screen, DevicesScreen))
+        assert type(app.screen).__name__ == "MainScreen"
+
+
+async def test_attaching_from_devices_moves_the_pin(live_app, monkeypatch) -> None:
+    from sandroid.core import device_clock
+    from sandroid.core.device_manager import DeviceManager
+
+    connected: list[str] = []
+    monkeypatch.setattr(device_clock, "after_device_connect_async", connected.append)
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", "emulator-5554")
+    app, adb = live_app.app, live_app.adb
+    adb.devices["emulator-5556"] = "Theirs"
+    async with app.run_test(size=(160, 45)) as pilot:
+        await _boot(app, pilot)
+        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
+        app._on_devices_result("emulator-5556")  # ⏎ on it in Devices
+        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5556")
+        assert DeviceManager.preferred_serial() == "emulator-5556"
+        device = live_app.dm().active_device
+        assert device.api_level == 35
+        assert device.root_kind == "adbd root"
+        assert connected[-1] == "emulator-5556"

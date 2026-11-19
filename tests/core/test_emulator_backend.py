@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -140,6 +141,29 @@ def test_free_console_port_skips_taken_and_busy(monkeypatch):
     assert emu.free_console_port({5554}) == 5558
     with pytest.raises(EmulatorLaunchError, match="No free emulator console port"):
         emu.free_console_port(set(range(5554, 5586)))
+
+
+def test_port_bindable_ignores_time_wait_but_not_a_listener():
+    """Right after ``emu kill`` the console/adb ports sit in TIME_WAIT for
+    30-60 s; a restart on the same port must not wait for that.
+    """
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    client = socket.create_connection(("127.0.0.1", port))
+    accepted, _addr = server.accept()
+    assert emu._port_bindable(port) is False  # live listener
+    # The side that closes first keeps (127.0.0.1, port) in TIME_WAIT.
+    accepted.close()
+    client.recv(1)  # EOF: the FIN arrived
+    client.close()
+    server.close()
+    if os.name != "nt":
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as plain:
+            with pytest.raises(OSError):  # really in TIME_WAIT
+                plain.bind(("127.0.0.1", port))
+    assert emu._port_bindable(port) is True
 
 
 def test_port_bindable_detects_a_bound_port():
@@ -399,6 +423,63 @@ def test_rename_avd_moves_dir_ini_and_prefs(no_config, tmp_path, monkeypatch):
     assert emu.rename_avd("Ghost", "Other")[0] is False
 
 
+def test_avd_lock_files_ignore_multiinstance_and_dead_pids(
+    no_config, tmp_path, monkeypatch
+):
+    home = tmp_path / "avd"
+    home.mkdir()
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(home))
+    _make_avd(home, "Pixel")
+    directory = home / "Pixel.avd"
+    # Left behind by every clean exit (the emulator only flocks it).
+    (directory / "multiinstance.lock").write_text("")
+    assert emu.avd_lock_files("Pixel") == []
+    dead = subprocess.Popen([sys.executable, "-I", "-c", "pass"])
+    dead.wait(timeout=30)
+    (directory / "hardware-qemu.ini.lock").write_text(f"{dead.pid} ")
+    assert emu.avd_lock_files("Pixel") == []  # a crashed emulator's lock
+    (directory / "hardware-qemu.ini.lock").write_text(f"{os.getpid()} ")
+    assert [p.name for p in emu.avd_lock_files("Pixel")] == [
+        "hardware-qemu.ini.lock"
+    ]
+    (directory / "hardware-qemu.ini.lock").unlink()
+    (directory / "userdata-qemu.img.lock").mkdir()  # Windows-style lock dir
+    assert [p.name for p in emu.avd_lock_files("Pixel")] == [
+        "userdata-qemu.img.lock"
+    ]
+    assert emu.avd_lock_files("Ghost") == []
+
+
+def test_rename_avd_refuses_a_running_avd(no_config, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    home = tmp_path / "avd"
+    home.mkdir()
+    monkeypatch.setenv("ANDROID_AVD_HOME", str(home))
+    _make_avd(home, "Busy")
+    lock = home / "Busy.avd" / "hardware-qemu.ini.lock"
+    lock.write_text(f"{os.getpid()}")
+    ok, msg = emu.rename_avd("Busy", "Renamed")
+    assert not ok
+    assert "hardware-qemu.ini.lock" in msg
+    assert (home / "Busy.ini").exists()
+    assert (home / "Busy.avd").is_dir()
+    lock.unlink()
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    launch = emu.EmulatorLaunch(
+        "Busy", "emulator-5570", 5570, AvdLaunchOptions(), _Alive(), None, 0.0
+    )
+    monkeypatch.setattr(emu, "_LAUNCHES", {launch.serial: launch})
+    ok, msg = emu.rename_avd("Busy", "Renamed")
+    assert not ok
+    assert "emulator-5570" in msg
+    monkeypatch.setattr(emu, "_LAUNCHES", {})
+    assert emu.rename_avd("Busy", "Renamed")[0] is True
+
+
 # -- Adb.init / missing adb ----------------------------------------------------
 
 
@@ -456,6 +537,16 @@ def dm(monkeypatch):
             "none",
             False,
         ),
+        (  # Magisk on a user-build emulator image
+            "emulator-5554",
+            {
+                "shell id -u": "2000\n",
+                "shell getprop ro.build.type": "user\n",
+                "shell su -c id": "uid=0(root) gid=0(root)\n",
+            },
+            "su",
+            True,
+        ),
         ("R58N123ABC", {"shell su -c id": "uid=0(root) gid=0(root)"}, "su", True),
         ("R58N123ABC", {"shell su -c id": ""}, "none", False),
     ],
@@ -465,7 +556,9 @@ def test_root_kind_probe(dm, monkeypatch, serial, replies, kind, rooted):
 
     calls = []
 
-    def fake(command, serial=None):
+    def fake(command, serial=None, timeout=30):
+        if command == "shell su -c id":
+            assert timeout <= 5  # a root prompt must not stall the probe
         calls.append(serial)
         return replies.get(command, "14\n" if "getprop" in command else ""), ""
 
@@ -497,6 +590,98 @@ def test_auto_select_skips_our_booting_launch(dm, monkeypatch):
     selected.clear()
     assert dm.auto_select_device() is None
     assert selected == []
+
+
+class AdbTable:
+    """adb transport double: ``devices -l`` from a table, per-serial props."""
+
+    def __init__(self):
+        self.devices: dict[str, str] = {}
+        self.calls: list[tuple[str, str | None]] = []
+
+    def send(self, command, serial=None, timeout=30):
+        self.calls.append((command, serial))
+        if command.startswith("devices"):
+            rows = "".join(f"{s}\tdevice\n" for s in self.devices)
+            return "List of devices attached\n" + rows + "\n", ""
+        if serial not in self.devices:
+            return "", f"error: device '{serial}' not found"
+        if command == "shell getprop ro.build.version.release":
+            return "15\n", ""
+        if command == "shell getprop ro.build.version.sdk":
+            return "35\n", ""
+        if command == "shell id -u":
+            return "0\n", ""
+        if "avd_name" in command:
+            return self.devices[serial] + "\n", ""
+        return "", ""
+
+
+@pytest.fixture
+def adb_table(dm, monkeypatch):
+    from sandroid.core import device_clock
+    from sandroid.core.adb import Adb
+    from sandroid.core.device_manager import DeviceManager
+
+    table = AdbTable()
+    monkeypatch.setattr(Adb, "send_adb_command", table.send)
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
+    connected: list[str] = []
+    monkeypatch.setattr(
+        device_clock, "after_device_connect_async", connected.append
+    )
+    table.connected = connected
+    return table
+
+
+def test_lost_device_is_reconnected_but_never_replaced(dm, adb_table):
+    """After the active device is gone, the session waits for it: another
+    device -- even the only ready one -- is never selected silently.
+    """
+    changes = []
+    dm.on_device_change(changes.append)
+    adb_table.devices = {"emulator-5554": "Mine"}
+    dm.refresh_devices()  # first start: the only ready device is taken
+    assert dm.active_device.serial == "emulator-5554"
+
+    adb_table.devices = {"emulator-5556": "Theirs"}  # mine stopped/restarting
+    dm.refresh_devices()
+    assert dm.active_device is None
+    assert changes[-1] is None
+    dm.refresh_devices()
+    assert dm.active_device is None  # still not moved to emulator-5556
+
+    adb_table.devices = {"emulator-5554": "Mine", "emulator-5556": "Theirs"}
+    dm.refresh_devices()
+    assert dm.active_device.serial == "emulator-5554"
+    assert adb_table.connected == ["emulator-5554", "emulator-5554"]
+
+
+def test_attaching_another_device_moves_the_pin(dm, adb_table, monkeypatch):
+    from sandroid.core.device_manager import DeviceManager
+
+    monkeypatch.setattr(DeviceManager, "_preferred_serial", "emulator-5554")
+    adb_table.devices = {"emulator-5554": "Mine", "emulator-5556": "Other"}
+    dm.refresh_devices()
+    assert dm.active_device.serial == "emulator-5554"
+    other = dm.get_device("emulator-5556")
+    assert other.android_version == ""  # the pin rule: never probed
+    probed_other = [c for c in adb_table.calls if c[1] == "emulator-5556"]
+    assert probed_other == []
+
+    assert dm.set_active_device("emulator-5556") is True  # Devices screen ⏎
+    assert DeviceManager.preferred_serial() == "emulator-5556"
+    assert other.android_version == "15"
+    assert other.api_level == 35
+    assert other.root_kind == "adbd root"
+    assert adb_table.connected[-1] == "emulator-5556"  # device clock hook
+
+    adb_table.devices = {"emulator-5554": "Mine"}
+    dm.refresh_devices()
+    assert dm.active_device is None  # not back to the old pin
+    adb_table.devices = {"emulator-5554": "Mine", "emulator-5556": "Other"}
+    dm.refresh_devices()
+    assert dm.active_device.serial == "emulator-5556"
 
 
 def test_get_avd_name_for_device_uses_backend(dm, monkeypatch):

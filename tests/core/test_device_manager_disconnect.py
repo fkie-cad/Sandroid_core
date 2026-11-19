@@ -219,11 +219,12 @@ def test_ready_device_with_version_is_not_repopulated(monkeypatch):
     dm.on_device_change(calls.append)
 
     populated: list = []
-    monkeypatch.setattr(
-        DeviceManager,
-        "_populate_device_info",
-        lambda self, dev: populated.append(dev.serial),
-    )
+
+    def populate(self, dev):  # stamps the attempt, like the real probe
+        populated.append(dev.serial)
+        dev.last_probe_attempt = time.monotonic()
+
+    monkeypatch.setattr(DeviceManager, "_populate_device_info", populate)
     monkeypatch.setattr(
         Adb,
         "send_adb_command",
@@ -333,7 +334,7 @@ def test_populate_device_info_root_check_uses_serial_not_global(monkeypatch):
 
     calls: list = []
 
-    def fake_send_adb_command(command, serial=None):
+    def fake_send_adb_command(command, serial=None, timeout=30):
         calls.append((command, serial))
         if "getprop" in command:
             return "14\n", ""
@@ -378,11 +379,12 @@ def test_zombie_device_not_reprobed_within_cooldown(monkeypatch):
     dm._devices = {"emulator-5554": device}
 
     populated: list = []
-    monkeypatch.setattr(
-        DeviceManager,
-        "_populate_device_info",
-        lambda self, dev: populated.append(dev.serial),
-    )
+
+    def populate(self, dev):  # stamps the attempt, like the real probe
+        populated.append(dev.serial)
+        dev.last_probe_attempt = time.monotonic()
+
+    monkeypatch.setattr(DeviceManager, "_populate_device_info", populate)
     monkeypatch.setattr(
         Adb,
         "send_adb_command",
@@ -407,11 +409,12 @@ def test_zombie_device_reprobed_after_cooldown_elapses(monkeypatch):
     dm._devices = {"emulator-5554": device}
 
     populated: list = []
-    monkeypatch.setattr(
-        DeviceManager,
-        "_populate_device_info",
-        lambda self, dev: populated.append(dev.serial),
-    )
+
+    def populate(self, dev):  # stamps the attempt, like the real probe
+        populated.append(dev.serial)
+        dev.last_probe_attempt = time.monotonic()
+
+    monkeypatch.setattr(DeviceManager, "_populate_device_info", populate)
     monkeypatch.setattr(
         Adb,
         "send_adb_command",

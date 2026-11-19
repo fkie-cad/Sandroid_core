@@ -333,23 +333,77 @@ class DeviceController:
         say(self._log_info, msg + "...")
         say(on_launched, True, msg)
 
-        if not emulator.wait_until_ready(launch.serial):
-            log = f" (log: {launch.log_path})" if launch.log_path else ""
-            say(
-                self._log_warning,
-                f"AVD '{launch.avd}' ({launch.serial}) did not finish booting{log}. "
-                "It is listed in Devices (D) once it is ready.",
-            )
+        if not self._wait_for_boot(launch, say):
             return launch
         try:
             self._get_device_manager().refresh_devices(auto_select=False)
         except Exception:
             logger.debug("Device refresh after boot failed", exc_info=True)
-        say(self._on_emulator_ready or self._attach_if_idle, launch.serial, launch.avd)
+        if self._stale(launch):
+            return launch
+        if self._on_emulator_ready is not None:
+            say(self._on_emulator_ready, launch.serial, launch.avd)
+        else:
+            self._attach_if_idle(launch.serial, launch.avd)
         return launch
 
+    @staticmethod
+    def _stale(launch: Any) -> bool:
+        """True once *launch* was stopped/restarted (its serial may be reused)."""
+        from sandroid.core import emulator
+
+        current = emulator.get_launch(launch.serial)
+        return launch.cancel.is_set() or (current is not None and current is not launch)
+
+    def _wait_for_boot(self, launch: Any, say: Callable[..., None]) -> bool:
+        """Worker: wait until *launch* is ready; False if it never will be.
+
+        Waits the usual boot timeout, then -- if the emulator still runs --
+        says so once and keeps waiting (up to the age after which a launch
+        no longer counts as booting), so a slow boot is still attached when
+        nothing else is active. Gives up quietly when the launch was stopped
+        or restarted meanwhile.
+        """
+        from sandroid.core import emulator
+
+        def ready(timeout: float) -> bool:
+            return emulator.wait_until_ready(
+                launch.serial, timeout=timeout, cancel=launch.cancel
+            )
+
+        if ready(emulator.DEFAULT_BOOT_TIMEOUT):
+            return not self._stale(launch)
+        if self._stale(launch):
+            return False
+        log = f" (log: {launch.log_path})" if launch.log_path else ""
+        if not launch.alive:
+            say(
+                self._log_warning,
+                f"AVD '{launch.avd}' ({launch.serial}) exited while booting{log}.",
+            )
+            return False
+        say(
+            self._log_warning,
+            f"AVD '{launch.avd}' ({launch.serial}) is still booting after "
+            f"{emulator.DEFAULT_BOOT_TIMEOUT:g}s{log}; it is used once it is "
+            "ready (see Devices, D).",
+        )
+        remaining = emulator.BOOTING_MAX_AGE - emulator.DEFAULT_BOOT_TIMEOUT
+        if ready(max(0.0, remaining)) and not self._stale(launch):
+            return True
+        if not self._stale(launch):
+            say(
+                self._log_warning,
+                f"AVD '{launch.avd}' ({launch.serial}) did not finish booting{log}.",
+            )
+        return False
+
     def _attach_if_idle(self, serial: str, avd_name: str) -> None:
-        """UI thread: make a freshly booted emulator active if none is."""
+        """Worker thread: make a freshly booted emulator active if none is.
+
+        The default ``on_emulator_ready``. Runs off the UI thread (the switch
+        talks to adb); log lines and the refresh are marshaled.
+        """
         try:
             dm = self._get_device_manager()
             active = dm.active_device
@@ -357,12 +411,12 @@ class DeviceController:
                 if self.switch_device(serial, cleanup=False):
                     return
             elif active.serial == serial:
-                self._log_info(f"AVD '{avd_name}' ({serial}) is ready")
-                if self._refresh_ui:
-                    self._refresh_ui()
+                self._ui(self._log_info, f"AVD '{avd_name}' ({serial}) is ready")
+                self._ui(self._refresh_ui)
                 return
-            self._log_info(
-                f"AVD '{avd_name}' ({serial}) is ready -- switch to it in Devices (D)"
+            self._ui(
+                self._log_info,
+                f"AVD '{avd_name}' ({serial}) is ready -- switch to it in Devices (D)",
             )
         except Exception as e:
             logger.error(f"Error attaching {serial}: {e}")

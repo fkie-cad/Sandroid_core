@@ -398,7 +398,8 @@ class DeviceManager:
         """Set ``device.root_kind`` (and ``ADB_ROOT`` when root is usable).
 
         Emulators: adbd running as root (``id -u`` = 0) -> ``"adbd root"``;
-        else a userdebug/eng build -> ``"adb root"``; else ``"none"``.
+        else a userdebug/eng build -> ``"adb root"``; else a working ``su``
+        (Magisk on a user-build image) -> ``"su"``; else ``"none"``.
         Physical devices: a working ``su`` -> ``"su"``, else ``"none"``.
 
         Args:
@@ -420,11 +421,29 @@ class DeviceManager:
                 )
                 if (build or "").strip() in ("userdebug", "eng"):
                     kind = "adb root"
+                elif self._su_works(device.serial):
+                    kind = "su"
         except Exception:
             pass
         device.root_kind = kind
         if kind != "none":
             device.add_capability(DeviceCapability.ADB_ROOT)
+
+    #: Seconds the ``su`` probe may take (a root manager may show a prompt).
+    SU_PROBE_TIMEOUT = 5.0
+
+    @classmethod
+    def _su_works(cls, serial: str) -> bool:
+        """True if ``su -c id`` gives uid 0 on *serial* (short timeout)."""
+        from .adb import Adb
+
+        try:
+            stdout, _stderr = Adb.send_adb_command(
+                "shell su -c id", serial=serial, timeout=cls.SU_PROBE_TIMEOUT
+            )
+        except Exception:
+            return False
+        return bool(stdout) and "uid=0" in stdout
 
     def _check_root_capability(self, device: Device) -> None:
         """Check if a physical device has root access (``su``).
@@ -432,19 +451,11 @@ class DeviceManager:
         Args:
             device: The device to check
         """
-        from .adb import Adb
-
         device.root_kind = "none"
-        try:
-            stdout, _stderr = Adb.send_adb_command(
-                "shell su -c id", serial=device.serial
-            )
-            if stdout and "uid=0" in stdout:
-                device.root_kind = "su"
-                device.add_capability(DeviceCapability.ADB_ROOT)
-                logger.debug(f"Device {device.serial} has root access")
-        except Exception:
-            pass
+        if self._su_works(device.serial):
+            device.root_kind = "su"
+            device.add_capability(DeviceCapability.ADB_ROOT)
+            logger.debug(f"Device {device.serial} has root access")
 
     def get_device(self, serial: str) -> Device | None:
         """Get a device by serial number.
@@ -513,6 +524,20 @@ class DeviceManager:
         if device.state != "device":
             logger.error(f"Device {serial} is not ready (state: {device.state})")
             return False
+
+        # A pin (--serial / ANDROID_SERIAL) follows the device the user
+        # attaches: otherwise the new device is never probed (the pin rule
+        # skips other serials), and reconnects would wait for the old one.
+        pinned = self.preferred_serial()
+        if pinned and pinned != serial:
+            logger.info(f"Device pin moves from {pinned} to {serial}")
+            DeviceManager.set_preferred_serial(serial)
+        if (
+            not device.android_version
+            and time.monotonic() - device.last_probe_attempt
+            >= PROBE_RETRY_COOLDOWN_SECONDS
+        ):
+            self._populate_device_info(device)  # never probed (pinned out)
 
         # Reset state if switching to a different device
         if self._active_device and self._active_device.serial != serial:
@@ -723,10 +748,12 @@ class DeviceManager:
 
         Selection priority:
         1. An explicitly requested serial (``--serial`` / config /
-           ``ANDROID_SERIAL``), and never another device
-        2. If only one device is ready, select it
-        3. If several are ready, return to the previously active device when
-           it is back (reconnect after a snapshot load / emulator restart)
+           ``ANDROID_SERIAL``; it follows the device the user attaches), and
+           never another device
+        2. Once this session had a device: only that device, when it is
+           back (reconnect after a snapshot load / emulator restart) --
+           never another one, even if it is the only one ready
+        3. Before that (first start): the only ready device
         4. Otherwise don't select: the user must choose (``--serial`` or the
            Devices screen). Picking "the first emulator" once prepared and
            hooked another session's emulator.
@@ -768,6 +795,27 @@ class DeviceManager:
             self.set_active_device(match.serial)
             return match
 
+        # Once the session had a device, only that device is taken back
+        # (reconnect after a snapshot load / emulator restart / replug).
+        # Moving the session to whatever else is online -- even the only
+        # ready device -- is the user's call (the Devices screen opens).
+        if self._last_active_serial is not None:
+            previous = next(
+                (d for d in ready_devices if d.serial == self._last_active_serial),
+                None,
+            )
+            if previous is not None:
+                logger.info(
+                    f"Reconnected to the previous device: {previous.display_name}"
+                )
+                self.set_active_device(previous.serial)
+                return previous
+            logger.debug(
+                f"Previous device {self._last_active_serial} is not back; not "
+                "selecting another one"
+            )
+            return None
+
         if len(ready_devices) == 0:
             logger.warning("No devices in ready state")
             return None
@@ -775,15 +823,6 @@ class DeviceManager:
         if len(ready_devices) == 1:
             self.set_active_device(ready_devices[0].serial)
             return ready_devices[0]
-
-        # Several devices ready: only return to the one this session used.
-        previous = next(
-            (d for d in ready_devices if d.serial == self._last_active_serial), None
-        )
-        if previous is not None:
-            logger.info(f"Reconnected to the previous device: {previous.display_name}")
-            self.set_active_device(previous.serial)
-            return previous
 
         serials = tuple(d.serial for d in ready_devices)
         # The device poll lands here every few seconds: say it once per set.

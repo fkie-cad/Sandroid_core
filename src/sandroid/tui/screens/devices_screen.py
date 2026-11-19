@@ -46,7 +46,7 @@ from sandroid.core.adb_device_monitor import AdbDeviceMonitor
 from sandroid.tui.themes import lens_palette
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Collection, Iterable, Sequence
 
     from textual import events
     from textual.app import ComposeResult
@@ -72,6 +72,13 @@ NO_PERMISSIONS_HELP = (
     "Android udev rules (e.g. the android-udev-rules package), add your user "
     "to the plugdev group, replug and run `adb kill-server`. Elsewhere: "
     "replug, use a data cable and set the USB mode to File transfer."
+)
+
+RUNNING_ELSEWHERE_HELP = (
+    "Running elsewhere: an emulator holds this AVD's lock files (another "
+    "session, or an adb server this one does not see), so it cannot be "
+    "started, renamed or wiped here. If no emulator runs it, delete the "
+    "stale *.lock files in its .avd directory."
 )
 
 OFFLINE_HELP = (
@@ -162,6 +169,9 @@ class AvdRow:
         last_used: The last AVD launched from Sandroid.
         abi: Image ABI.
         device_name: Hardware profile.
+        running_elsewhere: Its directory holds an emulator's lock files
+            although no listed device runs it (another session / adb
+            server): listed, but not startable, renamable or wipeable here.
     """
 
     name: str
@@ -172,6 +182,7 @@ class AvdRow:
     last_used: bool = False
     abi: str = ""
     device_name: str = ""
+    running_elsewhere: bool = False
 
     @property
     def key(self) -> str:
@@ -216,8 +227,12 @@ def classify(raw_state: str, probe: SerialProbe | None, booting: bool) -> RowSta
         probe: Readiness probe of a ``device`` row (``None``: not probed --
             the pin rule forbids probing someone else's device).
         booting: Sandroid launched it and its boot has not completed yet.
+            A probe that saw the boot complete wins over it (the launch's
+            boot waiter may have given up long ago).
     """
     if raw_state == "device":
+        if probe is not None and probe.booted:
+            return RowState.READY
         if booting or (probe is not None and probe.booted is False):
             return RowState.BOOTING
         return RowState.READY
@@ -242,6 +257,7 @@ def build_snapshot(
     *,
     known: dict[str, Any] | None = None,
     notes: Sequence[str] = (),
+    locked_avds: Collection[str] = (),
 ) -> HubSnapshot:
     """Combine adb, probes, the AVD catalogue and our launches (pure).
 
@@ -257,6 +273,9 @@ def build_snapshot(
         known: ``Device`` objects of the DeviceManager by serial (model, API
             and root kind it already probed).
         notes: Extra notes to show.
+        locked_avds: AVDs whose directory holds emulator lock files
+            (:func:`~sandroid.core.emulator.avd_lock_files`); those not
+            running here are listed last as running elsewhere.
 
     Returns:
         The snapshot. Our launch not yet listed (or still offline) shows as
@@ -281,14 +300,19 @@ def build_snapshot(
         api = (probe.api if probe else None) or (
             getattr(device, "api_level", 0) or None
         )
+        state = classify(entry.state, probe, booting)
         rows[serial] = DeviceRow(
             serial=serial,
             avd_name=avd_name,
             model=entry.props.get("model", "") or getattr(device, "model", ""),
             api=api,
-            state=classify(entry.state, probe, booting),
+            state=state,
             raw_state=entry.state,
-            boot_elapsed=now - launch.started_at if booting else None,
+            boot_elapsed=(
+                now - launch.started_at
+                if booting and state is RowState.BOOTING
+                else None
+            ),
             root_kind=getattr(device, "root_kind", "") or "",
             is_emulator=serial_port(serial) is not None,
             active=serial == active_serial,
@@ -321,23 +345,28 @@ def build_snapshot(
 
     running_avds = {row.avd_name for row in rows.values() if row.avd_name}
     last_avd = prefs.get("last_avd")
-    avd_rows = tuple(
-        AvdRow(
-            name=info.name,
-            api=info.api_level,
-            tag=info.tag,
-            snapshot_count=info.snapshot_count,
-            options=options_from_prefs(prefs, info.name),
-            last_used=info.name == last_avd,
-            abi=info.abi,
-            device_name=info.device_name,
-        )
-        for info in avds
-        if info.name not in running_avds
+    locked = set(locked_avds)
+    avd_rows = sorted(
+        (
+            AvdRow(
+                name=info.name,
+                api=info.api_level,
+                tag=info.tag,
+                snapshot_count=info.snapshot_count,
+                options=options_from_prefs(prefs, info.name),
+                last_used=info.name == last_avd,
+                abi=info.abi,
+                device_name=info.device_name,
+                running_elsewhere=info.name in locked,
+            )
+            for info in avds
+            if info.name not in running_avds
+        ),
+        key=lambda row: row.running_elsewhere,  # stable: keeps catalogue order
     )
     return HubSnapshot(
         devices=tuple(rows[s] for s in sorted(rows)),
-        avds=avd_rows,
+        avds=tuple(avd_rows),
         notes=tuple(out_notes),
         taken_at=now,
     )
@@ -485,6 +514,11 @@ class HubCollector:
         launches = emulator.launches()
         ours = {launch.serial for launch in launches}
         alive = {launch.serial for launch in launches if launch.alive}
+        # Our live launches still booting: a cached "booted" probe may be the
+        # previous emulator's on the same port (restart), so probe again.
+        unconfirmed = {
+            launch.serial for launch in launches if launch.alive and not launch.ready
+        }
         listed = {entry.serial for entry in entries}
         known: dict[str, Any] = {}
         active_serial = None
@@ -502,7 +536,9 @@ class HubCollector:
             logger.debug("Devices screen: no device manager", exc_info=True)
 
         with self._lock:
-            for serial in list(self._probes):
+            # Per-serial caches end with the serial: a later emulator on the
+            # same port may run another AVD.
+            for serial in set(self._probes) | set(self._avd_names):
                 if serial not in listed:
                     self._probes.pop(serial, None)
                     self._avd_names.pop(serial, None)
@@ -517,11 +553,15 @@ class HubCollector:
                 continue  # someone else's device in a shared lab
             with self._lock:
                 cached = self._probes.get(serial)
-            if cached is not None and cached.booted:
+            if cached is not None and cached.booted and serial not in unconfirmed:
                 continue  # readiness is sticky until the serial goes away
             probe = self._probe(serial)
             if probe is None:
                 continue
+            if probe.booted and serial in alive:
+                # Our launch booted: it no longer counts as booting (nor is
+                # it kept from auto-selection) even if its waiter gave up.
+                emulator.mark_ready(serial)
             with self._lock:
                 self._probes[serial] = probe
                 if probe.avd_name:
@@ -542,6 +582,13 @@ class HubCollector:
                 self._avd_names[serial] = name
 
         avds = self._catalogue(force_avds, notes)
+        locked: set[str] = set()
+        for info in avds:
+            try:
+                if emulator.avd_lock_files(info.name):
+                    locked.add(info.name)
+            except Exception:
+                logger.debug(f"lock check of {info.name} failed", exc_info=True)
         with self._lock:
             probes = dict(self._probes)
             avd_names = {k: v for k, v in self._avd_names.items() if v}
@@ -556,6 +603,7 @@ class HubCollector:
             time.monotonic(),
             known=known,
             notes=notes,
+            locked_avds=locked,
         )
 
 
@@ -584,15 +632,45 @@ _STATE_STYLE = {
 _DEVICE_ACTIONS = frozenset({"attach"})
 _EMULATOR_ACTIONS = frozenset({"stop", "restart"})
 _AVD_ACTIONS = frozenset({"start", "cold", "snapshot", "wipe", "headless", "rename"})
+#: AVD actions refused while another emulator holds the AVD's lock files.
+_LOCKED_AVD_ACTIONS = frozenset({"start", "cold", "snapshot", "wipe", "rename"})
 
 
-class _RunningTable(DataTable):
+class _HubTable(DataTable):
+    """A Devices list where a click only highlights.
+
+    Selecting a row starts or attaches something, so a single (stray) click
+    must never do it: ⏎ selects, and so does a second click on the row the
+    previous click highlighted. Textual's own rule ("click the cell that has
+    the cursor") also fired on the very first click when it hit the cell
+    the screen had highlighted on its own.
+    """
+
+    _armed_row: int | None = None
+
+    async def _on_click(self, event: events.Click) -> None:
+        row = event.style.meta.get("row")
+        if not isinstance(row, int) or row < 0 or "column" not in event.style.meta:
+            return  # header / outside the rows: DataTable's own handling
+        event.prevent_default()
+        event.stop()
+        if row >= self.row_count:
+            return
+        if row == self.cursor_row and self._armed_row == row:
+            self._armed_row = None
+            self.action_select_cursor()
+            return
+        self._armed_row = row
+        self.move_cursor(row=row, animate=False)
+
+
+class _RunningTable(_HubTable):
     """The running-devices list (⏎ attaches; shown in the footer)."""
 
     BINDINGS = [Binding("enter", "select_cursor", "Attach")]
 
 
-class _AvdTable(DataTable):
+class _AvdTable(_HubTable):
     """The available-AVDs list (⏎ starts; shown in the footer)."""
 
     BINDINGS = [Binding("enter", "select_cursor", "Start")]
@@ -908,14 +986,18 @@ class DevicesScreen(ModalScreen[str | None]):
     def _avd_cells(self, row: AvdRow) -> tuple[Any, ...]:
         dim = Text("–", style=_c("dim"))
         busy = self._busy.get(row.key)
-        launch = (
-            Text(busy, style=_c("title"))
-            if busy
-            else Text(describe_options(row.options), style=_c("text"))
+        if busy:
+            launch = Text(busy, style=_c("title"))
+        elif row.running_elsewhere:
+            launch = Text("running elsewhere", style=_c("warn"))
+        else:
+            launch = Text(describe_options(row.options), style=_c("text"))
+        name_style = (
+            _c("dim") if row.running_elsewhere else "bold" if row.last_used else ""
         )
         return (
             Text("★", style=_c("warn")) if row.last_used else Text(""),
-            Text(row.name, style="bold" if row.last_used else ""),
+            Text(row.name, style=name_style),
             Text(str(row.api)) if row.api else dim,
             Text(row.tag) if row.tag else dim,
             Text(str(row.snapshot_count)) if row.snapshot_count else dim,
@@ -960,7 +1042,10 @@ class DevicesScreen(ModalScreen[str | None]):
         running.border_title = f"Running · {len(snap.devices)}" + (
             f" · {booting} booting" if booting else ""
         )
-        avds.border_title = f"Available AVDs · {len(snap.avds)}"
+        elsewhere = sum(1 for a in snap.avds if a.running_elsewhere)
+        avds.border_title = f"Available AVDs · {len(snap.avds) - elsewhere}" + (
+            f" · {elsewhere} running elsewhere" if elsewhere else ""
+        )
         running.display = bool(snap.devices)
         avds.display = bool(snap.avds)
         empty_running = self.query_one("#hub-running-empty", Static)
@@ -1033,6 +1118,9 @@ class DevicesScreen(ModalScreen[str | None]):
             text.append(row.name, style=f"bold {_c('title')}")
             if facts:
                 text.append(f"  {facts}", style=_c("dim"))
+            if row.running_elsewhere:
+                text.append(f"\n{RUNNING_ELSEWHERE_HELP}", style=_c("warn"))
+                return text
             text.append("\n⏎ starts it with ", style=_c("text"))
             text.append(parts[0], style="bold")
             text.append(
@@ -1105,6 +1193,8 @@ class DevicesScreen(ModalScreen[str | None]):
                 return isinstance(row, DeviceRow) and row.is_emulator
             if not isinstance(row, AvdRow):
                 return False
+            if row.running_elsewhere and action in _LOCKED_AVD_ACTIONS:
+                return None  # shown, disabled
             if action == "snapshot" and not row.snapshot_count:
                 return None  # shown, disabled
             return True
@@ -1121,6 +1211,12 @@ class DevicesScreen(ModalScreen[str | None]):
         fn = getattr(actions, method, None)
         if fn is None:
             self.app.notify("Device actions are not available", severity="error")
+            return
+        if key in self._busy:
+            # A second ⏎ / key while the first action still runs.
+            self.app.notify(
+                f"Already {self._busy[key] or 'busy'}", title="Devices", timeout=3
+            )
             return
         self._busy[key] = busy
         self._repaint_busy()
@@ -1211,9 +1307,19 @@ class DevicesScreen(ModalScreen[str | None]):
         }.get(row.state, f"is in state '{row.raw_state}'")
         self.app.notify(f"{row.title} {hint}", title="Devices", severity="warning")
 
-    def _avd_row(self) -> AvdRow | None:
+    def _avd_row(self, *, startable: bool = True) -> AvdRow | None:
+        """The highlighted AVD row (``None`` if it may not be started here)."""
         row = self.current_row()
-        return row if isinstance(row, AvdRow) else None
+        if not isinstance(row, AvdRow):
+            return None
+        if startable and row.running_elsewhere:
+            self.app.notify(
+                f"'{row.name}' is running elsewhere (it holds lock files)",
+                title="Devices",
+                severity="warning",
+            )
+            return None
+        return row
 
     def _start(self, row: AvdRow, options: Any, label: str) -> None:
         self._call("start_avd", row.key, label, row.name, options)
@@ -1276,7 +1382,7 @@ class DevicesScreen(ModalScreen[str | None]):
         )
 
     def action_headless(self) -> None:
-        row = self._avd_row()
+        row = self._avd_row(startable=False)
         if row is None or row.options is None:
             return
         from sandroid.core.emulator import remember_launch
@@ -1342,7 +1448,33 @@ class DevicesScreen(ModalScreen[str | None]):
         row = self.current_row()
         if not isinstance(row, DeviceRow) or not row.is_emulator:
             return
-        self._call("restart_emulator", row.key, "restarting…", row.serial)
+        if not (row.active and self._session_busy()):
+            self._call("restart_emulator", row.key, "restarting…", row.serial)
+            return
+        from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._call("restart_emulator", row.key, "restarting…", row.serial)
+
+        self.app.push_screen(
+            ConfirmModal(
+                title=f"Restart {row.title}?",
+                message=f"Restarts emulator {row.serial} (same AVD and port).\n"
+                "It is the active device: running tasks lose their device.",
+                yes_label="Restart",
+                no_label="Cancel",
+            ),
+            confirmed,
+        )
+
+    def _session_busy(self) -> bool:
+        """True while the session runs tasks or has a spotlight app."""
+        check = getattr(self.app, "_has_active_session", None)
+        try:
+            return bool(check()) if callable(check) else False
+        except Exception:
+            return False
 
     def action_connect(self) -> None:
         from sandroid.tui.modals.input_modal import InputModal
@@ -1365,6 +1497,7 @@ class DevicesScreen(ModalScreen[str | None]):
 
 __all__ = [
     "NO_PERMISSIONS_HELP",
+    "RUNNING_ELSEWHERE_HELP",
     "UNAUTHORIZED_HELP",
     "AvdRow",
     "DeviceRow",

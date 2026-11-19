@@ -13,6 +13,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ import pytest
 from sandroid.core import emulator as emu
 from sandroid.core.emulator import AvdLaunchOptions
 from sandroid.core.exceptions import EmulatorLaunchError
+
+_real_sleep = time.sleep  # the env fixture turns time.sleep into a no-op
 
 
 @pytest.fixture
@@ -123,6 +126,10 @@ class FakeAdb:
 
     def send_telnet_command(self, command, serial=None):
         self.calls.append((f"telnet {command}", serial))
+        if serial not in self.devices:
+            return "", f"error: device '{serial}' not found"
+        if self.devices[serial] != "device":
+            return "", "error: device offline"
         if command == "kill" and self.kill_removes:
             self.devices.pop(serial, None)
         return "OK", ""
@@ -135,8 +142,28 @@ class _Proc:
     def __init__(self, pid=4242, exit_code=None):
         self.pid = pid
         self.exit_code = exit_code
+        self.signals: list[str] = []
+        self.on_exit = None  # called once the process "exits"
 
     def poll(self):
+        return self.exit_code
+
+    def _exit(self, code):
+        self.exit_code = code
+        if self.on_exit:
+            self.on_exit()
+
+    def terminate(self):
+        self.signals.append("TERM")
+        self._exit(-15)
+
+    def kill(self):
+        self.signals.append("KILL")
+        self._exit(-9)
+
+    def wait(self, timeout=None):
+        if self.exit_code is None:
+            raise subprocess.TimeoutExpired("emulator", timeout)
         return self.exit_code
 
 
@@ -144,13 +171,23 @@ class _Proc:
 def env(monkeypatch, tmp_path, log_dir):
     """Fake adb, spawn, binary, ports and clock; isolated prefs + registry."""
     adb = FakeAdb()
-    state = {"spawned": [], "busy": set(), "startup": [], "on_spawn": None}
+    state = {
+        "spawned": [],
+        "busy": set(),
+        "startup": [],
+        "on_spawn": None,
+        "procs": [],
+    }
 
     def fake_spawn(command, avd_name, env=None):
         state["spawned"].append(command)
         if state["on_spawn"]:
             state["on_spawn"](command)
-        return _Proc(), log_dir / f"{avd_name}.log"
+        proc = _Proc()
+        serial = f"emulator-{_port_of(command)}"
+        proc.on_exit = lambda: adb.devices.pop(serial, None)  # adb drops it
+        state["procs"].append(proc)
+        return proc, log_dir / f"{avd_name}.log"
 
     def fake_startup(process, log_path=None):
         if state["startup"]:
@@ -166,6 +203,8 @@ def env(monkeypatch, tmp_path, log_dir):
     monkeypatch.setattr(emu.time, "sleep", lambda s: None)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setattr(emu, "_LAUNCHES", {})
+    monkeypatch.setattr(emu, "_RESERVED_PORTS", set())
+    monkeypatch.setattr(emu, "_STARTING_AVDS", set())
     state["adb"] = adb
     return state
 
@@ -203,6 +242,33 @@ def test_launch_avd_skips_ports_of_our_live_launches(env):
     emu.launch_avd("A")
     second = emu.launch_avd("B")
     assert second.serial == "emulator-5556"
+
+
+def test_near_simultaneous_launches_never_share_a_port(env):
+    """B is started while A's process is still being spawned (A is not in
+    the registry yet): A's port is reserved, so B takes the next one.
+    """
+    second = []
+
+    def start_b_meanwhile(command):
+        if _port_of(command) == 5554 and not second:
+            second.append(None)
+            second[0] = emu.launch_avd("B")
+
+    env["on_spawn"] = start_b_meanwhile
+    first = emu.launch_avd("A")
+    assert first.port == 5554
+    assert second[0].port == 5556
+    assert not emu._RESERVED_PORTS
+
+
+def test_a_running_avd_is_not_launched_twice(env):
+    first = emu.launch_avd("Pixel")
+    with pytest.raises(EmulatorLaunchError, match="already running"):
+        emu.launch_avd("Pixel")
+    assert len(env["spawned"]) == 1
+    first.process.exit_code = 0  # it exited: may start again
+    assert emu.launch_avd("Pixel").port == 5554
 
 
 def test_launch_avd_crash_raises_with_log_path(env):
@@ -258,6 +324,50 @@ def test_stop_emulator_sends_emu_kill_to_that_serial_only(env, monkeypatch):
     assert popen_calls == []  # no pkill / killall, nothing spawned
 
 
+def test_stop_emulator_keeps_a_reachable_emulator_s_process_alone(env):
+    """The console kill worked: the emulator shuts down on its own (it may
+    be saving its quick-boot snapshot) and is never signalled.
+    """
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    assert emu.stop_emulator(launch.serial) is True
+    assert launch.process.signals == []
+    assert launch.cancel.is_set()
+    assert emu.get_launch(launch.serial) is None
+
+
+@pytest.mark.parametrize("listed_as", [None, "offline"])
+def test_stop_emulator_terminates_our_launch_adb_cannot_reach(env, listed_as):
+    """Stopped before adb lists it (or while it is still offline): ``emu
+    kill`` cannot reach it, so our own process is terminated -- otherwise it
+    kept booting and was attached later.
+    """
+    launch = emu.launch_avd("Pixel")
+    if listed_as:
+        env["adb"].add(launch.serial, state=listed_as)
+    assert emu.stop_emulator(launch.serial) is True
+    assert launch.process.signals == ["TERM"]
+    assert not launch.alive
+    assert launch.cancel.is_set()
+    assert emu.get_launch(launch.serial) is None
+    assert launch.serial not in env["adb"].devices
+    assert emu.booting_serials() == []
+
+
+def test_stop_emulator_kills_our_process_when_term_is_ignored(env):
+    launch = emu.launch_avd("Pixel")
+    launch.process.terminate = lambda: launch.process.signals.append("TERM")
+    assert emu.stop_emulator(launch.serial) is True
+    assert launch.process.signals == ["TERM", "KILL"]
+
+
+def test_stop_emulator_never_signals_someone_else_s_emulator(env):
+    env["adb"].add("emulator-5556", state="offline")  # not our launch
+    env["adb"].kill_removes = False
+    assert emu.stop_emulator("emulator-5556", timeout=0) is False
+    assert env["procs"] == []
+
+
 def test_stop_emulator_refuses_non_emulator_serials(env):
     assert emu.stop_emulator("R58N123ABC") is False
     assert env["adb"].calls == []
@@ -282,6 +392,15 @@ def test_restart_reuses_port_and_launch_options(env):
     assert "-no-window" in command
     assert "-no-snapshot-load" in command
     assert ("telnet kill", "emulator-5560") in adb.calls
+
+
+def test_restart_cancels_the_old_launch_s_boot_waiter(env):
+    first = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    second = emu.restart_emulator(first.serial)
+    assert first.cancel.is_set()
+    assert not second.cancel.is_set()
+    assert emu.get_launch("emulator-5560") is second
 
 
 def test_restart_resolves_avd_before_kill_and_never_wipes(env):
@@ -372,6 +491,33 @@ def test_ensure_avd_running_reuses_a_running_emulator(env):
     env["adb"].add("emulator-5570", avd="Pixel")
     assert emu.ensure_avd_running("Pixel") == "emulator-5570"
     assert env["spawned"] == []
+
+
+def test_ensure_avd_running_skips_offline_emulators(env):
+    env["adb"].add("emulator-5570", avd="Pixel", state="offline")
+    env["on_spawn"] = lambda command: env["adb"].add(
+        f"emulator-{_port_of(command)}", avd="Pixel"
+    )
+    assert emu.ensure_avd_running("Pixel") == "emulator-5554"
+    asked = {serial for command, serial in env["adb"].calls if "avd" in command}
+    assert "emulator-5570" not in asked
+
+
+def test_avd_name_console_query_has_a_short_timeout(env, monkeypatch):
+    seen = []
+    adb = env["adb"]
+    adb.add("emulator-5570", avd="")
+
+    def send(command, serial=None, timeout=30):
+        seen.append((command, timeout))
+        if command == "emu avd name":
+            return "Pixel\r\nOK\r\n", ""
+        return "", ""
+
+    monkeypatch.setattr(adb, "send_adb_command", send)
+    assert emu.avd_name_of("emulator-5570") == "Pixel"
+    assert ("emu avd name", emu._ADB_TIMEOUT) in seen
+    assert all(timeout <= emu._ADB_TIMEOUT for _command, timeout in seen)
 
 
 def test_ensure_avd_running_launches_waits_and_remembers(env):
@@ -558,3 +704,137 @@ def test_tui_launch_failure_is_logged_not_raised(env):
     controller.start_avd("Pixel", emu.AvdLaunchOptions())
     assert any("PANIC: broken" in str(m) for m in logs)
     assert dm.switched == []
+
+
+# -- boot waiters: cancel on stop/restart, keep waiting after the timeout ----
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        _real_sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def _join(name, timeout=10.0):
+    for thread in threading.enumerate():
+        if thread.name == name:
+            thread.join(timeout)
+            assert not thread.is_alive(), f"{name} still running"
+
+
+def _ready_recorder(logs):
+    from sandroid.tui.controllers.device_controller import DeviceController
+
+    ready = []
+
+    class _Toolbox:
+        @classmethod
+        def get_device_manager(cls):
+            return _Dm()
+
+    controller = DeviceController(
+        log_info=logs.append,
+        log_warning=logs.append,
+        log_error=logs.append,
+        toolbox=_Toolbox,
+        on_emulator_ready=lambda serial, avd: ready.append((serial, avd)),
+    )
+    return controller, ready
+
+
+def test_stop_during_boot_ends_the_boot_waiter_quietly(env, monkeypatch):
+    monkeypatch.setattr(emu.time, "sleep", lambda s: _real_sleep(0.005))
+    adb = env["adb"]
+    env["on_spawn"] = lambda command: adb.add(
+        f"emulator-{_port_of(command)}", avd="Pixel", booted=False
+    )
+    logs = []
+    controller, ready = _ready_recorder(logs)
+    controller.start_avd("Pixel")
+    _wait_for(lambda: emu.get_launch("emulator-5554"))
+    assert emu.stop_emulator("emulator-5554") is True
+    _join("start-avd-Pixel")
+    assert ready == []
+    assert not any("booting" in str(m) for m in logs)  # no misleading warning
+
+
+def test_restart_during_boot_reports_ready_once(env, monkeypatch):
+    monkeypatch.setattr(emu.time, "sleep", lambda s: _real_sleep(0.005))
+    adb = env["adb"]
+    env["on_spawn"] = lambda command: adb.add(
+        f"emulator-{_port_of(command)}", avd="Pixel", booted=False
+    )
+    logs = []
+    controller, ready = _ready_recorder(logs)
+    controller.start_avd("Pixel")
+    first = _wait_for(lambda: emu.get_launch("emulator-5554"))
+    controller.restart_emulator("emulator-5554")
+    _wait_for(lambda: emu.get_launch("emulator-5554") not in (None, first))
+    adb.booted["emulator-5554"] = True
+    _join("restart-emulator-emulator-5554")
+    _join("start-avd-Pixel")
+    assert ready == [("emulator-5554", "Pixel")]
+    assert first.cancel.is_set()
+
+
+def test_slow_boot_is_still_attached_after_the_boot_timeout(env, monkeypatch):
+    adb = env["adb"]
+    env["on_spawn"] = lambda command: adb.add(
+        f"emulator-{_port_of(command)}", avd="Pixel", booted=False
+    )
+    monkeypatch.setattr(emu, "DEFAULT_BOOT_TIMEOUT", 0.0)
+    # Booted a while after the waiter's first timeout.
+    monkeypatch.setattr(
+        emu.time, "sleep", lambda s: adb.booted.update({"emulator-5554": True})
+    )
+    dm, logs = _Dm(), []
+    controller = _controller(dm, logs)
+    _inline(controller)
+    controller.start_avd("Pixel")
+    assert dm.switched == ["emulator-5554"]
+    assert any("still booting" in str(m) for m in logs)
+    assert emu.booting_serials() == []
+
+
+def test_default_attach_never_switches_on_the_ui_thread(env):
+    """``call_from_thread`` runs things on the UI thread: the device switch
+    (adb work) must not be among them.
+    """
+    from sandroid.tui.controllers.device_controller import DeviceController
+
+    adb = env["adb"]
+    env["on_spawn"] = lambda command: adb.add(
+        f"emulator-{_port_of(command)}", avd="Pixel"
+    )
+    on_ui = threading.local()
+    switched_on_ui = []
+
+    def call_from_thread(fn, *args):
+        on_ui.active = True
+        try:
+            return fn(*args)
+        finally:
+            on_ui.active = False
+
+    dm = _Dm()
+    real_set = dm.set_active_device
+
+    def set_active_device(serial):
+        switched_on_ui.append(getattr(on_ui, "active", False))
+        return real_set(serial)
+
+    dm.set_active_device = set_active_device
+
+    class _Toolbox:
+        @classmethod
+        def get_device_manager(cls):
+            return dm
+
+    controller = DeviceController(toolbox=_Toolbox, call_from_thread=call_from_thread)
+    _inline(controller)
+    controller.start_avd("Pixel")
+    assert switched_on_ui == [False]
