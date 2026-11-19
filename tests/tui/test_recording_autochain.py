@@ -241,8 +241,56 @@ def test_play_start_and_end_bracket_the_run(monkeypatch, tmp_path) -> None:
     assert end["ref"] == {"of": start["seq"], "run": run_id, "lens": "runs"}
     assert end["data"] == {
         "error": None,
+        "failed": False,
         "saved": True,
         "changed": 1,
         "new": 0,
         "deleted": 2,
     }
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [SystemExit(1), RuntimeError("Device not ready, replay aborted: authorizing")],
+)
+def test_a_failing_play_ends_with_a_failed_play_end_and_never_exits(
+    monkeypatch, tmp_path, boom
+) -> None:
+    """E2E crash: ``SystemExit(1)`` from ``adb shell date`` on the Play worker
+    ended the whole TUI. Whatever the engine raises, the Play ends with a
+    ``run/play-end`` marked failed and the worker returns normally.
+    """
+    from sandroid.analysis import engine as engine_module
+    from sandroid.core import run_bundle, timeline
+    from sandroid.tui.controllers import recording_controller as rc
+
+    class _Engine:
+        def __init__(self, config, **kwargs):
+            pass
+
+        def run(self):
+            raise boom
+
+    errors: list[str] = []
+    monkeypatch.setattr(engine_module, "AnalysisEngine", _Engine)
+    monkeypatch.setattr(run_bundle, "create_bundle", lambda run_id: None)
+    monkeypatch.setattr(run_bundle, "import_recording", lambda run_id, path: "rec")
+    monkeypatch.setattr(run_bundle, "raw_dir", lambda run_id: str(tmp_path))
+    monkeypatch.setattr(run_bundle, "bundle_dir", lambda run_id: tmp_path)
+    monkeypatch.setattr(rc, "reset_device_handles_after_snapshot_load", lambda: None)
+    controller = RecordingController(log_info=lambda *_: None)
+    monkeypatch.setattr(controller, "_log_error", errors.append)
+    monkeypatch.setattr(controller, "_stop_monitor_before_revert", lambda: None)
+    monkeypatch.setattr(controller, "_persist_run", lambda **kw: kw["run_id"])
+    monkeypatch.setattr(controller, "_get_toolbox", lambda: None)
+    monkeypatch.setattr(controller, "_get_forensic_service", lambda: None)
+    monkeypatch.setattr(controller, "_get_action_window_service", lambda: None)
+    monkeypatch.setattr(controller, "_current_device_name", lambda: "Pixel")
+    with timeline.capture() as lines:
+        controller._run_playback_analysis()  # must not raise
+    end = [x for x in lines if x["kind"] == "play-end"]
+    assert len(end) == 1
+    assert end[0]["data"]["failed"] is True
+    assert end[0]["data"]["error"].startswith("Playback failed:")
+    assert errors
+    assert controller._is_replaying is False

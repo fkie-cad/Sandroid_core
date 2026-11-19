@@ -75,6 +75,17 @@ CONFIRM_WINDOW_MS = 1_000.0
 #: Logcat activity lines are only written when no a11y window line came
 #: within this many seconds (with a FULL helper).
 LOGCAT_GRACE_S = 0.5
+#: A screen-change shot claims ``data.unchanged`` only when the pre-change
+#: frame was hashed at most this long after the screen event; a later hash
+#: may already show the new screen (or a transition frame).
+SCREEN_BEFORE_MAX_MS = 300.0
+#: An input received this long (host) before a screen event is never "next";
+#: one received this long after it always is (a snapshot load can rewind the
+#: device clock in between).
+INPUT_SKEW_S = 1.0
+#: Device and host lags that differ by more than this are from different
+#: clock epochs (snapshot load): only the host lag counts.
+CLOCK_SANE_MS = 5_000.0
 #: Max points of a swipe path.
 PATH_MAX = 32
 #: Default MT axis maximum (virtio multitouch).
@@ -1104,6 +1115,11 @@ class TrackingService:
         #: being settled (``open`` until its frame is captured).
         self._screen_q: deque[dict] = deque()
         self._screen_cur: dict | None = None
+        #: ``(device s, host epoch)`` of recent finger-downs and keys: a
+        #: screen-change shot taken after the next input is not that screen's.
+        self._input_seen: deque[tuple[float, float]] = deque(maxlen=64)
+        #: Screen-change shots not taken, per reason (``late``, ``superseded``).
+        self._shot_drops: dict[str, int] = {}
         self._label_seen = 0
         #: sha256 -> (ref path, seq) per shots folder (a new session or
         #: device writes into another folder: its own files, its own dedupe).
@@ -1326,6 +1342,8 @@ class TrackingService:
             self._activities = []
             self._screen_q.clear()
             self._screen_cur = None
+            self._input_seen.clear()
+            self._shot_drops = {}
             self._session = None
             self._pw_focus = False
             self._label_seen = self._timeline_last_seq()
@@ -1395,16 +1413,20 @@ class TrackingService:
                 logcat.terminate()
         with self._lock:
             inputs, shots = self._inputs, self._shots
+            drops = dict(self._shot_drops)
             since = self._since or time.time()
+        dropped = sum(drops.values())
         _emit(
             "tracking",
             "stop",
-            summary=f"◎ tracking off · {inputs} inputs, {shots} shots",
+            summary=f"◎ tracking off · {inputs} inputs, {shots} shots"
+            + (f" ({dropped} dropped)" if dropped else ""),
             actor=actor or self._actor("user"),
             data={
                 "reason": reason,
                 "inputs": inputs,
                 "shots": shots,
+                "shots_dropped": drops,
                 "keys_unnamed": self._keys_other,
                 "duration_s": round(time.time() - since, 1),
             },
@@ -1579,6 +1601,9 @@ class TrackingService:
         for ev in events:
             g = ev.gesture
             g.host_recv = host_recv
+            if ev.kind in ("down", "key"):
+                with self._lock:
+                    self._input_seen.append((g.t_down, host_recv))
             if ev.kind == "down":
                 self._at_down(g)
             else:
@@ -2098,11 +2123,14 @@ class TrackingService:
             window_id=d.get("window_id"),
             via="a11y",
             dev_mono=float(d.get("t_mono_ms") or 0.0) / 1000.0,
+            t_evt=host_recv,
         )
 
     def _emit_screen(
-        self, kind: str, *, pkg, cls, title, window_id, via, dev_mono
+        self, kind: str, *, pkg, cls, title, window_id, via, dev_mono, t_evt=None
     ) -> int | None:
+        """``t_evt``: host epoch the event was received at (default: now)."""
+        t_evt = time.time() if t_evt is None else float(t_evt)
         key = (pkg, cls, title)
         with self._lock:
             gen = self._gen  # a stop() from here on cancels the shot
@@ -2133,36 +2161,58 @@ class TrackingService:
             dev=self._serial,
         )
         if seq is not None and active and _config().shot_screen_change:
-            self._request_screen_shot(gen, seq, pkg, cls, title)
+            self._request_screen_shot(gen, seq, pkg, cls, title, dev_mono, t_evt)
         return seq
 
     def _request_screen_shot(
-        self, gen: int, seq: int, pkg: Any, cls: Any, title: Any
+        self,
+        gen: int,
+        seq: int,
+        pkg: Any,
+        cls: Any,
+        title: Any,
+        dev_mono: float | None = None,
+        t_evt: float | None = None,
     ) -> None:
         """Queue the screen-change shot of line ``seq`` (any thread).
 
         The pre-change frame's hash is requested now, at event time; the
-        shot waits for a frame that differs from it. Every distinct screen
-        keeps its own request; an activity line (no title) and a window line
-        of the same ``pkg``/``cls`` are one screen: they share one capture
-        while it has not been taken yet (each line still gets its shot line).
+        shot waits for a frame that differs from it. An activity line (no
+        title) and a window line of the same ``pkg``/``cls`` are one screen:
+        they share one capture while it has not been taken yet (each line
+        still gets its shot line). A new distinct screen supersedes every
+        request whose capture has not started (dropped, counted): its capture
+        would start after this event, i.e. show this screen. So no backlog
+        builds up on a loaded device; the latest screen wins.
         """
         ident = (pkg, cls)
+        t_evt = time.time() if t_evt is None else float(t_evt)
         with self._lock:
             # Only the latest screen not captured yet can absorb this line.
             last = self._screen_q[-1] if self._screen_q else self._screen_cur
             if (
                 last is not None
                 and last["open"]
+                and not last.get("superseded")
                 and last["ident"] == ident
                 and not (last["titled"] and title)
             ):
                 last["seqs"].append(seq)
                 last["titled"] = last["titled"] or bool(title)
                 return
+            stale = list(self._screen_q)
+            self._screen_q.clear()
+            cur = self._screen_cur
+            if cur is not None and cur["open"] and not cur.get("superseded"):
+                stale.append(cur)  # still settling: its capture is not taken
+            for old in stale:
+                old["superseded"] = True
+                if old["before"] is not None:
+                    old["before"].cancel()
+                self._count_drop_locked(old, "superseded")
             helper = self._helper_up()
             before = (
-                self._screen_pre_lane.submit(helper.shot, hash_only=True)
+                self._screen_pre_lane.submit(self._pre_hash, helper)
                 if helper is not None
                 else None
             )
@@ -2172,9 +2222,58 @@ class TrackingService:
                 "titled": bool(title),
                 "before": before,
                 "open": True,
+                "t_evt": t_evt,
+                "ev_dev": float(dev_mono) if dev_mono and dev_mono > 0 else None,
             }
             self._screen_q.append(req)
         self._shot_lane.submit(self._screen_shot, gen, req)
+
+    @staticmethod
+    def _pre_hash(helper: Any) -> tuple[Any, float]:
+        """Screen-pre lane: the pre-change frame hash and its host start."""
+        start = time.time()
+        return helper.shot(hash_only=True), start
+
+    def _count_drop_locked(self, req: dict, reason: str) -> None:
+        """Lock held: the shot lines of ``req`` are not written (``reason``)."""
+        n = len(req["seqs"])
+        self._shot_drops[reason] = self._shot_drops.get(reason, 0) + n
+        logger.debug(f"Tracking: screen shot of #{req['seqs']} dropped ({reason})")
+
+    @staticmethod
+    def _lag_ms(req: dict, host: float, dev_ms: float | None = None) -> float:
+        """Capture instant - screen event time (ms): the host lag, or the
+        device lag when it is larger and from the same clock epoch.
+        """
+        lag = (host - req["t_evt"]) * 1000.0
+        ev_dev = req.get("ev_dev")
+        if dev_ms and ev_dev is not None:
+            dev_lag = float(dev_ms) - ev_dev * 1000.0
+            if abs(dev_lag - lag) <= CLOCK_SANE_MS:
+                lag = max(lag, dev_lag)
+        return round(lag, 1)
+
+    def _input_after(self, req: dict, until_dev: float | None = None) -> bool:
+        """An input (finger-down or key) came after the screen event of
+        ``req`` -- and, with ``until_dev``, before that device time (s).
+
+        The device clock orders them (getevent and the a11y/logcat times are
+        both CLOCK_MONOTONIC); an input received :data:`INPUT_SKEW_S` before
+        the event never counts, one received that long after always does.
+        """
+        ev_dev, t_evt = req.get("ev_dev"), req["t_evt"]
+        with self._lock:
+            seen = list(self._input_seen)
+        for dev, host in seen:
+            if host <= t_evt - INPUT_SKEW_S:
+                continue
+            if ev_dev is None:
+                after = host > t_evt
+            else:
+                after = dev > ev_dev or host > t_evt + INPUT_SKEW_S
+            if after and (until_dev is None or dev < until_dev):
+                return True
+        return False
 
     def _start_logcat(self, gen: int, serial: str) -> None:
         argv = [
@@ -2286,6 +2385,7 @@ class TrackingService:
             window_id=None,
             via="logcat",
             dev_mono=act["dev_mono"],
+            t_evt=act.get("host"),
         )
 
     def _check_activities(self, now: float) -> None:
@@ -2753,12 +2853,17 @@ class TrackingService:
                    sensitive=sensitive)  # fmt: skip
 
     def _settle_change(
-        self, helper: Any, cfg: Any, before: str | None
+        self,
+        helper: Any,
+        cfg: Any,
+        before: str | None,
+        abort: Callable[[], bool] | None = None,
     ) -> tuple[bool, bool, float]:
         """hash_only shots until the frame differs from ``before`` (the
         pre-change frame) and two consecutive hashes match, or
         ``settle_max_ms``: ``(changed, stable, ms waited)``. Without
-        ``before`` only the settling counts.
+        ``before`` only the settling counts. ``abort()`` true ends the wait
+        early (the shot is no longer wanted).
         """
         t0 = time.monotonic()
         deadline = t0 + cfg.settle_max_ms / 1000.0
@@ -2766,6 +2871,8 @@ class TrackingService:
         changed = stable = False
         while time.monotonic() < deadline:
             time.sleep(cfg.settle_interval_ms / 1000.0)
+            if abort is not None and abort():
+                break
             try:
                 r = helper.shot(hash_only=True)
             except Exception:
@@ -2781,20 +2888,32 @@ class TrackingService:
         return changed, stable, round((time.monotonic() - t0) * 1000.0, 1)
 
     def _screen_shot(self, gen: int, req: dict) -> None:
-        """Shot lane: one screen-change request (FIFO, so the oldest).
+        """Shot lane: one screen-change request.
 
         Waits until the frame differs from the pre-change frame (hashed at
         event time) and settles, at most ``settle_max_ms``; a frame that
-        never changed is still kept, flagged ``data.unchanged``. One capture
-        serves every line of the request (the later ones are dedup lines).
+        never changed is still kept, flagged ``data.unchanged`` -- only when
+        that hash was taken within :data:`SCREEN_BEFORE_MAX_MS` of the event
+        (else ``data.before_late_ms`` and no claim). One capture serves every
+        line of the request (the later ones are dedup lines); ``data.lag_ms``
+        is capture instant - event time.
+
+        A capture that would start (or, per the helper's device time, was
+        taken) after the next input's finger-down, or after a newer screen
+        superseded this one, is dropped and counted: it would show the next
+        screen under this one's line.
         """
         with self._lock:
             with contextlib.suppress(ValueError):
                 self._screen_q.remove(req)
+            if req.get("superseded"):
+                return  # dropped (and counted) when the newer screen came
             self._screen_cur = req
         try:
             cfg = _config()
             if gen != self._gen or not cfg.shot_screen_change:
+                return
+            if self._drop_if_late(req, capture=False):
                 return
             extra: dict[str, Any] = {}
             helper = self._helper_up()
@@ -2803,21 +2922,43 @@ class TrackingService:
                 fut = req["before"]
                 if fut is not None:
                     with contextlib.suppress(Exception):
-                        res = fut.result(timeout=cfg.settle_max_ms / 1000.0)
-                        before = getattr(res, "hash", None)
-                changed, stable, waited = self._settle_change(helper, cfg, before)
-                extra = {"stable": stable, "settle_ms": waited}
-                if before is not None and not changed:
+                        res, start = fut.result(timeout=cfg.settle_max_ms / 1000.0)
+                        before = getattr(res, "hash", None) or None
+                        if before is not None:
+                            before_lag = self._lag_ms(
+                                req, start, getattr(res, "t_mono_ms", None)
+                            )
+                            if before_lag > SCREEN_BEFORE_MAX_MS:
+                                extra["before_late_ms"] = before_lag
+                changed, stable, waited = self._settle_change(
+                    helper,
+                    cfg,
+                    before,
+                    abort=lambda: bool(req.get("superseded")) or self._input_after(req),
+                )
+                extra.update(stable=stable, settle_ms=waited)
+                if before is not None and not changed and "before_late_ms" not in extra:
                     extra["unchanged"] = True  # the frame never left the old one
             else:
                 time.sleep(cfg.settle_interval_ms / 1000.0)
-            with self._lock:
-                req["open"] = False
-                seqs = list(req["seqs"])
             if gen != self._gen or not _config().shot_screen_change:
                 return
+            if self._drop_if_late(req):
+                return
+            with self._lock:
+                seqs = list(req["seqs"])
+            cap_host = time.time()
             cap = self._capture()
             png = cap.pop("png")
+            dev_s = cap.get("dev_mono")
+            if dev_s is not None and self._input_after(req, until_dev=dev_s):
+                # the helper took it after the next finger-down (it was busy)
+                with self._lock:
+                    self._count_drop_locked(req, "late")
+                return
+            extra["lag_ms"] = self._lag_ms(
+                req, cap_host, dev_s * 1000.0 if dev_s is not None else None
+            )
             for seq in seqs:
                 if gen != self._gen:
                     return
@@ -2827,6 +2968,22 @@ class TrackingService:
                 req["open"] = False
                 if self._screen_cur is req:
                     self._screen_cur = None
+
+    def _drop_if_late(self, req: dict, *, capture: bool = True) -> bool:
+        """Drop ``req`` when a newer screen superseded it (counted then) or
+        the next input came already (counted ``late``). With ``capture`` (the
+        capture starts now) the request is closed to new lines either way.
+        """
+        late = self._input_after(req)
+        with self._lock:
+            if capture or late:
+                req["open"] = False
+            if req.get("superseded"):
+                return True
+            if late:
+                self._count_drop_locked(req, "late")
+                return True
+        return False
 
     def _manual(self, gen: int, t: float, actor: str) -> None:
         self._take("manual", of=None, gen=gen, t=t, actor=actor)

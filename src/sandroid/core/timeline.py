@@ -2975,11 +2975,23 @@ def get_timeline() -> TimelineService:
         return _SERVICE
 
 
+def _atexit_reason() -> str:
+    """``"crash"`` when an uncaught exception ended the interpreter (Python
+    sets ``sys.last_exc``/``sys.last_value`` before ``atexit`` runs), else
+    ``"exit"``. A ``SystemExit`` code is not visible here: the TUI launcher
+    closes the timeline itself with ``"crash"`` for a non-zero exit.
+    """
+    import sys
+
+    crashed = getattr(sys, "last_exc", None) or getattr(sys, "last_value", None)
+    return "crash" if crashed is not None else "exit"
+
+
 def _atexit_close() -> None:
     service = _SERVICE
     if service is not None:
         try:
-            service.close("exit", 2.0)
+            service.close(_atexit_reason(), 2.0)
         except Exception:
             pass
 

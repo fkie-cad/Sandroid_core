@@ -78,6 +78,48 @@ def _raise_cancelled() -> None:
     raise FatalStepError("Replay cancelled")
 
 
+#: ``adb shell date`` attempts before a replay (or dry run) gives up: right
+#: after a snapshot load adb can still report "device still authorizing".
+ACTION_TIME_ATTEMPTS = 6
+#: Wait between those attempts (seconds; a cancel ends it at once).
+ACTION_TIME_RETRY_S = 1.5
+
+
+def set_action_time_after_load(toolbox: object = None) -> None:
+    """Set the action time from the device, retrying while adb is not ready.
+
+    Retries :class:`~sandroid.core.exceptions.DeviceTimeError` up to
+    :data:`ACTION_TIME_ATTEMPTS` times, :data:`ACTION_TIME_RETRY_S` apart (a
+    cancel stops the wait). Still failing, it raises the engine's
+    ``FatalStepError`` so the run (Play) ends cleanly with that error instead
+    of continuing with a stale action window.
+
+    Args:
+        toolbox: Object with ``set_action_time()`` (default: :class:`Toolbox`).
+    """
+    from sandroid.core.exceptions import DeviceTimeError
+
+    box = toolbox if toolbox is not None else Toolbox
+    last: Exception | None = None
+    for attempt in range(1, ACTION_TIME_ATTEMPTS + 1):
+        try:
+            box.set_action_time()
+            return
+        except DeviceTimeError as exc:
+            last = exc
+            logger.warning(
+                f"Device time not readable (attempt {attempt}/"
+                f"{ACTION_TIME_ATTEMPTS}): {exc}"
+            )
+        if attempt < ACTION_TIME_ATTEMPTS and _cancel_event.wait(ACTION_TIME_RETRY_S):
+            _raise_cancelled()
+    try:
+        from sandroid.analysis.engine import FatalStepError
+    except Exception:  # pragma: no cover - engine always importable
+        FatalStepError = RuntimeError
+    raise FatalStepError(f"Device not ready, replay aborted: {last}") from last
+
+
 class Player(Functionality):
     """Replays previously recorded touch/input events on an Android device.
 
@@ -157,11 +199,12 @@ class Player(Functionality):
             RuntimeError: If no recording path was supplied, or if the
                 recording file cannot be opened.
             FatalStepError: If :meth:`cancel_all` was called before or
-                during the replay.
+                during the replay, or the device time stayed unreadable
+                (see :func:`set_action_time_after_load`).
         """
         if _cancel_event.is_set():
             _raise_cancelled()
-        Toolbox.set_action_time()
+        set_action_time_after_load()
         start_time = int(round(time.time()))
         logger.info("Start playing")
 

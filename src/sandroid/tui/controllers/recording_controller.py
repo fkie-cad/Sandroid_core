@@ -1171,8 +1171,12 @@ class RecordingController:
                         self._guarded(self._suppress_disconnect_guard, False)
                     if self._set_replay_indicator:
                         self._ui(self._set_replay_indicator, False)
-            except Exception as e:
-                error = f"Playback failed: {e}"
+            except (Exception, SystemExit) as e:
+                # SystemExit too: raised on this worker thread it would end
+                # the whole TUI (E2E: "device still authorizing" after a
+                # snapshot load); the Play ends with an error instead.
+                why = repr(e) if isinstance(e, SystemExit) else str(e)
+                error = f"Playback failed: {why}"
                 self._ui(self._log_error, error)
         finally:
             self._is_replaying = False
@@ -1374,6 +1378,7 @@ class RecordingController:
                 summary=summary,
                 data={
                     "error": error,
+                    "failed": error is not None and error != "Replay cancelled",
                     "saved": saved_run_id is not None,
                     "changed": changed,
                     "new": _count("new_files"),

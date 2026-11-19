@@ -2161,3 +2161,209 @@ def test_invisible_mode_logcat_shot_waits_for_the_new_screen(env, cfg):
     assert shot["ref"]["of"] == of(lines, "screen", "activity")[0]["seq"]
     assert shot["ref"]["sha256"] == _sha("after")
     assert "unchanged" not in shot["data"]
+
+
+# --------------------------------------------------------------------------
+# F2 under device load (E2E round 2: #39, #100, #142)
+# --------------------------------------------------------------------------
+
+
+def _stop_data(svc, lines) -> dict:
+    svc.stop()
+    return of(lines, "tracking", "stop")[-1]["data"]
+
+
+def _load_cfg(cfg, settle_max_ms: int = 2000) -> None:
+    cfg.shot_screen_change = True
+    cfg.shot_before_tap = False
+    cfg.settle_interval_ms = 100
+    cfg.settle_max_ms = settle_max_ms
+
+
+def test_screen_shot_is_dropped_when_the_next_tap_comes_first(env, cfg):
+    """#39: the shot of Settings home was captured 12.8 s late, after the
+    next tap, showed the next screen and claimed ``unchanged``. A capture
+    that would start after the next finger-down is dropped (counted).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        _screen_helper(helpers[0], "home")  # never settles to a new frame
+        svc._emit_screen("window", pkg="a", cls="a.Home", title="Home",
+                         window_id=1, via="a11y", dev_mono=10.0)  # fmt: skip
+        time.sleep(0.25)
+        ge.feed(*tap_lines(10.4))  # the next tap, before the shot was taken
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1)
+        time.sleep(0.2)
+        data = _stop_data(svc, lines)
+    assert not of(lines, "shot", "screen_change")
+    assert data["shots_dropped"] == {"late": 1}
+    assert "1 dropped" in of(lines, "tracking", "stop")[-1]["summary"]
+
+
+def test_the_tap_that_caused_the_screen_change_is_not_the_next_input(env, cfg):
+    """The causal tap went down before the screen event (device clock),
+    even when its getevent line reaches the host after the a11y line.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        _screen_helper(h, "old")
+        svc._emit_screen("window", pkg="a", cls="a.Next", title="Next",
+                         window_id=1, via="a11y", dev_mono=10.0)  # fmt: skip
+        ge.feed(*tap_lines(9.9, dur=0.05))  # down 100 ms before the event
+        time.sleep(0.2)
+        h.frame = "new"
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["ref"]["sha256"] == _sha("new")
+    assert not svc._shot_drops
+
+
+def test_a_capture_the_busy_helper_took_after_the_next_tap_is_dropped(env, cfg):
+    """The capture started in time, but the busy helper took it (device
+    time) after the next finger-down: not this screen's image.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        _screen_helper(h, "old")
+        hash_shot = h.shot
+
+        def busy_shot(*, hash_only=False, timeout=5.0):
+            if hash_only:
+                return hash_shot(hash_only=True)
+            ge.feed(*tap_lines(10.2))  # the user taps while the helper is busy
+            wait_for(lambda: svc._input_seen)
+            return ShotResult(10_400.0, 1080, 2424, "new", 14.0,
+                              _frame_png("new"), "/x")  # fmt: skip
+
+        h.shot = busy_shot
+        svc._emit_screen("window", pkg="a", cls="a.B", title="B",
+                         window_id=1, via="a11y", dev_mono=10.0)  # fmt: skip
+        time.sleep(0.15)
+        h.frame = "new"
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1)
+    assert not of(lines, "shot", "screen_change")
+
+
+@pytest.mark.parametrize("late_by", ["host", "device"])
+def test_a_late_before_hash_makes_no_unchanged_claim(env, cfg, late_by):
+    """#100 / #142: the pre-change hash was taken late (busy lane/helper),
+    already showed the new screen, and the shot claimed ``unchanged``. Now
+    no claim; ``data.before_late_ms`` and ``data.lag_ms`` say why.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=1000)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        _screen_helper(h, "new")  # the new screen is already up
+        frame_shot = h.shot
+        calls = {"n": 0}
+
+        def slow_first_hash(*, hash_only=False, timeout=5.0):
+            res = frame_shot(hash_only=hash_only)
+            if hash_only and calls["n"] == 0 and late_by == "device":
+                calls["n"] += 1  # the busy helper took it 450 ms after the event
+                return ShotResult(1_450.0, 1080, 2424, res.hash, 3.0, None, None)
+            return res
+
+        h.shot = slow_first_hash
+        if late_by == "host":  # the screen-pre lane is still busy
+            svc._screen_pre_lane.submit(time.sleep, 0.4)
+        svc._emit_screen("window", pkg="a", cls="a.B", title="B",
+                         window_id=1, via="a11y", dev_mono=1.0)  # fmt: skip
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    shot = of(lines, "shot", "screen_change")[0]
+    assert "unchanged" not in shot["data"]
+    assert shot["data"]["before_late_ms"] > ts.SCREEN_BEFORE_MAX_MS
+    assert shot["data"]["lag_ms"] >= shot["data"]["before_late_ms"]
+    assert shot["data"]["stable"] is True
+
+
+def test_a_timely_before_hash_still_flags_unchanged_with_its_lag(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg, settle_max_ms=500)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        _screen_helper(helpers[0], "same")
+        svc._emit_screen("window", pkg="a", cls="a.B", title="T",
+                         window_id=1, via="a11y", dev_mono=1.0)  # fmt: skip
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    data = of(lines, "shot", "screen_change")[0]["data"]
+    assert data["unchanged"] is True
+    assert "before_late_ms" not in data
+    assert 400 <= data["lag_ms"] < 2000  # settled for settle_max_ms first
+
+
+def test_screencap_fallback_records_the_lag_and_never_claims_unchanged(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg, mode="off")
+        svc._emit_screen("activity", pkg="a", cls="a.B", title=None,
+                         window_id=None, via="logcat", dev_mono=1.0,
+                         t_evt=time.time() - 3.0)  # fmt: skip
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    data = of(lines, "shot", "screen_change")[0]["data"]
+    assert data["via"] == "screencap"
+    assert "unchanged" not in data
+    assert data["lag_ms"] >= 3000
+
+
+def test_queued_screen_shots_coalesce_to_the_latest_screen(env, cfg):
+    """No backlog: screens queued behind a busy shot lane are superseded by
+    a newer distinct screen (dropped, counted); the latest one is shot.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        _screen_helper(helpers[0], "old")
+        gate = threading.Event()
+        svc._shot_lane.submit(gate.wait, 5.0)  # e.g. a slow screencap
+        svc._screen_pre_lane.submit(gate.wait, 5.0)  # and a busy helper
+        seqs = []
+        for i, name in enumerate(("A", "B", "C")):
+            seq = svc._emit_screen("window", pkg="a", cls=f"a.{name}", title=name,
+                                   window_id=i, via="a11y", dev_mono=1.0 + i)  # fmt: skip
+            seqs.append(seq)
+        assert len(svc._screen_q) == 1
+        helpers[0].frame = "C"
+        gate.set()
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+        time.sleep(0.3)
+        data = _stop_data(svc, lines)
+    shots = of(lines, "shot", "screen_change")
+    assert [s["ref"]["of"] for s in shots] == [seqs[2]]
+    assert data["shots_dropped"] == {"superseded": 2}
+
+
+def test_a_settling_screen_shot_yields_to_a_newer_screen(env, cfg):
+    """A screen still settling when the next distinct screen arrives would
+    be captured after that event: it is dropped, the newer one is shot.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        _screen_helper(helpers[0], "old")  # A never changes: it would wait 2 s
+        first = svc._emit_screen("window", pkg="a", cls="a.A", title="A",
+                                 window_id=1, via="a11y", dev_mono=1.0)  # fmt: skip
+        time.sleep(0.25)
+        second = svc._emit_screen("window", pkg="a", cls="a.B", title="B",
+                                  window_id=2, via="a11y", dev_mono=1.3)  # fmt: skip
+        time.sleep(0.1)  # B draws after its pre-change hash
+        helpers[0].frame = "B"
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+    shots = of(lines, "shot", "screen_change")
+    assert [s["ref"]["of"] for s in shots] == [second]
+    assert shots[0]["ref"]["sha256"] == _sha("B")
+    assert first not in [s["ref"]["of"] for s in shots]
+    assert svc._shot_drops == {"superseded": 1}

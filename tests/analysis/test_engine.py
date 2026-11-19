@@ -846,3 +846,57 @@ def test_the_engine_writes_its_phases_and_restores_the_one_it_found():
 def test_run_config_carries_an_optional_run_id():
     assert RunConfig().run_id is None
     assert RunConfig(run_id="r1").run_id == "r1"
+
+
+# ===========================================================================
+# Device time unreadable (E2E: "device still authorizing" after a load)
+# ===========================================================================
+
+
+class _NoClockToolbox(FakeToolbox):
+    """``set_action_time`` fails ``fails`` times with ``DeviceTimeError``."""
+
+    def __init__(self, fails: int, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.fails = fails
+
+    def set_action_time(self) -> None:
+        from sandroid.core.exceptions import DeviceTimeError
+
+        super().set_action_time()
+        if self.action_times_set <= self.fails:
+            raise DeviceTimeError("adb: device still authorizing")
+
+
+def test_dry_run_retries_the_device_time_after_the_snapshot_load(monkeypatch):
+    from sandroid.features import player as player_module
+
+    monkeypatch.setattr(player_module, "ACTION_TIME_RETRY_S", 0.0)
+    toolbox = _NoClockToolbox(fails=2)
+    config = RunConfig(number_of_runs=1, noise_filter=True, action=FakeAction())
+    result = _make_engine(config, toolbox=toolbox).run()
+    assert result.error is None
+    assert toolbox.action_times_set == 3
+
+
+def test_an_unreadable_device_time_ends_the_run_with_an_error(monkeypatch):
+    """Never ``SystemExit`` (it ended the TUI); never a silently stale window."""
+    from sandroid.core.exceptions import DeviceTimeError
+    from sandroid.features import player as player_module
+
+    monkeypatch.setattr(player_module, "ACTION_TIME_RETRY_S", 0.0)
+
+    class _ClockAction(FakeAction):  # e.g. TrigDroid / manual capture
+        def perform(self) -> None:
+            raise DeviceTimeError("adb: device still authorizing")
+
+    config = RunConfig(number_of_runs=2, noise_filter=False, action=_ClockAction())
+    engine = _make_engine(config)
+    result = engine.run()
+    assert "authorizing" in (result.error or "")
+    assert engine.gatherers["changed_files"].gather_calls == 0
+
+    toolbox = _NoClockToolbox(fails=99)
+    config = RunConfig(number_of_runs=1, noise_filter=True, action=FakeAction())
+    result = _make_engine(config, toolbox=toolbox).run()
+    assert "Device not ready" in (result.error or "")
