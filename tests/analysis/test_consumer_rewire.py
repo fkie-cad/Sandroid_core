@@ -135,7 +135,6 @@ def test_cli_run_analysis_writes_to_json_dict(monkeypatch, tmp_path):
         toolbox,
         adb,
         MagicMock(),  # ActionQ (unused now)
-        MagicMock(),  # PDFReport (report disabled)
     )
 
     # The tmp snapshot the engine reverts to was created before the run.

@@ -1,15 +1,16 @@
 """Tests for reporting & evidence documentation.
 
 Covers ``core/run_report.py`` (plain-text sanitising, run metadata, hash
-manifest, finalisation, ``report_from_folder``), ``core/pdf_report.py``
-(env-free, cwd-independent rendering), ``core/timeline_generator.py`` and the
-SHA-256 hashing in ``FileExtractionService``. No device access: adb is faked.
+manifest, finalisation, ``report_from_folder``), the legacy results sections
+of ``core/report_engine.py`` rendered by ``core/report_render.py`` (env-free,
+cwd-independent rendering) and the SHA-256 hashing in
+``FileExtractionService``. No device access: adb is faked. The timeline parts
+of the report are covered in ``test_report_engine.py``.
 """
 
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import logging
 from datetime import datetime
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from sandroid.core import pdf_report, run_report, timeline_generator
+from sandroid.core import report_engine, report_render, run_report
 from sandroid.services.file_extraction_service import FileExtractionService
 
 ESC = "\x1b"
@@ -524,47 +525,30 @@ class TestServiceHashing:
 
 
 # ---------------------------------------------------------------------------
-# Timeline
-# ---------------------------------------------------------------------------
-
-
-class TestTimeline:
-    def test_events_are_averaged_filtered_and_deterministic(self):
-        events = timeline_generator.build_timeline_events(_results())
-        assert events == [
-            ("file_2.txt", 3.0, timeline_generator.NEW_COLOR, "new"),
-            ("GroundTruth.xml", 6.0, "#1A535C", "changed"),
-        ]
-        assert events == timeline_generator.build_timeline_events(_results())
-
-    def test_parse_timeline_writes_next_to_json(self, tmp_path, clean_env):
-        js = tmp_path / "sandroid.json"
-        js.write_text(json.dumps(_results()))
-        png = timeline_generator.parse_timeline(js)
-        assert png == str(tmp_path.resolve() / "timeline.png")
-        assert Path(png).stat().st_size > 0
-
-    def test_parse_timeline_without_events(self, tmp_path):
-        js = tmp_path / "sandroid.json"
-        js.write_text(json.dumps({"Device Name": "x", "Action Duration": 1}))
-        assert timeline_generator.parse_timeline(js) is None
-
-    def test_spread_labels_no_overlap_and_in_range(self):
-        ys = timeline_generator._spread_labels([5.0] * 30 + [19.0] * 10, 20.0)
-        gap = 20.0 / (timeline_generator.MAX_LABELS_PER_SIDE + 2)
-        assert all(b - a >= gap - 1e-9 for a, b in itertools.pairwise(ys))
-        assert max(ys) <= 20.0
-
-
-# ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
 
 
+def _render(result_dir: Path, out: Path) -> report_render.PdfRenderer:
+    """Build the report from ``result_dir`` (no timeline) and render the PDF."""
+    doc = report_engine.build_report(
+        timeline=None,
+        seal=None,
+        scope=report_engine.ReportScope(),
+        bundle_dir=result_dir,
+    )
+    data = json.loads(json.dumps(doc))
+    renderer = report_render.PdfRenderer(data, result_dir)
+    renderer.build(out)
+    return renderer
+
+
 class TestPdf:
     def test_assets_load_independent_of_cwd(self, clean_env):
-        assert pdf_report._asset_bytes(pdf_report.FRAUNHOFER_LOGO)[:2] == b"\xff\xd8"
-        assert pdf_report._asset_bytes(pdf_report.SANDROID_LOGO)[:4] == b"\x89PNG"
+        assert (
+            report_render._asset_bytes(report_render.FRAUNHOFER_LOGO)[:2] == b"\xff\xd8"
+        )
+        assert report_render._asset_bytes(report_render.SANDROID_LOGO)[:4] == b"\x89PNG"
 
     def test_generate_without_env_and_screenshots_untouched(self, tmp_path, clean_env):
         from PIL import Image
@@ -579,15 +563,13 @@ class TestPdf:
         )
         (result_dir / "sandroid.json").write_text(json.dumps(data))
 
-        report = pdf_report.PDFReport(
-            str(result_dir / "out.pdf"), str(result_dir / "sandroid.json")
-        )
+        report = _render(result_dir, result_dir / "out.pdf")
         assert (result_dir / "out.pdf").read_bytes()[:5] == b"%PDF-"
-        assert (result_dir / "timeline.png").exists()
-        # Screenshot evidence is not converted/deleted.
+        # The old timeline image is gone; screenshot evidence is untouched.
+        assert not (result_dir / "timeline.png").exists()
         assert sorted(p.name for p in shots.iterdir()) == ["s1.png"]
 
-        texts = "\n".join(_paragraph_texts(report.elements))
+        texts = "\n".join(_paragraph_texts(report.story))
         assert ESC not in texts
         assert "[success]" not in texts
         # Regression: the last changed-files row used to lose its file name
@@ -604,9 +586,16 @@ class TestPdf:
     def test_old_json_without_metadata_or_other_data(self, tmp_path, clean_env):
         js = tmp_path / "sandroid.json"
         js.write_text(json.dumps({"Device Name": "x", "Action Duration": 0}))
-        out = pdf_report.generate_pdf_report(tmp_path)
-        assert out == tmp_path / run_report.DEFAULT_PDF_NAME
+        doc = report_engine.build_report(
+            timeline=None,
+            seal=None,
+            scope=report_engine.ReportScope(),
+            bundle_dir=tmp_path,
+        )
+        out = report_engine.write_report(doc, tmp_path)["pdf"]
         assert out.read_bytes()[:5] == b"%PDF-"
+        overview = json.dumps(doc["sections"][0])
+        assert "it was produced by an older Sandroid version" in overview
 
     def test_huge_diffs_never_exceed_a_page(self, tmp_path, clean_env):
         """P2-H3: the Wikipedia run's PDF failed with a 15718 pt table row.
@@ -635,12 +624,10 @@ class TestPdf:
         data["Network"] = ["x" * 50_000]
         (tmp_path / "sandroid.json").write_text(json.dumps(data))
 
-        report = pdf_report.PDFReport(
-            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
-        )
+        report = _render(tmp_path, tmp_path / "out.pdf")
         assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
         assert report.degraded_sections == []
-        texts = "\n".join(_paragraph_texts(report.elements))
+        texts = "\n".join(_paragraph_texts(report.story))
         # All 53 wikipedia.db lines are in the report (continuation rows).
         assert "Category:Example category number 52" in texts
         assert "continued, part 2/" in texts
@@ -649,55 +636,59 @@ class TestPdf:
         assert "60 more line(s) not shown — see sandroid.json / raw/" in texts
 
     def test_cell_paragraph_height_is_bounded(self):
-        style = pdf_report.ParagraphStyle(
+        style = report_render.ParagraphStyle(
             "t", fontName="Helvetica", fontSize=7.5, leading=9.5
         )
-        para = pdf_report.bounded_lines_paragraph(["word " * 4000] * 30, style, 260)
-        assert para.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT
-        cells = pdf_report.split_lines_into_cells(["y " * 300] * 300, style, 260)
-        assert all(c.wrap(260, 1e9)[1] <= pdf_report.MAX_CELL_HEIGHT for c in cells)
+        para = report_render.bounded_lines_paragraph(["word " * 4000] * 30, style, 260)
+        assert para.wrap(260, 1e9)[1] <= report_render.MAX_CELL_HEIGHT
+        cells = report_render.split_lines_into_cells(["y " * 300] * 300, style, 260)
+        assert all(c.wrap(260, 1e9)[1] <= report_render.MAX_CELL_HEIGHT for c in cells)
         assert "100 more line(s) not shown" in cells[-1].text
 
     def test_unlayoutable_section_degrades_instead_of_failing(
         self, tmp_path, clean_env, monkeypatch
     ):
-        """A section that cannot be laid out is replaced by a note."""
+        """A part that cannot be laid out is replaced by a note."""
+        original = report_render.PdfRenderer._block_table
 
-        def too_tall(self, key, title=None):
-            self.sectionTitle(title or key)
-            if key == "Processes":  # ReportLab drawing error (negative width)
-                self.elements.append(pdf_report.Table([[pdf_report.Spacer(10, 9)]]))
-            else:  # LayoutError: one row taller than a page
+        def bad_table(self, block):
+            dumped = json.dumps(block.get("rows"))
+            if "Package" in (block.get("columns") or []):
+                raise ValueError("bad data")
+            if "kworker" in dumped:  # ReportLab drawing error (negative width)
                 self.elements.append(
-                    pdf_report.Table([[pdf_report.Spacer(10, 5000)]], colWidths=[100])
+                    report_render.Table([[report_render.Spacer(10, 9)]])
                 )
+            elif "file_2.txt" in dumped:  # LayoutError: a row taller than a page
+                self.elements.append(
+                    report_render.Table(
+                        [[report_render.Spacer(10, 5000)]], colWidths=[100]
+                    )
+                )
+            else:
+                original(self, block)
 
-        def broken(self):
-            raise ValueError("bad data")
-
-        monkeypatch.setattr(pdf_report.PDFReport, "generalTableMaker", too_tall)
-        monkeypatch.setattr(pdf_report.PDFReport, "APKTableMaker", broken)
+        monkeypatch.setattr(report_render.PdfRenderer, "_block_table", bad_table)
         (tmp_path / "sandroid.json").write_text(json.dumps(_results()))
-        report = pdf_report.PDFReport(
-            str(tmp_path / "out.pdf"), str(tmp_path / "sandroid.json")
-        )
+        report = _render(tmp_path, tmp_path / "out.pdf")
         assert (tmp_path / "out.pdf").read_bytes()[:5] == b"%PDF-"
         titles = {t for t, _ in report.degraded_sections}
         assert "APKs & Hashes" in titles
         assert "New Files" in titles
         assert "Processes" in titles
         assert any("layout error" in r for _, r in report.degraded_sections)
-        texts = "\n".join(_paragraph_texts(report.elements))
+        texts = "\n".join(_paragraph_texts(report.story))
         assert "could not be laid out in the PDF" in texts
-        # Unaffected sections are still there.
+        # Unaffected parts are still there.
         assert "GroundTruth.db" in texts
+        assert "Total number of artifacts found" in texts
 
     def test_find_results_json(self, tmp_path):
         with pytest.raises(FileNotFoundError):
-            pdf_report.find_results_json(tmp_path)
+            report_engine.find_results_json(tmp_path)
         (tmp_path / "other.json").write_text("[]")
         (tmp_path / "custom.json").write_text('{"Device Name": "d"}')
-        assert pdf_report.find_results_json(tmp_path).name == "custom.json"
+        assert report_engine.find_results_json(tmp_path).name == "custom.json"
 
 
 # ---------------------------------------------------------------------------
@@ -732,14 +723,21 @@ class TestFinalize:
             f["path"]
             for f in json.loads(outcome.manifest.manifest_path.read_text())["files"]
         }
-        assert {"sandroid.json", run_report.DEFAULT_PDF_NAME, "timeline.png"} <= listed
+        assert {
+            "sandroid.json",
+            run_report.DEFAULT_PDF_NAME,
+            run_report.REPORT_JSON_NAME,
+            run_report.REPORT_MD_NAME,
+        } <= listed
+        assert outcome.report_json == tmp_path / "report.json"
+        assert outcome.markdown == tmp_path / "report.md"
         assert run_report.verify_hash_manifest(tmp_path).ok
 
     def test_finalize_pdf_failure_is_reported_not_raised(self, tmp_path, monkeypatch):
         def boom(*a, **k):
             raise RuntimeError("render failed")
 
-        monkeypatch.setattr(pdf_report, "generate_pdf_report", boom)
+        monkeypatch.setattr(report_render, "render_pdf", boom)
         outcome = run_report.finalize_run(tmp_path, _results(), generate_pdf=True)
         assert outcome.pdf is None
         assert outcome.errors == ["pdf: render failed"]
@@ -766,29 +764,31 @@ class TestFinalize:
         first = run_report.report_from_folder(tmp_path)
         assert first.check.present is False
         assert first.pdf == tmp_path / run_report.DEFAULT_PDF_NAME
+        assert first.report_json == tmp_path / run_report.REPORT_JSON_NAME
         assert first.manifest is not None
         assert not (tmp_path / "timeline.png").exists()  # nothing extra added
         assert run_report.verify_hash_manifest(tmp_path).ok
 
     def test_report_from_sealed_folder_never_overwrites(self, tmp_path, clean_env):
-        """P2-H4: intact bundle -> new PDF name + addendum, originals untouched."""
+        """P2-H4: intact bundle -> new report names + addendum, originals kept."""
         root = self._sealed_run(tmp_path)
         before = self._snapshot(root)
 
         outcome = run_report.report_from_folder(root)
         assert outcome.check.ok
         assert outcome.manifest is None
-        assert outcome.pdf.name.startswith("Sandroid_Forensic_Report_regenerated_")
+        assert outcome.pdf.name.startswith("report_regenerated_")
         assert outcome.pdf.name.endswith("Z.pdf")
         after = self._snapshot(root)
-        # Every original file is byte-identical, incl. PDF, timeline, SHA256SUMS.
+        # Every original file is byte-identical, incl. reports and SHA256SUMS.
         assert {k: after[k] for k in before} == before
         added = set(after) - set(before)
-        assert added == {outcome.pdf.name, outcome.addendum.name}
+        new_files = [outcome.report_json, outcome.markdown, outcome.pdf]
+        assert added == {p.name for p in new_files} | {outcome.addendum.name}
         assert outcome.addendum.name.startswith("SHA256SUMS.addendum-")
         lines = outcome.addendum.read_text().splitlines()
         assert lines == [
-            f"{run_report.sha256_file(outcome.pdf)}  {outcome.pdf.name}",
+            *(f"{run_report.sha256_file(p)}  {p.name}" for p in new_files),
             f"{run_report.sha256_file(root / 'SHA256SUMS')}  SHA256SUMS",
         ]
         check = run_report.verify_hash_manifest(root)

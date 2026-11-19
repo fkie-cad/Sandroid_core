@@ -16,9 +16,11 @@ verifiable evidence in a result folder:
   SHA-256 of ``SHA256SUMS`` is written to the log so the whole folder is
   anchored by a single value.
 * :func:`finalize_run` is the reusable "end of run" entry point: write the
-  results JSON (with metadata), optionally render the PDF, then write the
-  manifest. Every UI (CLI, TUI, API) should call it after an analysis instead of
-  re-implementing these steps.
+  results JSON (with metadata), seal the session timeline, write the report
+  (``report.json`` + ``report.md``, optionally the PDF; see
+  :mod:`sandroid.core.report_engine`), then write the manifest. Every UI (CLI,
+  TUI, API) should call it after an analysis instead of re-implementing these
+  steps.
 """
 
 from __future__ import annotations
@@ -53,11 +55,21 @@ DEFAULT_PDF_NAME = "Sandroid_Forensic_Report.pdf"
 MANIFEST_NAME = "manifest.json"
 SHA256SUMS_NAME = "SHA256SUMS"
 
+#: The JSON report (the renderers' only input) and its Markdown rendering.
+REPORT_STEM = "report"
+REPORT_JSON_NAME = f"{REPORT_STEM}.json"
+REPORT_MD_NAME = f"{REPORT_STEM}.md"
+#: Seal of the session timeline a report was built from (``{seal,
+#: timeline_path, session_id, scope}``); the timeline itself is not copied.
+TIMELINE_SEAL_NAME = "timeline_seal.json"
+TIMELINE_FILE_NAME = "timeline.jsonl"
+
 #: Regenerated reports never replace an existing file; they are written as
-#: ``Sandroid_Forensic_Report_regenerated_<UTC timestamp>.pdf`` and recorded in
-#: an addendum manifest ``SHA256SUMS.addendum-<UTC timestamp>`` (sha256sum
+#: ``report_regenerated_<UTC timestamp>.{json,md,pdf}`` and recorded in an
+#: addendum manifest ``SHA256SUMS.addendum-<UTC timestamp>`` (sha256sum
 #: format) instead of rewriting the original ``SHA256SUMS``.
-REGENERATED_PDF_TEMPLATE = "Sandroid_Forensic_Report_regenerated_{stamp}.pdf"
+REGENERATED_STEM_TEMPLATE = "report_regenerated_{stamp}"
+REGENERATED_PDF_TEMPLATE = f"{REGENERATED_STEM_TEMPLATE}.pdf"
 ADDENDUM_PREFIX = f"{SHA256SUMS_NAME}.addendum-"
 
 #: Hash algorithms recorded for every evidence file (MD5 kept for
@@ -65,8 +77,25 @@ ADDENDUM_PREFIX = f"{SHA256SUMS_NAME}.addendum-"
 HASH_ALGORITHMS: tuple[str, ...] = ("md5", "sha256")
 
 #: Files that are still being written after the manifest is created (the log
-#: receives the manifest hash itself), so they cannot be part of it.
-LIVE_FILE_PATTERNS: tuple[str, ...] = ("sandroid*.log", "sandroid*.log.*")
+#: receives the manifest hash itself; the session timeline keeps growing), so
+#: they cannot be part of it. Patterns without ``/`` match the file name,
+#: patterns with ``/`` the end of the relative path. A live timeline's prefix
+#: seal is recorded in ``manifest.json["timeline_seals"]`` instead.
+LIVE_FILE_PATTERNS: tuple[str, ...] = (
+    "sandroid*.log",
+    "sandroid*.log.*",
+    TIMELINE_FILE_NAME,
+    ".timeline.lock",
+    "tracking/raw/*",
+)
+
+_LIVE_REASONS: dict[str, str] = {
+    TIMELINE_FILE_NAME: (
+        "live session timeline, still appended; sealed in timeline_seals"
+    ),
+    ".timeline.lock": "timeline lock file of a running Sandroid",
+    "tracking/raw/*": "live raw tracking evidence, still written",
+}
 
 #: Python distributions whose versions are recorded in the run metadata.
 TOOL_DISTRIBUTIONS: tuple[str, ...] = (
@@ -494,7 +523,6 @@ def describe_run_settings(run_config: Any) -> dict[str, Any]:
         "show_deleted_files": bool(getattr(run_config, "show_deleted", False)),
         "hash_files": bool(getattr(run_config, "hash_files", False)),
         "list_apks": bool(getattr(run_config, "pull_apk", False)),
-        "screenshot_interval": getattr(run_config, "screenshot_interval", None),
     }
     window = getattr(run_config, "capture_window", 0)
     action = getattr(run_config, "action", None)
@@ -567,9 +595,47 @@ class ManifestInfo:
     excluded: list[dict[str, str]] = field(default_factory=list)
 
 
-def _is_live_file(rel: str) -> bool:
+def _live_pattern(rel: str, patterns: tuple[str, ...]) -> str | None:
+    """The first pattern ``rel`` matches (name or path suffix), else None."""
     name = rel.rsplit("/", 1)[-1]
-    return any(fnmatch.fnmatch(name, pat) for pat in LIVE_FILE_PATTERNS)
+    for pat in patterns:
+        if "/" in pat:
+            if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, f"*/{pat}"):
+                return pat
+        elif fnmatch.fnmatch(name, pat):
+            return pat
+    return None
+
+
+def _is_live_file(rel: str) -> bool:
+    return _live_pattern(rel, LIVE_FILE_PATTERNS) is not None
+
+
+def _timeline_prefix_seal(full: Path, rel: str) -> dict[str, Any]:
+    """Read-only seal of a live timeline (``timeline.seal_file``).
+
+    Falls back to ``{bytes, sha256}`` of the current prefix when the timeline
+    module is unavailable or cannot seal the file.
+    """
+    from sandroid.core import report_engine
+
+    tl = report_engine._timeline_module()
+    entry: dict[str, Any] = {"rel": rel}
+    if tl is not None:
+        try:
+            entry.update(report_engine.seal_to_dict(tl.seal_file(full)) or {})
+            return entry
+        except Exception as exc:
+            entry["seal_error"] = f"{type(exc).__name__}: {exc}"
+    size = full.stat().st_size
+    entry.update(
+        {
+            "path": str(full),
+            "bytes": size,
+            "sha256": report_engine.sha256_prefix(full, size),
+        }
+    )
+    return entry
 
 
 def _iter_result_files(root: Path):
@@ -604,14 +670,25 @@ def write_hash_manifest(
     root = Path(result_dir).resolve()
     files: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
+    timeline_seals: list[dict[str, Any]] = []
     for full, rel in _iter_result_files(root):
         if rel in (MANIFEST_NAME, SHA256SUMS_NAME):
             continue
-        name = rel.rsplit("/", 1)[-1]
-        if any(fnmatch.fnmatch(name, pat) for pat in exclude_patterns):
+        pattern = _live_pattern(rel, exclude_patterns)
+        if pattern is not None:
             excluded.append(
-                {"path": rel, "reason": "live log file, still written after manifest"}
+                {
+                    "path": rel,
+                    "reason": _LIVE_REASONS.get(
+                        pattern, "live log file, still written after manifest"
+                    ),
+                }
             )
+            if pattern == TIMELINE_FILE_NAME and not full.is_symlink():
+                try:
+                    timeline_seals.append(_timeline_prefix_seal(full, rel))
+                except OSError as exc:
+                    timeline_seals.append({"rel": rel, "seal_error": str(exc)})
             continue
         if full.is_symlink():
             excluded.append({"path": rel, "reason": f"symlink to {full.readlink()}"})
@@ -636,6 +713,8 @@ def write_hash_manifest(
         "files": files,
         "excluded": excluded,
     }
+    if timeline_seals:
+        manifest["timeline_seals"] = timeline_seals
     manifest_path = root / MANIFEST_NAME
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -782,6 +861,156 @@ class FinalizeOutcome:
     pdf: Path | None = None
     manifest: ManifestInfo | None = None
     errors: list[str] = field(default_factory=list)
+    #: ``report.json`` (the renderers' input) and ``report.md``.
+    report_json: Path | None = None
+    markdown: Path | None = None
+    #: ``timeline_seal.json`` (only when a session timeline was sealed).
+    timeline_seal: Path | None = None
+
+
+def _find_session_timeline(root: Path) -> Path | None:
+    """A closed ``timeline.jsonl`` in ``root`` or one of its device folders."""
+    candidates = [
+        root / TIMELINE_FILE_NAME,
+        *sorted(root.glob(f"*/{TIMELINE_FILE_NAME}")),
+    ]
+    found = [p for p in candidates if p.is_file()]
+    if not found:
+        return None
+    return max(found, key=lambda p: p.stat().st_mtime)
+
+
+def _seal_timeline_for_report(
+    root: Path,
+) -> tuple[Path | None, Any | None, str | None]:
+    """Seal the session timeline for a report written into ``root``.
+
+    With a bound timeline sink the live file is sealed through the service
+    (``seal(by="report")`` writes a ``sandroid/seal`` line). Otherwise (pure
+    CLI over a session folder) a ``timeline.jsonl`` under ``root``'s device
+    folder is sealed read-only with ``seal_file``.
+
+    Returns:
+        ``(timeline path, seal, note)``; ``note`` explains a missing timeline.
+    """
+    from sandroid.core import report_engine
+
+    tl = report_engine._timeline_module()
+    if tl is None:
+        return None, None, "The session timeline is not available in this build."
+    status = None
+    try:
+        service = tl.get_timeline()
+        status = service.status()
+    except Exception as exc:
+        logger.debug("report: no timeline service: %s", exc)
+    state = getattr(status, "state", None)
+    folder = getattr(status, "folder", None)
+    if state == "open" and folder:
+        report_rel = os.path.relpath(
+            root.resolve() / REPORT_JSON_NAME, Path(folder).resolve()
+        )
+        path = Path(folder) / tl.FILE_NAME
+        try:
+            seal = service.seal(by="report", report=Path(report_rel).as_posix())
+        except Exception as exc:
+            logger.error("Sealing the session timeline failed: %s", exc, exc_info=True)
+            seal = None
+        if seal is None:
+            return path, None, f"The session timeline {path} could not be sealed."
+        return Path(getattr(seal, "path", None) or path), seal, None
+    if state in ("locked", "failed"):
+        who = getattr(status, "locked_by", None)
+        return (
+            None,
+            None,
+            f"The session timeline was {state}"
+            + (f" ({who})" if who else "")
+            + "; this Sandroid window recorded no timeline.",
+        )
+    path = _find_session_timeline(root)
+    if path is None:
+        return None, None, "No session timeline was found for this result folder."
+    try:
+        return path, tl.seal_file(path), None
+    except Exception as exc:
+        logger.error("Sealing %s failed: %s", path, exc, exc_info=True)
+        return path, None, f"The session timeline {path} could not be sealed: {exc}"
+
+
+def _write_timeline_seal(root: Path, timeline: Path, seal: Any, scope: Any) -> Path:
+    from sandroid.core import report_engine
+
+    sealed = report_engine.seal_to_dict(seal) or {}
+    path = root / TIMELINE_SEAL_NAME
+    doc = {
+        "seal": sealed,
+        "timeline_path": str(Path(timeline).resolve()),
+        "session_id": sealed.get("session_id"),
+        "scope": report_engine.scope_to_dict(scope),
+    }
+    path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def _write_run_report(
+    root: Path,
+    outcome: FinalizeOutcome,
+    *,
+    config: Any,
+    run_id: str | None,
+    generate_pdf: bool,
+    pdf_name: str,
+) -> None:
+    """Seal the timeline, then write report.json/.md (+ PDF) into ``root``."""
+    from sandroid.core import report_engine, report_render
+
+    doc = None
+    try:
+        timeline, seal, note = _seal_timeline_for_report(root)
+        scope = report_engine.ReportScope()
+        if timeline is not None and seal is not None:
+            if run_id:
+                scope = report_engine.scope_for_run(
+                    timeline, run_id, end=getattr(seal, "bytes", None)
+                )
+            outcome.timeline_seal = _write_timeline_seal(root, timeline, seal, scope)
+        elif run_id:
+            scope = report_engine.ReportScope(kind="run", run_id=run_id)
+        options = report_engine.report_options_from_config(
+            config, coverage_notes=(note,) if note else ()
+        )
+        doc = report_engine.build_report(
+            timeline=timeline if seal is not None else None,
+            seal=seal,
+            scope=scope,
+            bundle_dir=root,
+            options=options,
+            results_json=outcome.results_json,
+        )
+        formats = ["json"]
+        if "md" in report_engine.report_formats(config):
+            formats.append("md")
+        written = report_engine.write_report(
+            doc, root, stem=REPORT_STEM, formats=formats
+        )
+        outcome.report_json = written.get("json")
+        outcome.markdown = written.get("md")
+        logger.info("Report written: %s", outcome.report_json)
+    except Exception as exc:
+        logger.error("Report generation failed: %s", exc, exc_info=True)
+        outcome.errors.append(f"report: {exc}")
+
+    if not generate_pdf:
+        return
+    try:
+        if outcome.report_json is None:
+            raise RuntimeError("report.json could not be written")
+        data = json.loads(outcome.report_json.read_text(encoding="utf-8"))
+        outcome.pdf = report_render.render_pdf(data, root / pdf_name, base_dir=root)
+    except Exception as exc:
+        logger.error("PDF report generation failed: %s", exc, exc_info=True)
+        outcome.errors.append(f"pdf: {exc}")
 
 
 def finalize_run(
@@ -803,9 +1032,12 @@ def finalize_run(
     """Write all evidence documentation for a finished analysis run.
 
     Call this once per run, after the analysis engine returned (CLI, TUI and
-    API alike). Steps: results JSON with ``"Run Metadata"`` → optional PDF →
-    hash manifest. PDF and manifest failures are logged and reported in
-    ``errors`` but never raised; failing to write the JSON raises.
+    API alike). Steps: results JSON with ``"Run Metadata"`` → seal of the
+    session timeline (``timeline_seal.json``) → ``report.json`` +
+    ``report.md`` → optional PDF → hash manifest. Report, PDF and manifest
+    failures are logged and reported in ``errors`` (``"report: …"``,
+    ``"pdf: …"``, ``"manifest: …"``) but never raised; failing to write the
+    JSON raises.
 
     Args:
         result_dir: The run's result folder (where the JSON is written).
@@ -816,7 +1048,8 @@ def finalize_run(
         config: ``SandroidConfig`` for the sanitised settings (optional).
         started_at: Analysis start (datetime/ISO string/epoch).
         ended_at: Analysis end; defaults to now.
-        run_id: Optional run identifier (run bundles).
+        run_id: Optional run identifier (run bundles); selects the run scope
+            of the report.
         mode: Free-form mode label (``"cli"``, ``"tui-play"``, ...).
         generate_pdf: Also render the PDF report.
         pdf_name: PDF file name inside ``result_dir``.
@@ -870,16 +1103,14 @@ def finalize_run(
     )
     logger.info("Results written: %s", out_json)
 
-    if generate_pdf:
-        try:
-            from sandroid.core.pdf_report import generate_pdf_report
-
-            outcome.pdf = generate_pdf_report(
-                root, json_file=out_json, output_pdf=root / pdf_name
-            )
-        except Exception as exc:
-            logger.error("PDF report generation failed: %s", exc, exc_info=True)
-            outcome.errors.append(f"pdf: {exc}")
+    _write_run_report(
+        root,
+        outcome,
+        config=config,
+        run_id=run_id,
+        generate_pdf=generate_pdf,
+        pdf_name=pdf_name,
+    )
 
     if write_manifest:
         try:
@@ -897,9 +1128,14 @@ class ReportFromFolderOutcome:
     pdf: Path
     check: ManifestCheck
     manifest: ManifestInfo | None = None
-    #: Addendum manifest recording the regenerated PDF (sealed folders).
+    #: Addendum manifest recording the regenerated files (sealed folders).
     addendum: Path | None = None
     addendum_sha256: str | None = None
+    #: The regenerated ``report*.json`` and ``report*.md``.
+    report_json: Path | None = None
+    markdown: Path | None = None
+    #: Why the timeline could not be re-read (missing or changed), if so.
+    timeline_note: str | None = None
 
 
 class EvidenceVerificationError(RuntimeError):
@@ -964,6 +1200,113 @@ def write_manifest_addendum(
     return path, sha256_file(path)
 
 
+def _timeline_problem(path: Path, seal: dict[str, Any]) -> str | None:
+    """Why ``path`` no longer matches ``seal`` (``None``: the prefix matches)."""
+    from sandroid.core import report_engine
+
+    if not path.is_file():
+        return f"The session timeline {path} is missing"
+    try:
+        n_bytes = int(seal.get("bytes") or 0)
+        size = path.stat().st_size
+        if size < n_bytes:
+            return (
+                f"The session timeline {path} is shorter ({size} bytes) than "
+                f"when it was sealed ({n_bytes} bytes)"
+            )
+        if (
+            report_engine.sha256_prefix(path, n_bytes)
+            != str(seal.get("sha256") or "").lower()
+        ):
+            return (
+                f"The session timeline {path} changed: the SHA-256 of its first "
+                f"{n_bytes} bytes no longer matches the seal"
+            )
+    except (OSError, ValueError, TypeError) as exc:
+        return f"The session timeline {path} could not be checked: {exc}"
+    return None
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _regenerated_report(
+    root: Path, json_file: str | os.PathLike[str] | None
+) -> tuple[dict[str, Any], str | None]:
+    """The report document for :func:`report_from_folder` and a timeline note.
+
+    The timeline is re-read when ``timeline_seal.json`` still matches it.
+    Otherwise the previous ``report.json`` is re-rendered with a coverage
+    warning, or (no previous report) the report is built without timeline.
+    """
+    from sandroid.core import report_engine
+
+    config = None
+    try:
+        from sandroid.config import get_config
+
+        config = get_config()
+    except Exception:
+        config = None
+    seal_info = _read_json(root / TIMELINE_SEAL_NAME)
+    previous = _read_json(root / REPORT_JSON_NAME)
+    scope = report_engine.scope_from_dict(
+        (seal_info or {}).get("scope") or (previous or {}).get("scope")
+    )
+    results_json = Path(json_file) if json_file else None
+    note: str | None = None
+    if seal_info and isinstance(seal_info.get("seal"), dict):
+        seal = seal_info["seal"]
+        timeline = Path(str(seal_info.get("timeline_path") or seal.get("path") or ""))
+        note = _timeline_problem(timeline, seal)
+        if note is None and report_engine._timeline_module() is None:
+            note = "The session timeline reader is not available in this build"
+        if note is None:
+            options = report_engine.report_options_from_config(config)
+            doc = report_engine.build_report(
+                timeline=timeline,
+                seal=seal,
+                scope=scope,
+                bundle_dir=root,
+                options=options,
+                results_json=results_json,
+            )
+            return doc, None
+        logger.warning("%s; the report is not re-derived from it.", note)
+        if previous is not None:
+            return report_engine.annotate_rerender(previous, note), note
+        notes: tuple[str, ...] = (f"{note}. The transcript is omitted.",)
+    else:
+        notes = (
+            "This result folder has no sealed session timeline "
+            f"({TIMELINE_SEAL_NAME}); the transcript is omitted.",
+        )
+    options = report_engine.report_options_from_config(config, coverage_notes=notes)
+    doc = report_engine.build_report(
+        timeline=None,
+        seal=None,
+        scope=scope,
+        bundle_dir=root,
+        options=options,
+        results_json=results_json,
+    )
+    return doc, note
+
+
+def _free_stem(folder: Path, stem: str, suffixes: tuple[str, ...]) -> str:
+    """``stem`` or ``<stem>_2``, ``_3``, ... so that no ``stem+suffix`` exists."""
+    candidate, n = stem, 1
+    while any((folder / f"{candidate}{sfx}").exists() for sfx in suffixes):
+        n += 1
+        candidate = f"{stem}_{n}"
+    return candidate
+
+
 def report_from_folder(
     result_dir: str | os.PathLike[str],
     *,
@@ -971,7 +1314,7 @@ def report_from_folder(
     output_pdf: str | os.PathLike[str] | None = None,
     update_manifest: bool = True,
 ) -> ReportFromFolderOutcome:
-    """(Re)generate the PDF report for an existing result folder.
+    """(Re)generate the report (JSON, Markdown, PDF) for a result folder.
 
     Shared by ``sandroid --report-from`` and the TUI ``P`` key. Evidence
     rules:
@@ -979,11 +1322,14 @@ def report_from_folder(
     1. The existing ``SHA256SUMS`` (and any addenda) is verified *before*
        anything is written. On a mismatch nothing is written and
        :class:`EvidenceVerificationError` is raised.
-    2. No existing file is ever overwritten: the PDF is written as
-       ``Sandroid_Forensic_Report_regenerated_<UTC>.pdf`` (only a folder
-       without manifest and without a PDF gets the default name), an
-       existing ``timeline.png`` is reused, a missing one is not added.
-    3. In a sealed folder the new PDF is recorded in
+    2. The session timeline is re-read only if the SHA-256 of its first
+       ``seal.bytes`` bytes still matches ``timeline_seal.json``. If it is
+       missing or changed, the previous ``report.json`` is re-rendered and
+       its coverage section states that the data was not re-derived.
+    3. No existing file is ever overwritten: the files are written as
+       ``report_regenerated_<UTC>.{json,md,pdf}`` (only a folder without
+       manifest and without a report gets the default names).
+    4. In a sealed folder the new files are recorded in
        ``SHA256SUMS.addendum-<UTC>`` (plus a log line); the original
        ``SHA256SUMS``/``manifest.json`` stay unchanged. A folder without any
        manifest gets a fresh one.
@@ -991,8 +1337,9 @@ def report_from_folder(
     Args:
         result_dir: Existing result folder.
         json_file: Results JSON (located automatically if omitted).
-        output_pdf: Explicit output path; must not exist yet.
-        update_manifest: Record the new PDF (addendum or new manifest).
+        output_pdf: Explicit PDF path; must not exist yet. The JSON and
+            Markdown files are written next to it with the same stem.
+        update_manifest: Record the new files (addendum or new manifest).
 
     Returns:
         A :class:`ReportFromFolderOutcome`.
@@ -1000,9 +1347,9 @@ def report_from_folder(
     Raises:
         FileNotFoundError: ``result_dir`` does not exist.
         EvidenceVerificationError: The folder does not match its manifest.
-        FileExistsError: ``output_pdf`` already exists.
+        FileExistsError: ``output_pdf`` (or its JSON/Markdown) already exists.
     """
-    from sandroid.core.pdf_report import generate_pdf_report
+    from sandroid.core import report_engine, report_render
 
     root = Path(result_dir)
     if not root.is_dir():
@@ -1015,27 +1362,56 @@ def report_from_folder(
     sealed = check.present or (root / MANIFEST_NAME).exists()
     stamp = utc_stamp()
     if output_pdf is not None:
-        out = Path(output_pdf)
-        if out.exists():
-            raise FileExistsError(f"Refusing to overwrite existing file: {out}")
-    elif not sealed and not (root / DEFAULT_PDF_NAME).exists():
-        out = root / DEFAULT_PDF_NAME
+        pdf = Path(output_pdf)
+        out_dir, stem = pdf.parent, pdf.stem
+        for path in (pdf, out_dir / f"{stem}.json", out_dir / f"{stem}.md"):
+            if path.exists():
+                raise FileExistsError(f"Refusing to overwrite existing file: {path}")
+    elif not sealed and not any(
+        (root / name).exists()
+        for name in (REPORT_JSON_NAME, REPORT_MD_NAME, DEFAULT_PDF_NAME)
+    ):
+        out_dir, stem = root, REPORT_STEM
+        pdf = root / DEFAULT_PDF_NAME
     else:
-        out = _free_path(root / REGENERATED_PDF_TEMPLATE.format(stamp=stamp))
-    try:
-        pdf = generate_pdf_report(
-            root, json_file=json_file, output_pdf=out, write_timeline=False
+        out_dir = root
+        stem = _free_stem(
+            root,
+            REGENERATED_STEM_TEMPLATE.format(stamp=stamp),
+            (".json", ".md", ".pdf"),
         )
+        pdf = root / f"{stem}.pdf"
+    doc, note = _regenerated_report(root, json_file)
+    written: dict[str, Path] = {}
+    try:
+        written = report_engine.write_report(
+            doc, out_dir, stem=stem, formats=("json", "md")
+        )
+        data = json.loads(written["json"].read_text(encoding="utf-8"))
+        written["pdf"] = report_render.render_pdf(data, pdf, base_dir=out_dir)
     except BaseException:
-        # Do not leave a half-written report behind (it did not exist before).
-        out.unlink(missing_ok=True)
+        # Do not leave half-written reports behind (they did not exist before).
+        for path in (*written.values(), pdf):
+            Path(path).unlink(missing_ok=True)
         raise
-    outcome = ReportFromFolderOutcome(pdf=pdf, check=check)
+    outcome = ReportFromFolderOutcome(
+        pdf=pdf,
+        check=check,
+        report_json=written.get("json"),
+        markdown=written.get("md"),
+        timeline_note=note,
+    )
     if not update_manifest:
         return outcome
     if sealed:
+        resolved = root.resolve()
+        new_files = [
+            p
+            for p in (outcome.report_json, outcome.markdown, pdf)
+            if p is not None and Path(p).resolve().is_relative_to(resolved)
+        ]
         outcome.addendum, outcome.addendum_sha256 = write_manifest_addendum(
-            root, [pdf], stamp
+            root, new_files, stamp
         )
         logger.info(
             "Report regenerated: %s (SHA-256 %s). Recorded in %s (SHA-256 %s); "
@@ -1058,9 +1434,13 @@ __all__ = [
     "HASH_ALGORITHMS",
     "MANIFEST_NAME",
     "REGENERATED_PDF_TEMPLATE",
+    "REGENERATED_STEM_TEMPLATE",
+    "REPORT_JSON_NAME",
+    "REPORT_MD_NAME",
     "RUN_ERRORS_KEY",
     "RUN_METADATA_KEY",
     "SHA256SUMS_NAME",
+    "TIMELINE_SEAL_NAME",
     "EvidenceVerificationError",
     "FinalizeOutcome",
     "ManifestCheck",

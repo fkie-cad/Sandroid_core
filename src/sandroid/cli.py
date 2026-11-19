@@ -114,12 +114,6 @@ def __getattr__(name: str):
     "--sockets", is_flag=True, help="Monitor listening sockets during the action"
 )
 @click.option(
-    "--screenshot",
-    type=click.IntRange(min=1),
-    metavar="INTERVAL",
-    help="Take a screenshot each INTERVAL seconds",
-)
-@click.option(
     "--trigdroid",
     metavar="PACKAGE_NAME",
     help="Use the TrigDroid tool to execute malware triggers in package PACKAGE_NAME",
@@ -296,7 +290,6 @@ def main(
     show_deleted: bool,
     no_processes: bool,
     sockets: bool,
-    screenshot: int | None,
     trigdroid: str | None,
     trigdroid_ccf: str | None,
     hash: bool,
@@ -399,12 +392,10 @@ def main(
 
         from .core.actionQ import ActionQ
         from .core.adb import Adb
-        from .core.pdf_report import PDFReport
         from .core.toolbox import Toolbox
 
         # Build legacy argparse namespace expected by Toolbox / ActionQ
         mock_args = argparse.Namespace(
-            screenshot=screenshot,
             number_of_runs=number if number else 2,
             avoid_strong_noise_filter=avoid_strong_noise_filter,
             network=network,
@@ -443,7 +434,6 @@ def main(
             show_deleted=show_deleted,
             no_processes=no_processes,
             sockets=sockets,
-            screenshot=screenshot,
             hash_files=locals()["hash"],
             apk=apk,
             degrade_network=degrade_network,
@@ -577,7 +567,6 @@ def main(
                 Toolbox,
                 Adb,
                 ActionQ,
-                PDFReport,
             )
         else:
             # Default: Textual TUI

@@ -1,15 +1,17 @@
-"""``sandroid --report-from DIR``: offline PDF (re)generation.
+"""``sandroid --report-from DIR``: offline report (re)generation.
 
-Works without a configuration or a device: it only reads the results folder.
-The evidence rules are those of :func:`sandroid.core.run_report.report_from_folder`:
-the manifest is verified first, nothing is written on a mismatch, existing
-files are never overwritten (the PDF gets a ``_regenerated_<UTC>`` name) and
-the new PDF is recorded in an addendum manifest.
+Works without a configuration or a device: it only reads the results folder
+(its results JSON, ``timeline_seal.json`` and the sealed prefix of the session
+timeline it names, or the previous ``report.json``). The evidence rules are
+those of :func:`sandroid.core.run_report.report_from_folder`: the manifest is
+verified first, nothing is written on a mismatch, existing files are never
+overwritten (the new files are named ``report_regenerated_<UTC>.{json,md,pdf}``)
+and the new files are recorded in an addendum manifest.
 
 After a successful verification the invocation is appended to
-``<DIR>/sandroid_report.log`` (verification result, PDF and addendum hashes)
-so the regeneration itself is documented next to the evidence. On a failed
-verification the log is only shown on the console.
+``<DIR>/sandroid_report.log`` (verification result, report and addendum
+hashes) so the regeneration itself is documented next to the evidence. On a
+failed verification the log is only shown on the console.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def _plain(console, text: str, style: str | None = None) -> None:
 
 
 def run_report_from(result_dir: str) -> int:
-    """Regenerate the PDF report for ``result_dir``.
+    """Regenerate the report (JSON, Markdown, PDF) for ``result_dir``.
 
     Args:
         result_dir: Existing Sandroid results folder.
@@ -116,6 +118,16 @@ def run_report_from(result_dir: str) -> int:
         console.print(
             "[warning]No evidence manifest existed; a new one was written.[/warning]"
         )
+    if outcome.timeline_note:
+        _plain(
+            console,
+            f"{outcome.timeline_note}; the transcript was not re-derived from it.",
+            "warning",
+        )
+    if outcome.report_json is not None:
+        _plain(console, f"Report written: {outcome.report_json}", "success")
+    if outcome.markdown is not None:
+        _plain(console, f"Markdown written: {outcome.markdown}", "success")
     _plain(console, f"PDF report written: {outcome.pdf}", "success")
     if outcome.addendum is not None:
         _plain(
