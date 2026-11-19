@@ -183,11 +183,15 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "get_replay_status": _e("recording"),
     "list_recent_runs": _e("recording"),
     "get_run_detail": _e("recording"),
-    # agents (legacy subtask tools until the panel cut-over, then WP5's tools;
-    # registered by their own modules, so they may be absent)
+    # agents (legacy subtask tools until the panel cut-over, then WP5's tools
+    # from ai/agents.py; registered by their own modules, so they may be
+    # absent). spawn_agent's risk depends on its profile (operator spawns ask,
+    # researcher spawns do not), so remembered rules are keyed by profile; with
+    # wait=true it blocks until the agent's result (the agent wall budget plus
+    # queueing), hence the long timeout.
     "spawn_subtask": _e("agents"),
     "spawn_privileged_subtask": _e("agents"),
-    "spawn_agent": _e("agents", timeout_s=_LONG),
+    "spawn_agent": _e("agents", timeout_s=1800, permission_key="profile"),
     "wait_agent": _e("agents", timeout_s=90),
     "get_agent_result": _e("agents"),
     "cancel_agent": _e("agents"),

@@ -421,9 +421,15 @@ def _reset_module_singletons(*, fresh_config: bool) -> None:
     if controllers is not None:
         controllers._monitor_controller = None
         controllers._recording_controller = None
-    # AI runtime singletons: permission store + approval broker, result-store
-    # cache, thread-index locks.
-    for name in ("sandroid.ai.tool_permissions", "sandroid.ai.results"):
+    # AI runtime singletons: agent manager (cancels live agents), arbiter,
+    # permission store + approval broker, result-store cache, thread-index
+    # locks.
+    for name in (
+        "sandroid.ai.agents",
+        "sandroid.ai.arbiter",
+        "sandroid.ai.tool_permissions",
+        "sandroid.ai.results",
+    ):
         module = sys.modules.get(name)
         if module is not None:
             module.reset_for_tests()

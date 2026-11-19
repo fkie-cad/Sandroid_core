@@ -6,6 +6,7 @@ singleton is exercised separately for its identity contract.
 """
 
 from sandroid.ai.arbiter import (
+    CEILING_OWNER,
     Conflict,
     DeviceResourceArbiter,
     ResourceId,
@@ -207,3 +208,97 @@ def test_get_arbiter_is_a_singleton():
     first = get_arbiter()
     second = get_arbiter()
     assert first is second
+
+
+# -- lineage and ceiling (subagents, WP5) ---------------------------------------
+
+
+def test_sync_child_uses_its_blocked_parents_lease():
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.note_subtask("a-op-child1", parent="orchestrator")
+
+    newly = arb.claim("a-op-child1", frozenset({ResourceId.FRIDA_SERVER}))
+
+    # Counts as held: nothing new, so the child's rollback never frees it.
+    assert newly == frozenset()
+    assert arb.snapshot() == {ResourceId.FRIDA_SERVER: "orchestrator"}
+    arb.release_resources("a-op-child1", newly)
+    assert arb.snapshot() == {ResourceId.FRIDA_SERVER: "orchestrator"}
+
+
+def test_async_child_conflicts_with_the_parents_lease():
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.note_subtask("a-op-child1")
+
+    result = arb.claim("a-op-child1", frozenset({ResourceId.FRIDA_SERVER}))
+
+    assert result == Conflict(ResourceId.FRIDA_SERVER, "orchestrator")
+
+
+def test_sync_child_declared_release_drops_the_parents_lease():
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.DEVICE_PROXY}))
+    arb.note_subtask("a-op-child1", parent="orchestrator")
+
+    arb.release_resources("a-op-child1", frozenset({ResourceId.DEVICE_PROXY}))
+
+    assert arb.snapshot() == {}
+
+
+def test_sync_child_world_claim_ignores_parent_leases_but_not_strangers():
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.MITMPROXY}))
+    arb.note_subtask("a-op-child1", parent="orchestrator")
+    assert arb.claim("a-op-child1", frozenset({ResourceId.WORLD})) == frozenset(
+        {ResourceId.WORLD}
+    )
+    arb.release_resources("a-op-child1", frozenset({ResourceId.WORLD}))
+
+    arb.claim("other", frozenset({ResourceId.FOCUS}))
+    result = arb.claim("a-op-child1", frozenset({ResourceId.WORLD}))
+    assert result == Conflict(ResourceId.FOCUS, "other")
+
+
+def test_lineage_dropped_by_set_parent_and_forget():
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.note_subtask("c", parent="orchestrator")
+    assert arb.lineage("c") == {"c", "orchestrator"}
+
+    arb.set_parent("c", None)
+    assert arb.lineage("c") == {"c"}
+    assert isinstance(arb.claim("c", frozenset({ResourceId.FRIDA_SERVER})), Conflict)
+
+    arb.set_parent("c", "orchestrator")
+    arb.forget_subtask("c")
+    assert arb.lineage("c") == {"c"}
+    assert "c" not in arb.live_subtasks()
+
+
+def test_ceiling_refuses_before_any_lease_check():
+    arb = DeviceResourceArbiter()
+    arb.note_subtask("a-re-x", ceiling=frozenset())
+
+    result = arb.claim("a-re-x", frozenset({ResourceId.MONITOR}))
+
+    assert result == Conflict(ResourceId.MONITOR, CEILING_OWNER)
+    assert arb.snapshot() == {}
+    arb.note_subtask("a-op-y", ceiling=frozenset({ResourceId.MONITOR}))
+    assert arb.claim("a-op-y", frozenset({ResourceId.MONITOR})) == frozenset(
+        {ResourceId.MONITOR}
+    )
+    arb.forget_subtask("a-re-x")
+    # Without a registered ceiling anything may be claimed again.
+    assert arb.claim("a-re-x", frozenset({ResourceId.FOCUS})) == frozenset(
+        {ResourceId.FOCUS}
+    )
+
+
+def test_reset_for_tests_drops_the_singleton():
+    from sandroid.ai import arbiter as arbiter_module
+
+    first = get_arbiter()
+    arbiter_module.reset_for_tests()
+    assert get_arbiter() is not first
