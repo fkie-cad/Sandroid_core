@@ -1204,6 +1204,17 @@ class NetworkPanel(Widget):
             pass
         self._do_refresh_status()
         self._hl.attach(self, self._redraw_highlights, self._highlight_rows_snapshot)
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
+        except Exception:
+            pass
+
+    def _repaint_for_theme(self, _theme: Any = None) -> None:
+        """A live theme switch: cells and the highlight bar take the new
+        palette (their Rich styles are built from ``lens_palette()``).
+        """
+        if self.is_attached:
+            self._rebuild()
 
     # -- accessors ---------------------------------------------------------
 

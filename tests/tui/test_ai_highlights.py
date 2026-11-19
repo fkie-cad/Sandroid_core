@@ -854,3 +854,51 @@ async def test_files_H_while_live_keeps_live_and_the_newest_row(store):
             await settle(pilot)
             assert panel.following
             assert table.cursor_row == table.row_count - 1
+
+
+async def test_files_lens_repaints_on_a_live_theme_switch(store):
+    """Visual check on main: after a live switch to paper the Files bar and
+    Highlight words kept the dark palette until the lens was switched.
+    """
+    from sandroid.tui.themes import (
+        THEMES,
+        build_textual_theme,
+        lens_palette,
+        textual_theme_name,
+    )
+
+    app = _Harness()
+    async with app.run_test(size=WIDE) as pilot:
+        app.register_theme(build_textual_theme(THEMES["paper"]))
+        panel = await _files(app, pilot)
+        table = panel.table
+        store.create("files", "secrets", short="secrets", reasons={PREFS: "a"})
+        await until(pilot, lambda: "hl" in _cols(table))
+        dark = str(table.get_cell(PREFS, "hl").spans[0].style)
+        app.theme = textual_theme_name("paper")
+        await settle(pilot)
+        light = str(table.get_cell(PREFS, "hl").spans[0].style)
+        assert light != dark
+        assert lens_palette().highlight_1 in light
+        bar = panel.query_one("#files-highlights", HighlightBar)
+        from textual.color import Color
+
+        heading = bar.render().spans[0].style
+        assert heading.background == Color.parse(lens_palette().band)
+
+
+async def test_network_lens_repaints_on_a_live_theme_switch(flow_dir, store):
+    from sandroid.tui.themes import lens_palette, textual_theme_name
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _network(app, pilot, flow_dir)
+        table = panel.table
+        store.create("network", "facebook", short="fb", reasons={"flow-2": "fb"})
+        await until(pilot, lambda: "hl" in _cols(table))
+        dark = str(table.get_cell("f2", "hl").spans[0].style)
+        app.theme = textual_theme_name("paper")
+        await settle(pilot)
+        light = str(table.get_cell("f2", "hl").spans[0].style)
+        assert light != dark
+        assert lens_palette().highlight_1 in light

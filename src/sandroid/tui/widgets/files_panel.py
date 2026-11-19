@@ -734,6 +734,17 @@ class FilesPanel(Widget):
             self._set_marks(marks.marks)
         self.refresh_rows()
         self._hl.attach(self, self._redraw_highlights, self._highlight_rows_snapshot)
+        try:
+            self.app.theme_changed_signal.subscribe(self, self._repaint_for_theme)
+        except Exception:
+            pass
+
+    def _repaint_for_theme(self, _theme: Any = None) -> None:
+        """A live theme switch: rows, bar and caption take the new palette
+        (their Rich styles are built from ``lens_palette()`` at render time).
+        """
+        if self.is_attached:
+            self.refresh_rows()
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
