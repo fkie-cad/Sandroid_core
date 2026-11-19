@@ -2505,3 +2505,199 @@ def test_going_back_to_an_earlier_screen_is_still_captured(env, cfg):
     assert shot_a["data"]["dup_of"] == first_before["seq"]
     assert shot_a["data"]["before_late_ms"] > ts.SCREEN_BEFORE_MAX_MS
     assert not svc._shot_drops
+
+
+# --------------------------------------------------------------------------
+# Coverage: the fallback capture (E2E runD #12/#16/#20/#35/#38 dropped late)
+# --------------------------------------------------------------------------
+
+
+def _clocked_helper(h: FakeHelper, frame: str, dev0: float) -> dict:
+    """Like :func:`_screen_helper`, with a device clock (``dev0`` s now) in
+    the replies' ``t_mono_ms``. ``h.frame`` may be a callable (an animation:
+    a new frame per shot). Returns counters (``full``: frames captured in
+    full).
+    """
+    h.frame = frame
+    host0 = time.time()
+    stats: dict = {"full": []}
+
+    def now_dev() -> float:
+        return dev0 + (time.time() - host0)
+
+    def shot(*, hash_only=False, timeout=5.0):
+        f = h.frame() if callable(h.frame) else h.frame
+        t_ms = now_dev() * 1000.0
+        if hash_only:
+            return ShotResult(t_ms, 1080, 2424, f, 3.0, None, None)
+        stats["full"].append(f)
+        return ShotResult(t_ms, 1080, 2424, f, 14.0, _frame_png(f), "/x")
+
+    h.shot = shot
+    stats["now"] = now_dev
+    return stats
+
+
+def _animation(prefix: str, n: int | None = None):
+    """A new frame per shot (``n``: cycle through ``n`` frames, a blink)."""
+    k = {"i": 0}
+
+    def frame() -> str:
+        k["i"] += 1
+        return f"{prefix}{k['i'] % n if n else k['i']}"
+
+    return frame
+
+
+def test_an_animated_new_screen_gets_its_fallback_when_the_next_tap_comes(env, cfg):
+    """An animated new screen never settles; the next tap ends the wait. The
+    fallback (a new frame captured in full before the tap) is stored,
+    ``stable:false``, instead of dropping the shot as late.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        stats = _clocked_helper(h, "old", 100.0)
+        seq = svc._emit_screen("window", pkg="a", cls="a.Anim", title="Anim",
+                               window_id=1, via="a11y", dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.1)
+        h.frame = _animation("anim-")
+        time.sleep(0.8)
+        t_tap = stats["now"]()
+        ge.feed(*tap_lines(t_tap))
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+        data = _stop_data(svc, lines)
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["ref"]["of"] == seq
+    assert shot["data"]["stable"] is False
+    assert shot["data"]["fallback"] is True
+    assert shot["ref"]["sha256"] == _sha(stats["full"][-1])  # the newest
+    assert shot["dev_mono"] < t_tap  # captured before the finger-down
+    assert 0 < shot["data"]["lag_ms"] < 1500
+    assert 1 <= len(stats["full"]) <= ts.SHOT_FALLBACK_MAX
+    assert not data.get("shots_dropped")
+
+
+def test_a_new_logcat_screen_seen_before_the_next_tap_is_stored(env, cfg):
+    """E2E runD #38: the new screen appeared (a blinking cursor: it never
+    settled) and the next tap came: the shot was dropped as late. Now the
+    fallback captured before the tap is stored.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    cfg.shot_before_tap = True
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        h = helpers[0]
+        stats = _clocked_helper(h, "home", 50.0)
+        _tap_with_before_shot(ge, lines, stats["now"]())
+        seq = svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                               window_id=None, via="logcat", dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.4)
+        h.frame = _animation("net-", 2)  # drawn, cursor blinking
+        time.sleep(0.6)
+        t_tap = stats["now"]()
+        n_before = len(stats["full"])
+        _tap_with_before_shot(ge, lines, t_tap)
+        assert wait_for(lambda: of(lines, "shot", "screen_change"))
+        data = _stop_data(svc, lines)
+    shot = of(lines, "shot", "screen_change")[0]
+    assert shot["ref"]["of"] == seq
+    assert shot["data"]["stable"] is False
+    assert shot["data"]["fallback"] is True
+    assert shot["ref"]["sha256"] in {_sha("net-0"), _sha("net-1")}
+    assert shot["dev_mono"] < t_tap
+    assert n_before >= 2  # the first before-tap shot and the fallback
+    assert not data.get("shots_dropped")
+
+
+def test_no_new_frame_before_the_next_tap_is_still_dropped_late(env, cfg):
+    """E2E runD #35: the device showed the old screen until after the next
+    tap. No new frame was seen before it: nothing to fall back on, dropped
+    ``late`` (a frame seen after the tap may show the next screen).
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        h = helpers[0]
+        stats = _clocked_helper(h, "battery", 70.0)
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SETTINGS + ".Settings",
+                         title=None, window_id=None, via="logcat",
+                         dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.5)
+        ge.feed(*tap_lines(stats["now"]()))
+        time.sleep(0.05)
+        h.frame = "home"  # drawn only after the tap
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1)
+        time.sleep(0.2)
+        data = _stop_data(svc, lines)
+    assert not of(lines, "shot", "screen_change")
+    assert data["shots_dropped"] == {"late": 1}
+
+
+def test_a_transition_back_to_the_old_screen_is_no_fallback(env, cfg):
+    """E2E runD #12: the late pre-change hash was the pressed row (a ripple)
+    and the next before-tap shot the old screen again. Frames that were new
+    for a moment (captured in full as fallbacks) are void once the old
+    screen comes back after them; the late pre-change hash (either screen)
+    is never captured as one.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg, mode="invisible")
+        h = helpers[0]
+        stats = _clocked_helper(h, "home", 30.0)
+        svc._shot_seen(h, hash_only=True)  # the old screen, before the event
+        svc._screen_pre_lane.submit(time.sleep, 0.4)  # a late pre-change hash
+        taken = _spy_pre_hash(svc)
+        svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
+                         window_id=None, via="logcat", dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.2)
+        h.frame = "pressed"  # the late hash sees the ripple
+        assert wait_for(lambda: taken)
+        h.frame = _animation("fade-")  # the ripple fades
+        time.sleep(0.6)
+        h.frame = "home"  # back to the old screen; the new one never drew
+        time.sleep(0.4)
+        ge.feed(*tap_lines(stats["now"]()))
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=4.0)
+        time.sleep(0.2)
+        data = _stop_data(svc, lines)
+    assert taken[0][0].hash == "pressed"
+    assert not of(lines, "shot", "screen_change")
+    assert data["shots_dropped"] == {"late": 1}
+    assert stats["full"]
+    assert all(f.startswith("fade-") for f in stats["full"])
+
+
+def test_a_settling_screen_with_a_fallback_survives_a_newer_screen(env, cfg):
+    """A newer screen supersedes a still-settling one: its fallback, taken
+    before the newer event, is stored; the newer screen gets its own shot.
+    """
+    svc, popen, _run, helpers, _tmp = env
+    _load_cfg(cfg)
+    with timeline.capture() as lines:
+        start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        stats = _clocked_helper(h, "old", 10.0)
+        first = svc._emit_screen("window", pkg="a", cls="a.A", title="A",
+                                 window_id=1, via="a11y", dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.1)
+        h.frame = _animation("a-", 2)
+        time.sleep(0.6)
+        second = svc._emit_screen("window", pkg="a", cls="a.B", title="B",
+                                  window_id=2, via="a11y", dev_mono=stats["now"]())  # fmt: skip
+        time.sleep(0.05)
+        h.frame = "B"
+        assert wait_for(lambda: len(of(lines, "shot", "screen_change")) == 2)
+    shot_a, shot_b = of(lines, "shot", "screen_change")
+    assert shot_a["ref"]["of"] == first
+    assert shot_a["data"]["fallback"] is True
+    assert shot_a["ref"]["sha256"] in {_sha("a-0"), _sha("a-1")}
+    assert shot_b["ref"]["of"] == second
+    assert shot_b["ref"]["sha256"] == _sha("B")
+    assert not svc._shot_drops
