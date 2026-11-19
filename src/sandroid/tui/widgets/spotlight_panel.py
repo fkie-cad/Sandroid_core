@@ -581,7 +581,7 @@ class SpotlightPanel(Widget):
         info = None
         if self._has_sections():
             sections = self._sections()
-            info = "⏎ inspect · / filter · z fold · u refresh"
+            info = "⏎ inspect · / filter · z or click title: fold · u refresh"
             primary = self._primary_hint()
             if primary:
                 info += f" · {primary}"

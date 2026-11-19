@@ -606,6 +606,30 @@ async def test_tab_moves_between_sections_and_z_folds(fake):
         assert perms.size.height > 3
 
 
+async def test_clicking_a_section_header_band_folds_and_unfolds_it(fake):
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        sections = _sections(ms)
+        await until(pilot, lambda: _loaded(sections))
+        perms = sections.section("permissions")
+        perms.scroll_visible(animate=False)
+        await settle(pilot)
+        await pilot.click(perms, offset=(4, 0))  # the ▾ PERMISSIONS band
+        await settle(pilot)
+        assert perms.folded
+        assert app.focused is perms
+        assert _band(perms).startswith("▸ PERMISSIONS")
+        assert not ms.inspector_is_open
+        await pilot.click(perms, offset=(4, 0))
+        await settle(pilot)
+        assert not perms.folded
+        # a click on a row still moves the cursor and does not fold
+        await pilot.click(perms, offset=(4, 3))
+        await settle(pilot)
+        assert not perms.folded
+
+
 async def test_slash_filters_rows_across_sections_and_esc_clears(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
@@ -1165,7 +1189,7 @@ def test_bookkeeping_ops_collapse_and_are_counted() -> None:
     assert len(noted) == 6
 
 
-async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
+async def test_other_ops_row_expands_with_enter_z_folds_and_filter(fake):
     FakeService.extra_ops = _bookkeeping_ops()
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
@@ -1181,10 +1205,22 @@ async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
         perms.focus()
         perms.move_cursor(row=len(keys) - 1)
         await settle(pilot)
+        assert "⏎ shows them" in str(perms.rows_shown[-1].cells[-1])
+        # z folds the section from any row, also from "+N other ops"
         await pilot.press("z")
+        await settle(pilot)
+        assert perms.folded
+        assert not perms.expanded
+        await pilot.press("z")
+        await settle(pilot)
+        assert not perms.folded
+        perms.move_cursor(row=len(keys) - 1)
+        await settle(pilot)
+        await pilot.press("enter")  # Enter on "+N" shows them, no Inspector
         await settle(pilot)
         assert perms.expanded
         assert not perms.folded
+        assert not ms.inspector_is_open
         assert "op:READ_SMS" in [r.key for r in perms.rows_shown]
         assert perms.cursor_key() == perms.data.hidden_rows[0].key
         perms.move_cursor(row=len(perms.rows_shown) - 1)

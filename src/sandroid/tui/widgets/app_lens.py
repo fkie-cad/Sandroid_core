@@ -1855,6 +1855,22 @@ class LensSection(DataTable):
         name = "datatable--even-row" if index % 2 else "datatable--odd-row"
         return self.get_component_styles(name).rich_style
 
+    async def _on_click(self, event: Any) -> None:
+        """A click on the header band (the top border row) folds / unfolds
+        the section; clicks on rows keep DataTable's behaviour.
+        """
+        if event.y == 0:
+            event.stop()
+            event.prevent_default()
+            self.focus()
+            owner = self.parent
+            if isinstance(owner, AppLensSections):
+                owner.fold_section(self)
+            else:
+                self.set_folded(not self.folded)
+            return
+        await super()._on_click(event)
+
     def toggle_expanded(self) -> None:
         """Show / hide the section's hidden rows (the "+N" row).
 
@@ -1926,16 +1942,16 @@ class LensSection(DataTable):
         key = LESS_KEY if self.expanded else MORE_KEY
         if self.compact:
             text = (
-                f"− hide {hidden} (z)"
+                f"− hide {hidden} (⏎)"
                 if self.expanded
-                else (f"+{hidden} {data.hidden_short} · z")
+                else (f"+{hidden} {data.hidden_short} · ⏎")
             )
             return _placeholder(key[1:], text, width)
         if self.expanded:
-            text, hint = f"− hide the {hidden} {data.hidden_short}", "z hides them"
+            text, hint = f"− hide the {hidden} {data.hidden_short}", "⏎ hides them"
         else:
             text = f"+{hidden} {data.hidden_label}"
-            hint = "z shows them · / filters"
+            hint = "⏎ shows them · / filters"
         row = _placeholder(key[1:], text, width)
         if width > 1:
             row.cells = (*row.cells[:-1], _t(hint, _c().dim))
@@ -2767,15 +2783,20 @@ class AppLensSections(Vertical):
             widget = sections[0] if sections else None
         if widget is None:
             return None
-        if not widget.folded and widget.cursor_key() in (MORE_KEY, LESS_KEY):
-            widget.toggle_expanded()  # z on "+N other ops": show / hide them
-            return widget
+        self.fold_section(widget)
+        return widget
+
+    def fold_section(self, widget: LensSection) -> None:
+        """Fold / unfold ``widget`` (``z`` and a click on its header band).
+
+        Always folds, also on the "+N other ops" row: that row opens with
+        Enter, so ``z`` closes a section from any row.
+        """
         widget.set_folded(not widget.folded)
         if widget.folded:
             self._folded.add(widget.section_id)
         else:
             self._folded.discard(widget.section_id)
-        return widget
 
     def inspect_selected(self) -> InspectorContent | None:
         widget = self.current_section()
