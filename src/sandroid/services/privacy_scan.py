@@ -95,6 +95,9 @@ SNIPPET_MATCH_MAX = 64
 AUTO_WATCH_DIRS = ("shared_prefs/", "databases/", "no_backup/")
 #: Minimum seconds between two auto-watch pulls of one file.
 AUTO_WATCH_MIN_INTERVAL_S = 10.0
+#: How long a Play waits for its end-of-run sweep before it seals the run
+#: report (the sweep goes on after a timeout).
+SWEEP_WAIT_S = 30.0
 
 #: Queue priorities (lower first). A session switch goes before any scan.
 PRIO_STOP = -2
@@ -981,7 +984,7 @@ class PrivacyScanService:
 
     def sweep_app_data(
         self, serial: str | None, package: str, *, run_id: str | None = None
-    ) -> None:
+    ) -> threading.Thread | None:
         """Pull every file of ``package``'s data folders and scan them.
 
         Pulls on its own thread (``privacy-sweep``); the scans run on the
@@ -993,14 +996,16 @@ class PrivacyScanService:
         """
         snap = self._snapshot()
         if snap is None or not package:
-            return
+            return None
         self._ensure_worker()
-        threading.Thread(
+        thread = threading.Thread(
             target=self._sweep,
             args=(serial, package, snap, run_id),
             name="privacy-sweep",
             daemon=True,
-        ).start()
+        )
+        thread.start()
+        return thread
 
     def _sweep(
         self, serial: str | None, package: str, snap: tuple, run_id: str | None = None
@@ -2761,13 +2766,19 @@ def sweep_after_run(
     serial: str | None = None,
     *,
     run_id: str | None = None,
+    wait: float = 0.0,
 ) -> bool:
     """A Play finished: sweep the app's data folders when a profile is active.
 
     ``package`` defaults to the Spotlight app, ``serial`` to the adb target.
     ``run_id``: the finished run; the sweep's records carry it, so the run's
     Privacy tab includes them although they are found after its end.
-    Returns whether a sweep was started (never raises, never blocks).
+    ``wait``: seconds to wait for the sweep's pulls and scans (0: return at
+    once). The Play waits before it seals the run report, so the report
+    lists what the sweep found; on a timeout the sweep goes on and the
+    run's Privacy tab still shows its findings later.
+    Returns whether a sweep was started (never raises; blocks only for
+    ``wait``).
     """
     try:
         service = get_privacy_scan_service()
@@ -2783,8 +2794,13 @@ def sweep_after_run(
             from sandroid.core.adb import Adb
 
             serial = Adb.get_target_device()
-        service.sweep_app_data(serial, package, run_id=run_id)
-        return True
+        thread = service.sweep_app_data(serial, package, run_id=run_id)
+        if wait > 0 and thread is not None:
+            deadline = time.monotonic() + wait
+            thread.join(wait)
+            if not thread.is_alive():
+                service.flush(max(0.0, deadline - time.monotonic()))
+        return thread is not None
     except Exception:
         logger.debug("privacy scan: sweep after run failed", exc_info=True)
         return False
@@ -2794,6 +2810,7 @@ __all__ = [
     "AUTO_WATCH_DIRS",
     "AUTO_WATCH_MIN_INTERVAL_S",
     "ENGINE_VERSION",
+    "SWEEP_WAIT_S",
     "HitRecord",
     "PrivacyAnnotations",
     "PrivacyScanService",

@@ -735,10 +735,36 @@ def test_sweep_after_run_passes_the_run_id(monkeypatch):
 
         def sweep_app_data(self, serial, package, *, run_id=None):
             calls.append((serial, package, run_id))
+            thread = threading.Thread(target=lambda: None)
+            thread.start()
+            return thread
 
     monkeypatch.setattr(ps, "get_privacy_scan_service", lambda: Fake())
     assert ps.sweep_after_run("com.a", "emulator-5", run_id="r1")
     assert calls == [("emulator-5", "com.a", "r1")]
+
+
+def test_sweep_after_run_waits_for_the_pulls_and_the_scans(monkeypatch):
+    """The Play waits for its sweep before it seals the run report."""
+    done = threading.Event()
+    flushed: list[float] = []
+
+    class Fake:
+        is_active = True
+
+        def sweep_app_data(self, serial, package, *, run_id=None):
+            thread = threading.Thread(target=lambda: (time.sleep(0.2), done.set()))
+            thread.start()
+            return thread
+
+        def flush(self, timeout):
+            flushed.append(timeout)
+            return True
+
+    monkeypatch.setattr(ps, "get_privacy_scan_service", lambda: Fake())
+    assert ps.sweep_after_run("com.a", "emulator-5", run_id="r1", wait=5.0)
+    assert done.is_set()
+    assert flushed and 0 < flushed[0] <= 5.0
 
 
 def test_listener_runs_on_the_worker(svc, flow_dir):

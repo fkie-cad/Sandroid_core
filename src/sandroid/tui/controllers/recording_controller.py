@@ -1192,6 +1192,13 @@ class RecordingController:
         # silently vanishing — this is exactly why RunRecord.error exists.
         # Every UI touch goes through _ui(), which never raises, so a dead or
         # broken UI can no longer skip this step (P2-H1).
+        # Identity profile active: sweep the app's data folders for markers
+        # BEFORE the run is saved, so its sealed report lists what is stored
+        # (bounded wait; never raises). The records carry the run id.
+        from sandroid.services.privacy_scan import SWEEP_WAIT_S, sweep_after_run
+
+        sweep_after_run(run_id=run_id, wait=SWEEP_WAIT_S)
+
         self._ui(self._log_info, "Saving results...")
         if self._set_replay_phase:
             self._ui(self._set_replay_phase, "saving")
@@ -1214,12 +1221,6 @@ class RecordingController:
             if self._set_replay_phase:
                 self._ui(self._set_replay_phase, None)
         self._timeline_play_end(run_id, play_start, result, error, saved_run_id)
-        # Identity profile active: sweep the app's data folders for markers
-        # (own thread; never raises). The records carry the run id: they are
-        # found after the run's end but belong to it.
-        from sandroid.services.privacy_scan import sweep_after_run
-
-        sweep_after_run(run_id=saved_run_id or run_id)
 
         if error == "Replay cancelled":
             self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
