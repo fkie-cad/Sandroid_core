@@ -48,6 +48,17 @@ def _clean(monkeypatch, tmp_path):
     get_forensic_service()._spotlight_files.clear()
 
 
+def _minutes_ago(minutes: int) -> datetime:
+    """``minutes`` before now, but never before 00:02 today.
+
+    The Inspector shows today's times as HH:MM:SS and older ones as a date,
+    so a run just after midnight must not put its versions on yesterday.
+    """
+    now = datetime.now().replace(microsecond=0)
+    floor = now.replace(hour=0, minute=2, second=0)
+    return max(now - timedelta(minutes=minutes), floor)
+
+
 def _render(renderable, width: int = 55) -> str:
     console = Console(file=StringIO(), width=width, color_system=None)
     console.print(renderable)
@@ -92,7 +103,7 @@ def _record(file: Path, when: datetime, trigger: str, match: bool = True) -> dic
 
 
 def _places_versions(tmp_path) -> list[Path]:
-    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=10)
+    t0 = _minutes_ago(10)
     dirs = []
     for v in (1, 2, 3):
         db = make_places(tmp_path / f"src{v}" / "places.sqlite", v)
@@ -233,7 +244,7 @@ def test_content_tab_for_prefs_json_and_binary(tmp_path):
     a, b = tmp_path / "a.xml", tmp_path / "b.xml"
     a.write_text(PREFS_OLD, encoding="utf-8")
     b.write_text(PREFS_NEW, encoding="utf-8")
-    t0 = datetime.now() - timedelta(minutes=3)
+    t0 = _minutes_ago(3)
     _add_version(PREFS, t0, {"prefs.xml": a})
     _add_version(PREFS, t0 + timedelta(minutes=1), {"prefs.xml": b}, diff="x")
     text = _sections_text(fins.content_sections(PREFS), 70)
@@ -461,7 +472,7 @@ def _keep(path: str, src: Path, when: datetime, record: dict | None = None) -> P
 
 
 def test_versions_tab_reads_diff_json_not_the_copies(tmp_path):
-    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    t0 = _minutes_ago(5)
     _keep(PLACES, make_places(tmp_path / "a" / "places.sqlite", 1), t0)
     v2 = _keep(
         PLACES,
@@ -485,7 +496,7 @@ def test_versions_tab_reads_diff_json_not_the_copies(tmp_path):
 
 
 def test_checks_collapse_into_one_line_between_versions(tmp_path):
-    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    t0 = _minutes_ago(5)
     _keep(PLACES, make_places(tmp_path / "a" / "places.sqlite", 1), t0)
     _keep(
         PLACES,
@@ -535,7 +546,7 @@ def test_checks_collapse_into_one_line_between_versions(tmp_path):
 
 
 def test_the_hash_line_covers_the_wal(tmp_path):
-    t0 = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+    t0 = _minutes_ago(5)
     src = make_places(tmp_path / "a" / "places.sqlite", 3, wal=True)
     main_sha = hashlib.sha256(src.read_bytes()).hexdigest()
     wal = Path(f"{src}-wal")
@@ -608,7 +619,7 @@ def _prefs_with_ad_id(tmp_path, monkeypatch):
     a, b = tmp_path / "a.xml", tmp_path / "b.xml"
     a.write_text(PREFS_OLD, encoding="utf-8")
     b.write_text(PREFS_NEW, encoding="utf-8")
-    t0 = datetime.now() - timedelta(minutes=3)
+    t0 = _minutes_ago(3)
     _add_version(PREFS, t0, {"prefs.xml": a})
     newest = _add_version(PREFS, t0 + timedelta(minutes=1), {"prefs.xml": b}, diff="x")
     hit = file_hit(
