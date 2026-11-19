@@ -1,0 +1,151 @@
+name: Nightly flake report
+
+# Runs `tools/test.sh full` twice and the quarantined tests five times and
+# reports, in the job summary, which tests failed on a first try (and whether
+# they passed on tools/test.sh's serial rerun) and how the quarantined tests
+# did. A separate workflow: it never affects the Tests workflow's status.
+# The job fails only when a `full` run fails for real (exit 1).
+
+on:
+  schedule:
+    - cron: '17 2 * * *'  # 02:17 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flakes:
+    name: full x2 + quarantine x5 (Python 3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      UV_COMPILE_BYTECODE: '1'
+      SANDROID_TEST_PYTHON: python3.13
+      RUNS: ${{ github.workspace }}/.test-results/nightly-runs.tsv
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        cache-dependency-glob: |
+          pyproject.toml
+          tools/test-constraints.txt
+
+    - name: Run the suite and the quarantined tests
+      # Every run records "label<TAB>exit code<TAB>results dir"; the per-run
+      # job-summary sections of tools/test.sh are left out (one report below).
+      run: |
+        mkdir -p .test-results
+        : >"$RUNS"
+        run() {
+          label=$1
+          shift
+          rc=0
+          GITHUB_STEP_SUMMARY= tools/test.sh "$@" || rc=$?
+          printf '%s\t%s\t%s\n' "$label" "$rc" "$(readlink .test-results/latest)" >>"$RUNS"
+        }
+        run full-1 full -n auto
+        run full-2 full -n auto
+        for i in 1 2 3 4 5; do
+          run "quarantine-$i" tests -n auto -- -m quarantine
+        done
+        cp "$HOME/.cache/sandroid-tests/flakes.jsonl" .test-results/ 2>/dev/null || true
+
+    - name: Report
+      if: always()
+      run: |
+        python3 -I - "$RUNS" .test-results >>"$GITHUB_STEP_SUMMARY" <<'EOF'
+        import os, sys, xml.etree.ElementTree as ET
+        from collections import Counter
+
+        runs_file, root = sys.argv[1:]
+
+        def nodeid(tc):  # as tools/test.sh's summarize
+            f, cls, name = tc.get("file") or "", tc.get("classname") or "", tc.get("name")
+            mod = f[:-3].replace("/", ".") if f.endswith(".py") else ""
+            rest = cls[len(mod) + 1:] if mod and cls.startswith(mod + ".") else ""
+            parts = [f or cls] + (rest.split(".") if rest else []) + [name]
+            return "::".join(p for p in parts if p)
+
+        def outcomes(*paths):  # nodeid -> failed (skipped tests left out)
+            res = {}
+            for path in paths:
+                if not os.path.exists(path):
+                    continue
+                for tc in ET.parse(path).getroot().iter("testcase"):
+                    tags = {c.tag for c in tc}
+                    if "skipped" not in tags:
+                        res[nodeid(tc)] = bool(tags & {"failure", "error"})
+            return res
+
+        runs = [l.split("\t") for l in open(runs_file).read().splitlines() if l]
+        seen = {"full": Counter(), "quarantine": Counter()}
+        failed = {"full": Counter(), "quarantine": Counter()}
+        recovered = Counter()
+        print("## Nightly flake report\n")
+        print(f"Commit `{os.environ.get('GITHUB_SHA', '?')[:10]}`, Python 3.13.\n")
+        print("| run | exit | tests | failed on first try |\n|---|---|---|---|")
+        for label, rc, d in runs:
+            kind = label.split("-")[0]
+            d = os.path.join(root, d)
+            first = outcomes(*(os.path.join(d, f"junit-{n}.xml")
+                               for n in ("parallel", "perf", "paths")))
+            rerun = outcomes(os.path.join(d, "junit-rerun.xml"))
+            for nid, bad in first.items():
+                seen[kind][nid] += 1
+                if bad:
+                    failed[kind][nid] += 1
+                    recovered[nid] += rerun.get(nid) is False
+            print(f"| {label} | {rc} | {len(first)} | {sum(first.values())} |")
+
+        print("\n### `full`: tests that failed on a first try\n")
+        if not failed["full"]:
+            print("None.")
+        else:
+            print("| test | failed / runs | passed on the serial rerun |\n|---|---|---|")
+            for nid, n in failed["full"].most_common():
+                print(f"| `{nid}` | {n} / {seen['full'][nid]} | {recovered[nid]} |")
+
+        print("\n### Quarantined tests\n")
+        if not seen["quarantine"]:
+            print("No tests are quarantined.")
+        else:
+            print("| test | failed / runs | verdict |\n|---|---|---|")
+            for nid, n in sorted(seen["quarantine"].items()):
+                k = failed["quarantine"][nid]
+                verdict = ("passed every run: candidate to unquarantine" if k == 0
+                           else "fails every run" if k == n else "still flaky")
+                print(f"| `{nid}` | {k} / {n} | {verdict} |")
+        EOF
+
+    - name: Fail on real failures of a full run
+      run: |
+        if awk -F'\t' '$1 ~ /^full-/ && $2 == 1 { bad = 1 } END { exit !bad }' "$RUNS"; then
+          echo "::error::a tools/test.sh full run failed (exit 1); see the report"
+          exit 1
+        fi
+
+    - name: Upload test results (with flakes.jsonl)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-test-results
+        path: |
+          .test-results/
+          !.test-results/latest
+        retention-days: 30
+        if-no-files-found: ignore

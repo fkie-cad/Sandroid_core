@@ -23,6 +23,11 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.12', '3.13']
+    env:
+      # tools/test.sh builds its deps-only venv with uv (constraints from
+      # tools/test-constraints.txt, pytest-xdist from the dev extra).
+      UV_COMPILE_BYTECODE: '1'
+      SANDROID_TEST_PYTHON: python${{ matrix.python-version }}
 
     steps:
     - name: Checkout code
@@ -32,19 +37,41 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-        cache: pip
-        cache-dependency-path: pyproject.toml
 
-    - name: Install Sandroid with dev + full extras
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install -e ".[dev,full]"
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        cache-dependency-glob: |
+          pyproject.toml
+          tools/test-constraints.txt
 
-    - name: Run test suite
-      # tests/conftest.py blocks every adb/emulator/frida call, so no
-      # Android SDK or device is needed (or touched) here.
+    - name: Run test suite (tools/test.sh full)
+      # The same entry point as on developer machines: hermetic env, stub
+      # adb/emulator/frida on PATH, tests/conftest.py's device guard, a
+      # parallel pass without perf/quarantine tests and then the perf tests
+      # serially. With CI=true, -n auto means one worker per CPU.
+      # Exit 3 (a test failed, then passed when rerun alone) is reported as
+      # a warning and in the job summary, not as a failed job.
       run: |
-        python -m pytest -ra
+        rc=0
+        tools/test.sh full -n auto || rc=$?
+        if [ "$rc" -eq 3 ]; then
+          echo "::warning title=Flaky tests::failed once and passed on the serial rerun (see the job summary)"
+          exit 0
+        fi
+        exit "$rc"
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-py${{ matrix.python-version }}
+        path: |
+          .test-results/
+          !.test-results/latest
+        retention-days: 14
+        if-no-files-found: ignore
 
   package:
     name: Build & check distribution
