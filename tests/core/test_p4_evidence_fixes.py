@@ -295,7 +295,7 @@ def test_critical_setup_warns_when_sqldiff_is_missing(monkeypatch):
 
 
 def test_run_errors_in_json_metadata_and_pdf_banner(tmp_path):
-    from sandroid.core import pdf_report
+    from sandroid.core import report_render
 
     result = RunResult(
         device_name="emu",
@@ -314,8 +314,10 @@ def test_run_errors_in_json_metadata_and_pdf_banner(tmp_path):
     assert written["Run Errors"]["fatal"].startswith("Failed to load")
     assert written["Run Metadata"]["run_status"] == "aborted"
 
-    report = pdf_report.PDFReport(str(tmp_path / "r.pdf"), str(out.results_json))
-    first_page = report._render_section("Title page", report.firstPage)
+    doc = json.loads(out.report_json.read_text())
+    overview = next(s for s in doc["sections"] if s["id"] == "overview")
+    renderer = report_render.PdfRenderer(doc, tmp_path)
+    first_page = renderer._render_unit(overview["title"], True, overview["blocks"])
     texts = "\n".join(_paragraph_texts(first_page))
     assert "RUN ABORTED" in texts
     assert "boom" in texts
@@ -406,7 +408,7 @@ def test_cli_trigdroid_writes_into_session_folder_and_exits_3(monkeypatch, tmp_p
 
     with pytest.raises(SystemExit) as info:
         cli_analysis.run_analysis(
-            config, MagicMock(), toolbox, MagicMock(), MagicMock(), MagicMock()
+            config, MagicMock(), toolbox, MagicMock(), MagicMock()
         )
 
     assert info.value.code == 3
@@ -650,7 +652,7 @@ def test_structural_and_dry_run_noise_are_recorded(tmp_path, monkeypatch):
 
 
 def test_pdf_has_filtered_noise_appendix(tmp_path):
-    from sandroid.core import pdf_report
+    from sandroid.core import report_engine, report_render
 
     doc = {
         "Device Name": "emu",
@@ -668,15 +670,17 @@ def test_pdf_has_filtered_noise_appendix(tmp_path):
         },
     }
     (tmp_path / "sandroid.json").write_text(json.dumps(doc))
-    report = pdf_report.PDFReport(
-        str(tmp_path / "r.pdf"), str(tmp_path / "sandroid.json")
+    assert "Filtered Noise" in [t for t, _ in report_engine.results_plan(doc)]
+    report = report_engine.build_report(
+        timeline=None,
+        seal=None,
+        scope=report_engine.ReportScope(),
+        bundle_dir=tmp_path,
+        options=report_engine.ReportOptions(sections=("results",)),
     )
-    assert "Filtered Noise" in [title for title, _ in report._section_plan()]
-    texts = "\n".join(
-        _paragraph_texts(
-            report._render_section("Filtered Noise", report.filteredNoiseTableMaker)
-        )
-    )
+    renderer = report_render.PdfRenderer(report, tmp_path)
+    unit = next(u for u in renderer._units() if u[1] == "Filtered Noise")
+    texts = "\n".join(_paragraph_texts(renderer._render_unit(unit[1], False, unit[3])))
     assert "/data/system/netstats/x" in texts
 
 

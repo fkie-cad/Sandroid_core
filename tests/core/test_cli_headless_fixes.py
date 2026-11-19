@@ -454,17 +454,6 @@ def toolbox_args():
     Toolbox.args, Toolbox.scan_directories = saved
 
 
-def test_screenshot_module_imports_without_toolbox_args(toolbox_args):
-    Toolbox = toolbox_args
-    Toolbox.args = None
-    sys.modules.pop("sandroid.features.screenshot", None)
-    mod = importlib.import_module("sandroid.features.screenshot")
-    assert mod.Screenshot().interval == mod.Screenshot.DEFAULT_INTERVAL
-    assert mod.Screenshot(interval=7).interval == 7
-    Toolbox.args = SimpleNamespace(screenshot=3)
-    assert mod.Screenshot().interval == 3
-
-
 def test_toolbox_init_never_parses_sys_argv(monkeypatch, toolbox_args):
     from sandroid import services
 
@@ -692,7 +681,6 @@ def test_cli_serial_option_and_override():
             "loglevel",
             "number",
             "whitelist",
-            "screenshot",
             "trigdroid",
             "trigdroid_ccf",
         ]

@@ -72,7 +72,6 @@ def build_cli_overrides(
     show_deleted: bool,
     no_processes: bool,
     sockets: bool,
-    screenshot: int | None,
     hash_files: bool,
     apk: bool,
     degrade_network: bool,
@@ -94,13 +93,13 @@ def build_cli_overrides(
         show_deleted: Show deleted files.
         no_processes: Disable process monitoring.
         sockets: Enable socket monitoring.
-        screenshot: Screenshot interval in seconds.
         hash_files: Enable file hashing.
         apk: List APKs from emulator.
         degrade_network: Simulate degraded network.
         trigdroid: TrigDroid package name.
         trigdroid_ccf: TrigDroid CCF mode.
-        report: Generate PDF report.
+        report: Also render the PDF report (``report.json``/``.md`` are
+            always written).
         serial: ADB serial of the device to use (``--serial``).
 
     Returns:
@@ -131,8 +130,6 @@ def build_cli_overrides(
         analysis_overrides["capture_processes"] = False
     if sockets:
         analysis_overrides["capture_sockets"] = True
-    if screenshot:
-        analysis_overrides["screenshot_interval"] = screenshot
     if hash_files:
         analysis_overrides["hash_files"] = True
     if apk:

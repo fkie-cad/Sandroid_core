@@ -30,13 +30,12 @@ def run_analysis(
     Toolbox,
     Adb,
     ActionQ,
-    PDFReport,
 ) -> None:
     """Execute automated forensic analysis workflow.
 
     Performs a complete forensic analysis cycle including initialization,
-    unified-engine execution, result generation, and optional PDF report
-    creation. This is the primary entry point for non-interactive,
+    unified-engine execution, result generation, and the report
+    (``report.json``/``report.md``, optional PDF). This is the primary entry point for non-interactive,
     command-line driven analysis (the ``--trigdroid`` path).
 
     The legacy ``ActionQ.assembleQ()``/``do_next()`` pump is gone; this
@@ -53,9 +52,8 @@ def run_analysis(
         Toolbox: The Toolbox class for core utility operations.
         Adb: The Adb class for Android Debug Bridge operations.
         ActionQ: The ActionQ class (retained for signature compatibility; the
-            unified engine no longer uses it).
-        PDFReport: Retained for signature compatibility; the PDF is now
-            rendered by :func:`sandroid.core.run_report.finalize_run` when
+            unified engine no longer uses it). The report is written by
+            :func:`sandroid.core.run_report.finalize_run`; the PDF only when
             ``config.report.generate_pdf`` is set.
 
     Raises:
@@ -111,8 +109,8 @@ def run_analysis(
         run_config = RunConfig.from_sandroid_config(config, action=Trigdroid())
         # Identity pin: CLI has no run bundle, so leave the env pointing at the
         # existing session dir (empty paths => the engine leaves RESULTS_PATH /
-        # RAW_RESULTS_PATH untouched, keeping PDF screenshots + timeline
-        # consistent).
+        # RAW_RESULTS_PATH untouched, keeping the raw pulls and the session
+        # timeline in the same session folder).
         run_config.results_path = ""
         run_config.raw_results_path = ""
 
@@ -154,6 +152,10 @@ def run_analysis(
                 outcome.results_json, config.output_file
             )
             console.print(f"[success]Results: {final_json}[/success]")
+            if outcome.report_json is not None:
+                console.print(f"[success]Report: {outcome.report_json}[/success]")
+            if outcome.markdown is not None:
+                console.print(f"[success]Markdown: {outcome.markdown}[/success]")
             if outcome.pdf is not None:
                 console.print(f"[success]PDF report: {outcome.pdf}[/success]")
             for err in outcome.errors:
