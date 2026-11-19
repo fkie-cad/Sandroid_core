@@ -156,6 +156,7 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "check_ca_injection_status": _e("certs"),
     "push_ca_certificate": _e("certs", timeout_s=180),
     "inject_ca_certificate": _e("certs", timeout_s=_LONG, permission_key="source"),
+    "remove_ca_certificate": _e("certs", timeout_s=180),
     # frida
     "check_frida_server_status": _e("frida", core=True),
     "start_frida_server": _e("frida", timeout_s=180),

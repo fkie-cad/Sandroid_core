@@ -62,6 +62,9 @@ class StatusBar(Static):
         # Per-app proxy lanes managed by FocusManager: pkg -> "ours"|"http://…".
         # Replaces the retired mutually-exclusive capture_scope/focus_apps model.
         self.app_proxies: dict = {}
+        # App Proxy lanes that pass no traffic: ``{state_label: count}``
+        # (e.g. "waiting for mitmproxy"), from the last reconcile; no adb.
+        self.app_proxy_problems: dict[str, int] = {}
         # mitmweb (our bundled proxy) status, distinct from where the device
         # points: ``mitmweb_address`` is our canonical host:port even when
         # stopped, so the Proxy row can tell "ours" from a foreign proxy.
@@ -346,6 +349,9 @@ class StatusBar(Static):
             proxy += f" [{muted}]·[/] [{run}]{n_ours} app(s)[/]"
         if m_ext:
             proxy += f" [{muted}]· {m_ext} → ext[/]"
+        for label, count in sorted(self.app_proxy_problems.items()):
+            what = "app" if count == 1 else "apps"
+            proxy += f" [{warn}]· {count} {what} {escape(label)}[/]"
         segs.append(f"[{muted}]Proxy[/] {proxy}")
 
         # Capture, only while running.
@@ -610,11 +616,22 @@ class StatusBar(Static):
             # the Mitmproxy panel on which device proxy is "ours" — NOT the raw
             # host LAN/VPN IP, which the device can't reach.
             self.mitmweb_address = f"{resolve_proxy_host_ip()}:{port}" if port else ""
-            self.app_proxies = dict(get_focus_manager().app_proxies())
+            focus = get_focus_manager()
+            routes = focus.app_proxies_nonblocking()
+            if routes is not None:  # a reconcile holds the lock: keep the last
+                self.app_proxies = dict(routes)
+            health = focus.lane_health_nonblocking()
+            if health is not None:
+                problems: dict[str, int] = {}
+                for lane in health.values():
+                    if not lane.ok:
+                        problems[lane.label] = problems.get(lane.label, 0) + 1
+                self.app_proxy_problems = problems
         except Exception:
             self.mitmweb_running = False
             self.mitmweb_address = ""
             self.app_proxies = {}
+            self.app_proxy_problems = {}
 
     def _poll_capture_state(self) -> None:
         """Keep the Mitmproxy/Proxy glance rows live.
@@ -628,12 +645,14 @@ class StatusBar(Static):
             self.mitmweb_running,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
+            tuple(sorted(self.app_proxy_problems.items())),
         )
         self._read_capture_state()
         after = (
             self.mitmweb_running,
             self.mitmweb_address,
             tuple(sorted(self.app_proxies.items())),
+            tuple(sorted(self.app_proxy_problems.items())),
         )
         if after != before:
             self.refresh()

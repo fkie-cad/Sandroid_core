@@ -177,9 +177,12 @@ def test_check_ca_injection_status_passes_through(monkeypatch):
 
     assert cc.check_ca_injection_status() == {
         "injected": True,
+        "verdict": "",
         "cert_hash": "a1b2c3d4",
         "zygote_pid": 100,
         "zygote64_pid": 101,
+        "namespaces_lacking": 0,
+        "message": None,
         "recommended_strategy": "bind_mount",
         "api_level": 34,
     }
@@ -292,6 +295,8 @@ def test_inject_ca_certificate_no_args_resolves_real_path_never_none(
         "success": True,
         "message": "CA injected",
         "needs_root": False,
+        "restart_required": False,
+        "verdict": None,
         "strategy": "bind_mount",
         "api_level": 34,
         "chrome_ct_bypass": {"success": True, "message": "Chrome CT bypass installed"},
@@ -401,3 +406,67 @@ def test_inject_ca_certificate_source_not_detected_raises(monkeypatch):
 
     with pytest.raises(ToolExecutionError, match="list_detected_ca_certificates"):
         cc.inject_ca_certificate(source="http_toolkit")
+
+
+# -- no restart from the AI ------------------------------------------------------
+
+
+def test_inject_ca_certificate_never_restarts_zygote(monkeypatch, tmp_path):
+    """A device that needs the Zygote-restart fallback gets a message, never
+    the restart: only the user can approve that, in the TUI.
+    """
+    from sandroid.services import proxy_restore
+
+    cert_path = tmp_path / "custom-ca.pem"
+    cert_path.write_text("x")
+    monkeypatch.setattr(cc, "resolve_confined_host_path", lambda raw: cert_path)
+    restarts: list = []
+    monkeypatch.setattr(
+        proxy_restore, "restart_framework_for_ca", lambda *a, **k: restarts.append(a)
+    )
+    _patch_ca_manager(
+        monkeypatch,
+        SimpleNamespace(
+            inject_ca_into_zygote=lambda cert_path=None: InjectionResult(
+                success=False,
+                message="Installing the CA without a Zygote restart failed: x",
+                restart_required=True,
+            ),
+            restart_zygote=lambda **kw: restarts.append("kill"),
+            bypass_chrome_ct=lambda path: restarts.append("ct"),
+        ),
+    )
+
+    result = cc.inject_ca_certificate(source="custom", custom_path="custom-ca.pem")
+
+    assert result["success"] is False
+    assert result["restart_required"] is True
+    assert "TUI" in result["message"]
+    assert restarts == []
+
+
+def test_inject_tool_needs_no_world_lease_and_docstring_is_honest():
+    import sandroid.ai  # registers the tools
+    from sandroid.ai.arbiter import ResourceId
+    from sandroid.ai.tools.registry import get_tool_registry
+
+    spec = get_tool_registry().get_spec("inject_ca_certificate")
+    assert ResourceId.WORLD not in (spec.resources or frozenset())
+    assert "Restarts Zygote" not in spec.description
+    assert "WITHOUT restarting" in spec.description
+
+
+def test_remove_ca_certificate_passes_through(monkeypatch):
+    _patch_ca_manager(
+        monkeypatch,
+        SimpleNamespace(
+            uninject_ca=lambda: (
+                True,
+                "CA removed from the system trust store (3 mounts). Apps that "
+                "are already running keep the old trust until they restart.",
+            )
+        ),
+    )
+    result = cc.remove_ca_certificate()
+    assert result["success"] is True
+    assert "keep the old trust" in result["message"]

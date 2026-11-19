@@ -276,6 +276,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         Binding("f", "add_spotlight", "Proxy spotlight app", show=False),
         Binding("p", "push_ca", "Push CA", show=False),
         Binding("i", "inject_ca", "Inject CA", show=False),
+        Binding("r", "remove_ca", "Remove CA", show=False),
     ]
 
     proxy_status = reactive(ProxyStatus.NOT_SET)
@@ -299,6 +300,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._detected_cas: list[CAInfo] = []
         self._zygote_status: ZygoteStatus | None = None
         self._pending_ca_path = None
+        #: A CA install/removal worker is running.
+        self._ca_busy = False
         self._pending_device_config: ProxyConfig | None = None
         self._pending_via_reverse: bool = False
         # Working state for App Proxies: (package, target_string) where
@@ -393,7 +396,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         )
                     yield Label("Device Info", classes="section-header")
                     yield Static("Checking...", id="device-info", classes="device-info")
-                    yield Label("Zygote Injection", classes="section-header")
+                    yield Label("System trust store", classes="section-header")
                     yield Static(
                         "Checking...", id="zygote-status", classes="zygote-status"
                     )
@@ -401,6 +404,9 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                         yield Button("Push CA", id="btn-push-ca", classes="-secondary")
                         yield Button(
                             "Inject CA", id="btn-inject-ca", classes="-secondary"
+                        )
+                        yield Button(
+                            "Remove CA", id="btn-remove-ca", classes="-secondary"
                         )
 
             # ----- Global action button ----- #
@@ -411,12 +417,12 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 hints={
                     "default": (
                         "[dim]Ctrl+S=Apply  A=Add app  F=Spotlight  "
-                        "P=Push CA  I=Inject CA  Esc=Cancel[/dim]"
+                        "P=Push CA  I=Inject CA  R=Remove CA  Esc=Cancel[/dim]"
                     ),
                     "input": ("[dim]Ctrl+S=Apply  Tab=Next  Esc=Cancel[/dim]"),
                     "radioset": (
                         "[dim]Ctrl+S=Apply  Space=Select  P=Push CA  "
-                        "I=Inject CA  Esc=Cancel[/dim]"
+                        "I=Inject CA  R=Remove CA  Esc=Cancel[/dim]"
                     ),
                     "button": (
                         "[dim]Enter=Activate  Ctrl+S=Apply  A=Add app  "
@@ -432,7 +438,6 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         self._rebuild_app_list()
         self._detect_certificates()
         self._refresh_device_info()
-        self._refresh_zygote_status()
 
         try:
             self.query_one("#device-radio-set", RadioSet).focus()
@@ -709,24 +714,6 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
     # Section 3 — CA Certificate (unchanged behavior)                    #
     # ------------------------------------------------------------------ #
 
-    def _refresh_device_info(self) -> None:
-        """Refresh and display device API level and injection strategy."""
-        info_widget = self.query_one("#device-info", Static)
-        try:
-            strategy, api_level = self._ca_manager.determine_injection_strategy()
-            strategy_label = (
-                "Bind-mount (Android 14+)"
-                if strategy == InjectionStrategy.BIND_MOUNT
-                else "Legacy (pre-Android 14)"
-            )
-            api_str = str(api_level) if api_level is not None else "unknown"
-            info_widget.update(
-                f"API level: [bold]{api_str}[/bold]  "
-                f"Strategy: [bold]{strategy_label}[/bold]"
-            )
-        except Exception:
-            info_widget.update("[yellow]●[/yellow] Could not detect device info")
-
     def _detect_certificates(self) -> None:
         """Detect available CA certificates and populate radio buttons."""
         self._detected_cas = self._ca_manager.detect_ca_certificates()
@@ -754,37 +741,91 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             )
             radio_set.mount(RadioButton("Custom path...", id="ca-radio-custom"))
 
-    def _refresh_zygote_status(self) -> None:
-        """Refresh and display Zygote injection status."""
+    def _refresh_device_info(self) -> None:
+        """Probe API level, store and CA status off the UI thread (adb)."""
+        self._kick_ca_probe()
+
+    def _kick_ca_probe(self) -> None:
+        """One worker: strategy + CA status in Zygote's namespace."""
         try:
             selected = self._get_selected_ca_path()
         except Exception:
             selected = None
-        self._zygote_status = self._ca_manager.check_zygote_injection_status(selected)
-        status_widget = self.query_one("#zygote-status", Static)
+        manager = self._ca_manager
 
-        if self._zygote_status.injected:
-            where = self._zygote_status.location or "trust store"
-            how = (
-                "fingerprint match"
-                if self._zygote_status.fingerprint_verified
-                else "hash match"
-            )
-            status_widget.update(
-                f"[green]●[/green] CA in trust store {where} "
-                f"(hash: {self._zygote_status.cert_hash}, {how})"
-            )
-        elif self._zygote_status.error_message:
-            status_widget.update(
-                f"[yellow]●[/yellow] {self._zygote_status.error_message}"
-            )
+        def worker() -> None:
+            try:
+                strategy, api_level = manager.determine_injection_strategy()
+            except Exception:
+                strategy, api_level = None, None
+            try:
+                status = manager.check_zygote_injection_status(selected)
+            except Exception as exc:  # pragma: no cover - defensive
+                status = ZygoteStatus(
+                    injected=False,
+                    cert_hash=None,
+                    zygote64_pid=None,
+                    zygote_pid=None,
+                    error_message=str(exc),
+                    verdict="unknown",
+                )
+            try:
+                self.app.call_from_thread(
+                    self._on_ca_probe, strategy, api_level, status
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=worker, name="proxy-modal-ca-probe", daemon=True
+        ).start()
+
+    def _on_ca_probe(self, strategy, api_level, status: ZygoteStatus) -> None:
+        """Render the probe result (UI thread)."""
+        try:
+            info_widget = self.query_one("#device-info", Static)
+        except NoMatches:
+            return
+        if strategy is None:
+            info_widget.update("[$warning]Could not detect device info[/]")
         else:
-            pid_info = ""
-            if self._zygote_status.zygote64_pid:
-                pid_info = f" [dim](zygote64: {self._zygote_status.zygote64_pid})[/dim]"
-            elif self._zygote_status.zygote_pid:
-                pid_info = f" [dim](zygote: {self._zygote_status.zygote_pid})[/dim]"
-            status_widget.update(f"[yellow]●[/yellow] Not injected{pid_info}")
+            store = (
+                "APEX store (Android 14+)"
+                if strategy == InjectionStrategy.BIND_MOUNT
+                else "system store (Android 13 and older)"
+            )
+            api_str = str(api_level) if api_level is not None else "unknown"
+            info_widget.update(
+                f"API level: [bold]{api_str}[/bold]  Trust store: [bold]{store}"
+                "[/bold], installed without a Zygote restart"
+            )
+        self._show_zygote_status(status)
+
+    def _refresh_zygote_status(self) -> None:
+        """Re-read the CA status (off the UI thread)."""
+        self._kick_ca_probe()
+
+    def _show_zygote_status(self, status: ZygoteStatus) -> None:
+        """Render a CA status in words and colours (UI thread)."""
+        self._zygote_status = status
+        try:
+            status_widget = self.query_one("#zygote-status", Static)
+        except NoMatches:
+            return
+        if status.verdict == "injected":
+            status_widget.update(
+                f"[$success]Installed[/] in Zygote and the running apps "
+                f"(hash {status.cert_hash})"
+            )
+        elif status.verdict == "partial":
+            status_widget.update(
+                f"[$success]Installed[/] for new apps; [$warning]{status.lacking} "
+                "running app namespace(s) lack it[/] (I installs it there)"
+            )
+        elif status.error_message:
+            status_widget.update(f"[$warning]{status.error_message}[/]")
+        else:
+            status_widget.update("[$warning]Not installed[/]  (I installs it)")
 
     def _get_selected_ca_path(self) -> Path | None:
         """Get the currently selected CA certificate path."""
@@ -824,54 +865,98 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             self.notify("Please select a valid CA certificate", severity="warning")
 
     def action_inject_ca(self) -> None:
-        """Confirm Zygote restart, then inject the CA into Zygote."""
-        from sandroid.tui.modals.confirm_modal import ConfirmModal
-
+        """Install the selected CA system-wide (no Zygote restart, worker)."""
         ca_path = self._get_selected_ca_path()
-        self._pending_ca_path = ca_path
-        self.app.push_screen(
-            ConfirmModal(
-                title="Restart Zygote to install CA?",
-                message=(
-                    "Installing the CA certificate requires restarting Zygote, "
-                    "the process every Android app is forked from.\n\n"
-                    "All running apps will close and the screen may flicker for "
-                    "a few seconds. The device does NOT reboot; it recovers on "
-                    "its own.\n\n"
-                    "Continue?"
-                ),
-                yes_label="Restart Zygote",
-                no_label="Cancel",
-            ),
-            self._on_restart_confirm,
-        )
-
-    def _on_restart_confirm(self, confirmed: bool) -> None:
-        """Handle Zygote restart confirmation result."""
-        if not confirmed:
-            self.notify(
-                "CA injection cancelled — Zygote not restarted",
-                severity="warning",
-            )
+        if ca_path is None:
+            ca_path = self._ca_manager._sandroid_ca_path()
+        if ca_path is None or not ca_path.exists():
+            self.notify("Please select a valid CA certificate", severity="warning")
             return
-        self._do_inject_ca(self._pending_ca_path)
+        self._pending_ca_path = ca_path
+        self._run_ca_job("inject", ca_path)
 
-    def _do_inject_ca(self, ca_path) -> None:
-        """Inject the CA into Zygote."""
-        result = self._ca_manager.inject_ca_into_zygote(ca_path)
-        if result.success:
-            self._refresh_zygote_status()
-            # Also bypass Chrome Certificate Transparency
-            if ca_path and ca_path.exists():
-                ct_ok, ct_msg = self._ca_manager.bypass_chrome_ct(ca_path)
-                if ct_ok:
-                    self.notify(ct_msg, severity="information")
-            self._dismiss_with_refresh(
-                ProxyModalResult(
-                    cancelled=False,
-                    action="inject_ca",
-                    ca_path=ca_path,
+    def action_remove_ca(self) -> None:
+        """Remove Sandroid's CA from the system trust store (worker)."""
+        self._run_ca_job("remove", self._get_selected_ca_path())
+
+    def _run_ca_job(self, kind: str, ca_path: Path | None) -> None:
+        """Run a CA install / fallback restart / removal off the UI thread.
+
+        ``kind`` is ``inject`` (no Zygote restart), ``restart`` (the
+        user-confirmed fallback) or ``remove``. The result lands in
+        :meth:`_on_ca_job_done` on the UI thread.
+        """
+        if self._ca_busy:
+            self.notify("A CA operation is still running", severity="warning")
+            return
+        self._ca_busy = True
+        labels = {
+            "inject": "Installing the CA…",
+            "restart": "Restarting Zygote to install the CA…",
+            "remove": "Removing the CA…",
+        }
+        try:
+            self.query_one("#zygote-status", Static).update(
+                f"[$text-muted]{labels.get(kind, 'Working…')}[/]"
+            )
+        except NoMatches:
+            pass
+        manager = self._ca_manager
+
+        def worker() -> None:
+            ct = None
+            status = None
+            try:
+                if kind == "remove":
+                    result = manager.uninject_ca()
+                else:
+                    if kind == "restart":
+                        from sandroid.services.proxy_restore import (
+                            restart_framework_for_ca,
+                        )
+
+                        result = restart_framework_for_ca(ca_path)
+                    else:
+                        result = manager.inject_ca_into_zygote(ca_path)
+                    if result.success and ca_path is not None:
+                        ct = manager.bypass_chrome_ct(ca_path)
+                status = manager.check_zygote_injection_status(ca_path)
+            except Exception as exc:
+                result = exc
+            try:
+                self.app.call_from_thread(
+                    self._on_ca_job_done, kind, ca_path, result, ct, status
                 )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=worker, name=f"proxy-modal-ca-{kind}", daemon=True
+        ).start()
+
+    def _on_ca_job_done(self, kind, ca_path, result, ct, status) -> None:
+        """Report a CA job (UI thread): toasts, the fallback offer, dismiss."""
+        self._ca_busy = False
+        if status is not None:
+            self._show_zygote_status(status)
+        if isinstance(result, Exception):
+            self.notify(f"CA operation failed: {result}", severity="error")
+            return
+        if kind == "remove":
+            ok, message = result
+            self.notify(message, severity="information" if ok else "error")
+            if ok:
+                self._dismiss_with_refresh(
+                    ProxyModalResult(cancelled=False, action="remove_ca")
+                )
+            return
+        if result.success:
+            message = result.message
+            if ct is not None and ct[0]:
+                message += f". {ct[1]}"
+            self.notify(message, severity="information")
+            self._dismiss_with_refresh(
+                ProxyModalResult(cancelled=False, action="inject_ca", ca_path=ca_path)
             )
         elif result.needs_root:
             from sandroid.tui.modals.confirm_modal import ConfirmModal
@@ -885,8 +970,33 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
                 ),
                 self._on_root_confirm,
             )
+        elif result.restart_required and kind == "inject":
+            from sandroid.tui.modals.confirm_modal import ConfirmModal
+
+            self.app.push_screen(
+                ConfirmModal(
+                    title="Restart Zygote to install the CA?",
+                    message=(
+                        f"{result.message}\n\nThe CA can still be installed by "
+                        "restarting Zygote, the process every Android app is "
+                        "forked from. All running apps close, Frida sessions "
+                        "end and the screen may flicker for a while. The device "
+                        "does NOT reboot.\n\nContinue?"
+                    ),
+                    yes_label="Restart Zygote",
+                    no_label="Cancel",
+                ),
+                self._on_restart_confirm,
+            )
         else:
             self.notify(result.message, severity="error")
+
+    def _on_restart_confirm(self, confirmed: bool) -> None:
+        """The user decided on the Zygote-restart fallback."""
+        if not confirmed:
+            self.notify("CA not installed: Zygote not restarted", severity="warning")
+            return
+        self._run_ca_job("restart", self._pending_ca_path)
 
     def _on_root_confirm(self, confirmed: bool) -> None:
         """Handle root confirmation result."""
@@ -895,7 +1005,7 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
         success, msg = self._ca_manager.enable_adb_root()
         if success:
             self.notify("ADB root enabled", severity="information")
-            self._do_inject_ca(self._pending_ca_path)
+            self._run_ca_job("inject", self._pending_ca_path)
         else:
             self.notify(f"Failed to enable root: {msg}", severity="error")
 
@@ -1038,17 +1148,14 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
 
         # 2. App proxies. Read the QUIC-block setting and commit it to the
         #    shared config BEFORE reconciling, so lanes newly enabled by the
-        #    reconcile pick it up; then sync any pre-existing lanes.
+        #    reconcile pick it up. The device work runs off the UI thread.
         try:
             block_quic = self.query_one("#block-quic-checkbox", Checkbox).value
         except NoMatches:
             block_quic = get_config().focus.block_quic
         get_config().focus.block_quic = block_quic
-        self._reconcile_app_proxies()
-        try:
-            get_focus_manager().set_quic_blocking(block_quic)
-        except Exception as exc:  # pragma: no cover - defensive
-            self.notify(f"QUIC-block sync failed: {exc}", severity="warning")
+        self._sync_app_targets_from_inputs()
+        self._start_app_proxy_apply(dict(self._app_rows), block_quic)
 
         self._dismiss_with_refresh(
             ProxyModalResult(
@@ -1058,31 +1165,57 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             )
         )
 
-    def _reconcile_app_proxies(self) -> None:
-        """Diff ``_app_rows`` against the live app proxies and apply deltas."""
+    def _start_app_proxy_apply(self, desired: dict[str, str], block_quic: bool) -> None:
+        """Apply the App Proxy rows on a worker; toasts via the app."""
+        app = self.app
+
+        def notify(message: str, severity: str) -> None:
+            try:
+                app.call_from_thread(app.notify, message, severity=severity)
+            except Exception:
+                pass
+
+        def worker() -> None:
+            try:
+                for message, severity in self._reconcile_app_proxies(
+                    desired, block_quic
+                ):
+                    notify(message, severity)
+            except Exception as exc:  # pragma: no cover - defensive
+                notify(f"App proxies failed: {exc}", "error")
+
+        threading.Thread(target=worker, name="proxy-modal-apply", daemon=True).start()
+
+    @staticmethod
+    def _reconcile_app_proxies(
+        desired: dict[str, str], block_quic: bool
+    ) -> list[tuple[str, str]]:
+        """Apply the App Proxy rows, then reconcile EVERY lane with the device.
+
+        Diffs the rows against the requested lanes (enable/disable deltas),
+        then always reconciles: Ctrl+S with an unchanged list used to do
+        nothing, so a lane whose gost had died stayed dead. Blocking (adb);
+        runs on a worker.
+
+        Args:
+            desired: ``{package: target}``; target ``""`` routes to our
+                mitmproxy.
+            block_quic: The QUIC-block checkbox.
+
+        Returns:
+            ``[(message, severity)]`` toasts.
+        """
         try:
             fm = get_focus_manager()
-        except Exception as exc:
-            self.notify(f"App proxies unavailable: {exc}", severity="error")
-            return
-
-        try:
             live = fm.app_proxies()  # {pkg: "ours" | "http://ip:port"}
-        except Exception:
-            live = {}
-        # Normalize live targets to the working-state convention ("" == ours).
+        except Exception as exc:
+            return [(f"App proxies unavailable: {exc}", "error")]
         live_norm = {
             pkg: ("" if target == "ours" else target) for pkg, target in live.items()
         }
-        desired = dict(self._app_rows)
-
         results: list[tuple[bool, str]] = []
-
-        # Removed packages.
         for pkg in set(live_norm) - set(desired):
             results.append(fm.disable_focus(pkg))
-
-        # Added or changed packages.
         for pkg, target in desired.items():
             target_arg = None if target == "" else target
             if pkg not in live_norm:
@@ -1090,19 +1223,40 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             elif live_norm[pkg] != target:
                 fm.disable_focus(pkg)
                 results.append(fm.enable_focus(pkg, target_arg))
-
-        if not results:
-            return
+        toasts: list[tuple[str, str]] = []
+        try:
+            fm.set_quic_blocking(block_quic)
+        except Exception as exc:  # pragma: no cover - defensive
+            toasts.append((f"QUIC-block sync failed: {exc}", "warning"))
+        reports = fm.reconcile(None, "apply") if desired else []
         failures = [msg for ok, msg in results if not ok]
         if failures:
             summary = "; ".join(failures[:3])
-            self.notify(f"Some app proxies failed: {summary}", severity="error")
-        else:
-            self.notify(
-                f"App proxies updated ({len(results)} change"
-                f"{'s' if len(results) != 1 else ''})",
-                severity="information",
+            toasts.append((f"Some app proxies failed: {summary}", "error"))
+        elif results:
+            toasts.append(
+                (
+                    f"App proxies updated ({len(results)} change"
+                    f"{'s' if len(results) != 1 else ''})",
+                    "information",
+                )
             )
+        repaired = [r for r in reports if r.repaired]
+        for report in repaired:
+            toasts.append(
+                (
+                    f"App Proxy {report.package} repaired: "
+                    f"{', '.join(report.repaired)}",
+                    "information",
+                )
+            )
+        for report in reports:
+            if not report.health.ok:
+                severity = "error" if report.health.state == "failed" else "warning"
+                toasts.append(
+                    (f"App Proxy {report.package}: {report.health.label}", severity)
+                )
+        return toasts
 
     def _set_glance_device_proxy(self, address: str) -> None:
         """Push the just-applied device proxy straight into the glance band.
@@ -1134,6 +1288,8 @@ class ProxyModal(ForensicModal[ProxyModalResult]):
             self.action_push_ca()
         elif btn_id == "btn-inject-ca":
             self.action_inject_ca()
+        elif btn_id == "btn-remove-ca":
+            self.action_remove_ca()
         elif btn_id == "app-add-btn":
             self.action_add_app()
         elif btn_id == "app-add-spotlight-btn":

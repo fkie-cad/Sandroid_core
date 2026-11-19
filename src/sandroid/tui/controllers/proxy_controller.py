@@ -87,7 +87,13 @@ class ProxyController:
                 return
 
             if result.action == "inject_ca":
-                self._log_success("CA certificate injected into Zygote")
+                self._log_success("CA certificate installed in the system trust store")
+            elif result.action == "remove_ca":
+                self._log_success(
+                    "CA certificate removed from the system trust store (apps "
+                    "that are already running keep the old trust until they "
+                    "restart)"
+                )
             elif result.proxy_config is not None:
                 self._log_success(
                     f"Proxy settings applied — device at {result.proxy_config.address}"

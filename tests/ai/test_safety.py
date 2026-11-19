@@ -324,6 +324,7 @@ _STATE_CHANGING_TOOLS = {
     "pull_path",
     "push_ca_certificate",
     "push_path",
+    "remove_ca_certificate",
     "restart_emulator",
     "set_app_proxy_quic_blocking",
     "set_device_proxy",
