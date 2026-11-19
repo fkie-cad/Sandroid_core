@@ -96,6 +96,12 @@ FRAMES_KEPT = 128
 #: one received this long after it always is (a snapshot load can rewind the
 #: device clock in between).
 INPUT_SKEW_S = 1.0
+#: Without a stored before-tap shot, the cached frame closest to an input's
+#: finger-down (within this many seconds, before its finger-up) is its
+#: before-tap frame: the screen the input acted on.
+BEFORE_TAP_FRAME_S = 0.25
+#: How long a screen-change decision waits for a before-tap capture.
+BEFORE_TAP_WAIT_S = 2.0
 #: Device and host lags that differ by more than this are from different
 #: clock epochs (snapshot load): only the host lag counts.
 CLOCK_SANE_MS = 5_000.0
@@ -1131,6 +1137,8 @@ class TrackingService:
         #: ``(device s, host epoch)`` of recent finger-downs and keys: a
         #: screen-change shot taken after the next input is not that screen's.
         self._input_seen: deque[tuple[float, float]] = deque(maxlen=64)
+        #: ``(device s, gesture, before-tap capture)`` of recent finger-downs.
+        self._downs: deque[tuple[float, Gesture, Future | None]] = deque(maxlen=64)
         #: Screen-change shots not taken, per reason (``late``,
         #: ``superseded``, ``unverified``).
         self._shot_drops: dict[str, int] = {}
@@ -1361,6 +1369,7 @@ class TrackingService:
             self._screen_q.clear()
             self._screen_cur = None
             self._input_seen.clear()
+            self._downs.clear()
             self._frames.clear()
             self._shot_drops = {}
             self._session = None
@@ -1620,12 +1629,15 @@ class TrackingService:
         for ev in events:
             g = ev.gesture
             g.host_recv = host_recv
+            fut = self._at_down(g) if ev.kind == "down" else None
             if ev.kind in ("down", "key"):
+                # after _at_down: an input seen by the shot lane has its
+                # before-tap capture registered
                 with self._lock:
                     self._input_seen.append((g.t_down, host_recv))
-            if ev.kind == "down":
-                self._at_down(g)
-            else:
+                    if ev.kind == "down":
+                        self._downs.append((g.t_down, g, fut))
+            if ev.kind != "down":
                 self._order_lane.submit(self._finish, gen, g)
 
     def _helper_up(self) -> Any:
@@ -1634,10 +1646,11 @@ class TrackingService:
             return None
         return helper
 
-    def _at_down(self, g: Gesture) -> None:
+    def _at_down(self, g: Gesture) -> Future | None:
+        """Start the node lookup and the before-tap capture (returned)."""
         helper = self._helper_up()
         if helper is None:
-            return
+            return None
         p = _Pending(t0=time.monotonic())
         full = str(getattr(helper, "mode", self._mode)) == "full"
         # An axis never seen is unknown, not 0: no node_at at a made-up spot
@@ -1653,6 +1666,7 @@ class TrackingService:
             p.shot = self._pre_shot(helper)
             p.shot_skipped = p.shot is None
         self._pending[g.gid] = p
+        return p.shot
 
     def _pre_shot(self, helper: Any) -> Future | None:
         """A before-tap capture, unless one is still in flight: fast taps
@@ -2253,6 +2267,7 @@ class TrackingService:
                 "t_evt": t_evt,
                 "ev_dev": ev_dev,
                 "logcat": via == "logcat",
+                "a11y": via == "a11y",
             }
             self._screen_q.append(req)
         self._shot_lane.submit(self._screen_shot, gen, req)
@@ -2381,6 +2396,76 @@ class TrackingService:
             if after and (until_dev is None or dev < until_dev):
                 return True
         return False
+
+    def _input_next(self, req: dict) -> tuple[float, float] | None:
+        """The first input after ``req``'s screen event (see
+        :meth:`_input_after`): ``(device s, host epoch)``.
+        """
+        ev_dev, t_evt = req.get("ev_dev"), req["t_evt"]
+        with self._lock:
+            seen = list(self._input_seen)
+        first = None
+        for dev, host in seen:
+            if host <= t_evt - INPUT_SKEW_S:
+                continue
+            if ev_dev is None:
+                after = host > t_evt
+            else:
+                after = dev > ev_dev or host > t_evt + INPUT_SKEW_S
+            if after and (first is None or dev < first[0]):
+                first = (dev, host)
+        return first
+
+    def _tap_shot(self, inp: tuple[float, float] | None) -> Any:
+        """The before-tap capture of the finger-down ``inp`` when it was
+        taken before that finger's up (as :meth:`_before_shot` stores it).
+        """
+        if inp is None:
+            return None
+        with self._lock:
+            down = next((d for d in self._downs if d[0] == inp[0]), None)
+        if down is None or down[2] is None:
+            return None
+        res = None
+        with contextlib.suppress(Exception):
+            res = down[2].result(timeout=BEFORE_TAP_WAIT_S)
+        if res is None or not getattr(res, "hash", None):
+            return None
+        return None if self._late(res, down[1].t_up) else res
+
+    def _before_frame(self, inp: tuple[float, float]) -> str | None:
+        """The frame hash the input ``inp`` acted on: its stored before-tap
+        shot, else the cached frame closest to its finger-down (within
+        :data:`BEFORE_TAP_FRAME_S`, before its finger-up).
+        """
+        res = self._tap_shot(inp)
+        if res is not None:
+            return str(res.hash)
+        dev_in, host_in = inp
+        with self._lock:
+            frames = list(self._frames)
+            t_up = next((d[1].t_up for d in self._downs if d[0] == dev_in), None)
+        best: tuple[float, str] | None = None
+        for dev, h0, h1, frame in frames:
+            if dev is None or abs(dev - dev_in) > BEFORE_TAP_FRAME_S:
+                continue
+            if t_up is not None and dev > t_up:
+                continue
+            if h1 < host_in - INPUT_SKEW_S or h0 > host_in + INPUT_SKEW_S:
+                continue  # another clock epoch (a snapshot load)
+            if best is None or abs(dev - dev_in) < best[0]:
+                best = (abs(dev - dev_in), frame)
+        return best[1] if best else None
+
+    def _prev_screen(self, req: dict) -> str | None:
+        """R1: the previous screen of ``req`` -- the before-tap frame of the
+        triggering input (the latest input before the event); None without
+        one (R3: the app navigated by itself) or without a frame for it.
+        """
+        if "prev" not in req:
+            inp = self._input_before(req)
+            req["prev"] = self._before_frame(inp) if inp is not None else None
+        return req["prev"]
 
     def _start_logcat(self, gen: int, serial: str) -> None:
         argv = [
@@ -3072,20 +3157,25 @@ class TrackingService:
         (``data.before_late_ms``) the frames seen before the event
         (:meth:`_old_frames`), and the late hash only when none was seen.
 
-        A final frame equal to a timely pre-change hash is kept, flagged
-        ``data.unchanged``. A final frame equal to another old-screen frame
-        is the previous screen (the new one has not drawn yet): dropped,
-        counted ``unverified``. One capture serves every line of the request
-        (the later ones are dedup lines); ``data.lag_ms`` is capture instant
-        - event time.
+        R1: after an input (the triggering input: the latest finger-down
+        or key before the event) the previous screen is that input's
+        before-tap frame (:meth:`_prev_screen`). A final frame equal to it
+        is never stored: dropped, counted ``unverified`` -- whether or not
+        the pre-change hash was late. The one exception: an a11y window
+        line whose timely pre-change hash equals the final frame keeps it,
+        flagged ``data.unchanged``. Otherwise a final frame equal to a
+        timely pre-change hash is flagged ``data.unchanged``, and one equal
+        to another old-screen frame is dropped (``unverified``). One capture
+        serves every line of the request (the later ones are dedup lines);
+        ``data.lag_ms`` is capture instant - event time.
 
         A capture that would start (or, per the helper's device time, was
         taken) after the next input's finger-down, or after a newer screen
         superseded this one, would show the next screen under this one's
-        line. The fallback (a new frame captured in full while settling,
-        :meth:`_settle_change`) is stored instead, ``data.stable:false``
-        and ``data.fallback``, when :meth:`_fallback_ok`; else the shot is
-        dropped and counted.
+        line. A fallback is stored instead, ``data.stable:false`` and
+        ``data.fallback``: R2 (:meth:`_fallback_r2`) with a previous
+        screen, else (R3, no triggering input) the settle's new frame when
+        :meth:`_fallback_ok`. Without one the shot is dropped and counted.
         """
         with self._lock:
             with contextlib.suppress(ValueError):
@@ -3194,13 +3284,21 @@ class TrackingService:
                 self._store_fallback(gen, req, fb, bad, helper, extra, "late")
                 return
             if helper is not None and frame:
-                if timely and frame == before:
-                    extra["unchanged"] = True  # the frame never left the old one
-                elif (timely or self._old_frames(req)) and frame in old():
+                same = timely and frame == before
+                prev = self._prev_screen(req)
+                if (
+                    prev is not None
+                    and frame == prev
+                    and not (same and req.get("a11y"))
+                ) or (
+                    not same and (timely or self._old_frames(req)) and frame in old()
+                ):
                     # still the previous screen: the new one has not drawn
                     with self._lock:
                         self._drop_locked(req, "unverified")
                     return
+                if same:
+                    extra["unchanged"] = True  # the frame never left the old one
             extra["lag_ms"] = self._lag_ms(
                 req, cap_host, dev_s * 1000.0 if dev_s is not None else None
             )
@@ -3240,10 +3338,11 @@ class TrackingService:
         bad: Callable[[str], bool],
         helper: Any,
     ) -> bool:
-        """The fallback may stand for ``req``'s screen: it is not (now) an
-        old-screen frame, it is :meth:`_in_time`, and no frame seen after it
-        is an old-screen frame (one more hash is taken to check: a ripple
-        or a transition of the old screen ends back on the old screen).
+        """R3 (no triggering input): the fallback may stand for ``req``'s
+        screen: it is not (now) an old-screen frame, it is :meth:`_in_time`,
+        and no frame seen after it is an old-screen frame (one more hash is
+        taken to check: a ripple or a transition of the old screen ends back
+        on the old screen).
         """
         if bad(fb["hash"]) or not self._in_time(req, fb):
             return False
@@ -3260,6 +3359,68 @@ class TrackingService:
                 return False
         return True
 
+    def _fallback_r2(
+        self, req: dict, fb: dict[str, Any] | None, prev: str
+    ) -> dict[str, Any] | None:
+        """R2 (with the previous screen ``prev`` of R1): the fallback of
+        ``req``, from frames seen before the next input only (frames after
+        it are irrelevant: the screen is expected to change then).
+
+        The window: frames from the screen event to the next input's
+        finger-down (or the newer screen event that superseded ``req``),
+        then the next input's before-tap capture, taken at its finger-down
+        (the last frame before that input). The settle's fallback ``fb`` is
+        valid when it differs from ``prev``, is :meth:`_in_time`, was seen
+        at least twice in a row or is the last frame of the window, and the
+        window never shows ``prev`` after it. Else the before-tap capture,
+        when it differs from ``prev``. None: no valid fallback.
+        """
+        nxt = self._input_next(req)
+        sup = req.get("sup_ev")  # (device s | None, host epoch)
+        sup_first = sup is not None and (
+            nxt is None or (sup[0] < nxt[0] if sup[0] is not None else sup[1] < nxt[1])
+        )
+        end_dev, end_host = (sup if sup_first else nxt) or (None, None)
+        # a newer screen that came first: the next input acted on it
+        tap = None if sup_first else self._tap_shot(nxt)
+        with self._lock:
+            frames = list(self._frames)
+        win: list[tuple[float | None, str]] = []
+        for dev, h0, h1, frame in frames:
+            if self._dev_ok(dev, h0, h1, req) and end_dev is not None:
+                ok = req["ev_dev"] <= dev < end_dev
+            elif self._dev_ok(dev, h0, h1, req):
+                ok = dev >= req["ev_dev"] and (end_host is None or h1 <= end_host)
+            else:
+                ok = h0 >= req["t_evt"] and (end_host is None or h1 <= end_host)
+            if ok:
+                win.append((dev, frame))
+        seq = [frame for _dev, frame in win]
+        if tap is not None:
+            seq.append(str(tap.hash))
+        if fb is not None and fb["hash"] != prev and self._in_time(req, fb):
+            at = next(
+                (i for i, w in enumerate(win) if w == (fb["dev"], fb["hash"])),
+                None,
+            )
+            h = fb["hash"]
+            if at is not None and prev not in seq[at + 1 :]:
+                twice = (at > 0 and seq[at - 1] == h) or (
+                    at + 1 < len(seq) and seq[at + 1] == h
+                )
+                if twice or seq[-1] == h:
+                    return fb
+        if tap is not None and tap.hash != prev:
+            with self._lock:
+                spans = [f for f in self._frames if f[3] == tap.hash]
+            dev = float(tap.t_mono_ms) / 1000.0
+            h0, h1 = next(
+                ((f[1], f[2]) for f in spans if f[0] == dev), (time.time(),) * 2
+            )
+            return {"res": tap, "hash": str(tap.hash), "dev": dev, "h0": h0,
+                    "h1": h1, "source": "next_before_tap"}  # fmt: skip
+        return None
+
     def _store_fallback(
         self,
         gen: int,
@@ -3270,15 +3431,18 @@ class TrackingService:
         extra: dict[str, Any],
         why: str,
     ) -> None:
-        """The wait ended, or the capture came, too late (``why``): store
-        the fallback ``fb`` (``data.stable:false``, ``data.fallback``) when
-        :meth:`_fallback_ok`, else drop the shot (counted ``why``).
+        """The wait ended, or the capture came, too late (``why``): store a
+        fallback (``data.stable:false``, ``data.fallback``) -- with a
+        previous screen (R1) the one :meth:`_fallback_r2` picks, else (R3)
+        ``fb`` when :meth:`_fallback_ok` -- or drop the shot (counted
+        ``why``).
         """
-        if (
-            fb is None
-            or gen != self._gen
-            or not self._fallback_ok(req, fb, bad, helper)
-        ):
+        prev = self._prev_screen(req) if gen == self._gen else None
+        if prev is not None:
+            fb = self._fallback_r2(req, fb, prev)
+        elif fb is not None and not self._fallback_ok(req, fb, bad, helper):
+            fb = None
+        if fb is None or gen != self._gen:
             with self._lock:
                 self._drop_locked(req, why)
             return
@@ -3288,6 +3452,8 @@ class TrackingService:
         cap.pop("hash", None)
         png = cap.pop("png")
         data = {**extra, "stable": False, "fallback": True}
+        if fb.get("source"):
+            data["source"] = fb["source"]
         data["lag_ms"] = self._lag_ms(req, fb["h0"], fb["dev"] * 1000.0)
         for seq in seqs:
             if gen != self._gen:
