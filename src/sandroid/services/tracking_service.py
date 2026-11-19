@@ -2442,12 +2442,16 @@ class TrackingService:
         src = d.get("src")
         if isinstance(src, dict) and src and not src.get("editable"):
             return None
+        if not src and str(d.get("cls") or "").endswith(".WebView"):
+            return None  # the page itself (no source to tell): not a field
         if any(OBJ_CHAR in str(d.get(k) or "") for k in ("text", "before")):
             d = {
                 **d,
                 "text": str(d.get("text") or "").replace(OBJ_CHAR, ""),
                 "before": str(d.get("before") or "").replace(OBJ_CHAR, ""),
             }
+            if not d["text"] and not d["before"]:
+                return None  # only an embedded object came or went
         return d
 
     def _on_text(self, d: dict, host_recv: float) -> None:

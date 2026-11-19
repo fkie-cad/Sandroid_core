@@ -3602,6 +3602,13 @@ def test_text_events_of_non_editable_sources_are_dropped(env, cfg):
                "text": ts.OBJ_CHAR, "window_id": 3,
                "src": {"cls": "android.webkit.WebView", "text": "Audi"}}  # fmt: skip
         h.on_event(doc, time.time())
+        # Dev3, Firefox navigating away: no source, only U+FFFC removed
+        h.on_event({"type": "ev", "ev": "TEXT_CHANGED", "t_mono_ms": 15.0,
+                    "pkg": "org.mozilla.firefox", "cls": "android.webkit.WebView",
+                    "before": ts.OBJ_CHAR, "from": 0, "added": 0, "removed": 1,
+                    "window_id": 52}, time.time())  # fmt: skip
+        h.on_event({**_text_ev(16.0, ts.OBJ_CHAR, rid="com.x:id/q"),
+                    "before": ""}, time.time())  # fmt: skip
         field = _text_ev(20.0, "ab" + ts.OBJ_CHAR, rid="com.x:id/q")
         h.on_event(field, time.time())
         svc.tick(time.time() + 10)
