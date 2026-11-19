@@ -408,6 +408,22 @@ def test_cli_headless_two_devices_without_serial_refuses(
     assert _device_changing(fake_adb.calls()) == []
 
 
+def _pilot_helpers():
+    """``settle`` / ``until`` of tests/tui/pilot_helpers.py (not on this path)."""
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    module = sys.modules.get("pilot_helpers")
+    if module is None:
+        path = Path(__file__).resolve().parents[1] / "tui" / "pilot_helpers.py"
+        spec = importlib.util.spec_from_file_location("pilot_helpers", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["pilot_helpers"] = module
+    return module.settle, module.until
+
+
 async def test_tui_two_devices_without_pin_asks_before_any_prep(
     fake_adb, core_spies, monkeypatch
 ):
@@ -439,31 +455,27 @@ async def test_tui_two_devices_without_pin_asks_before_any_prep(
     config = SimpleNamespace(emulator=SimpleNamespace(serial=None))
     app = SandroidTUI(startup_config=config)
 
+    settle, until = _pilot_helpers()
     async with app.run_test(size=(160, 45)) as pilot:
-        for _ in range(60):
-            await pilot.pause(0.05)
-            screen = app.screen
-            if isinstance(screen, DevicesScreen) and screen.snapshot is not None:
-                break
-        assert isinstance(app.screen, DevicesScreen)
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, DevicesScreen)
+            and app.screen.snapshot is not None,
+        )
         assert app.screen.mode == "startup"
         assert {row.serial for row in app.screen.snapshot.devices} == {
             "emulator-5556",
             "emulator-5554",
         }
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert core_spies.inits == []
         assert setup_calls == []
         assert _device_changing(fake_adb.calls()) == []
         assert Adb.get_target_device() is None
 
         await pilot.press("enter")
-        for _ in range(60):
-            await pilot.pause(0.05)
-            if setup_calls:
-                break
-        for _ in range(10):
-            await pilot.pause(0.05)
+        await until(pilot, lambda: setup_calls)
+        await settle(pilot)
         picked = config.emulator.serial
         assert picked in ("emulator-5556", "emulator-5554")
         assert core_spies.inits == [picked]  # prep only after the choice...

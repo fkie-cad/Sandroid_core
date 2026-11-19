@@ -12,6 +12,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import boot, settle, until
 from textual.app import App
 
 from sandroid.core import emulator
@@ -461,30 +462,31 @@ def _hub(devices=(), avds=(), notes=(), actions=None, **kw):
     return HubApp(screen), screen
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
+async def _shown(pilot, screen) -> None:
+    """The screen applied its first snapshot (collected in a thread worker)."""
+    await until(pilot, lambda: screen.snapshot is not None)
+    await settle(pilot)
 
 
 async def test_enter_on_a_ready_device_dismisses_with_its_serial() -> None:
     app, screen = _hub(devices=[READY, ACTIVE])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         # The cursor starts on the active device; go to the other one.
         assert screen.current_row() == ACTIVE
         await pilot.press("up")
         assert screen.current_row() == READY
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
     assert app.result == "emulator-5554"
 
 
 async def test_enter_on_a_booting_device_does_not_dismiss() -> None:
     app, screen = _hub(devices=[BOOTING])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen is screen
         assert "booting" in str(screen._state_cell(BOOTING))
     assert app.result == "unset"
@@ -494,11 +496,11 @@ async def test_enter_on_an_avd_starts_it_with_remembered_options() -> None:
     actions = FakeActions()
     app, screen = _hub(avds=[IDLE], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         # Nothing running: the cursor is on the last-used AVD.
         assert screen.current_row() == IDLE
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen is screen  # stays open, shows the boot
         assert screen._busy == {IDLE.key: "starting…"}
     assert actions.calls == [("start_avd", "Idle_AVD", IDLE.options)]
@@ -506,14 +508,14 @@ async def test_enter_on_an_avd_starts_it_with_remembered_options() -> None:
 
 async def test_cold_boot_key_overrides_the_boot_mode() -> None:
     actions = FakeActions()
-    app, _screen = _hub(
+    app, screen = _hub(
         avds=[IDLE.__class__(name="A", options=AvdLaunchOptions(), last_used=True)],
         actions=actions,
     )
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("c")
-        await _settle(pilot)
+        await settle(pilot)
     assert actions.calls == [("start_avd", "A", AvdLaunchOptions(boot="cold"))]
 
 
@@ -521,27 +523,27 @@ async def test_x_then_y_stops_the_emulator_by_serial() -> None:
     actions = FakeActions()
     app, screen = _hub(devices=[READY], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("x")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "ConfirmModal"
         await pilot.press("y")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen is screen
         assert screen._busy == {}  # on_done cleared it
-        assert screen.collects[-1] is True  # and refreshed
+        await until(pilot, lambda: screen.collects[-1] is True)  # and refreshed
     assert actions.calls == [("stop_emulator", "emulator-5554")]
 
 
 async def test_x_then_n_does_not_stop() -> None:
     actions = FakeActions()
-    app, _screen = _hub(devices=[READY], actions=actions)
+    app, screen = _hub(devices=[READY], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("x")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("n")
-        await _settle(pilot)
+        await settle(pilot)
     assert actions.calls == []
 
 
@@ -550,34 +552,34 @@ async def test_stop_is_not_offered_for_a_physical_device() -> None:
     phys = DeviceRow(serial="R58M", state=RowState.READY)
     app, screen = _hub(devices=[phys], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         assert screen.check_action("stop", ()) is False
         assert screen.check_action("attach", ()) is True
         assert screen.check_action("start", ()) is False
         await pilot.press("x")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen is screen
     assert actions.calls == []
 
 
 async def test_escape_dismisses_with_none() -> None:
-    app, _screen = _hub(devices=[READY])
+    app, screen = _hub(devices=[READY])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
     assert app.result is None
 
 
 async def test_unauthorized_row_explains_what_to_do() -> None:
     app, screen = _hub(devices=[UNAUTH])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         detail = str(screen.query_one("#hub-detail").render())
         assert "Allow USB debugging" in detail
         assert UNAUTHORIZED_HELP.split(":")[0] in detail
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen is screen
     assert app.result == "unset"
 
@@ -585,11 +587,11 @@ async def test_unauthorized_row_explains_what_to_do() -> None:
 async def test_tab_moves_between_the_lists_and_footer_follows() -> None:
     app, screen = _hub(devices=[READY], avds=[IDLE])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         assert isinstance(screen.current_row(), DeviceRow)
         assert screen.check_action("cold", ()) is False
         await pilot.press("tab")
-        await _settle(pilot)
+        await settle(pilot)
         assert screen.current_row() == IDLE
         assert screen.check_action("cold", ()) is True
         assert screen.check_action("stop", ()) is False
@@ -604,9 +606,9 @@ async def test_headless_toggle_is_remembered(monkeypatch) -> None:
     )
     app, screen = _hub(avds=[IDLE])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("h")
-        await _settle(pilot)
+        await settle(pilot)
         assert screen.current_row().options.headless is False
     assert saved == [("Idle_AVD", AvdLaunchOptions(boot="cold"), False)]
 
@@ -614,7 +616,7 @@ async def test_headless_toggle_is_remembered(monkeypatch) -> None:
 async def test_notes_and_empty_states_render() -> None:
     app, screen = _hub(notes=["adb is not answering: boom"])
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         assert "boom" in str(screen.query_one("#hub-notes").render())
         assert "none" in str(screen.query_one("#hub-running-empty").render())
 
@@ -703,14 +705,6 @@ def test_connect_runs_adb_connect_untargeted(monkeypatch, sync_threads) -> None:
 # --------------------------------------------------------------------------
 
 
-async def _boot(app, pilot) -> None:
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")  # first-run welcome modal
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
-
-
 class FakeAdbTransport:
     """adb as the whole app sees it: a table of booted emulators.
 
@@ -797,16 +791,16 @@ def _hubs(app) -> list:
 async def test_d_opens_devices_once(tui) -> None:
     app = tui
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("D")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, DevicesScreen)
         assert app.screen.mode == "session"
         await pilot.press("D")
-        await _settle(pilot)
+        await settle(pilot)
         assert len(_hubs(app)) == 1
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
 
 
@@ -815,13 +809,13 @@ async def test_d_types_into_a_focused_input(tui) -> None:
 
     app = tui
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("ctrl+y")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.focused, Input)
         assert app.check_action("show_devices", ()) is False
         await pilot.press("D")
-        await _settle(pilot)
+        await settle(pilot)
         assert _hubs(app) == []
         assert app.focused.value.endswith("D")
 
@@ -829,14 +823,14 @@ async def test_d_types_into_a_focused_input(tui) -> None:
 async def test_device_poll_keeps_running_under_the_devices_screen(tui) -> None:
     app = tui
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         app.open_devices()
-        await _settle(pilot)
+        await settle(pilot)
         polled: list = []
         app._refresh_devices_bg = lambda: polled.append(1)
         app._device_poll_in_flight = False
         app._poll_device_state()
-        await _settle(pilot)
+        await settle(pilot)
         assert polled == [1]
 
 
@@ -845,7 +839,7 @@ async def test_emulator_ready_attaches_only_when_nothing_is_active(
 ) -> None:
     app = tui
     async with app.run_test(size=(160, 45), notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         switched: list = []
         monkeypatch.setattr(
             app, "_perform_device_switch", lambda s, cleanup=False: switched.append(s)
@@ -856,7 +850,7 @@ async def test_emulator_ready_attaches_only_when_nothing_is_active(
         other = SimpleNamespace(serial="emulator-5554")
         monkeypatch.setattr(app, "_active_device", lambda: other)
         app._on_emulator_ready("emulator-5562", "B")
-        await _settle(pilot)
+        await settle(pilot)
         assert switched == ["emulator-5560"]
         assert any("B is ready" in str(n.message) for n in app._notifications)
 
@@ -864,7 +858,7 @@ async def test_emulator_ready_attaches_only_when_nothing_is_active(
 async def test_devices_result_switches_without_a_session(tui, monkeypatch) -> None:
     app = tui
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         switched: list = []
         monkeypatch.setattr(
             app, "_perform_device_switch", lambda s, cleanup=False: switched.append(s)
@@ -922,23 +916,23 @@ async def test_open_devices_if_detached_only_without_an_active_device(
 ) -> None:
     app = detached.app
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         app._open_devices_if_detached()  # the device is back already
-        await _settle(pilot)
+        await settle(pilot)
         assert _hubs(app) == []
         detached.state.device = None
         monkeypatch.setattr(app._device_controller, "is_polling", lambda: True)
         app._open_devices_if_detached()  # snapshot load in progress
-        await _settle(pilot)
+        await settle(pilot)
         assert _hubs(app) == []
         monkeypatch.setattr(app._device_controller, "is_polling", lambda: False)
         app._open_devices_if_detached()
-        await _settle(pilot)
+        await settle(pilot)
         assert len(_hubs(app)) == 1
         assert app.screen.mode == "session"
         assert "disconnected" in app.screen.reason
         app._open_devices_if_detached()  # never a second one
-        await _settle(pilot)
+        await settle(pilot)
         assert len(_hubs(app)) == 1
 
 
@@ -947,46 +941,53 @@ async def test_disconnect_opens_devices_and_reconnect_closes_it(detached) -> Non
 
     app = detached.app
     async with app.run_test(size=(160, 45), notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         callback = detached.cb()
         detached.state.device = None
         # The poll worker reports the disconnect (off the UI thread).
         await asyncio.to_thread(callback, None)
-        await _settle(pilot, 6)
+        await until(pilot, lambda: isinstance(app.screen, DevicesScreen))
         assert any("disconnected" in str(n.message) for n in app._notifications)
-        assert isinstance(app.screen, DevicesScreen)
         # Auto-reconnect (here on the UI thread: no call_from_thread there).
         detached.state.device = SimpleNamespace(serial="emulator-5554")
         callback(detached.state.device)
-        await _settle(pilot)
+        await until(pilot, lambda: type(app.screen).__name__ == "MainScreen")
         assert _hubs(app) == []
-        assert type(app.screen).__name__ == "MainScreen"
 
 
 async def test_quick_reconnect_never_opens_devices(detached) -> None:
     import asyncio
 
     app = detached.app
+    checks: list[int] = []
+    check = app._open_devices_if_detached
+
+    def counted() -> None:
+        checks.append(1)
+        check()
+
+    app._open_devices_if_detached = counted
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         callback = detached.cb()
         detached.state.device = None
         await asyncio.to_thread(callback, None)
         detached.state.device = SimpleNamespace(serial="emulator-5554")
         await asyncio.to_thread(callback, detached.state.device)
-        await _settle(pilot, 6)
-        assert _hubs(app) == []
+        await until(pilot, lambda: checks)  # the delayed check ran...
+        await settle(pilot)
+        assert _hubs(app) == []  # ...and opened nothing
 
 
 async def test_devices_opened_with_d_stays_open_on_reconnect(detached) -> None:
     app = detached.app
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         callback = detached.cb()
         app.open_devices()
-        await _settle(pilot)
+        await settle(pilot)
         callback(detached.state.device)
-        await _settle(pilot)
+        await settle(pilot)
         assert len(_hubs(app)) == 1
 
 
@@ -1002,18 +1003,18 @@ async def test_a_single_click_never_starts_an_avd() -> None:
     other = AvdRow(name="Other", options=AvdLaunchOptions())
     app, screen = _hub(avds=[IDLE, other], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         table = screen.query_one("#hub-avds")
         assert table.cursor_row == 0  # the screen highlighted IDLE itself
         y = 2  # border-top, header, first row
         await pilot.click(table, offset=(1, y))  # exactly the highlighted cell
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.click(table, offset=(10, y + 1))  # another row
-        await _settle(pilot)
+        await settle(pilot)
         assert table.cursor_row == 1
         assert actions.calls == []
         await pilot.click(table, offset=(10, y + 1))  # second click: start
-        await _settle(pilot)
+        await settle(pilot)
         assert actions.calls == [("start_avd", "Other", other.options)]
 
 
@@ -1021,12 +1022,12 @@ async def test_a_second_start_while_the_first_runs_is_ignored() -> None:
     actions = FakeActions()
     app, screen = _hub(avds=[IDLE], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("enter")
         await pilot.press("c")
-        await _settle(pilot)
+        await settle(pilot)
         assert screen._busy == {IDLE.key: "starting…"}
     assert actions.calls == [("start_avd", "Idle_AVD", IDLE.options)]
 
@@ -1035,14 +1036,14 @@ async def test_an_avd_running_elsewhere_cannot_be_started_or_renamed() -> None:
     actions = FakeActions()
     app, screen = _hub(avds=[BUSY_AVD], actions=actions)
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         assert screen.current_row() == BUSY_AVD
         for action in ("start", "cold", "wipe", "rename"):
             assert not screen.check_action(action, ())
         assert screen.check_action("headless", ()) is True
         for key in ("enter", "c", "w", "e"):
             await pilot.press(key)
-            await _settle(pilot, 2)
+            await settle(pilot)
             assert app.screen is screen  # no confirm / rename dialog
         detail = str(screen.query_one("#hub-detail").render())
         assert "Running elsewhere" in detail
@@ -1056,14 +1057,14 @@ async def test_restart_of_the_active_device_asks_while_tasks_run(busy, confirm) 
     app, screen = _hub(devices=[ACTIVE], actions=actions)
     app._has_active_session = lambda: busy
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await _shown(pilot, screen)
         await pilot.press("R")
-        await _settle(pilot)
+        await settle(pilot)
         if confirm:
             assert type(app.screen).__name__ == "ConfirmModal"
             assert actions.calls == []
             await pilot.press("y")
-            await _settle(pilot)
+            await settle(pilot)
         assert app.screen is screen
     assert actions.calls == [("restart_emulator", "emulator-5556")]
 
@@ -1071,15 +1072,6 @@ async def test_restart_of_the_active_device_asks_while_tasks_run(busy, confirm) 
 # --------------------------------------------------------------------------
 # the whole app on a fake adb: real DeviceManager, poll and HubCollector
 # --------------------------------------------------------------------------
-
-
-async def _until(pilot, predicate, timeout: float = 5.0) -> None:
-    import time
-
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        assert time.monotonic() < deadline, "condition not reached"
-        await pilot.pause(0.05)
 
 
 @pytest.fixture
@@ -1116,10 +1108,10 @@ def _active_serial(live) -> str | None:
 
 async def _poll(app, pilot) -> None:
     """One device poll (the 10 s timer / adb track-devices edge)."""
-    await _until(pilot, lambda: not app._device_poll_in_flight)
+    await until(pilot, lambda: not app._device_poll_in_flight)
     app._poll_device_state()
-    await _until(pilot, lambda: not app._device_poll_in_flight)
-    await _settle(pilot)
+    await until(pilot, lambda: not app._device_poll_in_flight)
+    await settle(pilot)
 
 
 async def test_lost_device_never_moves_the_session_and_comes_back(
@@ -1127,9 +1119,9 @@ async def test_lost_device_never_moves_the_session_and_comes_back(
 ) -> None:
     app, adb = live_app.app, live_app.adb
     async with app.run_test(size=(160, 45), notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         # First start: the only ready device is attached.
-        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
+        await until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
         adb.devices["emulator-5556"] = "Theirs"
         await _poll(app, pilot)
         assert _active_serial(live_app) == "emulator-5554"
@@ -1137,11 +1129,11 @@ async def test_lost_device_never_moves_the_session_and_comes_back(
         del adb.devices["emulator-5554"]  # stopped / crashed
         await _poll(app, pilot)
         assert _active_serial(live_app) is None  # not emulator-5556
-        await _until(pilot, lambda: isinstance(app.screen, DevicesScreen))
+        await until(pilot, lambda: isinstance(app.screen, DevicesScreen))
         screen = app.screen
         assert "disconnected" in screen.reason
         # The real collector lists the other device as ready to attach.
-        await _until(pilot, lambda: screen.snapshot is not None)
+        await until(pilot, lambda: screen.snapshot is not None)
         rows = {row.serial: row for row in screen.snapshot.devices}
         assert rows["emulator-5556"].state is RowState.READY
         assert rows["emulator-5556"].avd_name == "Theirs"
@@ -1151,7 +1143,7 @@ async def test_lost_device_never_moves_the_session_and_comes_back(
         adb.devices["emulator-5554"] = "Mine"  # back (same serial)
         await _poll(app, pilot)
         assert _active_serial(live_app) == "emulator-5554"
-        await _until(pilot, lambda: not isinstance(app.screen, DevicesScreen))
+        await until(pilot, lambda: not isinstance(app.screen, DevicesScreen))
         assert type(app.screen).__name__ == "MainScreen"
 
 
@@ -1165,10 +1157,10 @@ async def test_attaching_from_devices_moves_the_pin(live_app, monkeypatch) -> No
     app, adb = live_app.app, live_app.adb
     adb.devices["emulator-5556"] = "Theirs"
     async with app.run_test(size=(160, 45)) as pilot:
-        await _boot(app, pilot)
-        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
+        await boot(app, pilot)
+        await until(pilot, lambda: _active_serial(live_app) == "emulator-5554")
         app._on_devices_result("emulator-5556")  # ⏎ on it in Devices
-        await _until(pilot, lambda: _active_serial(live_app) == "emulator-5556")
+        await until(pilot, lambda: _active_serial(live_app) == "emulator-5556")
         assert DeviceManager.preferred_serial() == "emulator-5556"
         device = live_app.dm().active_device
         assert device.api_level == 35

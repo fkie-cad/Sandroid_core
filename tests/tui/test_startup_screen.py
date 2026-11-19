@@ -301,12 +301,18 @@ async def test_d_opens_devices_its_pick_is_pinned_and_retried(
         await _error_screen(app, pilot)
         startup.inits.clear()
         await pilot.press(key)
-        await until(pilot, lambda: isinstance(app.screen, hub))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, hub) and app.screen.snapshot is not None,
+        )
         assert app.screen.mode == "startup"
         assert f"Device '{MISSING}' not found" in app.screen.reason
         assert startup.globals_fired == []  # not the app's D (show_devices)
         await pilot.press("enter")
-        await until(pilot, lambda: type(app.screen).__name__ == "StartupScreen")
+        await until(
+            pilot,
+            lambda: type(app.screen).__name__ == "StartupScreen" and startup.inits,
+        )
         await settle(pilot)
         _assert_pinned_and_retried(startup)
 
@@ -320,7 +326,10 @@ async def test_device_error_opens_devices_escape_returns_to_the_error(
         screen = app.screen
         startup.inits.clear()
         screen._ask_for_device([PRESENT, "emulator-5556"])
-        await until(pilot, lambda: isinstance(app.screen, hub))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, hub) and app.screen.snapshot is not None,
+        )
         assert "More than one device" in app.screen.reason
         await pilot.press("escape")
         await until(pilot, lambda: app.screen is screen)
@@ -329,7 +338,10 @@ async def test_device_error_opens_devices_escape_returns_to_the_error(
         assert startup.inits == []  # nothing retried, nothing pinned
         assert startup.config.emulator.serial == MISSING
         await pilot.press("d")  # opens again
-        await until(pilot, lambda: isinstance(app.screen, hub))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, hub) and app.screen.snapshot is not None,
+        )
 
 
 async def test_emulator_ready_during_startup_is_taken_as_the_pick(startup, hub) -> None:
@@ -340,9 +352,13 @@ async def test_emulator_ready_during_startup_is_taken_as_the_pick(startup, hub) 
         screen = app.screen
         startup.inits.clear()
         screen._device_error(ERROR)
-        await until(pilot, lambda: isinstance(app.screen, hub))
+        await until(
+            pilot,
+            lambda: isinstance(app.screen, hub) and app.screen.snapshot is not None,
+        )
         app._on_emulator_ready(PRESENT, "Pixel")
-        await until(pilot, lambda: app.screen is screen)
+        await until(pilot, lambda: app.screen is screen and startup.inits)
+        await settle(pilot)
         _assert_pinned_and_retried(startup)
 
 
