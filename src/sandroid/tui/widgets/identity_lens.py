@@ -20,12 +20,13 @@ selected hit, ``J`` jumps to its source (Network, Files or Timeline lens).
 The *Value* tab holds the profile value, markers, apply mechanism, the
 permission an app needs, the status and the value before the apply.
 
-Keys (lens-local): ``space`` apply · ``e`` edit value · ``v`` verify ·
-``R`` regenerate · ``P`` profiles · ``I`` import · ``X`` export · ``M`` mode
-on/off · ``J`` jump · ``/`` filter.
+Keys (lens-local): ``space`` apply, ``e`` edit value, ``v`` verify,
+``R`` regenerate, ``P`` profiles, ``I`` import, ``X`` export, ``M`` mode
+on/off, ``J`` jump, ``/`` filter.
 
-Threading: every device call (plan / apply / verify) runs in a thread
-worker; results come back through a :class:`UiDispatcher`. The services'
+Threading: every device call (plan / apply / verify) and the profile read
+on activation run in a thread worker; results come back through a
+:class:`UiDispatcher`. The services'
 listeners (identity status, privacy hits) fire on worker threads: they only
 mark the lens dirty and post one refresh, which runs at most once per
 second. Rows keep their order and the cursor stays on its value when data
@@ -421,7 +422,7 @@ def flat_hits(hits: Iterable[Any]) -> list[Any]:
 
 
 def where_words(hit: Any) -> str:
-    """``POST t.appsflyer.com/api/v1/… · request body`` or the file."""
+    """``POST t.appsflyer.com/api/v1/…, request body`` or the file."""
     src = hit.source or {}
     if src.get("type") == "file":
         path = str(src.get("device_path") or "")
@@ -429,11 +430,11 @@ def where_words(hit: Any) -> str:
         bits = [member or path.rsplit("/", 1)[-1]]
         if src.get("version"):
             bits.append(f"version {src['version']}")
-        return " · ".join(b for b in bits if b)
+        return ", ".join(b for b in bits if b)
     target = f"{src.get('host') or ''}{src.get('path') or ''}"
     method = str(src.get("method") or "").upper()
     head = _clip(f"{method} {target}".strip(), 56)
-    return f"{head} · {part_words(hit.part)}"
+    return f"{head}, {part_words(hit.part)}"
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +679,9 @@ class IdentityLens(Vertical):
         self._busy = False
         self.applied_at: float | None = None
         self.verified_at: float | None = None
+        #: A profile read is running in a worker; only the newest one counts.
+        self._loading = False
+        self._reload_seq = 0
         #: (package, pid) of the spotlight app that ran during the last apply.
         self._stale_app: tuple[str, int] | None = None
         self._inspector_sig: tuple | None = None
@@ -689,7 +693,7 @@ class IdentityLens(Vertical):
         yield Static("", id="identity-empty")
         yield Input(
             id="identity-filter",
-            placeholder="filter values   enter keep · esc clear",
+            placeholder="filter values   enter keep   esc clear",
         )
         yield IdentityTable(id="identity-table")
 
@@ -805,25 +809,40 @@ class IdentityLens(Vertical):
     # -- data -----------------------------------------------------------------
 
     def reload(self) -> None:
-        """Re-read the profile (library file) and refresh everything."""
+        """Re-read the profile (library file) in a worker, then refresh.
+
+        The library listing, the profile file and the session's frozen
+        apply record are file reads: they never run on the UI thread. The
+        lens keeps showing what it has until the newest read is back.
+        """
+        self._reload_seq += 1
+        seq = self._reload_seq
         ident = identity_service()
-        self.profile = None
-        self.profile_error = ""
-        self.library_count = 0
-        if ident is not None:
-            try:
-                self.library_count = len(ident.list_profiles())
-            except Exception:
-                self.library_count = 0
-            try:
-                profile_id = str(ident.config().profile or "")
-            except Exception:
-                profile_id = ""
-            if profile_id:
-                try:
-                    self.profile = ident.load(profile_id)
-                except Exception as exc:
-                    self.profile_error = f"{profile_id}: {exc}"
+        if ident is None:
+            self._loaded(seq, (0, None, ""))
+            return
+        self._loading = True
+        if self.profile is None:
+            self._update_empty()
+        self._run_bg(
+            lambda: _read_library(ident),
+            lambda result: self._loaded(seq, result),
+            group="identity-load",
+        )
+
+    def _loaded(self, seq: int, result: Any) -> None:
+        """Apply a finished profile read (UI thread)."""
+        if seq != self._reload_seq:
+            return  # a newer read is on its way
+        self._loading = False
+        if isinstance(result, Exception):
+            count, profile, error = 0, None, str(result)
+        else:
+            count, profile, error = result
+        old = self.profile.id if self.profile is not None else None
+        if profile is None or profile.id != old:
+            self.applied_at = self.verified_at = None
+        self.library_count, self.profile, self.profile_error = count, profile, error
         self.refresh_data()
 
     def refresh_data(self) -> None:
@@ -868,6 +887,9 @@ class IdentityLens(Vertical):
         out = []
         for info in infos:
             status = self._statuses.get(info.id)
+            owner = getattr(status, "profile_id", "") if status is not None else ""
+            if owner and owner != profile.id:
+                status = None  # read for another profile: stale here
             out.append(status if status is not None else info)
         return out
 
@@ -1010,7 +1032,9 @@ class IdentityLens(Vertical):
             return
         c = lens_palette()
         text = Text()
-        if self.profile_error:
+        if self._loading and not self.profile_error:
+            text.append("Reading the identity profile.", c.dim)
+        elif self.profile_error:
             text.append("The active identity profile could not be read.\n", "bold")
             text.append(self.profile_error + "\n\n", c.bad)
             text.append("P", f"bold {c.accent}")
@@ -1082,7 +1106,7 @@ class IdentityLens(Vertical):
             except Exception:
                 mode = "off"
         name = profile.name or profile.id
-        title = f"{name} rev {profile.revision} · mode {mode}"
+        title = f"{name} rev {profile.revision}, mode {mode}"
         bits = []
         if self.applied_at:
             bits.append(f"applied {datetime.fromtimestamp(self.applied_at):%H:%M:%S}")
@@ -1091,7 +1115,7 @@ class IdentityLens(Vertical):
         if not bits:
             bits.append("not applied in this session")
         bits.append("enter inspect")
-        ms.set_lens_caption(LENS_ID, title=title, info=" · ".join(bits))
+        ms.set_lens_caption(LENS_ID, title=title, info=", ".join(bits))
 
     def failed_count(self) -> int:
         return sum(1 for r in self.rows if r.info.status == "failed")
@@ -1194,7 +1218,7 @@ class IdentityLens(Vertical):
         tabs = [found_tab, value_tab] if hits else [value_tab, found_tab]
         word = STATUS_WORDS.get(info.status, info.status)
         found_words = row.found.words()
-        subtitle = f"{escape(word)} · " + (
+        subtitle = f"{escape(word)}, " + (
             f"[{c.dim}]not seen[/]"
             if found_words == "not seen"
             else f"[bold {c.warn}]{escape(found_words)}[/]"
@@ -1254,7 +1278,7 @@ class IdentityLens(Vertical):
         conf = f"{hit.confidence} confidence"
         text.append("\n    ")
         text.append(how, c.text)
-        text.append(" · ")
+        text.append(", ")
         text.append(conf, c.dim if hit.confidence == "low" else c.muted)
         extras = []
         if getattr(hit, "count", 1) and hit.count > 1:
@@ -1264,7 +1288,7 @@ class IdentityLens(Vertical):
         if getattr(hit, "direction", "") == "received":
             extras.append("received")
         if extras:
-            text.append(" · " + ", ".join(extras), c.muted)
+            text.append(", " + ", ".join(extras), c.muted)
         before, match, after = (tuple(hit.snippet) + ("", "", ""))[:3]
         text.append("\n    ")
         text.append(_oneline(before), c.dim)
@@ -1312,7 +1336,7 @@ class IdentityLens(Vertical):
         word = STATUS_WORDS.get(info.status, info.status)
         status = Text(word, style={"verified": c.ok, "failed": c.bad}.get(info.status))
         if info.reason:
-            status.append(f" · {info.reason}", c.muted)
+            status.append(f", {info.reason}", c.muted)
         apply_pairs: list[tuple[str, Any]] = [
             ("Status", status),
             ("Via", info.provider),
@@ -1346,7 +1370,7 @@ class IdentityLens(Vertical):
         ident = identity_service()
         if ident is not None:
             try:
-                active = ident.active_markers()
+                active = ident.active_markers(load=False)
             except Exception:
                 active = None
             if active:
@@ -1469,7 +1493,12 @@ class IdentityLens(Vertical):
 
     # -- device actions (workers) ----------------------------------------------
 
-    def _run_bg(self, fn: Callable[[], Any], done: Callable[[Any], None]) -> None:
+    def _run_bg(
+        self,
+        fn: Callable[[], Any],
+        done: Callable[[Any], None],
+        group: str = "identity-device",
+    ) -> None:
         """Run ``fn`` in a thread worker; ``done(result | exception)`` on the UI."""
 
         def work() -> None:
@@ -1480,7 +1509,7 @@ class IdentityLens(Vertical):
             if not self._ui.post(done, result):
                 logger.debug("identity lens: result dropped (not mounted)")
 
-        self.run_worker(work, thread=True, exclusive=False, group="identity-device")
+        self.run_worker(work, thread=True, exclusive=False, group=group)
 
     def _refresh_header(self) -> None:
         ms = self._main_screen()
@@ -1623,7 +1652,7 @@ class IdentityLens(Vertical):
                 self._failed("Applying the identity profile failed", result)
                 self.refresh_data()
                 return
-            self.applied_at = time.time()
+            self.applied_at = _read_at(result.infos.values())
             self.verified_at = self.applied_at
             self._statuses = {i.id: i for i in result.infos.values()}
             self._note_running_app(package)
@@ -1671,7 +1700,7 @@ class IdentityLens(Vertical):
             if isinstance(result, Exception):
                 self._failed("Verify failed", result)
                 return
-            self.verified_at = time.time()
+            self.verified_at = _read_at(result.infos.values())
             self._statuses = {i.id: i for i in result.infos.values()}
             self.app.notify("Identity values read back from the device.", timeout=3)
             self.refresh_data()
@@ -2035,6 +2064,36 @@ class IdentityLens(Vertical):
             ),
             done,
         )
+
+
+def _read_library(ident: Any) -> tuple[int, Any, str]:
+    """``(profiles in the library, active profile, error)`` (worker thread)."""
+    try:
+        count = len(ident.list_profiles())
+    except Exception:
+        count = 0
+    try:
+        profile_id = str(ident.config().profile or "")
+    except Exception:
+        profile_id = ""
+    profile, error = None, ""
+    if profile_id:
+        try:
+            profile = ident.load(profile_id)
+        except Exception as exc:
+            error = f"{profile_id}: {exc}"
+    try:
+        ident.active_markers()  # reads the session's frozen record once
+    except Exception:
+        logger.debug("identity lens: active markers failed", exc_info=True)
+    return count, profile, error
+
+
+def _read_at(infos: Iterable[Any]) -> float:
+    """When the service read these statuses from the device (now if unset)."""
+    return max((getattr(i, "at", 0.0) or 0.0 for i in infos), default=0.0) or (
+        time.time()
+    )
 
 
 def _text_sig(text: Text) -> tuple:

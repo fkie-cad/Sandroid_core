@@ -63,8 +63,10 @@ logger = logging.getLogger(__name__)
 FORMAT = "sandroid-identity"
 #: Profile schema this code writes; a newer one is refused on load/import.
 SCHEMA = 1
-TOKEN_RE = re.compile(r"^[0-9a-f]{8,32}$")
-ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+#: Validators: always ``fullmatch`` (``^...$`` with ``match`` lets a trailing
+#: newline through).
+TOKEN_RE = re.compile(r"[0-9a-f]{8,32}")
+ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 PROFILES_DIR_ENV = "SDROID_PROFILES_DIR"
 
 STATUSES = ("pending", "applied", "verified", "failed", "hook-only", "skipped")
@@ -96,15 +98,37 @@ RESTART_TIMEOUT_S = 180.0
 RESTART_POLL_S = 2.0
 
 _UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
 )
 _UUID_BYTES_RE = re.compile(
     rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
-_LOCALE_RE = re.compile(r"^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$")
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PHONE_RE = re.compile(r"^\+?[0-9]{3,15}$")
-_COORD_RE = re.compile(r"^-?\d{1,3}(\.\d+)?$")
+_LOCALE_RE = re.compile(r"[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?")
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_PHONE_RE = re.compile(r"\+?[0-9]{3,15}")
+_COORD_RE = re.compile(r"-?[0-9]{1,3}(\.[0-9]+)?")
+#: ``content insert --bind duration:i:`` takes a Java int.
+_INT_MAX = 2**31 - 1
+
+
+def _ascii_digits(text: str) -> bool:
+    """Only ``0-9`` (``str.isdigit`` also accepts other scripts' digits)."""
+    return bool(text) and text.isascii() and text.isdigit()
+
+
+def _call_duration(value: Any) -> int | None:
+    """A call-log ``duration`` as seconds (0 when absent), None when invalid."""
+    if value is None or value == "":
+        return 0
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str) and _ascii_digits(value):
+        seconds = int(value)
+    else:
+        return None
+    return seconds if 0 <= seconds <= _INT_MAX else None
 
 
 class ProfileError(ValueError):
@@ -791,7 +815,7 @@ def split_gps(value: str) -> tuple[str, str, str]:
         ValueError: Not two or three comma-separated numbers.
     """
     parts = [p.strip() for p in value.split(",")]
-    if len(parts) not in (2, 3) or not all(_COORD_RE.match(p) for p in parts[:2]):
+    if len(parts) not in (2, 3) or not all(_COORD_RE.fullmatch(p) for p in parts[:2]):
         raise ValueError(f"GPS {value!r} is not 'lat, lon[, alt]'")
     alt = parts[2] if len(parts) == 3 else "34"
     float(alt)
@@ -868,34 +892,34 @@ def _check_value(
         if not re.fullmatch(r"[0-9a-f]{16}", value):
             out.append(("error", "Android ID must be 16 lower-case hex digits"))
     elif kind in ("gaid", "app_set_id"):
-        if not _UUID_RE.match(value):
+        if not _UUID_RE.fullmatch(value):
             out.append(("error", "must be a UUID (8-4-4-4-12 hex)"))
         elif uuidlib.UUID(value).int == 0:
             out.append(("error", "the nil UUID means 'no ID' to apps"))
     elif kind == "imei":
-        if not (len(value) == 15 and value.isdigit() and luhn_ok(value)):
+        if not (len(value) == 15 and _ascii_digits(value) and luhn_ok(value)):
             out.append(("error", "IMEI must be 15 digits with a valid Luhn digit"))
     elif kind == "iccid":
         if not (
-            value.isdigit()
+            _ascii_digits(value)
             and len(value) in (19, 20)
             and value.startswith("89")
             and luhn_ok(value)
         ):
             out.append(("error", "ICCID must be 19-20 digits, start with 89, Luhn"))
     elif kind == "imsi":
-        if not (value.isdigit() and 14 <= len(value) <= 15):
+        if not (_ascii_digits(value) and 14 <= len(value) <= 15):
             out.append(("error", "IMSI must be 14-15 digits"))
         elif mccmnc and not value.startswith(mccmnc):
             out.append(("error", f"IMSI must start with the SIM MCC/MNC {mccmnc}"))
     elif kind == "sim_mccmnc":
-        if not (value.isdigit() and len(value) in (5, 6)):
+        if not (_ascii_digits(value) and len(value) in (5, 6)):
             out.append(("error", "MCC/MNC must be 5-6 digits"))
     elif kind == "phone_number":
         if provider == "native":
-            if not value.isdigit() or len(value) > 11:
+            if not _ascii_digits(value) or len(value) > 11:
                 out.append(("error", "the emulator takes at most 11 digits, no '+'"))
-        elif not _PHONE_RE.match(value):
+        elif not _PHONE_RE.fullmatch(value):
             out.append(("error", "phone number must be digits (optional '+')"))
     elif kind == "gps":
         try:
@@ -915,10 +939,10 @@ def _check_value(
         except Exception:
             out.append(("error", f"unknown time zone {value!r}"))
     elif kind == "locale":
-        if not _LOCALE_RE.match(value):
+        if not _LOCALE_RE.fullmatch(value):
             out.append(("error", "locale must be BCP-47 like 'de-DE'"))
     elif kind == "account":
-        if not _EMAIL_RE.match(value):
+        if not _EMAIL_RE.fullmatch(value):
             out.append(("error", "not an e-mail address"))
     elif kind in ("device_name", "sim_operator", "build_model"):
         if not value.strip():
@@ -942,9 +966,9 @@ def validate(profile: Profile) -> list[Issue]:
     def add(sev: str, path: str, msg: str) -> None:
         issues.append(Issue(sev, path, msg))
 
-    if not ID_RE.match(profile.id):
+    if not ID_RE.fullmatch(profile.id):
         add("error", "id", "id must be lower-case letters, digits, '.', '_', '-'")
-    if not TOKEN_RE.match(profile.token):
+    if not TOKEN_RE.fullmatch(profile.token):
         add("error", "token", "token must be 8-32 lower-case hex digits")
     if len(profile.seed_bytes) != 32:
         add("error", "seed", "seed must be 'hex:' + 32 bytes")
@@ -1007,15 +1031,21 @@ def validate(profile: Profile) -> list[Issue]:
                 )
             for fname in ("phone", "address", "number"):
                 val = item.get(fname)
-                if fname in spec_l.fields and val and not _PHONE_RE.match(str(val)):
+                if fname in spec_l.fields and val and not _PHONE_RE.fullmatch(str(val)):
                     add("error", f"{path}.{fname}", "phone must be digits (opt. '+')")
             email = item.get("email")
-            if email and not _EMAIL_RE.match(str(email)):
+            if email and not _EMAIL_RE.fullmatch(str(email)):
                 add("error", f"{path}.email", "not an e-mail address")
             if name == "sms" and str(item.get("box", "inbox")) not in _SMS_TYPES:
                 add("error", f"{path}.box", "box must be inbox or sent")
             if name == "calls" and str(item.get("type", "incoming")) not in _CALL_TYPES:
                 add("error", f"{path}.type", "type must be incoming, outgoing, missed")
+            if name == "calls" and _call_duration(item.get("duration")) is None:
+                add(
+                    "error",
+                    f"{path}.duration",
+                    "duration must be whole seconds (0 or more)",
+                )
             if name in ("sms", "calls") and item.get("date") is not None:
                 try:
                     _resolve_date(item["date"], 0, datetime.now(UTC))
@@ -1178,7 +1208,7 @@ def markers_for(
                     continue
                 label = f"{spec_l.tag}: {title} ({fname})"
                 mid = f"{name}.{i}.{fname}"
-                if fname in ("phone", "address", "number") and _PHONE_RE.match(val):
+                if fname in ("phone", "address", "number") and _PHONE_RE.fullmatch(val):
                     mval, forms = _phone_marker_value(val, cc)
                     add(Marker(mid, mval, "phone", label, forms, tag=spec_l.tag))
                 elif fname == "email":
@@ -1311,7 +1341,7 @@ def generate_profile(
     pid = profile_id or f"{first.lower()}-{preset}"
     profile = Profile(
         id=pid,
-        name=name or f"{first} {last} · {preset.upper()}",
+        name=name or f"{first} {last} ({preset.upper()})",
         token=token,
         seed="hex:" + secrets.token_hex(32),
         revision=0,
@@ -1353,7 +1383,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _profile_path(pid: str) -> Path:
-    if not ID_RE.match(pid):
+    if not ID_RE.fullmatch(pid):
         raise ProfileError(f"invalid profile id {pid!r}")
     return profiles_dir() / f"{pid}.toml"
 
@@ -1416,14 +1446,29 @@ class _Device:
         chown: str = "",
         restorecon: bool = False,
     ) -> str:
-        """Write ``data`` to ``remote`` with ``cat >`` (keeps owner and label).
+        """Write ``data`` to ``remote`` atomically.
+
+        The data goes to a temp file next to ``remote`` (same directory, so
+        the final ``mv`` is a rename) that gets the original's owner, mode
+        and SELinux label first. A dropped adb link mid-write leaves the
+        original file as it was, never a truncated one.
+
+        Args:
+            remote: Device path.
+            data: New content (XML text when ``abx``).
+            abx: Re-encode the XML as Android binary XML on the device.
+            chown: ``uid:gid`` for a file that may not exist yet: owner and
+                mode 660 are set instead of copied from the original.
+            restorecon: Relabel ``remote`` from the policy afterwards.
 
         Returns:
             ``""`` on success, else the error text.
         """
         from sandroid.core.adb_utils import quote_host_arg
 
-        stage = f"{STAGE_DIR}/{Path(remote).name}.{uuidlib.uuid4().hex[:8]}"
+        tag = uuidlib.uuid4().hex[:8]
+        stage = f"{STAGE_DIR}/{Path(remote).name}.{tag}"
+        tmp = f"{remote}.sandroid-{tag}"
         fd, local = tempfile.mkstemp(prefix="sandroid-identity-")
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -1441,13 +1486,35 @@ class _Device:
             if abx:
                 src = f"{stage}.abx"
                 steps.append(f"xml2abx {_q(stage)} {_q(src)}")
-            steps.append(f"cat {_q(src)} > {_q(remote)}")
             if chown:
-                steps += [f"chown {chown} {_q(remote)}", f"chmod 660 {_q(remote)}"]
+                steps += [
+                    f"cat {_q(src)} > {_q(tmp)}",
+                    f"chown {_q(chown)} {_q(tmp)}",
+                    f"chmod 660 {_q(tmp)}",
+                ]
+            else:
+                # Owner, mode and label of the original; empty when it is
+                # missing or unreadable, which stops the chain (fail closed).
+                steps += [
+                    f"O=$(stat -c %u:%g {_q(remote)})",
+                    f"M=$(stat -c %a {_q(remote)})",
+                    f"L=$(stat -c %C {_q(remote)})",
+                    '[ -n "$O" ]',
+                    '[ -n "$M" ]',
+                    '[ -n "$L" ]',
+                    f"cat {_q(src)} > {_q(tmp)}",
+                    f'chown "$O" {_q(tmp)}',
+                    f'chmod "$M" {_q(tmp)}',
+                    f'chcon "$L" {_q(tmp)}',
+                ]
+            steps.append(f"mv -f {_q(tmp)} {_q(remote)}")
             if restorecon:
                 steps.append(f"restorecon {_q(remote)}")
             steps.append(f"echo {_OK}")
-            script = " && ".join(steps) + f"; rm -f {_q(stage)} {_q(stage)}.abx"
+            script = (
+                " && ".join(steps)
+                + f"; rm -f {_q(stage)} {_q(stage + '.abx')} {_q(tmp)}"
+            )
             result = self.shell(script, zygote=abx)
             return "" if _OK in result else f"write failed: {result.strip()[:200]}"
         finally:
@@ -1492,7 +1559,7 @@ def _where_like(column: str, tokens: Iterable[str]) -> str:
 
 def preflight_script(packages: Iterable[str], tokens: Iterable[str]) -> str:
     """The one batched read: every current value the pipeline compares."""
-    tokens = [t for t in tokens if TOKEN_RE.match(t)]
+    tokens = [t for t in tokens if TOKEN_RE.fullmatch(t)]
     pkgs = [p for p in packages if re.fullmatch(r"[A-Za-z0-9_.]+", p)]
     px = f"{STAGE_DIR}/packages.xml"
     lines = [
@@ -1724,6 +1791,11 @@ class ValueInfo:
     current: str = ""
     before: str = ""
     per_app: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: Set when the status is shared (plan / apply / verify): the profile
+    #: and fingerprint it belongs to, and when the device was read (epoch s).
+    profile_id: str = ""
+    fingerprint: str = ""
+    at: float = 0.0
 
 
 @dataclass
@@ -1807,7 +1879,7 @@ def _list_sig(name: str, row: dict[str, Any]) -> tuple:
         phone(row.get("number")),
         str(row.get("name") or ""),
         str(ctype),
-        str(int(row.get("duration") or 0)),
+        str(_call_duration(row.get("duration")) or 0),
     )
 
 
@@ -1833,6 +1905,47 @@ def _device_list_items(name: str, rows: list[dict[str, str]]) -> dict[str, dict]
         else:
             items[row.get("_id", "")] = dict(row)
     return items
+
+
+_RAW_CONTACTS = "content://com.android.contacts/raw_contacts"
+_LIST_FAIL = "@@identity-list-failed@@ "
+#: sed script: the digits after ``_id=`` of each ``content query`` row.
+_SED_IDS = r"s/.*_id=\([0-9][0-9]*\).*/\1/p"
+
+
+def _contact_steps(item: dict[str, Any]) -> list[str]:
+    """The ``&&`` chain that inserts one contact (raw contact + data rows).
+
+    ``content insert`` does not print the new row id, so the chain reads the
+    newest raw contact id before the insert (``MAX``) and the ids above it
+    after (``NEW``). The data rows are attached only when that is exactly one
+    id: no insert (empty) or a concurrent one, e.g. a sync adapter (two ids:
+    not an integer for ``[ -gt ]``), breaks the chain, so canary data never
+    lands on a real contact.
+    """
+    steps = [
+        f"MAX=$(content query --uri {_RAW_CONTACTS} --projection _id"
+        f" --sort {_q('_id DESC')} | sed -n {_q('1' + _SED_IDS)})",
+        'MAX="${MAX:-0}"',
+        f"content insert --uri {_RAW_CONTACTS}"
+        " --bind account_type:n: --bind account_name:n:",
+        f"NEW=$(content query --uri {_RAW_CONTACTS} --projection _id"
+        f' --where "_id>$MAX" | sed -n {_q(_SED_IDS)})',
+        '[ -n "$NEW" ]',
+        '[ "$NEW" -gt "$MAX" ]',
+    ]
+    for fname, mime in _CONTACT_MIME.items():
+        val = item.get(fname)
+        if not val:
+            continue
+        extra = " --bind data2:i:2" if fname in ("phone", "email") else ""
+        steps.append(
+            "content insert --uri content://com.android.contacts/data"
+            ' --bind raw_contact_id:i:"$NEW"'
+            f" --bind {_q('mimetype:s:' + mime)}"
+            f" --bind {_q('data1:s:' + str(val))}{extra}"
+        )
+    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -1900,7 +2013,7 @@ class IdentityService:
 
     def save(self, profile: Profile) -> Profile:
         """Save ``profile`` (drafts with errors too); bumps ``revision``."""
-        if not ID_RE.match(profile.id):
+        if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
         profile.revision += 1
         if profile.created is None:
@@ -1972,7 +2085,7 @@ class IdentityService:
         except OSError as exc:
             raise ProfileError(f"cannot read {source}: {exc}") from exc
         profile = Profile.loads(text)
-        if not ID_RE.match(profile.id):
+        if not ID_RE.fullmatch(profile.id):
             raise ProfileError(f"invalid profile id {profile.id!r}")
         target = _profile_path(profile.id)
         if not target.exists():
@@ -2114,14 +2227,18 @@ class IdentityService:
 
     # -- markers ------------------------------------------------------------
 
-    def active_markers(self) -> tuple[str, list[Marker]] | None:
+    def active_markers(self, *, load: bool = True) -> tuple[str, list[Marker]] | None:
         """``(fingerprint, markers)`` of the profile applied in this session,
         ``None`` when the mode is off or nothing was applied yet.
+
+        Args:
+            load: Read the session's newest frozen apply the first time
+                (file I/O); ``False`` only answers from memory (UI thread).
         """
         if self.config().mode != "profile":
             return None
         with self._lock:
-            if self._active is None and not self._loaded_frozen:
+            if self._active is None and not self._loaded_frozen and load:
                 self._loaded_frozen = True
                 self._active = _load_latest_frozen()
             if self._active is None:
@@ -2209,7 +2326,7 @@ class IdentityService:
         pkgs = self._packages(serial, package)
         state = self.preflight(serial, pkgs, profile)
         plan = self._plan(profile, state, pkgs)
-        self._publish(plan.infos)
+        self._publish(plan)
         return plan
 
     def _require_profile(self) -> Profile:
@@ -2619,63 +2736,67 @@ class IdentityService:
         return "" if _OK in out else (out.strip()[:160] or "no answer")
 
     def _run_list(self, dev: _Device, profile: Profile, name: str, diff: dict) -> str:
+        """Delete stale rows and insert missing items of list ``name``.
+
+        Every row is one ``&&`` chain; a chain that breaks echoes
+        :data:`_LIST_FAIL` with its item, and the list fails naming them.
+        """
         items = render_lists(profile)[name]
         now = datetime.now(UTC)
         lines = []
         uri, _proj, _col = _LIST_QUERY[name]
+
+        def chain(label: str, steps: list[str]) -> None:
+            lines.append(" && ".join(steps) + f" || echo {_q(_LIST_FAIL + label)}")
+
         for rid in diff["stale"]:
-            if not str(rid).isdigit():
+            if not _ascii_digits(str(rid)):
                 continue
             if name == "contacts":
-                lines.append(
-                    "content delete --uri"
-                    " 'content://com.android.contacts/raw_contacts?caller_is_syncadapter=true'"
-                    f" --where {_q(f'_id={rid}')}"
-                )
+                target = f"{_RAW_CONTACTS}?caller_is_syncadapter=true"
             else:
-                lines.append(f"content delete --uri {uri} --where {_q(f'_id={rid}')}")
+                target = uri
+            chain(
+                f"{name} row {rid}",
+                [f"content delete --uri {_q(target)} --where {_q(f'_id={rid}')}"],
+            )
         for i in diff["missing"]:
             item = items[i]
             if name == "contacts":
-                lines += [
-                    "content insert --uri content://com.android.contacts/raw_contacts"
-                    " --bind account_type:n: --bind account_name:n:",
-                    "RID=$(content query --uri content://com.android.contacts/raw_contacts"
-                    " --projection _id --sort '_id DESC' | head -n 1 | sed 's/.*_id=//')",
-                ]
-                for fname, mime in _CONTACT_MIME.items():
-                    val = item.get(fname)
-                    if not val:
-                        continue
-                    extra = " --bind data2:i:2" if fname in ("phone", "email") else ""
-                    lines.append(
-                        "content insert --uri content://com.android.contacts/data"
-                        ' --bind raw_contact_id:i:"$RID"'
-                        f" --bind {_q('mimetype:s:' + mime)}"
-                        f" --bind {_q('data1:s:' + str(val))}{extra}"
-                    )
+                chain(f"{name}.{i}", _contact_steps(item))
             elif name == "sms":
                 box = str(item.get("box", "inbox"))
                 when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
-                lines.append(
-                    f"content insert --uri content://sms/{box}"
-                    f" --bind {_q('address:s:' + str(item['address']))}"
-                    f" --bind {_q('body:s:' + str(item['body']))}"
-                    f" --bind date:l:{when} --bind read:i:1"
-                    f" --bind type:i:{_SMS_TYPES[box]}"
+                chain(
+                    f"{name}.{i}",
+                    [
+                        f"content insert --uri content://sms/{box}"
+                        f" --bind {_q('address:s:' + str(item['address']))}"
+                        f" --bind {_q('body:s:' + str(item['body']))}"
+                        f" --bind date:l:{when} --bind read:i:1"
+                        f" --bind type:i:{_SMS_TYPES[box]}"
+                    ],
                 )
             else:
                 ctype = _CALL_TYPES[str(item.get("type", "incoming"))]
                 when = int(_resolve_date(item.get("date"), i, now).timestamp() * 1000)
-                lines.append(
-                    "content insert --uri content://call_log/calls"
-                    f" --bind {_q('number:s:' + str(item['number']))}"
-                    f" --bind {_q('name:s:' + str(item.get('name') or ''))}"
-                    f" --bind type:i:{ctype} --bind date:l:{when}"
-                    f" --bind duration:i:{int(item.get('duration') or 0)} --bind new:i:0"
+                duration = _call_duration(item.get("duration")) or 0
+                chain(
+                    f"{name}.{i}",
+                    [
+                        "content insert --uri content://call_log/calls"
+                        f" --bind {_q('number:s:' + str(item['number']))}"
+                        f" --bind {_q('name:s:' + str(item.get('name') or ''))}"
+                        f" --bind type:i:{ctype} --bind date:l:{when}"
+                        f" --bind duration:i:{duration} --bind new:i:0"
+                    ],
                 )
         lines.append(f"echo {_OK}")
-        return self._check(dev.shell("\n".join(lines), zygote=True, timeout=120))
+        out = dev.shell("\n".join(lines), zygote=True, timeout=120)
+        failed = re.findall(re.escape(_LIST_FAIL) + r"(.+)", out)
+        if failed:
+            return "not written: " + ", ".join(f.strip() for f in failed)[:160]
+        return self._check(out)
 
     def _run_gms(
         self, dev: _Device, state: DeviceState, step: Step, info: ValueInfo
@@ -2726,40 +2847,78 @@ class IdentityService:
         stamp = f"{plan.fingerprint} {int(time.time())} {','.join(s.value_id for s in steps)}"
         dev.shell(f"echo {_q(stamp)} > {RESTART_MARKER}")
         dev.shell("stop")
-        for step in steps:
-            info = plan.infos[step.value_id]
-            err = ""
-            if info.kind == "android_id":
-                current = dev.shell(
-                    f"abx2xml {SSAID_FILE} - 2>/dev/null || cat {SSAID_FILE}",
-                    zygote=True,
-                )
-                xml = _edit_ssaid(current or state.ssaid_xml, step.desired)
-                if xml is None:
-                    err = "cannot parse settings_ssaid.xml"
-                else:
-                    err = dev.write(SSAID_FILE, xml.encode(), abx=True)
-            elif info.kind == "locale":
-                err = self._check(
-                    dev.shell(
-                        f"setprop persist.sys.locale {_q(step.desired)} && echo {_OK}"
-                    )
-                )
-            elif info.kind == "build_model":
-                err = self._check(
-                    dev.shell(
-                        f"resetprop ro.product.model {_q(step.desired)} && echo {_OK}"
-                    )
-                )
-            info.status, info.reason = ("failed", err) if err else ("applied", "")
-        dev.shell("start")
-        if not self._wait_framework(dev, state.system_server):
+        error: BaseException | None = None
+        try:
+            for step in steps:
+                info = plan.infos[step.value_id]
+                err = self._framework_step(dev, state, step, info)
+                info.status, info.reason = ("failed", err) if err else ("applied", "")
+        except BaseException as exc:
+            # The framework is down: whatever broke, it must come back up.
+            error = exc
+            for step in steps:
+                info = plan.infos.get(step.value_id)
+                if info is not None and info.status == "pending":
+                    info.status = "failed"
+                    info.reason = f"restart window aborted: {exc}"[:200]
+        try:
+            back = self._end_window(dev, state)
+        except Exception:
+            if error is None:
+                raise
+            logger.warning(
+                "identity: framework restart after an aborted window failed",
+                exc_info=True,
+            )
+            back = False
+        if not back:
             for step in steps:
                 info = plan.infos[step.value_id]
                 if info.status == "applied":
                     info.status, info.reason = "failed", "framework did not come back"
-            return
+        if error is not None:
+            self._publish(plan)
+            raise error
+
+    def _framework_step(
+        self, dev: _Device, state: DeviceState, step: Step, info: ValueInfo
+    ) -> str:
+        """One write while the framework is stopped (``""`` or the error)."""
+        if info.kind == "android_id":
+            current = dev.shell(
+                f"abx2xml {SSAID_FILE} - 2>/dev/null || cat {SSAID_FILE}",
+                zygote=True,
+            )
+            xml = _edit_ssaid(current or state.ssaid_xml, step.desired)
+            if xml is None:
+                return "cannot parse settings_ssaid.xml"
+            return dev.write(SSAID_FILE, xml.encode(), abx=True)
+        if info.kind == "locale":
+            return self._check(
+                dev.shell(
+                    f"setprop persist.sys.locale {_q(step.desired)} && echo {_OK}"
+                )
+            )
+        if info.kind == "build_model":
+            return self._check(
+                dev.shell(
+                    f"resetprop ro.product.model {_q(step.desired)} && echo {_OK}"
+                )
+            )
+        return f"no framework mechanism for {info.kind}"
+
+    def _end_window(self, dev: _Device, state: DeviceState) -> bool:
+        """``start`` the framework; drop the marker once it is back.
+
+        Returns:
+            True when a new system_server answers. Otherwise the marker
+            stays, and the next apply resumes the restart.
+        """
+        dev.shell("start")
+        if not self._wait_framework(dev, state.system_server):
+            return False
         dev.shell(f"rm -f {RESTART_MARKER}")
+        return True
 
     def _wait_framework(self, dev: _Device, old_pid: str) -> bool:
         """Wait for a new system_server and a working package manager."""
@@ -2819,7 +2978,7 @@ class IdentityService:
                 mem.done.add(package)
             elif package:
                 mem.done.discard(package)
-        self._publish(plan.infos)
+        self._publish(plan)
         digest = hashlib.sha256(
             json.dumps(
                 [
@@ -2898,10 +3057,18 @@ class IdentityService:
         _atomic_write_text(path, text)
         return path, hashlib.sha256(text.encode()).hexdigest()
 
-    def _publish(self, infos: dict[str, ValueInfo]) -> None:
+    def _publish(self, plan: IdentityPlan) -> None:
+        """Stamp the plan's statuses (profile, fingerprint, time) and share."""
+        now = time.time()
+        for info in plan.infos.values():
+            info.profile_id, info.fingerprint, info.at = (
+                plan.profile_id,
+                plan.fingerprint,
+                now,
+            )
         with self._lock:
             self._statuses = {
-                k: replace(v, per_app=dict(v.per_app)) for k, v in infos.items()
+                k: replace(v, per_app=dict(v.per_app)) for k, v in plan.infos.items()
             }
         self._notify_status()
 
@@ -3081,9 +3248,13 @@ def _edit_ssaid(xml_text: str, desired: dict[str, dict[str, Any]]) -> str | None
         root = ET.fromstring(xml_text.encode("utf-8"))  # noqa: S314 - device file
     except ET.ParseError:
         return None
-    rows = {r.get("package"): r for r in root.iter("setting")}
-    next_id = max((int(r.get("id") or 0) for r in rows.values()), default=0) + 1
+    rows = {r.get("package"): r for r in root.iter("setting") if r.get("package")}
+    ids = [r.get("id") or "" for r in root.iter("setting")]
+    # A malformed id is skipped (never reused: new ids only go up).
+    next_id = max((int(i) for i in ids if re.fullmatch(r"-?[0-9]+", i)), default=0) + 1
     for pkg, entry in desired.items():
+        if not entry.get("uid") or not entry.get("value"):
+            return None
         row = rows.get(pkg)
         if row is None:
             row = ET.SubElement(root, "setting")
