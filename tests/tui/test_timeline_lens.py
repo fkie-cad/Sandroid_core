@@ -1230,6 +1230,73 @@ async def test_settings_timeline_tab_stages_whole_values_and_two_part_keys(
             assert screen.query(f"#setting-tracking--{name}"), name
 
 
+async def test_settings_save_is_the_users_and_skips_unchanged_timeline_keys(
+    monkeypatch,
+) -> None:
+    """F5 + F9: Ctrl+S is logged as the user's, and the Timeline tab's
+    Inputs/Selects (which post Changed while mounting) save nothing unchanged.
+    """
+    from textual.widgets import Select
+
+    import sandroid.config as config_mod
+    from sandroid.config import SandroidConfig
+    from sandroid.core import timeline
+    from sandroid.tui.controllers import settings_controller
+    from sandroid.tui.screens.settings_screen import SettingsScreen
+
+    monkeypatch.setattr(SettingsScreen, "_fetch_frida_versions", lambda self: None)
+    config = SandroidConfig()
+    monkeypatch.setattr(config_mod, "_config_instance", config)
+    saved: list[set[str]] = []
+    real_update = config_mod.update_config
+
+    def _update(pending, persist=True):
+        saved.append(set(pending))
+        return real_update(pending, persist=False)  # never touch a real file
+
+    monkeypatch.setattr(settings_controller, "update_config", _update)
+
+    class _Harness(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sandroid_config = config
+
+        def on_mount(self) -> None:
+            self.push_screen(SettingsScreen())
+
+    async def open_and_save(change=None) -> None:
+        app = _Harness()
+        async with app.run_test(size=(140, 50)) as pilot:
+            await _settle(pilot)
+            if change is not None:
+                change(app.screen)
+                await _settle(pilot)
+            await pilot.press("ctrl+s")
+            await _settle(pilot)
+            assert not isinstance(app.screen, SettingsScreen)
+
+    def helper_invisible(screen) -> None:
+        select = screen.query_one("#setting-tracking--helper_mode", Select)
+        select.value = "invisible"
+
+    def policy_keys(keys: set[str]) -> set[str]:
+        return {k for k in keys if k.startswith(("timeline.", "tracking."))}
+
+    with timeline.capture() as lines:
+        await open_and_save()
+        await open_and_save(helper_invisible)
+    assert len(saved) == 2
+    assert policy_keys(saved[0]) == set()  # nothing changed on the tab
+    assert policy_keys(saved[1]) == {"tracking.helper_mode"}
+    policy = [line for line in lines if line["kind"] == "policy"]
+    assert len(policy) == 1, policy  # no empty changed:{} line
+    assert policy[0]["actor"] == "user"
+    assert policy[0]["data"]["by"] == "user"
+    assert policy[0]["data"]["changed"] == {
+        "tracking.helper_mode": ["full", "invisible"]
+    }
+
+
 # --------------------------------------------------------------------------
 # with the real timeline core (active after the WP1 merge)
 # --------------------------------------------------------------------------

@@ -5,6 +5,7 @@ Changes are tracked in-memory and only applied on Save (Ctrl+S).
 Theme preview is applied live and reverted on Cancel.
 """
 
+import contextlib
 import logging
 import threading
 from typing import Any
@@ -78,6 +79,20 @@ _TIMELINE_LIST_IDS = {
     "setting-timeline--kinds_off": "timeline.kinds_off",
     "setting-timeline--count_only": "timeline.count_only",
 }
+#: Config sections of the Timeline tab (unchanged values are never saved).
+_POLICY_PREFIXES = ("timeline.", "tracking.")
+_MISSING = object()
+
+
+def _acting_as_user() -> Any:
+    """``timeline.acting_as("user")``, or a no-op without the timeline."""
+    try:
+        from sandroid.core.timeline import acting_as
+    except Exception:
+        return contextlib.nullcontext()
+    return acting_as("user")
+
+
 #: (field, label, input type) of the numeric timeline / Tracking fields.
 _TIMELINE_NUMBERS = (
     ("files_modify_coalesce_ms", "Coalesce modify (ms, 0 off):", "integer"),
@@ -1640,8 +1655,24 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
         self.app.call_later(self._refresh_app)
         self.dismiss(None)
 
+    def _drop_unchanged_timeline_keys(self) -> None:
+        """Unstage ``timeline.*`` / ``tracking.*`` values equal to the config.
+
+        Their Inputs/Selects post ``Changed`` while mounting, which staged
+        every one of them (written to the save target and, through the
+        config listener, a ``sandroid/policy`` line) although nothing was
+        changed. Only these keys: the other tabs keep their behaviour.
+        """
+        config = self._get_config()
+        for key in [k for k in self._pending if k.startswith(_POLICY_PREFIXES)]:
+            section, _, field = key.partition(".")
+            current = getattr(getattr(config, section, None), field, _MISSING)
+            if current is not _MISSING and current == self._pending[key]:
+                del self._pending[key]
+
     def action_save(self) -> None:
         """Save pending settings and dismiss."""
+        self._drop_unchanged_timeline_keys()
         if not self._pending:
             # Nothing changed
             self.app.call_later(self._refresh_app)
@@ -1652,7 +1683,10 @@ class SettingsScreen(ModalScreen[SandroidConfig | None]):
 
         try:
             if self._controller:
-                updated_config = self._controller.save(self._pending)
+                # A Settings save is the user's: the timeline policy line
+                # written by the config listener (same thread) says so.
+                with _acting_as_user():
+                    updated_config = self._controller.save(self._pending)
                 # Values already applied live (see _apply_ai_toggle_live)
                 # are now persisted -- nothing left to revert.
                 self._ai_toggle_originals.clear()

@@ -468,6 +468,28 @@ def test_the_config_listener_writes_a_policy_line(monkeypatch):
     assert timeline.get_timeline()._policy.count_window_s == 7.0
 
 
+def test_a_users_settings_save_is_attributed_and_no_ops_write_nothing(
+    monkeypatch,
+):
+    """F5: actor/by "user" inside acting_as("user"); no empty changed:{}."""
+    import sandroid.config as config_mod
+    from sandroid.config.schema import SandroidConfig
+
+    monkeypatch.setattr(config_mod, "_config_instance", SandroidConfig())
+    with timeline.capture() as lines:
+        with timeline.acting_as("user"):
+            config_mod.update_config({"tracking.helper_mode": "invisible"},
+                                     persist=False)  # fmt: skip
+            # Same value again: the listener fires, but nothing changed.
+            config_mod.update_config({"tracking.helper_mode": "invisible",
+                                      "timeline.count_window_s": 5.0},
+                                     persist=False)  # fmt: skip
+    (policy,) = lines
+    assert policy["actor"] == "user"
+    assert policy["data"]["by"] == "user"
+    assert policy["data"]["changed"] == {"tracking.helper_mode": ["full", "invisible"]}
+
+
 # ---------------------------------------------------------------------------
 # time model: transitions, dev_mono, world
 # ---------------------------------------------------------------------------
