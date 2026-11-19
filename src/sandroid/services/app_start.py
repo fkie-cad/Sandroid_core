@@ -502,14 +502,18 @@ def gather_inputs(
 
     spotlight = get_spotlight_service()
     liveness, live_pid = probe_liveness(package, frida_fallback=frida_fallback)
-    if liveness != Liveness.UNKNOWN:
-        try:
-            if spotlight.get_pid() != live_pid:
-                spotlight.announce_pid(live_pid, package)
-        except Exception as exc:
-            logger.debug("Could not update the spotlight PID: %s", exc)
     jm = _job_manager()
     spid = session_pid(jm)
+    # Correct a stale cached PID -- but a held spawn pidof cannot name yet
+    # keeps the PID its spawn announced.
+    try:
+        cached = spotlight.get_pid()
+        stale = liveness == Liveness.RUNNING and cached != live_pid
+        gone = liveness == Liveness.NOT_RUNNING and cached and cached != spid
+        if stale or gone:
+            spotlight.announce_pid(live_pid, package)
+    except Exception as exc:
+        logger.debug("Could not update the spotlight PID: %s", exc)
     try:
         paused = bool(jm.is_paused()) if jm is not None and spid else False
     except Exception:

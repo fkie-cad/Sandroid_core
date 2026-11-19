@@ -843,3 +843,16 @@ def test_chrome_ct_bypass_keeps_a_running_spotlight_chrome(env):
     env.spotlight.set_app(PKG)
     env.live = (Liveness.RUNNING, 31)
     assert CAManager._chrome_is_running_spotlight() is False
+
+
+def test_gather_inputs_keeps_the_pid_of_a_held_unnamed_spawn(env):
+    env.jm = FakeJM(session_pid=99, package_name=PKG, paused=True)
+    env.spotlight.set_pid(99)
+    env.live = (Liveness.NOT_RUNNING, None)
+
+    app_start.gather_inputs(PKG)
+
+    assert env.spotlight.get_pid() == 99
+    env.jm = FakeJM()
+    app_start.gather_inputs(PKG)
+    assert env.spotlight.get_pid() is None  # really gone now
