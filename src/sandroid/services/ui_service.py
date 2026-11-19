@@ -8,7 +8,7 @@ Extracted from Toolbox class to follow Single Responsibility Principle.
 The heavy rendering and dialog logic has been further extracted into:
   - :mod:`sandroid.core.notifications.blocking_dialog` -- blocking dialogs
   - :mod:`sandroid.services.output_buffer_service` -- output ring buffer
-  - :mod:`sandroid.services.renderers` -- emulator info / exit summary / boxes
+  - :mod:`sandroid.services.renderers` -- exit summary / boxes
 
 This module retains view cycling, warning flags, and backward-compatible
 delegation methods so that existing callers do not need to change.
@@ -46,7 +46,6 @@ from sandroid.services.output_buffer_service import OutputBufferService, OutputL
 from sandroid.services.protocols import EventBusProtocol
 from sandroid.services.renderers import (
     BoxRenderer,
-    EmulatorInfoRenderer,
     ExitSummaryRenderer,
 )
 
@@ -436,14 +435,6 @@ class UIService:
     def create_ascii_box(self, text: str, title: str) -> str:
         """Create an ASCII box with a title."""
         return BoxRenderer.create_ascii_box(text, title)
-
-    # =========================================================================
-    # Emulator Information Display  (delegates to EmulatorInfoRenderer)
-    # =========================================================================
-
-    def print_emulator_information(self, emulator_info: dict[str, Any]) -> None:
-        """Display emulator/device information in a formatted Rich Panel."""
-        EmulatorInfoRenderer.print_emulator_information(emulator_info)
 
     # =========================================================================
     # Exit Summary  (delegates to ExitSummaryRenderer)

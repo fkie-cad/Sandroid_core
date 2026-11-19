@@ -133,10 +133,8 @@ def test_critical_setup_reports_the_missing_serial_and_the_devices() -> None:
     assert not any("PATH" in e for e in [result.message, *result.errors])
 
 
-def test_environment_service_tells_a_missing_device_from_missing_adb() -> None:
-    from sandroid.services.environment_service import EnvironmentService
-
-    result = EnvironmentService(adb=FakeAdb(target=MISSING)).check_setup()
+def test_setup_service_tells_a_missing_device_from_missing_adb() -> None:
+    result = SetupService(adb=FakeAdb(target=MISSING)).check_setup()
     assert not result.success
     assert result.adb_available
     assert result.message == f"Device '{MISSING}' not found"

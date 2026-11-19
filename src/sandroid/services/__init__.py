@@ -146,12 +146,6 @@ def _create_ui_service() -> "UIService":
     return UIService(event_bus=_get_event_bus())
 
 
-def _create_environment_service() -> "EnvironmentService":
-    from .environment_service import EnvironmentService
-
-    return EnvironmentService(event_bus=_get_event_bus())
-
-
 def _create_forensic_apk_service() -> "ForensicAPKService":
     from .forensic_apk_service import ForensicAPKService
 
@@ -275,11 +269,6 @@ def get_ui_service() -> "UIService":
     return _get_or_create(_create_ui_service)
 
 
-def get_environment_service() -> "EnvironmentService":
-    """Get or create the EnvironmentService singleton."""
-    return _get_or_create(_create_environment_service)
-
-
 def get_forensic_apk_service() -> "ForensicAPKService":
     """Get or create the ForensicAPKService singleton."""
     return _get_or_create(_create_forensic_apk_service)
@@ -367,7 +356,6 @@ from .configuration_service import ConfigurationService, SessionConfig
 from .device_service import DeviceService, DeviceState
 from .device_settings_service import DevicePreset, DeviceSettingsService, SettingsResult
 from .emulator_service import EmulatorService, ScreenRecordingState, SnapshotInfo
-from .environment_service import EnvironmentService, SetupResult
 from .file_extraction_service import ExtractionResult, FileExtractionService
 from .forensic_apk_service import ForensicAPK, ForensicAPKService
 from .forensic_service import ForensicService, Snapshot, TimelineEntry
@@ -384,10 +372,10 @@ from .network_capture_service import CaptureSession, NetworkCaptureService
 from .objection_service import ObjectionService
 from .output_buffer_service import OutputBufferService
 from .proxy_service import ProxyService, ProxySettings
-from .renderers import BoxRenderer, EmulatorInfoRenderer, ExitSummaryRenderer
+from .renderers import BoxRenderer, ExitSummaryRenderer
 from .service_registry import ServiceRegistry
 from .session_state_service import SessionStateService
-from .setup_service import SetupCheckResult, SetupCheckStatus, SetupService
+from .setup_service import SetupCheckResult, SetupCheckStatus, SetupResult, SetupService
 from .setup_service import SetupResult as SetupServiceResult
 from .spotlight_service import SpotlightApp, SpotlightService
 from .task_service import BackgroundTask, TaskService
@@ -410,9 +398,7 @@ __all__ = [
     "DeviceService",
     "DeviceSettingsService",
     "DeviceState",
-    "EmulatorInfoRenderer",
     "EmulatorService",
-    "EnvironmentService",
     "ExitSummaryRenderer",
     "ExtractionResult",
     "FileExtractionService",
@@ -464,7 +450,6 @@ __all__ = [
     "get_device_service",
     "get_device_settings_service",
     "get_emulator_service",
-    "get_environment_service",
     "get_file_extraction_service",
     "get_forensic_apk_service",
     "get_forensic_service",

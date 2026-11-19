@@ -490,17 +490,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         return cls._fetch_changed_files(fetch_all)
 
     @classmethod
-    def print_emulator_information(cls):
-        """Prints information about the emulator.
-
-        Delegates to DeviceService for data gathering and UIService for display.
-        """
-        device_service = _service("get_device_service")
-        ui_service = _service("get_ui_service")
-        emulator_info = device_service.get_emulator_info()
-        ui_service.print_emulator_information(emulator_info)
-
-    @classmethod
     def _fetch_changed_files(cls, fetch_all=False):
         """Delegates to ForensicService.fetch_changed_files()."""
         action_service = _service("get_action_window_service")
@@ -751,14 +740,6 @@ class Toolbox(metaclass=_ToolboxMeta):
             line_length_cutoff=line_length_cutoff,
             line_number_cutoff=line_number_cutoff,
         )
-
-    @classmethod
-    def restart_emulator(cls):
-        """Restarts the Android emulator.
-
-        Delegates to EmulatorService.restart() for the implementation.
-        """
-        _service("get_emulator_service").restart()
 
     # ==================== Proxy ====================
 

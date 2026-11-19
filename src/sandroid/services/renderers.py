@@ -1,4 +1,4 @@
-"""Rendering utilities for emulator info, exit summary, and box drawing.
+"""Rendering utilities for the exit summary and box drawing.
 
 Contains self-contained renderers that were extracted from ``UIService`` so
 that the main service module stays focused on UI state management.
@@ -6,12 +6,10 @@ that the main service module stays focused on UI state management.
 Usage::
 
     from sandroid.services.renderers import (
-        EmulatorInfoRenderer,
         ExitSummaryRenderer,
         BoxRenderer,
     )
 
-    EmulatorInfoRenderer.print_emulator_information(info_dict)
     ExitSummaryRenderer.print_exit_summary(tools_used)
 """
 
@@ -158,90 +156,6 @@ class BoxRenderer:
 
         bottom = f"\n\u2514{h_line}\u2518"
         return f"{top}{body}{bottom}"
-
-
-# ---------------------------------------------------------------------------
-# Emulator Info Renderer
-# ---------------------------------------------------------------------------
-
-
-class EmulatorInfoRenderer:
-    """Renders emulator / device information in a Rich Panel."""
-
-    @staticmethod
-    def print_emulator_information(emulator_info: dict[str, Any]) -> None:
-        """Display emulator/device information in a formatted Rich Panel.
-
-        Args:
-            emulator_info: Dictionary containing emulator information with keys:
-                - emulator_id: AVD name
-                - emulator_path: Path to AVD configuration
-                - device_time: Current device time
-                - device_locale: Device locale setting
-                - android_version: Android version string
-                - api_level: Android API level
-                - network_interfaces: List of (interface, ip) tuples
-                - snapshots: List of snapshot dictionaries with 'tag' and 'date'
-        """
-        from rich.panel import Panel
-
-        try:
-            from sandroid.core.console import SandroidConsole
-
-            console = SandroidConsole.get()
-        except ImportError:
-            from rich.console import Console
-
-            console = Console()
-
-        emulator_id = emulator_info.get("emulator_id", "Unknown")
-        emulator_path = emulator_info.get("emulator_path", "Unknown")
-        device_time = emulator_info.get("device_time", "Unknown")
-        device_locale = emulator_info.get("device_locale", "Unknown")
-        android_version = emulator_info.get("android_version", "Unknown")
-        api_level = emulator_info.get("api_level", "Unknown")
-        network_interfaces = emulator_info.get("network_interfaces", [])
-        snapshots = emulator_info.get("snapshots", [])
-
-        info_text = (
-            f"[primary]Emulator ID:[/primary] [success]{emulator_id}[/success]\n"
-        )
-        info_text += (
-            f"[primary]Emulator Path:[/primary] [success]{emulator_path}[/success]\n"
-        )
-        info_text += (
-            f"[primary]Device Time:[/primary] [success]{device_time}[/success]\n"
-        )
-        info_text += (
-            f"[primary]Device Locale:[/primary] [success]{device_locale}[/success]\n"
-        )
-        info_text += (
-            f"[primary]Android Version & API Level:[/primary] "
-            f"[success]{android_version} (API {api_level})[/success]\n\n"
-        )
-
-        info_text += "[warning]Network Interfaces:[/warning]\n"
-        for interface, ip in network_interfaces:
-            info_text += (
-                f"[primary]Interface:[/primary] [success]{interface}[/success] "
-                f"([info]{ip}[/info])\n"
-            )
-
-        if snapshots:
-            info_text += "\n[warning]Available Snapshots:[/warning]\n"
-            for snapshot in snapshots:
-                info_text += (
-                    f"[success]{snapshot['date']}[/success] - "
-                    f"[primary]{snapshot['tag']}[/primary]\n"
-                )
-
-        panel = Panel(
-            info_text.strip(),
-            title="[accent]Emulator Information[/accent]",
-            border_style="cyan",
-            expand=False,
-        )
-        console.print(panel)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +402,5 @@ class DeviceInfoRenderer:
 __all__ = [
     "BoxRenderer",
     "DeviceInfoRenderer",
-    "EmulatorInfoRenderer",
     "ExitSummaryRenderer",
 ]

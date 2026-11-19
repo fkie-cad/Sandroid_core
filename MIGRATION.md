@@ -20,6 +20,8 @@ Device and AVD management moved from `sandroid-config` into the TUI.
 | `sandroid-config devices` | Devices screen (`D`, *Running*) or `adb devices -l` |
 | `sandroid-config init` AVD selection/start prompts | `init` only detects the SDK/adb/emulator paths; pick the AVD in the Devices screen (it opens at startup when no device runs). `--skip-avd-setup` still works as an alias of `--skip-android-setup`. |
 | `emulator.selected_avd`, `emulator.avd_auto_start` | Removed; old configs still load (the keys are ignored). For a scripted start use `sandroid --avd NAME`; the last-used AVD is preselected in the Devices screen. |
+| `set_avd_location.py` (repository-root GPS script) | Device settings: `E` in the TUI, `sandroid --device-settings FILE` or `--preset CODE` |
+| `sandroid.services.EnvironmentService` / `get_environment_service()` | `SetupService` / `get_setup_service()` (`sandroid.services.SetupResult` now refers to `SetupService`'s result) |
 
 Launch options chosen in the Devices screen (headless, boot mode, snapshot)
 are remembered per AVD in `~/.config/sandroid/devices.json`.

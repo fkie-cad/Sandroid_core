@@ -473,14 +473,6 @@ class DeviceManager:
         """
         return [d for d in self._devices.values() if d.is_emulator]
 
-    def get_physical_devices(self) -> list[Device]:
-        """Get all connected physical devices.
-
-        Returns:
-            List of physical Device objects
-        """
-        return [d for d in self._devices.values() if d.is_physical]
-
     @property
     def active_device(self) -> Device | None:
         """Get the currently active device.
@@ -705,29 +697,6 @@ class DeviceManager:
             return False
         return self._active_device.is_physical
 
-    def require_capability(
-        self, capability: DeviceCapability, action_name: str
-    ) -> bool:
-        """Check capability and log warning if missing.
-
-        Args:
-            capability: The required capability
-            action_name: Name of the action requiring this capability
-
-        Returns:
-            True if capability is available, False otherwise
-        """
-        if not self.check_capability(capability):
-            if self._active_device:
-                logger.warning(
-                    f"Action '{action_name}' requires {capability.name} "
-                    f"which is not available on {self._active_device.display_name}"
-                )
-            else:
-                logger.warning(f"No active device for action '{action_name}'")
-            return False
-        return True
-
     def on_device_change(self, callback: Callable[[Device], None]) -> None:
         """Register a callback for device change events.
 
@@ -826,91 +795,10 @@ class DeviceManager:
         )
         return None
 
-    def has_devices(self) -> bool:
-        """Check if any devices are connected.
-
-        Returns:
-            True if at least one device is connected
-        """
-        return len(self._devices) > 0
-
     def has_active_device(self) -> bool:
         """Check if an active device is selected.
 
         Returns:
             True if an active device is selected
         """
-        return self._active_device is not None
-
-    def verify_active_device(self) -> bool:
-        """Verify the active device is still connected and responsive.
-
-        This method should be called when ADB commands fail to check if the
-        device was disconnected. It refreshes the device list and returns
-        whether the active device is still available.
-
-        Returns:
-            True if active device is still connected, False if disconnected
-        """
-        if not self._active_device:
-            return False
-
-        old_serial = self._active_device.serial
-        self.refresh_devices()
-
-        # Check if the device is still connected
-        if self._active_device and self._active_device.serial == old_serial:
-            return True
-
-        logger.warning(f"Active device {old_serial} is no longer available")
-        return False
-
-    def handle_device_error(self, error: Exception) -> bool:
-        """Handle an ADB error that might indicate device disconnection.
-
-        Call this when an ADB command fails unexpectedly. It will check if
-        the device is still connected and attempt to recover.
-
-        Args:
-            error: The exception that occurred
-
-        Returns:
-            True if the device is still available, False if it was disconnected
-        """
-        error_str = str(error).lower()
-
-        # Check for common disconnection error patterns
-        disconnect_patterns = [
-            "device not found",
-            "device offline",
-            "no devices",
-            "connection refused",
-            "closed",
-            "broken pipe",
-            "transport",
-        ]
-
-        is_disconnect = any(pattern in error_str for pattern in disconnect_patterns)
-
-        if is_disconnect:
-            logger.warning(f"Device may have disconnected: {error}")
-            return self.verify_active_device()
-
-        # Not a disconnection error, device is probably still connected
-        return self.has_active_device()
-
-    def ensure_device_selected(self) -> bool:
-        """Ensure a device is selected, refreshing if necessary.
-
-        This is useful for recovery scenarios where the device list might
-        have changed. It will refresh devices and auto-select if possible.
-
-        Returns:
-            True if a device is now selected, False otherwise
-        """
-        if self._active_device:
-            return True
-
-        # Try to refresh and auto-select
-        self.refresh_devices()
         return self._active_device is not None

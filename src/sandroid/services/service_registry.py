@@ -88,7 +88,6 @@ class ServiceRegistry:
         from .app_selection_service import AppSelectionService
         from .configuration_service import ConfigurationService
         from .emulator_service import EmulatorService
-        from .environment_service import EnvironmentService
         from .file_extraction_service import FileExtractionService
         from .forensic_apk_service import ForensicAPKService
         from .forensic_service import ForensicService
@@ -105,7 +104,6 @@ class ServiceRegistry:
         standard_services: list[type] = [
             AppSelectionService,
             ConfigurationService,
-            EnvironmentService,
             FileExtractionService,
             ForensicAPKService,
             InitializationService,

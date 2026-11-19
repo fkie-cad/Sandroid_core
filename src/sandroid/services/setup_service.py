@@ -222,11 +222,6 @@ class EmulatorProtocol(Protocol):
         """List available Android Virtual Devices."""
         ...
 
-    @staticmethod
-    def start_avd(avd_name: str) -> bool:
-        """Start an Android Virtual Device."""
-        ...
-
 
 class CoreEmulator:
     """:class:`EmulatorProtocol` over :mod:`sandroid.core.emulator`."""
@@ -237,19 +232,6 @@ class CoreEmulator:
         from sandroid.core.emulator import list_avds
 
         return list_avds()
-
-    @staticmethod
-    def start_avd(avd_name: str) -> bool:
-        """Launch *avd_name* with its remembered options; True if it started."""
-        from sandroid.core.emulator import launch_avd, remembered_options
-        from sandroid.core.exceptions import EmulatorLaunchError
-
-        try:
-            launch_avd(avd_name, remembered_options(avd_name))
-        except EmulatorLaunchError as e:
-            logger.error(str(e))
-            return False
-        return True
 
 
 class SetupService:
@@ -920,34 +902,6 @@ class SetupService:
         from sandroid.services.device_info import get_host_ip
 
         return get_host_ip()
-
-    # ==================== Emulator Management ====================
-
-    def get_available_emulators(self) -> list[str]:
-        """Get list of available Android Virtual Devices.
-
-        Returns:
-            List of AVD names.
-        """
-        emulator = self._get_emulator()
-        return emulator.list_available_avds()
-
-    def start_emulator(self, avd_name: str) -> bool:
-        """Start an Android Virtual Device.
-
-        Args:
-            avd_name: Name of the AVD to start.
-
-        Returns:
-            True if emulator started successfully.
-        """
-        emulator = self._get_emulator()
-        result = emulator.start_avd(avd_name)
-        if result:
-            self._logger.info(f"Emulator '{avd_name}' started successfully")
-        else:
-            self._logger.error(f"Failed to start emulator '{avd_name}'")
-        return result
 
     # ==================== State Management ====================
 

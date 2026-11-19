@@ -328,7 +328,6 @@ class CommandRegistry:
         "io_commands",
         "system_commands",
         "snapshot_commands",
-        "device_commands",
         "memory_commands",
     ]
 

@@ -130,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **`sandroid-config avd list|start|stop|rename|create` and `sandroid-config devices`** — use the TUI's Devices screen (`D`) or `sandroid --avd NAME`; create AVDs with Android Studio or `deploy/create_avd.py` (see MIGRATION.md).
 - Config keys `emulator.selected_avd` and `emulator.avd_auto_start` (configs that still set them load fine; the values are ignored).
+- The repository-root `set_avd_location.py` GPS script (use the device settings: `E` in the TUI, `--device-settings FILE` or `--preset CODE`), the unused `EnvironmentService` (`get_environment_service`; `sandroid.services.SetupResult` is now the `SetupService` result) and other dead device code: `Toolbox.restart_emulator`/`print_emulator_information`, `EmulatorInfoRenderer`, `DeviceService.get_emulator_info`, `SetupService.get_available_emulators`/`start_emulator`, six unused `DeviceManager` helpers, and the broken `Select Device` command handler (`commands/device_commands.py`).
 
 ## [2.1.0] - 2026-11-17
 

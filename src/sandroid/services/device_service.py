@@ -359,50 +359,8 @@ class DeviceService:
         }
 
     # =========================================================================
-    # Emulator Information
+    # Device Information
     # =========================================================================
-
-    def get_emulator_info(self) -> dict[str, Any]:
-        """Get comprehensive information about the connected emulator/device.
-
-        Gathers device information including:
-        - Emulator ID and path
-        - Device time and locale
-        - Android version and API level
-        - Network interfaces
-        - Available snapshots
-
-        Returns:
-            Dictionary containing emulator information with keys:
-            - emulator_id: AVD name
-            - emulator_path: Path to AVD configuration
-            - device_time: Current device time
-            - device_locale: Device locale setting
-            - android_version: Android version string
-            - api_level: Android API level
-            - network_interfaces: List of (interface, ip) tuples
-            - snapshots: List of snapshot dictionaries with 'tag' and 'date'
-        """
-        from sandroid.core.adb import Adb
-
-        emulator_id = Adb.get_current_avd_name()
-        emulator_path = Adb.get_current_avd_path()
-        device_time = Adb.get_device_time()
-        device_locale = Adb.get_device_locale()
-        android_info = Adb.get_android_version_and_api_level()
-        network_info = Adb.get_network_info()
-        snapshots = Adb.get_avd_snapshots()
-
-        return {
-            "emulator_id": emulator_id,
-            "emulator_path": emulator_path,
-            "device_time": device_time,
-            "device_locale": device_locale,
-            "android_version": android_info.get("android_version", "Unknown"),
-            "api_level": android_info.get("api_level", "Unknown"),
-            "network_interfaces": network_info,
-            "snapshots": snapshots,
-        }
 
     def get_device_info(self) -> dict[str, Any]:
         """Get comprehensive device information, adapting to device type.

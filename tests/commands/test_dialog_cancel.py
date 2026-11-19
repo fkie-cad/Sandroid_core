@@ -71,35 +71,6 @@ def test_proxy_prompt_esc_cancels_and_an_address_is_set(monkeypatch):
     assert calls == [("set", "10.0.2.2:8081")]
 
 
-# -- device: Select Device -------------------------------------------------------
-
-
-def test_device_selection_esc_cancels_and_a_pick_switches(monkeypatch):
-    from sandroid import services
-    from sandroid.commands.device_commands import DeviceSelectorCommand
-
-    switched: list[str] = []
-    devices = [
-        SimpleNamespace(serial="emulator-5554", name="A"),
-        SimpleNamespace(serial="emulator-5556", name="B"),
-    ]
-    service = SimpleNamespace(
-        get_connected_devices=lambda: devices,
-        set_active_device=switched.append,
-    )
-    monkeypatch.setattr(services, "get_device_service", lambda: service)
-    command = DeviceSelectorCommand()
-    result = asyncio.run(
-        command.execute(_ctx(request_selection=_selection(lambda o: None)))
-    )
-    assert result.error == "cancelled"
-    assert switched == []
-    ctx = _ctx(request_selection=_selection(lambda options: options[1]))
-    result = asyncio.run(command.execute(ctx))
-    assert result.success
-    assert switched == ["emulator-5556"]
-
-
 # -- forensic: add / remove spotlight file, pull all -----------------------------
 
 

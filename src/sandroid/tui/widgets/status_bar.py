@@ -51,7 +51,6 @@ class StatusBar(Static):
         self.show_theme_indicator = False
         self.active_device = ""
         self.device_type = ""
-        self.device_count = 0
         # Cached device metadata (populated at discovery — no ADB on refresh):
         self.device_android_version = ""
         self.device_api_level = 0
@@ -509,7 +508,6 @@ class StatusBar(Static):
                 self.device_android_version = ""
                 self.device_api_level = 0
                 self.device_rooted = None
-            self.device_count = dm.device_count
         except Exception:
             pass
 
