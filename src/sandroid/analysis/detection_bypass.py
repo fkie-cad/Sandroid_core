@@ -3351,10 +3351,13 @@ class BypassService:
         Returns:
             The armed categories, in display order.
         """
+        # One lock hold for the union and the drop: a live toggle lands
+        # either before (kept as armed) or after (a fresh load), never lost.
         with self._lock:
             self._armed |= self._active
             armed = set(self._armed)
-        self._reset_script_state()
+            job, path = self._take_script_locked()
+        self._dispose_script(job, path)
         rank = {c: i for i, c in enumerate(self.categories())}
         return sorted(armed, key=lambda c: (rank.get(c, len(rank)), c))
 
@@ -3838,13 +3841,23 @@ class BypassService:
         on the new process.
         """
         with self._lock:
-            job = self._job
-            path = self._temp_path
-            self._job = None
-            self._script = None
-            self._temp_path = None
-            self._active = set()
-            self._merge_errors = set()
+            job, path = self._take_script_locked()
+        self._dispose_script(job, path)
+
+    def _take_script_locked(self) -> tuple[Any, str | None]:
+        """Null the script state (caller holds ``_lock``); returns the job
+        and temp path for :meth:`_dispose_script`.
+        """
+        job, path = self._job, self._temp_path
+        self._job = None
+        self._script = None
+        self._temp_path = None
+        self._active = set()
+        self._merge_errors = set()
+        return job, path
+
+    def _dispose_script(self, job: Any, path: str | None) -> None:
+        """Stop the taken job, unlink its temp, unregister the task."""
         if job is not None:
             try:
                 Toolbox.get_frida_job_manager().stop_job_with_id(job.get_id())

@@ -2202,13 +2202,7 @@ class SandroidTUI(App):
 
     def _open_objection_modal(self, package_name, liveness, pid, held) -> None:
         from sandroid.services.app_start import Liveness
-        from sandroid.tui.modals.objection_modal import (
-            ObjectionModal,
-            build_objection_command,
-        )
-        from sandroid.tui.screens.objection_terminal_screen import (
-            ObjectionTerminalScreen,
-        )
+        from sandroid.tui.modals.objection_modal import ObjectionModal
 
         if held:
             self.notify(
@@ -2218,14 +2212,8 @@ class SandroidTUI(App):
             return
 
         def on_config(config):
-            if config is None:
-                return
-            cmd = build_objection_command(package_name, config)
-            self.push_screen(
-                ObjectionTerminalScreen(
-                    cmd=cmd, package_name=package_name, spawn_mode=config.spawn_mode
-                )
-            )
+            if config is not None:
+                self._start_objection(package_name, config)
 
         self.push_screen(
             ObjectionModal(
@@ -2236,6 +2224,43 @@ class SandroidTUI(App):
             ),
             on_config,
         )
+
+    def _start_objection(self, package_name: str, config) -> None:
+        """Open Objection; a spawn runs the pre-start step first (worker).
+
+        The pre-start step (identity profile) may ask, apply and restart the
+        framework; when it fails or is declined Objection is not opened.
+        """
+        from sandroid.tui.modals.objection_modal import build_objection_command
+        from sandroid.tui.screens.objection_terminal_screen import (
+            ObjectionTerminalScreen,
+        )
+
+        def open_terminal() -> None:
+            cmd = build_objection_command(package_name, config)
+            self.push_screen(
+                ObjectionTerminalScreen(
+                    cmd=cmd, package_name=package_name, spawn_mode=config.spawn_mode
+                )
+            )
+
+        if not config.spawn_mode:
+            open_terminal()
+            return
+
+        def prepare() -> None:
+            from sandroid.services.app_start import AppStartError, prepare_launch
+
+            try:
+                prepare_launch(package_name, "Objection")
+            except AppStartError as exc:
+                self.call_from_thread(
+                    self.notify, f"Objection not started: {exc}", severity="error"
+                )
+                return
+            self.call_from_thread(open_terminal)
+
+        self.run_worker(prepare, name="objection_prepare", thread=True)
 
     def action_resume_objection(self) -> None:
         self._objection_resume_controller.resume_session()

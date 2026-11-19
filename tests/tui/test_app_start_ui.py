@@ -490,3 +490,94 @@ async def test_no_identity_notice_when_off_or_not_running(monkeypatch, state, pi
         expected = (PKG, "mara-de") if state else None
         assert panel._identity_gap == expected
         assert "Identity profile" not in _body(app)
+
+
+# -- fix round: Objection's spawn and the pre-start progress line ------------------
+
+
+class _ObjectionApp:
+    """Just what SandroidTUI._start_objection uses."""
+
+    def __init__(self):
+        self.pushed: list = []
+        self.notes: list = []
+
+    def push_screen(self, screen):
+        self.pushed.append(screen)
+
+    def notify(self, message, severity="information"):
+        self.notes.append((message, severity))
+
+    def call_from_thread(self, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    def run_worker(self, fn, **kwargs):
+        import threading
+
+        t = threading.Thread(target=fn)
+        t.start()
+        t.join(5)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_objection_spawn_runs_the_pre_start_step_first(monkeypatch, fails):
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals import objection_modal
+
+    calls: list = []
+
+    def prepare(pkg, tool, **kw):
+        calls.append((pkg, tool))
+        if fails:
+            raise app_start.AppStartError(f"{pkg} not started — x not applied")
+        return True
+
+    monkeypatch.setattr(app_start, "prepare_launch", prepare)
+    monkeypatch.setattr(
+        objection_modal, "build_objection_command", lambda pkg, cfg: ["objection"]
+    )
+    fake = _ObjectionApp()
+
+    SandroidTUI._start_objection(fake, PKG, SimpleNamespace(spawn_mode=True))
+
+    assert calls == [(PKG, "Objection")]
+    if fails:
+        assert fake.pushed == []
+        assert fake.notes == [
+            (f"Objection not started: {PKG} not started — x not applied", "error")
+        ]
+    else:
+        assert len(fake.pushed) == 1
+
+    calls.clear()
+    fake.pushed.clear()
+    SandroidTUI._start_objection(fake, PKG, SimpleNamespace(spawn_mode=False))
+    assert calls == []  # attach: no pre-start step
+    assert len(fake.pushed) == 1
+
+
+async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):
+    import threading
+
+    _panel_env(monkeypatch, pid=None)
+    text = (
+        "Applying identity profile 'mara-de' (ssaid) — the Android framework "
+        "restarts; this can take a few minutes"
+    )
+
+    def header() -> str:
+        return str(app.query_one("#spotlight-header").content)
+
+    app = _Harness()
+    async with app.run_test(size=(240, 30)) as pilot:
+        await settle(pilot)
+        assert "not running" in header()
+        t = threading.Thread(target=app_start._set_status, args=((PKG, text),))
+        t.start()
+        await until(pilot, lambda: text in header())
+        assert "not running" not in header()
+        assert "␣ start" not in header()
+        t = threading.Thread(target=app_start._set_status, args=(None,))
+        t.start()
+        await until(pilot, lambda: "not running" in header())
+    assert app_start._STATUS_LISTENERS == []  # unmount unsubscribed

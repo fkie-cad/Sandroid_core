@@ -1401,11 +1401,19 @@ def test_abort_cleans_up_a_nameless_spawn_whose_session_is_gone(env, monkeypatch
 DESC = "apply identity profile 'mara' (ssaid, locale)"
 
 
+_REAL_SYSTEM_SERVER_PID = app_start._system_server_pid
+_REAL_PM_READY = app_start._package_manager_ready
+
+
 @pytest.fixture(autouse=True)
-def _no_pre_spawn_hooks():
-    """Each test starts with an empty registry (a booted TUI may register)."""
+def _no_pre_spawn_hooks(monkeypatch):
+    """Each test starts with an empty registry (a booted TUI may register);
+    system_server never changes unless a test says so (no adb).
+    """
     saved = list(app_start._PRE_SPAWN_HOOKS)
     app_start._PRE_SPAWN_HOOKS.clear()
+    monkeypatch.setattr(app_start, "_system_server_pid", lambda: 100)
+    monkeypatch.setattr(app_start, "_package_manager_ready", lambda: True)
     yield
     app_start._PRE_SPAWN_HOOKS[:] = saved
 
@@ -1616,6 +1624,7 @@ def test_a_failing_apply_aborts_the_spawn(env, bus, framework, monkeypatch):
     forgot: list = []
     monkeypatch.setattr(env.bypass, "forget_process", lambda: forgot.append(1))
     app_start.register_pre_spawn_hook(_hook(log, fail=RuntimeError("boom")))
+    framework.pids = [100]  # this one left the framework alone
 
     ok, msg = _in_worker(app_start.start_app)
 
@@ -1626,6 +1635,7 @@ def test_a_failing_apply_aborts_the_spawn(env, bus, framework, monkeypatch):
     # A disruptive one that fails mid-way still recovers the Frida state.
     app_start._PRE_SPAWN_HOOKS.clear()
     log.clear()
+    framework.pids = [100, 200]
     app_start.register_pre_spawn_hook(
         _hook(log, disruptive=True, fail=RuntimeError("window aborted"))
     )
@@ -1801,16 +1811,17 @@ def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
     log.clear()
     env.live = (Liveness.RUNNING, 77)  # am start only brings it to the front
     assert _in_worker(lambda: app_lifecycle.launch_app(PKG))["launched"] is True
-    assert log == ["launch"]
+    assert log == [("hook", PKG), "launch"]  # asked, nothing applied
 
     log.clear()
     env.live = (Liveness.UNKNOWN, None)
     result = _in_worker(lambda: app_lifecycle.launch_app(PKG))
     assert result["launched"] is False
     assert "adb error" in result["message"]
-    assert log == []
+    assert log == [("hook", PKG)]
 
     app_start._PRE_SPAWN_HOOKS.clear()
+    log.clear()
     app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
     env.live = (Liveness.NOT_RUNNING, None)
     bus.answer = False
@@ -1824,7 +1835,7 @@ def test_ai_launch_app_runs_hooks_on_a_first_launch_only(env, bus, monkeypatch):
     assert log == [("hook", PKG)]
 
 
-def test_ai_launch_app_is_refused_while_a_start_runs(env, monkeypatch):
+def test_ai_launch_app_with_a_step_is_refused_while_a_start_runs(env, monkeypatch):
     from sandroid.ai.tools import app_lifecycle
     from sandroid.core.adb import Adb
 
@@ -1833,6 +1844,7 @@ def test_ai_launch_app_is_refused_while_a_start_runs(env, monkeypatch):
         "launch_app",
         staticmethod(lambda pkg, activity=None: pytest.fail("launched")),
     )
+    app_start.register_pre_spawn_hook(_hook([]))
     held, release = threading.Event(), threading.Event()
 
     def _hold():
@@ -1889,13 +1901,22 @@ def recovery(monkeypatch):
     """Answers for ``pidof system_server``; records the drop and frida check."""
     from sandroid.core.adb import Adb
 
-    state = SimpleNamespace(pids=[], sent=[], dropped=0, refreshed=0)
+    monkeypatch.setattr(app_start, "_system_server_pid", _REAL_SYSTEM_SERVER_PID)
+    monkeypatch.setattr(app_start, "_package_manager_ready", _REAL_PM_READY)
+
+    state = SimpleNamespace(
+        pids=[], pm=[True], sent=[], dropped=0, refreshed=0, timeouts=[]
+    )
 
     def send(cmd, *a, **k):
         state.sent.append(cmd)
         if cmd == "shell pidof system_server":
             pid = state.pids.pop(0) if len(state.pids) > 1 else state.pids[0]
             return (f"{pid}\n" if pid else ""), ""
+        if cmd == "shell pm path android":
+            state.timeouts.append(k.get("timeout"))
+            up = state.pm.pop(0) if len(state.pm) > 1 else state.pm[0]
+            return ("package:/system/framework/framework-res.apk\n" if up else ""), ""
         if "boot_completed" in cmd:
             return "1\n", ""  # stale across a framework restart
         return "", ""
@@ -2079,3 +2100,214 @@ def test_stop_all_and_a_new_selection_clear_the_armed_set(env):
     env.bypass._armed = {"root"}
     env.spotlight.reset()
     assert env.bypass.armed_categories() == []
+
+
+def test_recovery_waits_for_the_package_manager_before_frida(recovery, clock):
+    """The PID alone is too early: frida would hit the post-restart ANRs."""
+    recovery.pids = [222]
+    recovery.pm = [False, False, True]
+    order: list = []
+    recovery_refresh = app_start._refresh_frida_server
+    app_start._refresh_frida_server = lambda: (
+        order.append(("refresh", clock.now)) or recovery_refresh()
+    )
+    try:
+        app_start.recover_after_framework_restart(100)
+    finally:
+        app_start._refresh_frida_server = recovery_refresh
+    assert clock.sleeps == 2  # pm silent twice
+    assert order == [("refresh", 2.0)]
+    assert recovery.timeouts == [5.0, 5.0, 5.0]  # short per-call timeout
+
+
+def test_recovery_times_out_on_a_silent_package_manager(recovery, clock):
+    recovery.pids = [222]
+    recovery.pm = [False]
+
+    with pytest.raises(AppStartError, match="package manager does not answer"):
+        app_start.recover_after_framework_restart(100, timeout=5.0)
+
+    assert recovery.dropped == 1  # dead handles dropped anyway
+    assert recovery.refreshed == 0
+
+
+# -- fix round: recovery, armed snapshot, no-plan launches, progress ------------
+
+
+def test_recovery_follows_the_pid_not_the_disruptive_claim(env, framework, monkeypatch):
+    """A plan that said "no restart" may still restart the framework."""
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    forgot: list = []
+    monkeypatch.setattr(env.bypass, "forget_process", lambda: forgot.append(1))
+    app_start.register_pre_spawn_hook(_hook(log))  # disruptive=False
+    framework.pids = [100, 200]
+
+    assert app_start.start_app() == (True, "ok")
+    assert forgot == [1]
+    assert framework.refreshed == [1]
+
+
+@pytest.mark.parametrize(
+    ("after", "disruptive", "recovered"),
+    [
+        (None, True, False),  # still unreadable: skip, never wait 90 s
+        (200, False, False),  # cannot tell a restart: skip
+        (200, True, True),  # the plan said so and system_server runs
+    ],
+)
+def test_an_unreadable_pid_before_never_waits(
+    env, framework, monkeypatch, after, disruptive, recovered
+):
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    framework.pids = [None, after]
+    calls: list = []
+    monkeypatch.setattr(
+        app_start,
+        "recover_after_framework_restart",
+        lambda pid, timeout=90.0: calls.append(pid),
+    )
+    app_start.register_pre_spawn_hook(_hook(log, disruptive=disruptive))
+
+    assert app_start.start_app(consent=True)[0] or not disruptive
+    assert calls == ([None] if recovered else [])
+
+
+def test_start_keeps_the_bypasses_armed_before_the_pre_start_step(
+    env, framework, monkeypatch
+):
+    """An AI select_app during the dialog/restart disarms; this app keeps
+    the bypasses it was started with.
+    """
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    env.bypass._armed = {"ssl"}
+    framework.pids = [100]
+
+    def hook(pkg):
+        return app_start.PreSpawnPlan(
+            DESC, False, lambda: env.spotlight.set_app("org.example.other")
+        )
+
+    app_start.register_pre_spawn_hook(hook)
+
+    assert app_start.start_app() == (True, "ok")
+    assert env.bypass.armed_categories() == []  # the selection change disarmed
+    assert log == [("spawn", {"ssl"})]
+
+
+def test_prepare_launch_without_plans_needs_no_lock_or_adb(env, monkeypatch):
+    monkeypatch.setattr(
+        app_start,
+        "probe_liveness",
+        lambda *a, **k: pytest.fail("probed the app"),
+    )
+    app_start.register_pre_spawn_hook(lambda pkg: None)  # identity off
+    held, release = threading.Event(), threading.Event()
+
+    def _hold():
+        with app_start.lifecycle_lock():
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    held.wait(5)
+    try:
+        assert app_start.prepare_launch(PKG, "TrigDroid") is True
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_the_dialog_lists_the_spotlight_apps_tools_for_another_launch(
+    env, bus, framework, monkeypatch
+):
+    """An AI launch of another app restarts the framework: the spotlight
+    app's tools die too, are named in the dialog, and are stopped after.
+    """
+    other = "org.example.other"
+    env.tasks = [
+        SimpleNamespace(name="fritap", app_name=PKG, display_name="FriTap"),
+        SimpleNamespace(name="dexray", app_name=other, display_name="Dexray"),
+    ]
+    log: list = []
+    app_start.register_pre_spawn_hook(_hook(log, disruptive=True))
+
+    assert _in_worker(lambda: app_start.prepare_launch(other, other)) is True
+
+    _name, kw = bus.asked[0]
+    assert kw["message"].endswith("This stops: Dexray, FriTap.")
+    assert sorted(env.stopped) == ["dexray", "fritap"]
+
+
+def test_the_progress_text_is_set_while_a_step_applies(env, framework, monkeypatch):
+    log: list = []
+    _ladder(env, monkeypatch, log)
+    seen: list = []
+    events: list = []
+    app_start.add_pre_spawn_status_listener(lambda: events.append(1))
+    framework.pids = [100]
+
+    def hook(pkg):
+        return app_start.PreSpawnPlan(
+            "apply identity profile 'mara-de' (ssaid)",
+            True,
+            lambda: seen.append(app_start.pre_spawn_status(PKG)),
+        )
+
+    app_start.register_pre_spawn_hook(hook)
+    try:
+        assert app_start.start_app(consent=True) == (True, "ok")
+    finally:
+        app_start._STATUS_LISTENERS.clear()
+
+    assert seen == [
+        "Applying identity profile 'mara-de' (ssaid) — the Android framework "
+        "restarts; this can take a few minutes"
+    ]
+    assert app_start.pre_spawn_status() is None
+    assert events == [1, 1]  # began, ended
+
+
+def test_ai_tools_say_the_app_may_still_start_before_their_timeout(env, monkeypatch):
+    from sandroid.ai import loop
+    from sandroid.ai.tools import app_lifecycle, session_control
+
+    release = threading.Event()
+    monkeypatch.setattr(loop, "tool_time_remaining", lambda: 0.05)
+    monkeypatch.setattr(session_control, "_DEADLINE_MARGIN_S", 0.0)
+    monkeypatch.setattr(
+        app_start, "start_app", lambda **k: release.wait(5) and (True, "ok")
+    )
+    monkeypatch.setattr(app_start, "prepare_launch", lambda *a, **k: release.wait(5))
+    try:
+        started = session_control.start_spotlight_app()
+        launched = app_lifecycle.launch_app(PKG)
+    finally:
+        release.set()
+
+    assert started["pending"] is True
+    assert started["started"] is False
+    assert "may still start" in started["message"]
+    assert launched["pending"] is True
+    assert "Still launching org.wikipedia" in launched["message"]
+
+
+def test_kill_takes_the_union_and_drops_the_script_in_one_lock_hold(env, monkeypatch):
+    """A live toggle cannot slip between the union and the drop."""
+    env.bypass._armed = {"root"}
+    env.bypass._active = {"ssl"}
+    seen: list = []
+    take = env.bypass._take_script_locked
+
+    def _take():
+        seen.append((env.bypass._lock._is_owned(), set(env.bypass._armed)))
+        return take()
+
+    monkeypatch.setattr(env.bypass, "_take_script_locked", _take)
+
+    env.bypass.keep_armed_and_forget()
+
+    assert seen == [(True, {"root", "ssl"})]

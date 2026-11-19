@@ -320,6 +320,9 @@ class SpotlightPanel(Widget):
             get_identity_service().add_status_listener(self._on_identity_status)
         except Exception:
             logger.debug("Spotlight panel: no identity status", exc_info=True)
+        from sandroid.services.app_start import add_pre_spawn_status_listener
+
+        add_pre_spawn_status_listener(self._on_pre_spawn_status)
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
@@ -329,6 +332,13 @@ class SpotlightPanel(Widget):
             get_identity_service().remove_status_listener(self._on_identity_status)
         except Exception:
             pass
+        from sandroid.services.app_start import remove_pre_spawn_status_listener
+
+        remove_pre_spawn_status_listener(self._on_pre_spawn_status)
+
+    def _on_pre_spawn_status(self) -> None:
+        """A pre-start step began or ended (any thread): repaint the header."""
+        self._post(self._repaint_text)
         if self._poll_timer is not None:
             try:
                 self._poll_timer.stop()
@@ -459,7 +469,13 @@ class SpotlightPanel(Widget):
         hooks = self._hooks_for_app(package)
         on = self._on_categories()
 
-        if paused:
+        from sandroid.services.app_start import pre_spawn_status
+
+        step = pre_spawn_status(package)
+        if step:
+            # Identity's apply can take minutes: say so, not "not running".
+            state = f"[{c.warn}]{escape(step)}[/]"
+        elif paused:
             pid_part = f" pid [b]{pid}[/]" if pid else ""
             state = f"[{c.warn}]◐ paused[/]{pid_part} [{c.dim}]· ␣ resume[/]"
         elif pid:
