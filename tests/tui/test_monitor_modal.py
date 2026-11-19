@@ -26,6 +26,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import settle, until
 from textual.app import App
 from textual.widgets import Button, Input, Static
 
@@ -157,18 +158,16 @@ async def test_add_and_remove_path_row(monkeypatch) -> None:
 
         # Add a row.
         modal.query_one("#path-add", Button).press()
-        await pilot.pause()
-        assert len(modal.query(".path-row")) == 2
+        await until(pilot, lambda: len(modal.query(".path-row")) == 2)
 
         # Remove the first row -> back to one.
         first_remove = list(modal.query(".path-remove"))[0]
         first_remove.press()
-        await pilot.pause()
-        assert len(modal.query(".path-row")) == 1
+        await until(pilot, lambda: len(modal.query(".path-row")) == 1)
 
         # Removing the last remaining row is a no-op.
         list(modal.query(".path-remove"))[0].press()
-        await pilot.pause()
+        await settle(pilot)
         assert len(modal.query(".path-row")) == 1
 
 

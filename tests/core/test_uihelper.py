@@ -37,7 +37,7 @@ PNG = uihelper._PNG_MAGIC + b"fake-png-body"
 # --------------------------------------------------------------------- fakes
 
 
-def wait_for(pred, timeout: float = 3.0) -> bool:
+def wait_for(pred, timeout: float = 10.0) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if pred():
@@ -661,8 +661,11 @@ def test_no_restart_once_a_quit_suppressed_it(adb):
     h, popen, rec, sleeps = make_helper(adb)
     assert h.start()
     h.suppress_restarts()
+    reader = h._gen.reader
     popen.current.die(137)
-    time.sleep(0.3)
+    reader.join(10.0)  # the reader handled the death (and is done)
+    assert not reader.is_alive()
+    assert h._supervisor is None  # nothing to restart it
     assert rec.states() == ["connected"]
     assert len(popen.helpers) == 1
     assert sleeps == []
@@ -674,10 +677,14 @@ def test_pending_request_fails_fast_on_death(adb):
     popen = FakePopen(silent=frozenset({"dump"}))
     h, popen, rec, _ = make_helper(adb, popen=popen)
     assert h.start()
-    threading.Timer(0.05, popen.current.die).start()
-    t0 = time.monotonic()
-    assert h.dump(timeout=10) is None
-    assert time.monotonic() - t0 < 3
+    res: dict = {}
+    t = threading.Thread(target=lambda: res.setdefault("dump", h.dump(timeout=60)))
+    t.start()
+    assert wait_for(lambda: any(c.startswith("dump") for c in popen.current.commands))
+    popen.current.die()
+    t.join(10.0)
+    assert not t.is_alive()  # woken by the death, not by its 60 s timeout
+    assert res["dump"] is None
     h.stop()
 
 
@@ -693,7 +700,8 @@ def test_five_deaths_go_down(adb):
     assert sleeps == [1.0, 2.0, 4.0, 8.0]
     assert len(popen.helpers) == 5
     assert not h.alive
-    time.sleep(0.05)
+    h._supervisor.join(10.0)  # the only spawner is done
+    assert not h._supervisor.is_alive()
     assert len(popen.helpers) == 5  # no more restarts
     h.stop()
     assert rec.states()[-1] == "stopped"
@@ -805,28 +813,37 @@ def test_requires_serial():
 class _A11yPopen(FakePopen):
     """Each helper spawn flips accessibility_enabled to 1 (FULL connect)."""
 
-    def __init__(self, adb: FakeAdb, delay: float = 0.0, **kw) -> None:
+    def __init__(self, adb: FakeAdb, gate: threading.Event | None = None, **kw) -> None:
         super().__init__(**kw)
         self.adb = adb
-        self.delay = delay
+        self.gate = gate  # adb shell comes up only once it is set
+        self.spawning = threading.Event()
 
     def __call__(self, argv, **kw):
         if "exec-out" not in argv:
-            if self.delay:
-                time.sleep(self.delay)  # adb shell takes a moment to come up
+            self.spawning.set()
+            if self.gate is not None:
+                self.gate.wait(10.0)
             self.adb.settings["accessibility_enabled"] = "1"
         return super().__call__(argv, **kw)
 
 
 def test_stop_during_start_kills_inflight_helper_and_restores_a11y(adb):
-    popen = _A11yPopen(adb, delay=0.3)
+    gate = threading.Event()
+    popen = _A11yPopen(adb, gate=gate)
     h, popen, rec, _ = make_helper(adb, popen=popen)
     res = {}
     t = threading.Thread(target=lambda: res.setdefault("ok", h.start()))
     t.start()
-    time.sleep(0.1)
-    h.stop()  # e.g. the app quits while tracking is starting
-    t.join(3)
+    assert popen.spawning.wait(10.0)  # adb shell is coming up ...
+    # ... when the app quits while tracking is starting
+    stopper = threading.Thread(target=h.stop)
+    stopper.start()
+    assert wait_for(lambda: h._stopping)
+    gate.set()  # the helper process appears after the stop
+    stopper.join(10.0)
+    t.join(10.0)
+    assert not stopper.is_alive()
     assert res["ok"] is False
     assert h.last_error == "cancelled"
     helper = popen.helpers[0]
@@ -847,10 +864,9 @@ def test_stop_while_start_waits_for_connect_returns_promptly(adb):
     t = threading.Thread(target=lambda: res.setdefault("ok", h.start(timeout=20)))
     t.start()
     assert wait_for(lambda: popen.helpers)
-    t0 = time.monotonic()
     h.stop(timeout=1)
-    t.join(3)
-    assert time.monotonic() - t0 < 5
+    t.join(10.0)
+    assert not t.is_alive()  # cancelled, not ended by its 20 s timeout
     assert res["ok"] is False
     assert popen.helpers[0].returncode is not None
     assert adb.settings["accessibility_enabled"] == "0"
@@ -865,8 +881,10 @@ def test_start_during_backoff_has_one_spawner(adb):
     assert wait_for(lambda: "lost" in rec.states())
     assert h.start() is True  # the caller reacts to "lost"
     gen2 = popen.helpers[-1]
+    sup = h._supervisor
     gate.set()  # the supervisor's back-off ends: it must not spawn again
-    time.sleep(0.2)
+    sup.join(10.0)
+    assert not sup.is_alive()
     assert len(popen.helpers) == 2
     assert h._gen.proc is gen2
     assert "restarted" not in rec.states()
@@ -1005,9 +1023,10 @@ def test_stop_kills_supervisor_spawn_before_restoring_a11y(adb):
         return real(command, serial, timeout)
 
     Adb.send_adb_command = spy
-    t0 = time.monotonic()
-    h.stop(timeout=1)
-    assert time.monotonic() - t0 < 5  # not the 20 s restart connect timeout
+    stopper = threading.Thread(target=h.stop, kwargs={"timeout": 1})
+    stopper.start()
+    stopper.join(10.0)
+    assert not stopper.is_alive()  # not the 20 s restart connect timeout
     assert seen["helper_rc_at_restore"] is not None
     assert inflight.stdin.closed
     assert "restarted" not in rec.states()
@@ -1021,10 +1040,13 @@ def test_stop_from_connected_callback_does_not_wait_for_start(adb):
     def on_status(state, info):
         rec.on_status(state, info)
         if state == "connected":
-            h.stop()
+            h.stop(timeout=30)  # waiting for start() would take 35 s
 
     h._on_status = on_status
-    t0 = time.monotonic()
-    assert h.start() is True
-    assert time.monotonic() - t0 < 3
+    res: dict = {}
+    t = threading.Thread(target=lambda: res.setdefault("ok", h.start()))
+    t.start()
+    t.join(10.0)
+    assert not t.is_alive()
+    assert res["ok"] is True
     assert rec.states() == ["connected", "stopped"]

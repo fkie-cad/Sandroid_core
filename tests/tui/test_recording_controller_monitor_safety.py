@@ -280,7 +280,7 @@ def test_stop_monitor_before_revert_marshals_via_call_from_thread_off_main_threa
 
     worker = threading.Thread(target=run_in_worker)
     worker.start()
-    worker.join(timeout=5)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     assert result_holder["config"] is config
@@ -521,7 +521,7 @@ def test_start_recording_chat_success_marshals_ui_via_call_from_thread_off_main_
 
     worker = threading.Thread(target=run_in_worker)
     worker.start()
-    worker.join(timeout=5)
+    worker.join(timeout=10)
 
     try:
         assert not worker.is_alive()
@@ -587,7 +587,7 @@ def test_stop_recording_chat_success_marshals_via_call_from_thread_off_main_thre
 
     worker = threading.Thread(target=run_in_worker)
     worker.start()
-    worker.join(timeout=5)
+    worker.join(timeout=10)
 
     assert not worker.is_alive()
     result = result_holder["result"]

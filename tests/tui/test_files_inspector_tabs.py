@@ -10,7 +10,6 @@ import hashlib
 import json
 import shutil
 import sys
-import time
 from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -26,6 +25,7 @@ from file_inspect_samples import (
     make_places,
     write_pairs,
 )
+from pilot_helpers import boot, settle, until
 
 from sandroid.core import file_diff
 from sandroid.core import file_inspect as fi
@@ -275,18 +275,6 @@ def test_review_diff_uses_the_runs_copies_or_parses_the_lines(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-async def _settle(pilot, n: int = 5) -> None:
-    for _ in range(n):
-        await pilot.pause(0.03)
-
-
-async def _wait(pilot, predicate, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and not predicate():
-        await pilot.pause(0.03)
-    assert predicate()
-
-
 async def test_versions_and_content_tabs_in_the_app(tmp_path):
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.widgets.file_inspect import InspectZoomModal
@@ -295,20 +283,16 @@ async def test_versions_and_content_tabs_in_the_app(tmp_path):
     get_forensic_service().add_spotlight_file(PLACES)
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
-        await _settle(pilot, 8)
-        if type(app.screen).__name__ != "MainScreen":
-            await pilot.press("enter")
-            await _settle(pilot)
-        ms = app.screen
+        ms = await boot(app, pilot)
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         panel = ms.lens_widget("files")
         panel.refresh_rows()
         panel.table.focus()
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.current_row().key == PLACES
         await pilot.press("enter")
-        await _wait(pilot, lambda: ms.inspector_is_open)
+        await until(pilot, lambda: ms.inspector_is_open)
         inspector = ms.query_one("#inspector")
         assert [t for t, _s in ms.inspector_content.tabs] == [
             "Summary",
@@ -324,27 +308,27 @@ async def test_versions_and_content_tabs_in_the_app(tmp_path):
         assert "Diff  v3" in _sections_text(ms.inspector_content.tabs[1][1])
 
         await pilot.press("left_curly_bracket")  # older
-        await _settle(pilot)
+        await settle(pilot)
         assert "Diff  v2" in _sections_text(ms.inspector_content.tabs[1][1])
         await pilot.press("asterisk")  # v2 is the base
-        await _settle(pilot)
+        await settle(pilot)
         assert fins.state_for(PLACES).base is not None
         await pilot.click("#inspector-body", offset=(3, 0))  # newest line
-        await _settle(pilot)
+        await settle(pilot)
         text = _sections_text(ms.inspector_content.tabs[1][1])
         assert "Diff  v3" in text
         assert "(base)" in text
         # A click focuses the Inspector (to scroll it); { } still work.
         await pilot.press("left_curly_bracket")
-        await _settle(pilot)
+        await settle(pilot)
         assert "Diff  v2" in _sections_text(ms.inspector_content.tabs[1][1])
         await pilot.press("right_curly_bracket")
-        await _settle(pilot)
+        await settle(pilot)
 
         await pilot.press("z")
-        await _wait(pilot, lambda: isinstance(app.screen, InspectZoomModal))
+        await until(pilot, lambda: isinstance(app.screen, InspectZoomModal))
         await pilot.press("escape")
-        await _wait(pilot, lambda: app.screen is ms)
+        await until(pilot, lambda: app.screen is ms)
 
         await pilot.press("right_square_bracket")
         assert inspector.tab_name == "Content"
@@ -352,19 +336,19 @@ async def test_versions_and_content_tabs_in_the_app(tmp_path):
             ms.inspector_content.tabs[2][1]
         )
         await pilot.press("right_curly_bracket")  # next table
-        await _settle(pilot)
+        await settle(pilot)
         assert "moz_meta · 3 of 3" in _sections_text(ms.inspector_content.tabs[2][1])
         await pilot.click("#inspector-body", offset=(3, 4))  # moz_places line
-        await _settle(pilot)
+        await settle(pilot)
         assert "moz_places · 8 of 8" in _sections_text(ms.inspector_content.tabs[2][1])
         await pilot.press("z")
-        await _wait(pilot, lambda: isinstance(app.screen, InspectZoomModal))
+        await until(pilot, lambda: isinstance(app.screen, InspectZoomModal))
         await pilot.press("escape")
-        await _wait(pilot, lambda: app.screen is ms)
+        await until(pilot, lambda: app.screen is ms)
 
         # { } * do nothing (and are not offered) without the Inspector.
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
         assert ms.check_action("inspector_key", ("asterisk",)) is False
 

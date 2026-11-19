@@ -19,11 +19,12 @@ and after every test to avoid cross-test leakage.
 
 from __future__ import annotations
 
-import time
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pilot_helpers import until
 from textual.app import App, ComposeResult
 
 from sandroid.core import watchlist_store
@@ -93,21 +94,6 @@ class _WatchlistHarness(App):
 
     def compose(self) -> ComposeResult:
         yield WatchlistView(id="files-watchlist")
-
-
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    """Poll ``predicate`` with real pauses until true or timeout elapses.
-
-    Pulls run on a genuine background thread (WatchlistView._run_bg), so a
-    plain ``await pilot.pause()`` doesn't guarantee the worker has posted
-    its result back yet -- mirrors test_diffs_view.py's identical helper.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
 
 
 PATH_A = "/data/data/com.app/config_a"  # extension-less -> txt_diff_paths fallback
@@ -184,9 +170,7 @@ async def test_a_pull_writes_a_readable_acquisition_record(monkeypatch) -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
         view.pull([PATH_A])
-        await _wait_for(
-            pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED
-        )
+        await until(pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED)
         assert seen == [[PATH_A, f"{PATH_A}-wal", f"{PATH_A}-journal"]]
         (version,) = watchlist_store.version_dirs(PATH_A)
         assert version.parent == watchlist_store.files_root() / "com.app" / "config_a"
@@ -328,16 +312,14 @@ async def test_w_pulls_a_first_version_right_away(monkeypatch) -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
         assert view.add_path(PATH_A) is True
-        await _wait_for(
-            pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY
-        )
+        await until(pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY)
         (first,) = watchlist_store.version_dirs(PATH_A)
         assert first.name.startswith("v001_")
         assert watchlist_store.version_record(first)["trigger"] == "watch"
 
         content[PATH_A] = "v1\nv2\n"
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
+        await until(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
         newest = watchlist_store.version_dirs(PATH_A)[-1]
         assert "+v2" in watchlist_store.version_diff(newest)
 
@@ -360,7 +342,7 @@ async def test_a_pattern_pulls_first_versions_of_its_matches(monkeypatch) -> Non
         view._adb = lambda: _Adb
         await pilot.pause()
         assert view.add_path("/data/data/com.app/db/*") is True
-        await _wait_for(
+        await until(
             pilot,
             lambda: all(view.rows[p].state is RowState.BASELINE_ONLY for p in (a, b)),
         )
@@ -395,7 +377,7 @@ async def test_unchanged_device_hashes_are_a_check_not_a_copy(monkeypatch) -> No
         await pilot.pause()
         view.marks = [Mark(1, datetime(2026, 1, 1, 10, 0, 0), "tap login")]
         view.pull([db])
-        await _wait_for(pilot, lambda: view.rows[db].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: view.rows[db].state is RowState.BASELINE_ONLY)
         (v1,) = watchlist_store.version_dirs(db)
         record = watchlist_store.version_record(v1)
         file_set = record["set"]
@@ -413,7 +395,7 @@ async def test_unchanged_device_hashes_are_a_check_not_a_copy(monkeypatch) -> No
 
         calls.clear()
         view.pull([db])
-        await _wait_for(pilot, lambda: view.rows[db].checked_at is not None)
+        await until(pilot, lambda: view.rows[db].checked_at is not None)
         assert calls == []  # not pulled again
         assert view.rows[db].state is RowState.UNCHANGED
         assert "no change since v001" in view.rows[db].detail
@@ -428,7 +410,7 @@ async def test_unchanged_device_hashes_are_a_check_not_a_copy(monkeypatch) -> No
 
         content[f"{db}-wal"] = "wal two\n"  # a WAL-only write
         view.pull([db])
-        await _wait_for(pilot, lambda: len(watchlist_store.version_dirs(db)) == 2)
+        await until(pilot, lambda: len(watchlist_store.version_dirs(db)) == 2)
         assert watchlist_store.version_dirs(db)[-1].name.startswith("v002_")
 
 
@@ -449,7 +431,7 @@ async def test_only_membership_survives_a_restart(monkeypatch) -> None:
         await pilot.pause()
         view.add_path("/data/data/com.app/other")
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view.rows[PATH_A].pulled_at is not None)
+        await until(pilot, lambda: view.rows[PATH_A].pulled_at is not None)
         row = view.rows[PATH_A]
         assert row.size == 4
         # The set hash (the file + its -wal/-journal; here the file alone).
@@ -481,9 +463,7 @@ async def test_first_pull_captures_baseline_not_a_diff(monkeypatch) -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
         view.pull([PATH_A])
-        await _wait_for(
-            pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED
-        )
+        await until(pilot, lambda: view._rows[PATH_A].state != RowState.NEVER_PULLED)
 
         assert view._rows[PATH_A].state == RowState.BASELINE_ONLY
         assert "First version" in view._rows[PATH_A].detail
@@ -501,14 +481,12 @@ async def test_second_pull_with_changed_content_shows_diff(monkeypatch) -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
         view.pull([PATH_A])
-        await _wait_for(
-            pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY
-        )
+        await until(pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY)
 
         # Device-side content changes before the next pull.
         content[PATH_A] = "line one\nline two\n"
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.CHANGED)
+        await until(pilot, lambda: view._rows[PATH_A].state == RowState.CHANGED)
 
         info = view._rows[PATH_A]
         assert info.diff_text is not None
@@ -538,12 +516,10 @@ async def test_second_pull_with_unchanged_content_reports_unchanged(
         view = app.query_one(WatchlistView)
         await pilot.pause()
         view.pull([PATH_A])
-        await _wait_for(
-            pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY
-        )
+        await until(pilot, lambda: view._rows[PATH_A].state == RowState.BASELINE_ONLY)
 
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.UNCHANGED)
+        await until(pilot, lambda: view._rows[PATH_A].state == RowState.UNCHANGED)
 
         # No device hash here (autouse fixture): the identical copy is not
         # kept as a version; one "checked, no change" record instead.
@@ -565,7 +541,7 @@ async def test_pull_failure_marks_row_as_error(monkeypatch) -> None:
         view = app.query_one(WatchlistView)
         await pilot.pause()
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view._rows[PATH_A].state == RowState.ERROR)
+        await until(pilot, lambda: view._rows[PATH_A].state == RowState.ERROR)
 
 
 @pytest.mark.asyncio
@@ -637,17 +613,40 @@ async def test_two_pulls_of_one_file_at_once_run_one_after_the_other(
     fake = _fake_pull_file({PATH_A: "same\n"})
     active: list[int] = []
     overlap: list[int] = []
+    entered: list[int] = []
+    # The first pull holds on until the other one is under way: waiting for
+    # the file's lock, or (without the lock) pulling alongside it.
+    other_started = threading.Event()
+    real_lock = watchlist_store.pull_lock
+
+    class _Announcing:
+        def __init__(self, lock) -> None:
+            self._lock = lock
+
+        def __enter__(self):
+            entered.append(1)
+            if len(entered) > 1:
+                other_started.set()
+            return self._lock.__enter__()
+
+        def __exit__(self, *exc):
+            return self._lock.__exit__(*exc)
 
     def _slow_pull(self, remote_path, local_path, compute_hash=False):
         active.append(1)
         if len(active) > 1:
             overlap.append(1)
-        time.sleep(0.2)  # long enough for the other pull to start meanwhile
+            other_started.set()
+        if remote_path == PATH_A and len(entered) == 1:
+            assert other_started.wait(10.0), "the second pull never started"
         try:
             return fake(self, remote_path, local_path, compute_hash)
         finally:
             active.pop()
 
+    monkeypatch.setattr(
+        watchlist_store, "pull_lock", lambda path: _Announcing(real_lock(path))
+    )
     monkeypatch.setattr(FileExtractionService, "pull_file", _slow_pull)
     get_forensic_service().add_spotlight_file(PATH_A)
     warnings: list[str] = []
@@ -661,7 +660,7 @@ async def test_two_pulls_of_one_file_at_once_run_one_after_the_other(
         await pilot.pause()
         view.pull([PATH_A])
         view.pull([PATH_A])  # e.g. the watch's first version + a manual u
-        await _wait_for(
+        await until(
             pilot,
             lambda: (
                 not view.is_pulling(PATH_A)
@@ -707,17 +706,15 @@ async def test_pulls_and_checks_are_session_timeline_lines(
             )
         ]  # fmt: skip
         assert view.add_path(PATH_A) is True
-        await _wait_for(
-            pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY
-        )
+        await until(pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY)
         content[PATH_A] = "v1\nv2\n"
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
+        await until(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
         view.pull([PATH_A])  # the same bytes again: a check
-        await _wait_for(pilot, lambda: view.rows[PATH_A].checked_at is not None)
+        await until(pilot, lambda: view.rows[PATH_A].checked_at is not None)
         del content[PATH_A]
         view.pull([PATH_A])
-        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.ERROR)
+        await until(pilot, lambda: view.rows[PATH_A].state is RowState.ERROR)
     assert service.flush(3.0)
     lines = [x for x in service.tail().lines if x["src"] == "files"]
     first, second, check, failed = lines

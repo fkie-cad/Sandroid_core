@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import time
 import tomllib
 from pathlib import Path
 
@@ -164,6 +165,13 @@ def test_change_to_section_missing_from_minimal_file_is_persisted(xdg):
     assert ConfigLoader().load().analysis.number_of_runs == 4
 
 
+async def _until(pilot, cond, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, f"condition not met within {timeout} s"
+        await pilot.pause(0.01)
+
+
 async def test_settings_screen_shows_error_for_invalid_runs(xdg, monkeypatch):
     from textual.app import App
     from textual.widgets import Input
@@ -191,12 +199,17 @@ async def test_settings_screen_shows_error_for_invalid_runs(xdg, monkeypatch):
         assert isinstance(screen, SettingsScreen)
         runs = screen.query_one("#setting-analysis--number_of_runs", Input)
         runs.value = "1"
-        await pilot.pause()
+        # Input.Changed bubbles to the screen, which stages the value.
+        await _until(
+            pilot, lambda: screen._pending.get("analysis.number_of_runs") in (1, "1")
+        )
         screen.action_save()
-        await pilot.pause()
+
+        def messages() -> list[str]:
+            return [n.message for n in app._notifications]
+
+        await _until(pilot, lambda: any("number_of_runs" in m for m in messages()))
         assert app.screen is screen  # stays open
-        messages = [n.message for n in app._notifications]
-        assert any("number_of_runs" in m for m in messages)
 
     assert user_file.read_text() == 'log_level = "INFO"\n'
     assert live.analysis.number_of_runs == 2

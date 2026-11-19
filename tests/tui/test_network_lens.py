@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from pilot_helpers import boot, settle, until
 
 from sandroid.tui.widgets import network_panel as np_mod
 from sandroid.tui.widgets.network_panel import (
@@ -318,29 +319,6 @@ def test_run_window_uses_the_shared_run_history_resolver(tmp_path):
 # --------------------------------------------------------------------------
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _boot(app, pilot):
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
-    return app.screen
-
-
-async def _wait(pilot, cond, timeout: float = 4.0) -> None:
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return
-        await pilot.pause(0.05)
-    assert cond()
-
-
 def _app():
     from sandroid.tui.app import SandroidTUI
 
@@ -348,22 +326,22 @@ def _app():
 
 
 async def _lens_with_flows(app, pilot, flow_dir, base=None):
-    ms = await _boot(app, pilot)
+    ms = await boot(app, pilot)
     await pilot.press("2")
-    await _settle(pilot)
+    await settle(pilot)
     panel = ms.query_one("#network-panel", NetworkPanel)
     write_flows(flow_dir, base if base is not None else time.time() - 100)
     panel.poll_now()
-    await _wait(pilot, lambda: panel.table.row_count > 0)
+    await until(pilot, lambda: panel.table.row_count > 0)
     return ms, panel
 
 
 async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         panel = ms.query_one("#network-panel", NetworkPanel)
         head = str(panel.query_one("#net-empty-head").render())
         assert "No flows yet" in head
@@ -375,19 +353,19 @@ async def test_empty_state_and_space_starts_mitm(flow_dir, monkeypatch):
         assert app.focused is panel
         # Enter is "inspect" everywhere: with nothing captured it does nothing.
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == []
         assert not ms.inspector_is_open
         await pilot.press("space")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == ["toggle"]
         # Space only starts: with mitmproxy running it stops nothing (M does).
         monkeypatch.setattr(panel.mitm, "is_running", lambda: True)
         await pilot.press("space")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == ["toggle"]
         await pilot.press("M")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == ["toggle", "toggle"]
 
 
@@ -404,7 +382,7 @@ async def test_flows_fill_the_table_noise_hidden(flow_dir):
         # newest row is selected (tail-follow)
         assert panel.table.cursor_row == panel.table.row_count - 1
         await pilot.press("N")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.table.row_count == total
         # error row shows a ✗ marker
         cells = [
@@ -418,11 +396,11 @@ async def test_new_rows_do_not_yank_a_moved_cursor(flow_dir):
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         panel.table.move_cursor(row=0)
-        await _settle(pilot)
+        await settle(pilot)
         count = panel.table.row_count
         write_flows(flow_dir, time.time(), specs=_SPECS[1:3], start_seq=100)
         panel.poll_now()
-        await _wait(pilot, lambda: panel.table.row_count == count + 2)
+        await until(pilot, lambda: panel.table.row_count == count + 2)
         assert panel.table.cursor_row == 0
 
 
@@ -431,20 +409,20 @@ async def test_filter_and_app_only(flow_dir):
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         await pilot.press("slash")
-        await _settle(pilot)
+        await settle(pilot)
         for ch in "facebook":
             await pilot.press(ch)
         await pilot.press("enter")
-        await _wait(pilot, lambda: panel.table.row_count == 1)
+        await until(pilot, lambda: panel.table.row_count == 1)
         assert "facebook" in ms._lens_captions["network"][1]
         panel.set_filter("")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("N")  # show everything, then narrow to the app
         await pilot.press("v")  # v is only "review" (Runs lens) now: no-op
-        await _settle(pilot)
+        await settle(pilot)
         assert "app only" not in ms._lens_captions["network"][1]
         await pilot.press("T")
-        await _settle(pilot)
+        await settle(pilot)
         apps = {
             panel._row_by_key(
                 panel.table.coordinate_to_cell_key((i, 0)).row_key.value
@@ -460,10 +438,10 @@ async def test_enter_opens_inspector_with_tabs(flow_dir):
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         panel.set_filter("facebook")
-        await _settle(pilot)
+        await settle(pilot)
         panel.table.focus()
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         content = ms.inspector_content
         assert [name for name, _ in content.tabs] == ["Summary", "Request", "Response"]
@@ -472,7 +450,7 @@ async def test_enter_opens_inspector_with_tabs(flow_dir):
         # live rows arriving do not replace the open Inspector
         write_flows(flow_dir, time.time(), specs=_SPECS[2:3], start_seq=50)
         panel.poll_now()
-        await _settle(pilot, 8)
+        await settle(pilot)
         assert ms.inspector_content.key == "network:row:f2"
 
 
@@ -481,15 +459,15 @@ async def test_tls_failure_row_and_badge(flow_dir):
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         await pilot.press("1")
-        await _settle(pilot)
+        await settle(pilot)
         panel.mitm._append_line("[TLS_FAIL]|10:00:00|api.revenuecat.com|cert|" + PKG)
         panel.mitm._append_line("[TLS_FAIL]|10:00:01|pinned.example.com|cert|" + PKG)
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#lens-bar").badge("network") == "⚑2"
         tls = [r for r in panel._live if r.kind == "tls"]
         assert [r.host for r in tls] == ["api.revenuecat.com", "pinned.example.com"]
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#lens-bar").badge("network") is None
         last = panel.table.get_row_at(panel.table.row_count - 1)
         assert "✗ TLS" in str(last[3])
@@ -500,13 +478,13 @@ async def test_tls_failure_row_and_badge(flow_dir):
 async def test_mitm_lines_go_to_the_activity_log(flow_dir):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         panel = ms.query_one("#network-panel", NetworkPanel)
         log = ms.query_one("#activity-log")
         panel.mitm._append_line(
             "[ERROR] device CANNOT reach mitmproxy at 10.0.2.2:8080"
         )
-        await _settle(pilot)
+        await settle(pilot)
         assert any(
             "mitm:" in line and "CANNOT reach" in line for line in log._plain_lines
         )
@@ -527,7 +505,7 @@ async def test_proxy_controls_stay_bound(flow_dir, monkeypatch):
             )
         for key in ("ctrl+d", "ctrl+n", "ctrl+a", "M"):
             await pilot.press(key)
-            await _settle(pilot, 2)
+            await settle(pilot)
         assert calls == [
             "toggle_device",
             "inject_ca",
@@ -535,7 +513,7 @@ async def test_proxy_controls_stay_bound(flow_dir, monkeypatch):
             "toggle_running",
         ]
         await pilot.press("I")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_content.key == STATUS_KEY
         assert [n for n, _ in ms.inspector_content.tabs] == ["mitmproxy", "friTap"]
 
@@ -549,8 +527,8 @@ async def test_review_scope_filters_by_run_window(flow_dir, tmp_path):
         ms, panel = await _lens_with_flows(app, pilot, flow_dir, base=base)
         live_rows = panel.table.row_count
         ms.set_scope(str(run), label="Run 3")
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         assert {r.seq for r in panel._review} == {3, 4, 5}
         title, info = ms._lens_captions["network"]
         assert "Run 3" in title
@@ -559,7 +537,7 @@ async def test_review_scope_filters_by_run_window(flow_dir, tmp_path):
         assert panel.table.row_count == 2
         assert "2 of 3" in info
         ms.set_scope(None)
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.table.row_count == live_rows
 
 
@@ -569,15 +547,15 @@ async def test_review_scope_empty_and_unknown_runs(flow_dir, tmp_path):
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         ms.set_scope(str(empty))  # label comes from run.json
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         assert panel.table.has_class("-empty")
         assert "No flows were captured during Run 1" in str(
             panel.query_one("#net-empty-head").render()
         )
         ms.set_scope(str(tmp_path / "missing"), label="Run 9")
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         assert "No flow data for Run 9" in str(
             panel.query_one("#net-empty-head").render()
         )
@@ -667,7 +645,7 @@ async def test_caption_says_how_much_noise_is_hidden(flow_dir):
         info = ms._lens_captions["network"][1]
         assert "N: 2 OS noise hidden" in info
         await pilot.press("N")
-        await _settle(pilot)
+        await settle(pilot)
         info = ms._lens_captions["network"][1]
         assert "+ OS noise" in info
         assert "hidden" not in info
@@ -679,7 +657,7 @@ async def test_caption_says_how_much_noise_is_hidden(flow_dir):
             start_seq=50,
         )
         panel.poll_now()
-        await _wait(
+        await until(
             pilot, lambda: "N: 3 OS noise" in (ms._lens_captions["network"][1] or "")
         )
 
@@ -693,24 +671,24 @@ async def test_filter_matches_status_and_esc_clears_it(flow_dir):
         await pilot.press("slash")
         for ch in "200":
             await pilot.press(ch)
-        await _wait(pilot, lambda: panel._filter == "200")
+        await until(pilot, lambda: panel._filter == "200")
         statuses = {
             str(panel.table.get_row_at(i)[3]) for i in range(panel.table.row_count)
         }
         assert statuses == {"200"}
         # Esc in the input: filter cleared, input closed, back on the table
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel._filter == ""
         assert panel.table.row_count == shown
         assert not panel.query_one("#net-filter").has_class("-open")
         assert app.focused is panel.table
         # an applied filter with the input closed: Esc clears it too
         panel.set_filter("✗")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.table.row_count == 1  # the reset upload
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel._filter == ""
         assert panel.table.row_count == shown
 
@@ -722,10 +700,10 @@ async def test_end_and_home_jump_to_the_last_and_first_row(flow_dir):
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         panel.table.focus()
         await pilot.press("home")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.table.cursor_row == 0
         await pilot.press("end")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel.table.cursor_row == panel.table.row_count - 1
 
 
@@ -783,7 +761,7 @@ async def test_persisted_tls_failures_are_one_row(flow_dir):
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         panel.add_tls_failure("12:00:00", "pinned.example.com", "cert", "")
-        await _settle(pilot)
+        await settle(pilot)
         now = time.time()
         with open(flow_dir / "flows.jsonl", "a", encoding="utf-8") as f:
             for seq, host in ((200, "pinned.example.com"), (201, "other.example")):
@@ -808,7 +786,7 @@ async def test_persisted_tls_failures_are_one_row(flow_dir):
                     + "\n"
                 )
         panel.poll_now()
-        await _wait(pilot, lambda: any(r.host == "other.example" for r in panel._live))
+        await until(pilot, lambda: any(r.host == "other.example" for r in panel._live))
         tls = [r for r in panel._live if r.kind == "tls"]
         assert sorted(r.host for r in tls) == ["other.example", "pinned.example.com"]
         assert all(r.reason == "cert" for r in tls)
@@ -836,8 +814,8 @@ async def test_mitm_lines_from_a_thread_raise_no_lookup_error(flow_dir):
         worker = threading.Thread(target=reader)
         worker.start()
         worker.join()
-        await _wait(pilot, lambda: sum(r.kind == "tls" for r in panel._live) == 30)
-        await _wait(pilot, lambda: not panel._status_pending)
+        await until(pilot, lambda: sum(r.kind == "tls" for r in panel._live) == 30)
+        await until(pilot, lambda: not panel._status_pending)
         loop.set_exception_handler(None)
         assert errors == []
 
@@ -854,7 +832,7 @@ async def test_refresh_status_outside_the_app_context(flow_dir):
         loop.set_exception_handler(lambda _loop, ctx: errors.append(ctx))
         ms._lens_captions["network"] = (None, None)
         loop.call_soon(panel.refresh_status, context=contextvars.Context())
-        await _wait(pilot, lambda: ms._lens_captions["network"][1])
+        await until(pilot, lambda: ms._lens_captions["network"][1])
         loop.set_exception_handler(None)
         assert errors == []
         assert not panel._status_pending
@@ -873,7 +851,7 @@ async def test_ctrl_o_opens_mitmweb_with_its_token(flow_dir, monkeypatch):
         opened: list[str] = []
         monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
         await pilot.press("ctrl+o")
-        await _settle(pilot)
+        await settle(pilot)
         assert opened == [f"{svc.web_url(with_token=False)}?token=s3cret-token"]
         toast = [n.message for n in app._notifications]
         assert any("Opened mitmweb UI" in m and "token" in m for m in toast)
@@ -892,26 +870,26 @@ async def test_fritap_caption_follows_its_lifecycle(flow_dir, monkeypatch):
         monkeypatch.setattr(fritap, "is_running", lambda: running["on"])
         try:
             fritap_mod.set_lifecycle("starting", "org.wikipedia")
-            await _wait(pilot, lambda: "starting" in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "starting" in ms._lens_captions["network"][0])
             running["on"] = True
             fritap_mod.set_lifecycle("running", "org.wikipedia")
-            await _wait(pilot, lambda: "friTap ●" in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "friTap ●" in ms._lens_captions["network"][0])
             fritap_mod.set_lifecycle("hung", "org.wikipedia is not responding")
-            await _wait(
+            await until(
                 pilot, lambda: "not responding" in ms._lens_captions["network"][0]
             )
             head = dict(fritap.status_rows())["friTap"]
             assert "h stops friTap" in head
             fritap_mod.set_lifecycle("stopping", "org.wikipedia")
-            await _wait(pilot, lambda: "stopping" in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "stopping" in ms._lens_captions["network"][0])
             running["on"] = False
             fritap_mod.set_lifecycle("stopped", "agent still unloading")
-            await _wait(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
+            await until(pilot, lambda: "friTap" not in ms._lens_captions["network"][0])
             assert "agent still unloading" in dict(fritap.status_rows())["friTap"]
             # NEW-2: a failed unload dropped friTap from the caption (read
             # like a clean stop); only the tab said "✗ failed".
             fritap_mod.set_lifecycle("failed", "agent stuck in org.wikipedia")
-            await _wait(
+            await until(
                 pilot, lambda: "friTap ✗ failed" in ms._lens_captions["network"][0]
             )
         finally:
@@ -1077,14 +1055,14 @@ async def test_review_reads_the_bundle_and_hides_dry_run_flows(flow_dir, tmp_pat
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         panel = ms.query_one("#network-panel", NetworkPanel)
         assert not (flow_dir / "flows.jsonl").exists()  # new session: no flows
         ms.set_scope(str(run), label="#3 Run C")
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         assert len(panel._review) == len(_SPECS)
         assert panel._review_data.source == "bundle"
         # replay 1 only: api.fittrack.de + app-measurement.com
@@ -1095,7 +1073,7 @@ async def test_review_reads_the_bundle_and_hides_dry_run_flows(flow_dir, tmp_pat
         assert panel.check_action("toggle_phases", ()) is True
 
         await pilot.press("A")
-        await _settle(pilot)
+        await settle(pilot)
         # all phases, OS noise (connectivitycheck, play.googleapis) still hidden
         assert panel.table.row_count == len(_SPECS) - 2
         cells = [str(panel.table.get_row_at(i)[2]) for i in range(5)]
@@ -1122,13 +1100,13 @@ async def test_review_without_mitm_points_to_the_pcap(flow_dir, tmp_path):
     export_run_flows(flow_dir, run / "network", 100, 200, mitm_running=False)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         panel = ms.query_one("#network-panel", NetworkPanel)
         ms.set_scope(str(run))
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         head = str(panel.query_one("#net-empty-head").render())
         hint = str(panel.query_one("#net-empty-hint").render())
         assert "mitmproxy was not running during Run 1" in head
@@ -1141,12 +1119,12 @@ async def test_review_of_an_old_run_says_where_it_looked(flow_dir, tmp_path):
     run = write_run(tmp_path / "runs" / "r_old", 100, 200, label="Run 1")
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         panel = ms.query_one("#network-panel", NetworkPanel)
         ms.set_scope(str(run))
-        await _wait(pilot, lambda: not panel._review_loading)
-        await _settle(pilot)
+        await until(pilot, lambda: not panel._review_loading)
+        await settle(pilot)
         hint = str(panel.query_one("#net-empty-hint").render())
         assert "predates flows stored in its bundle" in hint

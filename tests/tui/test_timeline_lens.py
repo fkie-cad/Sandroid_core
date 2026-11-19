@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 import timeline_fakes
+from pilot_helpers import boot, settle, until
 from textual.app import App, ComposeResult
 from timeline_fakes import make_line
 
@@ -38,28 +39,6 @@ def install_fakes(monkeypatch, tmp_path):
     return _install
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _wait(pilot, predicate, timeout: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition not met in time"
-
-
-async def _boot(app, pilot) -> None:
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")  # first-run welcome modal
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
-
-
 def _app():
     from sandroid.tui.app import SandroidTUI
 
@@ -82,7 +61,7 @@ class _LensHarness(App):
 async def _loaded_lens(pilot, app) -> TimelineLens:
     lens = app.query_one(TimelineLens)
     lens.on_lens_activated()
-    await _wait(pilot, lambda: lens._loaded)
+    await until(pilot, lambda: lens._loaded)
     lens.view.focus()
     await pilot.pause()
     return lens
@@ -146,26 +125,26 @@ async def test_5_switches_and_focuses_the_lens_and_shift_arrow_reaches_it(
     assert LENSES[-1].id == "timeline"
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("5")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "timeline"
         lens = ms.lens_widget("timeline")
         assert isinstance(lens, TimelineLens)
         assert is_shown(lens)
         assert app.focused is not None
         assert lens in app.focused.ancestors_with_self
-        await _wait(pilot, lambda: len(lens.rows) == 30)
+        await until(pilot, lambda: len(lens.rows) == 30)
         assert ms.query_one("#lens-host").border_title.startswith("Timeline · ")
         await pilot.press("4", "shift+right")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "timeline"
         await pilot.press("shift+right")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "app"
         await pilot.press("5", "question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         from textual.widgets import OptionList
 
         options = app.screen.query_one("#kb-list", OptionList)
@@ -185,9 +164,9 @@ async def test_footer_on_the_timeline_lens_has_at_most_seven_keys(
     install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("5")
-        await _settle(pilot)
+        await settle(pilot)
         keys = list(app.screen.query_one(SandroidFooter).query("FooterKey"))
         assert 0 < len(keys) <= SandroidFooter.MAX_KEYS
         labels = [k.description for k in keys]
@@ -292,7 +271,7 @@ async def test_tail_load_of_100k_lines_paints_in_under_a_second(
         lens = app.query_one(TimelineLens)
         started = time.monotonic()
         lens.on_lens_activated()
-        await _wait(pilot, lambda: lens._loaded, timeout=10)
+        await until(pilot, lambda: lens._loaded, timeout=10)
         await pilot.pause()
         elapsed = time.monotonic() - started
         assert len(lens.rows) == 20_000
@@ -380,7 +359,7 @@ async def test_a_gap_in_the_ring_reloads_from_the_file(install_fakes) -> None:
         write_lines(fakes.path, [make_line(21, NOW - 100), make_line(22, NOW - 99)])
         fakes.service.gap_once = True
         lens._poll()
-        await _wait(pilot, lambda: len(lens.rows) == 22)
+        await until(pilot, lambda: len(lens.rows) == 22)
 
 
 # --------------------------------------------------------------------------
@@ -552,13 +531,13 @@ async def test_review_scope_adds_a_run_chip(install_fakes) -> None:
     async with app.run_test(size=(140, 30)) as pilot:
         lens = await _loaded_lens(pilot, app)
         lens.post_message(ScopeChanged("/results/runs/r1", "#1 login"))
-        await _settle(pilot)
+        await settle(pilot)
         assert lens.chip_text().startswith("REVIEW run r1")
         assert {r.seq for r in lens.visible_rows} == {8, 9}
         lens.set_review_window((NOW - 600 + 2.5, NOW - 600 + 6.5))
         assert {r.seq for r in lens.visible_rows} == {4, 6, 7, 8, 9}
         lens.post_message(ScopeChanged(None))
-        await _settle(pilot)
+        await settle(pilot)
         assert "REVIEW" not in lens.chip_text()
 
 
@@ -590,21 +569,21 @@ async def test_inspector_masks_per_setting_and_V_reveals_after_confirm(
     fakes = install_fakes(lines)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("5")
         lens = ms.lens_widget("timeline")
-        await _wait(pilot, lambda: len(lens.rows) == 4)
+        await until(pilot, lambda: len(lens.rows) == 4)
         # Masking off: the JSON tab shows the text.
         await pilot.press("enter")
-        await _wait(pilot, lambda: 4 in lens._detail)
+        await until(pilot, lambda: 4 in lens._detail)
         assert ms.inspector_is_open
         content = ms.inspector_content
         assert content.title == "#4 input/text"
         assert "hunter22" in _plain(content, "JSON")
         # V is inert while masking is off.
         await pilot.press("V")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert any("Masking is off" in m for m in _messages(app))
         # Masking on: masked, V asks, Esc keeps it masked.
@@ -613,17 +592,17 @@ async def test_inspector_masks_per_setting_and_V_reveals_after_confirm(
         assert "hunter22" not in _plain(ms.inspector_content, "JSON")
         assert "_masked" in _plain(ms.inspector_content, "JSON")
         await pilot.press("V")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "ConfirmModal"
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert fakes.service.reveals == []
         await pilot.press("V")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("tab")  # any focus; y answers
         app.screen.action_yes()
-        await _settle(pilot)
+        await settle(pilot)
         assert fakes.service.reveals == [4]
         assert lens.revealed == 4
         # The reveal paused follow: its own audit line (#5), pulled in by the
@@ -632,13 +611,13 @@ async def test_inspector_masks_per_setting_and_V_reveals_after_confirm(
         assert not lens.following
         lens._poll()
         lens.release_pending()
-        await _wait(pilot, lambda: 5 in lens._by_seq)
+        await until(pilot, lambda: 5 in lens._by_seq)
         assert lens.revealed == 4
-        await _wait(pilot, lambda: "hunter22" in _plain(ms.inspector_content, "JSON"))
+        await until(pilot, lambda: "hunter22" in _plain(ms.inspector_content, "JSON"))
         # Moving the selection masks it again.
         lens.view.focus()
         await pilot.press("up")
-        await _settle(pilot)
+        await settle(pilot)
         assert lens.revealed is None
         assert "Chain" in dict(ms.inspector_content.tabs)
 
@@ -706,17 +685,17 @@ async def test_J_jumps_to_files_network_runs_and_ref_of(
     )
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("5")
         lens = ms.lens_widget("timeline")
-        await _wait(pilot, lambda: len(lens.rows) == 5)
+        await until(pilot, lambda: len(lens.rows) == 5)
         for seq, lens_id in ((1, "files"), (2, "network"), (3, "runs")):
             await pilot.press("5")
-            await _settle(pilot)
+            await settle(pilot)
             assert lens._select_seq(seq)
             await pilot.press("J")
-            await _settle(pilot)
+            await settle(pilot)
             assert ms.active_lens == lens_id
         assert calls == [
             ("files", "/data/data/x/app.db", "v003"),
@@ -724,15 +703,15 @@ async def test_J_jumps_to_files_network_runs_and_ref_of(
             ("runs", "r7"),
         ]
         await pilot.press("5")
-        await _settle(pilot)
+        await settle(pilot)
         lens._select_seq(4)
         await pilot.press("J")  # ref.of -> that row here
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "timeline"
         assert lens.cursor_row.seq == 2
         lens._select_seq(5)
         await pilot.press("J")
-        await _settle(pilot)
+        await settle(pilot)
         assert any("Nothing to jump to" in m for m in _messages(app))
 
 
@@ -740,7 +719,7 @@ async def test_jump_targets_reveal_flow_and_select_run(install_fakes) -> None:
     install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.switch_lens("network")
         net = ms.lens_widget("network")
@@ -748,7 +727,7 @@ async def test_jump_targets_reveal_flow_and_select_run(install_fakes) -> None:
         record = {"id": "abc", "seq": 5, "method": "POST", "host": "api.x.com"}
         record.update(path="/v1", status_code=200, ts_start=NOW, ts_end=NOW)
         assert net.reveal_flow("abc", record=record)
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         assert ms.inspector_content.key == "network:row:f5"
         ms.switch_lens("runs")
@@ -757,7 +736,7 @@ async def test_jump_targets_reveal_flow_and_select_run(install_fakes) -> None:
         runs._summaries = [{"run_id": "r1", "label": "login", "started_at": None}]
         runs._load_run_detail = lambda run_id: None
         assert runs.select_run("r1") is True
-        await _settle(pilot)
+        await settle(pilot)
         assert runs._selected_run_id == "r1"
         assert ms.inspector_is_open
 
@@ -770,7 +749,7 @@ async def test_files_reveal_selects_the_row_and_opens_versions(install_fakes) ->
     path = f"{root}/databases/app.db"
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.switch_lens("files")
         files = ms.lens_widget("files")
@@ -785,7 +764,7 @@ async def test_files_reveal_selects_the_row_and_opens_versions(install_fakes) ->
         files.refresh_rows()
         assert files.reveal("/data/data/unknown") is False
         assert files.reveal(path, version="v002")
-        await _settle(pilot)
+        await settle(pilot)
         assert files.current_row().key == path
         assert ms.inspector_is_open
         assert ms.query_one("#inspector").tab_name == "Versions"
@@ -801,11 +780,11 @@ async def test_files_reveal_selects_the_row_and_opens_versions(install_fakes) ->
 
 async def _label(pilot, key: str, name: str = "") -> None:
     await pilot.press(key)
-    await _settle(pilot, 3)
+    await settle(pilot)
     if name:
         await pilot.press(*name)
     await pilot.press("enter")
-    await _settle(pilot, 3)
+    await settle(pilot)
 
 
 async def test_label_keys_nest_close_stop_and_esc_writes_nothing(install_fakes) -> None:
@@ -813,14 +792,14 @@ async def test_label_keys_nest_close_stop_and_esc_writes_nothing(install_fakes) 
     labels = fakes.labels
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("number_sign")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert type(app.screen).__name__ == "InputModal"
         assert "Label 1 · start at" in str(app.screen.title_text)
         await pilot.press(*"cookies", "enter")
-        await _settle(pilot, 3)
+        await settle(pilot)
         await _label(pilot, "plus", "a")  # 2 under 1
         await _label(pilot, "plus", "b")  # sibling: ends 2, starts 3 under 1
         hist = [(e.kind, e.number, e.ended_by, e.depth) for e in labels.history()]
@@ -836,10 +815,10 @@ async def test_label_keys_nest_close_stop_and_esc_writes_nothing(install_fakes) 
         assert ended[-2:] == [(3, "new_label"), (1, "new_label")]
         await _label(pilot, "plus", "sub")
         await pilot.press("minus")  # innermost
-        await _settle(pilot)
+        await settle(pilot)
         assert [s.number for s in labels.open_spans()] == [4]
         await pilot.press("minus", "minus")
-        await _settle(pilot)
+        await settle(pilot)
         assert labels.open_spans() == []
         assert any("No open label." in m for m in _messages(app))
         # + with nothing open: a top-level label and the notice.
@@ -850,9 +829,9 @@ async def test_label_keys_nest_close_stop_and_esc_writes_nothing(install_fakes) 
         before = len(labels.history())
         for key in ("number_sign", "plus", "B"):
             await pilot.press(key)
-            await _settle(pilot, 3)
+            await settle(pilot)
             await pilot.press("escape")
-            await _settle(pilot, 3)
+            await settle(pilot)
         assert len(labels.history()) == before
         assert type(app.screen).__name__ == "MainScreen"
         # The marks are the Files projection of the labels.
@@ -873,20 +852,20 @@ async def test_B_is_global_in_every_lens_and_the_name_is_typed_into_the_prompt(
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         for spec in LENSES:
             await pilot.press(spec.key)
-            await _settle(pilot)
+            await settle(pilot)
             await _label(pilot, "B", spec.id)
         points = [e for e in fakes.labels.history() if e.kind == "point"]
         assert [p.name for p in points] == [spec.id for spec in LENSES]
         # Label keys typed into the prompt are text, not commands.
         await pilot.press("number_sign")
-        await _settle(pilot, 3)
+        await settle(pilot)
         await pilot.press("a", "plus", "b", "minus", "c", "number_sign", "B", "5")
         await pilot.press("enter")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert fakes.labels.history()[-1].name == "a+b-c#B5"
         assert ms.active_lens == "timeline"
         assert "mark 1 'app'" in ms.query_one("#log-ticker").last_line or (
@@ -898,40 +877,40 @@ async def test_the_typing_guard_swallows_label_keys(install_fakes) -> None:
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         # "/" in a lens without a filter (Sessions) starts the guard ...
         await pilot.press("4", "slash")
-        await _settle(pilot, 2)
+        await settle(pilot)
         assert ms.typing_guard_active()
         await pilot.press("a", "number_sign", "plus", "minus", "B", "5")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert ms.active_lens == "runs"
         assert fakes.labels.history() == []
         # ... and so does a "that looked like typing" cancel.
         ms.start_typing_guard()
         await pilot.press("x", "number_sign", "B")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert fakes.labels.history() == []
         # ctrl+t is not typing: it passes the guard.
         ms.start_typing_guard()
         await pilot.press("ctrl+t")
-        await _wait(pilot, lambda: fakes.tracking.toggles == ["user"])
+        await until(pilot, lambda: fakes.tracking.toggles == ["user"])
 
 
 async def test_label_keys_do_nothing_under_a_modal(install_fakes) -> None:
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.check_action("label_start", ()) is False
         app.action_label_stop()  # direct call: no MainScreen on top
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.check_action("label_start", ()) is True
         assert fakes.labels.history() == []
 
@@ -952,23 +931,23 @@ async def test_files_lens_segments_follow_labels_and_keeps_mark_wording(
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         files = ms.lens_widget("files")
         files.ingest([item(f"{root}/a.db")], now=t0)
         ms.add_label("start", "cookies", t0 + timedelta(seconds=10))
-        await _settle(pilot, 2)  # MarksChanged reaches the lens
+        await settle(pilot)  # MarksChanged reaches the lens
         files.ingest([item(f"{root}/b.db")], now=t0 + timedelta(seconds=15))
         fakes.labels.stop(t=(t0 + timedelta(seconds=20)).timestamp())
         ms._labels_changed(fakes.labels.history()[-1])
-        await _settle(pilot, 2)  # MarksChanged reaches the lens
+        await settle(pilot)  # MarksChanged reaches the lens
         files.ingest([item(f"{root}/c.db")], now=t0 + timedelta(seconds=25))
         ms.add_mark("tap", t0 + timedelta(seconds=30))
-        await _settle(pilot, 2)  # MarksChanged reaches the lens
+        await settle(pilot)  # MarksChanged reaches the lens
         files.ingest([item(f"{root}/d.db")], now=t0 + timedelta(seconds=35))
-        await _settle(pilot)
+        await settle(pilot)
         assert [m.kind for m in files.marks] == ["start", "end", "point"]
         assert files.segment == 3
         t = lambda s: (t0 + timedelta(seconds=s)).strftime("%H:%M:%S")  # noqa: E731
@@ -987,19 +966,19 @@ async def test_files_lens_segments_follow_labels_and_keeps_mark_wording(
         files.table.focus()
         files._segment = 3
         await pilot.press("less_than_sign")
-        await _settle(pilot, 2)
+        await settle(pilot)
         assert files.segment == 2
         rows = {r.key for r in files._rows}
         assert f"{root}/c.db" in rows
         assert f"{root}/d.db" not in rows
         await pilot.press("A")
-        await _settle(pilot, 2)
+        await settle(pilot)
         assert files.segment is None
         await pilot.press("A")
-        await _settle(pilot, 2)
+        await settle(pilot)
         assert files.segment == 3
         await pilot.press("greater_than_sign")
-        await _settle(pilot, 2)
+        await settle(pilot)
         assert files.segment == 3
 
 
@@ -1007,17 +986,17 @@ async def test_a_pending_label_pre_splits_files_and_esc_settles(install_fakes) -
     install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         files = ms.lens_widget("files")
         await pilot.press("B")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert type(app.screen).__name__ == "InputModal"
         assert len(files.activity.mark_times) == 1  # pre-split at the key press
         await pilot.press("escape")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert len(files.activity.mark_times) == 0
         assert files.marks == []
 
@@ -1038,18 +1017,18 @@ async def test_without_the_timeline_labels_stay_in_memory(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "sandroid.core.timeline", None)
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await _label(pilot, "B", "x")
         assert [m.label() for m in ms.marks] == ["mark 1 'x'"]
         assert any("Timeline unavailable" in m for m in _messages(app))
         await pilot.press("minus")
-        await _settle(pilot)
+        await settle(pilot)
         assert any("labels need the session timeline" in m for m in _messages(app))
         await pilot.press("5")
-        await _settle(pilot)
+        await settle(pilot)
         lens = ms.lens_widget("timeline")
-        await _wait(pilot, lambda: lens._loaded)
+        await until(pilot, lambda: lens._loaded)
         assert "Timeline unavailable" in "".join(
             seg.text for seg in lens.strip_for(0, 120)
         )
@@ -1064,24 +1043,24 @@ async def test_ctrl_t_toggles_tracking_and_the_header_shows_it(install_fakes) ->
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         header = ms.query_one("#shell-header")
         await pilot.press("ctrl+t")
-        await _wait(pilot, lambda: fakes.tracking.active)
-        await _wait(pilot, lambda: header.tracking_on)
+        await until(pilot, lambda: fakes.tracking.active)
+        await until(pilot, lambda: header.tracking_on)
         assert fakes.tracking.toggles == ["user"]
         await pilot.press("ctrl+t")
-        await _wait(pilot, lambda: not header.tracking_on)
+        await until(pilot, lambda: not header.tracking_on)
 
 
 async def test_ctrl_t_without_tracking_says_so(install_fakes) -> None:
     install_fakes(tracking=False)
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("ctrl+t")
-        await _settle(pilot)
+        await settle(pilot)
         assert any("Tracking not available" in m for m in _messages(app))
 
 
@@ -1097,7 +1076,7 @@ async def test_header_label_note_banner_and_no_clock_sampling(
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         header = ms.query_one("#shell-header")
         now = time.time()
@@ -1118,7 +1097,7 @@ async def test_header_label_note_banner_and_no_clock_sampling(
         assert lens.badge() == "⚠"
         assert "Timeline locked by PID 4711" in lens._banner()
         ms._handle_timeline_event(SimpleNamespace(data={"op": "locked"}))
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#lens-bar").badge("timeline") == "⚠"
 
 
@@ -1128,14 +1107,14 @@ async def test_doorbell_rebuilds_marks_for_labels_added_elsewhere(
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         assert len(ms.marks) == 0
         fakes.labels.point("from the AI", source="ai")  # not through the UI
         ms._handle_timeline_event(
             SimpleNamespace(data={"op": "lines", "srcs": ["label"], "last_seq": 1})
         )
-        await _settle(pilot)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'from the AI'"]
         assert ms.lens_widget("files").segment == 1
 
@@ -1207,7 +1186,7 @@ async def test_settings_timeline_tab_stages_whole_values_and_two_part_keys(
 
     app = _Harness()
     async with app.run_test(size=(140, 50)) as pilot:
-        await _settle(pilot)
+        await settle(pilot)
         screen = app.screen
         screen._pending.clear()
         screen.query_one("#setting-timeline--sources__net", Switch).value = False
@@ -1220,7 +1199,7 @@ async def test_settings_timeline_tab_stages_whole_values_and_two_part_keys(
         screen.query_one("#setting-tracking--settle_max_ms", Input).value = "3000"
         screen.query_one("#setting-tracking--shot_after_tap", Switch).value = True
         screen.query_one("#setting-tracking--helper_mode", Select).value = "invisible"
-        await _settle(pilot)
+        await settle(pilot)
         pending = screen._pending
         assert pending["timeline.sources"] == {
             "files": True, "monitor": True, "net": False, "input": True,
@@ -1276,12 +1255,12 @@ async def test_settings_save_is_the_users_and_skips_unchanged_timeline_keys(
     async def open_and_save(change=None) -> None:
         app = _Harness()
         async with app.run_test(size=(140, 50)) as pilot:
-            await _settle(pilot)
+            await settle(pilot)
             if change is not None:
                 change(app.screen)
-                await _settle(pilot)
+                await settle(pilot)
             await pilot.press("ctrl+s")
-            await _settle(pilot)
+            await settle(pilot)
             assert not isinstance(app.screen, SettingsScreen)
 
     def helper_invisible(screen) -> None:
@@ -1325,12 +1304,12 @@ async def test_real_labels_are_written_as_timeline_lines(tmp_path) -> None:
     svc.bind("emulator-test", folder)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await _label(pilot, "number_sign", "cookies")
         await _label(pilot, "B", "tap")
         await pilot.press("minus")
-        await _settle(pilot)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == [
             "label 1 'cookies'",
             "mark 2 'tap'",
@@ -1357,7 +1336,7 @@ async def test_real_lens_shows_lines_written_by_the_service(tmp_path) -> None:
         lens = await _loaded_lens(pilot, app)
         assert any(r.kind == "intervention" for r in lens.rows)
         svc.emit("files", "pull", summary="◆ v001 app.db", data={"path": "/x"})
-        await _wait(pilot, lambda: any(r.kind == "pull" for r in lens.rows))
+        await until(pilot, lambda: any(r.kind == "pull" for r in lens.rows))
 
 
 # --------------------------------------------------------------------------
@@ -1380,12 +1359,12 @@ async def test_live_row_without_offset_is_read_back_by_seq(
         for i in range(10):
             fakes.service.emit("files", "modify", summary=f"m{i}", t=NOW - 50 + i)
         lens._poll()
-        await _wait(pilot, lambda: len(lens.rows) == 11)
+        await until(pilot, lambda: len(lens.rows) == 11)
         row = lens._by_seq[3]
         assert row.offset is None  # TailResult without offsets (today's core)
         assert 3 not in lens._lines  # evicted
         lens._load_detail(row)
-        await _wait(pilot, lambda: 3 in lens._detail)
+        await until(pilot, lambda: 3 in lens._detail)
         detail = lens._detail[3]
         assert detail["line"]["summary"] == "m1"
         assert detail["prev"]["seq"] == 2
@@ -1394,7 +1373,7 @@ async def test_live_row_without_offset_is_read_back_by_seq(
         # A row whose line is nowhere: an error, not "loading…" forever.
         ghost = row_from_line(make_line(99, NOW - 1))
         lens._load_detail(ghost)
-        await _wait(pilot, lambda: 99 in lens._detail)
+        await until(pilot, lambda: 99 in lens._detail)
         assert "not readable" in _plain(lens._content(ghost), "JSON")
         assert "not readable" in _plain(lens._content(ghost), "Line")
 
@@ -1408,7 +1387,7 @@ async def test_live_rows_keep_ring_offsets_when_tail_has_them(install_fakes) -> 
         lens = await _loaded_lens(pilot, app)
         fakes.service.emit("files", "modify", summary="live", t=NOW - 50)
         lens._poll()
-        await _wait(pilot, lambda: 2 in lens._by_seq)
+        await until(pilot, lambda: 2 in lens._by_seq)
         assert lens._by_seq[2].offset == fakes.service.offsets[2]
 
 
@@ -1435,7 +1414,7 @@ async def test_reveal_ends_on_follow_filter_and_rebind(install_fakes) -> None:
         fakes.service.emit("files", "modify", summary="new", t=NOW - 10)
         lens._poll()
         lens.release_pending()
-        await _wait(pilot, lambda: len(lens.rows) >= 3)
+        await until(pilot, lambda: len(lens.rows) >= 3)
         assert lens.cursor_row.seq == 2
         assert lens.revealed == 2
         # resuming follow moves the selection to the newest line: it ends
@@ -1445,7 +1424,7 @@ async def test_reveal_ends_on_follow_filter_and_rebind(install_fakes) -> None:
         lens.click_line(1)
         assert lens.cursor_row.seq == 2
         lens._load_detail(lens.cursor_row)
-        await _wait(pilot, lambda: 2 in lens._detail)
+        await until(pilot, lambda: 2 in lens._detail)
         assert "hunter22" not in _plain(lens._content(lens.cursor_row), "JSON")
         # a filter change ends it even when the same row stays selected
         lens.reveal(2)
@@ -1539,12 +1518,12 @@ async def test_label_keys_record_actor_user(install_fakes) -> None:
     fakes = install_fakes()
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await _label(pilot, "number_sign", "a")
         await _label(pilot, "plus", "b")
         await _label(pilot, "B", "c")
         await pilot.press("minus")
-        await _settle(pilot)
+        await settle(pilot)
         actors = [(name, call["actor"]) for name, call in fakes.labels.calls]
         assert actors == [
             ("start", "user"),
@@ -1567,21 +1546,21 @@ async def test_hash_with_an_open_label_pre_splits_at_end_and_start(
     item = build_monitor_item(f'FSE_CONTENT_MODIFIED\t1\t"fit"\t{path}', (root + "/",))
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         files = ms.lens_widget("files")
         await _label(pilot, "number_sign", "login")  # label 1 open
         assert len(files.marks) == 1
         await pilot.press("number_sign")  # ends 1 + starts 2 at this instant
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert type(app.screen).__name__ == "InputModal"
         assert len(files.activity.mark_times) == 3  # start 1, end 1, start 2
         typed_at = datetime.now()
         files.ingest([item], now=typed_at)  # the app writes while the user types
         await pilot.press(*"cookies", "enter")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.kind for m in files.marks] == ["start", "end", "start"]
         row = files.activity.paths[path]
         assert sorted(row.segments) == [3]
@@ -1602,16 +1581,16 @@ async def test_a_failed_label_start_settles_the_files_pre_split(
     fakes.labels.start = broken
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         files = ms.lens_widget("files")
         await pilot.press("number_sign")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert len(files.activity.mark_times) == 1  # pre-split
         await pilot.press("enter")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert files.activity.mark_times == []
         assert files._pending_mark is None
 
@@ -1642,31 +1621,31 @@ async def test_rebind_rebuilds_marks_per_sink_and_refreshes_the_watchlist(
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         files = ms.lens_widget("files")
         bind(folder_a, labels_a)
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
         assert [m.name for m in files.watchlist.marks] == ["in A"]
         bind(folder_b, labels_b)
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
         assert [m.name for m in files.watchlist.marks] == ["in B"]
         # back to the already-open A: its own labels again
         bind(folder_a, labels_a)
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
         assert [m.name for m in files.watchlist.marks] == ["in A"]
         # a label doorbell from another sink at the same version still
         # rebuilds (the cache key is (sink, version), not the version)
         bind(folder_b, labels_b, op="lines")
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
         # a session-id-only payload works too
         svc.folder, svc.labels = None, labels_a
         ms._handle_timeline_event(
             SimpleNamespace(data={"op": "bound", "session_id": "s-a"})
         )
-        await _settle(pilot, 3)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]

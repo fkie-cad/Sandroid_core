@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from pilot_helpers import boot, settle
 
 from sandroid.tui.key_display import format_key
 from sandroid.tui.utils.recording_wrapper import RecordingWrapper
@@ -21,20 +22,6 @@ from sandroid.tui.utils.recording_wrapper import RecordingWrapper
 # --------------------------------------------------------------------------
 
 SIZE = (200, 50)
-
-
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _boot(app, pilot) -> None:
-    """Wait for MainScreen and dismiss the first-run welcome modal."""
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
 
 
 def _app():
@@ -109,9 +96,9 @@ def test_record_play_are_global_rebindable_app_bindings() -> None:
 async def test_r_on_main_screen_without_device_explains_why() -> None:
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("r")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert any("No device connected" in m for m in _messages(app))
 
@@ -122,9 +109,9 @@ async def test_r_on_main_screen_opens_record_settings(monkeypatch) -> None:
     monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("r")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "RecordSettingsModal"
         # No spotlight app: warned, but recording is still allowed.
         assert any("No app selected" in m for m in _messages(app))
@@ -136,14 +123,14 @@ async def test_p_without_recording_explains_and_stays_put(monkeypatch) -> None:
     monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         monkeypatch.setattr(app._recording_controller, "has_recording", lambda: False)
         started = []
         monkeypatch.setattr(
             app._recording_controller, "start_playback", lambda: started.append(1)
         )
         await pilot.press("p")
-        await _settle(pilot)
+        await settle(pilot)
         assert started == []
         assert any("Nothing recorded yet" in m for m in _messages(app))
         assert app.screen.query_one("#lens-body").current == "spotlight-panel"
@@ -154,13 +141,15 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
     from sandroid.tui.modals.confirm_modal import ConfirmModal
 
     monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
-    # The "y typed right behind p" check below is timing-based: under a loaded
-    # suite the y can arrive after the real 0.4 s window, where accepting it
-    # is correct. A wide window keeps the check about the behaviour.
-    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 2.0)
+    from sandroid.tui.screens.main_screen import MainScreen
+
+    # The arm and typing-guard windows are wide, however slow the host; their
+    # ends are simulated below (backdated) instead of waited for.
+    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 60.0)
+    monkeypatch.setattr(MainScreen, "TYPING_GUARD_SECONDS", 60.0)
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         rc = app._recording_controller
         monkeypatch.setattr(rc, "has_recording", lambda: True)
         started = []
@@ -177,7 +166,7 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
             },
         )
         await pilot.press("p")
-        await _settle(pilot)
+        await settle(pilot)
         # p reverts the device: it asks first, naming the recording and time.
         assert started == []
         assert type(app.screen).__name__ == "ConfirmModal"
@@ -186,33 +175,33 @@ async def test_p_with_recording_jumps_to_diffs_and_plays(monkeypatch) -> None:
         assert "2 replays + a dry run" in message
         assert "roughly 6-8 min" in message
         await pilot.press("n")
-        await _settle(pilot)
+        await settle(pilot)
         assert started == []
         # Stray typing never confirms (E2E: "places" typed while no text
         # field had focus): No has the focus, so Enter declines ...
         await pilot.press("p")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.focused.id == "no"
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert started == []
         assert type(app.screen).__name__ == "MainScreen"
         # ... the rest of a word closes the dialog as No ...
         await pilot.press("p", "l", "a")
-        await _settle(pilot)
+        await settle(pilot)
         assert started == []
         assert type(app.screen).__name__ == "MainScreen"
         assert any("looked like typing" in m for m in _messages(app))
         # ... (the rest of the word ran no app command: typing guard) ...
-        await pilot.pause(app.screen.TYPING_GUARD_SECONDS)
+        app.screen._typing_until = 0.0  # the guard window is over
         # ... and a y typed right behind the p is ignored ("py...").
         await pilot.press("p", "y")
         await pilot.pause()
         assert started == []
         assert type(app.screen).__name__ == "ConfirmModal"
-        await pilot.pause(app.screen.ARM_SECONDS)
+        app.screen._opened_at -= 61.0  # the arm window is over
         await pilot.press("y")  # read, then confirmed
-        await _settle(pilot)
+        await settle(pilot)
         assert started == [1]
         assert app.screen.query_one("#lens-body").current == "runs-panel"
 
@@ -257,21 +246,21 @@ async def test_slot_digit_in_picker_needs_confirm(monkeypatch) -> None:
     monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("S")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotPickerModal)
         await pilot.press("7")
-        await _settle(pilot)
+        await settle(pilot)
         assert loads == []
         assert isinstance(app.screen, ConfirmModal)
         await pilot.press("escape")  # cancel: nothing loaded
-        await _settle(pilot)
+        await settle(pilot)
         assert loads == []
         await pilot.press("7")
-        await _settle(pilot)
+        await settle(pilot)
         app.screen.dismiss(True)
-        await _settle(pilot)
+        await settle(pilot)
         assert loads == ["7"]
 
 
@@ -287,10 +276,10 @@ async def test_digit_on_main_screen_switches_lens_not_slot(monkeypatch) -> None:
     monkeypatch.setattr(SnapshotsPanel, "load_slot", lambda self, s: loads.append(s))
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         assert app.focused.id == "spotlight-panel"
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.active_lens == "network"
         assert toggles == []
         assert loads == []
@@ -304,11 +293,11 @@ async def test_digit_on_main_screen_switches_lens_not_slot(monkeypatch) -> None:
 async def test_shift_arrow_moves_focus_into_each_panel() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         seen = []
         for _ in range(5):  # App -> Network -> Files -> Sessions -> Timeline -> App
             await pilot.press("shift+right")
-            await _settle(pilot)
+            await settle(pilot)
             current = app.screen.query_one("#lens-body").current
             panel = app.screen.query_one(f"#{current}")
             assert app.focused is not None
@@ -323,12 +312,12 @@ async def test_files_lens_has_no_subtabs_to_get_stuck_in() -> None:
     """
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         app.screen.open_files_tab()
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("shift+down")
         await pilot.press("shift+right")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.active_lens == "runs"
         assert type(app.focused).__name__ != "_LensInput"
 
@@ -342,9 +331,9 @@ async def _open_record_settings(app, pilot, monkeypatch) -> None:
     from sandroid.tui.app import SandroidTUI
 
     monkeypatch.setattr(SandroidTUI, "_active_device", lambda self: object())
-    await _boot(app, pilot)
+    await boot(app, pilot)
     await pilot.press("r")
-    await _settle(pilot)
+    await settle(pilot)
     assert type(app.screen).__name__ == "RecordSettingsModal"
 
 
@@ -367,7 +356,7 @@ async def test_record_settings_esc_aborts_recording(monkeypatch) -> None:
         footer_text = str(app.screen.query_one("KeyHintFooter").render())
         assert "Esc=Cancel (nothing recorded)" in footer_text
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert not app._recording_controller.is_recording()
 
@@ -402,9 +391,9 @@ async def test_help_catalog_is_case_aware_and_lists_panel_keys() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "HelpScreen"
         options = app.screen.query_one("#kb-list", OptionList)
         rows = [
@@ -648,13 +637,13 @@ async def test_q_goes_through_request_quit(monkeypatch) -> None:
     """``q`` must behave like Ctrl+C (QuitController), not hard-exit."""
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         calls = []
         monkeypatch.setattr(
             app._quit_controller, "request_quit", lambda: calls.append("q")
         )
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == ["q"]
         assert app.is_running
         assert app.return_code is None
@@ -668,7 +657,7 @@ async def test_palette_quit_goes_through_request_quit(monkeypatch) -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         calls = []
         monkeypatch.setattr(
             app._quit_controller, "request_quit", lambda: calls.append("palette")
@@ -679,7 +668,7 @@ async def test_palette_quit_goes_through_request_quit(monkeypatch) -> None:
                 CommandPalette.ActionSelected("quit")
             )
             gc.collect()
-            await _settle(pilot)
+            await settle(pilot)
         assert calls == ["palette"]
         assert not [w for w in caught if "never awaited" in str(w.message)]
 
@@ -769,31 +758,31 @@ async def test_picker_s_then_digit_saves_slot(monkeypatch) -> None:
     monkeypatch.setattr(SnapshotsPanel, "save_slot", lambda self, s: saves.append(s))
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("S")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotPickerModal)
         await pilot.press("s")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotSlotPickerModal)
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotPickerModal)
         assert saves == ["3"]
 
         # Esc cancels without saving, a second Esc closes the picker.
         await pilot.press("s")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert saves == ["3"]
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
 
         # Ctrl+digit saves through the picker (opened on demand).
         app.action_save_slot("5")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotPickerModal)
         assert saves == ["3", "5"]
 
@@ -817,14 +806,14 @@ async def test_view_switch_never_leaves_focus_in_text_input(monkeypatch) -> None
     monkeypatch.setattr(FilesPanel, "focus", _focus_input)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         app.screen.open_files_tab()
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.active_lens == "files"
         assert not isinstance(app.focused, Input)
         assert app.screen.query_one("#files-panel") in (app.focused.ancestors_with_self)
         await pilot.press("P")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.query_one("#files-input", Input).value == ""
 
 
@@ -832,12 +821,12 @@ async def test_shift_arrows_work_with_nothing_focused() -> None:
     """After Esc leaves an input, focus is None -- navigation must still work."""
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         app.screen.set_focus(None)
-        await _settle(pilot)
+        await settle(pilot)
         before = app.screen.query_one("#lens-body").current
         await pilot.press("shift+right")
-        await _settle(pilot)
+        await settle(pilot)
         after = app.screen.query_one("#lens-body").current
         assert after != before
         assert app.focused is not None

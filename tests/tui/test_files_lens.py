@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import timeline_fakes
+from pilot_helpers import boot, settle, until
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Input
 
@@ -110,15 +111,6 @@ class _Harness(App):
 
     def resume_monitor_after_playback(self, config) -> None:
         self.resume_calls.append(config)
-
-
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
 
 
 def _keys(panel: FilesPanel) -> list[str]:
@@ -393,14 +385,14 @@ async def test_u_pulls_the_row_and_U_pulls_all(monkeypatch) -> None:
         panel.table.move_cursor(row=_keys(panel).index(PREFS))
         rows = panel.watchlist.rows
         await pilot.press("u")
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
         assert rows[DB].state is RowState.NEVER_PULLED
         assert rows[PREFS].size == len("<map/>\n")
         assert rows[PREFS].sha256
         assert rows[PREFS].pulled_at
         await pilot.press("U")
-        await _wait_for(pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY)
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.UNCHANGED)
+        await until(pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: rows[PREFS].state is RowState.UNCHANGED)
 
 
 @pytest.mark.asyncio
@@ -421,7 +413,7 @@ async def test_u_on_an_unwatched_row_watches_then_pulls(monkeypatch) -> None:
         panel.table.focus()
         await pilot.press("u")
         rows = panel.watchlist.rows
-        await _wait_for(
+        await until(
             pilot,
             lambda: AAID in rows and rows[AAID].state is RowState.BASELINE_ONLY,
         )
@@ -614,10 +606,10 @@ async def test_inspector_summary_events_and_pull_diff(monkeypatch) -> None:
 
         rows = panel.watchlist.rows
         panel.watchlist.pull([PREFS])
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
         content[PREFS] = '<map><boolean name="a" value="false" /></map>'
         panel.watchlist.pull([PREFS])
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
+        await until(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         inspected = panel.inspect_selected()
         diff = _plain(_tab(inspected, "Versions"))
         assert "true → false" in diff
@@ -688,7 +680,7 @@ async def test_resume_offer_button_delegates_and_start_clears_it() -> None:
                 source="monitor",
             )
         )
-        await _wait_for(pilot, lambda: not panel.resume_offered)
+        await until(pilot, lambda: not panel.resume_offered)
         assert not panel.query_one("#files-resume-btn").has_class("-shown")
 
 
@@ -739,7 +731,7 @@ async def test_review_scope_shows_the_runs_files_and_live_comes_back(
         panel = app.query_one(FilesPanel)
         panel.ingest(_items(_fse("FSE_CREATE_FILE", f"{ROOT}/files/live")), now=T0)
         panel.post_message(ScopeChanged(str(run_dir), "Run #3"))
-        await _wait_for(pilot, lambda: panel._review_record is not None)
+        await until(pilot, lambda: panel._review_record is not None)
         assert [r.key for r in panel._rows] == [PREFS, AAID, CACHE]
         assert [r.review_kind for r in panel._rows] == ["changed", "new", "deleted"]
         assert panel.caption() == ("Run #3", "3 files")
@@ -766,7 +758,7 @@ async def test_review_scope_with_a_missing_run_says_so(tmp_path) -> None:
     async with app.run_test() as pilot:
         panel = app.query_one(FilesPanel)
         panel.post_message(ScopeChanged(str(tmp_path / "nope")))
-        await _wait_for(pilot, lambda: panel._review_error is not None)
+        await until(pilot, lambda: panel._review_error is not None)
         assert panel.has_class("-empty")
         assert "Could not load this run" in str(
             panel.query_one("#files-empty").render()
@@ -783,14 +775,9 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
 
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
-        for _ in range(8):
-            await pilot.pause(0.05)
-        if type(app.screen).__name__ != "MainScreen":
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-        ms = app.screen
+        ms = await boot(app, pilot)
         await pilot.press("3")
-        await pilot.pause(0.1)
+        await settle(pilot)
         panel = ms.lens_widget("files")
         assert isinstance(panel, FilesPanel)
         assert ms.query_one("#lens-host").border_title == "Files · monitor off"
@@ -800,7 +787,7 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         panel.table.focus()
         await pilot.pause()
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert ms.inspector_is_open
         key = ms.inspector_content.key
         assert key[:2] == ("files", "live")
@@ -814,10 +801,10 @@ async def test_files_lens_in_the_app_enter_opens_and_live_updates_inspector() ->
         assert ms.inspector_content is before
         # Moving the cursor follows with the Inspector.
         await pilot.press("down")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert ms.inspector_content.key[2] != path
         await pilot.press("escape")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert not ms.inspector_is_open
         assert "paths" in ms.query_one("#lens-host").border_subtitle
 
@@ -933,7 +920,7 @@ async def test_short_paths_name_the_package_in_review_and_for_other_apps(
         assert live[bugle] == "com.google.android.apps.messaging: databases/bugle_db"
         assert live[AAID] == "files/aaid.txt"  # the monitored app's own
         panel.post_message(ScopeChanged(str(run_dir), "Run #4"))
-        await _wait_for(pilot, lambda: panel._review_record is not None)
+        await until(pilot, lambda: panel._review_record is not None)
         cells = {r.key: panel._path_cell(r).plain for r in panel._rows}
         assert cells[bugle] == "com.google.android.apps.messaging: databases/bugle_db"
         assert cells[DB] == f"{PKG}: databases/app.db"
@@ -1113,10 +1100,10 @@ async def test_history_tab_keeps_every_pull_and_restart_restores_the_diff(
         await pilot.pause()
         rows = panel.watchlist.rows
         panel.watchlist.pull([PREFS])
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: rows[PREFS].state is RowState.BASELINE_ONLY)
         content[PREFS] = '<map><string name="k">two</string></map>'
         panel.watchlist.pull([PREFS])
-        await _wait_for(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
+        await until(pilot, lambda: rows[PREFS].state is RowState.CHANGED)
         panel.refresh_rows()
         history = _plain(_tab(panel.inspect_selected(), "Versions"))
         assert "▸ v2" in history
@@ -1149,27 +1136,22 @@ async def test_inspector_keys_work_while_the_inspector_has_focus() -> None:
 
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
-        for _ in range(8):
-            await pilot.pause(0.05)
-        if type(app.screen).__name__ != "MainScreen":
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-        ms = app.screen
+        ms = await boot(app, pilot)
         await pilot.press("3")
-        await pilot.pause(0.1)
+        await settle(pilot)
         panel = ms.lens_widget("files")
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         panel.table.focus()
         await pilot.pause()
         await pilot.press("enter")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert ms.inspector_is_open
         ms.query_one("#inspector-scroll").focus()
         await pilot.pause()
         assert panel.table is not app.focused
         await pilot.press("w")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert AAID in get_forensic_service().get_spotlight_files()
         # The Inspector's own keys stay its own: ] still switches tabs.
         await pilot.press("right_square_bracket")
@@ -1280,22 +1262,22 @@ async def test_B_asks_for_a_name_enter_keeps_it_unnamed_and_esc_cancels(
         panel.refresh_rows()
         panel.table.focus()
         await pilot.press("B")
-        await pilot.pause(0.15)
+        await settle(pilot)
         assert type(app.screen).__name__ == "InputModal"
         assert "Mark 1" in app.screen.title_text
         assert len(panel.activity.mark_times) == 1  # pre-split at the key press
         await pilot.press("enter")  # empty name = unnamed
-        await pilot.pause(0.15)
+        await settle(pilot)
         assert [m.label() for m in panel.marks] == ["mark 1"]
         await pilot.press("B")
-        await pilot.pause(0.15)
+        await settle(pilot)
         await pilot.press(*"login", "enter")
-        await pilot.pause(0.15)
+        await settle(pilot)
         assert [m.label() for m in panel.marks] == ["mark 1", "mark 2 'login'"]
         await pilot.press("B")
-        await pilot.pause(0.15)
+        await settle(pilot)
         await pilot.press("escape")  # no mark
-        await pilot.pause(0.15)
+        await settle(pilot)
         assert len(panel.marks) == 2
         assert len(panel.activity.mark_times) == 2
         assert [e.kind for e in fakes.labels.history()] == ["point", "point"]
@@ -1331,22 +1313,17 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens(
     fakes = install_fakes()
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
-        for _ in range(8):
-            await pilot.pause(0.05)
-        if type(app.screen).__name__ != "MainScreen":
-            await pilot.press("enter")
-            await pilot.pause(0.2)
-        ms = app.screen
+        ms = await boot(app, pilot)
         await pilot.press("3")
-        await pilot.pause(0.1)
+        await settle(pilot)
         panel = ms.lens_widget("files")
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         panel.table.focus()
         await pilot.press("B")
-        await pilot.pause(0.15)
+        await settle(pilot)
         await pilot.press(*"tap login", "enter")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'tap login'"]
         assert "mark 1 'tap login'" in ms.query_one("#log-ticker").last_line
         assert panel.segment == 1
@@ -1354,7 +1331,7 @@ async def test_marks_are_a_shell_concept_logged_and_sent_to_every_lens(
             "Files · since mark 1 'tap login' · "
         )
         mark = ms.add_mark("from elsewhere")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert mark.number == 2
         assert [m.number for m in panel.marks] == [1, 2]
         assert panel.segment == 2
@@ -1567,9 +1544,9 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
         _register_monitor()
         await pilot.pause()
         _publish(_fse("FSE_CONTENT_MODIFIED", DB + "-wal"))
-        await _wait_for(pilot, lambda: panel.watchlist.pending_auto == [DB])
+        await until(pilot, lambda: panel.watchlist.pending_auto == [DB])
         rows = panel.watchlist.rows
-        await _wait_for(
+        await until(
             pilot, lambda: rows[DB].state is RowState.BASELINE_ONLY, timeout=8.0
         )
         (version,) = watchlist_store.version_dirs(DB)
@@ -1587,14 +1564,9 @@ async def test_a_monitor_write_to_a_star_file_is_auto_pulled(monkeypatch) -> Non
 
 
 async def _boot_files(pilot, app):
-    for _ in range(8):
-        await pilot.pause(0.05)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")
-        await pilot.pause(0.2)
-    ms = app.screen
+    ms = await boot(app, pilot)
     await pilot.press("3")
-    await pilot.pause(0.1)
+    await settle(pilot)
     return ms, ms.lens_widget("files")
 
 
@@ -1617,20 +1589,20 @@ async def test_mark_then_help_then_slash_types_into_the_filter(monkeypatch) -> N
         panel.table.focus()
         await pilot.pause()
         await pilot.press("B", *"open wikipedia", "enter")
-        await pilot.pause(0.3)
+        await settle(pilot)
         assert panel.has_class("-empty")  # nothing since the mark yet
         assert ms.focused is not None
         assert panel in ms.focused.ancestors_with_self
         await pilot.press("question_mark")
-        await pilot.pause(0.2)
+        await settle(pilot)
         assert type(app.screen).__name__ == "HelpScreen"
         await pilot.press("escape")
-        await pilot.pause(0.2)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert ms.focused is not None
         assert panel in ms.focused.ancestors_with_self
         await pilot.press("slash", *"places")
-        await pilot.pause(0.2)
+        await settle(pilot)
         field = panel.query_one("#files-input", Input)
         assert app.focused is field
         assert field.value == "places"
@@ -1650,10 +1622,10 @@ async def test_focus_lost_to_nothing_or_a_hidden_lens_comes_back() -> None:
         panel.refresh_rows()
         await pilot.pause()
         ms.set_focus(None)
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert ms.focused is panel.table
         ms.set_focus(ms.query_one("#spotlight-panel"))  # hidden lens
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert ms.focused is panel.table
         # A modal closing with nothing focused: AUTO_FOCUS is the active lens.
         assert ms.AUTO_FOCUS == "#files-panel"
@@ -1709,21 +1681,21 @@ async def test_slash_in_a_lens_without_a_filter_swallows_the_typed_word(
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.screens.main_screen import MainScreen
 
-    monkeypatch.setattr(MainScreen, "TYPING_GUARD_SECONDS", 0.4)
+    monkeypatch.setattr(MainScreen, "TYPING_GUARD_SECONDS", 60.0)
     app = SandroidTUI()
     async with app.run_test(size=(160, 45), notifications=True) as pilot:
         ms, _panel = await _boot_files(pilot, app)
         played: list[int] = []
         monkeypatch.setattr(app, "action_play", lambda: played.append(1))
         await pilot.press("4")  # Runs lens: no "/" filter
-        await pilot.pause(0.1)
+        await settle(pilot)
         await pilot.press("slash", *"places")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert played == []
         assert type(app.screen).__name__ == "MainScreen"
         assert ms._typed_ignored == "places"
         assert any("no filter" in n.message for n in app._notifications)
-        await pilot.pause(0.5)
+        ms._typing_until = time.monotonic() - 1.0  # a pause ended the window
         await pilot.press("p")
         await pilot.pause()
         assert played == [1]
@@ -1741,9 +1713,9 @@ async def test_quit_dialog_opened_by_a_stray_q_is_cancelled_by_the_next_letter(
         exits: list[int] = []
         monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
         await pilot.press("4")
-        await pilot.pause(0.1)
+        await settle(pilot)
         await pilot.press(*"query", "enter")
-        await pilot.pause(0.3)
+        await settle(pilot)
         assert exits == []
         assert type(app.screen).__name__ == "MainScreen"
         assert any("looked like typing" in n.message for n in app._notifications)
@@ -1763,14 +1735,12 @@ def _burst(app, *keys: str) -> None:
     """
     from textual import events
 
+    # A key is never stale here: a slow host must not release the next key
+    # before the previous one took effect (KEY_SETTLE_SECONDS is a valve).
+    app.KEY_SETTLE_SECONDS = 60.0
     for key in keys:
         char = _CHARS.get(key, key if len(key) == 1 else None)
         app.post_message(events.Key(key, char))
-
-
-async def _until_idle(pilot, n: int = 10) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
 
 
 @pytest.mark.asyncio
@@ -1798,9 +1768,9 @@ async def test_drawer_toggle_then_typed_filter_word_reaches_the_filter(
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         panel.table.focus()
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         _burst(app, "grave_accent", "grave_accent", "slash", *"heise")
-        await _until_idle(pilot)
+        await settle(pilot)
         field = panel.query_one("#files-input", Input)
         assert field.value == "heise"
         assert app.focused is field
@@ -1827,17 +1797,17 @@ async def test_quit_cancelled_as_typing_never_runs_the_next_letter(
         monkeypatch.setattr(app, "action_proxy", lambda: proxy.append(1))
         monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
         await pilot.press("q")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert type(app.screen).__name__ == "QuitConfirmModal"
         _burst(app, *"xyz")
-        await _until_idle(pilot)
+        await settle(pilot)
         assert proxy == []
         assert exits == []
         assert type(app.screen).__name__ == "MainScreen"
         assert any("looked like typing" in n.message for n in app._notifications)
         # Within the guard window the next letters are text, not commands.
         _burst(app, "y")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert proxy == []
         assert ms.typing_guard_active()
 
@@ -1869,9 +1839,9 @@ async def test_lens_key_after_a_stray_typing_cancel_never_runs(
         monkeypatch.setattr(app, "exit", lambda *a, **k: exits.append(1))
         # p: the Play confirm (a recording present), not a device revert.
         monkeypatch.setattr(app, "action_play", app._confirm_play)
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         _burst(app, opener, "x", lens_key)
-        await _until_idle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert any("looked like typing" in n.message for n in app._notifications)
         assert ran == []
@@ -1880,7 +1850,7 @@ async def test_lens_key_after_a_stray_typing_cancel_never_runs(
         # The window is over: the lens key works again.
         ms._typing_until = 0.0
         await pilot.press(lens_key)
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert ran == [action]
 
 
@@ -1900,10 +1870,10 @@ async def test_stray_window_passes_keys_that_are_not_typing(monkeypatch) -> None
         )
         panel.refresh_rows()
         panel.table.focus()
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         row = panel.table.cursor_row
         _burst(app, "q", "x", "3", "down")
-        await _until_idle(pilot)
+        await settle(pilot)
         assert ms.typing_guard_active()
         assert ms._typed_ignored == "3"
         assert panel.table.cursor_row == row + 1
@@ -1924,10 +1894,10 @@ async def test_first_key_after_declining_play_is_not_lost(monkeypatch) -> None:
         plays: list[int] = []
         monkeypatch.setattr(app, "action_play", lambda: plays.append(1))
         app.push_screen(ConfirmModal(title="Play (replay)", guard_typing=True))
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert app.screen.focused.id == "no"
         _burst(app, "enter", "p")
-        await _until_idle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert plays == [1]
         assert not any("looked like typing" in n.message for n in app._notifications)
@@ -1944,9 +1914,9 @@ async def test_first_key_after_a_lens_switch_reaches_the_new_lens() -> None:
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         await pilot.press("4")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         _burst(app, "3", "slash", *"aid")
-        await _until_idle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "files"
         assert panel.query_one("#files-input", Input).value == "aid"
 
@@ -1961,7 +1931,7 @@ async def test_hidden_lenses_cannot_take_focus() -> None:
     app = SandroidTUI()
     async with app.run_test(size=(160, 45)) as pilot:
         ms, panel = await _boot_files(pilot, app)
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         hidden = [ms.lens_widget(i) for i in ("app", "network", "runs")]
         assert all(w.disabled for w in hidden)
         assert not panel.disabled
@@ -1970,11 +1940,11 @@ async def test_hidden_lenses_cannot_take_focus() -> None:
         for widget in network.query("*"):
             if widget.can_focus:
                 ms.set_focus(widget)
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert ms.focused is not None
         assert panel in ms.focused.ancestors_with_self
         await pilot.press("2")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert not network.disabled
         assert panel.disabled
         assert network in ms.focused.ancestors_with_self
@@ -1991,9 +1961,9 @@ async def test_reopened_filter_selects_the_old_text() -> None:
         panel.ingest(_items(_fse("FSE_CREATE_FILE", AAID)), now=T0)
         panel.refresh_rows()
         await pilot.press("slash", *"aaid", "enter")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         await pilot.press("slash", *"aid")
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         assert panel.query_one("#files-input", Input).value == "aid"
 
 
@@ -2011,25 +1981,26 @@ async def test_proxy_settings_ignore_a_bare_enter_in_the_stray_window(
 
     applied: list[int] = []
     monkeypatch.setattr(ProxyModal, "action_apply", lambda self: applied.append(1))
+    monkeypatch.setattr(ProxyModal, "ENTER_ARM_SECONDS", 60.0)
     app = SandroidTUI()
     async with app.run_test(size=(160, 45), notifications=True) as pilot:
         await _boot_files(pilot, app)
         app.push_screen(ProxyModal())
         _burst(app, "enter")  # typed ahead
-        await _until_idle(pilot, 4)
+        await settle(pilot)
         modal = app.screen
         assert isinstance(modal, ProxyModal)
         modal.query_one("#device-ext-input", Input).focus()
-        await pilot.pause(ProxyModal.ENTER_ARM_SECONDS)
+        modal._opened_at -= 61.0  # the arm window is over
         start_typing_guard(app)  # stray typing just closed a dialog
         await pilot.press("enter")
-        await _until_idle(pilot, 2)
+        await settle(pilot)
         assert applied == []
         assert any("Enter ignored" in n.message for n in app._notifications)
         ms = app.screen_stack[-2]
         ms._typing_until = 0.0  # the window is over
         await pilot.press("enter")
-        await _until_idle(pilot, 2)
+        await settle(pilot)
         assert applied == [1]
 
 
@@ -2323,7 +2294,7 @@ async def test_restart_separator_in_events_and_writes_counted_per_process() -> N
                 source="monitor",
             )
         )
-        await _wait_for(pilot, lambda: bool(panel._monitor_notes))
+        await until(pilot, lambda: bool(panel._monitor_notes))
         panel.ingest(items[1:], now=T0 + timedelta(seconds=9))
         panel.refresh_rows()
         inspected = panel.inspect_selected()

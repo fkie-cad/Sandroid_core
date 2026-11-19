@@ -122,7 +122,8 @@ class FakeHelper:
         self.alive = False
         self.hello = {"display": {"w": 1080, "h": 2424, "rotation": 0}}
         self.node_reply: dict | None = None
-        self.node_delay = 0.0
+        self.node_gate: threading.Event | None = None  # node_at blocks on it
+        self.node_returned = 0
         self.node_calls: list[tuple] = []
         self.shots: list[ShotResult] = []
         self.hashes: list[str] = []
@@ -156,8 +157,9 @@ class FakeHelper:
 
     def node_at(self, x, y, *, t_mono_ms=None, timeout=1.0):
         self.node_calls.append((x, y, t_mono_ms))
-        if self.node_delay:
-            time.sleep(self.node_delay)
+        if self.node_gate is not None:
+            self.node_gate.wait(10.0)
+        self.node_returned += 1
         return self.node_reply
 
     def shot(self, *, hash_only=False, timeout=5.0):
@@ -171,7 +173,7 @@ class FakeHelper:
         return ShotResult(self.shot_t_ms, 1080, 2424, "h-before", 14.0, PNG_A, "/x")
 
 
-def wait_for(cond, timeout: float = 3.0) -> bool:
+def wait_for(cond, timeout: float = 10.0) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if cond():
@@ -448,16 +450,19 @@ def test_input_line_is_written_when_node_at_times_out(env, cfg):
     cfg.shot_before_tap = False
     with timeline.capture() as lines:
         ge = start(svc, popen, helpers, cfg)
-        helpers[0].node_delay = 1.0
-        t0 = time.monotonic()
-        ge.feed(*tap_lines(10.0))
-        assert wait_for(lambda: of(lines, "input"))
-        took = time.monotonic() - t0
+        gate = helpers[0].node_gate = threading.Event()
+        try:
+            ge.feed(*tap_lines(10.0))
+            assert wait_for(lambda: of(lines, "input"))
+            # never waits for the slow node_at: it has not returned yet
+            assert helpers[0].node_calls
+            assert helpers[0].node_returned == 0
+        finally:
+            gate.set()
     tap = of(lines, "input", "tap")[0]
     assert tap["data"]["target"] is None
     assert tap["data"]["node_timeout"] is True
     assert tap["summary"].startswith("tap at ")
-    assert took < 0.9  # never waits for the slow node_at
 
 
 def test_confirm_line_refers_to_the_input(env, cfg):
@@ -1140,21 +1145,27 @@ def test_net_doorbell_never_works_on_the_listener_thread(tmp_path, monkeypatch):
         flow_dir_fn=lambda: flow_dir, folder_fn=lambda: tmp_path, debounce_s=0.05
     )
     polled: list[str] = []
+    gate = threading.Event()  # every poll blocks until the burst is over
     real = src.poll
-    monkeypatch.setattr(
-        src, "poll", lambda: polled.append(threading.current_thread().name) or real()
-    )
+
+    def poll():
+        polled.append(threading.current_thread().name)
+        gate.wait(10.0)
+        return real()
+
+    monkeypatch.setattr(src, "poll", poll)
     src.start()
     try:
-        t0 = time.monotonic()
         for _ in range(20):  # a burst of doorbells is debounced
             src.on_line("[FLOW]|12:00:00|HTTPS|200|GET|x/|1 KB|app")
         src.on_line("[INFO] not a flow")
-        assert time.monotonic() - t0 < 0.05
+        # on_line returned with every poll blocked: none ran on this thread
+        assert threading.current_thread().name not in polled
+        gate.set()
         assert wait_for(lambda: polled)
-        time.sleep(0.2)
     finally:
-        src.stop()
+        gate.set()
+        src.stop()  # joins the worker (its last poll included)
     assert threading.current_thread().name not in polled
     assert set(polled) == {"net-flows"}
     assert len(polled) <= 3
@@ -1892,24 +1903,38 @@ def test_start_never_blocks_the_header(env, cfg, monkeypatch):
     svc, popen, run, _helpers, _tmp = env
     cfg.helper_mode = "off"
     real = FakeRun.__call__
+    release = threading.Event()  # the teardown (kill) blocks until set
 
     def slow_kill(self, argv, timeout=10.0):
         if "kill" in " ".join(argv):
-            time.sleep(1.0)
+            release.wait(10.0)
         return real(self, argv, timeout)
 
     monkeypatch.setattr(FakeRun, "__call__", slow_kill)
     s = svc.getevent(SERIAL)
-    s.release()  # the teardown takes 1 s
+    waiting = threading.Event()
+    real_wait = s.wait_closed
+
+    def wait_closed(*args, **kwargs):
+        waiting.set()
+        return real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(s, "wait_closed", wait_closed)
+    s.release()  # the teardown hangs in kill
     with timeline.capture():
         t = threading.Thread(target=svc.start, args=(SERIAL,))
         t.start()
-        time.sleep(0.1)
-        t0 = time.monotonic()
-        svc.state()
-        took = time.monotonic() - t0
-        t.join(3.0)
-    assert took < 0.2
+        try:
+            assert waiting.wait(10.0)  # start() waits for the teardown ...
+            done = threading.Event()
+            threading.Thread(
+                target=lambda: (svc.state(), done.set()), daemon=True
+            ).start()
+            assert done.wait(10.0)  # ... and state() still answers
+            assert t.is_alive()  # while start() is still blocked
+        finally:
+            release.set()
+        t.join(10.0)
     assert svc.is_active()
 
 
@@ -2508,7 +2533,7 @@ def test_a_late_before_hash_equal_to_the_old_screen_is_not_stored(env, cfg):
         t_evt = time.time()
         svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
                          window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
-        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=10.0)
         data = _stop_data(svc, lines)
     assert not of(lines, "shot", "screen_change")
     assert data["shots_dropped"] == {"unverified": 1}
@@ -2541,7 +2566,7 @@ def test_a_frame_equal_to_an_earlier_before_tap_shot_is_not_stored(env, cfg):
                          window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
         time.sleep(0.6)
         h.frame = "home"  # the ripple ends; the new activity has not drawn yet
-        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=10.0)
     assert not of(lines, "shot", "screen_change")
     assert all(s["data"]["dup_of"] is None for s in of(lines, "shot"))
     assert taken[0][0].hash == "ripple"  # the late pre-change hash
@@ -2560,7 +2585,7 @@ def test_a_logcat_screen_drawn_3_s_later_is_still_captured(env, cfg):
                                window_id=None, via="logcat", dev_mono=10.0)  # fmt: skip
         time.sleep(3.0)
         helpers[0].frame = "new"
-        assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=4.0)
+        assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=10.0)
     shot = of(lines, "shot", "screen_change")[0]
     assert shot["ref"]["of"] == seq
     assert shot["ref"]["sha256"] == _sha("new")
@@ -2613,17 +2638,18 @@ def _clocked_helper(h: FakeHelper, frame: str, dev0: float) -> dict:
     """Like :func:`_screen_helper`, with a device clock (``dev0`` s now) in
     the replies' ``t_mono_ms``. ``h.frame`` may be a callable (an animation:
     a new frame per shot). Returns counters (``full``: frames captured in
-    full).
+    full, ``seen``: every frame shot, in order).
     """
     h.frame = frame
     host0 = time.time()
-    stats: dict = {"full": []}
+    stats: dict = {"full": [], "seen": []}
 
     def now_dev() -> float:
         return dev0 + (time.time() - host0)
 
     def shot(*, hash_only=False, timeout=5.0):
         f = h.frame() if callable(h.frame) else h.frame
+        stats["seen"].append(f)
         t_ms = now_dev() * 1000.0
         if hash_only:
             return ShotResult(t_ms, 1080, 2424, f, 3.0, None, None)
@@ -2758,19 +2784,27 @@ def test_a_transition_back_to_the_old_screen_is_no_fallback(env, cfg):
         h = helpers[0]
         stats = _clocked_helper(h, "home", 30.0)
         svc._shot_seen(h, hash_only=True)  # the old screen, before the event
-        svc._screen_pre_lane.submit(time.sleep, 0.4)  # a late pre-change hash
+        late = threading.Event()  # the pre-change hash is late until set
+        svc._screen_pre_lane.submit(late.wait, 10.0)
         taken = _spy_pre_hash(svc)
         svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
                          window_id=None, via="logcat", dev_mono=stats["now"]())  # fmt: skip
-        time.sleep(0.2)
+        # the settle samples the old screen while the hash is pending
+        assert wait_for(lambda: stats["seen"].count("home") >= 3)
         h.frame = "pressed"  # the late hash sees the ripple
+        late.set()
         assert wait_for(lambda: taken)
-        h.frame = _animation("fade-")  # the ripple fades
-        time.sleep(0.6)
-        h.frame = "home"  # back to the old screen; the new one never drew
-        time.sleep(0.4)
+        fade = _animation("fade-")  # the ripple fades (captured in full) ...
+
+        def fading() -> str:
+            # ... and the old screen is back right after the first full
+            # capture; the new one never drew
+            return "home" if stats["full"] else fade()
+
+        h.frame = fading
+        assert wait_for(lambda: stats["full"] and stats["seen"][-2:] == ["home"] * 2)
         ge.feed(*tap_lines(stats["now"]()))
-        assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=10.0)
         time.sleep(0.2)
         data = _stop_data(svc, lines)
     assert taken[0][0].hash == "pressed"
@@ -2959,7 +2993,7 @@ def test_round5_invisible_63_old_screen_after_a_late_hash_is_unverified(env, cfg
         seq = svc._emit_screen("activity", pkg=SETTINGS, cls=SUB, title=None,
                                window_id=None, via="logcat",
                                dev_mono=stats["now"]())  # fmt: skip
-        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=10.0)
         time.sleep(0.1)
         data = _stop_data(svc, lines)
     assert seq is not None
@@ -2989,7 +3023,7 @@ def test_round5_invisible_66_like_previous_screen_is_unverified(env, cfg):
         h.frame = "fade"  # seen once
         time.sleep(0.25)
         h.frame = "notif"  # home has not drawn when the wait ends
-        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=10.0)
         data = _stop_data(svc, lines)
     assert not of(lines, "shot", "screen_change")
     assert data["shots_dropped"] == {"unverified": 1}
@@ -3067,9 +3101,11 @@ def test_r1_late_logcat_near_duplicate_of_the_before_tap_is_unverified(
         time.sleep(0.1)
         h.frame = final
         if stored:
-            assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=4.0)
+            assert wait_for(lambda: of(lines, "shot", "screen_change"), timeout=10.0)
         else:
-            assert wait_for(lambda: svc._shot_drops.get("unverified") == 1, timeout=4.0)
+            assert wait_for(
+                lambda: svc._shot_drops.get("unverified") == 1, timeout=10.0
+            )
         data = _stop_data(svc, lines)
     shots = of(lines, "shot", "screen_change")
     if stored:
@@ -3123,5 +3159,5 @@ def test_r2_a_fallback_followed_by_the_old_screen_before_the_tap_is_void(env, cf
         h.frame = "home"
         time.sleep(0.4)
         _tap_with_before_shot(ge, lines, stats["now"]())
-        assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=4.0)
+        assert wait_for(lambda: svc._shot_drops.get("late") == 1, timeout=10.0)
     assert not of(lines, "shot", "screen_change")

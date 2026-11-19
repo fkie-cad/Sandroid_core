@@ -9,29 +9,18 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import boot, settle, until
 
 SIZE = (200, 50)
 PKG = "org.example.app"
 SERIAL = "emulator-5554"
 
 
-async def _settle(pilot, n: int = 6) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _boot(app, pilot) -> None:
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
-
-
 def _burst(app, *keys: str) -> None:
     """All keys queued at once, as a terminal delivers fast typing."""
     from textual import events
 
+    app.KEY_SETTLE_SECONDS = 60.0  # never released early by a slow host
     for key in keys:
         app.post_message(events.Key(key, key if len(key) == 1 else None))
 
@@ -63,26 +52,31 @@ def app_lens(monkeypatch):
     return ran
 
 
-async def test_kill_asks_first_and_a_typed_ahead_y_is_ignored(app_lens) -> None:
+async def test_kill_asks_first_and_a_typed_ahead_y_is_ignored(
+    app_lens, monkeypatch
+) -> None:
     from sandroid.tui.app import SandroidTUI
     from sandroid.tui.modals import ConfirmModal
 
+    # The typed-ahead y always lands inside the arm window, however slow the
+    # host; the window's end is simulated below.
+    monkeypatch.setattr(ConfirmModal, "ARM_SECONDS", 60.0)
     app = SandroidTUI()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         # Focus is on the App lens or one of its section tables (K bubbles up).
         panel = app.screen.query_one("#spotlight-panel")
         assert app.focused is panel or panel in app.focused.ancestors
         _burst(app, "K", "y")
-        await _settle(pilot)
+        await settle(pilot)
         modal = app.screen
         assert isinstance(modal, ConfirmModal)
         assert modal.guard_typing
         assert app.focused.id == "no"  # Enter declines
         assert app_lens == []  # the typed-ahead y did not confirm
-        await pilot.pause(ConfirmModal.ARM_SECONDS)
+        modal._opened_at -= 61.0  # the arm window is over
         await pilot.press("y")
-        await _settle(pilot)
+        await settle(pilot)
         assert app_lens == ["kill"]
         assert type(app.screen).__name__ == "MainScreen"
 
@@ -92,16 +86,16 @@ async def test_kill_confirm_cancels_on_typing_and_on_enter(app_lens) -> None:
 
     app = SandroidTUI()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         _burst(app, "K", "x")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert any("looked like typing" in m for m in _messages(app))
         app.screen._typing_until = 0.0
         await pilot.press("K")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("enter")  # No has the focus
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert app_lens == []
 
@@ -116,11 +110,11 @@ async def test_restart_is_not_run_inside_the_stray_typing_window(
 
     app = SandroidTUI()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         monkeypatch.setattr(app, "exit", lambda *a, **k: app_lens.append("exit"))
         _burst(app, "q", "x", "R")
-        await _settle(pilot, 10)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert app_lens == []
         assert any("Restart not run" in m for m in _messages(app))
@@ -131,7 +125,7 @@ async def test_restart_is_not_run_inside_the_stray_typing_window(
         # The window is over: R restarts without a dialog.
         ms._typing_until = 0.0
         await pilot.press("R")
-        await _settle(pilot)
+        await settle(pilot)
         assert app_lens == ["restart"]
         assert type(app.screen).__name__ == "MainScreen"
 
@@ -147,14 +141,14 @@ async def test_quit_dialog_focuses_cancel_and_enter_still_quits(monkeypatch) -> 
 
     app = SandroidTUI()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         cleaned: list[int] = []
         monkeypatch.setattr(
             app._quit_controller, "force_exit", lambda: cleaned.append(1)
         )
         monkeypatch.setattr(qc.QuitController, "_quit_notes", staticmethod(list))
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         modal = app.screen
         assert type(modal).__name__ == "QuitConfirmModal"
         cancel = modal.query_one("#btn-cancel")
@@ -164,10 +158,7 @@ async def test_quit_dialog_focuses_cancel_and_enter_still_quits(monkeypatch) -> 
         assert cancel.styles.background != quit_button.styles.background
         assert str(cancel.styles.text_style) == "bold"
         await pilot.press("enter")
-        for _ in range(40):
-            await pilot.pause(0.05)
-            if app._exit:
-                break
+        await until(pilot, lambda: app._exit)
         assert cleaned == [1]
         assert app._exit
 

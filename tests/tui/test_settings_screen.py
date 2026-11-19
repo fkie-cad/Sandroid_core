@@ -34,6 +34,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from pilot_helpers import until
 from textual.app import App, ComposeResult
 from textual.widgets import Input, RadioButton, Select, Static, Switch
 
@@ -512,10 +513,11 @@ async def test_default_monitor_path_input_stages_key(monkeypatch) -> None:
             "#setting-device_paths--default_monitor_path", Input
         )
         path_input.value = "/sdcard/Download/"
-        await pilot.pause()
-
-        assert (
-            screen._pending["device_paths.default_monitor_path"] == "/sdcard/Download/"
+        # Input.Changed bubbles from the Input to the screen: two hops.
+        await until(
+            pilot,
+            lambda: screen._pending.get("device_paths.default_monitor_path")
+            == "/sdcard/Download/",
         )
 
 
@@ -623,7 +625,7 @@ async def test_interactive_kprobe_select_shows_checking_before_probe(
 
     def _blocking_probe():
         probe_started.set()
-        release_probe.wait(timeout=5)
+        release_probe.wait(timeout=10)
         return True
 
     monkeypatch.setattr(KprobeTracer, "cached_availability", lambda: None)
@@ -645,7 +647,7 @@ async def test_interactive_kprobe_select_shows_checking_before_probe(
             kprobe_btn.value = True
             await pilot.pause()
 
-            assert probe_started.wait(timeout=2)
+            assert probe_started.wait(timeout=10)
             # Mid-probe: disabled + "checking" label, not the plain label.
             assert kprobe_btn.disabled is True
             assert "checking" in str(kprobe_btn.label).lower()
@@ -676,7 +678,15 @@ async def test_interactive_kprobe_select_restores_available_on_success(
         await pilot.pause()
 
         kprobe_btn.value = True
-        await pilot.pause(0.2)  # let the daemon thread + call_from_thread land
+        # the daemon thread's probe lands via call_from_thread
+        await until(
+            pilot,
+            lambda: (
+                screen._pending.get("tui.monitor_backend") == "kprobe"
+                and not kprobe_btn.disabled
+                and "checking" not in str(kprobe_btn.label).lower()
+            ),
+        )
 
         assert kprobe_btn.disabled is False
         assert "checking" not in str(kprobe_btn.label).lower()

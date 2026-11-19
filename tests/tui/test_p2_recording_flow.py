@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import settle, until
 from textual.app import App, ComposeResult
 
 from sandroid.core import run_history
@@ -56,15 +56,6 @@ class _DiffsHarness(App):
         yield DiffsView(id="files-diffs")
 
 
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
-
-
 # ---------------------------------------------------------------------------
 # P2-H1: NoActiveAppError when Diffs already lists a run
 # ---------------------------------------------------------------------------
@@ -84,8 +75,8 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table")
-        await _wait_for(pilot, lambda: view._detail_record is not None)
-        await _wait_for(pilot, lambda: table.row_count == 1)
+        await until(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: table.row_count == 1)
         monkeypatch.setattr(view, "_is_on_screen", lambda: True)
 
         callbacks = [cb for _etype, cb in view._event_handlers]
@@ -93,7 +84,7 @@ async def test_state_change_from_worker_thread_rerenders_diffs_without_crash(
         worker = threading.Thread(target=callbacks[0], args=(None,))
         worker.start()
         worker.join()
-        await pilot.pause(0.2)
+        await settle(pilot)
 
         assert app._exception is None
         assert table.row_count == 1
@@ -193,14 +184,20 @@ def test_player_stops_between_events_when_cancelled(
     from sandroid.features.player import Player
 
     rec = tmp_path / "recording.txt"
-    # 1 event every 200 ms for 10 s: an uncancelled replay would take ~10 s.
+    # 1 event a minute: only a cancel that cuts the wait short ends it soon.
     rec.write_text(
-        "".join(f"{i * 200}.0 /dev/input/event1 3 53 {i}\n" for i in range(50))
+        "".join(
+            f"{1000 + i * 60_000}.0 /dev/input/event1 3 53 {i}\n" for i in range(50)
+        )
     )
     sent: list[str] = []
-    monkeypatch.setattr(
-        Adb, "send_adb_command", classmethod(lambda cls, cmd, **kw: sent.append(cmd))
-    )
+    first = threading.Event()
+
+    def send(cls, cmd, **kw):
+        sent.append(cmd)
+        first.set()
+
+    monkeypatch.setattr(Adb, "send_adb_command", classmethod(send))
     monkeypatch.setattr("sandroid.core.toolbox.Toolbox.set_action_time", lambda: None)
 
     errors: list[BaseException] = []
@@ -211,16 +208,14 @@ def test_player_stops_between_events_when_cancelled(
         except BaseException as exc:
             errors.append(exc)
 
-    worker = threading.Thread(target=replay)
-    started = time.monotonic()
+    worker = threading.Thread(target=replay, daemon=True)
     worker.start()
-    time.sleep(0.5)
+    assert first.wait(10.0)  # the first event is out; now waiting a minute
     Player.cancel_all()
-    worker.join(timeout=2.0)
+    worker.join(timeout=10.0)
 
-    assert not worker.is_alive()
-    assert time.monotonic() - started < 2.0
-    assert len(sent) < 10
+    assert not worker.is_alive()  # the minute's wait was cut short
+    assert len(sent) == 1
     assert errors
     assert isinstance(errors[0], FatalStepError)
 
@@ -418,23 +413,24 @@ async def test_live_events_never_wait_for_the_ui_thread(monkeypatch) -> None:
             raise AssertionError("blocking call_from_thread")
 
         monkeypatch.setattr(app, "call_from_thread", forbidden)
-        took: list[float] = []
+        done: list[int] = []
 
         def reader() -> None:
-            t0 = time.monotonic()
             for i in range(50):
                 modal._on_event(f"/dev/input/event1: 0003 0035 {i:08x}")
-            took.append(time.monotonic() - t0)
+            done.append(1)
 
-        t = threading.Thread(target=reader)
+        t = threading.Thread(target=reader, daemon=True)
         t.start()
-        t.join(2.0)
-        await pilot.pause()
-        await pilot.pause()
-        text = str(modal.query_one("#live-events-log", Static).render())
-    assert took
-    assert took[0] < 0.5
-    assert "00000031" in text  # the last line made it to the display
+        # join() blocks the UI thread: the reader can only finish if it
+        # never waits for it.
+        t.join(10.0)
+        assert done
+        await until(
+            pilot,
+            lambda: "00000031"
+            in str(modal.query_one("#live-events-log", Static).render()),
+        )  # the last line made it to the display
 
 
 def test_controller_does_not_play_a_cancelled_recording(monkeypatch, tmp_path):
@@ -581,12 +577,12 @@ async def test_n_without_a_focused_run_reaches_the_global_binding(
     app = _DiffsWithGlobalN()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view.query_one("#runs-table").row_count == 1)
+        await until(pilot, lambda: view.query_one("#runs-table").row_count == 1)
         # The lens itself, not its runs table.
         super(DiffsView, view).focus()
         await pilot.pause()
         await pilot.press("n")
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert app.install_calls == 1
         assert type(app.screen).__name__ != "InputModal"
 
@@ -601,29 +597,29 @@ async def test_rename_needs_explicit_confirm(results_root) -> None:
     app = _DiffsWithGlobalN()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         view.focus()  # the Runs rail with the run highlighted
         await pilot.pause()
         await pilot.press("n")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "InputModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "InputModal")
         app.screen.query_one(Input).value = "/tmp/wikipedia.apk"
         await pilot.press("enter")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         assert run_history.load_run(run_id).label == "Run A"
         assert "apk" in str(app.screen.query("Label").last().render()).lower()
         await pilot.press("n")  # No
-        await pilot.pause(0.2)
+        await settle(pilot)
         assert run_history.load_run(run_id).label == "Run A"
 
         view.focus()
         await pilot.pause()
         await pilot.press("n")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "InputModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "InputModal")
         app.screen.query_one(Input).value = "Bookmark article"
         await pilot.press("enter")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         await pilot.press("y")
-        await _wait_for(
+        await until(
             pilot, lambda: run_history.load_run(run_id).label == "Bookmark article"
         )
         assert app.install_calls == 0
@@ -789,7 +785,7 @@ async def test_enter_on_spotlight_with_a_stale_pid_rechecks_and_starts(
             lambda work, label, feature: started.append(label),
         )
         panel.action_primary()
-        await _wait_for(pilot, lambda: started == ["start"])
+        await until(pilot, lambda: started == ["start"])
         assert spot.pid is None
 
         # A live app is still reported as running (no second spawn).
@@ -797,7 +793,7 @@ async def test_enter_on_spotlight_with_a_stale_pid_rechecks_and_starts(
         spot.pid = 4242
         started.clear()
         panel.action_primary()
-        await pilot.pause(0.3)
+        await settle(pilot)
         assert started == []
         assert spot.pid == 4242
 

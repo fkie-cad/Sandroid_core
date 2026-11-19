@@ -16,6 +16,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import settle
 
 from sandroid.services.setup_checks import (
     adb_binary_missing,
@@ -145,11 +146,6 @@ def test_environment_service_tells_a_missing_device_from_missing_adb() -> None:
 # --------------------------------------------------------------------------
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
 @pytest.fixture
 def startup(monkeypatch):
     """A SandroidTUI on its StartupScreen; init never runs (counted instead)."""
@@ -186,11 +182,11 @@ ERROR = f"Device '{MISSING}' not found\n  - Available devices: {PRESENT}"
 async def _error_screen(app, pilot):
     from sandroid.tui.screens.startup_screen import StartupScreen
 
-    await _settle(pilot)
+    await settle(pilot)
     screen = app.screen
     assert isinstance(screen, StartupScreen)
     screen._show_error(ERROR, device_problem=True)
-    await _settle(pilot)
+    await settle(pilot)
     return screen
 
 
@@ -205,7 +201,7 @@ async def test_error_screen_shows_the_device_and_its_keys(startup) -> None:
         for key_hint in ("r retry", "d pick a device", "q quit"):
             assert key_hint in hint
         screen._show_error("ADB not found in PATH", device_problem=False)
-        await _settle(pilot)
+        await settle(pilot)
         assert "pick a device" not in str(screen.query_one("#startup-hint").render())
 
 
@@ -216,7 +212,7 @@ async def test_retry_key_does_not_fire_record(startup, key) -> None:
         screen = await _error_screen(app, pilot)
         startup.inits.clear()
         await pilot.press(key)
-        await _settle(pilot)
+        await settle(pilot)
         assert startup.inits == [1]  # retried
         assert not screen.has_error
         assert startup.globals_fired == []
@@ -229,7 +225,7 @@ async def test_global_keys_are_dead_while_the_startup_screen_is_up(startup) -> N
         await _error_screen(app, pilot)
         for key in ("p", "1", "2", "grave_accent", "question_mark", "escape"):
             await pilot.press(key)
-        await _settle(pilot)
+        await settle(pilot)
         assert startup.globals_fired == []
         assert type(app.screen).__name__ == "StartupScreen"
         assert app.check_action("record", ()) is False
@@ -247,7 +243,7 @@ async def test_quit_after_a_failed_start_exits_non_zero(startup, key) -> None:
     async with app.run_test(size=SIZE) as pilot:
         await _error_screen(app, pilot)
         await pilot.press(key)
-        await _settle(pilot)
+        await settle(pilot)
     assert app.return_code == EXIT_STARTUP_FAILED == 2
     assert startup_failure() == ERROR
 
@@ -257,12 +253,12 @@ async def test_q_while_loading_is_ignored_ctrl_c_aborts(startup) -> None:
 
     app = startup.app
     async with app.run_test(size=SIZE) as pilot:
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.return_code is None
         await pilot.press("ctrl+c")
-        await _settle(pilot)
+        await settle(pilot)
     assert app.return_code == EXIT_STARTUP_ABORTED
 
 
@@ -285,11 +281,11 @@ async def test_d_picks_a_device_pins_it_and_retries(startup, monkeypatch, key) -
         await _error_screen(app, pilot)
         startup.inits.clear()
         await pilot.press(key)
-        await _settle(pilot, 8)
+        await settle(pilot)
         assert type(app.screen).__name__ == "DeviceSelectionModal"
         assert startup.globals_fired == []  # not the app's D (device selector)
         await pilot.press("enter")
-        await _settle(pilot, 8)
+        await settle(pilot)
         assert type(app.screen).__name__ == "StartupScreen"
         assert startup.inits == [1]  # retried with the picked device
         assert startup.config.emulator.serial == PRESENT

@@ -8,6 +8,7 @@ natural state.
 from __future__ import annotations
 
 import pytest
+from pilot_helpers import boot, settle, until
 
 from sandroid.tui.widgets.lens_shell import (
     LENSES,
@@ -16,19 +17,6 @@ from sandroid.tui.widgets.lens_shell import (
 )
 
 SIZE = (160, 45)
-
-
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _boot(app, pilot) -> None:
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")  # first-run welcome modal
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
 
 
 def _app():
@@ -55,12 +43,12 @@ def _content(title="row", key="k1") -> InspectorContent:
 async def test_digits_switch_lenses_and_focus_them() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         assert ms.active_lens == "app"
         for spec in reversed(LENSES):
             await pilot.press(spec.key)
-            await _settle(pilot)
+            await settle(pilot)
             assert ms.active_lens == spec.id
             body = ms.lens_widget(spec.id)
             assert body.id == spec.widget_id
@@ -78,29 +66,29 @@ async def test_digits_switch_lenses_and_focus_them() -> None:
 async def test_shift_arrows_cycle_lenses() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         seen = []
         for _ in range(len(LENSES)):
             await pilot.press("shift+right")
-            await _settle(pilot)
+            await settle(pilot)
             seen.append(ms.active_lens)
         assert seen == ["network", "files", "runs", "timeline", "app"]
         await pilot.press("shift+left")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "timeline"
 
 
 async def test_digits_do_nothing_while_a_modal_is_open() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "HelpScreen"
         app.action_switch_lens("runs")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "app"
         await pilot.press("escape")
 
@@ -108,44 +96,44 @@ async def test_digits_do_nothing_while_a_modal_is_open() -> None:
 async def test_legacy_navigation_helpers_redirect() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.open_files_tab("files-diffs")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "runs"
         ms.open_files_tab("files-watchlist")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "files"
         assert ms.lens_widget() in app.focused.ancestors_with_self
         ms.open_fritap_tab()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "network"
         assert ms.inspector_is_open  # friTap tab of the Capture status page
         assert ms.query_one("#inspector").tab_index == 1
         ms.cycle_bottom_tab(1)
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "files"
 
 
 async def test_lens_badge_and_caption() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.set_lens_badge("network", "⚑2")
         ms.set_lens_caption("network", "flows", "10 of 247")
-        await _settle(pilot)
+        await settle(pilot)
         assert "⚑2" in str(ms.query_one("#lens-tab-network").render())
         host = ms.query_one("#lens-host")
         assert host.border_title == ""  # app lens: no caption set
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         # The Network lens captions itself on activation; set ours again.
         ms.set_lens_caption("network", "flows", "10 of 247")
         assert host.border_title == "Network · flows"
         assert host.border_subtitle == "10 of 247"
         ms.set_lens_badge("network", None)
-        await _settle(pilot)
+        await settle(pilot)
         assert "⚑" not in str(ms.query_one("#lens-tab-network").render())
 
 
@@ -158,9 +146,9 @@ async def test_lens_activation_hook_is_called(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("4")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == [1]
 
 
@@ -174,33 +162,33 @@ async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         log = ms.query_one("#activity-log", ActivityLog)
         assert not is_shown(log)
         log.log_info("hello from the ticker test")
-        await _settle(pilot)
+        await settle(pilot)
         ticker = ms.query_one("#log-ticker")
         assert "hello from the ticker test" in ticker.last_line
         # Blank / separator lines never replace the ticker text.
         log.write("")
         log.write("[dim]────────[/dim]")
-        await _settle(pilot)
+        await settle(pilot)
         assert "hello from the ticker test" in ticker.last_line
 
         await pilot.press("grave_accent")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.log_drawer_is_open
         assert is_shown(log)
         await pilot.press("grave_accent")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.log_drawer_is_open
 
         # Esc closes an open drawer too.
         ms.toggle_log_drawer()
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.log_drawer_is_open
 
 
@@ -212,14 +200,14 @@ async def test_backtick_toggles_drawer_and_ticker_mirrors_log() -> None:
 async def test_inspector_open_update_close_and_esc_precedence(monkeypatch) -> None:
     app = _app()
     async with app.run_test(size=SIZE, notifications=True) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         quits = []
         monkeypatch.setattr(
             app._quit_controller, "request_quit", lambda: quits.append(1)
         )
         ms.open_inspector(_content())
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         inspector = ms.query_one("#inspector")
         assert is_shown(inspector)
@@ -230,39 +218,39 @@ async def test_inspector_open_update_close_and_esc_precedence(monkeypatch) -> No
         assert ms.lens_widget() in app.focused.ancestors_with_self
 
         ms.update_inspector(_content(title="row v2"))
-        await _settle(pilot)
+        await settle(pilot)
         assert inspector.border_title == "Inspector · row v2"
 
         app._notifications.clear()
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
         assert quits == []
         # Nothing was open, so this Esc only produced the hint, not a quit.
         assert not [n for n in app._notifications if "q to quit" in n.message]
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert quits == []
         assert app.is_running
         assert [n for n in app._notifications if "q to quit" in n.message]
 
         # update_inspector never opens a closed Inspector.
         ms.update_inspector(_content(title="ghost"))
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
 
 
 async def test_inspector_tabs() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         content = InspectorContent(
             title="t",
             tabs=[("Summary", [("", "one")]), ("Raw", [("", "two")])],
         )
         ms.open_inspector(content)
-        await _settle(pilot)
+        await settle(pilot)
         inspector = ms.query_one("#inspector")
         assert inspector.has_class("-tabbed")
         assert inspector.tab_index == 0
@@ -288,19 +276,19 @@ async def test_enter_opens_inspector_via_lens_hook(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         # The App lens inspects too (Space is Start/Resume); with no app
         # selected there is no row, so Enter opens nothing.
         assert ms.check_action("inspect", ()) is True
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.check_action("inspect", ()) is True
         ms.action_inspect()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         assert ms.inspector_content.title == "from files"
         assert ms.inspector_content.lens == "files"
@@ -319,20 +307,20 @@ async def test_option_selected_in_active_lens_opens_inspector(monkeypatch) -> No
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("4")
-        await _settle(pilot)
+        await settle(pilot)
         # The Runs lens is a DataTable now; mount a stand-in OptionList so the
         # OptionList.OptionSelected path stays covered.
         runs = OptionList("a row")
         await ms.query_one("#runs-panel").mount(runs)
-        await _settle(pilot)
+        await settle(pilot)
         index = runs.option_count - 1
         runs.post_message(
             OptionList.OptionSelected(runs, runs.get_option_at_index(index), index)
         )
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         assert ms.inspector_content.title == "a run"
 
@@ -340,27 +328,27 @@ async def test_option_selected_in_active_lens_opens_inspector(monkeypatch) -> No
 async def test_chat_and_inspector_share_the_side_slot() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.open_inspector(_content())
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("ctrl+y")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.chat_is_open
         assert not ms.inspector_is_open
         assert is_shown(ms.query_one("#chat-dock"))
         assert not is_shown(ms.query_one("#inspector"))
         ms.open_inspector(_content(title="back"))
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         assert not ms.chat_is_open
         await pilot.press("ctrl+y")
-        await _settle(pilot)
+        await settle(pilot)
         # Esc closes the chat even with the chat input focused.
         assert app.focused is not None
         assert app.focused.id == "chat-input"
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.side_slot_mode is None
         assert ms.lens_widget() in app.focused.ancestors_with_self
 
@@ -370,16 +358,16 @@ async def test_esc_in_watchlist_input_still_leaves_the_input() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         ms.open_files_tab("files-watchlist")
-        await _settle(pilot)
+        await settle(pilot)
         ms.open_inspector(_content())
-        await _settle(pilot)
+        await settle(pilot)
         ms.lens_widget("files").open_input("add")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         # The input's own Esc handling ran; the Inspector is still open.
         assert not isinstance(app.focused, Input)
         assert ms.inspector_is_open
@@ -402,19 +390,19 @@ async def test_scope_pill_and_scope_changed_message(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         header = ms.query_one("#shell-header")
         assert ms.scope is None
         assert header.pill_text == "● LIVE"
         ms.set_scope("20261117-1", label="Run #3")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope == "20261117-1"
         assert header.pill_text == "◆ REVIEW Run #3"
         assert ms.query_one("#scope-pill").has_class("-review")
         assert ("20261117-1", "Run #3") in received
         ms.set_scope(None)
-        await _settle(pilot)
+        await settle(pilot)
         assert header.pill_text == "● LIVE"
         assert received[-1] == (None, None)
 
@@ -422,15 +410,15 @@ async def test_scope_pill_and_scope_changed_message(monkeypatch) -> None:
 async def test_recording_shows_in_the_pill() -> None:
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         app._set_status_bar_mode(recording=True)
         ms.refresh_status()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#shell-header").pill_text == "● REC"
         app._set_status_bar_mode(recording=False)
         ms.refresh_status()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#shell-header").pill_text == "● LIVE"
 
 
@@ -453,31 +441,31 @@ async def test_b_then_digit_toggles_bypass(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         assert app.focused.id == "spotlight-panel"
         await pilot.press("b")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, BypassChordModal)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert toggles == ["root"]
         assert app.screen.active_lens == "app"  # the digit did not switch lens
         await pilot.press("b", "o")
-        await _settle(pilot)
+        await settle(pilot)
         assert objection == [1]
         await pilot.press("b")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert toggles == ["root"]
         assert type(app.screen).__name__ == "MainScreen"
         await pilot.press("b", "6")
-        await _settle(pilot)
+        await settle(pilot)
         assert toggles == ["root", "emulator"]
         assert app.screen.active_lens == "app"
         await pilot.press("t")  # retired TrigDroid key: opens nothing
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         assert toggles == ["root", "emulator"]
 
@@ -487,17 +475,17 @@ async def test_zero_and_s_open_the_snapshot_picker() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         for key in ("S", "0"):
             await pilot.press(key)
-            await _settle(pilot)
+            await settle(pilot)
             assert isinstance(app.screen, SnapshotPickerModal)
             assert app.screen.panel() is not None
             await pilot.press("escape")
-            await _settle(pilot)
+            await settle(pilot)
             assert type(app.screen).__name__ == "MainScreen"
         app.screen.open_snapshots_tab()  # legacy helper -> picker
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, SnapshotPickerModal)
 
 
@@ -506,10 +494,10 @@ async def test_footer_shows_at_most_seven_keys() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         for key in ("1", "2", "3", "4", "5"):
             await pilot.press(key)
-            await _settle(pilot)
+            await settle(pilot)
             footer = app.screen.query_one(SandroidFooter)
             keys = list(footer.query("FooterKey"))
             assert 0 < len(keys) <= SandroidFooter.MAX_KEYS
@@ -542,32 +530,32 @@ async def test_legacy_keybinding_ids_in_config_are_tolerated(monkeypatch) -> Non
         },
     )
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("1")  # still the App lens, not a slot load
-        await _settle(pilot)
+        await settle(pilot)
         assert app.screen.active_lens == "app"
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         help_screen = app.screen
         assert type(help_screen).__name__ == "HelpScreen"
         assert "load_slot_1" not in help_screen._pending
         assert "pick_save_slot" not in help_screen._pending
         assert help_screen._pending.get("show_snapshots") == "F2"
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
 
 
 @pytest.mark.parametrize("width", [100, 160])
 async def test_layout_degrades_gracefully(width) -> None:
     app = _app()
     async with app.run_test(size=(width, 30 if width == 100 else 45)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         assert ms.query_one("#status-bar").size.height <= 2
         assert ms.query_one("#lens-bar").size.height == 1
         assert ms.query_one("#log-ticker").size.height == 1
         ms.open_inspector(_content())
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.query_one("#lens-host").size.width >= 40
         assert ms.query_one("#side-slot").size.width >= 56 or width >= 140
 
@@ -649,16 +637,16 @@ async def test_picker_keeps_the_highlighted_snapshot_across_poll_rebuilds(
     _fake_picker_panel(monkeypatch, snaps)
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("S")
-        await _settle(pilot)
+        await settle(pilot)
         picker = app.screen
         assert isinstance(picker, SnapshotPickerModal)
         panel = picker.panel()
         options = panel.query_one("#snapshots-list", OptionList)
         assert panel._highlighted_tag() == "tmp"
         await pilot.press("down")
-        await _settle(pilot)
+        await settle(pilot)
         assert panel._highlighted_tag() == "clean_64g"
 
         # Poll tick with an unchanged list: the options are not rebuilt.
@@ -668,14 +656,14 @@ async def test_picker_keeps_the_highlighted_snapshot_across_poll_rebuilds(
             options, "clear_options", lambda: cleared.append(1) or original_clear()
         )
         panel.refresh_snapshots()
-        await _settle(pilot)
+        await settle(pilot)
         assert cleared == []
         assert panel._highlighted_tag() == "clean_64g"
 
         # A new snapshot on top (rows shift down): the highlight follows its tag.
         snaps.insert(0, {"tag": "slot-5", "date": "2026-11-17 16:50", "size": "1G"})
         panel.refresh_snapshots()
-        await _settle(pilot)
+        await settle(pilot)
         assert cleared == [1]
         assert options.highlighted == 2
         assert panel._highlighted_tag() == "clean_64g"
@@ -685,22 +673,22 @@ async def test_picker_keeps_the_highlighted_snapshot_across_poll_rebuilds(
         panel._snapshots = list(reversed(panel._snapshots))
         assert panel._highlighted_tag() == "clean_64g"
         panel._rebuild_list()
-        await _settle(pilot)
+        await settle(pilot)
 
         # Enter: the confirm names the highlighted snapshot (with its date).
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, ConfirmModal)
         assert "'clean_64g'" in app.screen.message_text
         assert "2026-11-16 10:00" in app.screen.message_text
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
 
         # The highlighted snapshot disappears: stay on the same row position.
         idx = options.highlighted
         snaps[:] = [s for s in snaps if s["tag"] != "clean_64g"]
         panel.refresh_snapshots()
-        await _settle(pilot)
+        await settle(pilot)
         assert options.highlighted == min(idx, len(snaps) - 1)
         assert panel._highlighted_tag() != "clean_64g"
 
@@ -711,21 +699,21 @@ async def test_picker_poll_pauses_while_a_confirm_is_open(monkeypatch) -> None:
     fetches = _fake_picker_panel(monkeypatch, list(_SNAPS))
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("S")
-        await _settle(pilot)
+        await settle(pilot)
         panel = app.screen.panel()
         before = len(fetches)
         panel._poll()
         assert len(fetches) == before + 1
         await pilot.press("d")
-        await _settle(pilot)
+        await settle(pilot)
         assert isinstance(app.screen, ConfirmModal)
         assert "Delete snapshot 'tmp'" in app.screen.message_text
         panel._poll()
         assert len(fetches) == before + 1  # no rebuild under the dialog
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
 
 
 def test_slot_pointing_at_a_deleted_snapshot(monkeypatch) -> None:
@@ -853,11 +841,11 @@ async def test_inspector_tabs_switch_while_focus_stays_in_the_lens() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         tabs = [("Summary", [("", "1")]), ("Diff", [("", "2")]), ("Events", [])]
         ms.open_inspector(InspectorContent(title="t", tabs=tabs))
-        await _settle(pilot)
+        await settle(pilot)
         inspector = ms.query_one("#inspector")
         assert ms.lens_widget() in app.focused.ancestors_with_self
         assert "[ ] tabs" in str(inspector.border_subtitle)
@@ -873,14 +861,14 @@ async def test_inspector_tabs_switch_while_focus_stays_in_the_lens() -> None:
         # Runs lens with its DataTable focused: [ ] still work (←/→ stay the
         # table's while it can scroll sideways; Textual skips them otherwise).
         await pilot.press("4")
-        await _settle(pilot)
+        await settle(pilot)
         ms.open_inspector(InspectorContent(title="run", tabs=tabs))
-        await _settle(pilot)
+        await settle(pilot)
         # (No runs here: show the table -- a hidden widget never keeps focus.)
         ms.query_one("#runs-panel").set_class(True, "-has-runs")
         table = ms.query_one("#runs-panel").query_one(DataTable)
         table.focus()
-        await _settle(pilot)
+        await settle(pilot)
         assert app.focused is table
         start = inspector.tab_index
         await pilot.press("right_square_bracket")
@@ -888,7 +876,7 @@ async def test_inspector_tabs_switch_while_focus_stays_in_the_lens() -> None:
 
         # Inspector closed: the keys are inert.
         ms.close_inspector()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.check_action("inspector_tab", (1,)) is False
 
 
@@ -898,24 +886,24 @@ async def test_lens_switch_closes_the_inspector_of_another_lens() -> None:
     """
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         ms.open_inspector(_content(title="a file"))
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_content.lens == "files"
         await pilot.press("1")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
         assert ms.lens_widget() in app.focused.ancestors_with_self
         # Re-selecting the lens that owns the Inspector keeps it open.
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         ms.open_inspector(_content(title="a file"))
-        await _settle(pilot)
+        await settle(pilot)
         ms.switch_lens("files")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
 
 
@@ -943,7 +931,7 @@ async def test_objection_modal_offers_no_bypass_toggles() -> None:
 
     app = Harness()
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot)
+        await settle(pilot)
         modal = app.screen
         assert isinstance(modal, ObjectionModal)
         await pilot.press("s")
@@ -963,9 +951,9 @@ async def test_help_fits_small_terminals_and_lists_every_global_key(size) -> Non
 
     app = _app()
     async with app.run_test(size=size) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         help_screen = app.screen
         assert type(help_screen).__name__ == "HelpScreen"
         container = help_screen.query_one("#kb-container")
@@ -1008,9 +996,9 @@ async def test_chat_banner_wraps_to_the_panel_width() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("ctrl+y")
-        await _settle(pilot, 8)
+        await settle(pilot)
         log = app.screen.query_one("#chat-log", RichLog)
         width = log.scrollable_content_region.width
         assert log.lines
@@ -1026,7 +1014,7 @@ async def test_ui_callbacks_from_threads_can_start_timers() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         panel = app.screen.query_one("#spotlight-panel")
         fired: list[int] = []
         errors: list = []
@@ -1039,10 +1027,7 @@ async def test_ui_callbacks_from_threads_can_start_timers() -> None:
         worker = threading.Thread(target=panel._post, args=(start_timer,))
         worker.start()
         worker.join()
-        for _ in range(10):
-            await pilot.pause(0.05)
-            if fired:
-                break
+        await until(pilot, lambda: fired)
         loop.set_exception_handler(None)
         assert fired == [1]
         assert errors == []
@@ -1052,9 +1037,9 @@ async def test_settings_have_no_default_view_row() -> None:
     """L3: views were removed in 2.1; Settings still offered "Default View"."""
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("comma")
-        await _settle(pilot, 8)
+        await settle(pilot)
         assert type(app.screen).__name__ == "SettingsScreen"
         assert not app.screen.query("#setting-analysis--default_view")
         await pilot.press("escape")
@@ -1069,13 +1054,13 @@ async def test_ctrl_q_asks_before_quitting(monkeypatch) -> None:
     """Textual's own Ctrl+Q quit at once, without the dialog and cleanup."""
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         calls: list[str] = []
         monkeypatch.setattr(
             app._quit_controller, "request_quit", lambda: calls.append("ctrl+q")
         )
         await pilot.press("ctrl+q")
-        await _settle(pilot)
+        await settle(pilot)
         assert calls == ["ctrl+q"]
         assert app.is_running
         assert app.return_code is None
@@ -1090,20 +1075,17 @@ async def test_quit_dialog_exit_runs_the_cleanup(monkeypatch) -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         cleaned: list[int] = []
         monkeypatch.setattr(
             app._quit_controller, "force_exit", lambda: cleaned.append(1)
         )
         monkeypatch.setattr(qc.QuitController, "_quit_notes", staticmethod(list))
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "QuitConfirmModal"
         await pilot.press("y")
-        for _ in range(40):
-            await pilot.pause(0.05)
-            if app._exit:
-                break
+        await until(pilot, lambda: app._exit)
         assert cleaned == [1]
         assert app._exit
         assert app.return_code == 0
@@ -1116,16 +1098,13 @@ async def test_exit_does_not_wait_for_a_hung_cleanup(monkeypatch) -> None:
     app = _app()
     release = threading.Event()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         monkeypatch.setattr(type(app), "QUIT_CLEANUP_BUDGET", 0.3)
         monkeypatch.setattr(
             app._quit_controller, "force_exit", lambda: release.wait(10)
         )
         app.exit()
-        for _ in range(40):
-            await pilot.pause(0.05)
-            if app._exit:
-                break
+        await until(pilot, lambda: app._exit)
         assert app._exit  # posted although the cleanup still "runs"
         app.exit()  # a second request while cleaning up: harmless
     release.set()
@@ -1168,7 +1147,6 @@ def test_force_exit_stops_mitmweb_first_and_bounds_hung_steps(monkeypatch):
     a timeout.
     """
     import threading
-    import time as _time
 
     from sandroid.services import mitmproxy_service as ms
     from sandroid.tui.controllers import quit_controller as qc
@@ -1186,19 +1164,29 @@ def test_force_exit_stops_mitmweb_first_and_bounds_hung_steps(monkeypatch):
         def stop_all(self):
             order.append("tasks")
             blocker.wait(10)
+            order.append("tasks done")
 
     from sandroid import services
 
     monkeypatch.setattr(services, "get_task_service", _Tasks)
     real_bounded = qc.run_bounded
-    monkeypatch.setattr(
-        qc, "run_bounded", lambda name, fn, timeout: real_bounded(name, fn, 0.2)
-    )
-    started = _time.monotonic()
-    qc.QuitController().force_exit()
-    blocker.set()
+    bounded: dict[str, bool] = {}
+
+    def run_bounded(name, fn, timeout):
+        # the hung step gets a short bound; the others keep theirs
+        short = name == "background tasks"
+        bounded[name] = real_bounded(name, fn, 0.2 if short else timeout)
+        return bounded[name]
+
+    monkeypatch.setattr(qc, "run_bounded", run_bounded)
+    try:
+        qc.QuitController().force_exit()
+        # force_exit returned while the task stop still hangs
+        assert "tasks done" not in order
+        assert bounded["background tasks"] is False
+    finally:
+        blocker.set()
     assert order[:2] == ["mitm", "tasks"]
-    assert _time.monotonic() - started < 5
 
 
 def test_quit_dialog_says_what_quitting_tears_down(monkeypatch):
@@ -1261,7 +1249,7 @@ async def test_ticker_shows_human_lines_not_adb_commands() -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         log = ms.query_one("#activity-log", ActivityLog)
         ticker = ms.query_one("#log-ticker")
@@ -1271,7 +1259,7 @@ async def test_ticker_shows_human_lines_not_adb_commands() -> None:
             "-w 4 10.0.2.2 8090'): nc: connect: Network is unreachable"
         )
         log.log_warning(raw)
-        await _settle(pilot)
+        await settle(pilot)
         assert "adb: nc: connect: Network is unreachable" in ticker.last_line
         assert "printf" not in ticker.last_line
         assert "printf" in "\n".join(log._plain_lines)  # full line in the drawer
@@ -1279,7 +1267,7 @@ async def test_ticker_shows_human_lines_not_adb_commands() -> None:
             "Task exception was never retrieved\nTraceback (most recent call "
             "last):\n  File x\nLookupError: <ContextVar name='active_app'>"
         )
-        await _settle(pilot)
+        await settle(pilot)
         assert "Task exception was never retrieved" in ticker.last_line
 
 
@@ -1289,7 +1277,7 @@ async def test_recurring_errors_are_folded(monkeypatch) -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         log = app.screen.query_one("#activity-log", ActivityLog)
         before = len(log._plain_lines)
         for i in range(6):
@@ -1311,20 +1299,20 @@ async def test_drawer_focus_offers_no_inspect_and_has_no_hscroll() -> None:
 
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         await pilot.press("2")  # a lens with an Inspector
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.check_action("inspect", ()) is True
         ms.toggle_log_drawer()
-        await _settle(pilot)
+        await settle(pilot)
         log = ms.query_one("#activity-log", ActivityLog)
         log.focus()
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.check_action("inspect", ()) is False
         assert log.styles.overflow_x == "hidden"
         log.log_info("x" * 300)
-        await _settle(pilot)
+        await settle(pilot)
         assert log.max_scroll_x == 0
 
 
@@ -1339,15 +1327,15 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
     meant for the dialog then opened Proxy Settings and Sandroid stayed up.
     """
     import threading
-    import time
 
     from sandroid.services import get_task_service
 
     stops: list[tuple[str, bool]] = []
+    release = threading.Event()  # the stops hang until the keys are checked
 
     def _slow_stop(name: str):
         def _stop() -> None:
-            time.sleep(0.6)
+            release.wait(10.0)
             stops.append((name, threading.current_thread() is threading.main_thread()))
 
         return _stop
@@ -1356,7 +1344,7 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
     app = _app()
     try:
         async with app.run_test(size=SIZE) as pilot:
-            await _boot(app, pilot)
+            await boot(app, pilot)
             for name, display in (("fritap", "FriTap"), ("monitor", "Monitor")):
                 tasks.register(
                     name=name,
@@ -1364,9 +1352,9 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
                     instance=None,
                     stop_callback=_slow_stop(name),
                 )
-            await _settle(pilot)
+            await settle(pilot)
             await pilot.press("q")
-            await _settle(pilot)
+            await settle(pilot)
             modal = app.screen
             assert type(modal).__name__ == "QuitConfirmModal"
             assert stops == []  # nothing stopped before the confirm
@@ -1374,23 +1362,23 @@ async def test_q_asks_first_and_stops_running_tools_off_the_ui_thread() -> None:
             assert "stops friTap" in notes
             assert "stops the file monitor" in notes
             await pilot.press("y")
-            await _settle(pilot, 2)
+            await settle(pilot)
             # Still up, as a progress note that swallows keys.
             assert app.screen is modal
             assert modal.quitting
             assert "Quitting" in str(modal.query_one("#quit-title").render())
             for key in ("y", "escape", "M", "q", "n"):
                 await pilot.press(key)
-            await _settle(pilot, 2)
+            await settle(pilot)
             assert app.screen is modal
             assert app.check_action("toggle_proxy", ()) is False
-            for _ in range(80):
-                await pilot.pause(0.05)
-                if app._exit:
-                    break
+            assert stops == []  # the stops are still running meanwhile
+            release.set()
+            await until(pilot, lambda: app._exit)
             assert app._exit
             assert sorted(stops) == [("fritap", False), ("monitor", False)]
     finally:
+        release.set()
         for name in ("fritap", "monitor"):
             tasks.unregister(name)
 
@@ -1424,18 +1412,18 @@ async def test_q_asks_even_with_a_resident_frida_script(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "QuitConfirmModal"
         assert cleaned == []
         await pilot.press("ctrl+c")  # a second quit key does not stack dialogs
-        await _settle(pilot)
+        await settle(pilot)
         assert (
             sum(type(s).__name__ == "QuitConfirmModal" for s in app.screen_stack) == 1
         )
         await pilot.press("n")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
 
 
@@ -1454,22 +1442,22 @@ async def test_q_after_closing_the_objection_dialog_asks(monkeypatch) -> None:
     )
     app = _app()
     async with app.run_test(size=(80, 24)) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("1")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("b")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("o")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "ObjectionModal"
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "MainScreen"
         await pilot.press("q")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ == "QuitConfirmModal"
         await pilot.press("n")
-        await _settle(pilot)
+        await settle(pilot)
 
 
 async def test_status_bar_refreshes_while_a_modal_is_open(monkeypatch) -> None:
@@ -1481,12 +1469,12 @@ async def test_status_bar_refreshes_while_a_modal_is_open(monkeypatch) -> None:
 
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         bar = app.screen.query_one("#status-bar", StatusBar)
         calls: list[int] = []
         monkeypatch.setattr(bar, "update_from_toolbox", lambda: calls.append(1))
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         assert type(app.screen).__name__ != "MainScreen"
         app._update_status_bar()  # what _auto_start_frida_server calls
         assert calls == [1]
@@ -1539,13 +1527,13 @@ async def test_drawer_lines_use_the_drawer_width_and_only_errors_are_red(
 
     app = _app()
     async with app.run_test(size=size) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         log = ms.query_one("#activity-log", ActivityLog)
         ms.toggle_log_drawer()  # open once (size known), then close
-        await _settle(pilot)
+        await settle(pilot)
         ms.toggle_log_drawer()
-        await _settle(pilot)
+        await settle(pilot)
         path = (
             "/data/data/org.mozilla.firefox/cache/k3m7yjvw.default/cache2/"
             "entries/98651ACF954B76241C3F4101CF4BC5B2C0B66362"
@@ -1553,9 +1541,9 @@ async def test_drawer_lines_use_the_drawer_width_and_only_errors_are_red(
         log.log_info(f"Pulled {path} to /private/tmp/results/files/{path[11:]}")
         log.log_task_stopped("Monitor")
         log.log_task_stopped("Monitor")  # the same stop from a second channel
-        await _settle(pilot)
+        await settle(pilot)
         ms.toggle_log_drawer()
-        await _settle(pilot)
+        await settle(pilot)
         width = log.scrollable_content_region.width
         assert width > size[0] - 10
         texts = ["".join(seg.text for seg in strip).rstrip() for strip in log.lines]
@@ -1576,11 +1564,11 @@ async def test_drawer_lines_use_the_drawer_width_and_only_errors_are_red(
         # A resize re-wraps what is already there.
         lines_before = len(log.lines)
         await pilot.resize_terminal(size[0] // 2, size[1])
-        await _settle(pilot, 8)
+        await settle(pilot)
         assert len(log.lines) > lines_before
         # An ERROR line is still coloured.
         log.log_error("pull failed")
-        await _settle(pilot)
+        await settle(pilot)
         assert any(
             seg.style and seg.style.color and "ERROR" in seg.text
             for seg in log.lines[-1]
@@ -1601,11 +1589,11 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
 
     app = _app()
     async with app.run_test(size=size) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         await pilot.press("3")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("question_mark")
-        await _settle(pilot)
+        await settle(pilot)
         help_screen = app.screen
         assert type(help_screen).__name__ == "HelpScreen"
         options = help_screen.query_one("#kb-list", OptionList)
@@ -1648,7 +1636,7 @@ async def test_help_opens_on_the_current_lens_and_explains_shadowed_keys(
         # The detail pane (wide terminals) spells the override out.
         if size[0] >= 200:
             options.highlighted = rows.index(watch)
-            await _settle(pilot)
+            await settle(pilot)
             detail = str(help_screen.query_one("#kb-detail").render())
             assert "Overrides the global key w = " in detail
         await pilot.press("escape")
@@ -1686,7 +1674,7 @@ async def test_live_pill_says_monitor_blind_while_it_is() -> None:
     app = _app()
     svc = get_task_service()
     async with app.run_test(size=SIZE) as pilot:
-        await _boot(app, pilot)
+        await boot(app, pilot)
         ms = app.screen
         header = ms.query_one("#shell-header")
         panel = ms.lens_widget("files")
@@ -1701,16 +1689,16 @@ async def test_live_pill_says_monitor_blind_while_it_is() -> None:
             table.clear()
             watch.poll_once()  # the target is gone: blind
             panel._update_caption()
-            await _settle(pilot)
+            await settle(pilot)
             assert header.pill_text == "○ LIVE · monitor blind"
             assert ms.query_one("#scope-pill").has_class("-blind")
             ms.refresh_status()  # the screen re-sets "● LIVE": still blind
-            await _settle(pilot)
+            await settle(pilot)
             assert header.pill_text == "○ LIVE · monitor blind"
         finally:
             svc._tasks.pop("monitor", None)
         panel._update_caption()
-        await _settle(pilot)
+        await settle(pilot)
         assert header.pill_text == "● LIVE"
         assert ms.query_one("#scope-pill").has_class("-live")
 

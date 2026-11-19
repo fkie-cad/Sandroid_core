@@ -21,6 +21,7 @@ import time as time_module
 from types import SimpleNamespace
 
 import pytest
+from pilot_helpers import until
 from rich.markdown import Markdown
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -768,18 +769,23 @@ async def test_approve_tool_call_resolves_via_real_button_click(monkeypatch):
             # button can become queryable a beat before that coroutine
             # actually resumes past its `await self.mount(...)` to set the
             # header state -- wait for both together rather than assume
-            # they land in the same tick.
-            button = None
-            for _ in range(300):
+            # they land in the same tick. And wait until it is laid out:
+            # pilot.click() hits the button's top-left cell, which belongs to
+            # another widget while the fresh button still has an empty region.
+            def ready() -> Button | None:
                 try:
                     candidate = app.query_one("#btn-once", Button)
                 except NoMatches:
-                    candidate = None
-                if candidate is not None and panel._header_state == "awaiting-approval":
-                    button = candidate
-                    break
-                await asyncio.sleep(0.02)
-            assert button is not None, "ToolPermissionPrompt's button never mounted"
+                    return None
+                if panel._header_state != "awaiting-approval":
+                    return None
+                region = candidate.region
+                if not region.area:
+                    return None
+                hit, _ = app.get_widget_at(region.x, region.y)
+                return candidate if hit is candidate else None
+
+            await until(pilot, ready, msg="ToolPermissionPrompt's button never ready")
             assert panel._header_state == "awaiting-approval"
 
             # ONLY NOW simulate the click -- this is what sets the local
@@ -801,7 +807,7 @@ async def test_approve_tool_call_resolves_via_real_button_click(monkeypatch):
                 app.query_one(ToolPermissionPrompt)
             assert panel._header_state != "awaiting-approval"
 
-    await asyncio.wait_for(scenario(), timeout=15)
+    await asyncio.wait_for(scenario(), timeout=60)
 
 
 @pytest.mark.smoke
@@ -854,14 +860,11 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
             )
             thread.start()
 
-            button = None
-            for _ in range(300):
-                try:
-                    button = app.query_one("#btn-once", Button)
-                    break
-                except NoMatches:
-                    await asyncio.sleep(0.02)
-            assert button is not None, "ToolPermissionPrompt's button never mounted"
+            await until(
+                pilot,
+                lambda: app.query("#btn-once"),
+                msg="ToolPermissionPrompt's button never mounted",
+            )
 
             # Simulate Ctrl+X: set the turn's cancel_event directly, exactly
             # what ChatPanel.action_stop_turn does via `handle.stop()`.
@@ -875,7 +878,7 @@ async def test_approve_tool_call_never_hangs_returns_cancelled_on_stop(monkeypat
             with pytest.raises(NoMatches):
                 app.query_one(ToolPermissionPrompt)
 
-    await asyncio.wait_for(scenario(), timeout=15)
+    await asyncio.wait_for(scenario(), timeout=60)
 
 
 # -- Phase 3/4: async-subtask integration ---------------------------------

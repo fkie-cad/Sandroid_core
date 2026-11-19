@@ -11,6 +11,7 @@ import threading
 import time
 
 import pytest
+from pilot_helpers import boot, settle, until
 
 from sandroid.services.app_info_service import (
     AppOpEntry,
@@ -315,29 +316,6 @@ def fake(monkeypatch):
         gate.set()
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
-async def _wait(pilot, cond, timeout: float = 5.0) -> None:
-    end = time.monotonic() + timeout
-    while time.monotonic() < end:
-        if cond():
-            return
-        await pilot.pause(0.05)
-    assert cond()
-
-
-async def _boot(app, pilot):
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")
-        await _settle(pilot, 4)
-    assert type(app.screen).__name__ == "MainScreen"
-    return app.screen
-
-
 def _app():
     from sandroid.tui.app import SandroidTUI
 
@@ -517,10 +495,10 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
     monkeypatch.setattr(SpotlightPanel, "action_primary", lambda s: started.append(1))
     app = _app()
     async with app.run_test(size=size) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
-        await _settle(pilot)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
         titles = [_band(s) for s in sections.sections()]
         # " ▾ TITLE   summary" on the header band
         assert [t.split("   ")[0][2:] for t in titles] == [
@@ -554,7 +532,7 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         assert ms.check_action("inspect", ()) is True
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         content = ms.inspector_content
         assert content.lens == "app"
@@ -562,14 +540,14 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         assert content.key.startswith("app:identity:")
         # Space = Start/Resume, also from inside a section table
         await pilot.press("space")
-        await _settle(pilot)
+        await settle(pilot)
         assert started == [1]
         # the caption advertises the lens keys
         assert "⏎ inspect" in (ms._lens_captions["app"][1] or "")
         if size == (100, 30):
             # header, the frame and the action row stay on screen
             ms.close_inspector()
-            await _settle(pilot)
+            await settle(pilot)
             text = _screen_text(app)
             assert "␣ Start" in text or "● running" in text
             assert "⇧K kill" in text
@@ -579,18 +557,18 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
 async def test_permissions_row_inspector_has_grant_and_appops(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         perms = sections.section("permissions")
         perms.focus()
-        await _settle(pilot)
+        await settle(pilot)
         index = next(
             i for i, r in enumerate(perms.rows_shown) if r.key.endswith("CAMERA")
         )
         perms.move_cursor(row=index)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         content = ms.inspector_content
         assert content.key == "app:permissions:perm:android.permission.CAMERA"
         evidence = dict(content.tabs[0][1])
@@ -602,17 +580,17 @@ async def test_permissions_row_inspector_has_grant_and_appops(fake):
 async def test_tab_moves_between_sections_and_z_folds(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         first = sections.section("identity")
         first.focus()
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("tab")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.focused is sections.section("permissions")
         await pilot.press("z")
-        await _settle(pilot)
+        await settle(pilot)
         perms = sections.section("permissions")
         assert perms.folded
         assert perms.size.height == 0
@@ -620,10 +598,10 @@ async def test_tab_moves_between_sections_and_z_folds(fake):
         # still in the focus order while folded
         await pilot.press("tab")
         await pilot.press("shift+tab")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.focused is perms
         await pilot.press("z")
-        await _settle(pilot)
+        await settle(pilot)
         assert not perms.folded
         assert perms.size.height > 3
 
@@ -631,22 +609,22 @@ async def test_tab_moves_between_sections_and_z_folds(fake):
 async def test_slash_filters_rows_across_sections_and_esc_clears(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         await pilot.press("slash")
-        await _settle(pilot)
+        await settle(pilot)
         assert app.focused.id == "app-filter"
         for ch in "camera":
             await pilot.press(ch)
-        await _wait(pilot, lambda: sections.filter_text == "camera")
+        await until(pilot, lambda: sections.filter_text == "camera")
         perms = _texts(sections.section("permissions"))
         assert len(perms) == 1
         assert "CAMERA" in perms[0]
         assert "no rows match" in _texts(sections.section("exposure"))[0]
         assert "1 of" in _band(sections.section("permissions"))
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
         assert sections.filter_text == ""
         assert len(_texts(sections.section("permissions"))) > 1
 
@@ -654,12 +632,12 @@ async def test_slash_filters_rows_across_sections_and_esc_clears(fake):
 async def test_u_refreshes_runtime_facts_off_thread(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
         before = len(FakeService.calls)
         await pilot.press("u")
-        await _wait(
+        await until(
             pilot,
             lambda: (
                 {"footprint", "static_cache"}
@@ -678,17 +656,17 @@ async def test_uncached_apk_shows_analysing_then_pulls(fake):
     FakeService.gates[("static_pull", PKG)] = gate
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: sections.facts and sections.facts.footprint)
+        await until(pilot, lambda: sections.facts and sections.facts.footprint)
         assert sections.facts.static_state == "analysing"
         assert "analysing manifest" in _band(sections.section("exposure"))
         gate.set()
-        await _wait(pilot, lambda: sections.facts.static_state == "ready")
-        await _settle(pilot)
+        await until(pilot, lambda: sections.facts.static_state == "ready")
+        await settle(pilot)
         assert any(".Files" in t for t in _texts(sections.section("exposure")))
         # the decoded manifest triggers a permissions re-read
-        await _wait(
+        await until(
             pilot,
             lambda: sum(m == "permissions" for m, _p, _t in FakeService.calls) >= 2,
         )
@@ -700,13 +678,13 @@ async def test_a_slow_footprint_does_not_hold_up_the_manifest(fake):
     FakeService.gates[("footprint", PKG)] = gate
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: sections.facts.static_state == "ready")
+        await until(pilot, lambda: sections.facts.static_state == "ready")
         assert sections.facts.footprint is None
         assert "measuring" in _texts(sections.section("data"))[0]
         gate.set()
-        await _wait(pilot, lambda: sections.facts.footprint is not None)
+        await until(pilot, lambda: sections.facts.footprint is not None)
 
 
 async def test_unhashable_apk_is_not_pulled_and_says_why(fake):
@@ -714,10 +692,10 @@ async def test_unhashable_apk_is_not_pulled_and_says_why(fake):
     FakeService.unhashable = {PKG}
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: sections.facts and sections.facts.footprint)
-        await _settle(pilot)
+        await until(pilot, lambda: sections.facts and sections.facts.footprint)
+        await settle(pilot)
         assert sections.facts.static_state == "missing"
         assert "could not hash" in _texts(sections.section("defences"))[0]
         assert "static_pull" not in {m for m, _p, _t in FakeService.calls}
@@ -728,17 +706,17 @@ async def test_stale_results_of_a_previous_app_are_dropped(fake):
     FakeService.gates[("details", PKG)] = gate
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: sections.package == PKG)
+        await until(pilot, lambda: sections.package == PKG)
         fake["pkg"] = OTHER
         ms.query_one(SpotlightPanel).refresh_panel()
-        await _wait(pilot, lambda: _loaded(sections) and sections.package == OTHER)
+        await until(pilot, lambda: _loaded(sections) and sections.package == OTHER)
         gate.set()  # the old app's details arrive late
-        await _wait(
+        await until(
             pilot, lambda: sum(m == "details" for m, _p, _t in FakeService.calls) >= 2
         )
-        await _settle(pilot, 6)
+        await settle(pilot)
         assert sections.package == OTHER
         assert sections.facts.details.value["version_name"] == "9.9"
 
@@ -746,20 +724,20 @@ async def test_stale_results_of_a_previous_app_are_dropped(fake):
 async def test_appops_poll_only_while_visible(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         before = len(FakeService.calls)
         sections._last_runtime = sections.facts.appops_at = 0.0  # 10 s are over
         sections._poll_tick()
         sections.note_state_changed()
-        await _settle(pilot)
+        await settle(pilot)
         assert len(FakeService.calls) == before
         assert sections._stale
         await pilot.press("1")
-        await _wait(pilot, lambda: len(FakeService.calls) > before)
+        await until(pilot, lambda: len(FakeService.calls) > before)
         sections_calls = {m for m, _p, _t in FakeService.calls[before:]}
         assert "appops" in sections_calls
 
@@ -768,14 +746,14 @@ async def test_no_app_keeps_the_old_panel_and_no_inspector(fake):
     fake["pkg"] = None
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
         assert sections.facts is None
         assert not sections.display
         assert app.focused.id == "spotlight-panel"
         assert ms.check_action("inspect", ()) is True
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert not ms.inspector_is_open
         assert FakeService.calls == []
 
@@ -849,20 +827,20 @@ async def test_a_poll_keeps_the_scroll_position_and_the_cursor() -> None:
         section = app.query_one(LensSection)
         section.show(_many_rows(300, "5s ago"))
         section.focus()
-        await _settle(pilot)
+        await settle(pilot)
         section.move_cursor(row=160, animate=False)
         section.scroll_to(y=150, animate=False)
-        await _settle(pilot)
+        await settle(pilot)
         assert section.scroll_y == 150
         # same rows, new text: cells update in place
         section.show(_many_rows(300, "15s ago"))
-        await _settle(pilot)
+        await settle(pilot)
         assert section.scroll_y == 150
         assert section.cursor_row == 160
         assert "15s ago" in str(section.get_row("r10")[1])
         # a row more: the table is rebuilt, the view is restored
         section.show(_many_rows(300, "25s ago", extra=1))
-        await _settle(pilot)
+        await settle(pilot)
         assert section.scroll_y == 150
         assert section.cursor_row == 160
 
@@ -884,16 +862,16 @@ async def test_theme_switch_recolors_the_lens_css_and_rich_text(fake):
 
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         perms = sections.section("permissions")
         body = ms.query_one("#spotlight-body")
         assert dangerous_style(perms) == DEFAULT_LENS.warn
         assert perms.styles.background.hex.lower() == DEFAULT_LENS.bg
 
         app._apply_theme(LIGHT_THEME, get_theme_css_path("light"))
-        await _settle(pilot)
+        await settle(pilot)
         light = LIGHT_THEME.lens
         assert app.theme == "sandroid-light"
         assert perms.styles.background.hex.upper() == light.bg
@@ -902,7 +880,7 @@ async def test_theme_switch_recolors_the_lens_css_and_rich_text(fake):
         assert DEFAULT_LENS.label not in str(body.content)
 
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
-        await _settle(pilot)
+        await settle(pilot)
         assert dangerous_style(perms) == DEFAULT_LENS.warn
         assert perms.styles.background.hex.lower() == DEFAULT_LENS.bg
 
@@ -917,23 +895,26 @@ async def test_dense_dark_theme_keeps_cell_colors_under_the_cursor(fake):
 
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         perms = sections.section("permissions")
         assert perms.cursor_foreground_priority == "css"
 
         app._apply_theme(GRAPHITE_THEME, get_theme_css_path("graphite"))
-        await _settle(pilot)
-        assert app.theme == "sandroid-graphite"
-        assert perms.cursor_foreground_priority == "renderable"
-        assert perms.styles.background.hex.upper() == GRAPHITE_THEME.lens.bg
+        await until(
+            pilot,
+            lambda: (
+                app.theme == "sandroid-graphite"
+                and perms.cursor_foreground_priority == "renderable"
+                and perms.styles.background.hex.upper() == GRAPHITE_THEME.lens.bg
+            ),
+        )
         footer_key = app.theme_variables["footer-key-foreground"].upper()
         assert footer_key == GRAPHITE_THEME.lens.title
 
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
-        await _settle(pilot)
-        assert perms.cursor_foreground_priority == "css"
+        await until(pilot, lambda: perms.cursor_foreground_priority == "css")
 
 
 def test_dense_dark_themes_meet_their_contrast_floors():
@@ -985,12 +966,12 @@ async def test_light_themes_recolor_the_shell_chrome_and_status_glyphs(fake):
 
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         header = ms.query_one("#shell-header")
         for name in ("paper", "daylight"):
             theme = THEMES[name]
             app._apply_theme(theme, get_theme_css_path(name))
-            await _settle(pilot)
+            await settle(pilot)
             assert app.theme == f"sandroid-{name}"
             assert fixed_color("running") == theme.status_colors["running"]
             assert (
@@ -1000,7 +981,7 @@ async def test_light_themes_recolor_the_shell_chrome_and_status_glyphs(fake):
             assert header.styles.background.hex.upper() != "#0B1628"
 
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
-        await _settle(pilot)
+        await settle(pilot)
         assert fixed_color("running") == FIXED_COLORS["running"]
         assert header.styles.background.hex.lower() == "#0b1628"
 
@@ -1012,14 +993,14 @@ async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
     FakeService.no_insight = {PKG}
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
-        await _settle(pilot)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
         assert _texts(sections.section("trackers"))[0] == ANALYSIS_HINT
         FakeService.no_insight = set()  # the analysis wrote meta.json
         AnalysisCompleted(source="static_analysis").publish()
-        await _wait(
+        await until(
             pilot,
             lambda: any(
                 "Firebase Analytics" in t for t in _texts(sections.section("trackers"))
@@ -1031,29 +1012,29 @@ async def test_lens_activation_re_reads_a_cache_without_insight(fake):
     FakeService.no_insight = {PKG}
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
         await pilot.press("2")
-        await _settle(pilot)
+        await settle(pilot)
         FakeService.no_insight = set()
         before = len(FakeService.calls)
         await pilot.press("1")
-        await _wait(
+        await until(
             pilot,
             lambda: "static_cache" in {m for m, _p, _t in FakeService.calls[before:]},
         )
-        await _wait(pilot, lambda: sections.facts.static.insight is not None)
+        await until(pilot, lambda: sections.facts.static.insight is not None)
 
 
 async def test_a_failed_worker_clears_only_its_own_flags(fake):
     FakeService.fail = {("footprint", PKG)}
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: sections.facts and sections.facts.services)
-        await _wait(pilot, lambda: sections._footprint_inflight is None)
+        await until(pilot, lambda: sections.facts and sections.facts.services)
+        await until(pilot, lambda: sections._footprint_inflight is None)
         # a failed runtime worker of another generation / request is ignored
         token = sections._token()
         sections._runtime_rid = 99
@@ -1065,15 +1046,15 @@ async def test_a_failed_worker_clears_only_its_own_flags(fake):
         # a failing appops refresh still ends its in-flight state
         FakeService.fail = {("appops", PKG)}
         assert sections.refresh_runtime(("appops",))
-        await _wait(pilot, lambda: not sections._runtime_inflight)
+        await until(pilot, lambda: not sections._runtime_inflight)
 
 
 async def test_u_during_a_running_poll_runs_right_after_it(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
+        await until(pilot, lambda: _loaded(sections) and not sections._runtime_inflight)
         gate = threading.Event()
         FakeService.gates[("appops", PKG)] = gate
         sections._last_runtime = sections.facts.appops_at = 0.0
@@ -1081,10 +1062,10 @@ async def test_u_during_a_running_poll_runs_right_after_it(fake):
         assert sections._runtime_inflight
         before = len(FakeService.calls)
         await pilot.press("u")
-        await _settle(pilot)
+        await settle(pilot)
         gate.set()
         start = time.monotonic()
-        await _wait(
+        await until(
             pilot,
             lambda: "static_cache" in {m for m, _p, _t in FakeService.calls[before:]},
             timeout=3.0,
@@ -1095,17 +1076,17 @@ async def test_u_during_a_running_poll_runs_right_after_it(fake):
 async def test_footprint_gets_the_known_data_dir(fake):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         assert FakeService.footprint_dirs == [f"/data/user/0/{PKG}"]
 
 
 async def test_caption_offers_space_only_when_it_does_something(fake, monkeypatch):
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
-        await _wait(pilot, lambda: _sections(ms).facts is not None)
+        ms = await boot(app, pilot)
+        await until(pilot, lambda: _sections(ms).facts is not None)
         panel = ms.query_one(SpotlightPanel)
 
         def caption() -> str:
@@ -1124,16 +1105,16 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
     """100x30 with the Inspector open: the lens is ~44 columns wide."""
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
-        await _settle(pilot)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
         wide = _screen_text(app)
         assert "⇧K kill" in wide
         assert "1 ○ SSL" in wide  # the full toggle row fits
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         panel = ms.query_one(SpotlightPanel)
         assert panel.size.width < 60
@@ -1144,7 +1125,7 @@ async def test_narrow_lens_keeps_bypass_and_actions_on_one_line_each(fake):
         for key in ("⇧R", "⇧A", "⇧P", "⇧K", "⇧X"):
             assert key in actions
         ms.close_inspector()
-        await _settle(pilot)
+        await settle(pilot)
         assert "⇧K kill" in _screen_text(app)
 
 
@@ -1188,10 +1169,10 @@ async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
     FakeService.extra_ops = _bookkeeping_ops()
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
-        await _settle(pilot)
+        await until(pilot, lambda: _loaded(sections))
+        await settle(pilot)
         perms = sections.section("permissions")
         keys = [r.key for r in perms.rows_shown]
         assert keys[-1] == app_lens.MORE_KEY
@@ -1199,23 +1180,23 @@ async def test_other_ops_row_expands_with_z_enter_and_filter(fake):
         assert "+4 other ops (no recorded use)" in perms.rows_shown[-1].text
         perms.focus()
         perms.move_cursor(row=len(keys) - 1)
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("z")
-        await _settle(pilot)
+        await settle(pilot)
         assert perms.expanded
         assert not perms.folded
         assert "op:READ_SMS" in [r.key for r in perms.rows_shown]
         assert perms.cursor_key() == perms.data.hidden_rows[0].key
         perms.move_cursor(row=len(perms.rows_shown) - 1)
-        await _settle(pilot)
+        await settle(pilot)
         assert perms.cursor_key() == app_lens.LESS_KEY
         await pilot.press("enter")  # Enter on "hide" collapses, no Inspector
-        await _settle(pilot)
+        await settle(pilot)
         assert not perms.expanded
         assert not ms.inspector_is_open
         # a filter searches the hidden rows too
         sections.set_filter("read_sms")
-        await _settle(pilot)
+        await settle(pilot)
         assert [r.key for r in perms.rows_shown] == ["op:READ_SMS"]
 
 
@@ -1240,15 +1221,15 @@ def test_compact_permission_cells_combine_grant_and_use() -> None:
 async def test_narrow_lens_shows_the_compact_permission_columns(fake):
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(pilot, lambda: _loaded(sections))
+        await until(pilot, lambda: _loaded(sections))
         perms = sections.section("permissions")
         assert len(perms.columns) == 5
         app.focused.move_cursor(row=0)
         await pilot.press("enter")
-        await _wait(pilot, lambda: perms.compact)
-        await _settle(pilot)
+        await until(pilot, lambda: perms.compact)
+        await settle(pilot)
         labels = [str(c.label) for c in perms.columns.values()]
         assert labels == ["permission", "✓·use", "last use"]
         cam = next(
@@ -1259,10 +1240,10 @@ async def test_narrow_lens_shows_the_compact_permission_columns(fake):
         perms.focus()
         perms.move_cursor(row=cam)
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert "AppOps CAMERA" in dict(ms.inspector_content.tabs[0][1])
         ms.close_inspector()
-        await _wait(pilot, lambda: not perms.compact)
+        await until(pilot, lambda: not perms.compact)
         assert len(perms.columns) == 5
 
 
@@ -1296,9 +1277,9 @@ async def test_quit_hook_stops_device_work_and_no_new_work_starts(fake, monkeypa
     FakeService.gates[("details", PKG)] = gate
     app = _app()
     async with app.run_test(size=(160, 45)) as pilot:
-        ms = await _boot(app, pilot)
+        ms = await boot(app, pilot)
         sections = _sections(ms)
-        await _wait(
+        await until(
             pilot, lambda: ("details", PKG) in {c[:2] for c in FakeService.calls}
         )
         assert sections.shutdown in [fn for _n, fn in qc._SHUTDOWN_HOOKS]
@@ -1306,10 +1287,10 @@ async def test_quit_hook_stops_device_work_and_no_new_work_starts(fake, monkeypa
         assert killed == [PKG]  # a worker was in flight
         before = len(FakeService.calls)
         gate.set()  # the load goes on: its next call is refused
-        await _wait(pilot, lambda: sections._inflight_workers == 0)
-        await _wait(pilot, lambda: not sections._runtime_inflight)
+        await until(pilot, lambda: sections._inflight_workers == 0)
+        await until(pilot, lambda: not sections._runtime_inflight)
         sections.refresh_runtime(static=True, explicit=True)
-        await _settle(pilot)
+        await settle(pilot)
         assert FakeService.calls[before:] == []
     # unmount unregistered the hook
     assert sections.shutdown not in [fn for _n, fn in qc._SHUTDOWN_HOOKS]

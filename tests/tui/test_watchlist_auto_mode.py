@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pilot_helpers import settle, until
 from textual.app import App, ComposeResult
 
 from sandroid.core import watchlist_store
@@ -94,15 +94,6 @@ class _Harness(App):
         yield WatchlistView(id="files-watchlist")
 
 
-async def _wait_for(pilot, predicate, timeout: float = 4.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
-
-
 @pytest.mark.asyncio
 async def test_a_write_to_a_watched_file_pulls_it_once_quiet(monkeypatch) -> None:
     content = {PREFS: "<map/>\n"}
@@ -116,13 +107,14 @@ async def test_a_write_to_a_watched_file_pulls_it_once_quiet(monkeypatch) -> Non
     async with app.run_test() as pilot:
         view = app.query_one(WatchlistView)
         await pilot.pause()
-        # A burst of writes: one pull after the last one.
+        # A burst of writes (no quiet period in between): each re-arms the
+        # one timer, one pull after the last one.
         for _ in range(4):
             assert view.note_write(PREFS, T0)
-            await pilot.pause(0.03)
+        assert view.pending_auto == [PREFS]
         assert view.rows[PREFS].state is RowState.SETTLING
         assert calls == []
-        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
         assert calls == [PREFS]
         (version,) = watchlist_store.version_dirs(PREFS)
         record = watchlist_store.version_record(version)
@@ -139,7 +131,7 @@ async def test_a_write_to_a_watched_file_pulls_it_once_quiet(monkeypatch) -> Non
         # The next change is diffed against the first version.
         content[PREFS] = '<map><string name="k">v</string></map>\n'
         view.note_write(PREFS, T0)
-        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.CHANGED)
+        await until(pilot, lambda: view.rows[PREFS].state is RowState.CHANGED)
         newest = watchlist_store.version_dirs(PREFS)[-1]
         assert newest.name.startswith("v002_")
         assert "k" in (watchlist_store.version_diff(newest) or "")
@@ -161,7 +153,7 @@ async def test_wal_and_journal_writes_pull_the_database_group(monkeypatch) -> No
         assert view.note_write(f"{DB}-wal", T0)
         assert view.note_write(f"{DB}-journal", T0)
         assert view.pending_auto == [DB]
-        await _wait_for(pilot, lambda: view.rows[DB].state is RowState.BASELINE_ONLY)
+        await until(pilot, lambda: view.rows[DB].state is RowState.BASELINE_ONLY)
         assert calls == [DB, f"{DB}-wal", f"{DB}-journal"]
         (version,) = watchlist_store.version_dirs(DB)
         assert sorted(p.name for p in version.iterdir()) == [
@@ -191,9 +183,7 @@ async def test_unwatched_paths_are_ignored_and_patterns_adopt_new_files(
         assert view.note_write(new_file, T0) is True
         assert new_file in get_forensic_service().get_spotlight_files()
         assert watchlist_store.load_membership() == [new_file]
-        await _wait_for(
-            pilot, lambda: view.rows[new_file].state is RowState.BASELINE_ONLY
-        )
+        await until(pilot, lambda: view.rows[new_file].state is RowState.BASELINE_ONLY)
 
 
 @pytest.mark.asyncio
@@ -233,8 +223,10 @@ async def test_a_manual_pull_cancels_the_pending_auto_pull(monkeypatch) -> None:
         await pilot.pause()
         view.note_write(PREFS, T0)
         view.pull([PREFS])
-        await _wait_for(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
-        await pilot.pause(0.3)
+        assert view.pending_auto == []  # the manual pull disarmed the auto one
+        await until(pilot, lambda: view.rows[PREFS].state is RowState.BASELINE_ONLY)
+        await settle(pilot)
+        assert view.pending_auto == []
         assert calls == [PREFS]  # no second (auto) pull
         record = watchlist_store.version_record(watchlist_store.version_dirs(PREFS)[0])
         assert record["trigger"] == "manual"

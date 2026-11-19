@@ -15,10 +15,10 @@
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 
 import pytest
+from pilot_helpers import settle, until
 from textual.app import App
 from textual.widgets import Input, OptionList
 
@@ -144,15 +144,6 @@ class _Host(App):
         self.push_screen(self._modal)
 
 
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
-
-
 def _row_texts(modal: AppSelectionModal) -> list[str]:
     app_list = modal.query_one("#app-list", OptionList)
     return [
@@ -166,7 +157,7 @@ async def test_picker_shows_cache_then_refreshes_in_background() -> None:
     svc.get_installed_packages()
     modal = AppSelectionModal(**svc.picker_loaders())
     async with _Host(modal).run_test(size=(120, 40)) as pilot:
-        await _wait_for(pilot, lambda: len(modal.filtered_packages) == 3)
+        await until(pilot, lambda: len(modal.filtered_packages) == 3)
         rows = _row_texts(modal)
         assert "org.mozilla.firefox" in rows[0]
         assert rows[0].startswith("● ")  # running
@@ -186,11 +177,11 @@ async def test_ctrl_r_refreshes_and_keeps_filter() -> None:
 
     modal = AppSelectionModal(packages=list(packages), package_loader=loader)
     async with _Host(modal).run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert calls == []  # no initial_loader: no automatic refresh
         await pilot.press("o", "r", "g")
         await pilot.press("ctrl+r")
-        await _wait_for(
+        await until(
             pilot, lambda: calls == [False] and len(modal.filtered_packages) == 2
         )
         assert modal.query_one("#filter-input", Input).value == "org"
@@ -207,7 +198,7 @@ async def test_typing_during_the_open_refresh_keeps_the_filter() -> None:
     release = threading.Event()
 
     def loader(include_system: bool) -> list[dict]:
-        release.wait(5)
+        release.wait(10)
         return [dict(FIREFOX), *OLD]
 
     modal = AppSelectionModal(
@@ -216,11 +207,12 @@ async def test_typing_during_the_open_refresh_keeps_the_filter() -> None:
         initial_loader=lambda on_status=None: loader(False),
     )
     async with _Host(modal).run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.05)
-        assert "refreshing" in str(modal.query_one(".modal-title").render())
+        await until(
+            pilot, lambda: "refreshing" in str(modal.query_one(".modal-title").render())
+        )
         await pilot.press("f", "i", "r")
         release.set()
-        await _wait_for(pilot, lambda: len(modal.all_packages) == 3)
+        await until(pilot, lambda: len(modal.all_packages) == 3)
         assert modal.query_one("#filter-input", Input).value == "fir"
         assert _names(modal.filtered_packages) == ["org.mozilla.firefox"]
 
@@ -257,7 +249,7 @@ def test_adb_commands_never_read_the_terminal(monkeypatch) -> None:
 async def test_app_picker_filter_shows_typed_text(css: Path) -> None:
     modal = AppSelectionModal(packages=[dict(FIREFOX), *OLD])
     async with _Host(modal, css_path=css).run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.1)
+        await settle(pilot)
         field = modal.query_one("#filter-input", Input)
         await pilot.press("f", "i", "r")
         await pilot.pause()
@@ -270,7 +262,7 @@ async def test_app_picker_filter_shows_typed_text(css: Path) -> None:
 async def test_selection_modal_filter_has_a_text_row(css: Path) -> None:
     modal = SelectionModal(title="Pick", options=["alpha", "beta"])
     async with _Host(modal, css_path=css).run_test(size=(120, 40)) as pilot:
-        await pilot.pause(0.1)
+        await settle(pilot)
         assert modal.query_one("#filter-input", Input).content_region.height == 1
 
 
@@ -285,7 +277,7 @@ class _CompactProbe(ForensicModal[None]):
 async def test_compact_inputs_stay_borderless_under_app_css(css: Path) -> None:
     modal = _CompactProbe()
     async with _Host(modal, css_path=css).run_test(size=(80, 20)) as pilot:
-        await pilot.pause(0.1)
+        await settle(pilot)
         field = modal.query_one(Input)
         assert field.compact
         assert field.content_region.height == 1

@@ -17,9 +17,8 @@ wall-clock pauses rather than assuming synchronous completion.
 
 from __future__ import annotations
 
-import time
-
 import pytest
+from pilot_helpers import boot, settle, until
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Input
 
@@ -79,29 +78,12 @@ class _DiffsHarness(App):
         yield DiffsView(id="files-diffs")
 
 
-async def _wait_for(pilot, predicate, timeout: float = 3.0) -> None:
-    """Poll ``predicate`` with real pauses until true or ``timeout`` elapses.
-
-    Needed because run detail loading happens on a genuine background
-    thread; a plain ``await pilot.pause()`` does not guarantee the thread
-    has posted its result back yet.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await pilot.pause(0.02)
-    assert predicate(), "condition was not met within timeout"
-
-
 @pytest.mark.asyncio
 async def test_empty_state_before_any_run() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(
-            pilot, lambda: view._summaries == [] or view._detail_record is None
-        )
+        await until(pilot, lambda: view._summaries == [] or view._detail_record is None)
         assert view.glance_fragment() == "Diffs — no runs yet"
         table = view.query_one("#runs-table", DataTable)
         assert table.row_count == 0
@@ -117,7 +99,7 @@ async def test_mount_loads_existing_runs_and_selects_newest() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
 
         assert view._selected_run_id == "20260101_000001_bbbbbb"
         assert view._detail_record.run_id == "20260101_000001_bbbbbb"
@@ -138,14 +120,12 @@ async def test_on_new_run_auto_selects_when_viewing_latest() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(
-            pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa"
-        )
+        await until(pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa")
 
         _save("20260101_000001_bbbbbb", label="Run B")
         view.on_new_run("20260101_000001_bbbbbb")
 
-        await _wait_for(
+        await until(
             pilot,
             lambda: view._detail_record is not None
             and view._detail_record.run_id == "20260101_000001_bbbbbb",
@@ -163,11 +143,11 @@ async def test_on_new_run_does_not_steal_selection_from_older_run() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
 
         # Navigate to the OLDER run (not the latest).
         view._select_run("20260101_000000_aaaaaa")
-        await _wait_for(
+        await until(
             pilot,
             lambda: view._detail_record is not None
             and view._detail_record.run_id == "20260101_000000_aaaaaa",
@@ -175,7 +155,8 @@ async def test_on_new_run_does_not_steal_selection_from_older_run() -> None:
 
         _save("20260101_000002_cccccc", label="Run C")
         view.on_new_run("20260101_000002_cccccc")
-        await pilot.pause(0.05)
+        await until(pilot, lambda: "20260101_000002_cccccc" in view._unread_run_ids)
+        await settle(pilot)
 
         # Selection must NOT have moved to the new run.
         assert view._selected_run_id == "20260101_000000_aaaaaa"
@@ -195,17 +176,15 @@ async def test_new_run_cursor_stays_on_older_run_row() -> None:
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table", DataTable)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         view.focus()
         await pilot.press("down")
-        await _wait_for(
-            pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa"
-        )
+        await until(pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa")
         _save("20260101_000002_cccccc", label="Run C")
         view.on_new_run("20260101_000002_cccccc")
         # The reload runs on a worker: wait for the new row, not a fixed time.
-        await _wait_for(pilot, lambda: table.row_count == 3)
-        await pilot.pause(0.05)
+        await until(pilot, lambda: table.row_count == 3)
+        await settle(pilot)
         assert view._cursor_run_id() == "20260101_000000_aaaaaa"
         assert "●" in str(table.get_row_at(0)[1])
 
@@ -217,12 +196,12 @@ async def test_rename_run_persists_via_run_history() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
 
         # Exercise the same worker path action_rename_run() would use after
         # the InputModal resolves, without driving the modal's keystrokes.
         view._rename_run_bg("20260101_000000_aaaaaa", "Renamed run")
-        await _wait_for(
+        await until(
             pilot,
             lambda: run_history.load_run("20260101_000000_aaaaaa").label
             == "Renamed run",
@@ -271,7 +250,7 @@ async def test_rp_reach_app_from_diffs_but_not_from_text_input() -> None:
     app = _RPHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._summaries is not None)
+        await until(pilot, lambda: view._summaries is not None)
 
         app.query_one("#other-widget", Input).focus()
         await pilot.pause()
@@ -299,11 +278,11 @@ async def test_delete_run_removes_it_and_selects_remaining() -> None:
     app = _DiffsHarness()
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         assert view._selected_run_id == "20260101_000001_bbbbbb"
 
         view._delete_run_bg("20260101_000001_bbbbbb")
-        await _wait_for(
+        await until(
             pilot,
             lambda: view._selected_run_id == "20260101_000000_aaaaaa",
         )
@@ -357,7 +336,7 @@ async def test_table_row_shows_changes_errors_and_batch() -> None:
     async with app.run_test(size=(140, 20)) as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table", DataTable)
-        await _wait_for(pilot, lambda: len(view._facts) == 3)
+        await until(pilot, lambda: len(view._facts) == 3)
         await pilot.pause()
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
         assert [r[0] for r in rows] == ["3", "2", "1"]
@@ -389,11 +368,11 @@ async def test_inspector_content_has_summary_changes_report_tabs() -> None:
     app = _DiffsHarness()
     async with app.run_test(size=(140, 30)) as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(
+        await until(
             pilot, lambda: view._detail_record is not None and run_id in view._facts
         )
         view.inspect_selected()  # starts the evidence check
-        await _wait_for(pilot, lambda: view._evidence.get(run_id) == "verified")
+        await until(pilot, lambda: view._evidence.get(run_id) == "verified")
         content = view.inspect_selected()
         assert content.key == ("run", run_id)
         assert content.title == "Consent · refuse"
@@ -436,28 +415,19 @@ def test_compare_sections_list_files_only_in_each_run() -> None:
 # --------------------------------------------------------------------------
 
 
-async def _settle(pilot, n: int = 4) -> None:
-    for _ in range(n):
-        await pilot.pause(0.05)
-
-
 async def _boot_runs_lens(pilot, app, labels: list[str]):
     """Boot SandroidTUI, save runs for its device, land on the Runs lens."""
-    await _settle(pilot, 8)
-    if type(app.screen).__name__ != "MainScreen":
-        await pilot.press("enter")  # first-run welcome modal
-        await _settle(pilot, 4)
-    ms = app.screen
+    ms = await boot(app, pilot)
     view = ms.query_one("#runs-panel", DiffsView)
     device = view._current_device_name()
     ids = [f"2026010{i}_100000_00000{i}" for i in range(len(labels))]
     for run_id, label in zip(ids, labels, strict=True):
         _save(run_id, label=label, device_name=device)
     await pilot.press("4")
-    await _settle(pilot)
+    await settle(pilot)
     view._reload_index()
     view.focus()
-    await _wait_for(pilot, lambda: view._detail_record is not None)
+    await until(pilot, lambda: view._detail_record is not None)
     return ms, view, ids
 
 
@@ -476,7 +446,7 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         )
         newest = ids[-1]
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         assert ms.inspector_content.key == ("run", newest)
         assert [t for t, _ in ms.inspector_content.tabs] == [
@@ -486,13 +456,13 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         ]
         # The open Inspector follows the cursor.
         await pilot.press("down")
-        await _wait_for(pilot, lambda: ms.inspector_content.key == ("run", ids[0]))
+        await until(pilot, lambda: ms.inspector_content.key == ("run", ids[0]))
         await pilot.press("escape")
-        await _settle(pilot)
+        await settle(pilot)
 
         assert ms.check_action("back_to_live", ()) is False
         await pilot.press("v")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope == run_history.scope_for_run(ids[0])
         assert ms.query_one("#shell-header").pill_text == "◆ REVIEW #1 Consent · accept"
         assert view._scope_run_id == ids[0]
@@ -500,19 +470,19 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
         assert ms.check_action("back_to_live", ()) is True
 
         await pilot.press("3")  # another lens: L works from there too
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("L")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope is None
         assert ms.query_one("#shell-header").pill_text == "● LIVE"
 
         await pilot.press("4")
-        await _settle(pilot)
+        await settle(pilot)
         await pilot.press("v")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope is not None
         await pilot.press("v")  # same run again: back to LIVE
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope is None
 
 
@@ -523,10 +493,10 @@ async def test_recording_or_replay_forces_live_scope() -> None:
         ms, _view, ids = await _boot_runs_lens(pilot, app, ["Run A"])
         for flag in ("recording", "replaying"):
             ms.set_scope(run_history.scope_for_run(ids[0]), "Run A")
-            await _settle(pilot)
+            await settle(pilot)
             assert ms.scope is not None
             app._set_status_bar_mode(**{flag: True})
-            await _settle(pilot)
+            await settle(pilot)
             assert ms.scope is None
             app._set_status_bar_mode(**{flag: False})
 
@@ -537,19 +507,19 @@ async def test_delete_key_confirms_and_leaves_review_scope() -> None:
     async with app.run_test(size=(160, 45)) as pilot:
         ms, view, ids = await _boot_runs_lens(pilot, app, ["Run A", "Run B"])
         await pilot.press("v")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.scope == run_history.scope_for_run(ids[-1])
 
         await pilot.press("delete")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         await pilot.press("n")  # No: nothing happens
-        await _settle(pilot)
+        await settle(pilot)
         assert run_history.load_run(ids[-1]).label == "Run B"
 
         await pilot.press("delete")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         await pilot.press("y")
-        await _wait_for(pilot, lambda: len(view._summaries) == 1)
+        await until(pilot, lambda: len(view._summaries) == 1)
         with pytest.raises(run_history.RunHistoryError):
             run_history.load_run(ids[-1])
         assert ms.scope is None
@@ -561,15 +531,15 @@ async def test_new_run_after_play_lands_in_runs_lens_and_is_selected() -> None:
     async with app.run_test(size=(160, 45)) as pilot:
         ms, view, _ids = await _boot_runs_lens(pilot, app, ["Run A"])
         await pilot.press("1")
-        await _settle(pilot)
+        await settle(pilot)
         ms.open_files_tab("files-diffs")  # what Play-press does (legacy id)
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.active_lens == "runs"
 
         new_id = "20260201_100000_ffffff"
         _save(new_id, label="Run B", device_name=view._current_device_name())
         app._notify_diffs_new_run(new_id)
-        await _wait_for(pilot, lambda: view._selected_run_id == new_id)
+        await until(pilot, lambda: view._selected_run_id == new_id)
         assert view._cursor_run_id() == new_id
         assert view.query_one("#runs-table").row_count == 2
 
@@ -586,15 +556,13 @@ async def test_table_refresh_keeps_a_pending_cursor_move() -> None:
     async with app.run_test() as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table", DataTable)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         assert view._selected_run_id == "20260101_000001_bbbbbb"
         # Move the cursor and refresh before the highlight event is handled.
         table.move_cursor(row=1, animate=False)
         view._apply_facts({})
         assert view._cursor_run_id() == "20260101_000000_aaaaaa"
-        await _wait_for(
-            pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa"
-        )
+        await until(pilot, lambda: view._selected_run_id == "20260101_000000_aaaaaa")
 
 
 # --------------------------------------------------------------------------
@@ -612,12 +580,12 @@ async def test_rename_input_shows_the_old_label_selected_so_typing_replaces() ->
     app = _DiffsHarness()
     async with app.run_test(size=(120, 30)) as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         view.focus()
         await pilot.pause()
         await pilot.press("n")
-        await _wait_for(pilot, lambda: isinstance(app.screen, InputModal))
-        await pilot.pause(0.1)
+        await until(pilot, lambda: isinstance(app.screen, InputModal))
+        await settle(pilot)
         field = app.screen.query_one("#input-field", Input)
         assert field.region.height == 3  # a real text row between the borders
         assert field.value == "Run 2 · 18:34"
@@ -627,7 +595,7 @@ async def test_rename_input_shows_the_old_label_selected_so_typing_replaces() ->
         assert field.value == "B replay"
         # R4-N3: the confirm named the run only by its label.
         await pilot.press("enter")
-        await _wait_for(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
+        await until(pilot, lambda: type(app.screen).__name__ == "ConfirmModal")
         message = str(app.screen.message_text)
         assert "#1" in message
         assert run_id in message
@@ -644,7 +612,7 @@ async def test_input_modal_without_select_all_appends() -> None:
 
     app = _Host()
     async with app.run_test(size=(120, 30)) as pilot:
-        await pilot.pause(0.1)
+        await settle(pilot)
         field = app.screen.query_one("#input-field", Input)
         await pilot.press("x")
         assert field.value == "/data/data/x"
@@ -667,14 +635,14 @@ async def test_evidence_is_rechecked_when_a_sealed_file_changes() -> None:
     app = _DiffsHarness()
     async with app.run_test(size=(140, 30)) as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         view.inspect_selected()
-        await _wait_for(pilot, lambda: view._evidence.get(run_id) == "verified")
+        await until(pilot, lambda: view._evidence.get(run_id) == "verified")
 
         with open(run_dir / "recording.txt", "a", encoding="utf-8") as f:
             f.write("x")  # one byte appended after sealing
         view.inspect_selected()  # Enter again: always re-verified
-        await _wait_for(
+        await until(
             pilot, lambda: view._evidence.get(run_id, "").startswith("modified:")
         )
         text = str(view._evidence_text(run_id))
@@ -684,7 +652,7 @@ async def test_evidence_is_rechecked_when_a_sealed_file_changes() -> None:
         # restored (same bytes): verified again on the next look
         (run_dir / "recording.txt").write_text("1 /dev/input/event1 0 0 0\n")
         view.inspect_selected()
-        await _wait_for(pilot, lambda: view._evidence.get(run_id) == "verified")
+        await until(pilot, lambda: view._evidence.get(run_id) == "verified")
 
 
 def test_bundle_fingerprint_changes_with_size_or_mtime(tmp_path) -> None:
@@ -760,7 +728,7 @@ async def test_runs_of_the_same_recording_that_diverge_are_flagged() -> None:
     async with app.run_test(size=(140, 20)) as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table", DataTable)
-        await _wait_for(pilot, lambda: len(view._facts) == 3)
+        await until(pilot, lambda: len(view._facts) == 3)
         await pilot.pause()
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
         assert "≠ #1" in rows[1][4]  # B (#2) diverges from A (#1)
@@ -799,11 +767,11 @@ async def test_took_is_the_run_time_and_dialogs_name_the_run_number() -> None:
     async with app.run_test(size=(140, 20)) as pilot:
         view = app.query_one(DiffsView)
         table = view.query_one("#runs-table", DataTable)
-        await _wait_for(pilot, lambda: view._detail_record is not None)
+        await until(pilot, lambda: view._detail_record is not None)
         assert str(table.get_row_at(0)[3]).startswith("5m 00s")
         view.focus()
         await pilot.press("delete")
-        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmModal))
+        await until(pilot, lambda: isinstance(app.screen, ConfirmModal))
         message = app.screen.message_text
         assert "#1 'Run A'" in message
         assert run_id in message
@@ -820,22 +788,18 @@ async def test_scope_pill_follows_the_recorder_and_the_player() -> None:
 
     app = _sandroid_app()
     async with app.run_test(size=(160, 45)) as pilot:
-        await _settle(pilot, 8)
-        if type(app.screen).__name__ != "MainScreen":
-            await pilot.press("enter")
-            await _settle(pilot, 4)
-        ms = app.screen
+        ms = await boot(app, pilot)
         header = ms.query_one("#shell-header")
         assert header.pill_text == "● LIVE"
 
         app.push_screen(ConfirmModal(title="stand-in for the Record dialog"))
-        await _settle(pilot)
+        await settle(pilot)
         app._set_status_bar_mode(recording=True)  # capture started
         assert header.pill_text == "● REC"
         app._set_status_bar_mode(recording=False)  # stopped / cancelled
         assert header.pill_text == "● LIVE"
         app.pop_screen()
-        await _settle(pilot)
+        await settle(pilot)
 
         app._set_status_bar_mode(replaying=True)
         assert header.pill_text == "● REPLAY"
@@ -863,25 +827,25 @@ async def test_arrows_switch_inspector_tabs_at_every_size(size) -> None:
             pilot, app, ["Consent · accept with a long label", "Consent · refuse"]
         )
         await pilot.press("enter")
-        await _settle(pilot)
+        await settle(pilot)
         assert ms.inspector_is_open
         table = view.query_one("#runs-table", DataTable)
         table.focus()
-        await _settle(pilot)
+        await settle(pilot)
         inspector = ms.query_one("#inspector")
         start = inspector.tab_index
         await pilot.press("right")
-        await _settle(pilot)
+        await settle(pilot)
         assert inspector.tab_index == (start + 1) % 3
         assert table.scroll_x == 0
         await pilot.press("left")
-        await _settle(pilot)
+        await settle(pilot)
         assert inspector.tab_index == start
         # A text input keeps its caret keys.
         field = Input(value="abc", id="probe-input")
         await ms.mount(field)
         field.focus()
-        await _settle(pilot)
+        await settle(pilot)
         field.cursor_position = 3
         await pilot.press("left")
         assert inspector.tab_index == start
@@ -907,7 +871,7 @@ async def test_inspector_recording_is_the_recordings_own_length() -> None:
     app = _DiffsHarness()
     async with app.run_test(size=(140, 30)) as pilot:
         view = app.query_one(DiffsView)
-        await _wait_for(
+        await until(
             pilot, lambda: view._detail_record is not None and run_id in view._facts
         )
         content = view.inspect_selected()

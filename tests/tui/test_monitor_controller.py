@@ -1595,7 +1595,7 @@ def test_start_monitor_kprobe_reader_routes_through_translator(monkeypatch):
         # The reader thread is real; give it a brief moment to drain 3 lines.
         import time
 
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and not received:
             time.sleep(0.01)
 
@@ -1632,7 +1632,7 @@ def test_reader_logs_a_requested_stop_as_normal_not_unexpected(requested, warned
         {"process": _DeadProc(), "translator": None, "stop_requested": requested},
     )()
     controller._start_output_reader(wrapper)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + 10.0
     while not ended and time.monotonic() < deadline:
         time.sleep(0.01)
     assert ended
@@ -2103,7 +2103,7 @@ def test_start_with_config_fsmon_resolves_backend_and_populates_recent_events(
         # test_start_monitor_kprobe_reader_routes_through_translator above).
         import time
 
-        deadline = time.monotonic() + 2.0
+        deadline = time.monotonic() + 10.0
         events: list = []
         while time.monotonic() < deadline:
             events = controller.get_recent_events()["events"]
