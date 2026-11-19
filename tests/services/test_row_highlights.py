@@ -201,6 +201,7 @@ def test_persistence_round_trip(tmp_path, notes):
     )
     store.create("files", "pii", reasons={"/sdcard/x": "email"}, origin="ai")
     store.finish(a.id, complete=False, stats={"scanned": 9})
+    assert store.flush()
     path = tmp_path / "ai" / "highlights.json"
     assert path.is_file()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -247,6 +248,144 @@ def test_corrupt_file_starts_empty(tmp_path, notes):
     store = HighlightStore()
     store.bind_folder(tmp_path)
     assert store.sets() == []
+    assert (tmp_path / "ai" / "highlights.json.bad").read_text() == "{not json"
+
+
+_GOOD_SET = {
+    "id": "h1",
+    "lens": "network",
+    "label": "posts",
+    "short": "posts",
+    "slot": 1,
+    "reasons": {"f1": "r"},
+}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"sets": [], "filters": ["x"]},  # filters not an object (verifier R6)
+        {"sets": {"h1": _GOOD_SET}},
+        {"sets": [{**_GOOD_SET, "label": 7}]},
+        {"sets": [{**_GOOD_SET, "short": None}]},
+        {"sets": [{**_GOOD_SET, "reasons": ["f1"]}]},
+        {"sets": [{**_GOOD_SET, "reasons": {"f1": 3}}]},
+        {"sets": [{**_GOOD_SET, "slot": "1"}]},
+        {"sets": [{**_GOOD_SET, "slot": 9}]},
+        {"sets": [{**_GOOD_SET, "complete": "yes"}]},
+        {"sets": [{**_GOOD_SET, "basis": 3}]},
+        {"sets": [{**_GOOD_SET, "id": 1}]},
+        {"sets": [_GOOD_SET, {**_GOOD_SET, "id": "h2"}]},  # duplicate slot
+        {"sets": [_GOOD_SET], "filters": {"network": "h9"}},
+        {"sets": [_GOOD_SET], "next_id": "2"},
+        ["not", "an", "object"],
+    ],
+)
+def test_malformed_file_never_half_applies(tmp_path, notes, data):
+    folder = tmp_path / "s"
+    path = folder / "ai" / "highlights.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(data))
+    store = HighlightStore()
+    store.create("network", "mem", reasons={"a": "b"}, filter=True)
+    store.bind_folder(folder)  # must not raise
+    assert store.sets() == []
+    assert store.lookup("network", "a") == ()
+    assert store.filter_set("network") is None
+    assert store.filter_predicate("network") is None
+    assert not path.exists()
+    assert json.loads((folder / "ai" / "highlights.json.bad").read_text()) == data
+    # The store keeps working and writes a fresh file.
+    assert store.create("network", "fresh", reasons={"f": "r"}).id == "h1"
+    assert store.flush()
+    assert json.loads(path.read_text())["sets"][0]["label"] == "fresh"
+
+
+def test_valid_file_with_optional_fields_missing_loads(tmp_path, notes):
+    path = tmp_path / "ai" / "highlights.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"sets": [_GOOD_SET], "filters": {"network": "h1"}}))
+    store = HighlightStore()
+    store.bind_folder(tmp_path)
+    assert [s.id for s in store.sets()] == ["h1"]
+    assert store.filter_set("network") == "h1"
+    assert store.create("network", "next").id == "h2"
+
+
+def test_generation_guards_mutations_after_a_session_switch(tmp_path, notes):
+    store = HighlightStore()
+    store.bind_folder(tmp_path / "one")
+    hs = store.create("network", "run", reasons={"f1": ""})
+    gen = hs.generation
+    assert gen == store.generation
+    assert store.get(hs.id).generation == gen
+    store.add(hs.id, {"f2": ""}, generation=gen)
+    store.bind_folder(tmp_path / "two")
+    other = store.create("network", "other session", reasons={"z": ""})
+    assert other.id == "h1"  # same id as the stale set
+    assert store.generation != gen
+    stale = [
+        lambda: store.add("h1", {"f3": ""}, generation=gen),
+        lambda: store.finish("h1", complete=True, generation=gen),
+        lambda: store.set_filter("network", "h1", generation=gen),
+        lambda: store.replace_keys("h1", {"f3": ""}, generation=gen),
+        lambda: store.remove_keys("h1", ["z"], generation=gen),
+        lambda: store.remove("h1", generation=gen),
+        lambda: store.update_meta("h1", label="x", generation=gen),
+        lambda: store.create("network", "late", generation=gen),
+    ]
+    for call in stale:
+        with pytest.raises(rh.StaleGenerationError):
+            call()
+    assert isinstance(rh.StaleGenerationError("x"), HighlightError)
+    # The other session's set is untouched.
+    assert store.keys("h1") == ["z"]
+    assert store.get("h1").label == "other session"
+    assert store.filter_set("network") is None
+    assert len(store.sets()) == 1
+
+
+def test_writes_happen_off_the_caller_and_outside_the_lock(
+    tmp_path, notes, monkeypatch
+):
+    from sandroid.config import loader
+
+    gate = threading.Event()
+    writing = threading.Event()
+    written: list[dict] = []
+    real = loader.atomic_write_bytes
+
+    def slow_write(path, data, **kw):
+        writing.set()
+        assert gate.wait(5.0)
+        written.append(json.loads(data))
+        real(path, data, **kw)
+
+    monkeypatch.setattr(loader, "atomic_write_bytes", slow_write)
+    store = HighlightStore()
+    store.bind_folder(tmp_path)
+    hs = store.create("network", "a", reasons={"f1": ""})
+    assert writing.wait(2.0)  # the writer thread is stuck in the write
+    started = time.monotonic()
+    store.set_filter("network", hs.id)  # the UI's H: must not wait for the disk
+    store.add(hs.id, {"f2": ""})
+    store.update_meta(hs.id, label="last")
+    assert time.monotonic() - started < 0.5
+    # Another thread can read the store while the write is in progress.
+    seen: list[int] = []
+    t = threading.Thread(target=lambda: seen.append(len(store.sets())))
+    t.start()
+    t.join(1.0)
+    assert seen == [1]
+    gate.set()
+    assert store.flush()
+    # Coalesced: the first snapshot, then only the newest one (last wins).
+    assert len(written) == 2
+    data = json.loads((tmp_path / "ai" / "highlights.json").read_text())
+    assert data["sets"][0]["label"] == "last"
+    assert sorted(data["sets"][0]["reasons"]) == ["f1", "f2"]
+    assert data["filters"] == {"network": "h1"}
+    assert "generation" not in data["sets"][0]
 
 
 class _Dispatcher:

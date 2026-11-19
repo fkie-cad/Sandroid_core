@@ -19,8 +19,15 @@ whole (copy-on-write), so :meth:`HighlightStore.lookup` and
 signal (``registry().notify``) is sent after the lock is released.
 
 Persistence: per analysis session, ``<session>/ai/highlights.json`` (0600,
-written atomically after each mutation). :meth:`HighlightStore.bind_folder`
-switches sessions; without a folder the sets live in memory only.
+written atomically). A mutation snapshots the data under the lock; a
+background writer thread writes the newest snapshot per file outside it, so
+the UI thread (``H`` / ``X`` / Esc) never waits for an fsync
+(:meth:`HighlightStore.flush` waits for pending writes).
+:meth:`HighlightStore.bind_folder` switches sessions and bumps the store's
+*generation*; mutations that pass ``generation=`` from before the switch
+raise :class:`StaleGenerationError` instead of landing in the new session.
+A malformed file is moved aside to ``highlights.json.bad`` and the session
+starts empty. Without a folder the sets live in memory only.
 
 Row sources: a lens registers a snapshot callable
 (:meth:`HighlightStore.register_row_source`); tools call
@@ -31,9 +38,11 @@ bounded time (never ``App.call_from_thread``).
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -87,6 +96,14 @@ class HighlightError(ValueError):
     """A highlight request broke a limit or named an unknown set/lens."""
 
 
+class StaleGenerationError(HighlightError):
+    """The store was bound to another session folder since the caller started."""
+
+
+class _BadFileError(ValueError):
+    """A persisted highlights file has the wrong shape."""
+
+
 @dataclass
 class HighlightSet:
     """One named group of highlighted rows of one lens.
@@ -121,6 +138,8 @@ class HighlightSet:
     complete: bool = True
     stats: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    #: The store's bind generation when this copy was taken (not persisted).
+    generation: int = field(default=0, compare=False)
 
     def copy(self) -> HighlightSet:
         """A detached copy (own dicts)."""
@@ -138,6 +157,7 @@ class HighlightSet:
             complete=self.complete,
             stats=dict(self.stats),
             created_at=self.created_at,
+            generation=self.generation,
         )
 
     @property
@@ -146,24 +166,60 @@ class HighlightSet:
         return len(self.reasons)
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> HighlightSet | None:
-        """Parse a persisted set (``None`` when unusable)."""
-        try:
-            known = {f.name for f in fields(cls)}
-            kwargs = {k: v for k, v in data.items() if k in known}
-            hs = cls(**kwargs)
-        except TypeError:
-            return None
-        if hs.lens not in LENSES or not isinstance(hs.reasons, dict):
-            return None
-        hs.reasons = {str(k): _clip(v, REASON_MAX) for k, v in hs.reasons.items()}
-        try:
-            hs.slot = int(hs.slot)
-        except (TypeError, ValueError):
-            return None
-        hs.basis = dict(hs.basis or {})
-        hs.stats = dict(hs.stats or {})
-        return hs
+    def from_dict(cls, data: Mapping[str, Any]) -> HighlightSet:
+        """Parse and validate a persisted set.
+
+        Raises:
+            ValueError: A missing field or a bad value.
+            TypeError: *data* is not an object.
+        """
+
+        def need(name: str, kind: Any, default: Any = _UNBOUND) -> Any:
+            value = data.get(name, default)
+            if value is _UNBOUND:
+                raise ValueError(f"set field {name!r} is missing")
+            if (isinstance(value, bool) and kind is not bool) or not isinstance(
+                value, kind
+            ):
+                raise ValueError(f"set field {name!r} has the wrong type")
+            return value
+
+        if not isinstance(data, dict):
+            raise TypeError("a set is not an object")
+        set_id = need("id", str)
+        if not re.fullmatch(r"h[1-9][0-9]*", set_id):
+            raise ValueError(f"bad set id {set_id!r}")
+        lens = need("lens", str)
+        if lens not in LENSES:
+            raise ValueError(f"unknown lens {lens!r}")
+        slot = need("slot", int)
+        if not 1 <= slot <= MAX_SETS_PER_LENS:
+            raise ValueError(f"bad slot {slot!r}")
+        reasons = need("reasons", dict, {})
+        if len(reasons) > MAX_KEYS_PER_SET or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in reasons.items()
+        ):
+            raise ValueError("reasons must map strings to strings")
+        scope = data.get("scope")
+        if scope is not None and not isinstance(scope, str):
+            raise ValueError("set field 'scope' has the wrong type")
+        complete = need("complete", bool, True)
+        created = need("created_at", (int, float), time.time())
+        return cls(
+            id=set_id,
+            lens=lens,
+            label=_clip(need("label", str), LABEL_MAX),
+            short=_clip(need("short", str), SHORT_MAX),
+            slot=slot,
+            reasons={k: _clip(v, REASON_MAX) for k, v in reasons.items()},
+            origin=need("origin", str, "manual"),
+            query=need("query", str, ""),
+            scope=scope,
+            basis=dict(need("basis", dict, {})),
+            complete=complete,
+            stats=dict(need("stats", dict, {})),
+            created_at=float(created),
+        )
 
 
 def _clip(text: Any, limit: int) -> str:
@@ -228,6 +284,16 @@ class HighlightStore:
         self._pred_cache: dict[str, tuple[int, Callable[[str], bool] | None]] = {}
         self._sources: dict[str, list[_RowSource]] = {}
         self._sources_lock = threading.Lock()
+        #: Bumps on every session switch (:meth:`bind_folder`).
+        self._generation = 0
+        #: Background writes: path -> (seq, payload); newest snapshot wins.
+        self._write_lock = threading.Lock()
+        self._pending_writes: dict[Path, tuple[int, dict]] = {}
+        self._written_seq: dict[Path, int] = {}
+        self._write_seq = 0
+        self._writer: threading.Thread | None = None
+        self._writes_idle = threading.Event()
+        self._writes_idle.set()
 
     # -- reads (lock-free where it matters) -----------------------------------
 
@@ -235,6 +301,11 @@ class HighlightStore:
     def revision(self) -> int:
         """Bumps on every change (monotonic)."""
         return self._revision
+
+    @property
+    def generation(self) -> int:
+        """Bumps on every session switch (pass it to mutations as ``generation=``)."""
+        return self._generation
 
     @property
     def folder(self) -> Path | None:
@@ -261,7 +332,11 @@ class HighlightStore:
         """A copy of one set, or ``None``."""
         with self._lock:
             hs = self._sets.get(set_id)
-            return hs.copy() if hs is not None else None
+            if hs is None:
+                return None
+            out = hs.copy()
+            out.generation = self._generation
+            return out
 
     def filter_set(self, lens: str) -> str | None:
         """The id of the lens's AI filter set, or ``None``."""
@@ -339,12 +414,17 @@ class HighlightStore:
         complete: bool = True,
         filter: bool = False,
         replace_id: str | None = None,
+        generation: int | None = None,
     ) -> HighlightSet:
         """Create a set (or replace *replace_id* in place, keeping its slot).
+
+        The returned copy's ``generation`` is the store's bind generation;
+        pass it to later mutations so they fail after a session switch.
 
         Raises:
             HighlightError: Bad lens, too many sets or keys, unknown
                 ``replace_id``.
+            StaleGenerationError: *generation* is from before a session switch.
         """
         self._check_lens(lens)
         clean = self._clean_reasons(lens, reasons or {})
@@ -355,6 +435,7 @@ class HighlightStore:
             )
         label = _clip(label, LABEL_MAX) or "highlight"
         with self._lock:
+            self._check_generation(generation)
             old: HighlightSet | None = None
             if replace_id is not None:
                 old = self._sets.get(replace_id)
@@ -400,17 +481,26 @@ class HighlightStore:
                 self._filters[lens] = set_id
             self._commit(lens)
             result = hs.copy()
+            result.generation = self._generation
         # The list of sets changed (bar, column, filter): redraw the whole lens.
         self._notify(lens, None)
         return result
 
-    def add(self, set_id: str, reasons: Mapping[str, str]) -> int:
+    def add(
+        self,
+        set_id: str,
+        reasons: Mapping[str, str],
+        *,
+        generation: int | None = None,
+    ) -> int:
         """Add rows (or update their reasons); returns the new total.
 
         Raises:
             HighlightError: Unknown set, or the set would exceed the key cap.
+            StaleGenerationError: *generation* is from before a session switch.
         """
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             clean = self._clean_reasons(hs.lens, reasons)
             new = [k for k in clean if k not in hs.reasons]
@@ -426,9 +516,12 @@ class HighlightStore:
         self._notify(lens, clean)
         return total
 
-    def remove_keys(self, set_id: str, keys: Iterable[str]) -> int:
+    def remove_keys(
+        self, set_id: str, keys: Iterable[str], *, generation: int | None = None
+    ) -> int:
         """Drop rows from a set; returns the new total."""
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             gone = [
                 k
@@ -444,9 +537,16 @@ class HighlightStore:
         self._notify(lens, gone)
         return total
 
-    def replace_keys(self, set_id: str, reasons: Mapping[str, str]) -> int:
+    def replace_keys(
+        self,
+        set_id: str,
+        reasons: Mapping[str, str],
+        *,
+        generation: int | None = None,
+    ) -> int:
         """Replace all rows of a set; returns the new total."""
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             clean = self._clean_reasons(hs.lens, reasons)
             if len(clean) > MAX_KEYS_PER_SET:
@@ -467,9 +567,11 @@ class HighlightStore:
         complete: bool,
         stats: Mapping[str, Any] | None = None,
         basis: Mapping[str, Any] | None = None,
+        generation: int | None = None,
     ) -> None:
         """Mark a set complete or partial and merge its stats/basis."""
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             hs.complete = bool(complete)
             if stats:
@@ -487,9 +589,11 @@ class HighlightStore:
         label: str | None = None,
         short: str | None = None,
         query: str | None = None,
+        generation: int | None = None,
     ) -> None:
         """Rename a set (label/short) or change its query text."""
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             if label:
                 hs.label = _clip(label, LABEL_MAX)
@@ -502,13 +606,15 @@ class HighlightStore:
             lens = hs.lens
         self._notify(lens, None)
 
-    def remove(self, set_id: str) -> None:
+    def remove(self, set_id: str, *, generation: int | None = None) -> None:
         """Delete one set (and its filter role).
 
         Raises:
             HighlightError: Unknown set.
+            StaleGenerationError: *generation* is from before a session switch.
         """
         with self._lock:
+            self._check_generation(generation)
             hs = self._require(set_id)
             del self._sets[set_id]
             if self._filters.get(hs.lens) == set_id:
@@ -533,14 +639,18 @@ class HighlightStore:
         self._notify(lens, None)
         return [s.id for s in gone]
 
-    def set_filter(self, lens: str, set_id: str | None) -> None:
+    def set_filter(
+        self, lens: str, set_id: str | None, *, generation: int | None = None
+    ) -> None:
         """Make *set_id* the lens's AI filter (``None``: no filter).
 
         Raises:
             HighlightError: Bad lens, unknown set, set of another lens.
+            StaleGenerationError: *generation* is from before a session switch.
         """
         self._check_lens(lens)
         with self._lock:
+            self._check_generation(generation)
             if set_id is None:
                 if self._filters.pop(lens, None) is None:
                     return
@@ -563,7 +673,9 @@ class HighlightStore:
 
         The same folder again is a no-op. ``None`` after a folder = no session:
         the sets are dropped and kept in memory only from then on; ``None``
-        while never bound keeps the in-memory sets.
+        while never bound keeps the in-memory sets. A real switch bumps
+        :attr:`generation`. The new state is built completely before it
+        replaces the old one (a bad file never half-applies).
         """
         target = Path(folder).expanduser().absolute() if folder is not None else None
         with self._lock:
@@ -572,62 +684,126 @@ class HighlightStore:
             if target is None and self._folder in (_UNBOUND, None):
                 self._folder = None
                 return
-            self._folder = target
-            self._sets = {}
-            self._filters = {}
-            self._next_id = 1
+            sets: dict[str, HighlightSet] = {}
+            filters: dict[str, str] = {}
+            next_id = 1
             if target is not None:
-                self._load(target / "ai" / HIGHLIGHTS_FILE)
+                # Our own pending write of that file must land first.
+                self.flush()
+                sets, filters, next_id = self._load(target / "ai" / HIGHLIGHTS_FILE)
+            self._folder = target
+            self._sets = sets
+            self._filters = filters
+            self._next_id = next_id
+            self._generation += 1
             self._rebuild_all()
             self._revision += 1
         self._notify(None, None)
 
-    def _load(self, path: Path) -> None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError):
-            logger.warning("Highlights file %s is unreadable; starting empty", path)
-            return
+    @staticmethod
+    def _parse(data: Any) -> tuple[dict[str, HighlightSet], dict[str, str], int]:
+        """Validate a whole file's content (raises :class:`_BadFileError`)."""
         if not isinstance(data, dict):
-            return
+            raise _BadFileError("not a JSON object")
+        raw_sets = data.get("sets", [])
+        raw_filters = data.get("filters", {})
+        if not isinstance(raw_sets, list) or not isinstance(raw_filters, dict):
+            raise _BadFileError("sets must be a list and filters an object")
         sets: dict[str, HighlightSet] = {}
-        slots: dict[str, set[int]] = {}
-        for raw in data.get("sets") or []:
-            if not isinstance(raw, dict):
-                continue
-            hs = HighlightSet.from_dict(raw)
-            if hs is None or hs.id in sets:
-                continue
-            used = slots.setdefault(hs.lens, set())
-            if hs.slot in used or not 1 <= hs.slot <= MAX_SETS_PER_LENS:
-                continue
-            used.add(hs.slot)
+        slots: set[tuple[str, int]] = set()
+        for raw in raw_sets:
+            try:
+                hs = HighlightSet.from_dict(raw)
+            except (ValueError, TypeError) as exc:
+                raise _BadFileError(str(exc)) from exc
+            if hs.id in sets or (hs.lens, hs.slot) in slots:
+                raise _BadFileError(f"duplicate set id or slot ({hs.id})")
+            slots.add((hs.lens, hs.slot))
             sets[hs.id] = hs
-        self._sets = sets
-        filters = data.get("filters") or {}
-        self._filters = {
-            lens: sid
-            for lens, sid in filters.items()
-            if sid in sets and sets[sid].lens == lens
-        }
+        filters: dict[str, str] = {}
+        for lens, sid in raw_filters.items():
+            if lens not in LENSES or sid not in sets or sets[sid].lens != lens:
+                raise _BadFileError(f"bad filter {lens!r}: {sid!r}")
+            filters[lens] = sid
         top = max((_id_number(s) for s in sets), default=0)
-        try:
-            self._next_id = max(int(data.get("next_id") or 1), top + 1)
-        except (TypeError, ValueError):
-            self._next_id = top + 1
+        raw_next = data.get("next_id", 1)
+        if isinstance(raw_next, bool) or not isinstance(raw_next, int):
+            raise _BadFileError("next_id must be an integer")
+        return sets, filters, max(raw_next, top + 1)
 
-    def _persist(self) -> None:
-        path = self.path
-        if path is None:
-            return
-        payload = {
+    def _load(self, path: Path) -> tuple[dict[str, HighlightSet], dict[str, str], int]:
+        """``(sets, filters, next_id)`` of *path*; empty when missing or bad.
+
+        A file that is not valid JSON or has the wrong shape is kept as
+        ``highlights.json.bad`` (the next save writes a fresh file).
+        """
+        empty: tuple[dict[str, HighlightSet], dict[str, str], int] = ({}, {}, 1)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return empty
+        except OSError:
+            logger.warning("Highlights file %s is unreadable; starting empty", path)
+            return empty
+        try:
+            return self._parse(json.loads(text))
+        except (ValueError, TypeError) as exc:
+            bad = path.with_name(path.name + ".bad")
+            logger.warning(
+                "Highlights file %s is malformed (%s); kept as %s, starting empty",
+                path,
+                exc,
+                bad.name,
+            )
+            with contextlib.suppress(OSError):
+                path.replace(bad)
+            return empty
+
+    def _snapshot(self) -> dict:
+        """Under the lock: the file content of the current state."""
+        sets = []
+        for hs in self._sets.values():
+            data = asdict(hs)
+            data.pop("generation", None)
+            sets.append(data)
+        return {
             "schema": SCHEMA,
             "next_id": self._next_id,
             "filters": dict(self._filters),
-            "sets": [asdict(s) for s in self._sets.values()],
+            "sets": sets,
         }
+
+    def _queue_write(self) -> None:
+        """Under the lock: hand the current state to the writer thread."""
+        path = self.path
+        if path is None:
+            return
+        payload = self._snapshot()
+        with self._write_lock:
+            self._write_seq += 1
+            self._pending_writes[path] = (self._write_seq, payload)
+            self._writes_idle.clear()
+            if self._writer is None:
+                self._writer = threading.Thread(
+                    target=self._write_loop, name="ai-highlights-writer", daemon=True
+                )
+                self._writer.start()
+
+    def _write_loop(self) -> None:
+        while True:
+            with self._write_lock:
+                if not self._pending_writes:
+                    self._writer = None
+                    self._writes_idle.set()
+                    return
+                path = next(iter(self._pending_writes))
+                seq, payload = self._pending_writes.pop(path)
+            self._write(path, seq, payload)
+
+    def _write(self, path: Path, seq: int, payload: dict) -> None:
+        """Write one snapshot (writer thread; never under the store lock)."""
+        if self._written_seq.get(path, 0) > seq:
+            return  # a newer snapshot of this file is already on disk
         try:
             from sandroid.ai.results import ensure_private_dir
             from sandroid.config.loader import atomic_write_bytes
@@ -638,8 +814,15 @@ class HighlightStore:
                 json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 mode=0o600,
             )
+            self._written_seq[path] = seq
         except Exception:
             logger.warning("Saving highlights to %s failed", path, exc_info=True)
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Wait until every queued write is on disk (True) or *timeout*."""
+        if self._writer is threading.current_thread():
+            return False
+        return self._writes_idle.wait(max(0.0, timeout))
 
     # -- row sources --------------------------------------------------------------
 
@@ -718,6 +901,13 @@ class HighlightStore:
                 f"unknown lens {lens!r}; use one of: {', '.join(LENSES)}"
             )
 
+    def _check_generation(self, generation: int | None) -> None:
+        if generation is not None and generation != self._generation:
+            raise StaleGenerationError(
+                "the analysis session changed; this highlight set belongs to "
+                "the previous one"
+            )
+
     def _require(self, set_id: str) -> HighlightSet:
         hs = self._sets.get(set_id)
         if hs is None:
@@ -750,11 +940,11 @@ class HighlightStore:
             self._rebuild_index(lens)
 
     def _commit(self, *lenses: str) -> None:
-        """Under the lock: new index, revision, file."""
+        """Under the lock: new index, revision, queued file write."""
         for lens in lenses:
             self._rebuild_index(lens)
         self._revision += 1
-        self._persist()
+        self._queue_write()
 
     @staticmethod
     def _notify(lens: str | None, keys: Iterable[str] | None) -> None:
@@ -828,6 +1018,7 @@ __all__ = [
     "HighlightError",
     "HighlightSet",
     "HighlightStore",
+    "StaleGenerationError",
     "get_row_highlights",
     "normalize_key",
     "reset_for_tests",
