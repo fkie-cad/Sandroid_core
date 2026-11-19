@@ -314,7 +314,7 @@ def test_results_path_renders_when_present(monkeypatch):
 def test_spotlight_files_none_when_empty(monkeypatch):
     monkeypatch.setattr(
         services,
-        "get_spotlight_service",
+        "get_forensic_service",
         lambda: SimpleNamespace(get_spotlight_files=list),
     )
     assert context._describe_spotlight_files() is None
@@ -324,7 +324,7 @@ def test_spotlight_files_renders_and_does_not_mutate_the_list(monkeypatch):
     files = ["/data/data/com.example/shared_prefs/a.xml", "/sdcard/b.db"]
     monkeypatch.setattr(
         services,
-        "get_spotlight_service",
+        "get_forensic_service",
         lambda: SimpleNamespace(get_spotlight_files=lambda: files),
     )
 

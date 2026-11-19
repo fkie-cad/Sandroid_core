@@ -780,6 +780,7 @@ class AnalysisEngine:
         action_window_service: Any = None,
         toolbox: Any = None,
         gatherer_classes: Mapping[str, type] | None = None,
+        spotlight_service: Any = None,
     ) -> None:
         """Initialize the engine.
 
@@ -794,6 +795,8 @@ class AnalysisEngine:
             toolbox: Toolbox-like object; defaults to the real ``Toolbox`` class.
             gatherer_classes: Optional override mapping of gatherer keys to
                 classes (test/DI hook). Defaults to the real gatherer classes.
+            spotlight_service: Spotlight service naming the target app;
+                defaults to the singleton.
         """
         self.config = config
         self._progress = progress
@@ -802,10 +805,12 @@ class AnalysisEngine:
         self._action_window_arg = action_window_service
         self._toolbox_arg = toolbox
         self._gatherer_classes_arg = gatherer_classes
+        self._spotlight_arg = spotlight_service
 
         # Resolved lazily in run() so construction stays cheap/side-effect-free.
         self.forensic_service: Any = None
         self.action_window_service: Any = None
+        self.spotlight_service: Any = None
         self.toolbox: Any = None
         self.adb: Any = None
         self.gatherers: dict[str, DataGatherBase] = {}
@@ -829,6 +834,13 @@ class AnalysisEngine:
             from sandroid.services import get_action_window_service
 
             self.action_window_service = get_action_window_service()
+
+        if self._spotlight_arg is not None:
+            self.spotlight_service = self._spotlight_arg
+        else:
+            from sandroid.services import get_spotlight_service
+
+            self.spotlight_service = get_spotlight_service()
 
         if self._toolbox_arg is not None:
             self.toolbox = self._toolbox_arg
@@ -891,14 +903,15 @@ class AnalysisEngine:
         return gatherers
 
     def _target_packages(self) -> list[str]:
-        """The spotlight (target) app's package, if one is selected."""
+        """The spotlight (target) app's package, if one is selected.
+
+        Attach or spawn mode: an app picked with ⇧C but not started counts.
+        """
         try:
-            app = self.toolbox.get_spotlight_application()
+            package = self.spotlight_service.get_effective_package()
         except Exception:
             return []
-        if isinstance(app, (tuple, list)) and app:
-            app = app[0]
-        return [app] if isinstance(app, str) and app else []
+        return [package] if isinstance(package, str) and package else []
 
     def _build_noise_filter(self) -> SystemNoiseFilter:
         """Build the curated system/GMS noise filter for this analysis."""

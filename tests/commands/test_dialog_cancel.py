@@ -168,7 +168,7 @@ def test_monitor_mode_esc_does_not_start_and_path_is_honoured(monkeypatch):
     )
     spotlight = SimpleNamespace(
         has_app=lambda: True,
-        get_app=lambda: SimpleNamespace(package_name="com.example.fit"),
+        get_effective_package=lambda: "com.example.fit",
     )
     adb = SimpleNamespace(get_pid_for_package_name=lambda package: 4242)
 

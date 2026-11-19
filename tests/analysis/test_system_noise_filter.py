@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock
 
-from test_engine import FakeToolbox, _classes, _make_engine
+from test_engine import _classes, _make_engine
 
 from sandroid.analysis.changedfiles import ChangedFiles
 from sandroid.analysis.deletedfiles import DeletedFiles
@@ -20,6 +20,7 @@ from sandroid.analysis.filters import (
     path_belongs_to_package,
 )
 from sandroid.analysis.run_config import RunConfig
+from sandroid.services.spotlight_service import SpotlightService
 
 GT_CHANGED = [
     "/data/data/com.google.android.apps.wellbeing/databases/bedtime",
@@ -189,11 +190,6 @@ def test_deleted_candidates_are_debug_only(caplog, monkeypatch):
     assert not [r for r in caplog.records if r.levelno >= logging.INFO]
 
 
-class _SpotlightToolbox(FakeToolbox):
-    def get_spotlight_application(self):
-        return ("org.wikipedia", "org.wikipedia.main.MainActivity")
-
-
 def test_engine_wires_filter_and_reports_filtered_noise(caplog):
     config = RunConfig(
         number_of_runs=2,
@@ -205,7 +201,9 @@ def test_engine_wires_filter_and_reports_filtered_noise(caplog):
         noise_patterns=["/data/*/com.example.sync/*"],
         protected_packages=["com.example.keep"],
     )
-    engine = _make_engine(config, toolbox=_SpotlightToolbox(), classes=_classes())
+    spotlight = SpotlightService()
+    spotlight.set_app("org.wikipedia", "org.wikipedia.main.MainActivity")
+    engine = _make_engine(config, classes=_classes(), spotlight=spotlight)
 
     with caplog.at_level(logging.INFO, logger="sandroid.analysis.engine"):
         result = engine.run()
@@ -228,6 +226,28 @@ def test_engine_wires_filter_and_reports_filtered_noise(caplog):
         "File changes: 1 changed, 1 new, 0 deleted "
         "(0 system-noise file(s) hidden, see Other Data -> Filtered Noise)"
     ]
+
+
+def test_engine_protects_a_spawn_mode_target():
+    """An app picked with ⇧C but not started (spawn mode) is protected too."""
+    config = RunConfig(
+        number_of_runs=1,
+        noise_filter=False,
+        network=False,
+        processes=False,
+        sockets=False,
+        show_deleted=False,
+    )
+    spotlight = SpotlightService()
+    spotlight.set_app("com.example.old", pid=7)
+    spotlight.set_spawn_app("org.mozilla.firefox")
+    engine = _make_engine(config, classes=_classes(), spotlight=spotlight)
+
+    engine.run()
+
+    noise_filter = engine.gatherers["changed_files"].system_noise_filter
+    assert noise_filter.protected_packages[0] == "org.mozilla.firefox"
+    assert "com.example.old" not in noise_filter.protected_packages
 
 
 def test_run_config_noise_settings_override_config():
