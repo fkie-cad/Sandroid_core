@@ -367,10 +367,12 @@ We welcome contributions to Sandroid! Before contributing:
    cd Sandroid_core
    git checkout dev
    pip install -e ".[dev,full]"
-   pytest            # ~1100 tests; never touch a real device (see tests/conftest.py)
+   tools/test.sh         # quick tier: parallel, skips slow/perf/quarantined tests
+   tools/test.sh full    # the merge gate (what CI runs)
    ```
+   `tools/test.sh` needs [uv](https://docs.astral.sh/uv/) and Python 3.13; it tests this checkout's `src/` from a shared, dependency-only venv, hermetically and without ever touching a device. Exit codes: `0` pass, `1` fail, `3` flaky (failed, then passed on a serial rerun; report it). Modes, markers, the flaky policy and worker slots: [docs/development/testing.rst](docs/development/testing.rst).
 
-3. **Submit Changes**: Fork the repository, create a feature branch off `dev`, ensure tests and `ruff check .` pass, and submit a pull request against `dev`.
+3. **Submit Changes**: Fork the repository, create a feature branch off `dev`, ensure `tools/test.sh full` and `ruff check .` pass, and submit a pull request against `dev`.
 
 For detailed contribution instructions, see [docs/development/contributing.rst](docs/development/contributing.rst).
 
