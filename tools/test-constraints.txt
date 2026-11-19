@@ -1,0 +1,3 @@
+# Pins for tools/test.sh's shared venv (uv pip install -c). The suite is
+# tested on Textual 8.2.x only; bump deliberately, together with the TUI tests.
+textual==8.2.8

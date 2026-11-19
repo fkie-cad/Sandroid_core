@@ -114,3 +114,6 @@ libsmali.jsonl
 /sandroid.yaml
 /sandroid.toml
 .env
+
+# tools/test.sh results
+.test-results/

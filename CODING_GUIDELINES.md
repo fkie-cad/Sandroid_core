@@ -318,11 +318,33 @@ with frida_session("emulator-5554") as session:
 The suite lives in `tests/` (mirroring `src/sandroid/`) and runs on every push and
 pull request against `main` and `dev` (Python 3.12 and 3.13, `.github/workflows/tests.yml`).
 
+Run it with **`tools/test.sh`** (needs `uv` and Python 3.13; it builds and
+reuses a shared, dependency-only venv under `~/.cache/sandroid-tests` and puts
+this checkout's `src/` on `PYTHONPATH`, so it always tests the tree it lives in):
+
 ```bash
-pip install -e ".[dev,full]"
-pytest                 # whole suite, ~1 minute
-pytest tests/core -q   # one package
+tools/test.sh                       # quick: parallel (-n 4), skips slow/perf/quarantine
+tools/test.sh full                  # merge gate: parallel pass, then the perf tests serially
+tools/test.sh tests/core/test_x.py  # paths or node ids: serial, starts in seconds
+tools/test.sh full -n 2 -- -x       # fewer workers; pytest options after --
 ```
+
+Exit codes: `0` pass, `1` fail, `3` flaky (failed in the run, passed when the
+failed tests were rerun once, serially; logged to
+`~/.cache/sandroid-tests/flakes.jsonl`). Merging on `3` is fine only when the
+flaky test is unrelated to the change and is reported. There are no automatic
+retries beyond that one rerun. JUnit XML and logs are in `.test-results/latest/`.
+Workers are shared host-wide (8 slots by default, `SANDROID_TEST_SLOTS`): a run
+waits briefly, then starts with what is free. Never use `-n auto`.
+
+Markers: `@pytest.mark.perf` for wall-clock budgets (run serially by `full`,
+skipped by `quick`), `@pytest.mark.slow`, and
+`@pytest.mark.quarantine(reason="...", issue="#123")` for a known-flaky test
+(deselected by `tools/test.sh`; both arguments are required).
+
+Plain `pytest` still works in a venv with `pip install -e ".[dev,full]"`
+(that is what CI does); `tests/conftest.py` refuses to run if `sandroid` is
+imported from outside this checkout's `src/`.
 
 **Tests must never touch a real device.** `tests/conftest.py` enforces this for
 every test: it intercepts `subprocess` calls to `adb`, `emulator`, `frida*`,
@@ -583,7 +605,7 @@ Closes #123"
 
 Before submitting code:
 
-- [ ] All tests pass: `pytest`
+- [ ] All tests pass: `tools/test.sh full` (exit 0, or 3 with the unrelated flaky test reported)
 - [ ] Code is formatted: `ruff format .` (CI pins ruff 0.12.7)
 - [ ] Linting and import order pass: `ruff check .`
 - [ ] Type checking runs: `mypy src/sandroid` (informational in CI)
