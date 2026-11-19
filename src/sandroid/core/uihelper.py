@@ -185,18 +185,83 @@ def build_info() -> dict[str, Any]:
     }
 
 
-def _remote_sha256(serial: str) -> str:
-    out, _ = Adb.send_adb_command(f"shell sha256sum {REMOTE_JAR}", serial=serial)
+def _remote_sha256(serial: str, path: str = REMOTE_JAR) -> str:
+    out, _ = Adb.send_adb_command(f"shell sha256sum {path}", serial=serial)
     first = (out or "").strip().split()
     return first[0].lower() if first else ""
+
+
+def _tmp_jar() -> str:
+    """Device name a new jar is pushed to before it replaces :data:`REMOTE_JAR`
+    (per host process: two Sandroids never write the same file).
+    """
+    return f"{REMOTE_JAR}.{os.getpid()}.tmp"
+
+
+def helper_pids(serial: str) -> list[int]:
+    """Pids of every helper process running on the device (any version).
+
+    An ``app_process`` keeps its command line (``app_process /
+    sandroid.uihelper.Main mode=...``); the ``sh -c`` that execs it is not
+    one of them.
+    """
+    out, _ = Adb.send_adb_command("shell ps -A -o PID,ARGS", serial=serial)
+    pids = []
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if (
+            len(parts) >= 3
+            and parts[0].isdigit()
+            and parts[1].rsplit("/", 1)[-1].startswith("app_process")
+            and MAIN_CLASS in parts[2:]
+        ):
+            pids.append(int(parts[0]))
+    return pids
+
+
+def stop_stale_helpers(serial: str, timeout: float = 3.0) -> list[int]:
+    """Stop every helper process still running on the device: a helper of
+    an older jar (a crashed or older Sandroid) keeps the device's one
+    UiAutomation connection, so the new helper could never connect.
+
+    ``kill`` first (the system server drops its UiAutomation when the
+    process dies), ``kill -9`` for one still there after ``timeout``.
+
+    Returns:
+        The pids that were running.
+    """
+    pids = helper_pids(serial)
+    if not pids:
+        return []
+    logger.info(f"UI helper: stopping old helper process(es) {pids} on {serial}")
+    Adb.send_adb_command(f"shell kill {' '.join(map(str, pids))}", serial=serial)
+    end = time.monotonic() + timeout
+    while True:
+        left = [p for p in helper_pids(serial) if p in pids]
+        if not left or time.monotonic() >= end:
+            break
+        time.sleep(0.1)
+    if left:
+        Adb.send_adb_command(f"shell kill -9 {' '.join(map(str, left))}", serial=serial)
+        time.sleep(0.2)
+        left = [p for p in helper_pids(serial) if p in pids]
+        if left:
+            logger.warning(f"UI helper: cannot stop old helper {left} on {serial}")
+    return pids
 
 
 def ensure_jar(serial: str) -> bool:
     """Make sure the device has exactly the packaged jar at :data:`REMOTE_JAR`.
 
-    Skips the push when the device copy already hashes to :data:`JAR_SHA256`;
-    otherwise removes it, pushes the packaged jar, verifies the hash and
-    ``chmod 644``s it.
+    Skips the push when the device copy already hashes to :data:`JAR_SHA256`.
+    Otherwise (an upgrade, or no jar yet) the packaged jar is pushed to a
+    temporary name (:func:`_tmp_jar`), its hash verified and ``chmod 644``;
+    every helper process still running (an old jar's) is stopped
+    (:func:`stop_stale_helpers`); then the temporary file is renamed over
+    :data:`REMOTE_JAR` (``mv``, one rename on the same file system: the device
+    holds the old jar or the new one, never a half-written one) and the
+    result verified again. A failed push removes the temporary file and
+    leaves the old jar in place.
 
     Args:
         serial: Device serial (every adb call is ``-s serial``).
@@ -214,18 +279,28 @@ def ensure_jar(serial: str) -> bool:
     except OSError as exc:
         logger.warning(f"UI helper: packaged jar unreadable: {exc}")
         return False
-    Adb.send_adb_command(f"shell rm -f {REMOTE_JAR}", serial=serial)
-    Adb.send_adb_command(
-        f"push {quote_host_arg(str(local))} {REMOTE_JAR}", serial=serial
-    )
-    got = _remote_sha256(serial)
+    tmp = _tmp_jar()
+    Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
+    Adb.send_adb_command(f"push {quote_host_arg(str(local))} {tmp}", serial=serial)
+    got = _remote_sha256(serial, tmp)
     if got != JAR_SHA256:
+        Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
         logger.warning(
             f"UI helper: jar push to {serial} failed verification "
             f"(device sha256 {got or 'missing'})"
         )
         return False
-    Adb.send_adb_command(f"shell chmod 644 {REMOTE_JAR}", serial=serial)
+    Adb.send_adb_command(f"shell chmod 644 {tmp}", serial=serial)
+    stop_stale_helpers(serial)
+    Adb.send_adb_command(f"shell mv -f {tmp} {REMOTE_JAR}", serial=serial)
+    got = _remote_sha256(serial)
+    if got != JAR_SHA256:
+        Adb.send_adb_command(f"shell rm -f {tmp}", serial=serial)
+        logger.warning(
+            f"UI helper: jar rename on {serial} failed "
+            f"(device sha256 {got or 'missing'})"
+        )
+        return False
     return True
 
 
