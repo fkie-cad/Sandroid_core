@@ -1382,6 +1382,8 @@ class DiffsView(FilesSubViewBase):
         per recipient x value x encoding (stored: per file x value x
         encoding), grouped by recipient.
         """
+        from sandroid.core.adb_utils import canonical_device_path
+
         hits, why = self._privacy_hits(s)
         if not hits:
             return [], why
@@ -1390,7 +1392,8 @@ class DiffsView(FilesSubViewBase):
             if hit.direction == "received":
                 continue
             if hit.direction == "stored":
-                where = ("stored", str(hit.device_path or ""))
+                # One group per file, whatever alias its path was seen under.
+                where = ("stored", canonical_device_path(str(hit.device_path or "")))
             else:
                 rcpt = hit.recipient or {}
                 label = rcpt.get("label") or hit.source.get("host") or "unknown"
@@ -1431,7 +1434,7 @@ class DiffsView(FilesSubViewBase):
                 group = where
                 party, label = where
                 if party == "stored":
-                    head = Text("Stored on the device", style=party_color("stored"))
+                    head = self._stored_head(label, party_color("stored"), pal.dim)
                 else:
                     head = Text(label, style=Style(color=party_color(party), bold=True))
                     head.append(f"  {party_words(party)}", style=pal.dim)
@@ -1440,8 +1443,6 @@ class DiffsView(FilesSubViewBase):
                 lines.append(None)
             line = Text("  ")
             line.append(str(hit.label), style=Style(color=pal.text, bold=True))
-            if party == "stored":
-                line.append(f", in {self._short_path(str(label), 40)}", style=pal.muted)
             words = [
                 encoding_words(hit.transform),
                 where_words(hit.part, hit.source, hit.offsets),
@@ -1457,6 +1458,24 @@ class DiffsView(FilesSubViewBase):
             text.append("\n")
             lines.append(i)
         return text, lines
+
+    @staticmethod
+    def _stored_head(path: str, color: str, dim: str) -> Text:
+        """``Stored in shared_prefs/p.xml  com.app``: the file, relative to
+        the app's data folder, then the app (a path outside one: as is).
+        """
+        from sandroid.core.watchlist_store import DEVICE_OWNER, owner_and_relative
+
+        try:
+            owner, relative = owner_and_relative(path)
+        except Exception:
+            owner, relative = DEVICE_OWNER, path
+        if owner == DEVICE_OWNER:
+            relative = path
+        head = Text(f"Stored in {relative}", style=Style(color=color, bold=True))
+        if owner != DEVICE_OWNER:
+            head.append(f"  {owner}", style=dim)
+        return head
 
     def _privacy_sections(self, run_id: str, s: dict[str, Any]) -> list:
         findings, why = self._privacy_findings(s)

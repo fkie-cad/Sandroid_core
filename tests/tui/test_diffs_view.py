@@ -960,9 +960,8 @@ async def test_privacy_tab_lists_the_runs_findings_by_recipient(monkeypatch) -> 
         )  # fmt: skip
         assert "fittrack.de  first party" in lines
         assert any(ln.startswith("  Email, as is, URL path") for ln in lines)
-        assert "Stored on the device" in lines
-        assert any("Email, in /data/data/app/shared_prefs/p.xml, as is" in ln
-                   for ln in lines)  # fmt: skip
+        assert "Stored in shared_prefs/p.xml  app" in lines
+        assert any(ln.startswith("  Email, as is") for ln in lines)
         assert "GPS" not in text  # found after the run
         assert text.count("Advertising ID") == 1  # first hit per finding
         assert not set(privacy_fakes.GLYPHS) & set(text)
@@ -1136,3 +1135,34 @@ async def test_privacy_tab_two_runs_leaking_the_same_value(monkeypatch) -> None:
             assert "1 profile value sent to 1 recipient" in text, run_id
             # The first hit in the run's scope (the recording's, for run 1).
             assert f"request body, {at}" in text, (run_id, text)
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_names_each_stored_file_once(monkeypatch) -> None:
+    """Stored findings are grouped per file, the group names the file, and a
+    file seen under an alias path is one group.
+    """
+    import privacy_fakes
+    from privacy_fakes import file_hit
+
+    run_id = "20260101_000000_abcdef"
+    hits = [
+        file_hit("/data/data/app/shared_prefs/p.xml", t=_at(1)),
+        file_hit("/data/user/0/app/shared_prefs/p.xml", t=_at(2), version="v002"),
+        file_hit("/data/data/app/databases/x.db", "Phone", "Phone", t=_at(3)),
+    ]
+    privacy_fakes.install(monkeypatch, hits)
+    _save(run_id)
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(run_id) is not None)
+        text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        heads = [ln for ln in lines if ln.startswith("Stored")]
+        assert heads == [
+            "Stored in databases/x.db  app",
+            "Stored in shared_prefs/p.xml  app",
+        ]
+        assert text.count("Email") == 1
+        assert "Stored on the device" not in text
