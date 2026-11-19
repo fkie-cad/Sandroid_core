@@ -219,7 +219,13 @@ with the emulator backend instead of wrapping each launch path:
   startup crash, and best effort when it died on its own (noticed by the
   boot waiter, ``reap_exited_launches()`` or the next launch). They run at
   most once per launch; their exceptions are logged and never block a stop
-  or restart, so they must tolerate a launch with nothing to restore.
+  or restart.
+- Pre-launch and post-stop hooks are **not paired**: when any pre-launch hook
+  fails, *all* registered post-stop hooks run, including ones whose own
+  pre-launch hook never ran or stopped half-way. Every post-stop hook must
+  therefore be idempotent and may run without its pre-launch hook -- e.g.
+  have pre-launch write a marker (pointing at its backup) before it patches
+  anything, and make post-stop a no-op when there is no marker.
 - Emulators Sandroid did not launch can still be stopped, but get no
   post-stop hooks.
 - Hooks run on the backend's worker threads, never on the Textual UI
