@@ -1,8 +1,9 @@
 """Theme definitions and CSS files for Sandroid TUI.
 
-This module provides 8 color themes for the TUI interface:
+This module provides 11 color themes for the TUI interface:
 - 4 standard themes: default, dark, light, high_contrast
 - 4 new themes: cyberpunk, nord, dracula, solarized
+- 3 dark themes tuned for reading dense tables: graphite, deep_sea, evergreen
 
 Themes are picked in Settings (``,``) → Appearance. ``Ctrl+T`` is not a
 theme key: it toggles Tracking (session timeline).
@@ -60,6 +61,9 @@ PARENT_DIR = THEMES_DIR.parent
 #   band               section header band (top border of each section)
 #   band_focus         header band of the focused section
 #   stripe             zebra stripe of the longer tables (permissions, ...)
+#   cursor_keeps_colors  (bool, not a CSS variable) True: a cell keeps its
+#                      own color under the row cursor (``dangerous`` stays
+#                      amber) instead of taking the cursor text color.
 #
 # Add a theme: give its ``Theme(...)`` a ``lens=LensPalette(...)``; it is
 # registered automatically (``THEMES``). Retune: change the value here.
@@ -101,12 +105,14 @@ class LensPalette:
     band: str
     band_focus: str
     stripe: str
+    cursor_keeps_colors: bool = False
 
     def css_variables(self) -> dict[str, str]:
         """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""
         return {
             "lens-" + f.name.replace("_", "-"): getattr(self, f.name)
             for f in fields(self)
+            if isinstance(getattr(self, f.name), str)
         }
 
 
@@ -201,6 +207,12 @@ class Theme:
 
     # App lens color tokens (see LensPalette above).
     lens: LensPalette = field(default_factory=lambda: DEFAULT_LENS)
+
+    # Overrides of Textual's own design variables (``footer-key-foreground``,
+    # ``block-cursor-foreground``, ``scrollbar``, ...) on top of the
+    # textual-dark/-light base; empty = the base values (see
+    # :func:`build_textual_theme`).
+    textual_variables: dict[str, str] = field(default_factory=dict)
 
 
 # ========== Fixed Semantic Colors ==========
@@ -694,6 +706,233 @@ SOLARIZED_THEME = Theme(
     ),
 )
 
+
+# ========== Dense-data dark themes ==========
+# Three original dark themes for reading the App lens tables for hours. Same
+# recipe for all three, so they differ in character, not in structure:
+#
+# * surfaces step up in small, even lightness steps:
+#   lens ``bg`` < ``panel`` (spotlight head, log ticker) < chrome band
+#   (header, status strip, lens tabs, footer) < ``cursor_focus``; the
+#   unfocused ``cursor`` sits just above ``bg``.
+# * text has three tiers: ``text`` (>= 12:1 on bg), ``label``/``muted``
+#   (>= 7:1) and ``dim``/``header`` (>= 5:1 on bg, >= 4.5:1 even on the
+#   focused cursor), so nothing the lens draws is below WCAG AA.
+# * one accent hue, kept away from the ok/warn/bad hues; ok/warn/bad are
+#   tuned to the surface but stay green/yellow/red.
+# * the focused cursor keeps the cells' own colors (``cursor_keeps_colors``)
+#   and the chrome's Textual variables (footer keys, scrollbars, OptionList
+#   cursor) use the theme's colors instead of textual-dark's orange/blue.
+
+
+def _dense_textual_variables(lens: LensPalette, band: str, scroll: str) -> dict:
+    """Textual design variables for a dense-data dark theme."""
+    return {
+        "block-cursor-foreground": lens.text,
+        "block-cursor-background": lens.cursor_focus,
+        "block-cursor-blurred-foreground": lens.text,
+        "block-cursor-blurred-background": lens.cursor,
+        "block-hover-background": lens.cursor,
+        "scrollbar": scroll,
+        "scrollbar-hover": lens.dim,
+        "scrollbar-active": lens.accent,
+        "scrollbar-background": lens.bg,
+        "scrollbar-background-hover": lens.bg,
+        "scrollbar-background-active": lens.bg,
+        "scrollbar-corner-color": lens.bg,
+        "footer-background": band,
+        "footer-foreground": lens.text,
+        "footer-key-foreground": lens.title,
+        "footer-description-foreground": lens.label,
+    }
+
+
+# Graphite: neutral charcoal, near-zero saturation, one copper accent.
+GRAPHITE_LENS = LensPalette(
+    bg="#1A1B1D",
+    panel="#202124",
+    text="#E8E6E1",
+    label="#B5B2AB",
+    dim="#A19E97",
+    muted="#ABA8A1",
+    title="#F0A15C",
+    accent="#E8914A",
+    accent_text="#1A1B1D",
+    ok="#8FC77E",
+    warn="#E6CD5A",
+    bad="#F47A80",
+    rule="#37393D",
+    rule_focus="#E8914A",
+    header="#A19E97",
+    cursor="#1F2023",
+    cursor_focus="#3E332C",
+    action_bg="#27282C",
+    action_text="#D2CFC8",
+    action_hover_bg="#37393D",
+    action_hover_text="#F0A15C",
+    input_bg="#232427",
+    input_focus_bg="#2D2E32",
+    input_text="#E8E6E1",
+    band="#26272B",
+    band_focus="#35302A",
+    stripe="#1E1F22",
+    cursor_keeps_colors=True,
+)
+
+GRAPHITE_THEME = Theme(
+    name="graphite",
+    display_name="Graphite",
+    is_dark=True,
+    primary="#F0A15C",  # copper title
+    secondary="#B5B2AB",  # warm grey label
+    accent="#E8914A",  # copper focus
+    background="#1A1B1D",  # charcoal
+    surface="#202124",  # panel
+    error="#F47A80",
+    warning="#E6CD5A",
+    success="#8FC77E",
+    text="#E8E6E1",  # warm off-white
+    text_muted="#ABA8A1",  # >= 6:1 on the chrome band
+    key_color="#F0A15C",
+    border_color="#37393D",
+    forensic_color="#8FC77E",
+    malware_color="#F47A80",
+    security_color="#E6CD5A",
+    logo_color="#E8914A",
+    logo_text_color="#E8E6E1",
+    tool_color="#C8A2E8",  # soft violet, apart from copper and the status hues
+    user_highlight_background="#2D2E32",
+    assistant_reply_color="#8FC77E",
+    waiting_color="#F2B84B",
+    muted_status_color="#A19E97",
+    lens=GRAPHITE_LENS,
+    textual_variables=_dense_textual_variables(GRAPHITE_LENS, "#27282C", "#45474C"),
+)
+
+# Deep Sea: blue-slate surfaces, a sea-glass cyan accent, lifted text.
+DEEP_SEA_LENS = LensPalette(
+    bg="#14202A",
+    panel="#192631",
+    text="#E3ECF4",
+    label="#AABCCD",
+    dim="#91A4B6",
+    muted="#A0B3C5",
+    title="#5CD0DA",
+    accent="#3FBCC8",
+    accent_text="#0D1820",
+    ok="#86D68F",
+    warn="#F2C063",
+    bad="#F7878A",
+    rule="#2B3D4E",
+    rule_focus="#3FBCC8",
+    header="#91A4B6",
+    cursor="#182531",
+    cursor_focus="#183A58",
+    action_bg="#1E2D3B",
+    action_text="#C9D6E2",
+    action_hover_bg="#2B3D4E",
+    action_hover_text="#5CD0DA",
+    input_bg="#1A2733",
+    input_focus_bg="#22334A",
+    input_text="#E3ECF4",
+    band="#1D2C3A",
+    band_focus="#22405A",
+    stripe="#17242F",
+    cursor_keeps_colors=True,
+)
+
+DEEP_SEA_THEME = Theme(
+    name="deep_sea",
+    display_name="Deep Sea",
+    is_dark=True,
+    primary="#5CD0DA",  # sea-glass title
+    secondary="#AABCCD",  # slate label
+    accent="#3FBCC8",  # sea-glass focus
+    background="#14202A",  # blue slate
+    surface="#192631",
+    error="#F7878A",
+    warning="#F2C063",
+    success="#86D68F",
+    text="#E3ECF4",
+    text_muted="#A0B3C5",  # >= 6:1 on the chrome band
+    key_color="#5CD0DA",
+    border_color="#2B3D4E",
+    forensic_color="#86D68F",
+    malware_color="#F7878A",
+    security_color="#F2C063",
+    logo_color="#3FBCC8",
+    logo_text_color="#E3ECF4",
+    tool_color="#B9A4F0",  # periwinkle, apart from cyan and the status hues
+    user_highlight_background="#22334A",
+    assistant_reply_color="#86D68F",
+    waiting_color="#F5A962",
+    muted_status_color="#91A4B6",
+    lens=DEEP_SEA_LENS,
+    textual_variables=_dense_textual_variables(DEEP_SEA_LENS, "#1E2D3B", "#344A5F"),
+)
+
+# Evergreen: warm moss-grey base, cream text, a heather (lilac) accent.
+EVERGREEN_LENS = LensPalette(
+    bg="#1A1F1B",
+    panel="#1F2520",
+    text="#EEE6D2",
+    label="#BDB6A2",
+    dim="#A5A08E",
+    muted="#B2AB97",
+    title="#CDAEE6",
+    accent="#B99AD8",
+    accent_text="#1A1F1B",
+    ok="#98D27F",
+    warn="#EAC55E",
+    bad="#F08474",
+    rule="#364036",
+    rule_focus="#B99AD8",
+    header="#A5A08E",
+    cursor="#1F2520",
+    cursor_focus="#283B23",
+    action_bg="#252C25",
+    action_text="#D6CFBC",
+    action_hover_bg="#364036",
+    action_hover_text="#CDAEE6",
+    input_bg="#212721",
+    input_focus_bg="#2B342B",
+    input_text="#EEE6D2",
+    band="#242B25",
+    band_focus="#2F3D2C",
+    stripe="#1D231E",
+    cursor_keeps_colors=True,
+)
+
+EVERGREEN_THEME = Theme(
+    name="evergreen",
+    display_name="Evergreen",
+    is_dark=True,
+    primary="#CDAEE6",  # heather title
+    secondary="#BDB6A2",  # parchment label
+    accent="#B99AD8",  # heather focus
+    background="#1A1F1B",  # moss grey
+    surface="#1F2520",
+    error="#F08474",
+    warning="#EAC55E",
+    success="#98D27F",
+    text="#EEE6D2",  # cream
+    text_muted="#B2AB97",  # >= 6:1 on the chrome band
+    key_color="#CDAEE6",
+    border_color="#364036",
+    forensic_color="#98D27F",
+    malware_color="#F08474",
+    security_color="#EAC55E",
+    logo_color="#98D27F",
+    logo_text_color="#EEE6D2",
+    tool_color="#8CC4E0",  # sky blue, apart from heather and the status hues
+    user_highlight_background="#2B342B",
+    assistant_reply_color="#98D27F",
+    waiting_color="#F0A866",
+    muted_status_color="#A5A08E",
+    lens=EVERGREEN_LENS,
+    textual_variables=_dense_textual_variables(EVERGREEN_LENS, "#252C25", "#424D41"),
+)
+
 # Theme registry
 THEMES: dict[str, Theme] = {
     "default": DEFAULT_THEME,
@@ -704,6 +943,9 @@ THEMES: dict[str, Theme] = {
     "nord": NORD_THEME,
     "dracula": DRACULA_THEME,
     "solarized": SOLARIZED_THEME,
+    "graphite": GRAPHITE_THEME,
+    "deep_sea": DEEP_SEA_THEME,
+    "evergreen": EVERGREEN_THEME,
 }
 
 # Theme cycling order
@@ -716,6 +958,9 @@ THEME_ORDER = [
     "nord",
     "dracula",
     "solarized",
+    "graphite",
+    "deep_sea",
+    "evergreen",
 ]
 
 
@@ -818,9 +1063,10 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
     """The Textual theme carrying ``theme``'s lens tokens as CSS variables.
 
     It is a copy of ``textual-dark`` (or ``textual-light`` for a light theme)
-    that only ADDS the ``$lens-*`` variables, so Textual's own widgets
-    (inputs, footers, scrollbars, ...) look exactly as they did when the app
-    switched between those two built-in themes.
+    that ADDS the ``$lens-*`` variables, so Textual's own widgets (inputs,
+    footers, scrollbars, ...) look exactly as they did when the app switched
+    between those two built-in themes -- unless the theme sets
+    ``textual_variables``, which override those base values.
 
     Args:
         theme: The Sandroid theme.
@@ -832,7 +1078,11 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
     return replace(
         base,
         name=textual_theme_name(theme.name),
-        variables={**base.variables, **theme.lens.css_variables()},
+        variables={
+            **base.variables,
+            **theme.textual_variables,
+            **theme.lens.css_variables(),
+        },
     )
 
 
@@ -905,10 +1155,13 @@ def get_available_theme_css_files() -> dict[str, Path]:
 __all__ = [
     "CYBERPUNK_THEME",
     "DARK_THEME",
+    "DEEP_SEA_THEME",
     "DEFAULT_LENS",
     "DEFAULT_THEME",
     "DRACULA_THEME",
+    "EVERGREEN_THEME",
     "FIXED_COLORS",
+    "GRAPHITE_THEME",
     "HIGH_CONTRAST_THEME",
     "LIGHT_THEME",
     "NORD_THEME",
