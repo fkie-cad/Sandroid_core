@@ -562,6 +562,9 @@ class FilesPanel(Widget):
         self._segment: int | None = None
         #: The time of a label / mark being named (prompt open; MarksChanged).
         self._pending_mark: datetime | None = None
+        #: The pending boundaries (one, or two when the label being named
+        #: ends an open one at the same instant: end + start).
+        self._pending_times: list[datetime] = []
         #: Expanded group folders.
         self._expanded: set[str] = set()
         #: Hidden rows of the last live redraw, by rule kind / "open-only".
@@ -1528,12 +1531,18 @@ class FilesPanel(Widget):
         if pending is not None:
             # A label name prompt is open: segment the activity from the key
             # press on, before anything is written (Esc settles it again).
+            # ``pending_times`` has the boundaries the label will add (two
+            # when it ends an open label), so the pre-split segment numbers
+            # are the final ones.
+            times = list(getattr(message, "pending_times", None) or [pending])
             self._pending_mark = pending
-            self.activity.set_marks([*(m.when for m in self._marks), pending])
+            self._pending_times = times
+            self.activity.set_marks([*(m.when for m in self._marks), *times])
             self._dirty = True
             self.refresh_rows()
             return
         self._pending_mark = None
+        self._pending_times = []
         self._set_marks(message.marks, follow=message.added is not None)
         self.refresh_rows()
         self._refresh_inspector()

@@ -1252,3 +1252,308 @@ async def test_real_lens_shows_lines_written_by_the_service(tmp_path) -> None:
         assert any(r.kind == "intervention" for r in lens.rows)
         svc.emit("files", "pull", summary="◆ v001 app.db", data={"path": "/x"})
         await _wait(pilot, lambda: any(r.kind == "pull" for r in lens.rows))
+
+
+# --------------------------------------------------------------------------
+# review fixes (R1 #3/#5, R2 M2/M4/M10/M11/L17/L18)
+# --------------------------------------------------------------------------
+
+
+async def test_live_row_without_offset_is_read_back_by_seq(
+    install_fakes, monkeypatch
+) -> None:
+    """R2-M11: a live row that left the line cache never hangs on loading…"""
+    from sandroid.tui.widgets import timeline_lens as tl
+
+    fakes = install_fakes([make_line(1, NOW - 100)])
+    fakes.service.write_through = True  # the writer put every line in the file
+    monkeypatch.setattr(tl, "_LINE_CACHE", 3)
+    app = _LensHarness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        for i in range(10):
+            fakes.service.emit("files", "modify", summary=f"m{i}", t=NOW - 50 + i)
+        lens._poll()
+        await _wait(pilot, lambda: len(lens.rows) == 11)
+        row = lens._by_seq[3]
+        assert row.offset is None  # TailResult without offsets (today's core)
+        assert 3 not in lens._lines  # evicted
+        lens._load_detail(row)
+        await _wait(pilot, lambda: 3 in lens._detail)
+        detail = lens._detail[3]
+        assert detail["line"]["summary"] == "m1"
+        assert detail["prev"]["seq"] == 2
+        assert lens._by_seq[3].offset == fakes.service.offsets[3]  # remembered
+        assert "loading" not in _plain(lens._content(lens._by_seq[3]), "Line")
+        # A row whose line is nowhere: an error, not "loading…" forever.
+        ghost = row_from_line(make_line(99, NOW - 1))
+        lens._load_detail(ghost)
+        await _wait(pilot, lambda: 99 in lens._detail)
+        assert "not readable" in _plain(lens._content(ghost), "JSON")
+        assert "not readable" in _plain(lens._content(ghost), "Line")
+
+
+async def test_live_rows_keep_ring_offsets_when_tail_has_them(install_fakes) -> None:
+    fakes = install_fakes([make_line(1, NOW - 100)])
+    fakes.service.write_through = True
+    fakes.service.ring_offsets = True
+    app = _LensHarness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        fakes.service.emit("files", "modify", summary="live", t=NOW - 50)
+        lens._poll()
+        await _wait(pilot, lambda: 2 in lens._by_seq)
+        assert lens._by_seq[2].offset == fakes.service.offsets[2]
+
+
+async def test_reveal_ends_on_follow_filter_and_rebind(install_fakes) -> None:
+    """R2-L17: the reveal is tied to the selection, however it changes."""
+    secret = {
+        "sensitive": True,
+        "data": {"text": "hunter22"},
+        "summary": "typed",
+        "ref": {"raw": "tracking/raw/getevent.txt#L1-2"},
+    }
+    lines = [make_line(1, NOW - 100), make_line(2, NOW - 90, "input", "text", **secret)]
+    fakes = install_fakes(lines)
+    fakes.module.MASK = True
+    app = _LensHarness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        assert lens.cursor_row.seq == 2
+        assert lens.following
+        lens.reveal(2)
+        assert fakes.service.reveal_devs == [timeline_fakes.SERIAL]  # dev passed
+        # follow moves the selection to a new line: the reveal ends
+        fakes.service.emit("files", "modify", summary="new", t=NOW - 10)
+        lens._poll()
+        await _wait(pilot, lambda: len(lens.rows) == 3)
+        assert lens.cursor_row.seq != 2
+        assert lens.revealed is None
+        lens.click_line(1)
+        assert lens.cursor_row.seq == 2
+        lens._load_detail(lens.cursor_row)
+        await _wait(pilot, lambda: 2 in lens._detail)
+        assert "hunter22" not in _plain(lens._content(lens.cursor_row), "JSON")
+        # a filter change ends it even when the same row stays selected
+        lens.reveal(2)
+        lens.set_filter("typed")
+        assert lens.cursor_row.seq == 2
+        assert lens.revealed is None
+        # a new sink ends it
+        lens.reveal(2)
+        lens.on_timeline_bound()
+        assert lens.revealed is None
+
+
+async def test_ref_tab_masks_ref_raw(install_fakes) -> None:
+    """R1#5: the Ref tab shows the masked ref while masking is on."""
+    lines = [
+        make_line(
+            1, NOW - 90, "input", "text", sensitive=True, summary="typed",
+            data={"text": "hunter22"}, ref={"raw": "tracking/raw/getevent.txt#L1-2"},
+        )
+    ]  # fmt: skip
+    fakes = install_fakes(lines)
+    fakes.module.MASK = True
+    app = _LensHarness()
+    async with app.run_test(size=(160, 40)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        content = lens._content(lens.cursor_row)
+        assert "getevent.txt#L1-2" not in _plain(content, "JSON")
+        assert "getevent.txt#L1-2" not in _plain(content, "Ref")
+        lens.reveal(1)
+        assert "getevent.txt#L1-2" in _plain(lens._content(lens.cursor_row), "Ref")
+
+
+async def test_negative_terms_keep_separators_but_minus_src_hides_them(
+    install_fakes,
+) -> None:
+    install_fakes(_mixed())
+    app = _LensHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        lens.set_filter("-actor:user -kind:start,load")
+        seqs = {r.seq for r in lens.visible_rows}
+        assert {4, 7} <= seqs  # the world and label separators stay
+        lens.set_filter("-src:label")
+        assert 7 not in {r.seq for r in lens.visible_rows}
+
+
+def test_late_insert_patches_the_view_like_a_full_rebuild() -> None:
+    """R2-L18: a late line no longer rebuilds the whole view."""
+    t0 = NOW - 10_000
+    base = []
+    for i in range(400):
+        src, kind = [("files", "modify"), ("clock", "sample"), ("net", "flow")][i % 3]
+        epoch = i // 100
+        base.append(row_from_line(make_line(i + 1, t0 + i, src, kind, epoch=epoch)))
+    for text in ("", "src:files", "-src:clock", "src:net"):
+        lens = TimelineLens()
+        lens._apply_rows(list(base), 0)
+        lens._query = parse_query(text)
+        lens._rebuild_view(keep=False)
+        late = [
+            row_from_line(make_line(1000 + k, t0 + k * 37.5, "files", "create"))
+            for k in range(10)
+        ] + [row_from_line(make_line(2000, t0 + 99.5, "net", "flow", epoch=0))]
+        lens._follow = False
+        lens.insert_rows(late)
+        patched = list(lens._view)
+        lens._rebuild_view(keep=False)
+        assert patched == lens._view, text
+
+
+def test_late_insert_is_much_cheaper_than_a_rebuild() -> None:
+    n = 60_000
+    t0 = NOW - n
+    rows = [row_from_line(make_line(i + 1, t0 + i), i * 300) for i in range(n)]
+    lens = TimelineLens()
+    lens._apply_rows(rows, 0)
+    lens._follow = False
+    started = time.perf_counter()
+    lens._rebuild_view(keep=False)
+    rebuild = time.perf_counter() - started
+    late = row_from_line(make_line(n + 1, t0 + n - 50))
+    started = time.perf_counter()
+    lens.insert_rows([late])
+    insert = time.perf_counter() - started
+    assert insert < rebuild / 3, (insert, rebuild)
+
+
+async def test_label_keys_record_actor_user(install_fakes) -> None:
+    """R2-M2: key labels are the user's (the root fallback keeps them)."""
+    fakes = install_fakes()
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        await _label(pilot, "number_sign", "a")
+        await _label(pilot, "plus", "b")
+        await _label(pilot, "B", "c")
+        await pilot.press("minus")
+        await _settle(pilot)
+        actors = [(name, call["actor"]) for name, call in fakes.labels.calls]
+        assert actors == [
+            ("start", "user"),
+            ("start", "user"),
+            ("point", "user"),
+            ("stop", "user"),
+        ]
+        assert {e.actor for e in fakes.labels.history()} == {"user"}
+
+
+async def test_hash_with_an_open_label_pre_splits_at_end_and_start(
+    install_fakes,
+) -> None:
+    """R2-M10: activity typed during the prompt lands in the new label."""
+    from sandroid.tui.controllers.monitor_controller import build_monitor_item
+
+    install_fakes()
+    root = "/data/data/com.example.fit"
+    path = f"{root}/shared_prefs/x.xml"
+    item = build_monitor_item(f'FSE_CONTENT_MODIFIED\t1\t"fit"\t{path}', (root + "/",))
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        await pilot.press("3")
+        await _settle(pilot)
+        files = ms.lens_widget("files")
+        await _label(pilot, "number_sign", "login")  # label 1 open
+        assert len(files.marks) == 1
+        await pilot.press("number_sign")  # ends 1 + starts 2 at this instant
+        await _settle(pilot, 3)
+        assert type(app.screen).__name__ == "InputModal"
+        assert len(files.activity.mark_times) == 3  # start 1, end 1, start 2
+        typed_at = datetime.now()
+        files.ingest([item], now=typed_at)  # the app writes while the user types
+        await pilot.press(*"cookies", "enter")
+        await _settle(pilot, 3)
+        assert [m.kind for m in files.marks] == ["start", "end", "start"]
+        row = files.activity.paths[path]
+        assert sorted(row.segments) == [3]
+        assert files.activity.segment_of(typed_at) == 3
+        assert files.segment == 3
+
+
+@pytest.mark.parametrize("failure", ["raises", "none"])
+async def test_a_failed_label_start_settles_the_files_pre_split(
+    install_fakes, failure
+) -> None:
+    fakes = install_fakes()
+
+    def broken(*_a, **_k):
+        if failure == "raises":
+            raise RuntimeError("sink gone")
+
+    fakes.labels.start = broken
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        await pilot.press("3")
+        await _settle(pilot)
+        files = ms.lens_widget("files")
+        await pilot.press("number_sign")
+        await _settle(pilot, 3)
+        assert len(files.activity.mark_times) == 1  # pre-split
+        await pilot.press("enter")
+        await _settle(pilot, 3)
+        assert files.activity.mark_times == []
+        assert files._pending_mark is None
+
+
+async def test_rebind_rebuilds_marks_per_sink_and_refreshes_the_watchlist(
+    install_fakes, tmp_path
+) -> None:
+    """R1#3 / R2-M4: marks follow the active sink, even at equal versions."""
+    fakes = install_fakes()
+    svc = fakes.service
+    labels_a = svc.labels
+    labels_a.point("in A")
+    folder_a = svc.folder
+    folder_b = tmp_path / "session" / "dev-b"
+    folder_b.mkdir(parents=True)
+    labels_b = timeline_fakes.FakeLabels(svc)
+    labels_b.point("in B")
+    assert labels_a.version == labels_b.version  # the versions collide
+
+    def bind(folder, labels, op="bound"):
+        svc.folder, svc.labels = folder, labels
+        if op:
+            ms._handle_timeline_event(
+                SimpleNamespace(
+                    data={"op": op, "folder": str(folder), "srcs": ["label"]}
+                )
+            )
+
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await _boot(app, pilot)
+        ms = app.screen
+        files = ms.lens_widget("files")
+        bind(folder_a, labels_a)
+        await _settle(pilot, 3)
+        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+        assert [m.name for m in files.watchlist.marks] == ["in A"]
+        bind(folder_b, labels_b)
+        await _settle(pilot, 3)
+        assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
+        assert [m.name for m in files.watchlist.marks] == ["in B"]
+        # back to the already-open A: its own labels again
+        bind(folder_a, labels_a)
+        await _settle(pilot, 3)
+        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+        assert [m.name for m in files.watchlist.marks] == ["in A"]
+        # a label doorbell from another sink at the same version still
+        # rebuilds (the cache key is (sink, version), not the version)
+        bind(folder_b, labels_b, op="lines")
+        await _settle(pilot, 3)
+        assert [m.label() for m in ms.marks] == ["mark 1 'in B'"]
+        # a session-id-only payload works too
+        svc.folder, svc.labels = None, labels_a
+        ms._handle_timeline_event(
+            SimpleNamespace(data={"op": "bound", "session_id": "s-a"})
+        )
+        await _settle(pilot, 3)
+        assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]

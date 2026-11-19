@@ -1394,8 +1394,11 @@ class SandroidTUI(App):
         boundary = kind == "point" or level == "top" or no_open
         if ms.scope is not None:
             self.notify("Label added to the live session.", timeout=3)
+        # "#" while a label is open ends it at the key press: the boundaries
+        # gain its end AND the new start there, so pre-split at both.
+        ends_open = kind == "start" and level == "top" and bool(open_spans)
         if boundary:
-            ms.post_marks_pending(stamp)
+            ms.post_marks_pending(stamp, ends_open=ends_open)
 
         def done(name: str | None) -> None:
             screen = self._main_screen_in_stack()
@@ -1405,7 +1408,7 @@ class SandroidTUI(App):
                 if boundary:
                     screen.post_marks_pending(None)
                 return
-            screen.add_label(kind, name, when, level=level, source="key")
+            screen.add_label(kind, name, when, level=level, source="key", actor="user")
             if no_open and screen.labels_api() is not None:
                 self.notify("No open label — started a top-level label.", timeout=3)
 
@@ -1429,7 +1432,7 @@ class SandroidTUI(App):
                 timeout=3,
             )
             return
-        event = ms.stop_label(time.time())
+        event = ms.stop_label(time.time(), actor="user")
         if event is None:
             self.notify("No open label.", severity="warning", timeout=3)
             return
