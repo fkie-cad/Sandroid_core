@@ -57,7 +57,7 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sandroid.core.frames import (  # R1 metric, re-exported
     SAME_MAX_DIFF,
@@ -3565,7 +3565,28 @@ class NetFlowSource:
     :meth:`on_line` (mitmweb's listener thread) only rings a bell; a worker
     thread debounces it (:data:`NET_DEBOUNCE_S`) and reads the new records of
     ``flows.jsonl`` with ``query_flows(since_cursor=...)``.
+
+    Sinks (:meth:`add_sink`, process-wide, e.g. the privacy scan) are called
+    on the worker after each ``net/flow`` line with ``(rec, flow_dir, seq)``;
+    they must only enqueue.
     """
+
+    _sinks: ClassVar[list[Callable[[dict, Path, int | None], None]]] = []
+    _sinks_lock: ClassVar[threading.Lock] = threading.Lock()
+
+    @classmethod
+    def add_sink(cls, sink: Callable[[dict, Path, int | None], None]) -> None:
+        """Call ``sink(rec, flow_dir, seq)`` after every ``net/flow`` line."""
+        with cls._sinks_lock:
+            if sink not in cls._sinks:
+                cls._sinks.append(sink)
+
+    @classmethod
+    def remove_sink(cls, sink: Callable[[dict, Path, int | None], None]) -> None:
+        """Undo :meth:`add_sink` (no-op when not added)."""
+        with cls._sinks_lock:
+            if sink in cls._sinks:
+                cls._sinks.remove(sink)
 
     def __init__(
         self,
@@ -3669,13 +3690,40 @@ class NetFlowSource:
                             "after": self.cursor,
                             "earliest": res.get("earliest_available_seq"),
                         }
-                    self._emit(rec, flow_dir, gap_info)
+                    seq = self._emit(rec, flow_dir, gap_info)
+                    self._notify_sinks(rec, flow_dir, seq)
                     n += 1
                 self.cursor = int(res.get("next_cursor") or self.cursor)
                 if not res.get("truncated"):
                     break
         self.emitted += n
         return n
+
+    def _notify_sinks(self, rec: dict, flow_dir: Path, seq: int | None) -> None:
+        """Hand a ``net/flow`` record to the sinks (never ``net/tls-fail``).
+
+        ``seq`` None: the line was left out by policy (sinks get None), or
+        there is no open timeline at all (sinks are skipped).
+        """
+        if rec.get("kind") == "tls":
+            return
+        with self._sinks_lock:
+            sinks = list(self._sinks)
+        if not sinks:
+            return
+        if seq is None:
+            from sandroid.core import timeline
+
+            try:
+                if timeline.get_timeline().status().state not in ("open", "capture"):
+                    return
+            except Exception:
+                return
+        for sink in sinks:
+            try:
+                sink(rec, flow_dir, seq)
+            except Exception:
+                logger.debug("net flows: sink failed", exc_info=True)
 
     def _emit(self, rec: dict, flow_dir: Path, gap: dict | None) -> int | None:
         app = rec.get("app") or None
