@@ -140,8 +140,7 @@ _INSPECTOR_PREFIX = "Inspector: "
 #: bindings without a rebindable id). Listed first, under "General".
 _GENERAL_KEYS: list[tuple[str, str]] = [
     ("question_mark", "This help"),
-    ("escape", "Close Inspector / chat / log drawer, then dialogs"),
-    ("ctrl+y", "AI chat (side panel; Ctrl+Y again closes it)"),
+    ("escape", "Chat → lens, then close Inspector / log drawer / chat, dialogs"),
     ("ctrl+b", "Focus the lens (back from the chat or Inspector)"),
     ("comma", "Settings"),
     ("0", "Snapshot picker (same as S)"),

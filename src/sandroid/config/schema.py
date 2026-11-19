@@ -763,6 +763,30 @@ def default_files_noise_rules() -> list[dict]:
     return rules
 
 
+#: Chat dock split presets (fraction of the left column the chat takes).
+CHAT_DOCK_PRESETS: tuple[float, ...] = (0.3, 0.5, 0.7)
+
+
+class ChatDockConfig(BaseModel):
+    """Size of the AI chat dock under the lens (the chat always starts closed)."""
+
+    ratio: float = Field(
+        default=0.5,
+        description="Share of the left column the chat takes when split: "
+        "0.3, 0.5 or 0.7 (other values snap to the nearest).",
+    )
+    maximized: bool = Field(
+        default=False,
+        description="Open the chat maximized (lens hidden).",
+    )
+
+    @field_validator("ratio")
+    @classmethod
+    def _snap_ratio(cls, v: float) -> float:
+        """Snap to the nearest preset."""
+        return min(CHAT_DOCK_PRESETS, key=lambda p: abs(p - float(v)))
+
+
 class TUIConfig(BaseModel):
     """TUI (Terminal User Interface) configuration."""
 
@@ -860,6 +884,10 @@ class TUIConfig(BaseModel):
             "{'Pixel_6_API_33': {'1': 'clean-boot', '3': 'post-install'}}. "
             "Edited via the snapshot picker (key S)."
         ),
+    )
+    chat_dock: ChatDockConfig = Field(
+        default_factory=ChatDockConfig,
+        description="AI chat dock size (Shift+Up/Down or drag its top border).",
     )
     snapshot_save_mode: str = Field(
         default="ask",

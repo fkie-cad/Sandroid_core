@@ -6,9 +6,11 @@ Layout (top to bottom, see ``MainScreen.compose``)::
     StatusBar     #status-bar     1-2 rows of live tool state
     LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  5 Timeline
     #workspace    Horizontal
-      #lens-host  framed ContentSwitcher #lens-body holding the five lenses
-      #side-slot  right-hand slot: Inspector #inspector  OR  chat #chat-dock
-    LogTicker     #log-ticker     newest log line + "` log" hint
+      #left-col   Vertical
+        #lens-host  framed ContentSwitcher #lens-body holding the five lenses
+        #chat-dock  the AI chat under the lens (Ctrl+Y; hidden while closed)
+      #side-slot  right-hand slot: Inspector #inspector
+    LogTicker     #log-ticker     newest log line + "^Y AI · ` log" hint
     LogDrawer     #log-drawer     hidden; ` toggles it; holds ActivityLog #activity-log
     SandroidFooter
 
@@ -1099,7 +1101,11 @@ def humanize_log_line(line: str) -> str:
 
 
 class LogTicker(Horizontal):
-    """One row: the newest meaningful log line, plus a dim "` log" hint."""
+    """One row: the newest meaningful log line, plus a dim key hint."""
+
+    #: The hint (AI chat + log drawer keys), drawer closed / open.
+    HINT = "^Y AI · ` log"
+    HINT_OPEN = "^Y AI · ` close log"
 
     DEFAULT_CSS = """
     LogTicker {
@@ -1126,7 +1132,7 @@ class LogTicker(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="log-ticker-line")
-        yield Static("` log", id="log-ticker-hint")
+        yield Static(self.HINT, id="log-ticker-hint")
 
     def show_line(self, content: Any) -> None:
         """Mirror one ActivityLog line (markup string or renderable)."""
@@ -1155,7 +1161,7 @@ class LogTicker(Horizontal):
     def set_drawer_open(self, is_open: bool) -> None:
         try:
             self.query_one("#log-ticker-hint", Static).update(
-                "` close log" if is_open else "` log"
+                self.HINT_OPEN if is_open else self.HINT
             )
         except Exception:
             pass

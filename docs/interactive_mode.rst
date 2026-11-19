@@ -52,8 +52,8 @@ everything else out of the way until you ask for it:
   ``Esc`` closes it. Switching to another lens closes it too.
 - **Log ticker** (one row): the newest activity-log line. The backtick key
   opens the **log drawer** with the full activity log.
-- **AI Chat** (optional, ``Ctrl+Y``, experimental) opens in the same
-  right-hand slot as the Inspector: see :ref:`ai-chat`.
+- **AI Chat** (optional, ``Ctrl+Y``, experimental) docks under the lens,
+  beside the Inspector: see :ref:`ai-chat`.
 
 Navigation
 ~~~~~~~~~~
@@ -76,15 +76,17 @@ Backtick (grave accent)     Toggle the log drawer
 ``L`` (Shift+L)             Back to LIVE while reviewing a run (``◆ REVIEW``)
 ``?``                       Help & keybinding editor (all actions by category)
 ``Ctrl+Shift+P``            Command palette (fuzzy-search any action)
-``Ctrl+Y``                  AI Chat in the right-hand slot
+``Ctrl+Y``                  AI Chat under the lens (focus it; again: close)
+``Shift+Up``/``Down``       AI Chat size: 30% / 50% / 70% / max
 ``Ctrl+B``                  Focus the active lens (e.g. after the chat)
 ``,``                       Settings
 ``D`` (Shift+D)             Switch device
 ``q`` / ``Ctrl+C``          Quit (asks first; ``Ctrl+Q`` too)
 ==========================  ==================================================
 
-``Esc`` closes the Inspector / AI Chat first, then the log drawer, then
-clears an applied lens filter; it never quits. The quit dialog always comes
+``Esc`` in the AI Chat goes back to the lens; otherwise it closes the
+Inspector first, then the log drawer, then the AI Chat, then clears an
+applied lens filter; it never quits. The quit dialog always comes
 first and lists what quitting stops (mitmweb, friTap, the file monitor, a
 recording, ...) and that it clears the device proxy Sandroid set. After the
 confirm the dialog stays up as "Quitting Sandroid…" and ignores keys until
@@ -611,8 +613,11 @@ Press ``?`` for the authoritative, up-to-date list.
 AI Chat (EXPERIMENTAL)
 ----------------------
 
-``Ctrl+Y`` opens a chat in the right-hand slot, backed by any OpenAI-compatible chat-completions
-endpoint. The assistant can query the device and drive ~76 Sandroid tools
+``Ctrl+Y`` opens a chat docked under the lens (``Ctrl+Y`` again focuses it,
+then closes it; ``Esc`` goes back to the lens), backed by any OpenAI-compatible
+chat-completions endpoint. ``Shift+Up`` / ``Shift+Down`` step its size through
+30%, 50%, 70% and max; dragging its top border resizes it and a double-click
+there toggles max. The size is remembered in ``tui.chat_dock``. The assistant can query the device and drive ~76 Sandroid tools
 (app lifecycle, flows, certificates, file transfer, monitor, record/replay),
 spawn background subtasks, and use tools from configured MCP servers. Each
 state-changing tool call asks for approval (once / always / never).

@@ -45,7 +45,8 @@ MainScreen {
     border: round #37393D;
 }
 
-/* Right-hand side slot: Inspector or AI chat (one at a time) */
+/* Right-hand side slot: Inspector (the AI chat docks under the lens and
+   styles itself from $lens-* tokens, see main_screen.ChatDock) */
 Inspector {
     background: #202124;
     border: round #37393D;
@@ -55,12 +56,6 @@ Inspector {
 
 Inspector:focus-within {
     border: round #F0A15C;
-}
-
-#chat-dock {
-    background: #202124;
-    border: round #37393D;
-    border-title-color: #F0A15C;
 }
 
 /* Log ticker (newest line) + bottom drawer (` toggles) */

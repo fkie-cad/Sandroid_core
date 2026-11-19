@@ -109,19 +109,130 @@ class _LensHost(Vertical):
 #: Backwards-compatible name (the help screen and older code referred to it).
 _ToolPanel = _LensHost
 
+#: Chat dock split presets (share of the left column), smallest first.
+CHAT_PRESETS: tuple[float, ...] = (0.3, 0.5, 0.7)
+#: Default split.
+CHAT_DEFAULT_RATIO = 0.5
+#: Fewest chat rows in split mode, and fewest rows left for the lens.
+CHAT_MIN_ROWS = 10
+LENS_MIN_ROWS = 6
+#: Below this left-column height the chat is shown maximized ("effective
+#: max"): a split would leave the lens or the chat unusably small.
+CHAT_SPLIT_MIN_HEIGHT = CHAT_MIN_ROWS + LENS_MIN_ROWS
+#: Below this screen width the screen gets ``-narrow`` (narrower Inspector).
+NARROW_WIDTH = 120
+#: Dock frame title (the "Blockhead" antennae + name).
+CHAT_TITLE = "▚▄▄▞ Sandroid AI"
+
+
+def chat_rows(height: int, ratio: float) -> int:
+    """Chat rows for a left column of ``height`` rows at ``ratio`` (split).
+
+    ``clamp(round(H * ratio), 10, H - 6)``; callers switch to the effective
+    max below :data:`CHAT_SPLIT_MIN_HEIGHT` rows.
+    """
+    return max(CHAT_MIN_ROWS, min(round(height * ratio), height - LENS_MIN_ROWS))
+
+
+def snap_chat_ratio(ratio: float) -> float:
+    """The preset nearest to ``ratio``."""
+    return min(CHAT_PRESETS, key=lambda p: abs(p - ratio))
+
+
+class _LeftCol(Vertical):
+    """``#left-col``: the lens above the chat dock; re-sizes the dock."""
+
+    def on_resize(self, _event) -> None:
+        apply = getattr(self.screen, "_apply_chat_layout", None)
+        if apply is not None:
+            apply()
+
+
+class ChatDock(Vertical):
+    """The AI chat frame under the lens (§6 of ai_foundations.rst).
+
+    Holds the one ``ChatPanel`` (composed once, never unmounted). Dragging
+    the top border resizes the split (snapping to the presets on release);
+    a double-click on it toggles max. All state lives on ``MainScreen``
+    (``chat_mode`` / ``chat_ratio``); this widget only forwards the mouse.
+    """
+
+    DEFAULT_CSS = """
+    ChatDock {
+        display: none;
+        height: 50%;
+        min-height: 0;
+        border: round $lens-rule;
+        border-title-color: $lens-accent;
+        border-title-style: bold;
+        border-subtitle-color: $lens-dim;
+        background: $lens-panel;
+    }
+    ChatDock:focus-within {
+        border: round $lens-rule-focus;
+    }
+    """
+
+    def __init__(self, *children, **kwargs) -> None:
+        super().__init__(*children, **kwargs)
+        self._dragging = False
+        self.border_title = CHAT_TITLE
+
+    def _on_border(self, event) -> bool:
+        return event.y == 0
+
+    def on_mouse_down(self, event) -> None:
+        if event.button != 1 or not self._on_border(event):
+            return
+        if not self.screen.chat_can_resize:
+            return
+        self._dragging = True
+        self.capture_mouse()
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_move(self, event) -> None:
+        if not self._dragging:
+            return
+        self.screen.drag_chat_dock(event.screen_y)
+        event.stop()
+
+    def on_mouse_up(self, event) -> None:
+        if not self._dragging:
+            return
+        self._dragging = False
+        self.release_mouse()
+        self.screen.end_chat_drag()
+        event.stop()
+
+    def on_click(self, event) -> None:
+        if self._on_border(event) and event.chain >= 2:
+            self.screen.toggle_chat_max()
+            event.stop()
+
 
 class MainScreen(Screen):
-    """Main screen: header, lens bar, full-width lens, on-demand side slot.
+    """Main screen: header, lens bar, lens + AI chat dock, Inspector slot.
 
     Global keys live on the app; this screen only adds the Shift+Arrow
-    fallback while NOTHING has focus (normally ``_LensHost`` catches them)
-    and Enter → Inspector for lenses that implement ``inspect_selected``.
+    fallback while NOTHING has focus (normally ``_LensHost`` catches them),
+    Enter → Inspector for lenses that implement ``inspect_selected`` and
+    Shift+Up/Down (chat size) while the chat is open.
     """
 
     BINDINGS = [
         Binding("shift+left", "unfocused_nav('cycle', -1)", show=False),
         Binding("shift+right", "unfocused_nav('cycle', 1)", show=False),
         Binding("enter", "inspect", "Inspect"),
+        # AI chat dock size while it is open (whatever has focus): 0.3 ->
+        # 0.5 -> 0.7 -> max. Not Ctrl+Up/Down: macOS's Mission Control.
+        Binding(
+            "shift+up",
+            "chat_size(1)",
+            "AI chat bigger (30% → 50% → 70% → max)",
+            show=False,
+        ),
+        Binding("shift+down", "chat_size(-1)", "AI chat smaller", show=False),
         # Inspector tabs while it is open, whatever has focus: [ / ] always;
         # plain ←/→ too, except in a text input (caret). They are priority
         # bindings: a lens table used to keep ←/→ for sideways scrolling
@@ -190,12 +301,15 @@ class MainScreen(Screen):
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         if action == "unfocused_nav":
             return self.focused is None
+        if action == "chat_size":
+            return self.chat_is_open
         if action == "inspect":
-            # Not while the log drawer or the side slot has focus: Enter means
-            # nothing there, and the footer must not offer "⏎ Inspect".
+            # Not while the log drawer, the side slot or the chat has focus:
+            # Enter means nothing there, and the footer must not offer
+            # "⏎ Inspect".
             focused = self.focused
             if focused is not None:
-                for box_id in ("#log-drawer", "#side-slot"):
+                for box_id in ("#log-drawer", "#side-slot", "#chat-dock"):
                     try:
                         box = self.query_one(box_id)
                     except Exception:
@@ -281,11 +395,34 @@ class MainScreen(Screen):
     MainScreen #lens-body {
         height: 1fr;
     }
+    MainScreen #left-col {
+        width: 1fr;
+        height: 1fr;
+    }
+    MainScreen #left-col > #lens-host {
+        min-height: 0;
+    }
+    MainScreen #left-col.-chat > #chat-dock {
+        display: block;
+    }
+    /* Max (by choice, or the effective max of a short window): the lens
+       hides and the dock fills the column. The inline split height is
+       cleared on the way in (_apply_chat_layout), so 1fr applies. */
+    MainScreen #left-col.-chat-max > #lens-host {
+        display: none;
+    }
+    MainScreen #left-col.-chat-max > #chat-dock {
+        height: 1fr;
+    }
     MainScreen #side-slot {
         display: none;
         width: 40%;
         min-width: 56;
         height: 1fr;
+    }
+    MainScreen.-narrow #side-slot {
+        width: 45%;
+        min-width: 0;
     }
     MainScreen #side-slot.-open {
         display: block;
@@ -296,14 +433,9 @@ class MainScreen(Screen):
     MainScreen #side-slot.-inspector > #inspector {
         display: block;
     }
-    MainScreen #chat-dock {
-        display: none;
-        height: 1fr;
-        border: round #1f2d4d;
-        border-title-color: #7dd3fc;
-    }
-    MainScreen #side-slot.-chat > #chat-dock {
-        display: block;
+    /* While the chat is open the log drawer may not eat the chat's rows. */
+    MainScreen.-chat-open #log-drawer {
+        max-height: 30%;
     }
     """
 
@@ -330,8 +462,17 @@ class MainScreen(Screen):
         # Active Shift+Arrow nav level: "outer" (the lens bar) or "inner"
         # (the current lens's own sub-tab bar, where it has one).
         self._nav_level = "outer"
-        # Side slot mode: None (closed), "inspector" or "chat".
+        # Side slot mode: None (closed) or "inspector".
         self._side_mode: str | None = None
+        # AI chat dock under the lens: "closed", "split" or "max"; the split
+        # share is one of CHAT_PRESETS. ``_chat_max_pref`` is the persisted
+        # "open maximized" choice. The chat always starts closed.
+        self._chat_mode = "closed"
+        self._chat_ratio = CHAT_DEFAULT_RATIO
+        self._chat_max_pref = False
+        self._chat_opened_once = False
+        # Rows of the dock while its border is dragged (None: no drag).
+        self._chat_drag_rows: int | None = None
         self._scope_label: str | None = None
         # lens id -> (title, info) for the lens frame.
         self._lens_captions: dict[str, tuple[str | None, str | None]] = {}
@@ -348,17 +489,20 @@ class MainScreen(Screen):
         # Starts "-level-active" to match the default nav level ("outer").
         yield LensBar(id="lens-bar", classes="-level-active")
         with Horizontal(id="workspace"):
-            with _LensHost(id="lens-host"):
-                with ContentSwitcher(initial=LENSES[0].widget_id, id="lens-body"):
-                    yield SpotlightPanel(id="spotlight-panel")
-                    yield NetworkPanel(id="network-panel")
-                    yield FilesPanel(id="files-panel")
-                    yield DiffsView(id="runs-panel")
-                    yield TimelineLens(id="timeline-panel")
+            with _LeftCol(id="left-col"):
+                with _LensHost(id="lens-host"):
+                    with ContentSwitcher(initial=LENSES[0].widget_id, id="lens-body"):
+                        yield SpotlightPanel(id="spotlight-panel")
+                        yield NetworkPanel(id="network-panel")
+                        yield FilesPanel(id="files-panel")
+                        yield DiffsView(id="runs-panel")
+                        yield TimelineLens(id="timeline-panel")
+                # The one ChatPanel: composed once, never unmounted -- only
+                # the dock's classes / height change (see _apply_chat_layout).
+                with ChatDock(id="chat-dock"):
+                    yield self._make_chat_panel()
             with Vertical(id="side-slot"):
                 yield Inspector(id="inspector")
-                with Vertical(id="chat-dock"):
-                    yield self._make_chat_panel()
         yield LogTicker(id="log-ticker")
         with LogDrawer(id="log-drawer"):
             yield ActivityLog(id="activity-log")
@@ -380,10 +524,8 @@ class MainScreen(Screen):
         logger.debug("[MAIN_SCREEN] on_mount: event subscription deferred")
         self._update_lens_frame()
         self._disable_hidden_lenses()
-        try:
-            self.query_one("#chat-dock").border_title = "AI chat"
-        except Exception:
-            pass
+        self._load_chat_dock_prefs()
+        self.set_class(self.app.size.width < NARROW_WIDTH, "-narrow")
 
         # Show welcome message immediately (fast)
         try:
@@ -515,6 +657,15 @@ class MainScreen(Screen):
             self.query_one("#lens-body", ContentSwitcher).current = panel_id
         except Exception:
             return
+        # A maximized chat hides the lens: switching lenses means "show me
+        # the lens", so a chosen max goes back to the split, and a window
+        # too short for a split closes the chat.
+        if self.chat_is_maximized:
+            if self._chat_too_short():
+                self.close_chat()
+            else:
+                self._chat_mode = "split"
+                self._apply_chat_layout()
         # The Inspector shows a row of the lens that opened it; on another
         # lens its content is stale and its key hints (e.g. "w watch") name
         # keys that mean something else there. Close it.
@@ -754,7 +905,7 @@ class MainScreen(Screen):
         """Legacy name of :meth:`cycle_lens`."""
         self.cycle_lens(delta)
 
-    # -- side slot: inspector + chat ------------------------------------------
+    # -- side slot: the Inspector ----------------------------------------------
 
     def _side_slot(self):
         try:
@@ -769,21 +920,16 @@ class MainScreen(Screen):
         self._side_mode = mode
         slot.set_class(mode is not None, "-open")
         slot.set_class(mode == "inspector", "-inspector")
-        slot.set_class(mode == "chat", "-chat")
         self.refresh_bindings()
 
     @property
     def side_slot_mode(self) -> str | None:
-        """``"inspector"``, ``"chat"`` or None (closed)."""
+        """``"inspector"`` or None (closed). The chat docks under the lens."""
         return self._side_mode
 
     @property
     def inspector_is_open(self) -> bool:
         return self._side_mode == "inspector"
-
-    @property
-    def chat_is_open(self) -> bool:
-        return self._side_mode == "chat"
 
     @property
     def inspector_content(self) -> InspectorContent | None:
@@ -794,7 +940,7 @@ class MainScreen(Screen):
             return None
 
     def open_inspector(self, content: InspectorContent) -> None:
-        """Show ``content`` in the right-hand Inspector (replaces the chat)."""
+        """Show ``content`` in the right-hand Inspector (the chat stays open)."""
         try:
             inspector = self.query_one("#inspector", Inspector)
         except Exception:
@@ -811,12 +957,12 @@ class MainScreen(Screen):
             self.open_inspector(content)
 
     def close_inspector(self) -> None:
-        """Close the Inspector (no-op if the chat or nothing is in the slot)."""
+        """Close the Inspector (no-op if it is not open)."""
         if self.inspector_is_open:
             self.close_side_slot()
 
     def close_side_slot(self) -> None:
-        """Close whatever is in the side slot and return focus to the lens."""
+        """Close the Inspector and return focus to the lens if it was there."""
         if self._side_mode is None:
             return
         refocus = self.focused is None or self._side_slot() in (
@@ -824,12 +970,15 @@ class MainScreen(Screen):
         )
         self._set_side_mode(None)
         if refocus:
-            panel = self.lens_widget()
-            if panel is not None:
-                try:
-                    panel.focus()
-                except Exception:
-                    pass
+            self._focus_lens()
+
+    def _focus_lens(self) -> None:
+        panel = self.lens_widget()
+        if panel is not None:
+            try:
+                panel.focus()
+            except Exception:
+                pass
 
     def action_inspect(self) -> None:
         """Enter reached the screen: ask the active lens for Inspector content."""
@@ -864,16 +1013,49 @@ class MainScreen(Screen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self._selection_from_active_lens(event)
 
+    def _focused_permission_prompt(self):
+        """The approval prompt holding the focus (it or a child), or None."""
+        focused = self.focused
+        if focused is None:
+            return None
+        try:
+            from sandroid.tui.widgets.tool_permission_prompt import (
+                ToolPermissionPrompt,
+            )
+        except Exception:
+            return None
+        for node in focused.ancestors_with_self:
+            if isinstance(node, ToolPermissionPrompt):
+                return node
+        return None
+
     def handle_escape(self) -> bool:
         """Esc on the main screen (called by the App's priority Esc handler).
 
-        Order: a focused text input outside the side slot keeps the old
-        behaviour (Esc leaves the input -> return False); otherwise an open
-        side slot (Inspector or chat) closes, then an open log drawer.
+        Order:
+
+        0. A focused approval prompt answers "No" (its ``action_cancel``):
+           the App's priority Esc would otherwise never reach it.
+        1. Focus in the chat dock goes to the lens; the chat stays open.
+        2. A focused text input elsewhere keeps the old behaviour (a lens
+           filter may clear itself, else Esc leaves the input -> False).
+        3. An open Inspector closes, then the log drawer, then the chat.
+        4. The lens's own Esc hook (e.g. clear an applied filter).
+
         Returns True when Esc was consumed here.
         """
         from textual.widgets import Input, TextArea
 
+        prompt = self._focused_permission_prompt()
+        if prompt is not None:
+            try:
+                prompt.action_cancel()
+            except Exception:
+                logger.debug("approval prompt cancel failed", exc_info=True)
+            return True
+        if self.chat_has_focus:
+            self._leave_chat_dock()
+            return True
         focused = self.focused
         slot = self._side_slot()
         in_slot = focused is not None and slot is not None and slot in focused.ancestors
@@ -896,7 +1078,9 @@ class MainScreen(Screen):
         if self.log_drawer_is_open:
             self.toggle_log_drawer()
             return True
-        # Then the lens (e.g. clear an applied filter).
+        if self.chat_is_open:
+            self.close_chat()
+            return True
         if lens_escape is not None:
             try:
                 return bool(lens_escape())
@@ -926,27 +1110,297 @@ class MainScreen(Screen):
             markup=True,
         )
 
-    def toggle_chat_panel(self) -> None:
-        """Toggle the AI chat in the right-hand side slot (Ctrl+Y).
+    # -- AI chat dock (under the lens) ------------------------------------------
+    #
+    # ``_chat_mode`` is "closed", "split" or "max"; ``_chat_ratio`` one of
+    # CHAT_PRESETS. In split the dock is ``chat_rows(H, ratio)`` rows of the
+    # left column (H rows); below CHAT_SPLIT_MIN_HEIGHT rows the layout is an
+    # "effective max" whatever the mode. Shift+Up/Down step 0.3 -> 0.5 -> 0.7
+    # -> max; dragging the dock's top border resizes and snaps on release; a
+    # double-click on it toggles max. Only key presses and mouse-up persist
+    # the size (``tui.chat_dock``); the chat always starts closed.
 
-        Shares the slot with the Inspector (only one at a time). Non-modal:
-        the lens stays live. ChatPanel never unmounts -- only the slot's
-        classes flip -- so conversation history and scroll persist.
-        """
-        if self._side_mode == "chat":
-            self.close_side_slot()
+    def _chat_dock(self):
+        try:
+            return self.query_one("#chat-dock", ChatDock)
+        except Exception:
+            return None
+
+    def _left_col(self):
+        try:
+            return self.query_one("#left-col")
+        except Exception:
+            return None
+
+    @property
+    def chat_mode(self) -> str:
+        """``"closed"``, ``"split"`` or ``"max"`` (the chosen mode)."""
+        return self._chat_mode
+
+    @property
+    def chat_ratio(self) -> float:
+        """The split share (one of :data:`CHAT_PRESETS`)."""
+        return self._chat_ratio
+
+    @property
+    def chat_is_open(self) -> bool:
+        return self._chat_mode != "closed"
+
+    @property
+    def chat_is_maximized(self) -> bool:
+        """The dock fills the left column (chosen max or a short window)."""
+        if not self.chat_is_open:
+            return False
+        return self._chat_mode == "max" or self._chat_too_short()
+
+    def _chat_too_short(self) -> bool:
+        col = self._left_col()
+        height = col.size.height if col is not None else 0
+        return 0 < height < CHAT_SPLIT_MIN_HEIGHT
+
+    @property
+    def chat_can_resize(self) -> bool:
+        """The border can be dragged (open, and tall enough for a split)."""
+        return self.chat_is_open and not self._chat_too_short()
+
+    @property
+    def chat_has_focus(self) -> bool:
+        """The focus is inside the chat dock."""
+        dock = self._chat_dock()
+        focused = self.focused
+        return (
+            dock is not None
+            and focused is not None
+            and (focused is dock or dock in focused.ancestors)
+        )
+
+    def _apply_chat_layout(self) -> None:
+        """Sync the dock's classes, height and subtitle to the chat state."""
+        col, dock = self._left_col(), self._chat_dock()
+        if col is None or dock is None:
             return
-        self._set_side_mode("chat")
+        is_open = self.chat_is_open
+        maxed = self.chat_is_maximized
+        col.set_class(is_open, "-chat")
+        col.set_class(maxed, "-chat-max")
+        self.set_class(is_open, "-chat-open")
+        if not is_open:
+            return
+        if maxed:
+            # The inline split height would beat the -chat-max rule.
+            dock.styles.height = None
+        else:
+            rows = self._chat_drag_rows
+            if rows is None:
+                rows = chat_rows(col.size.height, self._chat_ratio)
+            dock.styles.height = rows
+        dock.border_subtitle = self._chat_subtitle()
+
+    def _chat_subtitle(self) -> str:
+        if self._chat_drag_rows is not None:
+            col = self._left_col()
+            height = max(1, col.size.height if col is not None else 1)
+            return f"{round(100 * self._chat_drag_rows / height)}% · release to snap"
+        if self._chat_mode == "max":
+            return "max · ⇧↓ restore · ^Y close"
+        if self._chat_too_short():
+            return "small window · ^Y close"
+        return f"{round(self._chat_ratio * 100)}% · ⇧↑↓ size · ^Y close"
+
+    def open_chat(self, focus: bool = True) -> None:
+        """Open the chat dock (max if that was the last choice)."""
+        if not self.chat_is_open:
+            self._chat_mode = "max" if self._chat_max_pref else "split"
+            self._apply_chat_layout()
+            self.refresh_bindings()
+            panel = self._chat_panel()
+            if panel is not None and hasattr(panel, "refresh_header"):
+                try:
+                    panel.refresh_header()
+                except Exception:
+                    pass
+            if not self._chat_opened_once:
+                self._chat_opened_once = True
+                # The egress banner sits at the top of the transcript: show
+                # it on the first open (the log scrolled to its end while
+                # the dock was still hidden).
+                self.call_after_refresh(self._scroll_chat_home)
+        if focus:
+            self._focus_chat_input()
+
+    def close_chat(self) -> None:
+        """Close the chat dock; the lens gets the focus back if it had it."""
+        if not self.chat_is_open:
+            return
+        refocus = self.focused is None or self.chat_has_focus
+        self._chat_mode = "closed"
+        self._apply_chat_layout()
+        self.refresh_bindings()
+        if refocus:
+            self._focus_lens()
+
+    def toggle_chat_panel(self) -> None:
+        """Ctrl+Y: open + focus the chat; focus it; or close it.
+
+        Closed -> open it and focus its input. Open but the focus is
+        elsewhere -> focus the input. Open and focused -> close it.
+        """
+        if not self.chat_is_open:
+            self.open_chat()
+        elif not self.chat_has_focus and self._chat_input() is not None:
+            self._focus_chat_input()
+        else:
+            self.close_chat()
+
+    def _leave_chat_dock(self) -> None:
+        """Esc in the dock: the lens gets the focus, the chat stays open.
+
+        A chosen max is restored to the split first (the lens must be
+        visible to take the focus); a window too short for a split closes
+        the chat instead.
+        """
+        if self._chat_too_short():
+            self.close_chat()
+            return
+        if self._chat_mode == "max":
+            self._chat_mode = "split"
+            self._apply_chat_layout()
+        self._focus_lens()
+
+    def _chat_panel(self):
         try:
-            panel = self.query_one("#chat-panel")
-            if hasattr(panel, "refresh_header"):
-                panel.refresh_header()
+            return self.query_one("#chat-panel")
         except Exception:
-            pass
+            return None
+
+    def _chat_input(self):
         try:
-            self.query_one("#chat-input").focus()
+            return self.query_one("#chat-input")
         except Exception:
-            pass
+            return None
+
+    def _focus_chat_input(self) -> None:
+        widget = self._chat_input()
+        if widget is not None:
+            try:
+                widget.focus()
+            except Exception:
+                pass
+
+    def _scroll_chat_home(self, tries: int = 4) -> None:
+        """Scroll the transcript to its top (the egress banner).
+
+        Repeated a few times, 50 ms apart: the panel re-wraps (and its log
+        auto-scrolls to the end) once it learns its first real width.
+        """
+        try:
+            self.query_one("#chat-log").scroll_home(animate=False, immediate=True)
+        except Exception:
+            return
+        if tries > 1:
+            self.set_timer(0.05, lambda: self._scroll_chat_home(tries - 1))
+
+    def action_chat_size(self, delta: int) -> None:
+        """Shift+Up (+1) / Shift+Down (-1): step 0.3 -> 0.5 -> 0.7 -> max."""
+        if not self.chat_is_open:
+            return
+        if delta > 0:
+            if self._chat_mode == "max":
+                return
+            bigger = [p for p in CHAT_PRESETS if p > self._chat_ratio]
+            if bigger:
+                self._chat_ratio = bigger[0]
+            else:
+                self._chat_mode = "max"
+        elif self._chat_mode == "max":
+            self._chat_mode = "split"
+        else:
+            smaller = [p for p in CHAT_PRESETS if p < self._chat_ratio]
+            if not smaller:
+                return
+            self._chat_ratio = smaller[-1]
+        self._apply_chat_layout()
+        self._persist_chat_dock()
+
+    def toggle_chat_max(self) -> None:
+        """Double-click on the dock border: max <-> split."""
+        if not self.chat_is_open:
+            return
+        self._chat_mode = "split" if self._chat_mode == "max" else "max"
+        self._apply_chat_layout()
+        self._persist_chat_dock()
+
+    def drag_chat_dock(self, screen_y: int) -> None:
+        """The dock's top border is dragged to ``screen_y`` (live resize)."""
+        col = self._left_col()
+        if col is None or not self.chat_can_resize:
+            return
+        region = col.content_region
+        height = region.height
+        # Up to the full column while dragging: released past the 0.7
+        # preset it snaps to max.
+        rows = max(CHAT_MIN_ROWS, min(region.bottom - screen_y, height))
+        if self._chat_mode == "max":
+            self._chat_mode = "split"
+        self._chat_drag_rows = rows
+        self._apply_chat_layout()
+
+    def end_chat_drag(self) -> None:
+        """Mouse-up after a drag: snap to the nearest preset (or max)."""
+        rows = self._chat_drag_rows
+        self._chat_drag_rows = None
+        col = self._left_col()
+        if rows is None or col is None:
+            self._apply_chat_layout()
+            return
+        share = rows / max(1, col.size.height)
+        targets = [*CHAT_PRESETS, 1.0]
+        nearest = min(targets, key=lambda p: abs(p - share))
+        if nearest == 1.0:
+            self._chat_mode = "max"
+        else:
+            self._chat_mode = "split"
+            self._chat_ratio = nearest
+        self._apply_chat_layout()
+        self._persist_chat_dock()
+
+    def _load_chat_dock_prefs(self) -> None:
+        """Read ``tui.chat_dock`` (split share + "open maximized")."""
+        try:
+            prefs = self.app.sandroid_config.tui.chat_dock
+        except Exception:
+            return
+        try:
+            self._chat_ratio = snap_chat_ratio(float(prefs.ratio))
+            self._chat_max_pref = bool(prefs.maximized)
+        except Exception:
+            logger.debug("bad tui.chat_dock", exc_info=True)
+
+    def _persist_chat_dock(self) -> None:
+        """Remember the dock size (off the UI thread)."""
+        ratio, maximized = self._chat_ratio, self._chat_mode == "max"
+        self._chat_max_pref = maximized
+        self.run_worker(
+            lambda: self._write_chat_dock_prefs(ratio, maximized),
+            thread=True,
+            group="chat-dock-prefs",
+            exit_on_error=False,
+        )
+
+    def _write_chat_dock_prefs(self, ratio: float, maximized: bool) -> None:
+        """Save ``tui.chat_dock`` (runs on a worker thread)."""
+        try:
+            from sandroid.config.loader import ConfigLoader
+
+            updated, _ = ConfigLoader().load_and_update_section(
+                "tui", {"chat_dock": {"ratio": ratio, "maximized": maximized}}
+            )
+            self.app._sandroid_config = updated
+        except Exception as exc:
+            logger.warning(f"Could not save the chat dock size: {exc}")
+
+    def on_resize(self, event) -> None:
+        self.set_class(event.size.width < NARROW_WIDTH, "-narrow")
 
     # -- focus guard + key routing ---------------------------------------------
     #
@@ -978,8 +1432,11 @@ class MainScreen(Screen):
     @property
     def AUTO_FOCUS(self) -> str:
         """Textual focuses this on resume when nothing has focus: the active
-        lens, never the first focusable widget of a hidden lens.
+        lens, never the first focusable widget of a hidden lens (the chat
+        input while the maximized chat hides the lens).
         """
+        if self.chat_is_maximized and self._chat_input() is not None:
+            return "#chat-input"
         spec = LENS_BY_ID.get(self.active_lens)
         return f"#{spec.widget_id}" if spec else "*"
 
@@ -993,15 +1450,16 @@ class MainScreen(Screen):
         return focused is None or not is_shown(focused)
 
     def _focus_is_elsewhere_on_purpose(self) -> bool:
-        """A text field (the AI chat, a lens filter) or the side slot has
-        focus: its unhandled keys (Ctrl+L ...) must not run lens commands.
+        """A text field (the AI chat, a lens filter), the side slot or the
+        chat dock has focus: its unhandled keys (Ctrl+L ...) must not run
+        lens commands.
         """
         from textual.widgets import Input, TextArea
 
         focused = self.focused
         if focused is None:
             return False
-        if isinstance(focused, Input | TextArea):
+        if isinstance(focused, Input | TextArea) or self.chat_has_focus:
             return True
         slot = self._side_slot()
         return slot is not None and slot in focused.ancestors
@@ -1019,6 +1477,10 @@ class MainScreen(Screen):
             return
         lens = self.lens_widget()
         if lens is None:
+            return
+        if self.chat_is_maximized and self._focus_in_limbo():
+            # The lens is hidden behind the maximized chat.
+            self._focus_chat_input()
             return
         focused = self.focused
         if resumed and focused is lens and type(lens).focus is not Widget.focus:

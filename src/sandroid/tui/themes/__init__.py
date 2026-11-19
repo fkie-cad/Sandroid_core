@@ -1348,13 +1348,34 @@ def build_textual_theme(theme: Theme) -> TextualTheme:
             **base.variables,
             **theme.textual_variables,
             **theme.lens.css_variables(),
+            **chat_css_variables(theme),
         },
     )
 
 
+def chat_css_variables(theme: Theme) -> dict[str, str]:
+    """The ``$chat-*`` variables of ``theme`` (AI chat transcript colors).
+
+    Built from existing :class:`Theme` fields, so every theme gets them:
+    ``chat-user-band`` (the user line's band), ``chat-reply`` (assistant
+    text), ``chat-tool`` (tool calls), ``chat-wait`` (waiting on the user),
+    ``chat-muted`` (idle / secondary text) and ``chat-brand`` (the mascot).
+    """
+    return {
+        "chat-user-band": theme.user_highlight_background,
+        "chat-reply": theme.assistant_reply_color,
+        "chat-tool": theme.tool_color,
+        "chat-wait": theme.waiting_color,
+        "chat-muted": theme.muted_status_color,
+        "chat-brand": theme.logo_color,
+    }
+
+
 def lens_css_defaults() -> dict[str, str]:
-    """The ``$lens-*`` variables of the default theme (fallback values)."""
-    return DEFAULT_LENS.css_variables()
+    """The ``$lens-*`` and ``$chat-*`` variables of the default theme
+    (fallback values for Textual themes that are not ours).
+    """
+    return {**DEFAULT_LENS.css_variables(), **chat_css_variables(DEFAULT_THEME)}
 
 
 def _active_theme() -> Theme | None:
@@ -1460,6 +1481,7 @@ __all__ = [
     "LensPalette",
     "Theme",
     "build_textual_theme",
+    "chat_css_variables",
     "fixed_color",
     "get_all_themes",
     "get_available_theme_css_files",

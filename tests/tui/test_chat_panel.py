@@ -80,8 +80,8 @@ def test_chat_tab_registered_in_tool_tabs():
 @pytest.mark.smoke
 async def test_toggle_chat_panel_shows_and_hides_the_dock():
     """``Ctrl+Y`` (``MainScreen.toggle_chat_panel``) opens the chat in the
-    side slot (focusing ``#chat-input``) and closes it again (focus back to
-    the active lens).
+    dock under the lens (focusing ``#chat-input``) and closes it again
+    (focus back to the active lens). The Inspector slot is not involved.
     """
     app = App()
     screen = MainScreen()
@@ -91,21 +91,22 @@ async def test_toggle_chat_panel_shows_and_hides_the_dock():
 
         dock = screen.query_one("#chat-dock")
         assert not dock.display or not screen.chat_is_open
-        assert screen.side_slot_mode is None
+        assert screen.chat_mode == "closed"
 
         screen.toggle_chat_panel()
         await pilot.pause()
 
         assert screen.chat_is_open
-        assert screen.query_one("#side-slot").has_class("-open", "-chat")
+        assert screen.query_one("#left-col").has_class("-chat")
+        assert screen.side_slot_mode is None
         assert isinstance(app.focused, Input)
         assert app.focused.id == "chat-input"
 
         screen.toggle_chat_panel()
         await pilot.pause()
 
-        assert screen.side_slot_mode is None
-        assert not screen.query_one("#side-slot").has_class("-open")
+        assert screen.chat_mode == "closed"
+        assert not screen.query_one("#left-col").has_class("-chat")
         assert app.focused is not None
         assert app.focused.id == "spotlight-panel"
 
@@ -230,9 +231,9 @@ async def test_ambient_block_reaches_the_turn_but_never_persists(monkeypatch):
         # one -- since the real backend silently ignores any system message
         # past the first.
         assert sum(1 for m in sent_messages if m["role"] == "system") == 1
-        assert not any(sentinel in m.get("content", "") for m in panel._messages), (
-            "the ambient block must never persist into self._messages"
-        )
+        assert not any(
+            sentinel in m.get("content", "") for m in panel._messages
+        ), "the ambient block must never persist into self._messages"
         assert panel._messages[0] == {
             "role": "system",
             "content": ORCHESTRATOR_SYSTEM_PROMPT,

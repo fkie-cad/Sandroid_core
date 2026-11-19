@@ -508,6 +508,16 @@ class MenuController:
                 inline_text=display,
             )
         self._register(
+            "toggle_chat",
+            "AI chat",
+            "ctrl+y",
+            ActionCategory.NAVIGATION,
+            ["forensic", "malware", "security"],
+            description="Open the AI chat under the lens (focus it; again: "
+            "close). Shift+Up/Down sizes it, Esc goes back to the lens",
+            inline_text="[^Y] AI chat",
+        )
+        self._register(
             "toggle_log",
             "Toggle log drawer",
             "grave_accent",

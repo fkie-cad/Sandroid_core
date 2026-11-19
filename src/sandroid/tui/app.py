@@ -173,7 +173,7 @@ class SandroidTUI(App):
         Binding("ctrl+shift+p", "show_palette", "Commands", show=False),
         Binding("ctrl+p", "toggle_ssl_unpin", "SSL Unpin", show=False),
         Binding("ctrl+b", "focus_tools", "Focus lens", show=False),
-        Binding("ctrl+y", "toggle_chat", "AI Chat", show=False),
+        Binding("ctrl+y", "toggle_chat", "AI chat", show=False, id="toggle_chat"),
         # Vim-style scrolling
         Binding("j", "scroll_down", "Down", show=False),
         Binding("ctrl+j", "scroll_down", "Down", show=False),
@@ -1542,7 +1542,7 @@ class SandroidTUI(App):
             screen.open_snapshot_picker()
 
     def action_toggle_chat(self) -> None:
-        """Toggle the AI chat in the right-hand side slot (Ctrl+Y)."""
+        """Ctrl+Y: open + focus the AI chat dock under the lens, or close it."""
         screen = self._get_main_screen()
         if screen is not None:
             screen.toggle_chat_panel()
