@@ -276,7 +276,8 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
         # Orchestrator-only (like start_replay): a subagent could otherwise
         # restart the app in two steps (kill_process, then this).
         raise ToolExecutionError(
-            "start_spotlight_app is not allowed inside a subtask; ask the "
+            "start_spotlight_app is not allowed inside a subagent (starting "
+            "the app is not a subtask a subagent may do); ask the "
             "orchestrator/analyst to start the app"
         )
     service = get_spotlight_service()

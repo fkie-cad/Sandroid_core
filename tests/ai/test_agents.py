@@ -1024,3 +1024,296 @@ def test_orchestrator_tools_list_wait_cancel_get(
         assert err.value.code == "invalid_arguments"
     finally:
         _current_run_context.reset(token)
+
+
+# -- fix pass A: leases, approvals, resume, wait budget, cancellation -------------
+
+
+@pytest.fixture
+def world_tool(registry):
+    state = {
+        "entered": threading.Event(),
+        "release": threading.Event(),
+        "finished": threading.Event(),
+    }
+
+    def world():
+        state["entered"].set()
+        state["release"].wait(10)
+        state["finished"].set()
+        return {"ok": True}
+
+    registry.register(
+        ToolSpec(
+            name="world_tool",
+            description="Touches the whole device.",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=world,
+            core=True,
+            resources=frozenset({ResourceId.WORLD}),
+        )
+    )
+    return state
+
+
+def test_cancelled_agent_keeps_leases_until_its_tool_thread_exits(
+    tmp_path, registry, cfg, manager, perm_store, arbiter, world_tool
+):
+    client = ScriptClient(children={"OP-W": [tool_reply(("world_tool", {}))]})
+    parent = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("operator", "OP-W restore the world", parent=parent)
+    assert world_tool["entered"].wait(5)
+    assert arbiter.snapshot() == {ResourceId.WORLD: rec.id}
+
+    manager.cancel(rec.id)
+    assert rec.done.wait(5)
+
+    # The agent ended, but its tool still runs: WORLD stays leased, the owner
+    # stays live, reconcile does not drop it.
+    manager.reconcile_leases()
+    assert arbiter.snapshot() == {ResourceId.WORLD: rec.id}
+    assert arbiter.claim("orchestrator", frozenset({ResourceId.MITMPROXY})) == (
+        arbiter_module.Conflict(ResourceId.WORLD, rec.id)
+    )
+    world_tool["release"].set()
+    assert world_tool["finished"].wait(5)
+    wait_for(lambda: not arbiter.snapshot(), what="lease released on exit")
+    wait_for(lambda: rec.id not in arbiter.live_subtasks(), what="owner forgotten")
+
+
+def test_child_approvals_are_persisted_once_in_the_childs_thread(
+    tmp_path, registry, cfg, manager, perm_store, arbiter, monkeypatch
+):
+    from sandroid.core import timeline
+
+    lines = []
+    monkeypatch.setattr(
+        timeline,
+        "emit",
+        lambda source, kind, **kw: lines.append(
+            (kind, (kw.get("data") or {}).get("agent"))
+        ),
+    )
+    broker = perms.get_approval_broker()
+    broker.add_listener(
+        lambda kind, req, _dec: kind == "added"
+        and threading.Thread(
+            target=broker.resolve, args=(req.request_id, "once")
+        ).start()
+    )
+    client = ScriptClient(
+        children={"OP-A": [tool_reply(("toggle_thing", {})), text_reply(PLAIN_REPORT)]}
+    )
+    events = Events()
+    parent = open_parent(tmp_path, client, registry, cfg, sink=events)
+    parent._persist("msg", role="user", content="x", msg_id="m0", turn="u0")
+    rec = manager.spawn("operator", "OP-A toggle it", parent=parent)
+    assert rec.done.wait(10)
+
+    approvals = [line for line in lines if line[0] == "approval"]
+    assert approvals == [("approval", rec.id)]
+    parent_records = ConversationStore.read(parent.thread_path)
+    assert not [r for r in parent_records if r["type"] == "approval"]
+    child_records = ConversationStore.read(rec.transcript_path)
+    assert len([r for r in child_records if r["type"] == "approval"]) == 1
+    # Still forwarded to the parent's sink for display.
+    assert [e.agent_id for e in events.of("approval_resolved")] == [rec.id]
+
+
+def _orchestrator_ctx(parent):
+    return agents.RunContext(
+        agent_id="orchestrator", thread_id=parent.thread_id, sink=parent._on_event
+    )
+
+
+def test_resuming_an_operator_needs_spawn_approval(
+    tmp_path, registry, cfg, manager, perm_store, arbiter
+):
+    client = ScriptClient(
+        children={"OP-RS": [text_reply(PLAIN_REPORT), text_reply(PLAIN_REPORT)]}
+    )
+    parent = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("operator", "OP-RS look", parent=parent)
+    assert rec.done.wait(10)
+    wait_for(lambda: not parent.running, what="wake turn")
+    broker = perms.get_approval_broker()
+    answers = iter(["no", "once"])
+    seen = []
+
+    def answer(kind, req, _dec):
+        if kind == "added":
+            seen.append(req)
+            threading.Thread(
+                target=broker.resolve, args=(req.request_id, next(answers))
+            ).start()
+
+    broker.add_listener(answer)
+    token = _current_run_context.set(_orchestrator_ctx(parent))
+    try:
+        with pytest.raises(ToolError) as err:
+            agents.send_to_agent(rec.id, "do it again")
+        assert err.value.code == "denied"
+        assert rec.runs == 1
+        assert not rec.live
+        reply = agents.send_to_agent(rec.id, "do it again")
+        assert reply["delivery"] == "resumed"
+    finally:
+        _current_run_context.reset(token)
+    assert [r.tool for r in seen] == ["spawn_agent", "spawn_agent"]
+    assert seen[0].args == {
+        "profile": "operator",
+        "task": "do it again",
+        "resume": rec.id,
+    }
+    wait_for(lambda: rec.runs == 2 and not rec.live, what="resumed run")
+
+
+def test_resuming_a_researcher_needs_no_approval(
+    tmp_path, registry, cfg, manager, perm_store, arbiter
+):
+    client = ScriptClient(children={"RS-R": [text_reply(PLAIN_REPORT)] * 2})
+    parent = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("researcher", "RS-R look", parent=parent)
+    assert rec.done.wait(10)
+    wait_for(lambda: not parent.running, what="wake turn")
+    token = _current_run_context.set(_orchestrator_ctx(parent))
+    try:
+        assert agents.send_to_agent(rec.id, "again")["delivery"] == "resumed"
+    finally:
+        _current_run_context.reset(token)
+    assert perms.get_approval_broker().pending() == []
+    wait_for(lambda: rec.runs == 2 and not rec.live, what="resumed run")
+
+
+def test_agents_of_another_thread_cannot_be_loaded_or_resumed(
+    tmp_path, registry, cfg, manager, perm_store, arbiter
+):
+    client = ScriptClient(children={"RS-T": [text_reply(PLAIN_REPORT)]})
+    first = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("researcher", "RS-T look", parent=first)
+    assert rec.done.wait(10)
+    wait_for(lambda: not first.running, what="wake turn")
+    first.close()
+    second = open_parent(tmp_path, client, registry, cfg)
+    # A fresh manager (restart): only meta.json is left.
+    with manager._lock:
+        manager._records.pop(rec.id)
+
+    assert manager._load_record(rec.id, second) is None
+    token = _current_run_context.set(_orchestrator_ctx(second))
+    try:
+        with pytest.raises(ToolError) as err:
+            agents.send_to_agent(rec.id, "resume please")
+        assert err.value.code == "invalid_arguments"
+    finally:
+        _current_run_context.reset(token)
+    # The spawning thread itself may still load it.
+    assert manager._load_record(rec.id, first) is not None
+
+
+def test_message_sent_during_the_report_wrap_up_gets_another_round(
+    tmp_path, registry, cfg, manager, perm_store, arbiter
+):
+    late = AGENT_MESSAGE_TEMPLATE.format(text="late addition")
+    wrap_up = Gate(then=text_reply("still no report"))
+
+    def after_late(messages):
+        assert messages[-1] == {"role": "user", "content": late}
+        return text_reply(PLAIN_REPORT.replace("Nothing to report.", "Saw it."))
+
+    client = ScriptClient(
+        children={"RS-L": [text_reply("rambling"), wrap_up, after_late]}
+    )
+    parent = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("researcher", "RS-L scan", parent=parent)
+    assert wrap_up.entered.wait(5)
+    assert manager.send(rec.id, "late addition")["delivery"] == "next_round"
+    wrap_up.release.set()
+    assert rec.done.wait(10)
+    assert rec.result.summary == "Saw it."
+    assert rec.result.undelivered == []
+
+
+def test_message_after_the_last_check_is_reported_undelivered(
+    tmp_path, registry, cfg, perm_store, arbiter
+):
+    manager = agents.AgentManager(
+        ai_cfg=cfg, task_registrar=None, start_thread=lambda fn, name: None
+    )
+    rec = manager.spawn("researcher", "never runs")
+    rec.inbox.append("too late")
+    result = manager._base_result(rec, "complete", "done")
+    manager._finish(rec, result)
+    assert rec.result.undelivered == ["too late"]
+    assert rec.result.to_dict()["undelivered_messages"] == ["too late"]
+    assert "Undelivered: 1 message" in agents.render_result_block(rec.result)
+    assert rec.inbox == []
+
+
+def test_sync_wait_turns_async_before_the_executor_would_abandon_it(
+    tmp_path, registry, cfg, manager, perm_store, arbiter
+):
+    registry.get_spec("spawn_agent").timeout_s = 1.5
+    gate = Gate(then=text_reply(PLAIN_REPORT))
+    client = ScriptClient(
+        children={"RS-SYNC": [gate]},
+        parents={
+            "ORCH-SYNC": [
+                tool_reply(
+                    (
+                        "spawn_agent",
+                        spawn_args("researcher", "RS-SYNC long", wait=True),
+                        "cs",
+                    )
+                ),
+                text_reply("will wait for the wake"),
+            ]
+        },
+    )
+    parent = open_parent(tmp_path, client, registry, cfg)
+    assert parent.submit_user_message("ORCH-SYNC go").result(10).status == ("completed")
+
+    payload = tool_result_of(parent, "cs")
+    assert payload["status"] == "running"  # not an executor timeout
+    assert "error" not in payload
+    rec = manager.get(payload["agent_id"])
+    assert rec.live
+    assert not rec.sync
+    assert arbiter.lineage(rec.id) == {rec.id}
+    gate.release.set()
+    assert rec.done.wait(10)
+    wait_for(lambda: len(wakes(parent)) == 1, what="background delivery")
+    assert rec.delivery == "wake"
+
+
+def test_sync_wait_budget_is_capped_to_the_executor_time_left(monkeypatch):
+    from sandroid.ai import loop
+
+    monkeypatch.setattr(loop, "tool_time_remaining", lambda: None)
+    assert agents._sync_wait_budget() == agents.SYNC_WAIT_CAP_S
+    monkeypatch.setattr(loop, "tool_time_remaining", lambda: 1800.0)
+    assert agents._sync_wait_budget() == agents.SYNC_WAIT_CAP_S
+    # 500 s already spent on the approval prompt.
+    monkeypatch.setattr(loop, "tool_time_remaining", lambda: 1300.0)
+    assert agents._sync_wait_budget() == 1300.0 - agents.SYNC_WAIT_MARGIN_S
+    monkeypatch.setattr(loop, "tool_time_remaining", lambda: 0.0)
+    assert agents._sync_wait_budget() == 0.0
+
+
+@pytest.mark.parametrize("how", ["cancel", "shutdown"])
+def test_report_wrap_up_is_cancellable(
+    tmp_path, registry, cfg, manager, perm_store, arbiter, how
+):
+    wrap_up = Gate(then=text_reply(PLAIN_REPORT))
+    client = ScriptClient(children={"RS-C": [text_reply("rambling"), wrap_up]})
+    parent = open_parent(tmp_path, client, registry, cfg)
+    rec = manager.spawn("researcher", "RS-C scan", parent=parent)
+    assert wrap_up.entered.wait(5)
+
+    if how == "cancel":
+        assert manager.cancel(rec.id)
+    else:
+        manager.shutdown(timeout=0.1)
+
+    assert rec.done.wait(3), "the wrap-up request ignored the cancel"
+    assert not wrap_up.release.is_set()

@@ -110,6 +110,45 @@ def test_list_installed_packages_include_system_flips_user_only(monkeypatch):
     assert captured["user_only"] is False
 
 
+def test_list_installed_packages_include_system_marks_third_party_apps(monkeypatch):
+    """Regression: with include_system every package came back with
+    is_user_app=false (it echoed the user_only flag); third-party packages
+    must be true, from ``pm list packages -3``.
+    """
+    commands = []
+
+    def fake_send(command):
+        commands.append(command)
+        if command == "shell pm list packages":
+            return (
+                "package:com.android.settings\r\npackage:com.example.one\n"
+                "package:android\npackage:org.example.two\n",
+                "",
+            )
+        if command == "shell pm list packages -3":
+            return "package:com.example.one\npackage:org.example.two\n", ""
+        return "firstInstallTime=2026-11-19 10:00:00\n", ""
+
+    monkeypatch.setattr(Adb, "send_adb_command", staticmethod(fake_send))
+
+    result = app_query.list_installed_packages(include_system=True)
+
+    flags = {p["package_name"]: p["is_user_app"] for p in result["packages"]}
+    assert flags == {
+        "com.android.settings": False,
+        "com.example.one": True,
+        "android": False,
+        "org.example.two": True,
+    }
+    assert result["count"] == 4
+    user_only = app_query.list_installed_packages()
+    assert all(p["is_user_app"] for p in user_only["packages"])
+    assert [p["package_name"] for p in user_only["packages"]] == [
+        "com.example.one",
+        "org.example.two",
+    ]
+
+
 def test_list_installed_packages_coerces_stringified_booleans(monkeypatch):
     """A model that emits a JSON string instead of a real JSON boolean for
     this ``"type": "boolean"`` parameter is a real, observed failure mode

@@ -30,12 +30,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from sandroid.ai import tool_permissions as _perms
-from sandroid.ai.arbiter import Conflict, get_arbiter
+from sandroid.ai.arbiter import Conflict, LeaseHandle, get_arbiter
 from sandroid.ai.prompts import WRAP_UP_PROMPT
 from sandroid.ai.results import (
     CHARS_PER_TOKEN,
     TurnBudget,
     get_result_store,
+    result_cap_tokens,
     shape_result,
 )
 from sandroid.ai.tools.meta import (
@@ -98,6 +99,9 @@ ToolStatus = Literal["ok", "error", "denied", "cancelled", "timeout"]
 
 #: How often a waiting executor re-checks the cancel event (seconds).
 _POLL_S = 0.1
+
+#: Maximum characters of the preview sent when storing/shaping a result fails.
+_FALLBACK_PREVIEW_CHARS = 4000
 
 
 # =============================================================================
@@ -282,6 +286,26 @@ def current_run_context() -> RunContext | None:
     return _current_run_context.get()
 
 
+#: ``time.monotonic()`` at which the executor stops waiting for the tool
+#: running in this context (``None``: no timeout / not inside a tool call).
+_tool_deadline: ContextVar[float | None] = ContextVar(
+    "sandroid_ai_tool_deadline", default=None
+)
+
+
+def tool_time_remaining() -> float | None:
+    """Seconds left before the executor abandons the current tool call.
+
+    ``None`` outside a tool call or for a tool without a timeout. Long tools
+    that wait on something (``spawn_agent`` with ``wait=true``) use it to stop
+    waiting in time instead of being abandoned while still running.
+    """
+    deadline = _tool_deadline.get()
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
+
+
 @dataclass
 class TurnResult:
     """How one :func:`run_turn` call ended.
@@ -452,31 +476,33 @@ def summarize_result(result: Any) -> str:
 
 
 def _settle_leases(
-    owner: str | None,
+    handle: LeaseHandle | None,
     spec: ToolSpec,
-    newly: frozenset,
     *,
     result: Any = None,
     failed: bool = False,
     abandoned: bool = False,
 ) -> None:
-    """Keep, roll back or release leases after a call (legacy semantics).
+    """Keep, roll back or release a call's leases (once its thread exited).
 
     A raising or logically failed call rolls back only what it newly
     acquired (never what the owner already held) and does not apply its
-    declared releases. A successful call applies ``spec.releases``. A call
-    the executor stopped waiting for (timeout/cancel) rolls back its new
-    leases once its thread really exits; its releases still apply when it
-    eventually succeeded.
+    declared releases. A successful call keeps its new leases and applies
+    ``spec.releases``. A call the executor stopped waiting for
+    (timeout/cancel) is settled when its thread really exits: its new leases
+    are rolled back (the model was told it did not finish), its declared
+    releases still apply when it eventually succeeded. Leases are reference
+    counted per call (:meth:`~sandroid.ai.arbiter.DeviceResourceArbiter.settle`),
+    so a newer call of the same owner that reused a lease keeps it.
     """
-    if owner is None:
+    if handle is None:
         return
-    arbiter = get_arbiter()
     failure = failed or _is_logical_failure(result)
-    if newly and (failure or abandoned):
-        arbiter.release_resources(owner, newly)
-    if not failure and spec.releases:
-        arbiter.release_resources(owner, spec.releases)
+    get_arbiter().settle(
+        handle,
+        failed=failure or abandoned,
+        releases=frozenset() if failure else frozenset(spec.releases or ()),
+    )
 
 
 class ToolExecutor:
@@ -578,9 +604,11 @@ class ToolExecutor:
         if ctx.cancel_event.is_set():
             raise ToolError("cancelled", "the turn was cancelled before this call ran")
         owner = ctx.owner_id
-        newly: frozenset = frozenset()
-        if spec.resources and owner is not None:
-            claimed = get_arbiter().claim(owner, spec.resources)
+        handle: LeaseHandle | None = None
+        if owner is not None:
+            # Every call is tracked (also without resources): an abandoned
+            # call keeps its owner live until its thread exits.
+            claimed = get_arbiter().acquire(owner, frozenset(spec.resources or ()))
             if isinstance(claimed, Conflict):
                 raise ToolError(
                     "resource_conflict",
@@ -589,8 +617,14 @@ class ToolExecutor:
                     retryable=True,
                     hint="Wait for the other task to finish, or report the conflict.",
                 )
-            newly = claimed
-        result, exc = self._dispatch(spec, args, owner, newly)
+            handle = claimed
+        try:
+            result, exc = self._dispatch(spec, args, handle)
+        except BaseException:
+            # The dispatch machinery itself failed (e.g. no thread): the
+            # tool never ran, so its leases are rolled back now.
+            _settle_leases(handle, spec, failed=True)
+            raise
         if exc is not None:
             if isinstance(exc, ToolError):
                 raise exc
@@ -684,7 +718,7 @@ class ToolExecutor:
         )
 
     def _dispatch(
-        self, spec: ToolSpec, args: dict, owner: str | None, newly: frozenset
+        self, spec: ToolSpec, args: dict, handle: LeaseHandle | None
     ) -> tuple[Any, BaseException | None]:
         """Run the tool on a helper thread; return ``(result, exception)``."""
         ctx = self.ctx
@@ -692,10 +726,13 @@ class ToolExecutor:
         lock = threading.Lock()
         state: dict[str, Any] = {"done": False, "abandoned": False}
         finished = threading.Event()
+        timeout = spec.timeout_s if spec.timeout_s and spec.timeout_s > 0 else None
+        deadline = None if timeout is None else time.monotonic() + timeout
 
         def body() -> None:
             from sandroid.core.timeline import acting_as
 
+            _tool_deadline.set(deadline)
             result: Any = None
             error: BaseException | None = None
             try:
@@ -714,9 +751,8 @@ class ToolExecutor:
                 # the tool really stopped (never while it still ran).
                 try:
                     _settle_leases(
-                        owner,
+                        handle,
                         spec,
-                        newly,
                         result=result,
                         failed=error is not None,
                         abandoned=True,
@@ -733,8 +769,6 @@ class ToolExecutor:
             target=cctx.run, args=(body,), name=f"ai-tool:{spec.name}", daemon=True
         )
         thread.start()
-        timeout = spec.timeout_s if spec.timeout_s and spec.timeout_s > 0 else None
-        deadline = None if timeout is None else time.monotonic() + timeout
         stop: str | None = None
         while not finished.wait(_POLL_S):
             if ctx.cancel_event.is_set():
@@ -748,6 +782,10 @@ class ToolExecutor:
                     stop = None  # finished in the meantime: treat as normal
                 else:
                     state["abandoned"] = True
+                    if handle is not None:
+                        # Under the state lock: the body sees ``abandoned``
+                        # only after the arbiter counts the owner as busy.
+                        get_arbiter().abandon(handle)
             break
         if stop == "cancelled":
             return None, ToolError(
@@ -765,7 +803,7 @@ class ToolExecutor:
             )
         error = state.get("error")
         result = state.get("result")
-        _settle_leases(owner, spec, newly, result=result, failed=error is not None)
+        _settle_leases(handle, spec, result=result, failed=error is not None)
         return result, error
 
     def _store(
@@ -786,15 +824,10 @@ class ToolExecutor:
                 truncated = isinstance(shaped, dict) and shaped.get("truncated") is True
             except ValueError:
                 truncated = False
-        except Exception:
+        except Exception as exc:
             logger.exception("Storing/shaping the result of %s failed", spec.name)
-            try:
-                content = json.dumps(
-                    {"result": result}, ensure_ascii=False, default=str
-                )
-            except Exception:
-                content = json.dumps({"result": str(result)})
-            size = len(content.encode("utf-8", errors="replace"))
+            content, size = self._fallback_content(result, rid, exc)
+            truncated = True
         status: ToolStatus = "error" if _is_logical_failure(result) else "ok"
         return ToolOutcome(
             call_id=call_id,
@@ -810,6 +843,46 @@ class ToolExecutor:
         )
 
     # -- helpers --------------------------------------------------------------
+
+    def _fallback_content(
+        self, result: Any, rid: str | None, exc: BaseException
+    ) -> tuple[str, int]:
+        """A capped preview plus an error note (storing/shaping failed).
+
+        Never sends the uncapped result: the preview is clipped to the ingest
+        cap (and at most :data:`_FALLBACK_PREVIEW_CHARS` characters).
+        """
+        try:
+            text = json.dumps(result, ensure_ascii=False, default=str)
+        except Exception:
+            try:
+                text = str(result)
+            except Exception:
+                text = f"<unprintable {type(result).__name__}>"
+        try:
+            cap = self.ctx.cap_tokens or result_cap_tokens()
+        except Exception:
+            cap = 0
+        limit = _FALLBACK_PREVIEW_CHARS
+        if cap and cap > 0:
+            limit = min(limit, int(cap * CHARS_PER_TOKEN * 0.9))
+        limit = max(200, limit)
+        preview = text[:limit]
+        payload: dict[str, Any] = {
+            "preview": preview,
+            "truncated": len(text) > len(preview),
+            "total_chars": len(text),
+            "note": _redact(
+                "the full result could not be stored or shaped "
+                f"({type(exc).__name__}); only this preview is available"
+                + ("" if rid is None else f"; read_result({rid!r}) may work")
+            ),
+        }
+        if rid is not None:
+            payload["result_id"] = rid
+        return json.dumps(payload, ensure_ascii=False), len(
+            text.encode("utf-8", errors="replace")
+        )
 
     @staticmethod
     def _best_effort_args(raw_args: Any) -> tuple[dict, str | None]:
@@ -970,6 +1043,7 @@ class _TurnRunner:
             logger.exception("AI turn failed")
             status = "error"
             error = _redact(f"{type(exc).__name__}: {exc}")
+            self._repair_pairs()
             ctx.emit("error", kind="internal", retryable=False, message=error)
         ctx.emit(
             "turn_end",
@@ -988,6 +1062,20 @@ class _TurnRunner:
             error=error,
             budget_kind=budget_kind,
         )
+
+    def _repair_pairs(self) -> None:
+        """Answer tool calls an internal error left unanswered (in memory).
+
+        The next request would otherwise carry an assistant ``tool_calls``
+        message without its tool replies, which backends reject. Resume
+        repairs the persisted thread the same way.
+        """
+        try:
+            repaired = repair_tool_pairs(self.messages)
+            if repaired != self.messages:
+                self.messages[:] = repaired
+        except Exception:
+            logger.exception("Repairing tool-call pairing failed")
 
     def _exhausted_budget(self) -> str | None:
         budgets = self.ctx.budgets
@@ -1200,6 +1288,52 @@ class _TurnRunner:
         return resp.text
 
 
+def repair_tool_pairs(messages: list[dict]) -> list[dict]:
+    """Answer tool calls a crash left unanswered (backends reject them).
+
+    Unanswered calls get a ``cancelled`` error message right after their
+    assistant message; orphan tool messages are dropped.
+    """
+    out: list[dict] = []
+    pending: list[str] = []
+
+    def flush() -> None:
+        for call_id in pending:
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(
+                        {
+                            "error": {
+                                "code": "cancelled",
+                                "message": "the session ended before this call "
+                                "finished",
+                                "retryable": True,
+                            }
+                        }
+                    ),
+                }
+            )
+        pending.clear()
+
+    for msg in messages:
+        if msg.get("role") == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id in pending:
+                pending.remove(call_id)
+                out.append(msg)
+            continue  # orphan tool message: drop
+        flush()
+        out.append(msg)
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            pending.extend(
+                c.get("id") for c in msg["tool_calls"] if isinstance(c, dict)
+            )
+    flush()
+    return out
+
+
 def _parses(raw: str) -> bool:
     try:
         parse_tool_arguments(raw)
@@ -1297,6 +1431,8 @@ __all__ = [
     "build_request_messages",
     "current_run_context",
     "install_permission_resolver",
+    "repair_tool_pairs",
     "run_turn",
     "summarize_result",
+    "tool_time_remaining",
 ]

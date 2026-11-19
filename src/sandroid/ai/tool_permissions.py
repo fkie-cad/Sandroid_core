@@ -32,10 +32,15 @@ Only argument-constrained ``allow`` rules apply to them; a bare ``allow`` rule
 is rejected when added and ignored (with a logged warning) when found in the
 file. A bare ``deny`` rule is honoured for every tool (it only restricts).
 
-The legacy ``allowed``/``never`` file format is migrated on load: ``allowed``
-becomes ``allow`` (minus bare names of argument-dependent tools); ``never`` is
-NOT enforced any more but kept as ``legacy_declines`` so the UI can show it
-once as "previous declines (not enforced)" (:meth:`legacy_notice_pending`).
+The legacy ``allowed``/``never`` file format (still read and written by
+older Sandroid installs) is migrated in memory only: ``allowed`` becomes
+``allow`` (minus bare names of argument-dependent tools); ``never`` is NOT
+enforced any more, it is shown once as "previous declines (not enforced)"
+(:meth:`legacy_notice_pending`). Loading never writes. The first explicit
+change (a new rule, a mode) writes ``<file>.bak-legacy`` once, materialises
+the migrated ``allow`` rules and marks the file ``version = 2``; the legacy
+``allowed``/``never`` keys are kept untouched so older installs keep working,
+and in a ``version = 2`` file they are never re-interpreted as rules.
 
 A file that exists but cannot be parsed fails closed: mode ``ask``, no allow
 rules, and the file is never overwritten (rules remembered meanwhile live for
@@ -556,6 +561,33 @@ def _default_text() -> str:
     return _FILE_HEADER + 'mode = "ask"\nallow = []\ndeny = []\n'
 
 
+#: Keys of the pre-rules file format (read by older Sandroid installs).
+_LEGACY_KEYS = ("allowed", "never")
+
+#: ``version`` written when a legacy file is first changed by this format.
+_FORMAT_VERSION = 2
+
+#: Suffix of the one-time backup of a legacy file before its first rewrite.
+LEGACY_BACKUP_SUFFIX = ".bak-legacy"
+
+
+def _names(raw: Any) -> list[str]:
+    """String entries of a legacy name list (anything else: empty)."""
+    if not isinstance(raw, list):
+        return []
+    return [n for n in raw if isinstance(n, str)]
+
+
+def _is_legacy_format(data: Mapping[str, Any]) -> bool:
+    """Legacy keys present and the file not yet migrated (``version < 2``)."""
+    if not any(key in data for key in _LEGACY_KEYS):
+        return False
+    try:
+        return int(data.get("version", 1)) < _FORMAT_VERSION
+    except (TypeError, ValueError):
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -661,11 +693,13 @@ class ToolPermissionStore:
             return bool(self._legacy_declines) and not self._legacy_notified
 
     def acknowledge_legacy_notice(self) -> None:
-        """Record that the one-time legacy-declines notice was shown."""
+        """Record that the one-time legacy-declines notice was shown.
+
+        In memory only (loading or showing the notice never writes the
+        file); the flag is persisted with the next explicit change.
+        """
         with self._lock:
             self._legacy_notified = True
-            if self._legacy_declines:
-                self._write(lambda doc: doc.set("legacy_declines_notified", True))
 
     # -- loading -----------------------------------------------------------
 
@@ -678,7 +712,7 @@ class ToolPermissionStore:
         return _is_arg_dependent_name(name)
 
     def reload(self) -> None:
-        """(Re)read the file, migrating a legacy file in place."""
+        """(Re)read the file. Never writes (a legacy file migrates in memory)."""
         with self._lock:
             self._load_error = None
             if not self._path.exists():
@@ -690,9 +724,7 @@ class ToolPermissionStore:
             except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
                 self._fail_closed(f"{type(exc).__name__}: {exc}")
                 return
-            if "allowed" in data or "never" in data:
-                data = self._migrate(data)
-            self._apply(data)
+            self._apply(self._interpret(data))
 
     def _fail_closed(self, error: str) -> None:
         logger.warning(
@@ -707,46 +739,62 @@ class ToolPermissionStore:
         self._deny = []
         self._warnings = [f"file unreadable: {error}"]
 
-    def _migrate(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Turn legacy ``allowed``/``never`` into ``allow`` + ``legacy_declines``."""
-        legacy_allowed = [n for n in data.get("allowed", []) if isinstance(n, str)]
-        legacy_never = [n for n in data.get("never", []) if isinstance(n, str)]
+    def _legacy_allow(self, data: Mapping[str, Any]) -> list[str]:
+        """Legacy ``allowed`` names that become ``allow`` rules."""
+        legacy_allowed = _names(data.get("allowed"))
         dropped = [n for n in legacy_allowed if self._name_is_arg_dependent(n)]
-        migrated = [n for n in legacy_allowed if n not in dropped]
         if dropped:
             logger.info(
                 "Not migrating 'always allow' for argument-dependent tools: %s",
                 ", ".join(sorted(dropped)),
             )
+        return [n for n in legacy_allowed if n not in dropped]
 
-        def mutate(doc: _Doc) -> None:
-            allow = doc.list("allow")
-            for name in migrated:
-                if name not in allow:
-                    allow.append(name)
-            doc.list("deny")
-            if "mode" not in doc:
-                doc.set("mode", "ask")
-            declines = doc.list("legacy_declines")
-            for name in legacy_never:
-                if name not in declines:
-                    declines.append(name)
-            doc.delete("allowed")
-            doc.delete("never")
+    def _interpret(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        """The effective data of a file (pure; nothing is written).
 
-        new = self._write(mutate, from_data=data)
-        if new is not None:
-            return new
-        # Write failed: migrate in memory only.
-        out = {k: v for k, v in data.items() if k not in ("allowed", "never")}
-        out.setdefault("mode", "ask")
-        out["allow"] = list(out.get("allow", [])) + [
-            n for n in migrated if n not in out.get("allow", [])
-        ]
-        out["legacy_declines"] = sorted(
-            set(out.get("legacy_declines", [])) | set(legacy_never)
-        )
+        An unmigrated legacy file gets its ``allowed`` names as ``allow``
+        rules (minus argument-dependent ones). Legacy ``never`` entries are
+        only reported as previous declines, never enforced. In a migrated
+        (``version = 2``) file the legacy keys are not re-interpreted.
+        """
+        out = dict(data)
+        if _is_legacy_format(data):
+            allow = out.get("allow", [])
+            if isinstance(allow, list):
+                out["allow"] = list(allow) + [
+                    n for n in self._legacy_allow(data) if n not in allow
+                ]
+        declines: list[str] = []
+        for name in _names(data.get("legacy_declines")) + _names(data.get("never")):
+            if name not in declines:
+                declines.append(name)
+        out["legacy_declines"] = declines
         return out
+
+    def _backup_legacy(self, text: str) -> None:
+        """Write ``<file>.bak-legacy`` once (never overwritten)."""
+        backup = self._path.with_name(self._path.name + LEGACY_BACKUP_SUFFIX)
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+    def _materialize_legacy(self, doc: _Doc) -> None:
+        """Write the in-memory migration into *doc*; legacy keys stay as is."""
+        data = doc.plain()
+        allow = doc.list("allow")
+        for name in self._legacy_allow(data):
+            if name not in allow:
+                allow.append(name)
+        doc.list("deny")
+        if "mode" not in doc:
+            doc.set("mode", "ask")
+        doc.set("version", _FORMAT_VERSION)
 
     def _parse_rules(self, raw: Any, kind: str) -> list[PermissionRule]:
         rules: list[PermissionRule] = []
@@ -791,23 +839,23 @@ class ToolPermissionStore:
                     "on its arguments, use e.g. "
                     f"'{rule.tool}(<argument>=<glob>)'"
                 )
-        declines = data.get("legacy_declines", [])
-        self._legacy_declines = [d for d in declines if isinstance(d, str)]
-        self._legacy_notified = bool(data.get("legacy_declines_notified", False))
+        self._legacy_declines = _names(data.get("legacy_declines"))
+        # An acknowledgement made in this process survives re-reads.
+        self._legacy_notified = self._legacy_notified or bool(
+            data.get("legacy_declines_notified", False)
+        )
 
     # -- writing -----------------------------------------------------------
 
-    def _write(
-        self,
-        mutate: Callable[[_Doc], None],
-        *,
-        from_data: Mapping[str, Any] | None = None,
-    ) -> dict[str, Any] | None:
-        """Re-read, mutate and atomically rewrite the file.
+    def _write(self, mutate: Callable[[_Doc], None]) -> dict[str, Any] | None:
+        """Re-read, mutate and atomically rewrite the file (explicit changes).
 
-        Returns the new plain data (also applied in memory unless
-        ``from_data`` is given, i.e. during load), or ``None`` when the file
-        must not or could not be written.
+        A legacy file is backed up once (``<file>.bak-legacy``) and its
+        in-memory migration materialised first; its ``allowed``/``never``
+        keys are preserved for older installs.
+
+        Returns the new plain data (also applied in memory), or ``None``
+        when the file must not or could not be written.
         """
         with self._lock:
             if self._load_error is not None:
@@ -824,7 +872,16 @@ class ToolPermissionStore:
                         # Changed under us into something unparseable.
                         self._fail_closed(f"{type(exc).__name__}: {exc}")
                         return None
+                    if _is_legacy_format(doc.plain()):
+                        self._backup_legacy(text)
+                        self._materialize_legacy(doc)
                     mutate(doc)
+                    if (
+                        self._legacy_notified
+                        and self._interpret(doc.plain())["legacy_declines"]
+                        and "legacy_declines_notified" not in doc
+                    ):
+                        doc.set("legacy_declines_notified", True)
                     _atomic_write(self._path, doc.dumps())
                     data = doc.plain()
             except OSError as exc:
@@ -832,8 +889,7 @@ class ToolPermissionStore:
                     "Failed to save AI tool permissions to %s: %s", self._path, exc
                 )
                 return None
-            if from_data is None:
-                self._apply(data)
+            self._apply(self._interpret(data))
             return data
 
     # -- mutations -----------------------------------------------------------

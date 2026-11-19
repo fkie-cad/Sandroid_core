@@ -363,41 +363,101 @@ def test_remove_rule(tmp_path):
 # -- legacy migration ---------------------------------------------------------
 
 
-def test_legacy_migration(tmp_path):
-    store = _store(
-        tmp_path,
-        'allowed = ["launch_app", "install_apk"]\nnever = ["clear_app_data"]\nfoo = 1\n',
-        arg_dep={"install_apk"},
-    )
-    data = _data(store)
-    assert "allowed" not in data
-    assert "never" not in data
-    assert data["allow"] == ["launch_app"]  # bare arg-dependent name dropped
-    assert data["deny"] == []  # never is NOT migrated
-    assert data["mode"] == "ask"
-    assert data["foo"] == 1
+LEGACY = (
+    'allowed = ["launch_app", "install_apk"]\nnever = ["clear_app_data"]\nfoo = 1\n'
+)
+
+
+def test_legacy_migration_is_in_memory_only(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    # Loading never writes: same bytes, no lock file, no backup.
+    assert store.path.read_text() == LEGACY
+    assert not (tmp_path / "ai_tool_permissions.toml.lock").exists()
+    assert not (tmp_path / "ai_tool_permissions.toml.bak-legacy").exists()
+    assert store.allow_rules() == ["launch_app"]  # bare arg-dependent name dropped
+    assert store.deny_rules() == []  # never is NOT migrated
+    assert store.mode == "ask"
     assert store.resolve("clear_app_data", C).outcome == "ask"
     assert store.resolve("launch_app", C).allowed
-    # one-time "previous declines (not enforced)" notice
+    assert store.resolve("install_apk", C, permission_key="path").outcome == "ask"
+    # one-time "previous declines (not enforced)" notice, acknowledged in
+    # memory only
     assert store.legacy_declines() == ["clear_app_data"]
     assert store.legacy_notice_pending()
     store.acknowledge_legacy_notice()
     assert not store.legacy_notice_pending()
-    again = ToolPermissionStore(store.path)
+    assert store.path.read_text() == LEGACY
+
+
+def test_legacy_file_first_write_preserves_legacy_keys_and_backs_up(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    store.acknowledge_legacy_notice()
+    store.add_allow_rule("kill_process(package=com.x)")
+    backup = tmp_path / "ai_tool_permissions.toml.bak-legacy"
+    assert backup.read_text() == LEGACY
+    data = _data(store)
+    # Older installs read these: untouched.
+    assert data["allowed"] == ["launch_app", "install_apk"]
+    assert data["never"] == ["clear_app_data"]
+    assert data["foo"] == 1
+    # The migration is materialised, the file marked migrated.
+    assert data["allow"] == ["launch_app", "kill_process(package=com.x)"]
+    assert data["deny"] == []
+    assert data["mode"] == "ask"
+    assert data["version"] == 2
+    assert "legacy_declines" not in data
+    assert data["legacy_declines_notified"] is True
+    again = ToolPermissionStore(store.path, arg_dependent=lambda n: n == "install_apk")
     assert again.legacy_declines() == ["clear_app_data"]
     assert not again.legacy_notice_pending()
+    # The backup is written once, never overwritten.
+    store.set_mode("allow_all")
+    assert backup.read_text() == LEGACY
+
+
+def test_migrated_file_never_reinterprets_legacy_keys(tmp_path):
+    store = _store(tmp_path, LEGACY, arg_dep={"install_apk"})
+    store.set_mode("ask")  # first explicit write
+    assert store.remove_rule("allow", "launch_app")
+    data = _data(store)
+    assert data["allow"] == []
+    assert data["allowed"] == ["launch_app", "install_apk"]
+    # A removed rule does not come back from the preserved legacy key.
+    again = ToolPermissionStore(store.path, arg_dependent=lambda n: n == "install_apk")
+    assert again.allow_rules() == []
+    assert again.resolve("launch_app", C).outcome == "ask"
+    assert again.deny_rules() == []
+
+
+def test_legacy_acknowledgement_alone_never_writes(tmp_path):
+    store = _store(tmp_path, LEGACY)
+    before = store.path.stat().st_mtime_ns, store.path.stat().st_ino
+    store.acknowledge_legacy_notice()
+    store.set_session_mode("allow_all")
+    store.mark_never("x")
+    ToolPermissionStore(store.path)
+    assert (store.path.stat().st_mtime_ns, store.path.stat().st_ino) == before
+    assert store.path.read_text() == LEGACY
+
+
+def test_new_file_gets_no_legacy_bookkeeping(tmp_path):
+    store = _store(tmp_path)
+    store.acknowledge_legacy_notice()
+    store.add_allow_rule("t")
+    data = _data(store)
+    assert data["allow"] == ["t"]
+    assert not {"legacy_declines", "legacy_declines_notified", "allowed"} & set(data)
+    assert not (tmp_path / "ai_tool_permissions.toml.bak-legacy").exists()
 
 
 def test_legacy_migration_merges_with_new_keys_and_is_idempotent(tmp_path):
-    store = _store(
-        tmp_path, 'mode="allow_all"\nallow=["x"]\nallowed=["x","y"]\nnever=[]\n'
-    )
-    assert _data(store)["allow"] == ["x", "y"]
+    text = 'mode="allow_all"\nallow=["x"]\nallowed=["x","y"]\nnever=[]\n'
+    store = _store(tmp_path, text)
+    assert store.allow_rules() == ["x", "y"]
     assert store.mode == "allow_all"
     assert not store.legacy_notice_pending()
-    before = store.path.read_text()
     ToolPermissionStore(store.path)
-    assert store.path.read_text() == before
+    assert store.path.read_text() == text
 
 
 def test_legacy_migration_of_corrupt_file_does_not_touch_it(tmp_path):

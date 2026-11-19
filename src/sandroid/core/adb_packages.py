@@ -265,13 +265,28 @@ def get_installed_packages(
         logger.error(f"Error getting installed packages: {error}")
         return []
 
-    packages = []
     package_pattern = re.compile(r"package:(.+)")
+    third_party: set[str] | None = None
+    if not user_only:
+        # ``pm list packages`` does not say which packages are third-party:
+        # ask for that set separately instead of marking every one a
+        # system package.
+        user_output, user_error = send_command("shell pm list packages -3")
+        if user_error:
+            logger.warning(f"Could not list third-party packages: {user_error}")
+        else:
+            third_party = {
+                m.group(1).strip()
+                for m in map(package_pattern.search, user_output.splitlines())
+                if m
+            }
+
+    packages = []
 
     for line in output.strip().split("\n"):
         match = package_pattern.search(line)
         if match:
-            package_name = match.group(1)
+            package_name = match.group(1).strip()
 
             detail_output, detail_error = send_command(
                 f"shell dumpsys package {device_shell_arg(package_name)}"
@@ -288,7 +303,11 @@ def get_installed_packages(
                 {
                     "package_name": package_name,
                     "install_date": install_date,
-                    "is_user_app": user_only,
+                    "is_user_app": (
+                        True
+                        if user_only
+                        else third_party is not None and package_name in third_party
+                    ),
                 }
             )
 

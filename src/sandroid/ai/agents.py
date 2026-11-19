@@ -143,7 +143,13 @@ MAX_WAIT_AGENT_S = 60.0
 #: ``spawn_agent`` executor timeout in the toolset table).
 SYNC_WAIT_CAP_S = 1700.0
 
+#: A ``wait=true`` spawn stops waiting this long before the executor would
+#: abandon the ``spawn_agent`` call (at most 10% of the remaining time).
+SYNC_WAIT_MARGIN_S = 30.0
+
 _POLL_S = 0.1
+#: How long a resume waits for the previous run's result delivery.
+_RESUME_SETTLE_S = 10.0
 _B32 = "abcdefghijklmnopqrstuvwxyz234567"
 _DEFAULT: Any = object()
 
@@ -465,6 +471,8 @@ class AgentResult:
         error: Redacted error for crashes and backend errors.
         parsed: Whether the final report parsed.
         raw_text: The agent's last text.
+        undelivered: ``send_to_agent`` messages that arrived after the
+            agent's last round (not seen by it).
     """
 
     agent_id: str
@@ -479,10 +487,11 @@ class AgentResult:
     error: str | None = None
     parsed: bool = False
     raw_text: str = ""
+    undelivered: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisable form (tool results, events, meta.json)."""
-        return {
+        data = {
             "agent_id": self.agent_id,
             "profile": self.profile,
             "title": self.title,
@@ -495,6 +504,9 @@ class AgentResult:
             "error": self.error,
             "parsed": self.parsed,
         }
+        if self.undelivered:
+            data["undelivered_messages"] = list(self.undelivered)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> AgentResult:
@@ -512,6 +524,7 @@ class AgentResult:
             error=data.get("error"),
             parsed=bool(data.get("parsed")),
             raw_text=str(data.get("raw_text", "")),
+            undelivered=[str(m) for m in data.get("undelivered_messages") or []],
         )
 
 
@@ -665,6 +678,12 @@ def render_result_block(
         lines.extend(f"- {_neutralise(q)}" for q in result.open_questions)
     if result.error:
         lines.append(f"Error: {_neutralise(result.error)}")
+    if result.undelivered:
+        lines.append(
+            f"Undelivered: {len(result.undelivered)} message(s) sent with "
+            "send_to_agent arrived after the agent finished; it did not see "
+            "them. Send them again to resume it."
+        )
     body = "\n".join(lines)
     limit = int(cap_tokens * CHARS_PER_TOKEN)
     if len(body) > limit:
@@ -729,6 +748,8 @@ class AgentRecord:
     delivery: str | None = None
     awaited: int = 0
     runs: int = 0
+    #: Set while no run (or its result delivery) is in progress.
+    idle: threading.Event = field(default_factory=threading.Event)
 
     @property
     def label(self) -> str:
@@ -961,6 +982,7 @@ class AgentManager:
         )
         title_part = f" ({title})" if title else ""
         rec.start_text = AGENT_TASK_TEMPLATE.format(title=title_part, task=task)
+        rec.idle.clear()
         with self._lock:
             while rec.id in self._records:
                 rec.id = new_agent_id(prof.name)
@@ -1043,12 +1065,23 @@ class AgentManager:
                     if rec.cancel_requested or turn.status != "completed":
                         break
                     pending = self._take_inbox(rec)
+                    if pending:
+                        text = self._inbox_text(pending)
+                        continue
+                    result = self._build_result(rec, session, turn)
+                    # Messages that arrived while the report was built (e.g.
+                    # during the format wrap-up) get another round.
+                    pending = self._take_inbox(rec)
                     if not pending:
                         break
-                    text = "\n\n".join(
-                        AGENT_MESSAGE_TEMPLATE.format(text=t) for t in pending
-                    )
-                result = self._build_result(rec, session, turn)
+                    if rec.cancel_requested:
+                        with self._lock:  # reported as undelivered
+                            rec.inbox[:0] = pending
+                        break
+                    result = None
+                    text = self._inbox_text(pending)
+                if result is None:
+                    result = self._build_result(rec, session, turn)
         except BaseException as exc:  # never die silently
             logger.exception("Agent %s crashed", rec.id)
             result = self._failed(rec, f"{type(exc).__name__}: {exc}")
@@ -1062,6 +1095,7 @@ class AgentManager:
             except Exception:
                 logger.exception("Finishing agent %s failed", rec.id)
                 rec.done.set()
+                rec.idle.set()
 
     def _open_session(self, rec: AgentRecord) -> Any:
         from sandroid.ai.session import AgentSession
@@ -1159,6 +1193,10 @@ class AgentManager:
             pending, rec.inbox = rec.inbox, []
         return pending
 
+    @staticmethod
+    def _inbox_text(pending: list[str]) -> str:
+        return "\n\n".join(AGENT_MESSAGE_TEMPLATE.format(text=t) for t in pending)
+
     def _add_usage(self, rec: AgentRecord, usage: dict | None, rounds: int) -> None:
         with self._lock:
             for key in ("prompt_tokens", "completion_tokens", "reasoning_tokens"):
@@ -1251,11 +1289,13 @@ class AgentManager:
         """
         from sandroid.ai import loop as _loop
 
-        cancel = threading.Event()
         if rec.cancel_requested:
             return ""
         try:
-            with session._run_lock:
+            # session.cancel() (cancel_agent, shutdown) sets this event.
+            with session._run_lock, session.cancellable() as cancel:
+                if rec.cancel_requested:
+                    return ""
                 ctx = session._make_context(session._current_turn(), cancel)
                 runner = _loop._TurnRunner(
                     session.messages, ctx, session.client, session.tools, False
@@ -1301,6 +1341,11 @@ class AgentManager:
 
     def _finish(self, rec: AgentRecord, result: AgentResult) -> None:
         with self._lock:
+            # A message that arrived after the last inbox check can no longer
+            # reach this run: report it instead of losing it.
+            late, rec.inbox = rec.inbox, []
+            if late:
+                result.undelivered = [*result.undelivered, *late]
             result.usage = dict(rec.usage)
             rec.result = result
             rec.status = result.status
@@ -1317,15 +1362,23 @@ class AgentManager:
             if deliver and not self._parent_open(rec):
                 # Epoch guard: the parent thread is gone; files only.
                 rec.delivery, deliver = "dropped", False
-        self._write_meta(rec)
-        self._emit(
-            rec,
-            "agent_result",
-            {**self._event_payload(rec), **result.to_dict(), "delivery": rec.delivery},
-        )
-        rec.done.set()
-        if deliver:
-            self._deliver(rec)
+        try:
+            self._write_meta(rec)
+            self._emit(
+                rec,
+                "agent_result",
+                {
+                    **self._event_payload(rec),
+                    **result.to_dict(),
+                    "delivery": rec.delivery,
+                },
+            )
+            rec.done.set()
+            if deliver:
+                self._deliver(rec)
+        finally:
+            # A resume (send_to_agent) waits for this before resetting rec.
+            rec.idle.set()
         self._start_queued()
 
     # -- delivery -----------------------------------------------------------------------
@@ -1568,7 +1621,12 @@ class AgentManager:
         return {ORCHESTRATOR_ID} | running
 
     def reconcile_leases(self) -> None:
-        """Drop leases of dead owners (call from a ~1 s UI timer)."""
+        """Drop leases of dead owners (call from a ~1 s UI timer).
+
+        An owner whose abandoned tool call still runs counts as live in the
+        arbiter, and a lease an in-flight call uses is only released when
+        that call's thread exits.
+        """
         try:
             get_arbiter().reconcile(self.live_owner_ids())
         except Exception:
@@ -1665,10 +1723,16 @@ class AgentManager:
                 break
             if time.monotonic() >= deadline:
                 with self._lock:
-                    if rec.live:
+                    converted = rec.live
+                    if converted:
+                        # Background delivery from now on: no parent leases,
+                        # the result arrives as a wake.
                         rec.sync = False
                         get_arbiter().set_parent(rec.id, None)
-                        return None
+                if converted:
+                    self._write_meta(rec)
+                    self._emit(rec, "agent_status", self._event_payload(rec))
+                    return None
                 break
         return rec.result
 
@@ -1720,12 +1784,27 @@ class AgentManager:
             ]
         return sum(1 for agent_id in ids if self.cancel(agent_id))
 
-    def send(self, agent_id: str, text: str, *, parent: Any = None) -> dict[str, Any]:
+    def send(
+        self,
+        agent_id: str,
+        text: str,
+        *,
+        parent: Any = None,
+        authorize: Callable[[AgentRecord], None] | None = None,
+    ) -> dict[str, Any]:
         """Send *text* to an agent.
 
         A live agent gets it at its next round boundary (or as a follow-up
         turn); a finished one is resumed from its transcript with it, and its
         new result is delivered like a fresh one.
+
+        Args:
+            agent_id: The agent.
+            text: The message.
+            parent: The calling session (resume reattaches to it).
+            authorize: Called (without the manager lock) before a finished
+                agent is resumed; raises to refuse. Resuming starts the
+                agent again, so it needs the same approval as spawning it.
 
         Raises:
             KeyError: Unknown agent.
@@ -1745,6 +1824,18 @@ class AgentManager:
                     "status": rec.status,
                     "delivery": "next_round",
                 }
+        if authorize is not None:
+            authorize(rec)
+        # The previous run may still be delivering its result.
+        rec.idle.wait(_RESUME_SETTLE_S)
+        with self._lock:
+            if rec.live:  # resumed by someone else meanwhile
+                rec.inbox.append(text)
+                return {
+                    "agent_id": rec.id,
+                    "status": rec.status,
+                    "delivery": "next_round",
+                }
             if parent is not None and rec.parent is None:
                 rec.parent = parent
                 rec.parent_thread_id = getattr(parent, "thread_id", None)
@@ -1756,6 +1847,7 @@ class AgentManager:
             rec.delivery = None
             rec.finished = None
             rec.start_text = AGENT_MESSAGE_TEMPLATE.format(text=text)
+            rec.idle.clear()
             start = self._can_start_locked(rec.profile)
             rec.status = "running" if start else "queued"
             if not start:
@@ -1778,6 +1870,9 @@ class AgentManager:
             profile = get_profile(meta["profile"])
         except (OSError, ValueError, KeyError):
             return None
+        if meta.get("parent_thread_id") != getattr(parent, "thread_id", None):
+            # Only agents spawned from the calling thread can be resumed.
+            return None
         rec = AgentRecord(
             id=agent_id,
             profile=profile,
@@ -1796,6 +1891,7 @@ class AgentManager:
             rec.status = rec.result.status
         rec.usage.update({k: int(v) for k, v in (meta.get("usage") or {}).items()})
         rec.done.set()
+        rec.idle.set()
         with self._lock:
             return self._records.setdefault(agent_id, rec)
 
@@ -2088,7 +2184,9 @@ def spawn_agent(
                 "wait_agent."
             ),
         }
-    result = manager.wait_sync(rec.id, cancel_event=ctx.cancel_event)
+    result = manager.wait_sync(
+        rec.id, cancel_event=ctx.cancel_event, max_wait=_sync_wait_budget()
+    )
     if result is None:
         return {
             **base,
@@ -2099,6 +2197,23 @@ def spawn_agent(
             ),
         }
     return {**base, **result.to_dict()}
+
+
+def _sync_wait_budget() -> float:
+    """How long a ``wait=true`` spawn may wait (measured after approval).
+
+    Capped at :data:`SYNC_WAIT_CAP_S` and to the executor time left for the
+    ``spawn_agent`` call minus a margin, so the executor never abandons the
+    call while a synchronous child still uses the parent's leases; the child
+    turns asynchronous first.
+    """
+    from sandroid.ai.loop import tool_time_remaining
+
+    remaining = tool_time_remaining()
+    if remaining is None:
+        return SYNC_WAIT_CAP_S
+    margin = min(SYNC_WAIT_MARGIN_S, remaining * 0.1)
+    return max(0.0, min(SYNC_WAIT_CAP_S, remaining - margin))
 
 
 def wait_agent(agent_id: str, timeout_s: float = 30) -> dict:
@@ -2155,10 +2270,22 @@ def cancel_agent(agent_id: str) -> dict:
 
 def send_to_agent(agent_id: str, text: str) -> dict:
     """Send a message to an agent (next round, or resume a finished one)."""
-    _ctx, parent = _calling_context()
+    ctx, parent = _calling_context()
     rec = _own_record(agent_id, parent)
+
+    def authorize(target: AgentRecord) -> None:
+        # Resuming runs the agent again: same approval as spawning it.
+        args = {
+            "profile": target.profile.name,
+            "task": str(text or ""),
+            "resume": target.id,
+        }
+        _authorize_spawn(ctx, target.profile, args)
+
     try:
-        return get_agent_manager().send(rec.id, text, parent=parent)
+        return get_agent_manager().send(
+            rec.id, text, parent=parent, authorize=authorize
+        )
     except ValueError as exc:
         raise ToolError("invalid_arguments", str(exc)) from None
 

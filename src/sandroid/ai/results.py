@@ -31,6 +31,7 @@ import math
 import os
 import re
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -371,6 +372,79 @@ _MAX_WALK_LINES = 200_000
 _MAX_GROUP_ROWS = 50_000
 _LINE_CHARS = 240
 
+#: ``read_result`` grep: one regex search sees at most this many characters
+#: (a longer line is searched in overlapping windows). Bounds the work of
+#: one search call, which holds the GIL.
+GREP_LINE_CHARS = 500
+#: Overlap of consecutive windows of a long line.
+_GREP_WINDOW_OVERLAP = 100
+#: Characters of one line searched at all.
+_GREP_MAX_LINE_CHARS = 64_000
+#: ``read_result`` grep: longest accepted pattern.
+GREP_MAX_PATTERN = 200
+#: ``read_result`` grep: wall-clock budget of one search (seconds).
+GREP_TIME_BUDGET_S = 2.0
+
+# A quantified group whose body itself repeats or alternates -- ``(a+)+``,
+# ``(a*)*``, ``(a|aa)+``, ``(?:x+){2,}`` -- can backtrack exponentially.
+_QUANT = r"(?:[*+]|\{\d*,?\d*\})"
+_NESTED_QUANT_RE = re.compile(
+    r"\((?:[^()\\]|\\.)*(?:[*+]|\{\d*,\d*\}|\|)(?:[^()\\]|\\.)*\)" + _QUANT
+)
+_BACKREF_RE = re.compile(r"\\[1-9]|\(\?P=")
+#: More unbounded quantifiers than this (``.*a.*b.*c``) is polynomial
+#: backtracking (cubic and worse) that even a 500-character window makes
+#: take seconds.
+_MAX_UNBOUNDED_QUANTIFIERS = 2
+_UNBOUNDED_RE = re.compile(r"(?<!\\)(?:[*+]|\{\d+,\})")
+
+
+def _grep_pattern(grep: str) -> re.Pattern[str] | str:
+    """Compile a ``read_result`` grep pattern, or explain why it is refused.
+
+    Invalid regex falls back to a literal search. Patterns that can
+    backtrack catastrophically (nested or alternated quantified groups,
+    backreferences, many unbounded quantifiers) or are too long are refused:
+    Python's ``re`` holds the GIL, so one such search freezes the process.
+
+    Returns:
+        The compiled pattern, or a refusal message.
+    """
+    if len(grep) > GREP_MAX_PATTERN:
+        return f"the grep pattern is longer than {GREP_MAX_PATTERN} characters"
+    try:
+        pattern = re.compile(grep, re.IGNORECASE)
+    except re.error:
+        return re.compile(re.escape(grep), re.IGNORECASE)
+    if _NESTED_QUANT_RE.search(grep) or _BACKREF_RE.search(grep):
+        return (
+            "the grep pattern has a repeated group that itself repeats or "
+            "alternates (e.g. (a+)+) or a backreference; such patterns can "
+            "take forever"
+        )
+    if len(_UNBOUNDED_RE.findall(grep)) > _MAX_UNBOUNDED_QUANTIFIERS:
+        return (
+            "the grep pattern has more than "
+            f"{_MAX_UNBOUNDED_QUANTIFIERS} unbounded quantifiers (* or +)"
+        )
+    return pattern
+
+
+def _grep_line(pattern: re.Pattern[str], line: str, deadline: float) -> bool:
+    """Whether *pattern* occurs in *line*, searched in bounded windows."""
+    line = line[:_GREP_MAX_LINE_CHARS]
+    if len(line) <= GREP_LINE_CHARS:
+        return pattern.search(line) is not None
+    step = GREP_LINE_CHARS - _GREP_WINDOW_OVERLAP
+    for start in range(0, len(line), step):
+        if start and time.monotonic() > deadline:
+            break
+        if pattern.search(line[start : start + GREP_LINE_CHARS]):
+            return True
+        if start + GREP_LINE_CHARS >= len(line):
+            break
+    return False
+
 
 def _flatten_lines(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
     """Yield ``(location, text)`` lines of a result, strings split per line."""
@@ -707,7 +781,9 @@ def read_stored_result(
         offset: Character offset into the canonical text (no *grep*).
         length: Characters to return (default and maximum: the cap).
         grep: Regex (case-insensitive; invalid regex = literal) selecting
-            matching lines, each with its location.
+            matching lines, each with its location. Patterns that can
+            backtrack catastrophically are refused (:func:`_grep_pattern`);
+            lines are searched in bounded windows within a time budget.
         cap_tokens: Ingest cap (default: configured).
 
     Returns:
@@ -734,15 +810,29 @@ def read_stored_result(
     result = record.get("result")
     base = {"result_id": record.get("id", rid), "tool": record.get("tool")}
     if grep:
-        try:
-            pattern = re.compile(grep, re.IGNORECASE)
-        except re.error:
-            pattern = re.compile(re.escape(grep), re.IGNORECASE)
+        pattern = _grep_pattern(str(grep))
+        if isinstance(pattern, str):
+            return {
+                "error": {
+                    "code": "invalid_arguments",
+                    "message": pattern,
+                    "retryable": True,
+                    "hint": (
+                        "Use a simpler pattern: plain words, alternatives "
+                        "like 'token|secret', or single quantifiers."
+                    ),
+                }
+            }
         matches: list[str] = []
         total = 0
         used = 0
+        timed_out = False
+        deadline = time.monotonic() + GREP_TIME_BUDGET_S
         for location, line in iter_result_lines(result):
-            if not pattern.search(line):
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
+            if not _grep_line(pattern, line, deadline):
                 continue
             total += 1
             entry = f"{location}: {_clip(line, 400)}" if location else _clip(line, 400)
@@ -750,13 +840,19 @@ def read_stored_result(
                 continue
             matches.append(entry)
             used += len(entry) + 4
-        return {
+        out = {
             **base,
             "grep": grep,
             "match_count": total,
             "matches": matches,
-            "truncated": len(matches) < total,
+            "truncated": len(matches) < total or timed_out,
         }
+        if timed_out:
+            out["note"] = (
+                f"the search stopped after {GREP_TIME_BUDGET_S:g}s; "
+                "match_count covers only the part searched"
+            )
+        return out
     text = result_text(result)
     try:
         start = max(0, int(offset or 0))

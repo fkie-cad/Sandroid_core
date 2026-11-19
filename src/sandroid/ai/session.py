@@ -40,7 +40,7 @@ import secrets
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -59,6 +59,7 @@ from sandroid.ai.loop import (
     TurnResult,
     build_request_messages,
 )
+from sandroid.ai.loop import repair_tool_pairs as _repair_tool_pairs
 from sandroid.ai.prompts import (
     CONTINUE_MESSAGE,
     MCP_CATALOGUE_HEADER,
@@ -523,6 +524,8 @@ class AgentSession:
         self._queue: deque[_Job] = deque()
         self._runner_active = False
         self._current_cancel: threading.Event | None = None
+        #: Cancel events of out-of-turn requests (report wrap-up, /compact).
+        self._aux_cancels: set[threading.Event] = set()
         self._closed = False
         self._turn_counter = 0
         self._msg_counter = 0
@@ -818,9 +821,13 @@ class AgentSession:
                         job.text = f"{job.text}\n\n{nxt.text}"
                         job.meta.setdefault("coalesced", []).append(nxt.meta)
                         job.futures.extend(nxt.futures)
+                # Published together with the pop: a cancel() from now on
+                # reaches this turn even before it starts running.
+                cancel = threading.Event()
+                self._current_cancel = cancel
             try:
                 with self._run_lock:
-                    result = self._run_job(job)
+                    result = self._run_job(job, cancel)
             except BaseException as exc:
                 logger.exception("AI session job failed")
                 for fut in job.futures:
@@ -835,16 +842,32 @@ class AgentSession:
         """Stop the running turn (and drop queued ones)."""
         dropped: list[_Job] = []
         with self._lock:
-            event = self._current_cancel
+            events = [self._current_cancel, *self._aux_cancels]
             if clear_queue:
                 dropped = list(self._queue)
                 self._queue.clear()
-        if event is not None:
-            event.set()
+        for event in events:
+            if event is not None:
+                event.set()
         for job in dropped:
             for fut in job.futures:
                 if not fut.done():
                     fut.set_result(TurnResult(status="cancelled"))
+
+    @contextlib.contextmanager
+    def cancellable(self) -> Iterator[threading.Event]:
+        """A cancel event for a request outside a turn, set by :meth:`cancel`.
+
+        Used for the subagent report wrap-up and ``/compact``.
+        """
+        event = threading.Event()
+        with self._lock:
+            self._aux_cancels.add(event)
+        try:
+            yield event
+        finally:
+            with self._lock:
+                self._aux_cancels.discard(event)
 
     def wait_idle(self, timeout: float | None = None) -> bool:
         """Block until no turn runs or is queued; returns False on timeout."""
@@ -857,10 +880,11 @@ class AgentSession:
 
     # -- one turn -------------------------------------------------------------------
 
-    def _run_job(self, job: _Job) -> TurnResult:
-        cancel = threading.Event()
-        with self._lock:
-            self._current_cancel = cancel
+    def _run_job(self, job: _Job, cancel: threading.Event | None = None) -> TurnResult:
+        if cancel is None:
+            cancel = threading.Event()
+            with self._lock:
+                self._current_cancel = cancel
         task = CHAT_TASK_NAME if self.kind == "chat" else f"agent:{self.agent_id}"
         label = "AI Chat" if self.kind == "chat" else f"AI agent {self.agent_id}"
         unregister: Callable[[], None] = lambda: None  # noqa: E731
@@ -892,7 +916,8 @@ class AgentSession:
             return result
         finally:
             with self._lock:
-                self._current_cancel = None
+                if self._current_cancel is cancel:
+                    self._current_cancel = None
             with contextlib.suppress(Exception):
                 unregister()
 
@@ -1124,15 +1149,29 @@ class AgentSession:
                 checkpoint=result.messages[1:],
             )
 
-    def _summarize(self, prefix: list[dict], instructions: str) -> str:
-        """Summary request: same tools array, ``tool_choice="none"``."""
+    def _summarize(
+        self,
+        prefix: list[dict],
+        instructions: str,
+        cancel: threading.Event | None = None,
+    ) -> str:
+        """Summary request: same tools array, ``tool_choice="none"``.
+
+        Args:
+            prefix: Messages to summarise.
+            instructions: The summary instructions.
+            cancel: Cancel event (default: the running turn's).
+        """
+        event = cancel if cancel is not None else self._current_cancel
+        if event is not None and event.is_set():
+            raise AIClientError("summary request cancelled")
         request = build_request_messages(
             [*prefix, {"role": "user", "content": instructions}], self.profile
         )
         choice = "none" if getattr(self.profile, "tool_choice_none", False) else None
         text: list[str] = []
         for chunk in self.client.stream(
-            request, self.tools, tool_choice=choice, cancel_event=self._current_cancel
+            request, self.tools, tool_choice=choice, cancel_event=event
         ):
             if chunk.kind == "text":
                 text.append(chunk.text)
@@ -1145,16 +1184,18 @@ class AgentSession:
         return "".join(text)
 
     def _valid_ids(self, ids: set[str]) -> set[str]:
+        """The ids in *ids* that exist (``R<n>`` results, ``#<seq>`` lines).
+
+        Timeline ids are checked against seq bounds only (cheap; design §8).
+        The read goes through :func:`_timeline_seq_limit`, which reads no
+        line content; any future content read there must use
+        ``reader="ai"`` so ``ai.mask_sensitive`` applies.
+        """
         known = set(self.result_store.ids())
         valid = {i for i in ids if i in known}
         seqs = {i for i in ids if i.startswith("#") and i[1:].isdigit()}
         if seqs:
-            limit = None
-            with contextlib.suppress(Exception):
-                from sandroid.core import timeline
-
-                status = timeline.get_timeline().status()
-                limit = status.lines + status.queued
+            limit = _timeline_seq_limit()
             valid |= {i for i in seqs if limit is None or 0 < int(i[1:]) <= limit}
         return valid
 
@@ -1168,6 +1209,10 @@ class AgentSession:
             sink(event)
 
     def _observe(self, event: AgentEvent) -> None:
+        if event.agent_id != self.agent_id:
+            # A subagent's event forwarded for display: the subagent's own
+            # session already persisted it and wrote its timeline line.
+            return
         p = event.payload
         if event.type == "approval_resolved":
             ref = self._persist(
@@ -1281,16 +1326,19 @@ class AgentSession:
         if not self._run_lock.acquire(blocking=False):
             raise SessionBusyError("a turn is running; stop it first (Ctrl+X)")
         try:
-            ctx = self._make_context(self._current_turn(), threading.Event())
-            result = compact(
-                list(self.messages),
-                self.tools,
-                self.meter,
-                self._context_cfg,
-                summarize=self._summarize,
-                valid_ids=self._valid_ids,
-                focus=focus,
-            )
+            with self.cancellable() as cancel:
+                ctx = self._make_context(self._current_turn(), cancel)
+                result = compact(
+                    list(self.messages),
+                    self.tools,
+                    self.meter,
+                    self._context_cfg,
+                    summarize=lambda prefix, instructions: self._summarize(
+                        prefix, instructions, cancel
+                    ),
+                    valid_ids=self._valid_ids,
+                    focus=focus,
+                )
             self._apply_compaction(ctx, result)
             if result.changed:
                 self.messages[:] = result.messages
@@ -1355,46 +1403,18 @@ def _msg_from_record(rec: dict) -> dict:
     return msg
 
 
-def _repair_tool_pairs(messages: list[dict]) -> list[dict]:
-    """Answer tool calls a crash left unanswered (backends reject them)."""
-    out: list[dict] = []
-    pending: list[str] = []
+def _timeline_seq_limit() -> int | None:
+    """Highest timeline seq written or queued (``None``: unknown).
 
-    def flush() -> None:
-        for call_id in pending:
-            out.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": json.dumps(
-                        {
-                            "error": {
-                                "code": "cancelled",
-                                "message": "the session ended before this call "
-                                "finished",
-                                "retryable": True,
-                            }
-                        }
-                    ),
-                }
-            )
-        pending.clear()
+    Seq bounds only (no line content is read, so nothing to mask).
+    """
+    try:
+        from sandroid.core import timeline
 
-    for msg in messages:
-        if msg.get("role") == "tool":
-            call_id = msg.get("tool_call_id")
-            if call_id in pending:
-                pending.remove(call_id)
-                out.append(msg)
-            continue  # orphan tool message: drop
-        flush()
-        out.append(msg)
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            pending.extend(
-                c.get("id") for c in msg["tool_calls"] if isinstance(c, dict)
-            )
-    flush()
-    return out
+        status = timeline.get_timeline().status()
+        return int(status.lines + status.queued)
+    except Exception:
+        return None
 
 
 def _sanitise_args(args: Any, limit: int = 120) -> Any:

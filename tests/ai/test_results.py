@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -291,3 +292,34 @@ def test_read_result_unknown_id_is_an_error(tmp_path):
     out = read_stored_result(store, "R77")
     assert out["error"]["code"] == "invalid_arguments"
     assert not os.path.exists(tmp_path / "ai")
+
+
+@pytest.mark.parametrize(
+    "pattern", ["(a+)+$", "(a*)*b", "(a|aa)+$", "(?:x+){2,}", "(a)\\1", "x" * 201]
+)
+def test_grep_refuses_catastrophic_patterns_without_running_them(tmp_path, pattern):
+    store = ResultStore(tmp_path)
+    rid = store.put("t", {}, {"x": "a" * 28 + "!"}).id
+    started = time.monotonic()
+    out = read_stored_result(store, rid, grep=pattern)
+    assert time.monotonic() - started < 0.5
+    assert out["error"]["code"] == "invalid_arguments"
+
+
+def test_grep_searches_long_lines_in_bounded_windows_within_a_budget(
+    tmp_path, monkeypatch
+):
+    store = ResultStore(tmp_path)
+    tail = "x" * 3000 + " needle at the end"
+    rid = store.put("t", {}, {"rows": ["a" * 5000] * 40 + [tail]}).id
+    # A match far beyond one search window is still found...
+    found = read_stored_result(store, rid, grep="needle")
+    assert found["match_count"] == 1
+    # ...and a slow (polynomial) pattern stops at the time budget instead of
+    # freezing the process.
+    monkeypatch.setattr(results, "GREP_TIME_BUDGET_S", 0.3)
+    started = time.monotonic()
+    slow = read_stored_result(store, rid, grep=".*a.*b")
+    assert time.monotonic() - started < 2.0
+    assert slow["truncated"] is True
+    assert "stopped" in slow["note"]

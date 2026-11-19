@@ -855,3 +855,75 @@ def test_usage_events_and_meter(tmp_path, registry):
     assert u["context_window"] == 262_144
     assert u["context_used"] == session.meter.used
     assert session.context_breakdown()
+
+
+# -- cancellation windows (fix pass A) --------------------------------------------
+
+
+def test_cancel_between_job_pop_and_turn_start_is_not_lost(
+    tmp_path, registry, perm_store
+):
+    client = FakeClient([text_reply("should never be requested")])
+    session = make_session(
+        tmp_path,
+        client,
+        registry,
+        spawn_worker=lambda fn: threading.Thread(target=fn, daemon=True).start(),
+    )
+    session._run_lock.acquire()  # e.g. /compact holds it
+    try:
+        future = session.submit_user_message("hi")
+        deadline = time.monotonic() + 5
+        while session._queue and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not session._queue  # popped; the drainer waits for the lock
+        session.cancel()
+    finally:
+        session._run_lock.release()
+
+    assert future.result(5).status == "cancelled"
+    assert client.calls == []
+
+
+def test_compact_now_summary_request_is_cancellable(
+    tmp_path, registry, perm_store, monkeypatch
+):
+    entered = threading.Event()
+    seen = {}
+
+    class BlockingClient:
+        model = "fake-model"
+        profile = PROFILE
+
+        def stream(self, messages, tools=None, *, tool_choice=None, **kwargs):
+            seen["cancel_event"] = kwargs.get("cancel_event")
+            entered.set()
+            event = kwargs.get("cancel_event")
+            while event is not None and not event.wait(0.02):
+                pass
+            yield StreamChunk("cancelled")
+
+    def fake_compact_now(messages, tools, meter, cfg, *, summarize, **_):
+        try:
+            summarize(messages[:1], "summarise")
+        except AIClientError as exc:
+            seen["error"] = str(exc)
+        from sandroid.ai.compaction import PrepareResult
+
+        return PrepareResult(list(messages), [], False)
+
+    monkeypatch.setattr(session_module._compaction, "compact_now", fake_compact_now)
+    session = make_session(tmp_path, BlockingClient(), registry)
+    done = threading.Event()
+    worker = threading.Thread(
+        target=lambda: (session.compact_now(), done.set()), daemon=True
+    )
+    worker.start()
+    assert entered.wait(5)
+    assert seen["cancel_event"] is not None
+
+    session.cancel()
+
+    assert done.wait(3), "the /compact summary request ignored cancel()"
+    assert "cancelled" in seen["error"]
+    assert session._aux_cancels == set()

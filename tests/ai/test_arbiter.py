@@ -7,6 +7,7 @@ singleton is exercised separately for its identity contract.
 
 from sandroid.ai.arbiter import (
     CEILING_OWNER,
+    SUBTASK_OWNER,
     Conflict,
     DeviceResourceArbiter,
     ResourceId,
@@ -302,3 +303,155 @@ def test_reset_for_tests_drops_the_singleton():
     first = get_arbiter()
     arbiter_module.reset_for_tests()
     assert get_arbiter() is not first
+
+
+# -- per-call reference counting and abandoned calls ------------------------------
+
+
+def test_acquire_settle_keeps_on_success_and_rolls_back_on_failure():
+    arb = DeviceResourceArbiter()
+    ok = arb.acquire("A", frozenset({ResourceId.MITMPROXY}))
+    assert ok.newly == frozenset({ResourceId.MITMPROXY})
+    arb.settle(ok, failed=False)
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "A"}
+
+    bad = arb.acquire("A", frozenset({ResourceId.FOCUS, ResourceId.MITMPROXY}))
+    assert bad.newly == frozenset({ResourceId.FOCUS})
+    arb.settle(bad, failed=True)
+    # Only the newly acquired lease is rolled back; the kept one stays.
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "A"}
+    arb.settle(bad, failed=True)  # idempotent
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "A"}
+
+
+def test_same_owner_reuse_survives_the_older_calls_rollback():
+    """Tool A claims X and times out; tool B (same owner) reuses X and
+    succeeds; A's late rollback must not release X under B.
+    """
+    arb = DeviceResourceArbiter()
+    a = arb.acquire("A", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.abandon(a)
+    b = arb.acquire("A", frozenset({ResourceId.FRIDA_SERVER}))
+    assert b.newly == frozenset()
+    arb.settle(b, failed=False)
+    arb.settle(a, failed=True)
+    assert arb.snapshot() == {ResourceId.FRIDA_SERVER: "A"}
+
+
+def test_same_owner_reuse_while_both_fail_rolls_back_after_the_last():
+    arb = DeviceResourceArbiter()
+    a = arb.acquire("A", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.abandon(a)
+    b = arb.acquire("A", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.settle(a, failed=True)  # A exits first while B still uses it
+    assert arb.snapshot() == {ResourceId.FRIDA_SERVER: "A"}
+    arb.settle(b, failed=True)
+    assert arb.snapshot() == {}
+
+
+def test_forget_with_an_abandoned_call_keeps_owner_live_and_leases_held():
+    arb = DeviceResourceArbiter()
+    arb.note_subtask("a-op-x")
+    call = arb.acquire("a-op-x", frozenset({ResourceId.FRIDA_SERVER}))
+    arb.abandon(call)
+
+    arb.forget_subtask("a-op-x")  # the agent ended; its tool still runs
+
+    assert arb.snapshot() == {ResourceId.FRIDA_SERVER: "a-op-x"}
+    assert "a-op-x" in arb.live_subtasks()
+    assert arb.claim("orchestrator", frozenset({ResourceId.FRIDA_SERVER})) == (
+        Conflict(ResourceId.FRIDA_SERVER, "a-op-x")
+    )
+    assert arb.claim("orchestrator", frozenset({ResourceId.WORLD})) == Conflict(
+        ResourceId.FRIDA_SERVER, "a-op-x"
+    )
+
+    arb.settle(call, failed=False)  # the thread exits (even successfully)
+
+    assert arb.snapshot() == {}
+    assert "a-op-x" not in arb.live_subtasks()
+    assert arb.abandoned_owners() == {}
+    assert arb.claim("orchestrator", frozenset({ResourceId.WORLD})) == frozenset(
+        {ResourceId.WORLD}
+    )
+
+
+def test_abandoned_call_without_resources_still_blocks_world():
+    arb = DeviceResourceArbiter()
+    call = arb.acquire("orchestrator", frozenset())
+    arb.abandon(call)
+    assert arb.claim("a-op-x", frozenset({ResourceId.WORLD})) == Conflict(
+        ResourceId.WORLD, SUBTASK_OWNER
+    )
+    arb.settle(call, failed=True)
+    assert arb.claim("a-op-x", frozenset({ResourceId.WORLD})) == frozenset(
+        {ResourceId.WORLD}
+    )
+
+
+def test_release_all_defers_leases_an_abandoned_call_still_uses():
+    """session.close() -> release_all(orchestrator) while a tool still runs."""
+    arb = DeviceResourceArbiter()
+    arb.claim("orchestrator", frozenset({ResourceId.SPOTLIGHT}))
+    call = arb.acquire("orchestrator", frozenset({ResourceId.MITMPROXY}))
+    arb.abandon(call)
+
+    arb.release_all("orchestrator")
+
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "orchestrator"}
+    assert isinstance(arb.claim("a-op-x", frozenset({ResourceId.MITMPROXY})), Conflict)
+    arb.settle(call, failed=False)  # a late success does not resurrect it
+    assert arb.snapshot() == {}
+
+
+def test_reclaim_after_a_deferred_release_belongs_to_the_new_call():
+    arb = DeviceResourceArbiter()
+    old = arb.acquire("orchestrator", frozenset({ResourceId.MITMPROXY}))
+    arb.abandon(old)
+    arb.release_all("orchestrator")  # the thread was closed
+    new = arb.acquire("orchestrator", frozenset({ResourceId.MITMPROXY}))
+    assert new.newly == frozenset({ResourceId.MITMPROXY})
+    arb.settle(new, failed=False)
+    arb.settle(old, failed=True)
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "orchestrator"}
+
+
+def test_reconcile_keeps_owners_with_abandoned_calls_and_in_flight_leases():
+    arb = DeviceResourceArbiter()
+    call = arb.acquire("a-re-gone00", frozenset({ResourceId.MONITOR}))
+    arb.abandon(call)
+    running = arb.acquire("a-re-busy00", frozenset({ResourceId.FOCUS}))
+
+    arb.reconcile({"orchestrator"})
+
+    assert arb.snapshot() == {
+        ResourceId.MONITOR: "a-re-gone00",
+        ResourceId.FOCUS: "a-re-busy00",
+    }
+    arb.settle(running, failed=False)  # dropped by reconcile: goes now
+    assert arb.snapshot() == {ResourceId.MONITOR: "a-re-gone00"}
+    arb.settle(call, failed=True)
+    arb.reconcile({"orchestrator"})
+    assert arb.snapshot() == {}
+
+
+def test_declared_release_waits_for_an_in_flight_user():
+    arb = DeviceResourceArbiter()
+    start = arb.acquire("A", frozenset({ResourceId.MITMPROXY}))
+    arb.abandon(start)
+    stop = arb.acquire("A", frozenset())
+    arb.settle(stop, failed=False, releases=frozenset({ResourceId.MITMPROXY}))
+    assert arb.snapshot() == {ResourceId.MITMPROXY: "A"}  # start still runs
+    arb.settle(start, failed=False)
+    assert arb.snapshot() == {}
+
+
+def test_note_subtask_again_cancels_a_pending_forget():
+    arb = DeviceResourceArbiter()
+    arb.note_subtask("a-op-x")
+    call = arb.acquire("a-op-x", frozenset())
+    arb.abandon(call)
+    arb.forget_subtask("a-op-x")
+    arb.note_subtask("a-op-x")  # resumed (send_to_agent)
+    arb.settle(call, failed=True)
+    assert "a-op-x" in arb.live_subtasks()
