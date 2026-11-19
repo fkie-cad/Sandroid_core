@@ -1163,3 +1163,166 @@ def test_network_tab_ctrl_p_disarms_an_armed_ssl_unpin(monkeypatch):
 
     assert svc.armed_categories() == []
     assert lines == ["[INFO] SSL pinning bypass disarmed"]
+
+
+# --------------------------------------------------------------------------
+# identity profile values (privacy scan)
+# --------------------------------------------------------------------------
+
+
+def _plain(renderable, width: int = 100) -> str:
+    import io
+
+    from rich.console import Console
+
+    console = Console(width=width, record=True, color_system=None, file=io.StringIO())
+    console.print(renderable)
+    return console.export_text()
+
+
+def _privacy_hits():
+    from privacy_fakes import flow_hit
+
+    return [
+        flow_hit("flow-2"),
+        flow_hit(
+            "flow-3",
+            "Email",
+            "Email",
+            party="first",
+            recipient="fittrack.de",
+            host="api.fittrack.de",
+            path="/v2/profile?mail=jane.canary@example.org",
+            part="url",
+            transform="value",
+            snippet=("/v2/profile?mail=", "jane.canary@example.org", ""),
+            offsets=(32,),
+        ),
+    ]
+
+
+async def test_flows_with_profile_values_are_tinted_named_and_filtered(
+    flow_dir, monkeypatch
+):
+    import privacy_fakes
+    from rich.style import Style
+
+    from sandroid.tui.themes import lens_palette
+
+    privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        table = panel.table
+        assert [str(c.value) for c in table.columns][:3] == ["time", "who", "ident"]
+        assert table.profile_keys == {"f2", "f3"}
+        assert str(table.get_cell("f2", "ident")) == "Ad ID"
+        assert str(table.get_cell("f3", "ident")) == "Email"
+        pal = lens_palette()
+        assert table.get_cell("f2", "ident").spans[0].style == pal.warn
+        assert table.get_cell("f3", "ident").spans[0].style == pal.accent
+        assert str(table.get_cell("f4", "ident")) == ""
+        # The row tint: a background on f2 / f3 only.
+        tinted = table._get_row_style(table.get_row_index("f2"), Style())
+        plain = table._get_row_style(table.get_row_index("f4"), Style())
+        assert tinted.bgcolor is not None
+        assert plain.bgcolor is None
+        assert "2 carry profile values" in ms._lens_captions["network"][1]
+        # ! shows only the flows with profile values, and back.
+        total = table.row_count
+        await pilot.press("exclamation_mark")
+        await until(pilot, lambda: table.row_count == 2)
+        assert "!: profile values only" in ms._lens_captions["network"][1]
+        await pilot.press("exclamation_mark")
+        await until(pilot, lambda: table.row_count == total)
+        # / matches the value names too.
+        panel.set_filter("ad id")
+        await until(pilot, lambda: table.row_count == 1)
+        assert table.coordinate_to_cell_key((0, 0)).row_key.value == "f2"
+        cells = "".join(
+            str(table.get_cell(k, "ident")) for k in ("f2",) if table.row_count
+        )
+        assert not set(privacy_fakes.GLYPHS) & set(cells)
+
+
+async def test_identity_tab_lists_each_hit_in_words(flow_dir, monkeypatch):
+    import privacy_fakes
+
+    from sandroid.tui.themes import lens_palette
+
+    privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        content = panel.flow_content(panel._row_by_key("f2"))
+        names = [name for name, _ in content.tabs]
+        assert names == ["Summary", "Request", "Response", "Identity"]
+        heading, body = dict(content.tabs)["Identity"][0]
+        assert heading == "1 profile value in this flow"
+        text = _plain(body)
+        for words in (
+            "Advertising ID",
+            "request body, sha256 of the lower-case value",
+            "sent to Meta, third party, high confidence",
+            "event=INSTALL&advertiser_id=3b9f0c1d&os=android",
+        ):
+            assert words in text, words
+        assert not set(privacy_fakes.GLYPHS) & set(text)
+        # The matched bytes are drawn on a warn background.
+        snippet = body.renderables[0]
+        marked = [s for s in snippet.spans if "on" in str(s.style)]
+        assert marked
+        assert snippet.plain[marked[0].start : marked[0].end] == "3b9f0c1d"
+        assert lens_palette().warn.lstrip("#") in str(marked[0].style.bgcolor)
+        url = _plain(
+            dict(panel.flow_content(panel._row_by_key("f3")).tabs)["Identity"][0][1]
+        )
+        assert "query string, as is" in url
+        assert "first party" in url
+        # A flow without profile values has no Identity tab.
+        plain = panel.flow_content(panel._row_by_key("f4"))
+        assert [name for name, _ in plain.tabs] == ["Summary", "Request", "Response"]
+
+
+async def test_hits_found_later_mark_rows_already_drawn(flow_dir, monkeypatch):
+    import privacy_fakes
+    from privacy_fakes import flow_hit
+
+    fake = privacy_fakes.install(monkeypatch, [flow_hit("flow-2")])
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        assert panel.table.profile_keys == {"f2"}
+        panel.table.move_cursor(row=0)
+        await settle(pilot)
+        fake.add(flow_hit("flow-4", "GPS", "GPS", party="third", recipient="Google"))
+        await until(pilot, lambda: "f4" in panel.table.profile_keys)
+        assert str(panel.table.get_cell("f4", "ident")) == "GPS"
+        assert panel.table.cursor_row == 0  # not yanked
+        await until(
+            pilot, lambda: "2 carry profile values" in ms._lens_captions["network"][1]
+        )
+
+
+async def test_narrow_lens_drops_the_identity_column_but_keeps_the_tint(
+    flow_dir, monkeypatch
+):
+    import privacy_fakes
+
+    privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=(96, 40)) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        assert "ident" not in [str(c.value) for c in panel.table.columns]
+        assert panel.table.profile_keys == {"f2", "f3"}
+
+
+async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
+    import privacy_fakes
+
+    privacy_fakes.install(monkeypatch, [], active=False)
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        assert len(panel.table.columns) == 5
+        assert panel.table.profile_keys == set()

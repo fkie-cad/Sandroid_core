@@ -31,6 +31,15 @@ Play services background traffic, Google ``*-pa`` APIs, Sandroid's own
 too, and ``v`` is only the Sessions lens's "review". The frame caption carries the
 counts ("38 of 412").
 
+Identity profile values (:mod:`sandroid.services.privacy_scan`): a flow that
+carries a seeded value gets a faint warn-tinted row and, from 100 columns, an
+Identity column naming the values in words (``Ad ID, GPS``; third party in
+the warn colour, first party in the accent colour); ``!`` shows only those
+flows, ``/`` matches the value names too, and the Inspector gains an Identity
+tab (where, how encoded, to whom, how sure, the matched text highlighted).
+Hits the scanner finds later re-mark rows already drawn (at most once a
+second).
+
 Proxy & friTap plumbing: :class:`MitmproxyPanel` and :class:`FriTapPanel` are
 mounted hidden inside this lens as controllers; this lens binds their keys
 (``Ctrl+D`` device proxy, ``Ctrl+N`` CA, ``Ctrl+P`` unpin, ...) and shows
@@ -56,6 +65,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -64,6 +74,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl
 
 from rich.markup import escape
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -72,12 +83,14 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
-from sandroid.tui.utils.ui_thread import in_app_context
+from sandroid.tui.utils.ui_thread import UiDispatcher, in_app_context
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rich.console import RenderableType
     from textual.app import ComposeResult
 
@@ -650,21 +663,353 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
 
 
 # --------------------------------------------------------------------------
+# identity profile values (privacy scan): words, colours, snippets
+# --------------------------------------------------------------------------
+#
+# Shared by the Network, Files, Timeline and Sessions lenses. Everything here
+# reads the privacy scan service's in-memory records only (no file reads) and
+# speaks in plain words: no glyphs, colours from the lens theme tokens.
+
+#: Hits arriving live redraw a lens at most this often (seconds).
+PRIVACY_REFRESH_S = 1.0
+#: The Identity column is shown from this lens width on (the row tint stays).
+PRIVACY_COLUMN_MIN_WIDTH = 100
+
+
+def privacy_service() -> Any | None:
+    """The privacy scan service, or None when it is not available."""
+    try:
+        from sandroid.services import privacy_scan
+
+        return privacy_scan.get_privacy_scan_service()
+    except Exception:
+        logger.debug("privacy scan service unavailable", exc_info=True)
+        return None
+
+
+def encoding_words(transform: str) -> str:
+    """``sha256(lower(value))`` -> ``sha256 of the lower-case value``;
+    ``value`` -> ``as is``; ``round(value, 4)`` -> ``rounded to 4 decimals``.
+    """
+    from sandroid.core.report_engine import transform_words
+
+    return transform_words(transform)
+
+
+def where_words(part: str, source: dict | None = None, offsets: Any = ()) -> str:
+    """Where in a flow or file a value was found, in words.
+
+    ``url`` is ``query string`` when the match lies after the ``?`` (else
+    ``URL path`` / ``host name``); headers name the header; ``file:<member>``
+    names a companion file (``-wal``) when it is not the file itself.
+    """
+    part = part or ""
+    if part == "url":
+        src = source or {}
+        host = str(src.get("host") or "")
+        full = host + str(src.get("path") or "")
+        first = next(iter(offsets or ()), None)
+        query = full.find("?")
+        if isinstance(first, int):
+            if query >= 0 and first > query:
+                return "query string"
+            if first < len(host):
+                return "host name"
+            return "URL path"
+        return "URL"
+    head, _, name = part.partition(":")
+    if head == "req.header":
+        return f"header {name}"
+    if head == "resp.header":
+        return f"response header {name}"
+    if head == "req.body":
+        return "request body"
+    if head == "resp.body":
+        return "response body"
+    if head == "file":
+        device_path = str((source or {}).get("device_path") or "")
+        if not name or device_path.rsplit("/", 1)[-1] == name:
+            return "file"
+        return f"file {name}"
+    return part.replace(".", " ")
+
+
+def party_words(party: str | None) -> str:
+    return {
+        "third": "third party",
+        "first": "first party",
+        "stored": "stored on the device",
+    }.get(party or "", "unknown party")
+
+
+def confidence_words(confidence: str | None) -> str:
+    return f"{confidence or 'low'} confidence"
+
+
+def party_color(party: str | None) -> str:
+    """Theme colour of a party: third = warn, first / stored = accent."""
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    if party == "third":
+        return pal.warn
+    if party in ("first", "stored"):
+        return pal.accent
+    return pal.text
+
+
+def profile_tint(role: str = "warn", amount: float = 0.13) -> str:
+    """The lens background blended a little towards a theme token."""
+    from textual.color import Color
+
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    try:
+        return Color.parse(pal.bg).blend(Color.parse(getattr(pal, role)), amount).hex
+    except Exception:
+        return pal.bg
+
+
+def tag_words(tags: Any, width: int | None = None) -> Text:
+    """``Ad ID, GPS, Email`` coloured by party (strongest first)."""
+    text = Text(no_wrap=True, overflow="ellipsis")
+    for i, tag in enumerate(tags or ()):
+        if i:
+            text.append(", ")
+        text.append(str(tag.tag or tag.label), style=party_color(tag.party))
+    if width is not None and width > 0:
+        text.truncate(width, overflow="ellipsis")
+    return text
+
+
+def tags_plain(tags: Any) -> str:
+    return ", ".join(str(t.tag or t.label) for t in tags or ())
+
+
+def _clean(text: str) -> str:
+    return "".join(ch if ch.isprintable() else " " for ch in str(text or ""))
+
+
+def snippet_text(snippet: Any) -> Text:
+    """``(before, match, after)`` with the match on a warn-coloured background."""
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    before, match, after = (list(snippet or ()) + ["", "", ""])[:3]
+    text = Text(overflow="fold")
+    text.append(_clean(before), style=pal.dim)
+    text.append(_clean(match), style=Style(color=pal.bg, bgcolor=pal.warn, bold=True))
+    text.append(_clean(after), style=pal.dim)
+    return text
+
+
+def _hit_order(hit: Any) -> tuple:
+    from sandroid.core.privacy_markers import CONFIDENCES
+
+    rank = {"sent": 0, "stored": 1, "received": 2}
+    conf = CONFIDENCES.index(hit.confidence) if hit.confidence in CONFIDENCES else 9
+    return (rank.get(hit.direction, 9), conf, str(hit.label).lower(), hit.part)
+
+
+def hit_lines(hit: Any, *, with_snippet: bool = True) -> Text:
+    """One hit in words: value, where, encoding, party, confidence, snippet."""
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    recipient = hit.recipient or {}
+    party = recipient.get("party") if hit.direction != "stored" else "stored"
+    out = Text()
+    out.append(str(hit.label), style=Style(color=party_color(party), bold=True))
+    if hit.count > 1:
+        out.append(f"  {hit.count} times", style=pal.dim)
+    out.append("\n  ")
+    out.append(where_words(hit.part, hit.source, hit.offsets), style=pal.text)
+    out.append(", ", style=pal.dim)
+    out.append(encoding_words(hit.transform), style=pal.text)
+    if hit.approx:
+        out.append(", less precise than seeded", style=pal.dim)
+    out.append("\n  ")
+    if hit.direction == "received":
+        out.append("came back in the response", style=pal.muted)
+        if hit.echo:
+            out.append(" after it was sent", style=pal.muted)
+    elif hit.direction == "stored":
+        out.append("stored on the device", style=party_color("stored"))
+    else:
+        label = recipient.get("label") or hit.source.get("host") or "unknown"
+        out.append(f"sent to {label}, ", style=pal.muted)
+        out.append(party_words(party), style=party_color(party))
+    out.append(", ", style=pal.dim)
+    conf_style = pal.dim if hit.confidence == "low" else pal.muted
+    out.append(confidence_words(hit.confidence), style=conf_style)
+    if with_snippet and any(hit.snippet or ()):
+        out.append("\n  ")
+        out.append_text(snippet_text(hit.snippet))
+    return out
+
+
+def hits_renderable(hits: Any) -> RenderableType:
+    """Every hit of a flow or file, strongest first, one block each."""
+    from rich.console import Group
+
+    blocks: list[RenderableType] = []
+    for i, hit in enumerate(sorted(hits or (), key=_hit_order)):
+        if i:
+            blocks.append(Text(""))
+        blocks.append(hit_lines(hit))
+    return Group(*blocks)
+
+
+def _privacy_tags_for_flow(flow_id: str | None) -> list:
+    if not flow_id:
+        return []
+    service = privacy_service()
+    if service is None:
+        return []
+    try:
+        return list(service.tags_for_flow(flow_id))
+    except Exception:
+        return []
+
+
+class PrivacyFeed:
+    """New privacy-scan hits for a lens, redrawn at most once a second.
+
+    The scan service calls listeners on its worker thread; this only queues
+    ``key(record)`` (a flow id, a device path ...) and posts one UI hop
+    (non-blocking, :class:`UiDispatcher`). On the UI the owner's
+    ``flush(keys)`` runs at most once per :data:`PRIVACY_REFRESH_S`.
+    """
+
+    def __init__(
+        self,
+        owner: Widget,
+        flush: Callable[[set[str]], None],
+        key: Callable[[Any], Any],
+    ) -> None:
+        self._owner = owner
+        self._flush_cb = flush
+        self._key = key
+        self._lock = threading.Lock()
+        self._pending: set[str] = set()
+        self._posted = False
+        self._last = 0.0
+        self._ui = UiDispatcher()
+        self._service: Any = None
+
+    def attach(self) -> None:
+        """Start listening (call on the UI thread, e.g. ``on_mount``)."""
+        self._ui = UiDispatcher.capture()
+        service = privacy_service()
+        if service is None:
+            return
+        try:
+            service.add_listener(self.on_hit)
+            self._service = service
+        except Exception:
+            logger.debug("privacy listener not attached", exc_info=True)
+
+    def detach(self) -> None:
+        service, self._service = self._service, None
+        if service is not None:
+            try:
+                service.remove_listener(self.on_hit)
+            except Exception:
+                pass
+
+    def on_hit(self, rec: Any) -> None:
+        """Scan worker thread: queue the record's key, post one UI hop."""
+        try:
+            key = self._key(rec)
+        except Exception:
+            key = None
+        if not key:
+            return
+        with self._lock:
+            self._pending.add(str(key))
+            if self._posted:
+                return
+            self._posted = True
+        if not self._ui.post(self._schedule):
+            with self._lock:
+                self._posted = False
+
+    def _schedule(self) -> None:
+        wait = self._last + PRIVACY_REFRESH_S - time.monotonic()
+        if wait > 0:
+            try:
+                self._owner.set_timer(wait, self._flush)
+                return
+            except Exception:
+                pass
+        self._flush()
+
+    def _flush(self) -> None:
+        with self._lock:
+            pending, self._pending = self._pending, set()
+            self._posted = False
+        self._last = time.monotonic()
+        if pending and self._owner.is_attached:
+            self._flush_cb(pending)
+
+
+class ProfileTintMixin:
+    """A ``DataTable`` whose rows in ``profile_keys`` get a faint warn tint.
+
+    For rows that carry identity-profile values. Uses Textual 8.2's row
+    style hook (``_get_row_style``); the cursor row keeps the cursor colour.
+    Changing ``profile_keys`` needs a cell update (``update_cell``) to
+    redraw, as any other row change.
+    """
+
+    profile_keys: set[str]
+
+    def clear(self, columns: bool = False):
+        self.profile_keys = set()
+        return super().clear(columns)  # type: ignore[misc]
+
+    def _get_row_style(self, row_index: int, base_style: Style) -> Style:
+        style = super()._get_row_style(row_index, base_style)  # type: ignore[misc]
+        keys = getattr(self, "profile_keys", None)
+        if row_index < 0 or not keys:
+            return style
+        try:
+            from textual.coordinate import Coordinate
+
+            cell = self.coordinate_to_cell_key(Coordinate(row_index, 0))  # type: ignore[attr-defined]
+        except Exception:
+            return style
+        if cell.row_key.value in keys:
+            return style + Style(bgcolor=profile_tint())
+        return style
+
+
+# --------------------------------------------------------------------------
 # the lens
 # --------------------------------------------------------------------------
 
 
-class FlowTable(DataTable):
+class FlowTable(ProfileTintMixin, DataTable):
     """The flow table: Home / End jump to the first / last row.
 
     DataTable's own Home / End scroll sideways (the cursor is a row cursor
     here, so they did nothing visible; End never reached the newest flow).
+
+    Rows in ``profile_keys`` (flows carrying identity-profile values) get a
+    faint warn-coloured background (``_get_row_style``, Textual 8.2's row
+    style hook; the cursor row keeps the cursor colour).
     """
 
     BINDINGS = [
         Binding("home", "scroll_top", "First row", show=False),
         Binding("end", "scroll_bottom", "Last row", show=False),
     ]
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: Row keys of flows that carry identity-profile values.
+        self.profile_keys = set()
 
 
 class NetworkPanel(Widget):
@@ -698,6 +1043,13 @@ class NetworkPanel(Widget):
         Binding("ctrl+l", "clear_view", "Clear view", show=False),
         Binding("ctrl+f", "fritap_output", "friTap output", show=False),
         Binding("A", "toggle_phases", "Review: show dry-run/setup flows", show=False),
+        Binding(
+            "exclamation_mark",
+            "toggle_profile_only",
+            "Only flows with profile values",
+            key_display="!",
+            show=False,
+        ),
     ]
 
     DEFAULT_CSS = """
@@ -808,6 +1160,12 @@ class NetworkPanel(Widget):
         self._net_layout: list[tuple[str, str, int]] = []
         self._status_pending = False
         self._filter_timer = None
+        # identity profile values (privacy scan; see the _privacy_* methods)
+        self._profile_only = False
+        self._privacy_table: DataTable | None = None
+        self._privacy_feed = PrivacyFeed(
+            self, self._privacy_flush, lambda rec: rec.flow_id
+        )
 
     # -- compose / mount -------------------------------------------------
 
@@ -834,6 +1192,7 @@ class NetworkPanel(Widget):
         # Recipient labels come from Dexray Insight; its first import takes
         # ~0.2 s (androguard), so warm it off the UI thread.
         self.run_worker(_insight_labeller, thread=True, name="net-insight-labels")
+        self._privacy_feed.attach()
         self._rebuild()
         try:
             self.set_interval(self.POLL_SECONDS, self._tick)
@@ -1085,6 +1444,8 @@ class NetworkPanel(Widget):
         """Whether ``row`` is shown (``noise=False``: ignore the noise filter)."""
         if self.in_review and not self._show_all_phases and row.phase in HIDDEN_PHASES:
             return False
+        if self._profile_only and not _privacy_tags_for_flow(row.flow_id):
+            return False
         if self._app_only and self._focus_app and row.app != self._focus_app:
             return False
         if (
@@ -1113,6 +1474,7 @@ class NetworkPanel(Widget):
         else:
             status = str(row.status) if row.status is not None else ""
         hay = f"{row.method} {row.host}{row.path} {row.app} {row.recipient[0]} {status}"
+        hay += " " + tags_plain(_privacy_tags_for_flow(row.flow_id))
         return hay.lower()
 
     def _count_phase_hidden(self) -> dict[str, int]:
@@ -1148,6 +1510,7 @@ class NetworkPanel(Widget):
         avail = self.size.width or 120
         who = 18 if avail >= 110 else (16 if avail >= 58 else 12)
         cols = [("time", "Time", 8), ("who", "Recipient", who)]
+        cols += self._privacy_columns(avail)
         cols += [("req", "Request", 0), ("status", "Status", 9), ("size", "Size", 10)]
         if avail < 76:
             cols = [c for c in cols if c[0] != "size"]
@@ -1203,6 +1566,7 @@ class NetworkPanel(Widget):
                 size = Text("–", style="#5b6479")
         size.justify = "right"
         cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
+        cells["ident"] = self._privacy_cell(row, widths.get("ident", 0))
         return [cells[k] for k, _, _ in layout]
 
     def _columns(self, table: DataTable) -> list[tuple[str, str, int]]:
@@ -1358,6 +1722,8 @@ class NetworkPanel(Widget):
                 widen.append("T shows all apps")
             if not self._show_noise:
                 widen.append("N shows OS noise")
+            if self._profile_only:
+                widen.append("! shows flows without profile values")
             head = "Nothing matches"
             if self._app_only and self._focus_app:
                 head = f"No flows attributed to {escape(self._focus_app)}"
@@ -1485,6 +1851,7 @@ class NetworkPanel(Widget):
             parts.append(f"A: {hidden} hidden")
         elif self.in_review and self._show_all_phases:
             parts.append("+ dry run/setup")
+        parts += self._privacy_caption_parts()
         if self._filter:
             parts.append(f"“{escape(self._filter)}”")
         if self._shown:
@@ -1810,10 +2177,12 @@ class NetworkPanel(Widget):
                 response.insert(
                     0, ("Error", Text(str(detail["error"]), style="#fb7185"))
                 )
+        tabs = [("Summary", summary), ("Request", request), ("Response", response)]
+        tabs += self._identity_tabs(row)
         return InspectorContent(
             title=f"{row.method} {label}",
             subtitle=escape(_ellipsize(row.host + row.path, 300)),
-            tabs=[("Summary", summary), ("Request", request), ("Response", response)],
+            tabs=tabs,
             footer="←/→ tab",
             key=key,
             lens=LENS_ID,
@@ -1867,6 +2236,114 @@ class NetworkPanel(Widget):
     def select_subtab(self, panel_id: str) -> None:
         """Legacy hook (``MainScreen.open_fritap_tab``, key ``h``)."""
         self.open_status(1 if panel_id == "fritap-panel" else 0)
+
+    # -- identity profile values (privacy scan) ----------------------------
+    #
+    # Flows carrying values of the active identity profile get a faint warn
+    # tint (FlowTable.profile_keys), an Identity column (from
+    # PRIVACY_COLUMN_MIN_WIDTH, only while a profile is set or hits are
+    # loaded) and an Identity Inspector tab. ``!`` shows only those flows.
+    # Hits found later (the scan worker) mark rows already drawn through a
+    # PrivacyFeed (UI redraw at most once per PRIVACY_REFRESH_S).
+
+    def on_unmount(self) -> None:
+        self._privacy_feed.detach()
+
+    def _privacy_wanted(self) -> bool:
+        """A profile is set or hits are loaded (the Identity column has a use)."""
+        service = privacy_service()
+        if service is None:
+            return False
+        try:
+            return bool(service.is_active or service.hits())
+        except Exception:
+            return False
+
+    def _privacy_columns(self, avail: int) -> list[tuple[str, str, int]]:
+        if avail < PRIVACY_COLUMN_MIN_WIDTH or not self._privacy_wanted():
+            return []
+        return [("ident", "Identity", 18 if avail >= 130 else 14)]
+
+    def _privacy_cell(self, row: FlowRow, width: int) -> Text:
+        """The Identity cell; also (un)marks the row for the tint."""
+        tags = _privacy_tags_for_flow(row.flow_id) if row.kind == "flow" else []
+        table = self._privacy_table
+        if table is None:  # one DOM query, not one per row
+            try:
+                table = self._privacy_table = self.table
+            except Exception:
+                table = None
+        if isinstance(table, FlowTable):
+            if tags:
+                table.profile_keys.add(row.key)
+            else:
+                table.profile_keys.discard(row.key)
+        return tag_words(tags, width or None)
+
+    def _privacy_caption_parts(self) -> list[str]:
+        parts = []
+        try:
+            n = len(self.table.profile_keys)
+        except Exception:
+            n = 0
+        if self._profile_only:
+            parts.append("!: profile values only")
+        elif n:
+            parts.append(f"{n} carry profile values")
+        return parts
+
+    def _identity_tabs(self, row: FlowRow) -> list:
+        """``[("Identity", sections)]`` when the flow carries profile values."""
+        if row.kind != "flow" or not row.flow_id:
+            return []
+        service = privacy_service()
+        try:
+            hits = list(service.hits_for_flow(row.flow_id)) if service else []
+        except Exception:
+            hits = []
+        if not hits:
+            return []
+        values = len({h.marker_id for h in hits})
+        heading = f"{values} profile value{'s' if values != 1 else ''} in this flow"
+        return [("Identity", [(heading, hits_renderable(hits))])]
+
+    def _privacy_flush(self, pending: set[str]) -> None:
+        """Redraw the rows (and the open Inspector) of flows with new hits."""
+        try:
+            table = self.table
+        except Exception:
+            return
+        keys = [k for k, _, _ in self._net_layout]
+        has_col = "ident" in keys
+        wants_col = bool(self._privacy_columns(self.size.width or 120))
+        if self._profile_only or has_col != wants_col or not keys:
+            self._rebuild()
+        else:
+            column = "ident" if has_col else "req"
+            for row in self._model():
+                if row.flow_id not in pending:
+                    continue
+                try:
+                    table.get_row_index(row.key)
+                except Exception:
+                    continue
+                cells = dict(
+                    zip(keys, self._cells(row, self._net_layout), strict=False)
+                )
+                table.update_cell(row.key, column, cells[column])
+        if self._inspecting_flow():
+            ms = self._main_screen()
+            key = str(ms.inspector_content.key).removeprefix("network:row:")
+            row = self._row_by_key(key)
+            if row is not None and row.flow_id in pending:
+                ms.update_inspector(self.flow_content(row))
+        self._do_refresh_status()
+
+    def action_toggle_profile_only(self) -> None:
+        """``!``: show only the flows that carry identity-profile values."""
+        self._profile_only = not self._profile_only
+        self._rebuild()
+        self._do_refresh_status()
 
     # -- actions ---------------------------------------------------------
 

@@ -376,9 +376,14 @@ async def test_inspector_content_has_summary_changes_report_tabs() -> None:
         content = view.inspect_selected()
         assert content.key == ("run", run_id)
         assert content.title == "Consent · refuse"
-        assert [name for name, _ in content.tabs] == ["Summary", "Changes", "Report"]
+        assert [name for name, _ in content.tabs] == [
+            "Summary",
+            "Changes",
+            "Report",
+            "Privacy",
+        ]
 
-        summary, changes, report = (text(s) for _, s in content.tabs)
+        summary, changes, report, _privacy = (text(s) for _, s in content.tabs)
         assert "8 s after replay" in summary
         assert "airplane" in summary
         assert "Step0" in summary  # the run's step error
@@ -453,6 +458,7 @@ async def test_enter_inspects_run_and_v_reviews_it_until_l() -> None:
             "Summary",
             "Changes",
             "Report",
+            "Privacy",
         ]
         # The open Inspector follows the cursor.
         await pilot.press("down")
@@ -836,7 +842,7 @@ async def test_arrows_switch_inspector_tabs_at_every_size(size) -> None:
         start = inspector.tab_index
         await pilot.press("right")
         await settle(pilot)
-        assert inspector.tab_index == (start + 1) % 3
+        assert inspector.tab_index == (start + 1) % 4
         assert table.scroll_x == 0
         await pilot.press("left")
         await settle(pilot)
@@ -882,3 +888,147 @@ async def test_inspector_recording_is_the_recordings_own_length() -> None:
         summary = console.export_text()
         assert "1m 20s" in summary
         assert "1m 33s" not in summary
+
+
+# ---------------------------------------------------------------------------
+# Privacy tab (identity profile values found during the run)
+# ---------------------------------------------------------------------------
+
+
+def _at(minute: int) -> float:
+    from datetime import datetime
+
+    return datetime(2026, 7, 21, 10, minute).astimezone().timestamp()
+
+
+def _privacy_run_hits():
+    from privacy_fakes import file_hit, flow_hit
+
+    return [
+        flow_hit("flow-1", t=_at(1), tl_seq=41),
+        flow_hit("flow-2", t=_at(2), tl_seq=42),  # same finding again
+        flow_hit(
+            "flow-3",
+            "Email",
+            "Email",
+            party="first",
+            recipient="fittrack.de",
+            host="api.fittrack.de",
+            part="url",
+            transform="value",
+            t=_at(3),
+        ),
+        file_hit("/data/data/app/shared_prefs/p.xml", t=_at(4), version="v002"),
+        flow_hit("flow-9", "GPS", "GPS", t=_at(30)),  # after the run
+    ]
+
+
+def _text_of(sections) -> str:
+    from io import StringIO
+
+    from rich.console import Console
+
+    console = Console(width=200, file=StringIO(), color_system=None)
+    for heading, body in sections:
+        if heading:
+            console.print(heading)
+        console.print(body)
+    return console.file.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_lists_the_runs_findings_by_recipient(monkeypatch) -> None:
+    import privacy_fakes
+
+    privacy_fakes.install(monkeypatch, _privacy_run_hits())
+    run_id = "20260101_000000_bbbbbb"
+    _save(run_id, label="Consent · accept")
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(run_id) is not None)
+        content = view._run_content(run_id)
+        privacy = dict(content.tabs)["Privacy"]
+        text = _text_of(privacy)
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        assert lines[0] == ("2 profile values sent to 2 recipients or stored")
+        assert "Meta  third party" in lines
+        assert any(
+            ln.startswith("  Advertising ID, sha256 of the lower-case value, "
+                          "request body, 10:01:00")
+            for ln in lines
+        )  # fmt: skip
+        assert "fittrack.de  first party" in lines
+        assert any(ln.startswith("  Email, as is, URL path") for ln in lines)
+        assert "Stored on the device" in lines
+        assert any("Email, in /data/data/app/shared_prefs/p.xml, as is" in ln
+                   for ln in lines)  # fmt: skip
+        assert "GPS" not in text  # found after the run
+        assert text.count("Advertising ID") == 1  # first hit per finding
+        assert not set(privacy_fakes.GLYPHS) & set(text)
+        # { } and clicks pick a finding (other tabs ignore them).
+        content.keys["right_curly_bracket"]("Summary")
+        assert view._privacy_pick.get(run_id, 0) == 0
+        content.keys["right_curly_bracket"]("Privacy")
+        assert view._privacy_pick[run_id] == 1
+        _body, line_map = view._privacy_render(
+            run_id, view._privacy_findings(view._summary(run_id))[0]
+        )
+        last = max(i for i in line_map if i is not None)
+        assert content.click("Privacy", 2 + line_map.index(last))
+        assert view._privacy_pick[run_id] == last
+        assert not content.click("Privacy", 2)  # a recipient heading
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_empty_states_and_jump(monkeypatch) -> None:
+    import privacy_fakes
+
+    fake = privacy_fakes.install(monkeypatch, [], active=False)
+    run_id = "20260101_000000_cccccc"
+    _save(run_id)
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(run_id) is not None)
+        text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+        assert "No identity profile was active." in text
+        fake.is_active = True
+        text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+        assert "No profile values found in this run." in text
+        # J: flow -> Network, file -> Files, else the timeline line.
+        calls: list = []
+
+        class _Lens:
+            def reveal_flow(self, fid, record=None):
+                calls.append(("net", fid, record["host"]))
+                return True
+
+            def reveal(self, path, version=None):
+                calls.append(("files", path, version))
+                return False
+
+            def select_seq(self, seq):
+                calls.append(("timeline", seq))
+                return True
+
+        class _Screen:
+            def switch_lens(self, lens_id):
+                calls.append(("switch", lens_id))
+
+            def lens_widget(self, lens_id):
+                return _Lens()
+
+        monkeypatch.setattr(view, "_main_screen", lambda: _Screen())
+        from privacy_fakes import file_hit, flow_hit
+
+        assert view.privacy_jump(flow_hit("flow-1"))
+        assert view.privacy_jump(file_hit("/data/data/a/p.xml", tl_seq=7))
+        assert calls == [
+            ("switch", "network"),
+            ("net", "flow-1", "graph.facebook.com"),
+            ("switch", "files"),
+            ("files", "/data/data/a/p.xml", "v001_x"),
+            ("switch", "timeline"),
+            ("timeline", 7),
+        ]

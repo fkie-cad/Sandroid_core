@@ -397,6 +397,43 @@ _ST = {
     "intervention": Style(color="#fb923c", bold=True),
     "note": Style(color="#5b6479", italic=True),
 }
+#: Per line type styling, keyed by ``(src, kind)`` or ``src`` (the pair wins):
+#: ``fg`` colours the summary, ``tint`` blends the row background a little
+#: towards a colour, ``bold``. Colours are lens theme token names
+#: (``LensPalette`` fields), read at render time.
+_TYPE_STYLE: dict[tuple[str, str] | str, dict[str, Any]] = {
+    # Identity-profile values found by the privacy scan.
+    ("privacy", "sent"): {"fg": "warn", "tint": "warn", "bold": True},
+    ("privacy", "stored"): {"fg": "accent", "tint": "accent"},
+}
+#: How far ``tint`` moves the row background towards its colour.
+_TINT_AMOUNT = 0.13
+
+
+def type_style(src: str, kind: str) -> tuple[Style | None, Style | None]:
+    """``(summary style, row background)`` of a line type, or ``None``s."""
+    spec = _TYPE_STYLE.get((src, kind)) or _TYPE_STYLE.get(src)
+    if not spec:
+        return None, None
+    from textual.color import Color
+
+    from sandroid.tui.themes import lens_palette
+
+    pal = lens_palette()
+    fg = getattr(pal, spec["fg"], None) if spec.get("fg") else None
+    text = Style(color=fg, bold=bool(spec.get("bold")) or None) if fg else None
+    tint = None
+    if spec.get("tint"):
+        try:
+            color = Color.parse(pal.bg).blend(
+                Color.parse(getattr(pal, spec["tint"])), _TINT_AMOUNT
+            )
+            tint = Style(bgcolor=color.hex)
+        except Exception:
+            tint = None
+    return text, tint
+
+
 _RUN_ICON = {
     "record-start": "● REC",
     "record-stop": "■ REC",
@@ -1166,10 +1203,11 @@ class TimelineLens(Vertical):
     def _render_row(self, vi: int, width: int, selected: bool) -> Strip:
         index = self._view[vi]
         row = self._rows[index]
-        bg = _BG_SEL if selected else None
+        typed, tint = type_style(row.src, row.kind)
+        bg = _BG_SEL if selected else tint
 
         def st(name: str) -> Style:
-            style = _ST[name]
+            style = typed if name == "text" and typed is not None else _ST[name]
             return style + bg if bg is not None else style
 
         segments: list[Segment] = []
@@ -1682,6 +1720,10 @@ class TimelineLens(Vertical):
             panel = ms.lens_widget("runs")
             select = getattr(panel, "select_run", None)
             return bool(select(str(ref["run"]))) if select else False
+        if row.src == "privacy" and ms is not None:
+            hop = self._privacy_jump(row, ms)
+            if hop is not None:
+                return hop
         if row.ref_of is not None:
             if self._select_seq(row.ref_of):
                 return True
@@ -1690,6 +1732,36 @@ class TimelineLens(Vertical):
                 return True
             return False
         return None
+
+    def _privacy_jump(self, row: Row, ms: Any) -> bool | None:
+        """A ``privacy`` line: the flow (Network) or file (Files) it cites.
+
+        Its ``ref.of`` is the net / pull line of the finding; when that line
+        is loaded, its own jump runs (full flow record, file + version).
+        Otherwise the flow opens by ``ref.id``, the file by the scan record
+        of this line; None falls back to selecting the cited line.
+        """
+        ref = row.ref or {}
+        cited = self._by_seq.get(row.ref_of) if row.ref_of is not None else None
+        if cited is not None and cited.src in ("net", "files"):
+            done = self.jump(cited)
+            if done is not None:
+                return done
+        if ref.get("lens") == "network" and ref.get("id"):
+            ms.switch_lens("network")
+            reveal = getattr(ms.lens_widget("network"), "reveal_flow", None)
+            return bool(reveal(str(ref["id"]))) if reveal else False
+        if ref.get("lens") == "files":
+            path, version = _privacy_file_of(row.seq)
+            if path:
+                ms.switch_lens("files")
+                reveal = getattr(ms.lens_widget("files"), "reveal", None)
+                return bool(reveal(path, version=version)) if reveal else False
+        return None
+
+    def select_seq(self, seq: int) -> bool:
+        """Put the cursor on line ``seq`` (False: not loaded or filtered out)."""
+        return self._select_seq(seq)
 
     # -- inspector ---------------------------------------------------------------------
 
@@ -1981,6 +2053,20 @@ def _flow_record(row: Row) -> dict:
         "ts_end": end,
         "tls_reason": data.get("reason"),
     }
+
+
+def _privacy_file_of(seq: int) -> tuple[str | None, str | None]:
+    """``(device path, version)`` of the scan record a ``privacy`` line made."""
+    try:
+        from sandroid.services import privacy_scan
+
+        hits = privacy_scan.get_privacy_scan_service().hits()
+    except Exception:
+        return None, None
+    for hit in hits:
+        if hit.tl_seq == seq and hit.device_path:
+            return hit.device_path, hit.source.get("version")
+    return None, None
 
 
 def _find_by_seq(

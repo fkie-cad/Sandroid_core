@@ -2,7 +2,8 @@
 
 Every completed Play is one row of a full-width table (newest first):
 ``#`` · run label · when · how long · what changed. Details are on demand:
-Enter opens the run in the Inspector (Summary / Changes / Report tabs), and
+Enter opens the run in the Inspector (Summary / Changes / Report / Privacy
+tabs), and
 ``v`` puts the whole UI in REVIEW scope for that run, so the Files and
 Network lenses show *that* run instead of the live session
 (``MainScreen.set_scope``; the scope id is the run folder, see
@@ -22,6 +23,11 @@ highlighted, and only after a confirm; anywhere else it falls through
 (``SkipAction``) to the GLOBAL ``n`` = Install APK (``app.py``'s
 ``action_install_apk``, id ``"new_apk"``). ``v``, ``=``, ``z`` and ``P`` are
 unbound globally. Record ``r`` / Play ``p`` are global app keys.
+
+Privacy tab: the identity-profile values the privacy scan found during the
+run (``hits_between(run start, run end)``), grouped by recipient, in words.
+``{``/``}`` (Inspector keys) or a click picks a finding and ``J`` jumps to
+its flow (Network), file (Files) or timeline line.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from textual.binding import Binding
@@ -184,6 +191,7 @@ class DiffsView(FilesSubViewBase):
         Binding("backspace", "delete_run", "Delete", show=False),
         Binding("equals_sign", "compare_runs", "Compare", key_display="="),
         Binding("z", "zoom_diff", "Full diff"),
+        Binding("J", "privacy_jump", "Jump to the picked privacy finding", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -259,6 +267,13 @@ class DiffsView(FilesSubViewBase):
         self._width = 0
         self._cursor_synced_to: str | None = None
         self._compact = False
+        #: run_id -> index of the picked finding on the Privacy tab.
+        self._privacy_pick: dict[str, int] = {}
+        from .network_panel import PrivacyFeed
+
+        self._privacy_feed = PrivacyFeed(
+            self, lambda _keys: self._follow_in_inspector(), lambda _rec: "run"
+        )
 
     # -- compose / mount ---------------------------------------------------
 
@@ -278,10 +293,12 @@ class DiffsView(FilesSubViewBase):
             self._main_loop = None
         self._setup_columns()
         self._subscribe_events()
+        self._privacy_feed.attach()
         self._reload_index()
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
+        self._privacy_feed.detach()
 
     def _table(self) -> DataTable | None:
         try:
@@ -1028,9 +1045,12 @@ class DiffsView(FilesSubViewBase):
                 ("Summary", self._summary_sections(s, facts)),
                 ("Changes", self._changes_sections(s, record, facts)),
                 ("Report", self._report_sections(run_id, facts)),
+                ("Privacy", self._privacy_sections(run_id, s)),
             ],
             footer="v review · = compare · z diff · ⇧P pdf",
             key=("run", run_id),
+            keys=self._privacy_keys(run_id),
+            click=lambda tab, line: self._privacy_click(run_id, tab, line),
         )
 
     @staticmethod
@@ -1262,6 +1282,209 @@ class DiffsView(FilesSubViewBase):
             ("Folder", Text(run_dir, style=_MUTED)),
             ("", Text("⇧P write a new PDF report", style=_DIM)),
         ]
+
+    # -- Privacy tab (identity profile values found during the run) ---------
+
+    @staticmethod
+    def _epoch(iso: str | None) -> float | None:
+        if not iso:
+            return None
+        try:
+            dt = datetime.fromisoformat(str(iso))
+        except (TypeError, ValueError):
+            return None
+        return (dt if dt.tzinfo else dt.astimezone()).timestamp()
+
+    def _privacy_findings(self, s: dict[str, Any]) -> tuple[list, bool]:
+        """``(findings, profile known)`` of the run: the first hit per
+        recipient x value x encoding (stored: per file x value x encoding),
+        grouped by recipient. ``profile known``: a profile is set now or the
+        session has hits (so "nothing found" means something).
+        """
+        from .network_panel import privacy_service
+
+        service = privacy_service()
+        start = self._epoch(s.get("recorded_at"))
+        end = self._epoch(s.get("completed_at")) or start
+        if service is None or start is None or end is None:
+            return [], False
+        try:
+            hits = list(service.hits_between(start, max(start, end)))
+            known = bool(service.is_active or hits or service.hits())
+        except Exception:
+            return [], False
+        first: dict[tuple, Any] = {}
+        for hit in sorted(hits, key=lambda h: (h.t or 0.0, h.at)):
+            if hit.direction == "received":
+                continue
+            if hit.direction == "stored":
+                where = ("stored", str(hit.device_path or ""))
+            else:
+                rcpt = hit.recipient or {}
+                label = rcpt.get("label") or hit.source.get("host") or "unknown"
+                where = (str(rcpt.get("party") or "unknown"), str(label))
+            first.setdefault((where, hit.marker_id, hit.transform), hit)
+        groups: dict[tuple, list] = {}
+        for (where, _m, _t), hit in first.items():
+            groups.setdefault(where, []).append(hit)
+        rank = {"third": 0, "unknown": 1, "first": 2, "stored": 3}
+        ordered = sorted(groups.items(), key=lambda g: (rank.get(g[0][0], 9), g[0][1]))
+        findings = []
+        for where, group in ordered:
+            for hit in sorted(group, key=lambda h: (str(h.label).lower(), h.t or 0)):
+                findings.append((where, hit))
+        return findings, known
+
+    def _privacy_render(self, run_id: str, findings: list) -> tuple[Text, list]:
+        """The finding list (one line each, no wrap) and ``line -> index``."""
+        from sandroid.tui.themes import lens_palette
+
+        from .network_panel import (
+            encoding_words,
+            party_color,
+            party_words,
+            where_words,
+        )
+
+        pal = lens_palette()
+        pick = self._privacy_pick.get(run_id, 0) % max(1, len(findings))
+        text = Text(no_wrap=True, overflow="ellipsis")
+        lines: list[int | None] = []
+        group = None
+        for i, (where, hit) in enumerate(findings):
+            if where != group:
+                if group is not None:
+                    text.append("\n")
+                    lines.append(None)
+                group = where
+                party, label = where
+                if party == "stored":
+                    head = Text("Stored on the device", style=party_color("stored"))
+                else:
+                    head = Text(label, style=Style(color=party_color(party), bold=True))
+                    head.append(f"  {party_words(party)}", style=pal.dim)
+                text.append_text(head)
+                text.append("\n")
+                lines.append(None)
+            line = Text("  ")
+            line.append(str(hit.label), style=Style(color=pal.text, bold=True))
+            if party == "stored":
+                line.append(f", in {self._short_path(str(label), 40)}", style=pal.muted)
+            words = [
+                encoding_words(hit.transform),
+                where_words(hit.part, hit.source, hit.offsets),
+            ]
+            line.append(", " + ", ".join(words), style=pal.muted)
+            if hit.t:
+                line.append(f", {time.strftime('%H:%M:%S', time.localtime(hit.t))}")
+            if hit.confidence == "low":
+                line.append(", low confidence", style=pal.dim)
+            if i == pick:
+                line.stylize(Style(bgcolor=pal.cursor_focus))
+            text.append_text(line)
+            text.append("\n")
+            lines.append(i)
+        return text, lines
+
+    def _privacy_sections(self, run_id: str, s: dict[str, Any]) -> list:
+        findings, known = self._privacy_findings(s)
+        if not findings:
+            why = (
+                "No profile values found in this run."
+                if known
+                else "No identity profile was active."
+            )
+            return [("", Text(why, style=_DIM))]
+        values = len({hit.marker_id for _w, hit in findings})
+        recipients = len({w for w, _h in findings if w[0] != "stored"})
+        summary = Text()
+        summary.append(f"{values} profile value{'s' if values != 1 else ''}")
+        if recipients:
+            summary.append(
+                f" sent to {recipients} recipient{'s' if recipients != 1 else ''}"
+            )
+        if any(w[0] == "stored" for w, _h in findings):
+            summary.append(" or stored" if recipients else " stored on the device")
+        body, _lines = self._privacy_render(run_id, findings)
+        hint = Text("{ } pick a finding, J jumps to its source", style=_DIM)
+        return [("", summary), ("", body), ("", hint)]
+
+    def _privacy_keys(self, run_id: str) -> dict:
+        def step(delta: int):
+            def go(tab: str | None) -> None:
+                if tab != "Privacy":
+                    return
+                self._privacy_pick[run_id] = self._privacy_pick.get(run_id, 0) + delta
+                self._follow_in_inspector()
+
+            return go
+
+        return {"left_curly_bracket": step(-1), "right_curly_bracket": step(1)}
+
+    def _privacy_click(self, run_id: str, tab: str | None, line: int) -> bool:
+        """A click on a finding picks it (body lines: summary, blank, list)."""
+        if tab != "Privacy":
+            return False
+        s = self._summary(run_id)
+        if s is None:
+            return False
+        findings, _known = self._privacy_findings(s)
+        if not findings:
+            return False
+        _text, lines = self._privacy_render(run_id, findings)
+        index = line - 2  # the summary line and the blank line before the list
+        if 0 <= index < len(lines) and lines[index] is not None:
+            self._privacy_pick[run_id] = lines[index]
+            self._follow_in_inspector()
+            return True
+        return False
+
+    def action_privacy_jump(self) -> None:
+        """``J``: jump to the picked finding's flow, file or timeline line."""
+        ms = self._main_screen()
+        run_id = self._selected_run_id
+        s = self._summary(run_id) if run_id else None
+        findings = self._privacy_findings(s)[0] if s is not None else []
+        if ms is None or not findings or not self._inspector_shows_run():
+            self._notify("Open a run's Privacy tab and pick a finding first.")
+            return
+        hit = findings[self._privacy_pick.get(run_id, 0) % len(findings)][1]
+        if not self.privacy_jump(hit):
+            self._notify("The finding's source is not available any more.", "warning")
+
+    def privacy_jump(self, hit: Any) -> bool:
+        """Show ``hit``'s source: its flow, its file version, else its line."""
+        ms = self._main_screen()
+        if ms is None:
+            return False
+        src = hit.source or {}
+        if hit.flow_id:
+            ms.switch_lens("network")
+            reveal = getattr(ms.lens_widget("network"), "reveal_flow", None)
+            record = {
+                "id": hit.flow_id,
+                "seq": src.get("flow_seq"),
+                "method": src.get("method"),
+                "host": src.get("host"),
+                "path": src.get("path"),
+                "app": src.get("app"),
+                "ts_start": hit.t,
+                "ts_end": hit.t,
+            }
+            if reveal is not None and reveal(hit.flow_id, record=record):
+                return True
+        elif hit.device_path:
+            ms.switch_lens("files")
+            reveal = getattr(ms.lens_widget("files"), "reveal", None)
+            if reveal is not None and reveal(
+                hit.device_path, version=src.get("version")
+            ):
+                return True
+        if hit.tl_seq is not None:
+            ms.switch_lens("timeline")
+            select = getattr(ms.lens_widget("timeline"), "select_seq", None)
+            return bool(select(int(hit.tl_seq))) if select else False
+        return False
 
     # -- actions (main-thread entry points) ---------------------------------
 
