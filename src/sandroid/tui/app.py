@@ -127,10 +127,10 @@ class SandroidTUI(App):
         Binding("r", "record", "Record", id="record"),
         Binding("p", "play", "Play/Replay", id="play"),
         # Navigation
-        # Lenses: 1-5 switch the full-width analysis view (Shift+←/→ cycles).
-        # Only "1" is shown, labelled "1-5", to keep the footer short.
+        # Lenses: 1-6 switch the full-width analysis view (Shift+←/→ cycles).
+        # Only "1" is shown, labelled "1-6", to keep the footer short.
         Binding(
-            "1", "switch_lens('app')", "Lens", key_display="1-5", id="lens_app"
+            "1", "switch_lens('app')", "Lens", key_display="1-6", id="lens_app"
         ),
         Binding(
             "2", "switch_lens('network')", "Network lens", show=False,
@@ -145,6 +145,10 @@ class SandroidTUI(App):
         Binding(
             "5", "switch_lens('timeline')", "Timeline lens", show=False,
             id="lens_timeline",
+        ),
+        Binding(
+            "6", "switch_lens('identity')", "Identity lens", show=False,
+            id="lens_identity",
         ),
         # Labels (session timeline) and Tracking: main screen only (see
         # check_action), every lens. #/+/B ask for an optional name.
@@ -684,6 +688,14 @@ class SandroidTUI(App):
             start_privacy_scan()
         except Exception as exc:
             logger.debug(f"Failed to start the privacy scan: {exc}")
+        # Identity profile: seed the active profile before app starts (a
+        # no-op until the app-start pre-spawn hook API exists).
+        try:
+            from sandroid.services.identity import get_identity_service
+
+            get_identity_service().install_pre_spawn_hook()
+        except Exception as exc:
+            logger.debug(f"Failed to install the identity pre-spawn hook: {exc}")
         self.call_later(self._check_devices_on_startup)
         self.call_later(self._show_welcome_if_first_run)
         # Pre-initialize command registry and package cache in background
@@ -763,7 +775,8 @@ class SandroidTUI(App):
                 message=(
                     "Sandroid runs as this terminal UI by default.\n"
                     "\n"
-                    "  1-5           App · Network · Files · Sessions · Timeline\n"
+                    "  1-6           App · Network · Files · Sessions · Timeline ·\n"
+                    "                Identity\n"
                     "  ⏎ / Esc       details on demand / close them\n"
                     "  S             snapshots     `  log\n"
                     "  ?             help & all keybindings\n"
@@ -1353,7 +1366,7 @@ class SandroidTUI(App):
             ms.open_snapshot_picker(then=fn)
 
     def action_switch_lens(self, lens: str) -> None:
-        """Digits 1-5: switch the lens (only while the main screen is on top)."""
+        """Digits 1-6: switch the lens (only while the main screen is on top)."""
         ms = self._get_main_screen()
         if ms is not None:
             ms.switch_lens(lens)
@@ -2491,6 +2504,7 @@ class SandroidTUI(App):
             "lens_files": lambda: self.action_switch_lens("files"),
             "lens_runs": lambda: self.action_switch_lens("runs"),
             "lens_timeline": lambda: self.action_switch_lens("timeline"),
+            "lens_identity": lambda: self.action_switch_lens("identity"),
             "label_start": self.action_label_start,
             "label_sub": self.action_label_sub,
             "label_stop": self.action_label_stop,

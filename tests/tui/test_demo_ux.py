@@ -295,7 +295,8 @@ async def test_shift_arrow_moves_focus_into_each_panel() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
         seen = []
-        for _ in range(5):  # App -> Network -> Files -> Sessions -> Timeline -> App
+        # App -> Network -> Files -> Sessions -> Timeline -> Identity -> App
+        for _ in range(6):
             await pilot.press("shift+right")
             await settle(pilot)
             current = app.screen.query_one("#lens-body").current

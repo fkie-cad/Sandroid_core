@@ -28,6 +28,7 @@ from sandroid.tui.widgets import (
     load_chat_panel_class,
 )
 from sandroid.tui.widgets.diffs_view import DiffsView
+from sandroid.tui.widgets.identity_lens import IdentityLens
 from sandroid.tui.widgets.lens_shell import (
     LENS_BY_ID,
     LENS_BY_WIDGET,
@@ -355,6 +356,7 @@ class MainScreen(Screen):
                     yield FilesPanel(id="files-panel")
                     yield DiffsView(id="runs-panel")
                     yield TimelineLens(id="timeline-panel")
+                    yield IdentityLens(id="identity-panel")
             with Vertical(id="side-slot"):
                 yield Inspector(id="inspector")
                 with Vertical(id="chat-dock"):
@@ -395,7 +397,7 @@ class MainScreen(Screen):
 
             activity_log.write(
                 f"[dim]Sandroid {__version__} · [bold]?[/] help · "
-                "[bold]1-5[/] lenses · [bold]`[/] this log[/]"
+                "[bold]1-6[/] lenses · [bold]`[/] this log[/]"
             )
             logger.debug("[MAIN_SCREEN] on_mount: welcome shown")
         except Exception as e:
@@ -433,7 +435,7 @@ class MainScreen(Screen):
 
     @property
     def active_lens(self) -> str:
-        """Id of the active lens (``"app"`` ... ``"runs"``, ``"timeline"``)."""
+        """Id of the active lens (``"app"`` ... ``"timeline"``, ``"identity"``)."""
         spec = LENS_BY_WIDGET.get(self._bottom_current() or "")
         return spec.id if spec else LENSES[0].id
 
@@ -1401,6 +1403,15 @@ class MainScreen(Screen):
     def _refresh_label_note(self) -> None:
         try:
             self.query_one("#shell-header", ShellHeader).refresh_timeline_state()
+        except Exception:
+            pass
+
+    def refresh_privacy_indicator(self) -> None:
+        """Repaint the header's privacy indicator now (the 1 s tick does it
+        too); the Identity lens calls it when an apply starts or ends.
+        """
+        try:
+            self.query_one("#shell-header", ShellHeader).refresh_privacy_state()
         except Exception:
             pass
 

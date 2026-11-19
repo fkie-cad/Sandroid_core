@@ -2,11 +2,13 @@
 
 Layout (top to bottom, see ``MainScreen.compose``)::
 
-    ShellHeader   #shell-header   crumb · snapshot · label · Tracking · pill · clock
+    ShellHeader   #shell-header   crumb · snapshot · label · Tracking · Privacy ·
+                                  pill · clock
     StatusBar     #status-bar     1-2 rows of live tool state
     LensBar       #lens-bar       1 App  2 Network  3 Files  4 Sessions  5 Timeline
+                                  6 Identity
     #workspace    Horizontal
-      #lens-host  framed ContentSwitcher #lens-body holding the five lenses
+      #lens-host  framed ContentSwitcher #lens-body holding the six lenses
       #side-slot  right-hand slot: Inspector #inspector  OR  chat #chat-dock
     LogTicker     #log-ticker     newest log line + "` log" hint
     LogDrawer     #log-drawer     hidden; ` toggles it; holds ActivityLog #activity-log
@@ -29,6 +31,7 @@ lens id    key  label        widget id              widget (module)
 ``files``  3    Files        ``files-panel``        FilesPanel (files_panel)
 ``runs``   4    Sessions     ``runs-panel``         DiffsView (diffs_view)
 ``timeline`` 5  Timeline     ``timeline-panel``     TimelineLens (timeline_lens)
+``identity`` 6  Identity     ``identity-panel``     IdentityLens (identity_lens)
 =========  ===  ===========  =====================  =============================
 
 To replace a lens body, keep the widget id (or change it here *and* in
@@ -227,6 +230,7 @@ LENSES: tuple[LensSpec, ...] = (
     # Labelled "Sessions" (id and widget id stay "runs" / "runs-panel").
     LensSpec("runs", "4", "Sessions", "runs-panel"),
     LensSpec("timeline", "5", "Timeline", "timeline-panel"),
+    LensSpec("identity", "6", "Identity", "identity-panel"),
 )
 LENS_BY_ID: dict[str, LensSpec] = {spec.id: spec for spec in LENSES}
 LENS_BY_WIDGET: dict[str, LensSpec] = {spec.widget_id: spec for spec in LENSES}
@@ -423,8 +427,9 @@ def _as_text(markup: str) -> Text:
 
 class ShellHeader(Header):
     """One-row header: ``○ Sandroid ▸ device ▸ app ◇ snapshot``, the open
-    label (``▶ 7 'accept cookies' 0:12``), the Tracking dot, a timeline
-    banner (locked / failed), pill, clock.
+    label (``▶ 7 'accept cookies' 0:12``), the Tracking dot, the privacy
+    indicator (``PRIVACY 3/12 found``; a click opens the Identity lens), a
+    timeline banner (locked / failed), pill, clock.
 
     Subclasses Textual's ``Header`` so theme rules for ``Header`` apply and the
     clock/title plumbing is reused; only the title formatting and the extra
@@ -477,10 +482,21 @@ class ShellHeader(Header):
     }
     ShellHeader #label-note,
     ShellHeader #tracking-dot,
+    ShellHeader #privacy-note,
     ShellHeader #timeline-banner {
         display: none;
         width: auto;
         padding: 0 1 0 0;
+    }
+    ShellHeader #privacy-note {
+        color: $lens-accent;
+    }
+    ShellHeader #privacy-note.-found {
+        color: $lens-warn;
+        text-style: bold;
+    }
+    ShellHeader #privacy-note.-applying {
+        color: $lens-muted;
     }
     ShellHeader #label-note {
         color: #facc15;
@@ -495,6 +511,7 @@ class ShellHeader(Header):
     }
     ShellHeader #label-note.-on,
     ShellHeader #tracking-dot.-on,
+    ShellHeader #privacy-note.-on,
     ShellHeader #timeline-banner.-on {
         display: block;
     }
@@ -510,12 +527,14 @@ class ShellHeader(Header):
         self._live_note: str | None = None
         self._label_note: str | None = None
         self._tracking = False
+        self._privacy: tuple[str | None, str] = (None, "")
         self._banner: str | None = None
 
     def compose(self) -> ComposeResult:
         yield HeaderTitle()
         yield Static("", id="label-note")
         yield Static("", id="tracking-dot")
+        yield Static("", id="privacy-note")
         yield Static("", id="timeline-banner")
         yield Static(self._pill[0], id="scope-pill", classes="-live")
         yield Static("", id="device-clock")
@@ -527,6 +546,7 @@ class ShellHeader(Header):
     def _tick(self) -> None:
         self.update_device_clock()
         self.refresh_timeline_state()
+        self.refresh_privacy_state()
 
     # -- open label, Tracking, timeline state ----------------------------------
 
@@ -557,6 +577,41 @@ class ShellHeader(Header):
         if text != self._banner:
             self._banner = text
             self._set_piece("timeline-banner", text)
+
+    def set_privacy(self, text: str | None, kind: str = "") -> None:
+        """The privacy indicator: ``PRIVACY <profile id>`` (accent),
+        ``PRIVACY 3/12 found`` (warn, bold), ``PRIVACY applying``; None hides
+        it. ``kind`` is ``""``, ``"found"`` or ``"applying"``.
+        """
+        text = text or None
+        if (text, kind) == self._privacy:
+            return
+        self._privacy = (text, kind)
+        self._set_piece("privacy-note", text)
+        try:
+            piece = self.query_one("#privacy-note", Static)
+        except Exception:
+            return
+        piece.set_class(kind == "found", "-found")
+        piece.set_class(kind == "applying", "-applying")
+
+    @property
+    def privacy_text(self) -> str | None:
+        return self._privacy[0]
+
+    @property
+    def privacy_kind(self) -> str:
+        return self._privacy[1]
+
+    def refresh_privacy_state(self) -> None:
+        """The privacy indicator from the scan summary (cheap, no I/O)."""
+        try:
+            from sandroid.tui.widgets.identity_lens import privacy_indicator
+
+            text, kind = privacy_indicator()
+        except Exception:
+            text, kind = None, ""
+        self.set_privacy(text, kind)
 
     @property
     def label_note(self) -> str | None:
@@ -655,8 +710,18 @@ class ShellHeader(Header):
             pass
         return text
 
-    def _on_click(self) -> None:  # no tall toggle
-        return
+    def _on_click(self, event=None) -> None:
+        """No tall toggle; a click on the privacy indicator opens the
+        Identity lens. (``_on_click`` shadows an ``on_click`` of the same
+        class in Textual's dispatch, so it is handled here.)
+        """
+        widget = getattr(event, "widget", None)
+        if getattr(widget, "id", None) != "privacy-note":
+            return
+        switch = getattr(self.screen, "switch_lens", None)
+        if switch is not None:
+            event.stop()
+            switch("identity")
 
     def format_title(self) -> Content:
         parts = [f"[b]{self.app.title or 'Sandroid'}[/b]"]
@@ -724,7 +789,8 @@ class ShellHeader(Header):
 
 
 class LensBar(Horizontal):
-    """``1 App  2 Network  3 Files  4 Sessions  5 Timeline`` + per-lens badges.
+    """``1 App  2 Network  3 Files  4 Sessions  5 Timeline  6 Identity`` +
+    per-lens badges.
 
     Clicks are routed by ``MainScreen.on_click`` (ids ``lens-tab-<lens id>``).
     Carries ``-level-active`` while Shift+←/→ cycles lenses (vs. a lens's own
