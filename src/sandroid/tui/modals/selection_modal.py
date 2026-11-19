@@ -30,6 +30,9 @@ class SelectionModal(ForensicModal):
     }
 
     SelectionModal .modal-message {
+        /* A Label is width: auto: without this a long message is one line,
+           cut at the dialog's edge instead of wrapping. */
+        width: 100%;
         padding-bottom: 1;
     }
 

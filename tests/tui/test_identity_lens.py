@@ -573,6 +573,14 @@ async def test_apply_runs_in_a_worker_and_asks_before_a_restart(fakes) -> None:
         fakes.ident.plan = plan
         await pilot.press("space")
         await until(pilot, lambda: isinstance(app.screen, SelectionModal))
+        # The explanation wraps inside the dialog instead of being cut off.
+        message = app.screen.query_one(".modal-message")
+        await settle(pilot)
+        assert message.region.height > 1
+        assert (
+            message.region.right
+            <= app.screen.query_one(".modal-container").region.right
+        )
         assert threads
         assert threads[0] != ui_thread
         assert fakes.ident.applied == []
