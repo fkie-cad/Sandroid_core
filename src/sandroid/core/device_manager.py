@@ -273,7 +273,14 @@ class DeviceManager:
                 logger.warning(
                     f"Active device {self._active_device.serial} disconnected"
                 )
+                lost_serial = self._active_device.serial
                 self._active_device = None
+                try:
+                    from .timeline import get_timeline
+
+                    get_timeline().note_device_lost(lost_serial)
+                except Exception:
+                    logger.debug("timeline: device/lost failed", exc_info=True)
                 # Keep the ADB target on the lost serial. A snapshot load
                 # drops the device from `adb devices` for about a second;
                 # clearing the target sent the calls in that window without
@@ -551,7 +558,16 @@ class DeviceManager:
 
         logger.info(f"Switched to device: {device.display_name}")
 
-        # First device-clock sample of this device (clock.jsonl), off-thread.
+        # The session timeline of this device folder (opened or resumed; a
+        # previous device's timeline stays open for its late lines).
+        try:
+            from .timeline import get_timeline
+
+            get_timeline().bind(serial, device_name=device.display_name)
+        except Exception as e:
+            logger.debug(f"Could not bind the session timeline: {e}")
+
+        # First device-clock sample of this device (session timeline), off-thread.
         try:
             from . import device_clock
 

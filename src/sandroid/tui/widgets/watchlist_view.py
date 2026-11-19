@@ -191,6 +191,102 @@ def _set_summary(
     }
 
 
+def _timeline_rel(target: Path) -> str:
+    """``target`` relative to the session timeline's folder."""
+    from sandroid.core.timeline import timeline_folder
+
+    try:
+        return os.path.relpath(target, timeline_folder())
+    except ValueError:  # another drive (Windows)
+        return str(target)
+
+
+def timeline_pull(
+    path: str,
+    trigger: str,
+    *,
+    ok: bool,
+    version: Path | None = None,
+    file_set: dict | None = None,
+    changed: bool | None = None,
+    error: str | None = None,
+) -> int | None:
+    """A ``files/pull`` session-timeline line (never raises).
+
+    ``ref`` points to the version's ``diff.json`` (``acquisition.json`` for
+    the first version) with its sha256; the diff itself is never copied.
+    """
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        _owner, rel = watchlist_store.owner_and_relative(path)
+        basename = os.path.basename(path.rstrip("/")) or "pulled_file"
+        file_set = file_set or {}
+        data: dict = {
+            "path": path,
+            "version": version.name if version is not None else None,
+            "size": file_set.get("size"),
+            "sha256": (file_set.get("local") or {}).get(basename),
+            "set_sha256": file_set.get("local_sha256"),
+            "changed": changed,
+            "trigger": trigger,
+            "ok": ok,
+        }
+        ref = None
+        if version is not None:
+            doc = version / "diff.json"
+            if not doc.is_file():
+                doc = version / "acquisition.json"
+            ref = {"path": _timeline_rel(doc), "lens": "files"}
+            sha = watchlist_store.sha256_file(doc) if doc.is_file() else None
+            if sha:
+                ref["sha256"] = sha
+        if ok and version is not None:
+            short = version.name.split("_", 1)[0]
+            if changed is None:
+                state = "first version"
+            else:
+                state = "changed" if changed else "no content change"
+            summary = f"◆ {short} {rel} ({state})"
+        else:
+            data["error"] = (error or "pull failed")[:500]
+            summary = f"pull failed · {rel}"
+        return get_timeline().emit(
+            "files",
+            "pull",
+            summary=summary,
+            actor="user" if trigger == "manual" else "sandroid",
+            data=data,
+            ref=ref,
+            pkg=watchlist_store.package_of(path),
+            level="info" if ok else "warn",
+        )
+    except Exception:
+        logger.debug("timeline: files/pull line failed", exc_info=True)
+        return None
+
+
+def timeline_check(path: str, trigger: str, same_as: str, note: str) -> int | None:
+    """A ``files/check`` session-timeline line: a pull found no change."""
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        _owner, rel = watchlist_store.owner_and_relative(path)
+        checks = watchlist_store.row_dir(path) / "checks.jsonl"
+        return get_timeline().emit(
+            "files",
+            "check",
+            summary=f"◇ {rel} unchanged (same as {same_as})",
+            actor="user" if trigger == "manual" else "sandroid",
+            data={"path": path, "same_as": same_as, "trigger": trigger, "note": note},
+            ref={"path": _timeline_rel(checks), "lens": "files"},
+            pkg=watchlist_store.package_of(path),
+        )
+    except Exception:
+        logger.debug("timeline: files/check line failed", exc_info=True)
+        return None
+
+
 def _file_facts(path: Path) -> tuple[int | None, str | None]:
     """``(size, sha256)`` of a pulled file, ``(None, None)`` if unreadable."""
     try:
@@ -644,6 +740,7 @@ class WatchlistView(Widget):
                     self._pull_and_diff_one(path, trigger, event_time)
             except Exception as exc:
                 logger.warning(f"Watchlist pull failed for {path}: {exc}")
+                timeline_pull(path, trigger, ok=False, error=str(exc))
                 self._post(
                     self._apply_pull_result, path, RowState.ERROR, str(exc), None
                 )
@@ -729,6 +826,7 @@ class WatchlistView(Widget):
         current_main = current / basename
         result = fx.pull_file(path, str(current_main))
         if not result.success:
+            timeline_pull(path, trigger, ok=False, error=result.error)
             self._post(
                 self._apply_pull_result,
                 path,
@@ -770,6 +868,14 @@ class WatchlistView(Widget):
                 return
 
         kept = watchlist_store.keep_version(path, record, pulled_at)
+        timeline_pull(
+            path,
+            trigger,
+            ok=True,
+            version=kept.dir,
+            file_set=file_set,
+            changed=None if latest is None else bool(kept.changed),
+        )
         if latest is None:
             self._post(
                 self._apply_pull_result,
@@ -822,18 +928,25 @@ class WatchlistView(Widget):
                 "device_clock": clock,
             },
         )
+        timeline_check(path, trigger, same_as, note)
         self._post(self._apply_check_result, path, latest.name, entry)
 
     def _active_mark(self, when: datetime) -> dict | None:
-        """The mark whose segment ``when`` falls in (``None`` before the first)."""
-        active = None
-        for mark in list(self.marks):
-            mark_when = getattr(mark, "when", None)
-            if mark_when is not None and mark_when <= when:
-                active = mark
+        """The label ``when`` falls in: the innermost open label, else the
+        latest point label before it (``None``: none).
+        """
+        from sandroid.core.timeline import active_label
+
+        active = active_label(list(self.marks), when)
         if active is None:
             return None
-        return watchlist_store.mark_entry(active.number, active.name, active.when)
+        return watchlist_store.mark_entry(
+            active.number,
+            getattr(active, "name", ""),
+            active.when,
+            kind=getattr(active, "kind", None) or "point",
+            seq=getattr(active, "seq", None),
+        )
 
     @staticmethod
     def _acquisition_record(

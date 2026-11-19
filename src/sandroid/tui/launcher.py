@@ -147,7 +147,15 @@ def _shutdown_services(get_task_service, get_network_capture_service) -> None:
     _cleanup_with_timeout(
         lambda: _stop_network_capture(get_network_capture_service), timeout=3.0
     )
+    # The session timeline last (idempotent: a no-op after the quit closed it).
+    _cleanup_with_timeout(_close_timeline, timeout=2.0)
     _reset_tui_mode()
+
+
+def _close_timeline() -> None:
+    from sandroid.core.timeline import close_timeline
+
+    close_timeline("quit", 1.5)
 
 
 def _shutdown_network() -> None:

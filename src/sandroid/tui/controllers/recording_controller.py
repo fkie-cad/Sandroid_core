@@ -257,7 +257,19 @@ class RecordingController:
         self._on_run_saved = on_run_saved
         self._on_monitor_stopped_for_playback = on_monitor_stopped_for_playback
         self._on_monitor_resume_available = on_monitor_resume_available
-        self._set_recording_indicator = set_recording_indicator
+        # Wrapped: every indicator change is also a run/record-start or
+        # run/record-stop line on the session timeline (modal and chat).
+        self._set_recording_indicator = self._timeline_indicator(
+            set_recording_indicator
+        )
+        #: How the current recording was started ("modal" | "chat").
+        self._record_via = "modal"
+        #: Session-timeline seqs of the open recording's start, and of the
+        #: last recording's (start, stop) -- a Play replays that range.
+        self._tl_record_start: int | None = None
+        self._tl_recording = False
+        self._tl_record_stop: int | None = None
+        self._tl_record_range: list[int] | None = None
         self._set_replay_indicator = set_replay_indicator
         self._suppress_disconnect_guard = suppress_disconnect_guard
         self._set_replay_phase = set_replay_phase
@@ -448,6 +460,12 @@ class RecordingController:
             self._current_noise_filter = noise_filter
 
         def on_recording_result(result: RecordingResult) -> None:
+            self._timeline_record_result(
+                events=getattr(result, "event_count", 0) if result else 0,
+                duration_s=getattr(result, "duration", 0) if result else 0,
+                completed=bool(getattr(result, "completed", False)),
+                cancelled=result is None or bool(result.cancelled),
+            )
             if result is None or result.cancelled:
                 # The earlier recording (if any) is still the one ``p``
                 # replays: keep its seeds instead of the cancelled dialog's.
@@ -481,6 +499,7 @@ class RecordingController:
                 # label chosen in the Record dialog.
                 self.start_playback(label=self._current_recording_label)
 
+        self._record_via = "modal"
         self._log_info("Opening recording modal...")
         self._push_modal(
             RecordingModal(
@@ -572,6 +591,7 @@ class RecordingController:
             stop_callback=wrapper.stop,
         )
         if self._set_recording_indicator:
+            self._record_via = "chat"
             self._ui(self._set_recording_indicator, True)
         self._ui(
             self._log_info,
@@ -603,6 +623,9 @@ class RecordingController:
 
         if self._set_recording_indicator:
             self._ui(self._set_recording_indicator, False)
+        self._timeline_record_result(
+            events=event_count, duration_s=duration, completed=True, cancelled=False
+        )
         self._ui(
             self._log_success,
             f"[AI] Recording stopped: {event_count} events, {duration}s",
@@ -1070,6 +1093,7 @@ class RecordingController:
         device_name = self._current_device_name()
         recorded_at = datetime.now().isoformat()
         run_id = run_history.new_run_id()
+        play_start = self._timeline_play_start(run_id)
         result: Any = None
         error: str | None = None
         abs_rec = self.get_recording_path()
@@ -1098,6 +1122,7 @@ class RecordingController:
                 config.raw_results_path = run_bundle.raw_dir(run_id)
                 config.results_path = str(run_bundle.bundle_dir(run_id))
                 config.device_name = device_name
+                config.run_id = run_id
                 # Recorded in the run metadata as the settings actually used.
                 self._last_run_config = config
 
@@ -1170,6 +1195,7 @@ class RecordingController:
             self._play_label = None
             if self._set_replay_phase:
                 self._ui(self._set_replay_phase, None)
+        self._timeline_play_end(run_id, play_start, result, error, saved_run_id)
 
         if error == "Replay cancelled":
             self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
@@ -1192,6 +1218,156 @@ class RecordingController:
         # case covered by _stop_monitor_before_revert).
         if monitor_config_for_resume is not None and self._on_monitor_resume_available:
             self._ui(self._on_monitor_resume_available, monitor_config_for_resume)
+
+    # -- session timeline (run/* lines) ---------------------------------------
+
+    def _timeline_indicator(
+        self, original: Callable[[bool], None] | None
+    ) -> Callable[[bool], None]:
+        """``set_recording_indicator`` that also writes record-start/stop."""
+
+        def indicator(active: bool) -> None:
+            try:
+                self._timeline_record(bool(active))
+            except Exception:
+                logger.debug("timeline: record line failed", exc_info=True)
+            if original is not None:
+                original(active)
+
+        return indicator
+
+    def _timeline_actor(self) -> str:
+        return "ai" if self._record_via == "chat" else "user"
+
+    def _timeline_record(self, active: bool) -> None:
+        from sandroid.core.timeline import get_timeline
+
+        service = get_timeline()
+        if active and not self._tl_recording:
+            label = self._current_recording_label or ""
+            self._tl_recording = True
+            self._tl_record_start = service.set_phase(
+                "record",
+                None,
+                kind="record-start",
+                summary=f"● REC · {label}" if label else "● REC",
+                actor=self._timeline_actor(),
+                data={
+                    "label": label,
+                    "number_of_runs": self._current_number_of_runs,
+                    "via": self._record_via,
+                },
+            )
+        elif not active and self._tl_recording:
+            start = self._tl_record_start
+            self._tl_recording = False
+            self._tl_record_stop = service.set_phase(
+                "live",
+                None,
+                kind="record-stop",
+                summary="■ REC stopped",
+                actor=self._timeline_actor(),
+                ref={"of": start} if start is not None else None,
+            )
+            if start is not None and self._tl_record_stop is not None:
+                self._tl_record_range = [start, self._tl_record_stop]
+
+    def _timeline_record_result(
+        self, *, events: Any, duration_s: Any, completed: bool, cancelled: bool
+    ) -> None:
+        """``run/record-result`` (after the recording stopped)."""
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            state = "cancelled" if cancelled else f"{events} events, {duration_s} s"
+            stop = self._tl_record_stop
+            get_timeline().emit(
+                "run",
+                "record-result",
+                summary=f"recording · {state}",
+                actor=self._timeline_actor(),
+                data={
+                    "events": events,
+                    "duration_s": duration_s,
+                    "completed": completed,
+                    "cancelled": cancelled,
+                },
+                ref={"of": stop} if stop is not None else None,
+            )
+        except Exception:
+            logger.debug("timeline: record-result line failed", exc_info=True)
+        finally:
+            self._record_via = "modal"
+            self._tl_record_stop = None
+
+    def _timeline_play_start(self, run_id: str) -> int | None:
+        """``run/play-start``: the Play's run id becomes the timeline's run."""
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            label = self._play_label or ""
+            seq_range = self._tl_record_range
+            return get_timeline().set_phase(
+                "live",
+                run_id,
+                kind="play-start",
+                summary=f"▷ Play · {label}" if label else f"▷ Play · {run_id}",
+                data={
+                    "label": label or None,
+                    "number_of_runs": self._current_number_of_runs,
+                    "noise_filter": self._current_noise_filter,
+                    "bundle": f"runs/{run_id}",
+                },
+                replays=(
+                    {"run": None, "seq_range": list(seq_range)} if seq_range else None
+                ),
+            )
+        except Exception:
+            logger.debug("timeline: play-start line failed", exc_info=True)
+            return None
+
+    def _timeline_play_end(
+        self,
+        run_id: str,
+        play_start: int | None,
+        result: Any,
+        error: str | None,
+        saved_run_id: str | None,
+    ) -> None:
+        """``run/play-end``: back to live, no run."""
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            def _count(name: str) -> int | None:
+                value = getattr(result, name, None)
+                try:
+                    return len(value) if value is not None else None
+                except TypeError:
+                    return None
+
+            changed = _count("changed_files")
+            ref = {"run": run_id, "lens": "runs"}
+            if play_start is not None:
+                ref["of"] = play_start
+            summary = "■ Play done" if error is None else f"■ Play ended · {error}"
+            if error is None and changed is not None:
+                summary += f" · {changed} changed"
+            get_timeline().set_phase(
+                "live",
+                None,
+                kind="play-end",
+                summary=summary,
+                data={
+                    "error": error,
+                    "saved": saved_run_id is not None,
+                    "changed": changed,
+                    "new": _count("new_files"),
+                    "deleted": _count("deleted_files"),
+                },
+                ref=ref,
+            )
+        except Exception:
+            logger.debug("timeline: play-end line failed", exc_info=True)
 
     def _emit_progress(self, update: Any) -> None:
         """Marshal an engine ``ProgressUpdate`` to a UI-thread log line.

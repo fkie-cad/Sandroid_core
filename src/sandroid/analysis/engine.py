@@ -654,7 +654,7 @@ class AnalysisPlan:
 
         cf = gatherers["changed_files"]
         nf = gatherers["new_files"]
-        df = gatherers.get("deleted_files")  # noqa: PD901 - gatherer, not a DataFrame
+        df = gatherers.get("deleted_files")
         want_deleted = config.show_deleted and df is not None
 
         # ---- Pre-analysis ----
@@ -780,6 +780,26 @@ def _pinned_env(config: RunConfig) -> Iterator[None]:
 # ===========================================================================
 # Engine
 # ===========================================================================
+
+
+#: Session-timeline phase per step window kind (everything else: setup).
+_TIMELINE_PHASES = {"replay": "replay", "capture": "record", "dry_run": "dry-run"}
+
+
+def _new_run_id() -> str:
+    from sandroid.core import run_history
+
+    return run_history.new_run_id()
+
+
+def _timeline_phase() -> tuple[str, str | None]:
+    """The session timeline's current ``(phase, run)`` (live/None if none)."""
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        return get_timeline().current_phase()
+    except Exception:
+        return ("live", None)
 
 
 class AnalysisEngine:
@@ -1113,7 +1133,19 @@ class AnalysisEngine:
         self._expected_device = self.config.device_name or self._current_device()
         self._expected_serial = self._active_serial()
         result = RunResult(device_name=self._expected_device)
+        self._run_id = getattr(self.config, "run_id", None) or _new_run_id()
+        found = _timeline_phase()
 
+        try:
+            self._run_pinned(result)
+        finally:
+            # Back to the phase the run found (live, or Play's run).
+            self._set_timeline_phase(found[0], found[1], None)
+        self._publish_completed(result)
+        return result
+
+    def _run_pinned(self, result: RunResult) -> None:
+        """:meth:`run`'s body inside the env pin."""
         with _pinned_env(self.config):
             self.gatherers = self._build_gatherers()
             self._reset_accumulators()
@@ -1131,9 +1163,6 @@ class AnalysisEngine:
             self._emit_phase(self.config.number_of_runs + 2, "analysing")
             self._materialize(result)
             self._finalize(result)
-
-        self._publish_completed(result)
-        return result
 
     def _apply_whitelist(self) -> None:
         """Point the forensic service at the whitelist file (before gathering).
@@ -1170,6 +1199,34 @@ class AnalysisEngine:
             return "pulling original files"
         return self._PHASES.get(step.kind)
 
+    def _set_timeline_phase(
+        self, phase: str, run: str | None, step: Step | None
+    ) -> None:
+        """A ``run/phase`` session-timeline line when the phase changes."""
+        try:
+            from sandroid.core.timeline import get_timeline
+
+            service = get_timeline()
+            if service.current_phase() == (phase, run):
+                return
+            data = {}
+            if step is not None:
+                data = {
+                    "step": step.label,
+                    "replay": step.run_number,
+                    "of": self.config.number_of_runs,
+                }
+            label = f" · {step.label}" if step is not None else ""
+            service.set_phase(
+                phase,
+                run,
+                summary=f"phase · {phase}{label}",
+                actor="sandroid",
+                data=data,
+            )
+        except Exception:
+            logger.debug("timeline: phase line failed", exc_info=True)
+
     def _emit_phase(self, run_number: int, phase: str) -> None:
         """Report a phase change once (``ProgressUpdate.phase``)."""
         if not phase or phase == self._last_phase:
@@ -1203,6 +1260,11 @@ class AnalysisEngine:
                 window_kind = "replay" if action is not None else "capture"
             elif step.kind == "dry_run_sleep":
                 window_kind = "dry_run"
+            self._set_timeline_phase(
+                _TIMELINE_PHASES.get(window_kind or "", "setup"),
+                getattr(self, "_run_id", None) or getattr(self.config, "run_id", None),
+                step,
+            )
             started = time.time()
             try:
                 if step.path_sensitive:
@@ -1246,7 +1308,7 @@ class AnalysisEngine:
 
         cf = self.gatherers.get("changed_files")
         nf = self.gatherers.get("new_files")
-        df = self.gatherers.get("deleted_files")  # noqa: PD901 - gatherer, not a DataFrame
+        df = self.gatherers.get("deleted_files")
         pr = self.gatherers.get("processes")
         sk = self.gatherers.get("sockets")
         nw = self.gatherers.get("network")

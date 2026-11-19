@@ -20,7 +20,8 @@ device_name = "Pixel_6_Pro_API_31"
 max_host_memory_gb = 10
 memory_guard_action = "kill"
 # After every snapshot load, set the device clock to host time (root `date`)
-# when it is more than 1 s off; the offset is recorded in clock.jsonl either way.
+# when it is more than 1 s off; the offset is recorded in the session timeline
+# either way.
 sync_clock_after_snapshot = true
 
 [frida]
@@ -80,11 +81,51 @@ enabled = false
 # Only loopback endpoints are used unless you explicitly opt in to sending
 # case data to a remote service (e.g. https://api.openai.com/v1):
 allow_remote = false
+# Mask the content of sensitive session-timeline lines (typed text, TLS keys)
+# in what the AI reads.
+mask_sensitive = false
 
 [report]
 generate_pdf = false
 include_screenshots = true
 # template_path = "/path/to/custom/template.html"  # Optional: custom report template
+# Seconds after an input in which file/network lines count as its effects.
+effects_window_s = 2.0
+# Screenshot triggers shown in the report.
+shot_triggers = ["before_tap", "after_tap", "screen_change", "label", "manual"]
+# Formats written besides report.json.
+formats = ["pdf", "md"]
+
+[timeline]
+# The session timeline: <results>/<session>/<device>/timeline.jsonl, one
+# hash-chained JSON line per event (labels, file monitor, device clock,
+# snapshots, record/play phases, ...). label, sandroid, clock, snapshot,
+# device and run lines are always written.
+sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true }
+kinds_off = []                          # "src.kind" or "src.*": not written
+count_only = ["files.open", "files.close"]  # only counted (<src>/count lines)
+files_attrs = "app_dirs"                # app_dirs | lines | counts
+files_modify_coalesce_ms = 1000         # merge files.modify per (path, pid); 0 = off
+count_window_s = 5.0
+queue_max = 10000                       # bulk lines queued per device before drops
+clock_every_s = 60                      # periodic device-clock sample; 0 = off
+mask_sensitive = false                  # mask typed text etc. in lens/exports/report
+
+[tracking]
+# Tracking: the interaction transcript (taps, typed text, screens, shots).
+helper_mode = "full"                    # full | invisible | off
+auto_on_record = true
+shot_before_tap = true
+shot_screen_change = true
+shot_after_tap = false
+shot_label = false
+settle_interval_ms = 300
+settle_max_ms = 2000
+capture_text = true
+text_idle_ms = 1500
+long_press_ms = 500
+swipe_slop_px = 24
+logcat_screen_backup = true
 
 # MCP (Model Context Protocol) client — lets the (experimental) AI Chat call
 # tools hosted by external MCP servers. No server is configured by default, and

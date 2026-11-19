@@ -998,6 +998,104 @@ def _publish_monitor_info(data: dict[str, Any]) -> None:
         logger.debug("Failed to publish monitor info", exc_info=True)
 
 
+_NOTE_LEVELS = {"warning": "warn", "error": "error"}
+
+
+def _timeline_monitor(
+    kind: str,
+    summary: str,
+    *,
+    level: str = "info",
+    when: datetime | float | None = None,
+    data: dict[str, Any] | None = None,
+    dev: str | None = None,
+    pkg: str | None = None,
+    t_err_ms: float | None = None,
+) -> None:
+    """A ``monitor/<kind>`` session-timeline line (any thread; never raises)."""
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        get_timeline().emit(
+            "monitor",
+            kind,
+            summary=summary,
+            data=data,
+            t=when,
+            t_err_ms=t_err_ms,
+            dev=dev,
+            pkg=pkg or None,
+            level=_NOTE_LEVELS.get(
+                level, level if level in ("info", "warn") else "info"
+            ),
+        )
+    except Exception:
+        logger.debug("timeline: monitor line failed", exc_info=True)
+
+
+def _timeline_serial() -> str | None:
+    """The adb target now (the device a monitor session records)."""
+    try:
+        from sandroid.core.adb import Adb
+
+        serial = Adb.get_target_device()
+    except Exception:
+        return None
+    return serial if isinstance(serial, str) and serial else None
+
+
+def _item_path(item: Any) -> str:
+    directory = getattr(item, "directory", "")
+    filename = getattr(item, "filename", "")
+    return f"{directory}/{filename}" if directory else filename
+
+
+def _timeline_file_event(wrapper: Any) -> Callable[..., None]:
+    """The reader thread's session-timeline sink for one monitor session:
+    ``(op, path, t, backend, new_path, process, pid, tid)`` ->
+    :meth:`TimelineService.file_event` with the session's device, app and
+    followed pids. Never raises, never blocks.
+    """
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        service = get_timeline()
+    except Exception:
+        return lambda *args: None
+    serial = getattr(wrapper, "timeline_serial", None)
+    watch = getattr(wrapper, "watch", None)
+    config = getattr(wrapper, "config", None)
+    package = getattr(watch, "package", None)
+    if package is None and getattr(config, "mode", "") == "pid":
+        package = getattr(config, "app_name", "") or None
+    # The followed app processes (a live dict: membership tests only), else
+    # the session's target PID.
+    pids = getattr(watch, "procs", None)
+    if pids is None:
+        target = getattr(config, "target_pid", None)
+        pids = frozenset({target}) if isinstance(target, int) else frozenset()
+
+    def file_event(op, path, t, backend, new_path, process, pid, tid) -> None:
+        try:
+            service.file_event(
+                op=op,
+                path=path,
+                t=t,
+                backend=backend,
+                new_path=new_path,
+                process=process or None,
+                pid=pid,
+                tid=tid,
+                dev=serial,
+                app_pkg=package or None,
+                app_pids=pids,
+            )
+        except Exception:
+            logger.debug("timeline: file event failed", exc_info=True)
+
+    return file_event
+
+
 def _recent_event_from_monitor_event(
     event: MonitorEvent, source: str, timestamp: float | None = None
 ) -> dict[str, Any]:
@@ -1218,8 +1316,11 @@ class MonitorWatch:
         self._gone: set[int] = set()
         #: The latest main exit noted (a later restart is ordered after it).
         self._last_exit_at: datetime | None = None
-        #: Notes of the running poll, emitted in time order at its end.
-        self._pending_notes: list[tuple[str, str, datetime]] | None = None
+        #: Notes of the running poll, emitted in time order at its end:
+        #: (text, level, when, kind, data).
+        self._pending_notes: list[tuple] | None = None
+        #: The device this session records (session-timeline ``dev``).
+        self.serial: str | None = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -1426,8 +1527,8 @@ class MonitorWatch:
                 notes, self._pending_notes = self._pending_notes, None
                 # In time order: an exit is never logged after the restart
                 # that followed it.
-                for text, level, when in sorted(notes, key=lambda n: n[2]):
-                    self._note(text, level, when)
+                for text, level, when, kind, data in sorted(notes, key=lambda n: n[2]):
+                    self._note(text, level, when, kind=kind, data=data)
             self._update_state()
 
     def _poll_table(self, listing: Any) -> None:
@@ -1482,6 +1583,8 @@ class MonitorWatch:
                 f"{self.package} exited · PID {pid} · noticed {stamp:%H:%M:%S}",
                 "warning",
                 when,
+                kind="proc-exit",
+                data={"pid": pid, "exact": exact, "noticed": stamp},
             )
 
     def check_lost(self) -> int:
@@ -1497,6 +1600,8 @@ class MonitorWatch:
                 f"{new} trace events lost {self._now():%H:%M:%S} "
                 f"(ring buffer overrun, {lost} this session)",
                 "warning",
+                kind="lost",
+                data={"new": new, "total": lost},
             )
             self._changed()
         return self.lost_events
@@ -1592,11 +1697,24 @@ class MonitorWatch:
                 # The start is estimated from its gap; the exit before it was
                 # seen: keep them in that order.
                 when = last_exit + timedelta(microseconds=1)
-            self._note(text, "warning" if restarted else "info", when)
+            data = {"pid": proc.pid, "gap_s": proc.gap, "via": proc.via}
+            if restarted:
+                data["new_pid"] = proc.pid
+            self._note(
+                text,
+                "warning" if restarted else "info",
+                when,
+                kind="proc-restart" if restarted else "proc-start",
+                data=data,
+            )
         else:
             # "follow": one line per burst in a file's Events (FilesPanel).
             self._note(
-                f"+ {proc.label} (PID {proc.pid}) followed · {gap}", "follow", started
+                f"+ {proc.label} (PID {proc.pid}) followed · {gap}",
+                "follow",
+                started,
+                kind="follow",
+                data={"pid": proc.pid, "label": proc.label, "gap_s": proc.gap},
             )
 
     def _sandroid_restarting(self) -> bool:
@@ -1612,10 +1730,27 @@ class MonitorWatch:
         if self.blind_since is None:
             self.blind_since = self._now()
             self.blind_reason = reason
+            _timeline_monitor(
+                "blind",
+                f"monitor blind · {reason}",
+                level="warning",
+                when=self.blind_since,
+                data={"reason": reason},
+                dev=self.serial,
+                pkg=self.package,
+            )
 
     def _update_state(self) -> None:
         if self.follow:
             if self.blind_reason != "can't follow":
+                if self.blind_since is not None:
+                    _timeline_monitor(
+                        "sight",
+                        "monitor sees the app again",
+                        data={"reason": self.blind_reason},
+                        dev=self.serial,
+                        pkg=self.package,
+                    )
                 self.blind_since, self.blind_reason = None, ""
         elif self.track and not self.procs:
             self._set_blind("target gone")
@@ -1638,10 +1773,39 @@ class MonitorWatch:
             except Exception:
                 logger.debug("monitor watch on_change failed", exc_info=True)
 
-    def _note(self, text: str, level: str, when: datetime | None = None) -> None:
+    def _note(
+        self,
+        text: str,
+        level: str,
+        when: datetime | None = None,
+        *,
+        kind: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """A timeline note: ``on_note(text, level, when)`` for the lens and,
+        with ``kind``, a ``monitor/<kind>`` session-timeline line (emitted on
+        this, the calling worker thread).
+        """
         if self._pending_notes is not None:
-            self._pending_notes.append((text, level, when or self._now()))
+            self._pending_notes.append((text, level, when or self._now(), kind, data))
             return
+        if kind is not None:
+            gap = (data or {}).get("gap_s")
+            estimated = (
+                kind in ("proc-start", "proc-restart")
+                and isinstance(gap, (int, float))
+                and (data or {}).get("via") != "spawn"
+            )
+            _timeline_monitor(
+                kind,
+                text,
+                level=level,
+                when=when or self._now(),
+                data=data,
+                dev=self.serial,
+                pkg=self.package,
+                t_err_ms=gap * 1000 if estimated and gap else None,
+            )
         if self.on_note is not None:
             try:
                 self.on_note(text, level, when or self._now())
@@ -2267,6 +2431,13 @@ class MonitorController:
             )
         else:
             reason = "kprobe backend unavailable on this device — using fsmon instead."
+        _timeline_monitor(
+            "fallback",
+            "monitor · kprobe unavailable, using fsmon",
+            level="warning",
+            data={"from": "kprobe", "to": "fsmon", "reason": reason},
+            dev=_timeline_serial(),
+        )
         if self._on_backend_fallback:
             try:
                 self._on_backend_fallback(reason)
@@ -2294,12 +2465,35 @@ class MonitorController:
             app_name=config.app_name if config.app_name else config.target_path,
         )
 
+        # The device this session records: every file/monitor line of the
+        # session goes to its timeline, also after a device switch.
+        serial = _timeline_serial()
+        wrapper.timeline_serial = serial
+        watch = getattr(wrapper, "watch", None)
+        if isinstance(watch, MonitorWatch):
+            watch.serial = serial
+        paths = list(getattr(config, "target_paths", None) or []) or (
+            [config.target_path] if getattr(config, "target_path", "") else []
+        )
+        _timeline_monitor(
+            "start",
+            f"monitor started · {mode_desc}",
+            data={
+                "backend": getattr(config, "backend", None),
+                "mode": getattr(config, "mode", None),
+                "app": getattr(config, "app_name", "") or None,
+                "paths": paths,
+                "follow": bool(getattr(config, "follow", False)),
+            },
+            dev=serial,
+            pkg=getattr(config, "app_name", "") or None,
+        )
+
         # Start output reader thread
         self._start_output_reader(wrapper)
 
         # Follow the app / notice blindness / count lost events -- for as
         # long as the session's stream runs.
-        watch = getattr(wrapper, "watch", None)
         if isinstance(watch, MonitorWatch):
             watch.bind_process(getattr(wrapper, "process", None))
             watch.start()
@@ -2653,6 +2847,7 @@ class MonitorController:
         """
         translator = getattr(monitor_process_wrapper, "translator", None)
         flush_interval = self._get_buffer_interval()
+        file_event = _timeline_file_event(monitor_process_wrapper)
 
         if translator is not None:
             # kprobe: deque of already-correlated items (translate-ahead).
@@ -2662,6 +2857,17 @@ class MonitorController:
                 now = time.time()
                 for item in translator.feed(line_str):
                     item = replace(item, timestamp=now)
+                    # The session timeline: before the lossy deque below.
+                    file_event(
+                        item.label,
+                        item.path or _item_path(item),
+                        now,
+                        "kprobe",
+                        item.new_path,
+                        item.process,
+                        item.pid,
+                        item.tid,
+                    )
                     item_buffer.append(item)
                     try:
                         monitor_process_wrapper.record_event(
@@ -2689,8 +2895,20 @@ class MonitorController:
 
             def ingest(line_str: str) -> None:
                 now = time.time()
-                line_buffer.append((line_str, now))
                 event = parse_monitor_line(line_str)
+                if event is not None:
+                    # The session timeline: before the lossy deque below.
+                    file_event(
+                        event.event_type,
+                        event.path,
+                        now,
+                        "fsmon",
+                        event.new_path,
+                        event.process,
+                        event.pid,
+                        None,
+                    )
+                line_buffer.append((line_str, now))
                 if event is not None:
                     try:
                         monitor_process_wrapper.record_event(
@@ -2841,6 +3059,28 @@ class MonitorController:
 
     def _monitor_ended(self) -> None:
         """Handle monitor process ending."""
+        try:
+            inst = getattr(
+                self._get_task_service().get_task("monitor"), "instance", None
+            )
+        except Exception:
+            inst = None
+        process = getattr(inst, "process", None)
+        try:
+            exit_code = process.poll() if process is not None else None
+        except Exception:
+            exit_code = None
+        intentional = getattr(inst, "stop_requested", False) is True
+        _timeline_monitor(
+            "end",
+            "monitor ended" if intentional else "monitor ended unexpectedly",
+            level="info" if intentional else "warning",
+            data={
+                "exit_code": exit_code if isinstance(exit_code, int) else None,
+                "intentional": intentional,
+            },
+            dev=getattr(inst, "timeline_serial", None),
+        )
         if self._log_task_stopped:
             self._log_task_stopped("Monitor")
         else:
@@ -2894,6 +3134,12 @@ class MonitorController:
         watch = getattr(getattr(task, "instance", None), "watch", None)
         if isinstance(watch, MonitorWatch):
             watch.stopping = True
+        _timeline_monitor(
+            "stop",
+            "monitor stop requested",
+            data={"requested": True},
+            dev=getattr(getattr(task, "instance", None), "timeline_serial", None),
+        )
         self._stop_pending = True
         _publish_monitor_info({"monitor_status": True})
 

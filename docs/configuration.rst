@@ -194,8 +194,8 @@ it was saved with, so after a load the device can be minutes or hours behind
 the host. With ``sync_clock_after_snapshot`` on (default, also in Settings →
 General), Sandroid sets the device wall clock to host time with a root
 ``date`` when it is more than 1 s off, and re-measures. Either way the
-offsets before and after go to the session's ``clock.jsonl`` (see
-:doc:`interactive_mode`); a failed sync is logged once as a warning and the
+offsets before and after go to the session timeline as ``clock`` lines (see
+the ``[timeline]`` section below); a failed sync is logged once as a warning and the
 offset is still recorded. Off keeps the snapshot's frozen clock. The device's
 CLOCK_MONOTONIC (used by getevent, Frida, ``logcat -v monotonic``, kprobe) is
 never changed; its offset is recorded too.
@@ -411,6 +411,106 @@ Report (``[report]``)
 
    # Custom report template path
    # template_path = <not set>
+
+   # Seconds after an input in which file/network lines count as its effects
+   # in the report transcript
+   effects_window_s = 2.0
+
+   # Screenshot triggers shown in the report
+   shot_triggers = ["before_tap", "after_tap", "screen_change", "label", "manual"]
+
+   # Formats written besides report.json
+   formats = ["pdf", "md"]
+
+Session timeline (``[timeline]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every session device folder (``<results>/<session>/<device>/``) holds one
+``timeline.jsonl``: an append-only JSON Lines file with one line per event --
+labels, file-monitor events, monitor notes, pulls and checks, device-clock
+samples, snapshot loads (world changes), device connects, record/play phases.
+Each line carries ``seq``, its host time ``t`` (device times converted, with
+``clk`` and ``t_err_ms``), ``world``/``epoch``/``phase``/``run``, ``src``,
+``kind``, ``actor``, a ``summary`` and ``data``, and ends with ``h``, a
+sha256 chained over every line before it. It replaces the former
+``marks.jsonl``, ``files/timeline.jsonl`` and ``clock.jsonl``. A second
+Sandroid on the same folder records no timeline (``.timeline.lock``). Check a
+file with ``python -m sandroid.core.timeline verify PATH`` (also ``seal``,
+``tail``, ``labels``; exit code 0 ok, 1 broken, 2 unreadable).
+
+``label``, ``sandroid``, ``clock``, ``snapshot``, ``device`` and ``run``
+lines are always written; the policy below applies to the other sources.
+Every change (Settings or ``update_config``) is recorded as a
+``sandroid/policy`` line.
+
+.. code-block:: toml
+
+   [timeline]
+   # Per-source switch (off = not written)
+   sources = { files = true, monitor = true, net = true, input = true, screen = true, shot = true }
+
+   # Kinds not written: "src.kind" or "src.*"
+   kinds_off = []
+
+   # Kinds only counted, as one "<src>/count" line per window
+   count_only = ["files.open", "files.close"]
+
+   # files.attrs: a line inside the analysed app's data directories and a
+   # count elsewhere (app_dirs), always a line (lines) or always a count
+   files_attrs = "app_dirs"
+
+   # files.modify lines of one path and process within this window become
+   # one line (data.n/first/last); 0 = off
+   files_modify_coalesce_ms = 1000
+
+   # Seconds per count line
+   count_window_s = 5.0
+
+   # Bulk lines (files, monitor, net) queued per device before they are
+   # dropped (a sandroid/dropped line says how many)
+   queue_max = 10000
+
+   # Seconds between periodic device-clock samples; 0 = off
+   clock_every_s = 60
+
+   # Mask sensitive lines (typed text, TLS keys) in the lens, the Inspector,
+   # exports and reports. The file always holds the content.
+   mask_sensitive = false
+
+Tracking (``[tracking]``)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: toml
+
+   [tracking]
+   # UI helper: full (accessibility events and element lookup; detectable by
+   # the app), invisible (screenshots only), off
+   helper_mode = "full"
+
+   # Start Tracking with every recording
+   auto_on_record = true
+
+   # Screenshot triggers
+   shot_before_tap = true
+   shot_screen_change = true
+   shot_after_tap = false
+   shot_label = false
+
+   # After a tap: re-check the screen every settle_interval_ms until it is
+   # stable or settle_max_ms passed
+   settle_interval_ms = 300
+   settle_max_ms = 2000
+
+   # Typed text (a line once the field is idle for text_idle_ms)
+   capture_text = true
+   text_idle_ms = 1500
+
+   # Gesture thresholds
+   long_press_ms = 500
+   swipe_slop_px = 24
+
+   # Activity changes from logcat when accessibility events are unavailable
+   logcat_screen_backup = true
 
 TUI (``[tui]``)
 ~~~~~~~~~~~~~~~
@@ -656,6 +756,10 @@ AI Chat (``[ai]``) -- EXPERIMENTAL
    # data_share_path and the current session's results/raw-results/cache
    # directories. Empty by default.
    extra_host_paths = []
+
+   # Mask the content of sensitive session-timeline lines (typed text, TLS
+   # keys) in what the AI reads
+   mask_sensitive = false
 
 MCP servers (``[mcp]``) -- EXPERIMENTAL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

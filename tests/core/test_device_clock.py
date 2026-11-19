@@ -8,14 +8,13 @@ so only the min-RTT query gives the exact offsets. Nothing runs adb.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from datetime import datetime
 
 import pytest
 
-from sandroid.core import device_clock
+from sandroid.core import device_clock, timeline
 from sandroid.core.adb import Adb
 from sandroid.core.device_clock import ShellDeadError
 
@@ -81,8 +80,15 @@ class FakeShell:
 def _fresh(monkeypatch):
     device_clock.reset()
     monkeypatch.setattr(device_clock, "sync_enabled", lambda: True)
-    yield
+    _CAPTURED.clear()
+    with timeline.capture():
+        timeline.get_timeline()._capture_out = _CAPTURED
+        yield
     device_clock.reset()
+
+
+#: Every session-timeline line of the running test (timeline.capture()).
+_CAPTURED: list[dict] = []
 
 
 @pytest.fixture
@@ -93,11 +99,13 @@ def device(monkeypatch) -> FakeDevice:
     return dev
 
 
+def _clock_lines() -> list[dict]:
+    return [line for line in _CAPTURED if line["src"] == "clock"]
+
+
 def _lines() -> list[dict]:
-    path = device_clock.clock_file()
-    if not path.exists():
-        return []
-    return [json.loads(line) for line in path.read_text().splitlines()]
+    """The recorded samples: each clock line's ``data`` plus its ``kind``."""
+    return [{**line["data"], "kind": line["kind"]} for line in _clock_lines()]
 
 
 # -- measuring ---------------------------------------------------------------
@@ -189,20 +197,30 @@ def test_parse_clocks_reads_timer_list_and_date():
     assert device_clock.parse_clocks([]) == (None, None)
 
 
-# -- clock.jsonl and jumps -----------------------------------------------------
+# -- timeline clock lines and jumps ---------------------------------------------
 
 
-def test_clock_jsonl_lines_are_flat_and_self_describing(device):
-    device_clock.record("device-connect", SERIAL)
+def test_clock_lines_are_self_describing_timeline_lines(device):
+    entry = device_clock.record("device-connect", SERIAL)
+    (envelope,) = _clock_lines()
     (line,) = _lines()
-    for key in ("reason", "off_wall", "off_mono", "rtt_ms", "host_at", "jump"):
+    for key in ("reason", "off_wall", "off_mono", "rtt_ms", "err_ms", "jump"):
         assert key in line
+    assert "serial" not in line
+    assert "host_at" not in line
     assert line["reason"] == "device-connect"
     assert line["jump"] is False
-    assert line["serial"] == SERIAL
-    assert ISO_MS.match(line["host_at"])
-    assert device_clock.clock_file().name == "clock.jsonl"
-    assert device_clock.clock_file().parent.name == "session"
+    assert line["kind"] == "sample"
+    # The envelope: the sample's host midpoint, its error, the device.
+    assert envelope["src"] == "clock"
+    assert envelope["dev"] == SERIAL
+    assert envelope["clk"] == "host"
+    assert envelope["actor"] == "sandroid"
+    assert envelope["t"] == entry["host_at"]
+    assert ISO_MS.match(envelope["t"])
+    assert envelope["t_err_ms"] == pytest.approx(entry["err_ms"], abs=0.05)
+    assert envelope["summary"] == "clock · device −75 min ±8 ms (device-connect)"
+    assert len(envelope["h"]) == 64
 
 
 def test_a_move_over_two_seconds_in_either_offset_is_a_jump(device):
@@ -217,6 +235,8 @@ def test_a_move_over_two_seconds_in_either_offset_is_a_jump(device):
     pull = _lines()[-1]
     assert pull["reason"] == "pull"
     assert pull["jump"] is True
+    assert pull["kind"] == "jump"
+    assert _clock_lines()[-1]["summary"] == "⏱ clock jump · wall −3.5 s"
     assert pull["jump_wall_s"] == pytest.approx(3.5, abs=1e-3)  # further behind
     assert pull["jump_mono_s"] == pytest.approx(0.0, abs=1e-3)
     device.host += 30
@@ -252,9 +272,13 @@ def test_snapshot_load_with_sync_on_sets_the_clock(device, caplog):
     assert sync["before_off_wall"] == pytest.approx(4500.0, abs=1e-3)
     assert abs(sync["after_off_wall"]) < 0.01
     assert sync["command"].startswith("date -u @")
+    assert (load["kind"], sync["kind"]) == ("jump", "sync")
+    assert _clock_lines()[-1]["summary"] == "⏱ clock synced · −75 min → +0.0 s"
     # The wall clock moved, CLOCK_MONOTONIC did not.
     assert sync["off_mono"] == pytest.approx(load["off_mono"], abs=1e-3)
-    assert final == sync
+    public = {k: v for k, v in final.items() if k not in ("serial", "host_at")}
+    assert public == {k: v for k, v in sync.items() if k != "kind"}
+    assert "_host" not in final
     assert caplog.records == []
 
 
@@ -314,7 +338,7 @@ def test_the_snapshot_service_records_after_every_load(monkeypatch, device):
 
     monkeypatch.setattr(device_clock, "sync_enabled", lambda: False)
     svc = EmulatorService()
-    svc._get_adb = lambda: FakeAdb()
+    svc._get_adb = FakeAdb
     monkeypatch.setattr(svc, "_restore_device_proxy", lambda serial: "skipped")
     assert svc.load_snapshot("clean_8g", serial=SERIAL) is True
     (line,) = _lines()
@@ -396,19 +420,34 @@ def test_header_shows_device_time_only_when_off(device, target):
     assert header.update_device_clock(now) == ""
 
 
-def test_header_re_measures_every_minute_in_the_background(monkeypatch, target):
-    from sandroid.tui.widgets.lens_shell import ShellHeader
-
+def test_the_timeline_writer_samples_the_clock_every_clock_every_s(
+    monkeypatch, tmp_path
+):
+    """The periodic sample is the timeline writer's (headless runs too), for
+    the active device, every ``timeline.clock_every_s`` (0 = off).
+    """
     calls = []
     monkeypatch.setattr(
         device_clock, "record_async", lambda *a, **k: calls.append((a, k))
     )
-    header = ShellHeader()
-    header.update_device_clock(1000.0)
-    header.update_device_clock(1030.0)
-    assert calls == []  # the connect sample is the first one
-    header.update_device_clock(1061.0)
-    assert calls == [(("periodic", SERIAL), {"samples": device_clock.SAMPLES_QUICK})]
+    service = timeline.TimelineService()
+    try:
+        assert service.bind(SERIAL, tmp_path / "s" / "d").state == "open"
+        service._policy.clock_every_s = 60
+        start = service._active.last_clock_tick
+        assert service._tick_clock(start + 30) is False
+        assert calls == []  # the connect sample is the first one
+        assert service._tick_clock(start + 61) is True
+        assert calls == [
+            (("periodic", SERIAL), {"samples": device_clock.SAMPLES_QUICK})
+        ]
+        assert service._tick_clock(start + 90) is False
+        assert service._tick_clock(start + 122) is True
+        service._policy.clock_every_s = 0
+        assert service._tick_clock(start + 1000) is False
+        assert len(calls) == 2
+    finally:
+        service.close("test", 2.0)
 
 
 @pytest.mark.asyncio

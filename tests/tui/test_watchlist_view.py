@@ -674,3 +674,78 @@ async def test_two_pulls_of_one_file_at_once_run_one_after_the_other(
         assert len(watchlist_store.version_dirs(PATH_A)) == 1
         (check,) = watchlist_store.version_checks(PATH_A)
         assert check["same_as"] == "v001"
+
+
+@pytest.mark.asyncio
+async def test_pulls_and_checks_are_session_timeline_lines(
+    monkeypatch, timeline_sink
+) -> None:
+    """``files/pull`` points to the version's diff.json (acquisition.json
+    for the first) with its sha256; ``files/check`` to checks.jsonl; a
+    failed pull is a warning. The diff is never copied into the line.
+    """
+    import hashlib
+    from types import SimpleNamespace
+
+    service, timeline_path = timeline_sink
+    folder = timeline_path.parent
+    content = {PATH_A: "v1\n"}
+    monkeypatch.setattr(FileExtractionService, "pull_file", _fake_pull_file(content))
+    monkeypatch.setattr(watchlist_store, "files_root", lambda: folder / "files")
+    app = _WatchlistHarness()
+    async with app.run_test() as pilot:
+        view = app.query_one(WatchlistView)
+        await pilot.pause()
+        view.marks = [
+            SimpleNamespace(
+                number=3, name="login", kind="start", seq=17,
+                when=datetime(2026, 1, 1, 10, 0, 0),
+            )
+        ]  # fmt: skip
+        assert view.add_path(PATH_A) is True
+        await _wait_for(
+            pilot, lambda: view.rows[PATH_A].state is RowState.BASELINE_ONLY
+        )
+        content[PATH_A] = "v1\nv2\n"
+        view.pull([PATH_A])
+        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.CHANGED)
+        view.pull([PATH_A])  # the same bytes again: a check
+        await _wait_for(pilot, lambda: view.rows[PATH_A].checked_at is not None)
+        del content[PATH_A]
+        view.pull([PATH_A])
+        await _wait_for(pilot, lambda: view.rows[PATH_A].state is RowState.ERROR)
+    assert service.flush(3.0)
+    lines = [x for x in service.tail().lines if x["src"] == "files"]
+    first, second, check, failed = lines
+    v1, v2 = watchlist_store.version_dirs(PATH_A)
+    assert (first["kind"], first["actor"]) == ("pull", "sandroid")
+    assert first["data"]["trigger"] == "watch"
+    assert first["data"]["changed"] is None
+    assert first["ref"]["path"] == f"files/com.app/config_a/{v1.name}/acquisition.json"
+    assert first["summary"] == "◆ v001 config_a (first version)"
+    assert (second["kind"], second["actor"]) == ("pull", "user")
+    assert second["data"]["changed"] is True
+    assert second["data"]["version"] == v2.name
+    assert second["data"]["ok"] is True
+    assert second["data"]["size"] == len(b"v1\nv2\n")
+    assert second["data"]["sha256"] == hashlib.sha256(b"v1\nv2\n").hexdigest()
+    diff = v2 / "diff.json"
+    assert second["ref"] == {
+        "path": f"files/com.app/config_a/{v2.name}/diff.json",
+        "sha256": hashlib.sha256(diff.read_bytes()).hexdigest(),
+        "lens": "files",
+    }
+    assert "diff" not in second["data"]
+    assert second["summary"] == "◆ v002 config_a (changed)"
+    assert second["pkg"] == "com.app"
+    assert check["kind"] == "check"
+    assert check["data"]["same_as"] == "v002"
+    assert check["ref"]["path"] == "files/com.app/config_a/checks.jsonl"
+    assert (failed["kind"], failed["level"]) == ("pull", "warn")
+    assert failed["data"]["ok"] is False
+    assert failed["data"]["error"]
+    # The acquisition record names the active label with its kind and seq.
+    record = watchlist_store.version_record(v2)
+    assert record["mark"]["number"] == 3
+    assert record["mark"]["kind"] == "start"
+    assert record["mark"]["seq"] == 17
