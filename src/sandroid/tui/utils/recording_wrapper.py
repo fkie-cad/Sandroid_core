@@ -329,7 +329,9 @@ class RecordingWrapper:
         try:
             from sandroid.core import device_clock
 
-            sample = device_clock.last_sample(self._serial)
+            # Only a sample of the current world: one from before a snapshot
+            # load / cold boot has the old CLOCK_MONOTONIC offset.
+            sample = device_clock.last_sample(self._serial, current_world=True)
             off = (sample or {}).get("off_mono")  # host = dev_mono + off_mono
             if isinstance(off, (int, float)):
                 return -float(off)

@@ -572,11 +572,13 @@ class DeviceManager:
         except Exception as e:
             logger.debug(f"Could not bind the session timeline: {e}")
 
-        # First device-clock sample of this device (session timeline), off-thread.
+        # First device-clock sample of this device (session timeline) and,
+        # with ``emulator.sync_device_clock`` on, the session-start clock
+        # sync (it waits for startup's SELinux step), off-thread.
         try:
             from . import device_clock
 
-            device_clock.record_async("device-connect", serial)
+            device_clock.after_device_connect_async(serial)
         except Exception as e:
             logger.debug(f"Could not sample the device clock: {e}")
 
