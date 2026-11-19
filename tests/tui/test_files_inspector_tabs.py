@@ -408,8 +408,9 @@ def test_files_lens_and_inspector_keys_never_clash():
 
     files = _binding_map(FilesPanel)
     screen = _binding_map(MainScreen)
-    for key in ("B", "A", "less_than_sign", "greater_than_sign"):
-        assert key in files  # the marks keys stay on the lens
+    for key in ("A", "less_than_sign", "greater_than_sign"):
+        assert key in files  # the since-mark keys stay on the lens
+    assert "B" not in files  # B is the global point-label key now
     inspector_side = {**_binding_map(Inspector)}
     for key, actions in [*screen.items(), *_binding_map(_LensHost).items()]:
         inspector_side.setdefault(key, set()).update(actions)

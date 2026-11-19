@@ -1140,7 +1140,8 @@ class _ConfigProxy:
         )  # fmt: skip
         ai = config.ai
         self.ai = SimpleNamespace(
-            **{k: getattr(ai, k) for k in type(ai).model_fields}, mask_sensitive=False
+            **{"mask_sensitive": False}
+            | {k: getattr(ai, k) for k in type(ai).model_fields}
         )
 
     def __getattr__(self, name):

@@ -269,7 +269,7 @@ def test_selinux_restore_skips_a_device_that_is_gone(selinux, caplog) -> None:
     assert not any("setenforce 1" in c for c in adb.calls)
 
 
-def test_quit_cleanup_restores_selinux_last(monkeypatch) -> None:
+def test_quit_cleanup_restores_selinux_before_timeline_close(monkeypatch) -> None:
     from sandroid.services import setup_checks
     from sandroid.tui.controllers import quit_controller as qc
 
@@ -284,8 +284,10 @@ def test_quit_cleanup_restores_selinux_last(monkeypatch) -> None:
         _cleanup_rest=lambda: steps.append("rest"),
     )
     qc.QuitController.force_exit(fake)
-    assert steps[-1] == "SELinux restore"
+    # The timeline is closed last so the SELinux restore is still recorded.
+    assert steps[-1] == "timeline close"
     assert steps.index("rest") < steps.index("SELinux restore")
+    assert steps.index("SELinux restore") < steps.index("timeline close")
 
 
 # --------------------------------------------------------------------------
