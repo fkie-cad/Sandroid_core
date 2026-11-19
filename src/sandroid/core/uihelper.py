@@ -66,8 +66,11 @@ REMOTE_SHOT_DIR = "/data/local/tmp/sandroid-shots"
 
 #: Rooted images whose adb shell lacks the zygote env (BOOTCLASSPATH etc.) need
 #: it imported before app_process can boot the runtime (a no-op otherwise).
+#: ``pidof`` lists several PIDs while an app launches (forked zygote64
+#: children share the env): use the first one.
 ZYGOTE_ENV = (
     'if [ -z "$BOOTCLASSPATH" ]; then ZP=$(pidof zygote64 || pidof zygote); '
+    "ZP=${ZP%% *}; "
     "for kv in $(tr '\\0' '\\n' < /proc/$ZP/environ | grep -vE '^ANDROID_SOCKET_'); "
     'do export "$kv"; done; fi'
 )
