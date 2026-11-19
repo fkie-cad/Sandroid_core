@@ -384,13 +384,28 @@ class StaticAnalysis(DataGatherBase):
         insight_dir = f"{os.getenv('RESULTS_PATH', '')}dexray_insight/"
         os.makedirs(insight_dir, exist_ok=True)
 
-        spotlight_app = self._get_toolbox().get_spotlight_application()
+        # The spotlight service knows the app in both attach and spawn mode
+        # (an app picked with ⇧C but not started is spawn mode); the legacy
+        # Toolbox getter only knows attach mode and returns None otherwise.
+        spotlight_app = None
+        try:
+            from sandroid.services import get_spotlight_service
+
+            spotlight_app = get_spotlight_service().get_app_tuple()
+        except Exception:
+            logger.debug("spotlight service lookup failed", exc_info=True)
+        if not spotlight_app:
+            spotlight_app = self._get_toolbox().get_spotlight_application()
         # Handle both string and tuple returns for backwards compatibility
         apk_name = (
             spotlight_app[0]
             if isinstance(spotlight_app, (list, tuple))
             else spotlight_app
         )
+        if not apk_name:
+            logger.error("No spotlight app selected; static analysis skipped.")
+            self.last_results = {"error": "no spotlight app selected"}
+            return False
         self.last_analysed_app = apk_name
 
         # Get APK path on device

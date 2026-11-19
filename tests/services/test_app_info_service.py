@@ -2085,3 +2085,52 @@ def test_real_settings_footprint_counts_de_storage(fake_adb):
     assert result.databases_count == 0
     script = next(c for c, _s in fake.calls if "du -sk" in c)
     assert "/data/user_de/0/com.android.settings" in script
+
+
+def test_static_analysis_uses_spawn_mode_spotlight(monkeypatch, tmp_path):
+    """An app picked with ⇧C but not started (spawn mode) is analysed.
+
+    The legacy Toolbox getter returns None there; it used to crash with
+    "can only concatenate str (not NoneType)" building `pm path`.
+    """
+    from sandroid import services
+
+    fake_service = SimpleNamespace(get_app_tuple=lambda: ("org.mozilla.firefox", ""))
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: fake_service)
+    analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
+    monkeypatch.setattr(
+        analyzer,
+        "_get_toolbox",
+        lambda: SimpleNamespace(get_spotlight_application=lambda: None),
+    )
+    seen = []
+
+    def fake_adb(cmd):
+        seen.append(cmd)
+        return "", "error: stop here"
+
+    monkeypatch.setattr(analyzer, "_send_adb_command", fake_adb)
+    monkeypatch.chdir(tmp_path)
+    analyzer._analyze_device_apk(time.time())
+    assert seen
+    assert seen[0] == "shell pm path org.mozilla.firefox"
+    assert analyzer.last_analysed_app == "org.mozilla.firefox"
+
+
+def test_static_analysis_without_spotlight_fails_cleanly(monkeypatch, tmp_path):
+    from sandroid import services
+
+    fake_service = SimpleNamespace(get_app_tuple=lambda: None)
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: fake_service)
+    analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
+    monkeypatch.setattr(
+        analyzer,
+        "_get_toolbox",
+        lambda: SimpleNamespace(get_spotlight_application=lambda: None),
+    )
+    monkeypatch.setattr(
+        analyzer, "_send_adb_command", lambda c: pytest.fail("adb called")
+    )
+    monkeypatch.chdir(tmp_path)
+    assert analyzer._analyze_device_apk(time.time()) is False
+    assert analyzer.last_results == {"error": "no spotlight app selected"}
