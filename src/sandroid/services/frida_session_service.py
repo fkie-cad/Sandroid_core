@@ -14,10 +14,7 @@ Usage:
     if frida_service.has_active_session():
         info = frida_service.get_session_info()
 
-    # Spawn app paused for multi-tool loading
-    job_manager, pid = frida_service.spawn_paused("com.example.app")
-    # ... load tools ...
-    frida_service.resume_app()
+    # Starting/attaching the spotlight app: sandroid.services.app_start
 """
 
 import logging
@@ -56,28 +53,16 @@ class FridaJobInfo:
 class SpotlightServiceProtocol(Protocol):
     """Protocol for SpotlightService dependency injection."""
 
-    def set_spawn_app(self, package: str, auto_resume: bool = True) -> None:
-        """Set spawn app configuration."""
+    def get_app_tuple(self) -> tuple[str, str] | None:
+        """The selected app as ``(package, activity)``."""
         ...
 
-    def set_spawn_mode(self, enabled: bool) -> None:
-        """Set spawn mode."""
+    def get_pid(self) -> int | None:
+        """The cached PID of the selected app."""
         ...
 
-    def set_auto_resume(self, enabled: bool) -> None:
-        """Set auto-resume setting."""
-        ...
-
-    def is_spawn_mode(self) -> bool:
-        """Check if in spawn mode."""
-        ...
-
-    def get_auto_resume(self) -> bool:
-        """Get auto-resume setting."""
-        ...
-
-    def get_spawn_package(self) -> str | None:
-        """Get spawn package name."""
+    def set_pid(self, pid: int | None) -> None:
+        """Update the cached PID."""
         ...
 
 
@@ -105,11 +90,6 @@ class FridaSessionService:
 
         # Check for hook conflicts
         conflicts = service.check_hook_conflicts(["crypto", "network"])
-
-        # Spawn for multi-tool loading
-        jm, pid = service.spawn_paused("com.example.app")
-        # ... load tools ...
-        service.resume_app()
     """
 
     def __init__(
@@ -696,67 +676,6 @@ class FridaSessionService:
             self._log_session_error(e)
             raise
 
-    def _spawn_session(
-        self, device: Any, spawn_package: str, spotlight: Any
-    ) -> tuple[Any, str, dict[str, Any]]:
-        """Spawn an application and attach to it (paused).
-
-        Args:
-            device: Frida device object.
-            spawn_package: Package name to spawn.
-            spotlight: SpotlightService instance.
-
-        Returns:
-            Tuple of (session, "spawn", app_info).
-        """
-        self._logger.info(f"Spawning application: {spawn_package}")
-
-        # Spawn the application (starts paused)
-        pid = device.spawn([spawn_package])
-        self._logger.debug(f"Spawned process with PID: {pid}")
-
-        # The spawn replaced any earlier process: show the new PID.
-        self._announce_spawned_pid(spotlight, pid, spawn_package)
-
-        # Attach to the spawned process
-        session = device.attach(pid)
-        self._logger.debug("Attached to spawned process")
-
-        # Don't resume yet - let the caller resume AFTER installing hooks
-        self._logger.debug(
-            "Process spawned and attached but PAUSED. "
-            "Will be resumed after hooks are installed (by its owner)."
-        )
-
-        app_info = {
-            "package_name": spawn_package,
-            "pid": pid,
-            "mode": "spawn",
-            "device": device,
-        }
-
-        self._logger.info(
-            f"Successfully spawned and attached to {spawn_package} (PID: {pid})"
-        )
-
-        return session, "spawn", app_info
-
-    def _announce_spawned_pid(self, spotlight: Any, pid: Any, package: str) -> None:
-        """Push a freshly spawned PID to the Spotlight (best-effort)."""
-        if not isinstance(pid, int) or pid <= 0:
-            return
-        announce = getattr(spotlight, "announce_pid", None)
-        if not callable(announce):
-            return
-        try:
-            announce(pid, package)
-        except Exception as e:
-            self._logger.debug(f"Could not update spotlight PID: {e}")
-        # Still paused: a running file monitor follows the new process now.
-        notify = getattr(spotlight, "notify_spawned", None)
-        if callable(notify):
-            notify(pid, package)
-
     def _attach_session(
         self, device: Any, spotlight: Any, pid: int | None = None
     ) -> tuple[Any, str, dict[str, Any]]:
@@ -869,123 +788,6 @@ class FridaSessionService:
             return None
 
     # =========================================================================
-    # Spawn/Attach Mode
-    # =========================================================================
-
-    def spawn_paused(self, package_name: str) -> tuple[Any, int]:
-        """Spawn an app in paused state for multi-tool loading.
-
-        Use this when you want to load multiple Frida tools before
-        the app starts executing.
-
-        Args:
-            package_name: The package name of the app to spawn.
-
-        Returns:
-            Tuple of (JobManager instance, process ID) or (None, -1) on failure.
-        """
-        try:
-            job_manager = self.get_job_manager()
-            pid = job_manager.spawn_paused(package_name)
-
-            # Update SpotlightService if available
-            spotlight = self._spotlight
-            if spotlight:
-                spotlight.set_spawn_app(package_name, auto_resume=False)
-                self._announce_spawned_pid(spotlight, pid, package_name)
-
-            self._logger.info(f"Spawned {package_name} (PID {pid}) in paused state")
-            self._publish_spawn_event(package_name, pid)
-            return job_manager, pid
-
-        except Exception as e:
-            self._logger.error(f"Failed to spawn {package_name} paused: {e}")
-            return None, -1
-
-    def resume_app(self) -> bool:
-        """Resume a paused app after tools have been loaded.
-
-        Returns:
-            True if app was resumed successfully.
-        """
-        with self._lock:
-            if self._job_manager is None:
-                self._logger.warning("No JobManager available to resume app")
-                return False
-
-        try:
-            result = self._job_manager.resume_app()
-
-            if result:
-                spotlight = self._spotlight
-                if spotlight:
-                    spotlight.set_auto_resume(True)
-                    package = spotlight.get_spawn_package()
-                    self._logger.info(f"Resumed app {package}")
-
-            return result
-
-        except Exception as e:
-            self._logger.error(f"Failed to resume app: {e}")
-            return False
-
-    def get_spawn_mode(self) -> str:
-        """Get the current spawn mode setting.
-
-        Returns:
-            One of: 'multi_tool', 'single_tool', 'late_attach'
-        """
-        spotlight = self._spotlight
-        if spotlight is None:
-            return "single_tool"
-
-        is_spawn = spotlight.is_spawn_mode()
-        auto_resume = spotlight.get_auto_resume()
-
-        if is_spawn and not auto_resume:
-            return "multi_tool"
-        if is_spawn:
-            return "single_tool"
-        return "late_attach"
-
-    def set_spawn_mode(self, mode) -> None:
-        """Set the spawn mode for the next Frida operation.
-
-        Args:
-            mode: Either a boolean (True=spawn, False=attach) or one of:
-                - 'multi_tool': Spawn paused, load multiple tools, then resume
-                - 'single_tool': Spawn with one primary tool, auto-resume
-                - 'late_attach' or 'attach': Attach to running app
-        """
-        spotlight = self._spotlight
-        if spotlight is None:
-            self._logger.warning("SpotlightService not available")
-            return
-
-        # Handle boolean for backward compatibility
-        if isinstance(mode, bool):
-            spotlight.set_spawn_mode(mode)
-            spotlight.set_auto_resume(True)
-            mode_str = "SPAWN" if mode else "ATTACH"
-            self._logger.debug(f"Spawn mode set to: {mode_str}")
-            return
-
-        # Handle string modes
-        if mode == "multi_tool":
-            spotlight.set_spawn_mode(True)
-            spotlight.set_auto_resume(False)
-        elif mode == "single_tool":
-            spotlight.set_spawn_mode(True)
-            spotlight.set_auto_resume(True)
-        elif mode in ("late_attach", "attach"):
-            spotlight.set_spawn_mode(False)
-            spotlight.set_auto_resume(True)
-        else:
-            self._logger.warning(f"Unknown spawn mode: {mode}, using single_tool")
-            spotlight.set_spawn_mode(True)
-            spotlight.set_auto_resume(True)
-
-    # =========================================================================
     # Session Management
     # =========================================================================
 
@@ -1052,25 +854,6 @@ class FridaSessionService:
             return Adb.selected_serial()
         except Exception:
             return None
-
-    def _publish_spawn_event(self, package: str, pid: int) -> None:
-        """Publish spawn event."""
-        if self._event_bus is None:
-            return
-
-        from sandroid.core.events import Event, EventType
-
-        self._event_bus.publish(
-            Event(
-                type=EventType.STATE_CHANGED,
-                data={
-                    "action": "app_spawned",
-                    "package": package,
-                    "pid": pid,
-                },
-                source="frida_session_service",
-            )
-        )
 
 
 # Exports

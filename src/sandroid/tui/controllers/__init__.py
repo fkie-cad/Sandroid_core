@@ -62,7 +62,6 @@ from .recording_controller import PlaybackResult, RecordingController, Recording
 from .screenshot_controller import ScreenshotController
 from .settings_controller import SettingsController
 from .spotlight_controller import SpotlightController, SpotlightFilesAction
-from .spotlight_selection_ui import SpotlightSelectionUI
 from .widget_refresh_controller import WidgetRefreshController
 
 __all__ = [
@@ -100,7 +99,6 @@ __all__ = [
     # Spotlight
     "SpotlightController",
     "SpotlightFilesAction",
-    "SpotlightSelectionUI",
     # Widget Refresh
     "WidgetRefreshController",
 ]

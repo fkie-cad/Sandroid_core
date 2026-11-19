@@ -27,14 +27,12 @@ Usage:
 
 import logging
 import threading
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
 from sandroid.core.adb_utils import validate_package_name
-from sandroid.core.enums import SpawnMode
 from sandroid.services.protocols import EventBusProtocol
 
 logger = logging.getLogger(__name__)
@@ -42,15 +40,6 @@ logger = logging.getLogger(__name__)
 #: ``set_app(pid=...)`` default: keep the PID of a re-picked same package.
 #: An explicit ``pid=None`` clears it (⇧C after a lookup found nothing).
 _UNSET: Any = object()
-
-
-def _deprecated(name: str, instead: str) -> None:
-    warnings.warn(
-        f"SpotlightService.{name} is deprecated: the spotlight has no "
-        f"spawn/attach mode any more ({instead}).",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 @dataclass
@@ -61,14 +50,12 @@ class SpotlightApp:
         package_name: Android package name (e.g., "com.example.app")
         activity_name: Current activity name (if known)
         pid: Process ID (if known)
-        mode: Deprecated, always ATTACH (removed in step 2)
         set_at: When the spotlight was set
     """
 
     package_name: str
     activity_name: str | None = None
     pid: int | None = None
-    mode: SpawnMode = SpawnMode.ATTACH
     set_at: datetime = field(default_factory=datetime.now)
 
 
@@ -145,7 +132,6 @@ class SpotlightService:
         package_name: str,
         activity_name: str | None = None,
         pid: Any = _UNSET,
-        mode: SpawnMode | str | None = None,
     ) -> None:
         """Select ``package_name`` as the spotlight app.
 
@@ -157,7 +143,6 @@ class SpotlightService:
             package_name: Android package name
             activity_name: Activity name (optional)
             pid: Process ID; omit to keep a same-package PID, None to clear.
-            mode: Deprecated and ignored (the spotlight has no mode).
 
         Raises:
             ValueError: *package_name* is not a valid Android package name.
@@ -165,8 +150,6 @@ class SpotlightService:
                 (pidof, force-stop, proxy lanes), so it is validated here.
         """
         validate_package_name(package_name)
-        if mode is not None and str(getattr(mode, "value", mode)) != "attach":
-            self._logger.debug(f"set_app: ignoring deprecated mode={mode!r}")
         with self._lock:
             previous = self._current_app
             same = previous is not None and previous.package_name == package_name
@@ -187,7 +170,6 @@ class SpotlightService:
         self._publish_app_changed(
             package_name=package_name,
             previous_package=previous_package,
-            mode=SpawnMode.ATTACH.value,
             pid=pid,
         )
 
@@ -373,52 +355,6 @@ class SpotlightService:
         return "not_running"
 
     # =========================================================================
-    # Deprecated mode API (no-op shims; removed in step 2)
-    # =========================================================================
-
-    def set_spawn_app(self, package_name: str, auto_resume: bool = True) -> None:
-        """Deprecated: select ``package_name`` (same as :meth:`set_app`).
-
-        Raises:
-            ValueError: *package_name* is not a valid Android package name.
-        """
-        _deprecated("set_spawn_app", "use set_app")
-        self.set_app(package_name)
-
-    def get_spawn_package(self) -> str | None:
-        """Deprecated: always None (there is no spawn target)."""
-        _deprecated("get_spawn_package", "use get_effective_package")
-        return None
-
-    def is_spawn_mode(self) -> bool:
-        """Deprecated: always False (tools decide per call)."""
-        _deprecated("is_spawn_mode", "tools decide via app_start")
-        return False
-
-    def set_spawn_mode(self, mode: bool | str) -> None:
-        """Deprecated no-op."""
-        _deprecated("set_spawn_mode", "tools decide via app_start")
-
-    def get_auto_resume(self) -> bool:
-        """Deprecated: always True (resume follows spawn ownership)."""
-        _deprecated("get_auto_resume", "resume follows spawn ownership")
-        return True
-
-    def set_auto_resume(self, enabled: bool) -> None:
-        """Deprecated no-op (resume follows spawn ownership)."""
-        _deprecated("set_auto_resume", "resume follows spawn ownership")
-
-    def get_spawn_mode_string(self) -> str:
-        """Deprecated: always ``"late_attach"``."""
-        _deprecated("get_spawn_mode_string", "tools decide via app_start")
-        return "late_attach"
-
-    def get_effective_mode(self) -> SpawnMode:
-        """Deprecated: always ``SpawnMode.ATTACH``."""
-        _deprecated("get_effective_mode", "use get_run_state")
-        return SpawnMode.ATTACH
-
-    # =========================================================================
     # Spawn App Paused (Multi-Tool Loading)
     # =========================================================================
 
@@ -576,7 +512,6 @@ class SpotlightService:
             self._publish_app_changed(
                 package_name="",
                 previous_package=previous_pkg,
-                mode=SpawnMode.ATTACH.value,
                 pid=None,
             )
 
@@ -621,7 +556,6 @@ class SpotlightService:
         self,
         package_name: str,
         previous_package: str | None,
-        mode: str,
         pid: int | None,
     ) -> None:
         """Publish a spotlight app changed event."""
@@ -637,42 +571,11 @@ class SpotlightService:
                     "change_type": "spotlight_app",
                     "package_name": package_name,
                     "previous_package": previous_package,
-                    "mode": mode,
                     "pid": pid,
                 },
                 source="spotlight_service",
             )
         )
-
-    # =========================================================================
-    # Interactive Spotlight Selection (delegated to SpotlightSelectionUI)
-    # =========================================================================
-
-    def ensure_app_for_tools(
-        self,
-        tool_name: str = "this tool",
-        adb: Any | None = None,
-    ) -> bool:
-        """Ensure a spotlight app is set, prompting user to select if not.
-
-        This is the unified entry point for tools that require a spotlight application.
-        Deprecated (no callers; removed in step 2).
-
-        Supports both CLI mode (Rich console) and TUI mode (modal dialogs).
-
-        Args:
-            tool_name: Name of the tool requiring spotlight (for display)
-            adb: Optional ADB interface for dependency injection
-
-        Returns:
-            True if spotlight is now set, False if user cancelled
-        """
-        from sandroid.tui.controllers.spotlight_selection_ui import (
-            SpotlightSelectionUI,
-        )
-
-        ui = SpotlightSelectionUI(self)
-        return ui.ensure_app_for_tools(tool_name=tool_name, adb=adb)
 
 
 __all__ = [

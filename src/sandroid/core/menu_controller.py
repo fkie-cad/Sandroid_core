@@ -163,7 +163,6 @@ class MenuController:
             ["forensic", "malware", "security"],
             description="Make the foreground app the spotlight app",
             inline_text="use the [c]urrent foreground app as spotlight app",
-            mode_indicator="",
         )
         self._register(
             "spotlight_spawn",
@@ -173,7 +172,6 @@ class MenuController:
             ["forensic", "malware", "security"],
             description="Pick the spotlight app from the installed apps",
             inline_text="pick an app with [Shift+C]",
-            mode_indicator="",
         )
         self._register(
             "dump_memory",
@@ -301,7 +299,6 @@ class MenuController:
             inline_text="start android [m]alware monitor (dexray-intercept)",
             requires_spotlight=True,
             requires_frida=True,
-            mode_indicator="ATTACH",
         )
         self._register(
             "reconfigure_hooks",
@@ -323,7 +320,6 @@ class MenuController:
             inline_text="start o[b]jection interactive shell",
             requires_spotlight=True,
             requires_frida=True,
-            mode_indicator="ATTACH",
         )
         self._register(
             "objection_resume",
@@ -389,7 +385,6 @@ class MenuController:
             inline_text="start friTap [h]ooking",
             requires_spotlight=True,
             requires_frida=True,
-            mode_indicator="ATTACH",
         )
         self._register(
             "network_capture",

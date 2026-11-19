@@ -5,7 +5,6 @@ Rich-based dialogs when running in TUI mode.
 """
 
 # Canonically defined elsewhere; re-exported for convenience.
-from sandroid.core.enums import SpawnMode
 from sandroid.tui.controllers.monitor_controller import MonitorConfig
 
 from .apk_install_modal import APKInstallModal, APKInstallResult
@@ -65,7 +64,6 @@ from .snapshot_save_choice_modal import (
     SnapshotSaveChoiceResult,
     SnapshotSlotPickerModal,
 )
-from .spawn_mode_modal import SpawnModeModal
 from .toggle_modal import FridaToggleConfigModal, ToggleConfigModal
 from .tool_selection_modal import ToolSelectionModal
 
@@ -138,8 +136,6 @@ __all__ = [
     "SnapshotSelectionModal",
     "SnapshotSelectionResult",
     "SnapshotSlotPickerModal",
-    "SpawnMode",
-    "SpawnModeModal",
     "ToggleConfigModal",
     "ToolSelectionModal",
     "build_objection_command",

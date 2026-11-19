@@ -69,37 +69,9 @@ def test_set_app_with_an_explicit_none_pid_clears_it():
     assert svc.get_pid() is None
 
 
-def test_set_app_ignores_the_deprecated_mode():
-    svc = SpotlightService()
-
-    svc.set_app(A, pid=5, mode="spawn")
-
-    assert svc.get_effective_package() == A
-    assert svc.get_pid() == 5
-
-
 def test_set_app_still_validates_the_package():
     with pytest.raises(ValueError):
         SpotlightService().set_app("com.x;id")
-
-
-def test_mode_shims_are_deprecated_no_ops():
-    svc = SpotlightService()
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        svc.set_spawn_app(A, auto_resume=False)
-    assert svc.get_effective_package() == A
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        assert svc.is_spawn_mode() is False
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        assert svc.get_spawn_package() is None
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        assert svc.get_auto_resume() is True
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        svc.set_spawn_mode(True)
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        assert svc.get_spawn_mode_string() == "late_attach"
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        assert svc.get_effective_mode().value == "attach"
 
 
 def test_spawn_app_paused_of_another_package_replaces_the_selection(monkeypatch):
@@ -327,32 +299,35 @@ def test_no_source_file_uses_the_legacy_spotlight_state():
     assert not offenders, offenders
 
 
-#: The spawn/attach mode API is gone; only deprecated shims remain (step 1).
+#: The spawn/attach mode API is gone (no shims): nothing in src/ may use it.
 _REMOVED_MODE_NAMES = re.compile(
     r"\bset_spawn_app\(|\bis_spawn_mode\(|\bget_spawn_package\(|\bset_spawn_mode\("
     r"|\b(get|set)_auto_resume\(|\bget_effective_mode\(|get_spawn_mode_string"
     r"|SpawnModeModal|SpotlightSelectionUI|ensure_(spotlight_)?app_for_tools"
-    r"|\bspawn_app_paused\(.*auto_resume"
-)
-
-#: Shim definitions and dead code that step 2 deletes.
-_MODE_ALLOWLIST = (
-    "sandroid/services/spotlight_service.py",
-    "sandroid/services/frida_session_service.py",
-    "sandroid/core/toolbox.py",
-    "sandroid/tui/controllers/spotlight_selection_ui.py",
-    "sandroid/tui/controllers/__init__.py",
-    "sandroid/tui/modals/spawn_mode_modal.py",
-    "sandroid/tui/modals/__init__.py",
+    r"|\bspawn_app_paused\(.*auto_resume|\bspawn_mode_modal\b"
+    r"|\bspotlight_selection_ui\b"
 )
 
 
 def test_no_source_file_uses_the_removed_mode_api():
     offenders = [
-        f"{rel}:{n}"
+        f"{path.relative_to(_SRC).as_posix()}:{n}"
         for path in _SRC.rglob("*.py")
-        if not (rel := path.relative_to(_SRC).as_posix()).endswith(_MODE_ALLOWLIST)
         for n, line in enumerate(path.read_text("utf-8").splitlines(), 1)
         if _REMOVED_MODE_NAMES.search(line)
     ]
     assert not offenders, offenders
+
+
+def test_spotlight_app_and_its_event_have_no_mode():
+    from sandroid.services.spotlight_service import SpotlightApp
+
+    assert "mode" not in SpotlightApp.__dataclass_fields__
+    events: list = []
+    svc = SpotlightService(event_bus=SimpleNamespace(publish=events.append))
+    svc.set_app(A)
+    svc.reset()
+    assert events
+    assert all("mode" not in e.data for e in events)
+    for gone in ("set_spawn_app", "is_spawn_mode", "get_effective_mode"):
+        assert not hasattr(svc, gone)

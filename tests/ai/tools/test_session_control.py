@@ -75,14 +75,8 @@ class _FakeSpotlightService:
             "spotlight_files": [],
         }
 
-    def set_app(self, package_name, activity_name=None, pid=None, mode=None):
-        self.calls.append(("set_app", package_name, activity_name, mode))
-
-    def set_spawn_app(self, package_name, auto_resume=True):
-        self.calls.append(("set_spawn_app", package_name))
-
-    def set_spawn_mode(self, mode):
-        self.calls.append(("set_spawn_mode", mode))
+    def set_app(self, package_name, activity_name=None, pid=None):
+        self.calls.append(("set_app", package_name, activity_name))
 
     def get_state_dict(self):
         return dict(self._state)
@@ -154,7 +148,7 @@ def test_set_spotlight_app_only_selects(monkeypatch):
 
     session_control.set_spotlight_app("com.example.app", activity_name=".MainActivity")
 
-    assert fake.calls == [("set_app", "com.example.app", ".MainActivity", None)]
+    assert fake.calls == [("set_app", "com.example.app", ".MainActivity")]
 
 
 def test_set_spotlight_app_ignores_the_deprecated_mode(monkeypatch):
@@ -166,8 +160,8 @@ def test_set_spotlight_app_ignores_the_deprecated_mode(monkeypatch):
     session_control.set_spotlight_app("com.example.app", mode="bogus")
 
     assert fake.calls == [
-        ("set_app", "com.example.app", None, None),
-        ("set_app", "com.example.app", None, None),
+        ("set_app", "com.example.app", None),
+        ("set_app", "com.example.app", None),
     ]
 
 

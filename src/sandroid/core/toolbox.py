@@ -638,12 +638,7 @@ class Toolbox(metaclass=_ToolboxMeta):
         """Delegates to DeviceService.is_emulator_device()."""
         return _service("get_device_service").is_emulator_device()
 
-    # ==================== Spawn Mode ====================
-
-    @classmethod
-    def is_spawn_mode(cls):
-        """Returns whether spawn mode is enabled. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").is_spawn_mode()
+    # ==================== Spotlight Frida session ====================
 
     @classmethod
     def resume_spawned_process_after_hooks(cls, device, pid):
@@ -652,7 +647,7 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def get_frida_session_for_spotlight(cls):
-        """Returns appropriate Frida session based on current mode (spawn/attach).
+        """Returns a private Frida session on the running spotlight app.
 
         Delegates to FridaSessionService for the implementation.
 
@@ -660,20 +655,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         :raises: Exception if Frida setup fails
         """
         return _service("get_frida_session_service").get_session_for_spotlight()
-
-    @classmethod
-    def ensure_spotlight_app_for_tools(cls, tool_name: str = "this tool") -> bool:
-        """Ensure a spotlight app is set, prompting user to select if not.
-
-        Delegates to SpotlightService for the implementation.
-
-        Args:
-            tool_name: Name of the tool requiring spotlight (for display)
-
-        Returns:
-            True if spotlight is now set, False if user cancelled
-        """
-        return _service("get_spotlight_service").ensure_app_for_tools(tool_name)
 
     @classmethod
     def select_app_with_fuzzy_search(cls, recently_installed_package=None):
