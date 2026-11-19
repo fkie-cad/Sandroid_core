@@ -426,7 +426,9 @@ class _Lane:
 
 def _default_run(argv: list[str], timeout: float = 10.0) -> tuple[int, bytes]:
     try:
-        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+        proc = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(f"tracking: {argv[:4]} failed: {exc}")
         return -1, b""
