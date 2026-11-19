@@ -205,21 +205,31 @@ with the emulator backend instead of wrapping each launch path:
    emulator.register_post_stop_hook(restore)
 
 - **Pre-launch** hooks run before every emulator process Sandroid spawns --
-  ``launch_avd``, ``restart_emulator`` and ``ensure_avd_running`` (Devices
-  screen, AI tools, ``--avd``) all funnel through one spot -- after the
-  console port was chosen, in registration order (registering a callable
+  ``launch_avd``, ``restart_emulator`` and ``ensure_avd_running`` (the
+  Devices screen, ``--avd``, and the AI tools via ``EmulatorService``'s
+  restart / kill, i.e. ``restart_emulator`` / ``stop_emulator``) all funnel
+  through one spot -- after the console port was chosen, in registration order (registering a callable
   twice is a no-op). Their arguments are appended after
   ``options.extra_args`` and never stored in ``devices.json``. Reusing an
   AVD that already runs calls no hook.
 - A pre-launch hook that raises fails the launch closed: no process is
   started, the port is released, the post-stop hooks run (best effort) and
   ``EmulatorLaunchError`` names the hook and its error.
-- **Post-stop** hooks get the same ``LaunchContext`` once that emulator has
-  exited: on stop, on restart (before the relaunch's pre-launch hooks), on a
-  startup crash, and best effort when it died on its own (noticed by the
-  boot waiter, ``reap_exited_launches()`` or the next launch). They run at
-  most once per launch; their exceptions are logged and never block a stop
-  or restart.
+- **Post-stop** hooks get the same ``LaunchContext`` once that emulator's
+  process has really exited: on stop, on restart, on a startup crash, and
+  best effort when it died on its own (noticed by the boot waiter or
+  ``reap_exited_launches()``, which the next launch, the TUI's device poll
+  worker and interpreter exit call). They run exactly once per launch, and
+  always *finish* before any later pre-launch for the same AVD starts: a
+  launch waits for a restore another thread is running (up to
+  ``POST_STOP_WAIT`` s, then it fails closed), and an AVD whose old process
+  is still exiting (e.g. saving its snapshot) is refused as "still shutting
+  down" (``restart_emulator`` waits for it, see its ``exit_timeout``).
+  Their exceptions are logged and never block a stop or restart.
+- An emulator still running when Sandroid exits keeps running (it is
+  detached) **with its patches**: post-stop hooks run only for launches
+  Sandroid saw exit. Pre-launch hooks must therefore tolerate leftover
+  state from an earlier session (e.g. a backup that is already there).
 - Pre-launch and post-stop hooks are **not paired**: when any pre-launch hook
   fails, *all* registered post-stop hooks run, including ones whose own
   pre-launch hook never ran or stopped half-way. Every post-stop hook must
@@ -229,7 +239,8 @@ with the emulator backend instead of wrapping each launch path:
 - Emulators Sandroid did not launch can still be stopped, but get no
   post-stop hooks.
 - Hooks run on the backend's worker threads, never on the Textual UI
-  thread; ``unregister_pre_launch_hook`` / ``unregister_post_stop_hook``
+  thread and never under the backend's internal locks;
+  ``unregister_pre_launch_hook`` / ``unregister_post_stop_hook``
   remove them.
 
 File Operations

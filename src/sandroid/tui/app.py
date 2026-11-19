@@ -999,7 +999,17 @@ class SandroidTUI(App):
             self._device_poll_in_flight = False
 
     def _refresh_devices_bg(self) -> None:
-        """Worker body: refresh the device list (may block on ADB)."""
+        """Worker body: refresh the device list (may block on ADB).
+
+        Also runs the post-stop hooks of our emulator launches that exited
+        unnoticed (crash, closed window) -- here, off the UI thread.
+        """
+        try:
+            from sandroid.core.emulator import reap_exited_launches
+
+            reap_exited_launches()
+        except Exception as e:
+            logger.debug(f"Reaping exited emulator launches failed: {e}")
         try:
             from sandroid.core.toolbox import Toolbox
 

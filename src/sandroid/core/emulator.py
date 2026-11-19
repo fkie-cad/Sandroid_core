@@ -36,6 +36,7 @@ restarts an emulator goes through this module:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import platform
@@ -645,7 +646,11 @@ def rename_avd(old_name: str, new_name: str) -> tuple[bool, str]:
         ``(success, message)``.
     """
     with _LAUNCH_LOCK:
-        ours = [x for x in _LAUNCHES.values() if x.avd == old_name and x.alive]
+        ours = [
+            x
+            for x in [*_LAUNCHES.values(), *_UNFINISHED]
+            if x.avd == old_name and x.alive
+        ]
     if ours:
         return False, f"AVD '{old_name}' is running as {ours[0].serial}; stop it first"
     locks = avd_lock_files(old_name)
@@ -1017,10 +1022,17 @@ def register_post_stop_hook(hook: PostStopHook) -> None:
     :func:`stop_emulator`, on :func:`restart_emulator` (before the
     relaunch's pre-launch hooks), when a launch crashes during startup or
     its pre-launch failed, and best effort when our emulator died on its own
-    (noticed by :func:`wait_until_ready`, :func:`reap_exited_launches` or
-    the next :func:`launch_avd`). At most once per launch, off the UI
-    thread. Exceptions are logged and swallowed; they never block a stop or
-    restart. Hooks must tolerate a launch with nothing to restore.
+    (noticed by :func:`wait_until_ready` or :func:`reap_exited_launches`:
+    the next :func:`launch_avd`, the TUI's device poll, interpreter exit).
+    At most once per launch, off the UI thread, and always finished before
+    a later pre-launch for the same AVD starts. Exceptions are logged and
+    swallowed; they never block a stop or restart. Hooks must tolerate a
+    launch with nothing to restore.
+
+    An emulator still running when Sandroid exits keeps running (detached)
+    with its patches: post-stop runs only for launches Sandroid saw exit.
+    Pre-launch hooks must therefore tolerate leftover state from an earlier
+    session.
 
     Emulators Sandroid did not launch (no launch record) get no post-stop
     hooks, although :func:`stop_emulator` stops them.
@@ -1119,7 +1131,10 @@ class EmulatorLaunch:
             port has its own event).
         context: What its launch hooks saw (post-stop gets the same).
         hook_args: Emulator arguments its pre-launch hooks added.
-        post_stop_done: True once its post-stop hooks ran (at most once).
+        post_stop_claimed: True once a thread started its post-stop hooks
+            (they run at most once; only after its process exited).
+        post_stop_finished: Set once its post-stop hooks have finished
+            (also when one raised); wait on it before patching its AVD again.
     """
 
     avd: str
@@ -1135,7 +1150,17 @@ class EmulatorLaunch:
     )
     context: LaunchContext | None = field(default=None, compare=False)
     hook_args: tuple[str, ...] = ()
-    post_stop_done: bool = field(default=False, compare=False, repr=False)
+    post_stop_claimed: bool = field(
+        default=False, init=False, compare=False, repr=False
+    )
+    post_stop_finished: threading.Event = field(
+        default_factory=threading.Event, init=False, compare=False, repr=False
+    )
+
+    @property
+    def post_stop_done(self) -> bool:
+        """True once its process exited and its post-stop hooks finished."""
+        return self.post_stop_finished.is_set()
 
     @property
     def alive(self) -> bool:
@@ -1154,9 +1179,18 @@ _LAUNCH_LOCK = threading.RLock()
 _RESERVED_PORTS: set[int] = set()
 #: AVDs a :func:`launch_avd` call is starting right now (``_LAUNCH_LOCK``).
 _STARTING_AVDS: set[str] = set()
-#: Launches dropped from ``_LAUNCHES`` (left adb) whose process had not
-#: exited yet, so their post-stop hooks are still due (``_LAUNCH_LOCK``).
+#: Launches dropped from ``_LAUNCHES`` (left adb, or crashed during startup)
+#: whose post-stop hooks have not finished yet: the process is still exiting
+#: (e.g. saving its snapshot) or the hooks are running (``_LAUNCH_LOCK``).
+#: An alive one still blocks a new launch of its AVD.
 _UNFINISHED: list[EmulatorLaunch] = []
+#: Seconds a launch waits for an earlier launch's post-stop hooks (run by
+#: another thread) to finish before its own pre-launch hooks; then it fails.
+POST_STOP_WAIT = 60.0
+#: Seconds :func:`restart_emulator` waits for the old process to exit after
+#: it left adb (``save_on_exit`` launches write their snapshot first).
+RESTART_EXIT_WAIT = 15.0
+RESTART_EXIT_WAIT_SAVING = 60.0
 
 
 def get_launch(serial: str) -> EmulatorLaunch | None:
@@ -1185,28 +1219,90 @@ def booting_serials() -> list[str]:
 
 
 def _forget_launch(serial: str) -> None:
+    """Drop *serial*'s record; one whose post-stop is due moves (atomically)
+    to ``_UNFINISHED``, so it is never in neither registry.
+    """
     with _LAUNCH_LOCK:
-        _LAUNCHES.pop(serial, None)
+        launch = _LAUNCHES.pop(serial, None)
+        if launch is not None:
+            _keep_unfinished(launch)
 
 
-def _finish_launch(launch: EmulatorLaunch) -> None:
-    """Run the post-stop hooks of *launch* (it exited); at most once."""
+def _keep_unfinished(launch: EmulatorLaunch) -> None:
+    """Track *launch* in ``_UNFINISHED`` until its post-stop finished."""
     with _LAUNCH_LOCK:
-        _UNFINISHED[:] = [x for x in _UNFINISHED if x is not launch]
-        if launch.post_stop_done or launch.context is None:
+        if launch.post_stop_done or any(x is launch for x in _UNFINISHED):
             return
-        launch.post_stop_done = True
-    _run_post_stop_hooks(launch.context)
+        _UNFINISHED.append(launch)
 
 
-def _post_stop_pending(launch: EmulatorLaunch | None) -> bool:
-    """True if *launch* still runs and post-stop hooks wait for its exit."""
-    return (
-        launch is not None
-        and not launch.post_stop_done
-        and launch.alive
-        and bool(_hook_snapshot("post_stop"))
-    )
+def _shutting_down(avd: str) -> EmulatorLaunch | None:
+    """Our forgotten launch of *avd* whose process still runs."""
+    with _LAUNCH_LOCK:
+        return next((x for x in _UNFINISHED if x.avd == avd and x.alive), None)
+
+
+def _finish_launch(launch: EmulatorLaunch) -> bool:
+    """Run the post-stop hooks of *launch* (it exited); at most once.
+
+    Only call it once the process exited. The first caller claims the hooks
+    and runs them; a later or concurrent caller returns at once -- wait on
+    ``launch.post_stop_finished`` (see :func:`_await_post_stop`) to know
+    they finished. Never runs hooks under ``_LAUNCH_LOCK``.
+
+    Returns:
+        True if this call ran them.
+    """
+    with _LAUNCH_LOCK:
+        if launch.post_stop_claimed:
+            return False
+        launch.post_stop_claimed = True
+    try:
+        if launch.context is not None:
+            _run_post_stop_hooks(launch.context)
+    finally:
+        with _LAUNCH_LOCK:
+            _UNFINISHED[:] = [x for x in _UNFINISHED if x is not launch]
+        launch.post_stop_finished.set()
+    return True
+
+
+def _await_post_stop(launch: EmulatorLaunch, timeout: float | None = None) -> None:
+    """Finish *launch* (exited) and wait until its post-stop hooks finished.
+
+    Another thread may be running them (a poll's reap, a boot waiter); a
+    pre-launch for the same AVD must not start before they are done.
+
+    Raises:
+        EmulatorLaunchError: They are still running after *timeout* s
+            (default :data:`POST_STOP_WAIT`); fails closed.
+    """
+    _finish_launch(launch)
+    wait = POST_STOP_WAIT if timeout is None else timeout
+    if not launch.post_stop_finished.wait(wait):
+        raise EmulatorLaunchError(
+            f"The post-stop hooks of the previous launch of AVD '{launch.avd}' "
+            f"({launch.serial}) are still running after {wait:g}s; not "
+            "starting it again until they finished restoring it -- try again "
+            "shortly"
+        )
+
+
+def _await_avd_post_stops(avd: str) -> None:
+    """Wait for the post-stop hooks of every exited launch of *avd*.
+
+    Raises:
+        EmulatorLaunchError: See :func:`_await_post_stop`.
+    """
+    with _LAUNCH_LOCK:
+        due = [
+            x
+            for x in [*_LAUNCHES.values(), *_UNFINISHED]
+            if x.avd == avd and not x.post_stop_done and not x.alive
+        ]
+    deadline = time.monotonic() + POST_STOP_WAIT
+    for launch in due:
+        _await_post_stop(launch, max(0.0, deadline - time.monotonic()))
 
 
 def _wait_exit(process: Any, timeout: float) -> None:
@@ -1221,22 +1317,35 @@ def reap_exited_launches() -> list[EmulatorLaunch]:
     """Run the post-stop hooks of our launches whose process has exited.
 
     Best effort for emulators that died on their own (crash, closed
-    window): their post-stop hooks have not run yet. Called by
-    :func:`launch_avd` before every launch; may be called by any worker
-    thread (never the UI thread: hooks may block).
+    window) or exited after they left adb: their post-stop hooks have not
+    run yet. Called by :func:`launch_avd` before every launch, by the TUI's
+    device poll worker and at interpreter exit; may be called by any worker
+    thread (never the UI thread: hooks may block). Emulators still running
+    are left alone (they are detached and keep running after Sandroid
+    exits, with their patches).
 
     Returns:
-        The launches whose post-stop hooks ran now.
+        The launches whose post-stop hooks this call ran (hooks another
+        thread is running are not waited for).
     """
     with _LAUNCH_LOCK:
         due = [
             x
             for x in [*_LAUNCHES.values(), *_UNFINISHED]
-            if not x.post_stop_done and x.context is not None and not x.alive
+            if not x.post_stop_claimed and not x.alive
         ]
-    for launch in due:
-        _finish_launch(launch)
-    return due
+    return [launch for launch in due if _finish_launch(launch)]
+
+
+def _reap_at_exit() -> None:
+    """``atexit``: run post-stop hooks of launches that exited (best effort)."""
+    try:
+        reap_exited_launches()
+    except Exception:
+        logger.debug("reaping exited emulator launches at exit failed", exc_info=True)
+
+
+atexit.register(_reap_at_exit)
 
 
 def mark_ready(serial: str) -> None:
@@ -1345,9 +1454,15 @@ def launch_avd(
         The registered :class:`EmulatorLaunch` (``serial`` is
         ``emulator-<port>``).
 
+    Before the pre-launch hooks, the post-stop hooks of every earlier
+    launch of *avd* that exited have finished (run here, or awaited when
+    another thread is running them).
+
     Raises:
         EmulatorLaunchError: No emulator binary / free port, our launch of
-            *avd* is still running, a pre-launch hook failed (named in the
+            *avd* is still running or still shutting down, an earlier
+            launch's post-stop hooks did not finish within
+            :data:`POST_STOP_WAIT`, a pre-launch hook failed (named in the
             message), the process could not start, or it crashed during
             startup (the message names the log file).
     """
@@ -1371,10 +1486,20 @@ def launch_avd(
             raise EmulatorLaunchError(
                 f"AVD '{avd}' is already running as {running.serial}"
             )
+        exiting = _shutting_down(avd)
+        if exiting is not None:
+            raise EmulatorLaunchError(
+                f"AVD '{avd}' is still shutting down ({exiting.serial}, PID "
+                f"{getattr(exiting.process, 'pid', '?')}; it may still be "
+                "saving its snapshot); start it again once it has exited"
+            )
         if avd in _STARTING_AVDS:
             raise EmulatorLaunchError(f"AVD '{avd}' is already being started")
         _STARTING_AVDS.add(avd)
     try:
+        # Another thread (a poll's reap) may still be restoring an earlier
+        # launch: never patch the AVD again before that has finished.
+        _await_avd_post_stops(avd)
         launch = _launch_reserved(avd, opts, binary, _adb(adb), port)
     finally:
         with _LAUNCH_LOCK:
@@ -1402,7 +1527,7 @@ def _launch_reserved(
                 )
                 return launch
             _forget_launch(launch.serial)
-            _finish_launch(launch)  # it exited: restore before any retry
+            _await_post_stop(launch)  # it exited: restore before any retry
             log_path = launch.log_path
             if reason in ("pinned", "last used") and not _ports_free(chosen):
                 # Never fall back to an arbitrary port: in a shared lab the
@@ -1437,31 +1562,55 @@ def _spawn_launch(
     """Run the pre-launch hooks, start the process, register the launch.
 
     The one place an emulator process is spawned, so every launch path runs
-    the pre-launch hooks exactly once per process, with its real port.
+    the pre-launch hooks exactly once per process, with its real port. A
+    dead earlier record on the same serial is finished (post-stop) first;
+    a live one refuses the launch.
     """
+    serial = f"emulator-{port}"
+    with _LAUNCH_LOCK:
+        previous = _LAUNCHES.get(serial)
+        if previous is not None and previous.alive:
+            raise EmulatorLaunchError(
+                f"{serial} is still used by our launch of AVD '{previous.avd}'"
+            )
+        if previous is not None:
+            _forget_launch(serial)
+    if previous is not None:
+        _await_post_stop(previous)
     context = _launch_context(avd, port, opts)
     hook_args = _run_pre_launch_hooks(context)
-    command = build_emulator_command(binary, avd, port, opts) + list(hook_args)
-    logger.info(f"Starting emulator '{avd}': {' '.join(command)}")
+    process = None
     try:
-        process, log_path = spawn_emulator(command, avd, emulator_env())
-    except (OSError, subprocess.SubprocessError) as e:
+        command = build_emulator_command(binary, avd, port, opts) + list(hook_args)
+        logger.info(f"Starting emulator '{avd}': {' '.join(command)}")
+        try:
+            process, log_path = spawn_emulator(command, avd, emulator_env())
+        except (OSError, subprocess.SubprocessError) as e:
+            raise EmulatorLaunchError(f"Could not start emulator '{avd}': {e}") from e
+        launch = EmulatorLaunch(
+            avd=avd,
+            serial=serial,
+            port=port,
+            options=opts,
+            process=process,
+            log_path=log_path,
+            started_at=time.monotonic(),
+            context=context,
+            hook_args=hook_args,
+        )
+        with _LAUNCH_LOCK:
+            displaced = _LAUNCHES.get(serial)
+            if displaced is not None:  # pragma: no cover - port is reserved
+                _forget_launch(serial)  # still finished by a later reap
+            _LAUNCHES[serial] = launch
+        return launch
+    except BaseException:
+        # Whatever failed after the pre-launch hooks: no process of ours
+        # keeps running unregistered, and what they patched is restored.
+        if process is not None:
+            _terminate(process)
         _run_post_stop_hooks(context)
-        raise EmulatorLaunchError(f"Could not start emulator '{avd}': {e}") from e
-    launch = EmulatorLaunch(
-        avd=avd,
-        serial=f"emulator-{port}",
-        port=port,
-        options=opts,
-        process=process,
-        log_path=log_path,
-        started_at=time.monotonic(),
-        context=context,
-        hook_args=hook_args,
-    )
-    with _LAUNCH_LOCK:
-        _LAUNCHES[launch.serial] = launch
-    return launch
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1597,9 +1746,10 @@ def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
 
     Once our launch has exited, its post-stop hooks run (when hooks are
     registered, the process is awaited within *timeout* after it left adb;
-    if it is still exiting, they run when it is next noticed, see
-    :func:`reap_exited_launches`). An emulator Sandroid did not launch is
-    stopped the same way but gets no post-stop hooks.
+    if it is still exiting, it is kept as "shutting down" -- a new launch
+    of its AVD is refused meanwhile -- and its hooks run when its exit is
+    next noticed, see :func:`reap_exited_launches`). An emulator Sandroid
+    did not launch is stopped the same way but gets no post-stop hooks.
 
     Returns:
         True once *serial* left ``adb devices`` (and our process, if it was
@@ -1625,7 +1775,7 @@ def stop_emulator(serial: str, adb: Any = None, timeout: float = 30.0) -> bool:
     while True:
         entries = _list_entries(adb)
         if entries is not None and all(e.serial != serial for e in entries):
-            _forget_launch(serial)
+            _forget_launch(serial)  # -> _UNFINISHED until post-stop finished
             if launch is not None:
                 _settle_stopped(launch, max(2.0, deadline - time.monotonic()))
             return True
@@ -1641,25 +1791,31 @@ def _settle_stopped(launch: EmulatorLaunch, wait: float) -> None:
     """*launch* left adb: run its post-stop hooks once its process exited.
 
     Waits up to *wait* seconds for the process (only when post-stop hooks
-    are registered); one still exiting is kept in ``_UNFINISHED`` and
-    finished by :func:`reap_exited_launches`.
+    are registered). Never finishes a launch whose process still runs, even
+    without hooks (one registered meanwhile must not run before the exit):
+    it stays in ``_UNFINISHED`` and is finished by
+    :func:`reap_exited_launches`.
     """
-    if _post_stop_pending(launch):
+    _keep_unfinished(launch)
+    hooks = bool(_hook_snapshot("post_stop"))
+    if hooks and launch.alive:
         _wait_exit(launch.process, wait)
-    if _post_stop_pending(launch):
-        logger.info(
-            f"Emulator {launch.serial} left adb but is still exiting; its "
-            "post-stop hooks run once it has exited"
-        )
-        with _LAUNCH_LOCK:
-            if all(x is not launch for x in _UNFINISHED):
-                _UNFINISHED.append(launch)
+    if launch.alive:
+        if hooks:
+            logger.info(
+                f"Emulator {launch.serial} left adb but is still exiting; its "
+                "post-stop hooks run once it has exited"
+            )
         return
     _finish_launch(launch)
 
 
 def restart_emulator(
-    serial: str, options: AvdLaunchOptions | None = None, adb: Any = None
+    serial: str,
+    options: AvdLaunchOptions | None = None,
+    adb: Any = None,
+    *,
+    exit_timeout: float | None = None,
 ) -> EmulatorLaunch:
     """Stop emulator *serial* and start the same AVD on the same port.
 
@@ -1667,8 +1823,18 @@ def restart_emulator(
     record, then the remembered options; ``wipe_once`` is dropped (a
     restart never factory-resets). Same port -> same serial, so the session
     reconnects to it. Does not wait for the boot (see
-    :func:`wait_until_ready`). The old launch's post-stop hooks run before
-    the new launch's pre-launch hooks (via :func:`launch_avd`).
+    :func:`wait_until_ready`). Once it left adb, our old process is awaited
+    (it may still be saving its snapshot); its post-stop hooks finish
+    before the new launch's pre-launch hooks (via :func:`launch_avd`).
+
+    Args:
+        serial: The emulator to restart.
+        options: Launch options of the relaunch (see above).
+        adb: adb interface (default: the global ``Adb``).
+        exit_timeout: Seconds to wait for the old process to exit and its
+            port to be free after it left adb (default
+            :data:`RESTART_EXIT_WAIT`, or :data:`RESTART_EXIT_WAIT_SAVING`
+            when the old launch saves its state on exit).
 
     Raises:
         EmulatorLaunchError: Not an emulator, AVD unknown, it did not stop,
@@ -1690,15 +1856,28 @@ def restart_emulator(
     if not stop_emulator(serial, adb):
         raise EmulatorLaunchError(f"Emulator {serial} did not stop")
     # Bindable ignores TIME_WAIT (see _port_bindable): this only waits for
-    # the old emulator to really let go of its ports -- and, with post-stop
-    # hooks registered, for our old process to exit, so its post-stop hooks
-    # run before the relaunch's pre-launch hooks.
-    deadline = time.monotonic() + 15.0
-    while not _ports_free(port) or _post_stop_pending(old):
+    # the old emulator to really let go of its ports -- and for our old
+    # process to exit, so its post-stop hooks run before the relaunch's
+    # pre-launch hooks (launch_avd refuses an AVD still shutting down).
+    saving = (old.options if old is not None else options).save_on_exit
+    if exit_timeout is None:
+        exit_timeout = RESTART_EXIT_WAIT_SAVING if saving else RESTART_EXIT_WAIT
+    deadline = time.monotonic() + exit_timeout
+    while not _ports_free(port) or (old is not None and old.alive):
         if time.monotonic() >= deadline:
-            if not _ports_free(port):
-                raise EmulatorLaunchError(f"Console port {port} is still in use")
-            raise EmulatorLaunchError(f"Emulator {serial} has not exited yet")
+            if old is not None and old.alive:
+                pid = getattr(old.process, "pid", "?")
+                raise EmulatorLaunchError(
+                    f"Emulator {serial} left adb but its process (PID {pid}) "
+                    f"has not exited after {exit_timeout:g}s"
+                    + (" -- it may still be saving its snapshot" if saving else "")
+                    + "; start the AVD again once it has exited (or end that "
+                    "process)"
+                )
+            raise EmulatorLaunchError(
+                f"Console port {port} is still in use {exit_timeout:g}s after "
+                f"{serial} stopped; start the AVD again once it is free"
+            )
         time.sleep(0.5)
     return launch_avd(avd, options, port=port, adb=adb)
 

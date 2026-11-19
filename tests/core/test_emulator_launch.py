@@ -189,6 +189,7 @@ def env(monkeypatch, tmp_path, log_dir):
         "on_spawn": None,
         "procs": [],
         "locked": set(),  # AVDs whose directory holds a live emulator lock
+        "kill_exits": True,  # ``emu kill`` also ends our fake process
     }
 
     def fake_spawn(command, avd_name, env=None):
@@ -234,6 +235,18 @@ def env(monkeypatch, tmp_path, log_dir):
     monkeypatch.setattr(DeviceManager, "_preferred_serial", None)
     monkeypatch.setattr(emu, "_config_emulator", lambda: None)
     state["adb"] = adb
+    original_telnet = adb.send_telnet_command
+
+    def telnet(command, serial=None):
+        result = original_telnet(command, serial=serial)
+        killed = result == ("OK", "") and adb.kill_removes
+        if command == "kill" and killed and state["kill_exits"]:
+            for cmd, proc in zip(state["spawned"], state["procs"], strict=True):
+                if f"emulator-{_port_of(cmd)}" == serial and proc.exit_code is None:
+                    proc._exit(0)
+        return result
+
+    adb.send_telnet_command = telnet
     return state
 
 
@@ -1080,22 +1093,6 @@ def test_default_attach_never_switches_on_the_ui_thread(env):
 # -- launch hooks ---------------------------------------------------------------
 
 
-def _kill_exits_process(env):
-    """``emu kill`` also ends the fake process of that serial."""
-    adb = env["adb"]
-    original = adb.send_telnet_command
-
-    def send(command, serial=None):
-        result = original(command, serial=serial)
-        if command == "kill":
-            for cmd, proc in zip(env["spawned"], env["procs"], strict=True):
-                if f"emulator-{_port_of(cmd)}" == serial and proc.exit_code is None:
-                    proc._exit(0)
-        return result
-
-    adb.send_telnet_command = send
-
-
 def _recorders(events):
     """A (pre-launch, post-stop) hook pair appending to *events*."""
 
@@ -1228,7 +1225,6 @@ def test_spawn_failure_restores_what_pre_launch_patched(env, monkeypatch):
 def test_post_stop_runs_once_after_stop_with_the_launch_context(env):
     events = []
     _recorders(events)
-    _kill_exits_process(env)
     launch = emu.launch_avd("Pixel")
     env["adb"].add(launch.serial, avd="Pixel")
     assert emu.stop_emulator(launch.serial) is True
@@ -1245,6 +1241,7 @@ def test_post_stop_waits_until_a_stopped_emulator_has_exited(env):
     """
     events = []
     _recorders(events)
+    env["kill_exits"] = False
     launch = emu.launch_avd("Pixel")
     env["adb"].add(launch.serial, avd="Pixel")
     assert emu.stop_emulator(launch.serial) is True
@@ -1261,7 +1258,6 @@ def test_post_stop_waits_until_a_stopped_emulator_has_exited(env):
 def test_restart_runs_post_stop_before_the_next_pre_launch(env):
     events = []
     _recorders(events)
-    _kill_exits_process(env)
     first = emu.launch_avd("Pixel", port=5560)
     env["adb"].add(first.serial, avd="Pixel")
     second = emu.restart_emulator(first.serial)
@@ -1273,6 +1269,7 @@ def test_restart_runs_post_stop_before_the_next_pre_launch(env):
 def test_restart_waits_for_the_old_process_before_pre_launch(env, monkeypatch):
     events = []
     _recorders(events)
+    env["kill_exits"] = False
     first = emu.launch_avd("Pixel", port=5560)
     env["adb"].add(first.serial, avd="Pixel")
     # It leaves adb on ``emu kill`` but exits only during the port wait.
@@ -1321,7 +1318,6 @@ def test_post_stop_exceptions_are_logged_and_swallowed(env, caplog):
 
     emu.register_post_stop_hook(failing_restore)
     _recorders(events)
-    _kill_exits_process(env)
     first = emu.launch_avd("Pixel", port=5560)
     env["adb"].add(first.serial, avd="Pixel")
     with caplog.at_level("WARNING", logger=emu.__name__):
@@ -1348,3 +1344,283 @@ def test_stopping_a_foreign_emulator_runs_no_post_stop_hook(env):
     env["adb"].add("emulator-5556", avd="Other")
     assert emu.stop_emulator("emulator-5556") is True
     assert events == []
+
+
+# -- launch hooks: concurrency (real threads) -----------------------------------
+
+
+def _slow_post_stop(events):
+    """A post-stop hook that blocks until ``release`` is set."""
+    started, release = threading.Event(), threading.Event()
+
+    def slow_restore(ctx):
+        events.append(("post-start", ctx.avd, threading.current_thread().name))
+        started.set()
+        assert release.wait(10), "test never released the post-stop hook"
+        events.append(("post-end", ctx.avd, threading.current_thread().name))
+
+    def pre(ctx):
+        events.append(("pre", ctx.avd, threading.current_thread().name))
+        return ()
+
+    emu.register_pre_launch_hook(pre)
+    emu.register_post_stop_hook(slow_restore)
+    return started, release
+
+
+def _thread(target, name):
+    """Run *target* on a real thread; its result/exception lands in a dict."""
+    out: dict = {}
+
+    def run():
+        try:
+            out["value"] = target()
+        except BaseException as e:  # handed to the test
+            out["error"] = e
+
+    thread = threading.Thread(target=run, name=name, daemon=True)
+    thread.start()
+    return thread, out
+
+
+def test_launch_waits_for_a_post_stop_another_thread_is_running(env):
+    """A poll's reap is still restoring the dead launch: the next launch's
+    pre-launch hooks wait until that restore has finished.
+    """
+    events = []
+    started, release = _slow_post_stop(events)
+    first = emu.launch_avd("Pixel")
+    first.process.exit_code = 1  # died on its own
+    reaper, _ = _thread(emu.reap_exited_launches, "reaper")
+    assert started.wait(5)
+    launcher, out = _thread(lambda: emu.launch_avd("Pixel"), "launcher")
+    _real_sleep(0.2)
+    assert [e[0] for e in events] == ["pre", "post-start"]
+    assert not first.post_stop_done  # claimed, but not finished
+    release.set()
+    reaper.join(5)
+    launcher.join(5)
+    assert "error" not in out, out
+    assert [(e[0], e[2]) for e in events] == [
+        ("pre", "MainThread"),
+        ("post-start", "reaper"),
+        ("post-end", "reaper"),
+        ("pre", "launcher"),
+    ]
+    assert first.post_stop_done
+    assert out["value"].context is not first.context
+
+
+def test_launch_fails_closed_when_the_other_post_stop_takes_too_long(env, monkeypatch):
+    events = []
+    started, release = _slow_post_stop(events)
+    monkeypatch.setattr(emu, "POST_STOP_WAIT", 0.1)
+    first = emu.launch_avd("Pixel")
+    first.process.exit_code = 1
+    reaper, _ = _thread(emu.reap_exited_launches, "reaper")
+    assert started.wait(5)
+    try:
+        with pytest.raises(EmulatorLaunchError, match="still running after"):
+            emu.launch_avd("Pixel")
+        assert len(env["spawned"]) == 1  # no second process
+        assert [e[0] for e in events] == ["pre", "post-start"]  # no 2nd pre
+        assert not emu._STARTING_AVDS
+        assert not emu._RESERVED_PORTS
+    finally:
+        release.set()
+        reaper.join(5)
+    assert emu.launch_avd("Pixel").port == 5554  # it works once restored
+
+
+def test_a_stopping_launch_is_never_out_of_both_registries(env, monkeypatch):
+    """Between leaving adb and settling, the stopping launch already blocks a
+    new launch of its AVD (it was in neither registry before).
+    """
+    events = []
+    _recorders(events)
+    env["kill_exits"] = False
+    first = emu.launch_avd("Pixel")
+    env["adb"].add(first.serial, avd="Pixel")
+    entered, release = threading.Event(), threading.Event()
+    settle = emu._settle_stopped
+
+    def held_settle(launch, wait):
+        entered.set()
+        assert release.wait(10)
+        settle(launch, wait)
+
+    monkeypatch.setattr(emu, "_settle_stopped", held_settle)
+    stopper, out = _thread(lambda: emu.stop_emulator(first.serial), "stopper")
+    assert entered.wait(5)
+    try:
+        assert emu.get_launch(first.serial) is None
+        assert [x is first for x in emu._UNFINISHED] == [True]
+        with pytest.raises(EmulatorLaunchError, match="still shutting down"):
+            emu.launch_avd("Pixel")
+    finally:
+        release.set()
+        stopper.join(5)
+    assert out == {"value": True}
+    assert len(env["spawned"]) == 1
+    assert _kinds(events) == [("pre", 5554)]
+
+
+def test_still_exiting_avd_is_refused_then_restored_before_relaunch(env):
+    events = []
+    _recorders(events)
+    env["kill_exits"] = False  # it keeps saving its state after leaving adb
+    first = emu.launch_avd("Pixel", AvdLaunchOptions(save_on_exit=True))
+    env["adb"].add(first.serial, avd="Pixel")
+    assert emu.stop_emulator(first.serial, timeout=0) is True
+    with pytest.raises(EmulatorLaunchError, match="still shutting down"):
+        emu.launch_avd("Pixel")
+    first.process._exit(0)
+    second = emu.launch_avd("Pixel")
+    assert _kinds(events) == [("pre", 5554), ("post", 5554), ("pre", 5554)]
+    assert events[1][2] is first.context
+    assert events[2][2] is second.context
+    assert emu._UNFINISHED == []
+
+
+def test_dead_record_on_the_same_port_is_finished_before_pre_launch(env):
+    """Another AVD's dead launch on the port: its post-stop (running on a
+    reaper thread) finishes before the new launch on that port patches.
+    """
+    events = []
+    started, release = _slow_post_stop(events)
+    other = emu.launch_avd("Other", port=5554)
+    other.process.exit_code = 1
+    reaper, _ = _thread(emu.reap_exited_launches, "reaper")
+    assert started.wait(5)
+    launcher, out = _thread(lambda: emu.launch_avd("Pixel", port=5554), "launcher")
+    _real_sleep(0.2)
+    assert [e[0] for e in events] == ["pre", "post-start"]
+    release.set()
+    reaper.join(5)
+    launcher.join(5)
+    assert "error" not in out, out
+    assert [e[:2] for e in events] == [
+        ("pre", "Other"),
+        ("post-start", "Other"),
+        ("post-end", "Other"),
+        ("pre", "Pixel"),
+    ]
+    assert emu.get_launch("emulator-5554") is out["value"]
+    assert other not in emu._UNFINISHED
+
+
+def test_a_live_record_on_the_same_serial_refuses_the_spawn(env):
+    events = []
+    _recorders(events)
+    first = emu.launch_avd("Other", port=5554)
+    with pytest.raises(EmulatorLaunchError, match="still used by our launch"):
+        emu._spawn_launch(Path("/sdk/emulator"), "Pixel", 5554, AvdLaunchOptions())
+    assert emu.get_launch("emulator-5554") is first
+    assert _kinds(events) == [("pre", 5554)]  # no pre-launch for Pixel
+
+
+def test_any_failure_after_pre_launch_restores_and_releases_the_port(env, monkeypatch):
+    events = []
+    _recorders(events)
+
+    def broken_spawn(command, avd_name, env=None):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(emu, "spawn_emulator", broken_spawn)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        emu.launch_avd("Pixel")
+    assert _kinds(events) == [("pre", 5554), ("post", 5554)]
+    assert not emu._RESERVED_PORTS
+    assert not emu._STARTING_AVDS
+    assert emu.launches() == []
+
+
+def test_post_stop_never_runs_before_exit_even_if_registered_late(env):
+    """Stopped with no post-stop hooks registered while it still exits: a
+    hook registered meanwhile runs once it has exited, never before.
+    """
+    env["kill_exits"] = False
+    launch = emu.launch_avd("Pixel")
+    env["adb"].add(launch.serial, avd="Pixel")
+    assert emu.stop_emulator(launch.serial) is True
+    assert not launch.post_stop_done
+    events = []
+    emu.register_post_stop_hook(lambda ctx: events.append(ctx))
+    assert emu.reap_exited_launches() == []
+    assert events == []
+    launch.process._exit(0)
+    assert emu.reap_exited_launches() == [launch]
+    assert events == [launch.context]
+    assert launch.post_stop_done
+
+
+def test_restart_waits_longer_for_a_saving_emulator_and_says_why(env, monkeypatch):
+    env["kill_exits"] = False
+    monkeypatch.setattr(emu, "RESTART_EXIT_WAIT", 1_000.0)
+    monkeypatch.setattr(emu, "RESTART_EXIT_WAIT_SAVING", 0.0)
+    first = emu.launch_avd("Pixel", AvdLaunchOptions(save_on_exit=True), port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    with pytest.raises(EmulatorLaunchError) as info:
+        emu.restart_emulator(first.serial)
+    message = str(info.value)
+    assert "has not exited after 0s" in message
+    assert "saving its snapshot" in message
+    assert "once it has exited" in message
+    assert len(env["spawned"]) == 1
+
+
+def test_restart_exit_timeout_is_configurable(env):
+    env["kill_exits"] = False
+    first = emu.launch_avd("Pixel", port=5560)
+    env["adb"].add(first.serial, avd="Pixel")
+    with pytest.raises(EmulatorLaunchError, match="has not exited after 0s"):
+        emu.restart_emulator(first.serial, exit_timeout=0)
+
+
+def test_device_poll_worker_reaps_a_death_off_the_ui_thread(env, monkeypatch):
+    """The TUI's device poll worker runs the post-stop hooks of a launch
+    that died after it was ready (nobody waits for its boot any more).
+    """
+    from types import SimpleNamespace
+
+    from sandroid.core.toolbox import Toolbox
+    from sandroid.tui.app import SandroidTUI
+
+    events = []
+    emu.register_post_stop_hook(
+        lambda ctx: events.append((ctx.avd, threading.current_thread().name))
+    )
+    launch = emu.launch_avd("Pixel")
+    emu.mark_ready(launch.serial)
+    launch.process.exit_code = 1  # crashed long after its boot
+    refreshed = []
+    monkeypatch.setattr(
+        Toolbox,
+        "get_device_manager",
+        classmethod(
+            lambda cls: SimpleNamespace(refresh_devices=lambda: refreshed.append(1))
+        ),
+    )
+    app = SimpleNamespace(_device_poll_in_flight=True, _device_poll_pending=False)
+    worker, out = _thread(
+        lambda: SandroidTUI._refresh_devices_bg(app), "device_state_poll"
+    )
+    worker.join(5)
+    assert "error" not in out, out
+    assert events == [("Pixel", "device_state_poll")]
+    assert refreshed == [1]
+    assert app._device_poll_in_flight is False
+    assert launch.post_stop_done
+
+
+def test_exit_reap_finishes_dead_launches_and_leaves_running_ones(env):
+    events = []
+    _recorders(events)
+    dead = emu.launch_avd("Dead", port=5554)
+    running = emu.launch_avd("Running", port=5556)
+    dead.process.exit_code = 0
+    emu._reap_at_exit()
+    assert [(e[0], e[2].avd) for e in events[2:]] == [("post", "Dead")]
+    assert running.alive
+    assert running.process.signals == []
+    assert not running.post_stop_done
