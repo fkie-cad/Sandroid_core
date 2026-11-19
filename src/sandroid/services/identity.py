@@ -170,6 +170,9 @@ class KindSpec:
         needs_emulator: The mechanism is an emulator console command.
         derives: Allowed ``derive`` methods.
         volatile: The device forgets the value on reboot / radio events.
+        emulator_hook_only: Why the native mechanism does not hold on an
+            emulator (there the value is hook-only, like a ``("hook",)``
+            kind), or empty.
     """
 
     kind: str
@@ -186,6 +189,11 @@ class KindSpec:
     needs_emulator: bool = False
     derives: tuple[str, ...] = ()
     volatile: bool = False
+    emulator_hook_only: str = ""
+
+
+#: The emulator's radio (RIL) rewrites the ``gsm.*`` SIM properties.
+EMULATOR_RADIO_RESETS = "the emulator radio resets it"
 
 
 def _spec(*args: Any, **kw: Any) -> tuple[str, KindSpec]:
@@ -306,6 +314,7 @@ REGISTRY: dict[str, KindSpec] = dict(
             "getprop",
             needs_root=True,
             volatile=True,
+            emulator_hook_only=EMULATOR_RADIO_RESETS,
         ),
         _spec(
             "sim_mccmnc",
@@ -319,6 +328,7 @@ REGISTRY: dict[str, KindSpec] = dict(
             "getprop",
             needs_root=True,
             volatile=True,
+            emulator_hook_only=EMULATOR_RADIO_RESETS,
         ),
         _spec(
             "build_model",
@@ -2477,6 +2487,12 @@ class IdentityService:
             info = plan.infos.get(vid)
             spec = vs.spec
             if info is None or spec is None or info.status != "pending":
+                continue
+            if spec.emulator_hook_only and state.emulator:
+                # Not natively settable here: hook-only, not a failure.
+                info.status, info.reason = "hook-only", spec.emulator_hook_only
+                info.provider = info.mechanism = "hook"
+                info.current = self._current(vs.kind, state, "", mem, vid)[0]
                 continue
             if spec.needs_root and not state.root:
                 info.status, info.reason = "failed", "adbd is not root"

@@ -760,13 +760,19 @@ def test_apply_seeds_everything_and_second_apply_writes_nothing(service, device)
         "device_name",
         "timezone",
         "locale",
-        "sim_operator",
-        "sim_mccmnc",
         "contacts",
         "sms",
         "calls",
     ):
         assert st[vid] == ("verified", ""), (vid, st[vid])  # fmt: skip
+    # The emulator radio resets the SIM properties: hook-only, not failed,
+    # and nothing is written for them.
+    for vid in ("sim_operator", "sim_mccmnc"):
+        assert st[vid] == ("hook-only", ident.EMULATOR_RADIO_RESETS), vid
+        assert plan.infos[vid].provider == "hook"
+    assert plan.infos["sim_operator"].current == "T-Mobile"
+    assert device.props["gsm.sim.operator.alpha"] == "T-Mobile"
+    assert not [w for w in device.writes if "gsm.sim" in w]
     assert st["phone_number"] == ("applied", "")
     assert st["gps"] == ("applied", "unverified")  # no app ran a GPS session
     assert st["imei"][0] == "hook-only"
@@ -1294,3 +1300,18 @@ def test_describe_lists_per_value_metadata(env):
     assert infos["contacts"].permission == "READ_CONTACTS"
     assert infos["imei"].status == "hook-only"
     assert infos["phone_number"].permission == "READ_PHONE_NUMBERS"
+
+
+def test_sim_properties_are_set_natively_off_the_emulator(service, device, monkeypatch):
+    parse = ident.parse_preflight
+
+    def real_device(serial, text):
+        state = parse(serial, text)
+        state.emulator = False
+        return state
+
+    monkeypatch.setattr(ident, "parse_preflight", real_device)
+    plan = service.apply(SERIAL, "com.example.app")
+    assert plan.infos["sim_operator"].status == "verified"
+    assert plan.infos["sim_operator"].provider == "native"
+    assert device.props["gsm.sim.operator.alpha"] == "Telekom 3f9a1c07"
