@@ -123,6 +123,13 @@ from .monitor_view import (
     app_relative,
     smart_truncate,
 )
+from .network_panel import (
+    PRIVACY_COLUMN_MIN_WIDTH,
+    PrivacyFeed,
+    ProfileTintMixin,
+    privacy_service,
+    tag_words,
+)
 from .watchlist_view import RowState, WatchlistView
 
 if TYPE_CHECKING:
@@ -137,6 +144,8 @@ _REFRESH_INTERVAL = 0.4
 
 #: Fixed column widths (★, ops, count, last); the path takes the rest.
 _W_MARK, _W_OPS, _W_COUNT, _W_LAST = 1, 5, 5, 8
+#: The Identity column (values of the identity profile found in the file).
+_W_IDENT = 16
 
 _DIM = "#5b6479"
 #: A monitor note that stands out (restart, exit, lost events).
@@ -368,12 +377,18 @@ class FilesSubViewBase(Widget):
         return f"{self._LABEL} —"
 
 
-class _FilesTable(DataTable):
+class _FilesTable(ProfileTintMixin, DataTable):
     """The lens table: ``Home``/``End`` move the row cursor.
 
     DataTable binds them to *horizontal* scrolling (its ``ctrl+home`` is the
     row jump); this table never scrolls sideways, so Home/End jump rows.
+    Rows of files holding identity-profile values are tinted
+    (``ProfileTintMixin``).
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.profile_keys = set()
 
     def action_scroll_home(self) -> None:
         self.action_scroll_top()
@@ -586,6 +601,10 @@ class FilesPanel(Widget):
         self._event_handlers: list = []
         self._main_loop = None
         self._ui = UiDispatcher()
+        self._privacy_table: DataTable | None = None
+        self._privacy_feed = PrivacyFeed(
+            self, self._privacy_flush, lambda rec: rec.device_path
+        )
 
     # -- compose / mount -----------------------------------------------------
 
@@ -605,6 +624,7 @@ class FilesPanel(Widget):
 
     def on_mount(self) -> None:
         self._subscribe_events()
+        self._privacy_feed.attach()
         self.set_interval(_REFRESH_INTERVAL, self._tick)
         marks = getattr(self.screen, "marks", None)
         if isinstance(marks, SessionMarks) and len(marks):
@@ -613,6 +633,7 @@ class FilesPanel(Widget):
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
+        self._privacy_feed.detach()
 
     # -- small accessors -------------------------------------------------------
 
@@ -1097,6 +1118,50 @@ class FilesPanel(Widget):
             return record.label
         return f"Run {Path(self._scope or '').name}"
 
+    # -- identity profile values (privacy scan) --------------------------------
+    #
+    # A file holding values of the identity profile gets a faint warn tint and,
+    # from PRIVACY_COLUMN_MIN_WIDTH, the value names in an Identity column.
+    # The Versions / Content tabs highlight the found text (file_inspect).
+    # New hits (scan worker) mark the table dirty, at most once a second.
+
+    def _privacy_column(self, width: int, path_width: int) -> bool:
+        if width < PRIVACY_COLUMN_MIN_WIDTH or path_width - (_W_IDENT + 2) < 24:
+            return False
+        service = privacy_service()
+        try:
+            return bool(service is not None and (service.is_active or service.hits()))
+        except Exception:
+            return False
+
+    def _privacy_tags(self, row: _Row) -> list:
+        if row.group is not None or row.pattern:
+            return []
+        return file_inspect.privacy_tags(row.key)
+
+    def _privacy_cell(self, row: _Row) -> Text:
+        """The Identity cell; also (un)marks the row for the tint."""
+        tags = self._privacy_tags(row)
+        table = self._privacy_table
+        if table is None:  # one DOM query, not one per row
+            table = self._privacy_table = self.table
+        if isinstance(table, _FilesTable):
+            if tags:
+                table.profile_keys.add(row.key)
+            else:
+                table.profile_keys.discard(row.key)
+        return tag_words(tags, _W_IDENT)
+
+    def _privacy_flush(self, paths: set[str]) -> None:
+        """New hits for ``paths``: redraw the table (tick) and the Inspector."""
+        self._dirty = True
+        if is_shown(self):
+            self.refresh_rows()
+        from sandroid.core.adb_utils import canonical_device_path
+
+        touched = paths | {canonical_device_path(p) for p in paths}
+        self._refresh_inspector(touched)
+
     # -- drawing ------------------------------------------------------------------
 
     def _tick(self) -> None:
@@ -1144,6 +1209,9 @@ class FilesPanel(Widget):
         elif path_width - (_W_COUNT + 2) >= 16:
             columns += ["count"]
             path_width -= _W_COUNT + 2
+        if self._privacy_column(width, path_width):
+            columns.append("ident")
+            path_width -= _W_IDENT + 2
         path_width = max(8, path_width)
         current = [str(c.value) for c in table.columns]
         if path_width == self._path_width and current == columns:
@@ -1156,6 +1224,7 @@ class FilesPanel(Widget):
             "ops": _W_OPS,
             "count": _W_COUNT,
             "last": _W_LAST,
+            "ident": _W_IDENT,
         }
         for key in columns:
             label = "" if key == "mark" else key
@@ -1329,10 +1398,10 @@ class FilesPanel(Widget):
         self._rows = rows
         with self.app.batch_update():
             table.clear()
-            order = ("mark", "path", "ops", "count", "last")
+            order = ("mark", "path", "ops", "count", "last", "ident")
             picks = [order.index(str(c.value)) for c in table.columns]
             for row in rows:
-                cells = self._cells(row)
+                cells = (*self._cells(row), self._privacy_cell(row))
                 table.add_row(*(cells[i] for i in picks), key=row.key)
             if rows:
                 index = keep_index

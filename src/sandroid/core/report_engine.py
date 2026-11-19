@@ -33,6 +33,7 @@ import importlib
 import json
 import logging
 import os
+import re
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
@@ -1280,6 +1281,241 @@ def build_coverage(ctx: ReportContext) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Section: privacy (identity-profile values leaving the device)
+# ---------------------------------------------------------------------------
+#
+# Built from the ``privacy/sent`` and ``privacy/stored`` lines the privacy
+# scan writes (one per new value x encoding x recipient domain / file) and
+# the ``identity/applied`` line that names how many values were seeded.
+
+#: Evidence rows listed at most (the timeline keeps every line).
+MAX_PRIVACY_EVIDENCE = 60
+
+_HASH_NAMES = ("md5", "sha1", "sha224", "sha256", "sha384", "sha512")
+_CALL_RE = re.compile(r"^([a-z0-9_]+)\((.*)\)$")
+_PLACES_RE = re.compile(r"^value,\s*(\d+)$")
+_WRAP_WORDS = {
+    "base64": "base64 of {}",
+    "base64url": "URL-safe base64 of {}",
+    "hex": "hex of {}",
+    "utf16": "UTF-16 of {}",
+    "url": "URL-encoded {}",
+}
+_VALUE_WORDS = {
+    "value": "the value",
+    "bytes": "the raw bytes of the value",
+    "strip_dashes": "the value without dashes",
+    "strip_separators": "the value without separators",
+    "dashes": "the value with dashes",
+    "colons": "the value with colons",
+    "digits": "the digits of the value",
+    "intl_00": "the number with 00 instead of the plus sign",
+    "e7": "the value times ten million",
+    "double_le": "a binary double (little-endian)",
+    "double_be": "a binary double (big-endian)",
+    "float_le": "a binary float (little-endian)",
+}
+_PARTY_WORDS = {"third": "third party", "first": "first party"}
+
+
+def _describe_transform(transform: str) -> str:
+    text = (transform or "value").strip()
+    if text in _VALUE_WORDS:
+        return _VALUE_WORDS[text]
+    match = _CALL_RE.match(text)
+    if match is None:
+        return text
+    name, inner = match.group(1), match.group(2)
+    places = _PLACES_RE.match(inner)
+    if places is not None and name in ("round", "truncate"):
+        verb = "rounded" if name == "round" else "cut"
+        return f"{verb} to {places.group(1)} decimals"
+    if name in _VALUE_WORDS and inner == "value":
+        return _VALUE_WORDS[name]
+    described = _describe_transform(inner)
+    if name in ("lower", "upper"):
+        case = "lower-case" if name == "lower" else "upper-case"
+        if described.startswith("the "):
+            return f"the {case} {described[4:]}"
+        return f"{described}, {case}"
+    if name in _WRAP_WORDS:
+        return _WRAP_WORDS[name].format(described)
+    return f"{name} of {described}"
+
+
+def transform_words(transform: str) -> str:
+    """How a value was encoded, in words: ``sha256(lower(value))`` ->
+    ``sha256 of the lower-case value``, ``value`` -> ``as is``,
+    ``round(value, 4)`` -> ``rounded to 4 decimals``.
+    """
+    words = _describe_transform(transform)
+    return "as is" if words == "the value" else words
+
+
+def encoding_class(transform: str) -> str:
+    """``hashed``, ``rounded``, ``encoded`` or ``as is`` (strongest first)."""
+    text = transform or "value"
+    if any(f"{name}(" in text for name in _HASH_NAMES):
+        return "hashed"
+    if any(tok in text for tok in ("round(", "truncate(", "e7(")):
+        return "rounded"
+    if any(
+        tok in text
+        for tok in ("base64", "hex(", "utf16(", "url(", "bytes(", "double_", "float_")
+    ):
+        return "encoded"
+    return "as is"
+
+
+def part_words(part: str) -> str:
+    """``req.body`` -> ``request body``, ``req.header:Cookie`` -> ``header
+    Cookie``, ``url`` -> ``URL``, ``file:x.db-wal`` -> ``file x.db-wal``.
+    """
+    head, _, name = (part or "").partition(":")
+    words = {
+        "url": "URL",
+        "req.header": "header",
+        "resp.header": "response header",
+        "req.body": "request body",
+        "resp.body": "response body",
+        "file": "file",
+    }.get(head, head.replace(".", " "))
+    return f"{words} {name}".strip()
+
+
+def _applied_markers(ctx: ReportContext) -> int | None:
+    """Values the identity profile seeded (the last ``identity/applied``
+    line up to the end of the scope), or None without one.
+    """
+    end = ctx.span[1] if ctx.span else None
+    count = None
+    for line in ctx.lines:
+        if line.get("src") != "identity" or line.get("kind") != "applied":
+            continue
+        if end is not None and line.get("_ts") is not None and line["_ts"] > end:
+            break
+        d = _data(line)
+        if isinstance(d.get("markers"), int):
+            count = d["markers"]
+        elif isinstance(d.get("values"), dict):
+            count = len(d["values"])
+    return count
+
+
+def _privacy_first(lines: list[dict[str, Any]]) -> dict[tuple, dict[str, Any]]:
+    """First line per (value, recipient or file, transform), in time order."""
+    first: dict[tuple, dict[str, Any]] = {}
+    for line in lines:
+        d = _data(line)
+        if line.get("kind") == "sent":
+            where = str(d.get("recipient") or d.get("host") or "unknown")
+        else:
+            where = str(d.get("path") or "unknown")
+        key = (str(d.get("label") or d.get("marker_id") or "?"), where)
+        first.setdefault((*key, str(d.get("transform") or "value")), line)
+    return first
+
+
+def build_privacy(ctx: ReportContext) -> dict:
+    """Which identity-profile values left the device, to whom and how."""
+    lines = [ln for ln in ctx.by_src.get("privacy", []) if not _data(ln).get("_masked")]
+    sent = [ln for ln in lines if ln.get("kind") == "sent"]
+    stored = [ln for ln in lines if ln.get("kind") == "stored"]
+    blocks: list[dict] = []
+    total = _applied_markers(ctx)
+    values = sorted({str(_data(ln).get("label") or "?") for ln in sent})
+    recipients: dict[str, str] = {}
+    for line in sent:
+        d = _data(line)
+        name = str(d.get("recipient") or d.get("host") or "unknown")
+        if recipients.get(name) != "third":
+            recipients[name] = str(d.get("party") or "unknown")
+    if sent:
+        first = sent[0]
+        of = f" of {total}" if total is not None else ""
+        third = sum(1 for p in recipients.values() if p == "third")
+        text = (
+            f"{len(values)}{of} profile value{'s' if len(values) != 1 else ''} "
+            f"left the device to {_plural(len(recipients), 'recipient')}, the "
+            f"first at {_clock(first.get('t'))} (line {first.get('seq')})."
+        )
+        if third:
+            text += f" {third} of the recipients are known third parties."
+    else:
+        text = "No profile value left the device in this report's scope."
+    stored_values = {str(_data(ln).get("label") or "?") for ln in stored}
+    if stored_values:
+        text += (
+            f" {_plural(len(stored_values), 'value')} "
+            f"{'was' if len(stored_values) == 1 else 'were'} written to app storage."
+        )
+    text += (
+        " Values are matched as seeded canaries (plain, hashed, encoded or "
+        "rounded); a blank cell means the value was not seen going there."
+    )
+    blocks.append(_text(text))
+    if not sent and not stored:
+        return {"blocks": blocks}
+    first = _privacy_first(sent + stored)
+    if sent:
+        seen: dict[tuple[str, str], set[str]] = {}
+        for (label, where, transform), line in first.items():
+            if line.get("kind") == "sent":
+                seen.setdefault((where, label), set()).add(encoding_class(transform))
+        order = ("as is", "encoded", "hashed", "rounded")
+        rows = []
+        for name in sorted(recipients, key=lambda n: (recipients[n] != "third", n)):
+            party = _PARTY_WORDS.get(recipients[name], "unknown party")
+            cells = [
+                ", ".join(c for c in order if c in seen.get((name, value), ()))
+                for value in values
+            ]
+            rows.append([f"{name} ({party})", *cells])
+        blocks.append(_heading("Recipients and values", 2))
+        blocks.append(
+            {"type": "table", "columns": ["Recipient", *values], "rows": rows}
+        )
+    evidence = sorted(first.values(), key=_sort_key)
+    rows = []
+    for line in evidence[:MAX_PRIVACY_EVIDENCE]:
+        d = _data(line)
+        if line.get("kind") == "sent":
+            where = str(d.get("recipient") or d.get("host") or "unknown")
+            host = str(d.get("host") or "")
+        else:
+            where, host = "stored on the device", str(d.get("path") or "")
+        rows.append(
+            [
+                str(d.get("label") or "?"),
+                where,
+                host,
+                part_words(str(d.get("part") or "")),
+                transform_words(str(d.get("transform") or "value")),
+                _clock(line.get("t")),
+                str(line.get("seq")),
+            ]
+        )
+    blocks.append(
+        _heading("Evidence (first finding per value, recipient and encoding)", 2)
+    )
+    blocks.append(
+        {
+            "type": "table",
+            "columns": ["Value", "Recipient", "Host or file", "Where", "Encoding",
+                        "First seen", "Line"],
+            "rows": rows,
+            "mono_cols": [6],
+        }
+    )  # fmt: skip
+    if len(evidence) > MAX_PRIVACY_EVIDENCE:
+        more = len(evidence) - MAX_PRIVACY_EVIDENCE
+        blocks.append(
+            _text(f"{more} more findings are in the timeline (privacy lines).")
+        )
+    return {"blocks": blocks}
+
+
+# ---------------------------------------------------------------------------
 # Section: transcript
 # ---------------------------------------------------------------------------
 
@@ -1429,6 +1665,7 @@ class _Effects:
                     and ln.get("kind") not in ("count", "pull", "check")
                 )
                 or (ln.get("src") == "net" and ln.get("kind") in ("flow", "tls-fail"))
+                or (ln.get("src") == "privacy" and ln.get("kind") in ("sent", "stored"))
             )
         ]
         self.stamps = [ln["_ts"] for ln in self.lines]
@@ -1441,6 +1678,7 @@ class _Effects:
             return None
         files = [ln for ln in picked if ln.get("src") == "files"]
         net = [ln for ln in picked if ln.get("src") == "net"]
+        privacy = [ln for ln in picked if ln.get("src") == "privacy"]
         out: dict[str, Any] = {
             "window": [_iso(t0), _iso(t1)],
             "window_s": round(t1 - t0, 3),
@@ -1479,6 +1717,23 @@ class _Effects:
                         "error": _data(ln).get("error") or _data(ln).get("reason"),
                     }
                     for ln in net[:TOP_EFFECTS]
+                ],
+            }
+        if privacy:
+            out["privacy"] = {
+                "count": len(privacy),
+                "by_kind": dict(Counter(str(ln.get("kind")) for ln in privacy)),
+                "top": [
+                    {
+                        "seq": ln.get("seq"),
+                        "kind": ln.get("kind"),
+                        "label": _data(ln).get("label"),
+                        "to": _data(ln).get("recipient")
+                        or _data(ln).get("host")
+                        or _data(ln).get("path"),
+                        "encoding": encoding_class(str(_data(ln).get("transform"))),
+                    }
+                    for ln in privacy[:TOP_EFFECTS]
                 ],
             }
         return out
@@ -2080,6 +2335,12 @@ def build_seal(ctx: ReportContext) -> dict:
 SECTION_PLAN: tuple[SectionSpec, ...] = (
     SectionSpec("overview", "Overview", build_overview),
     SectionSpec("coverage", "Coverage and validity", build_coverage),
+    SectionSpec(
+        "privacy",
+        "Identity data leaving the device",
+        build_privacy,
+        requires_src=frozenset({"privacy"}),
+    ),
     SectionSpec(
         "transcript",
         "Interaction transcript",

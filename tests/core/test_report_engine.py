@@ -804,6 +804,98 @@ def _sentences(doc: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Privacy (identity data leaving the device)
+# ---------------------------------------------------------------------------
+
+
+def _privacy_line(tl, sec, kind, label, transform, **data):
+    if kind == "sent":
+        summary = f"{label} sent to {data['host']} · req body · {transform}"
+    else:
+        summary = f"{label} stored in {data['path']} · {transform}"
+    return tl.add(
+        sec,
+        "privacy",
+        kind,
+        summary,
+        actor="app",
+        pkg="com.x",
+        data={"marker_id": label.lower(), "label": label, "transform": transform,
+              "confidence": "high", "direction": kind, "count": 1, **data},
+        ref={"of": 1, "path": "privacy/hits.jsonl", "lens": "network"},
+    )  # fmt: skip
+
+
+class TestPrivacy:
+    def test_privacy_section_recipients_values_evidence_and_effects(self, session):
+        # Without privacy lines the section only says so.
+        empty = _section(_build(session, sections=("privacy",)), "privacy")
+        assert [b["type"] for b in empty["blocks"]] == ["text"]
+        assert "privacy lines" in empty["blocks"][0]["text"]
+        tl = session.tl
+        tl.add(1, "identity", "applied", "identity applied", data={"markers": 5})
+        meta = {"host": "graph.facebook.com", "recipient": "Meta", "party": "third"}
+        fit = {"host": "api.x.com", "recipient": "x.com", "party": "first"}
+        sent = _privacy_line(
+            tl, 10.5, "sent", "Ad ID", "sha256(lower(value))", part="req.body", **meta
+        )
+        _privacy_line(tl, 12, "sent", "Ad ID", "value", part="url", **meta)
+        _privacy_line(tl, 13, "sent", "Email", "value", part="url", **fit)
+        _privacy_line(tl, 14, "sent", "GPS", "round(value, 4)", part="req.body", **meta)
+        _privacy_line(tl, 15, "stored", "Email", "value", part="file:p.xml",
+                      path="/data/data/com.x/shared_prefs/p.xml")  # fmt: skip
+        tl.write()
+        doc = _build(session)
+        section = _section(doc, "privacy")
+        assert section["title"] == "Identity data leaving the device"
+        ids = [s["id"] for s in doc["sections"]]
+        assert ids.index("privacy") == ids.index("coverage") + 1
+        intro = section["blocks"][0]["text"]
+        assert intro.startswith(
+            "3 of 5 profile values left the device to 2 recipients, the first at "
+            f"12:00:10 (line {sent})."
+        )
+        assert "1 of the recipients are known third parties" in intro
+        assert "1 value was written to app storage" in intro
+        matrix = next(b for b in section["blocks"] if b["type"] == "table")
+        assert matrix["columns"] == ["Recipient", "Ad ID", "Email", "GPS"]
+        assert matrix["rows"] == [
+            ["Meta (third party)", "as is, hashed", "", "rounded"],
+            ["x.com (first party)", "", "as is", ""],
+        ]
+        evidence = [b for b in section["blocks"] if b["type"] == "table"][1]
+        first = evidence["rows"][0]
+        assert first == [
+            "Ad ID", "Meta", "graph.facebook.com", "request body",
+            "sha256 of the lower-case value", "12:00:10", str(sent),
+        ]  # fmt: skip
+        assert evidence["rows"][3][4] == "rounded to 4 decimals"
+        assert evidence["rows"][-1][:3] == [
+            "Email", "stored on the device", "/data/data/com.x/shared_prefs/p.xml"
+        ]  # fmt: skip
+        glyphs = set("■▲◆●✓✗⚑⌁")
+        assert not glyphs & set(json.dumps(section, ensure_ascii=False))
+        # The tap's effects name the value that left within its window.
+        effects = _step(doc, session.seqs["tap_accept"])["effects"]["privacy"]
+        assert effects["count"] == 1
+        assert effects["top"][0] == {
+            "seq": sent, "kind": "sent", "label": "Ad ID", "to": "Meta",
+            "encoding": "hashed",
+        }  # fmt: skip
+        # Markdown: the section, its table and the step's effect line.
+        md = report_engine.write_report(doc, session.bundle, formats=("md",))
+        text = md["md"].read_text()
+        assert "## Identity data leaving the device" in text
+        row = next(ln for ln in text.splitlines() if ln.startswith("| Meta (third"))
+        assert row.split(" | ")[1:2] == ["as is, hashed"], row
+        assert row.rstrip(" |").endswith("rounded"), row
+        assert (
+            f"  - Profile values: 1 finding(s): Ad ID sent to Meta, hashed (#{sent})"
+            in text
+        )
+
+
+# ---------------------------------------------------------------------------
 # Transcript
 # ---------------------------------------------------------------------------
 
@@ -814,6 +906,7 @@ class TestTranscript:
         assert [s["id"] for s in doc["sections"]] == [
             "overview",
             "coverage",
+            "privacy",
             "transcript",
             "results",
             "seal",

@@ -332,7 +332,7 @@ def step_title(step: Mapping[str, Any]) -> str:
 
 
 def effect_lines(step: Mapping[str, Any]) -> list[str]:
-    """Plain-text effect summaries of a step (files, then network)."""
+    """Plain-text effect summaries of a step (files, network, profile values)."""
     effects = step.get("effects") or {}
     out: list[str] = []
     files = effects.get("files")
@@ -368,6 +368,19 @@ def effect_lines(step: Mapping[str, Any]) -> list[str]:
         more = net.get("count", 0) - len(net.get("top") or [])
         out.append(
             f"Network: {net.get('count')} flow(s): {items}"
+            + (f"; … {more} more" if more > 0 else "")
+        )
+    privacy = effects.get("privacy")
+    if privacy:
+        items = "; ".join(
+            f"{p.get('label') or '?'} "
+            + ("sent to" if p.get("kind") == "sent" else "stored in")
+            + f" {p.get('to') or '?'}, {p.get('encoding') or 'as is'} (#{p.get('seq')})"
+            for p in privacy.get("top") or []
+        )
+        more = privacy.get("count", 0) - len(privacy.get("top") or [])
+        out.append(
+            f"Profile values: {privacy.get('count')} finding(s): {items}"
             + (f"; … {more} more" if more > 0 else "")
         )
     return out

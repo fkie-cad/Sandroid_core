@@ -1649,3 +1649,168 @@ async def test_rebind_rebuilds_marks_per_sink_and_refreshes_the_watchlist(
         )
         await settle(pilot)
         assert [m.label() for m in ms.marks] == ["mark 1 'in A'"]
+
+
+# --------------------------------------------------------------------------
+# privacy lines (identity profile values)
+# --------------------------------------------------------------------------
+
+
+def _privacy_lines(t: float) -> list[dict]:
+    return [
+        make_line(
+            1,
+            t,
+            "files",
+            "pull",
+            summary="v003 prefs.xml",
+            data={"path": "/data/data/x/shared_prefs/p.xml", "version": "v003"},
+            ref={"path": "files/x/p.xml/v003/diff.json", "lens": "files"},
+        ),
+        make_line(
+            2,
+            t + 1,
+            "net",
+            "flow",
+            summary="POST 200",
+            data={"host": "graph.facebook.com", "method": "POST", "flow_seq": 9},
+            ref={"id": "abc", "lens": "network"},
+        ),
+        make_line(
+            3,
+            t + 2,
+            "privacy",
+            "sent",
+            summary="Advertising ID sent to graph.facebook.com · req body · plain",
+            actor="app",
+            ref={"of": 2, "id": "abc", "path": "privacy/hits.jsonl", "lens": "network"},
+        ),
+        make_line(
+            4,
+            t + 3,
+            "privacy",
+            "stored",
+            summary="Email stored in shared_prefs/p.xml · plain",
+            actor="app",
+            ref={"of": 1, "path": "privacy/hits.jsonl", "lens": "files"},
+        ),
+        make_line(
+            5,
+            t + 4,
+            "privacy",
+            "sent",
+            summary="GPS sent to example.com · URL · plain",
+            actor="app",
+            ref={
+                "of": 999,
+                "id": "gone",
+                "path": "privacy/hits.jsonl",
+                "lens": "network",
+            },
+        ),
+        make_line(
+            6,
+            t + 5,
+            "privacy",
+            "stored",
+            summary="Email stored in databases/a.db · plain",
+            actor="app",
+            ref={"of": 998, "path": "privacy/hits.jsonl", "lens": "files"},
+        ),
+    ]
+
+
+def test_privacy_line_types_have_their_own_style() -> None:
+    from sandroid.tui.themes import lens_palette
+    from sandroid.tui.widgets import timeline_lens as tl
+
+    pal = lens_palette()
+    assert ("privacy", "sent") in tl._TYPE_STYLE
+    text, tint = tl.type_style("privacy", "sent")
+    assert text.color.name == pal.warn
+    assert text.bold
+    assert tint.bgcolor is not None
+    assert tint.bgcolor.name != pal.bg
+    text, tint = tl.type_style("privacy", "stored")
+    assert text.color.name == pal.accent
+    assert tint.bgcolor is not None
+    assert tl.type_style("files", "modify") == (None, None)
+
+
+async def test_privacy_rows_are_tinted_and_keep_their_summary(install_fakes) -> None:
+    from sandroid.tui.themes import lens_palette
+
+    install_fakes(_privacy_lines(NOW - 100))
+    app = _LensHarness()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _loaded_lens(pilot, app)
+        lens._select_seq(1)  # the cursor away from the privacy rows
+        await pilot.pause()
+        y = lens._view_index(3) + lens._display_offset()
+        segments = list(lens.strip_for(y, 160))
+        text = "".join(s.text for s in segments)
+        assert "Advertising ID sent to graph.facebook.com · req body · plain" in text
+        warn = lens_palette().warn
+        summary = next(s for s in segments if "Advertising ID" in s.text)
+        assert summary.style.color.name == warn
+        assert summary.style.bgcolor is not None
+        assert all(s.style.bgcolor is not None for s in segments if s.style)
+        plain = list(lens.strip_for(lens._view_index(2) + lens._display_offset(), 160))
+        assert not any(s.style.bgcolor for s in plain if s.style)
+
+
+async def test_J_on_privacy_lines_reaches_the_flow_or_file(
+    install_fakes, monkeypatch
+) -> None:
+    import privacy_fakes
+    from privacy_fakes import file_hit
+
+    from sandroid.tui.widgets.files_panel import FilesPanel
+    from sandroid.tui.widgets.network_panel import NetworkPanel
+
+    calls: list = []
+    monkeypatch.setattr(
+        FilesPanel,
+        "reveal",
+        lambda self, path, version=None: calls.append(("files", path, version)) or True,
+    )
+    monkeypatch.setattr(
+        NetworkPanel,
+        "reveal_flow",
+        lambda self, fid, record=None: (
+            calls.append(("net", fid, (record or {}).get("host"))) or True
+        ),
+    )
+    privacy_fakes.install(
+        monkeypatch, [file_hit("/data/data/x/databases/a.db", version="v002", tl_seq=6)]
+    )
+    install_fakes(_privacy_lines(NOW - 100))
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        await boot(app, pilot)
+        ms = app.screen
+        await pilot.press("5")
+        lens = ms.lens_widget("timeline")
+        await until(pilot, lambda: len(lens.rows) == 6)
+        for seq, lens_id in (
+            (3, "network"),
+            (4, "files"),
+            (5, "network"),
+            (6, "files"),
+        ):
+            await pilot.press("5")
+            await settle(pilot)
+            assert lens.select_seq(seq)
+            await pilot.press("J")
+            await settle(pilot)
+            assert ms.active_lens == lens_id
+        assert calls == [
+            # cited net line: the full flow record
+            ("net", "abc", "graph.facebook.com"),
+            # cited pull line: its file and version
+            ("files", "/data/data/x/shared_prefs/p.xml", "v003"),
+            # cited line not loaded: the flow by ref.id
+            ("net", "gone", None),
+            # ... the file by the scan record of the line
+            ("files", "/data/data/x/databases/a.db", "v002"),
+        ]

@@ -31,6 +31,11 @@ None of them is a Files-lens key (``<``/``>``/``B`` are the lens's marks).
 Heavy work (SQLite diffs of large files) runs on a thread with a
 "computing..." placeholder; results are cached per version pair (kept
 versions never change).
+
+Identity profile values: when the privacy scan found seeded values in the
+selected version, the Versions tab lists them (where, how encoded, the found
+text) and both tabs draw the found text on a warn-coloured background
+(:class:`MatchHighlight`, over what is already drawn; no file is read for it).
 """
 
 from __future__ import annotations
@@ -44,6 +49,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Group
+from rich.segment import Segment
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
@@ -1401,7 +1408,9 @@ def versions_sections(
     if status is not None:
         sections.append(("", status))
     heading, body = version_diff_body(path, versions, index, state, notify, full=False)
-    sections.append((heading, body))
+    needles = _privacy_needles(path, versions[index].name)
+    sections.append((heading, MatchHighlight(body, needles) if needles else body))
+    sections += _privacy_sections(path, versions[index])
     return sections
 
 
@@ -1540,7 +1549,170 @@ def content_sections(path: str, notify=None) -> list[Section]:
         return [("", msg)]
     state = state_for(path)
     v = versions[_selected_index(versions, state)]
-    return content_sections_for_file(v.file, state, content_label(path), notify)
+    sections = content_sections_for_file(v.file, state, content_label(path), notify)
+    needles = _privacy_needles(path, v.name)
+    if not needles:
+        return sections
+    out: list[Section] = [
+        (h, MatchHighlight(b, needles) if isinstance(b, PreviewRenderable) else b)
+        for h, b in sections
+    ]
+    note = Text("Highlighted: profile values found in this version (", style=_DIM)
+    note.append_text(_privacy_tag_text(path, v.name))
+    note.append(")", style=_DIM)
+    out.append(("", note))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# identity profile values (privacy scan)
+# ---------------------------------------------------------------------------
+
+
+class MatchHighlight:
+    """``inner`` drawn as is, with every occurrence of ``needles`` (case
+    blind) on a warn-coloured background. Works over any renderable (a diff,
+    a SQLite table, a JSON tree) because it marks the rendered lines; a match
+    broken across two lines is not marked.
+    """
+
+    def __init__(self, inner: Any, needles: list[str]) -> None:
+        self.inner = inner
+        self.needles = [n.lower() for n in needles if n]
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        from sandroid.tui.themes import lens_palette
+
+        pal = lens_palette()
+        mark = Style(color=pal.bg, bgcolor=pal.warn, bold=True)
+        lines = console.render_lines(self.inner, options, pad=False)
+        for i, line in enumerate(lines):
+            if i:
+                yield Segment.line()
+            yield from _mark_line(line, self.needles, mark)
+
+
+def _mark_line(line: list[Segment], needles: list[str], mark: Style) -> list:
+    raw = "".join(seg.text for seg in line if not seg.control)
+    plain = raw.lower()
+    if len(plain) != len(raw):  # a case change that alters the length
+        plain = raw
+    spans: list[tuple[int, int]] = []
+    for needle in needles:
+        start = plain.find(needle)
+        while start >= 0:
+            spans.append((start, start + len(needle)))
+            start = plain.find(needle, start + 1)
+    if not spans:
+        return line
+    hit = [False] * len(plain)
+    for a, b in spans:
+        for k in range(a, b):
+            hit[k] = True
+    out: list[Segment] = []
+    pos = 0
+    for seg in line:
+        if seg.control:
+            out.append(seg)
+            continue
+        text = seg.text
+        k = 0
+        while k < len(text):
+            on = hit[pos + k]
+            j = k
+            while j < len(text) and hit[pos + j] == on:
+                j += 1
+            style = (
+                (seg.style + mark)
+                if (on and seg.style)
+                else (mark if on else seg.style)
+            )
+            out.append(Segment(text[k:j], style))
+            k = j
+        pos += len(text)
+    return out
+
+
+def privacy_hits(path: str, version: str | None = None) -> list:
+    """Hit records of ``path`` (any alias), optionally of one kept version."""
+    from sandroid.core.adb_utils import device_path_aliases
+
+    from .network_panel import privacy_service
+
+    service = privacy_service()
+    if service is None:
+        return []
+    try:
+        aliases = device_path_aliases(path)
+    except Exception:
+        aliases = [path]
+    out: list = []
+    try:
+        for alias in dict.fromkeys([path, *aliases]):
+            out += service.hits_for_file(alias)
+    except Exception:
+        return []
+    if version is not None:
+        out = [h for h in out if h.source.get("version") == version]
+    return out
+
+
+def privacy_tags(path: str) -> list:
+    """``TagInfo`` of every profile value found in ``path`` (any alias)."""
+    from sandroid.core.adb_utils import device_path_aliases
+
+    from .network_panel import privacy_service
+
+    service = privacy_service()
+    if service is None:
+        return []
+    try:
+        for alias in dict.fromkeys([path, *device_path_aliases(path)]):
+            tags = service.tags_for_file(alias)
+            if tags:
+                return list(tags)
+    except Exception:
+        return []
+    return []
+
+
+def _privacy_needles(path: str, version: str) -> list[str]:
+    """The text found for each hit of the version (3+ printable chars)."""
+    out = []
+    for hit in privacy_hits(path, version):
+        match = str((hit.snippet or ("", "", ""))[1] or "")
+        if len(match) >= 3 and match.isprintable():
+            out.append(match)
+    return list(dict.fromkeys(out))
+
+
+def _privacy_tag_text(path: str, version: str) -> Text:
+    from .network_panel import party_color
+
+    labels = list(dict.fromkeys(h.label for h in privacy_hits(path, version)))
+    text = Text()
+    for i, label in enumerate(labels):
+        if i:
+            text.append(", ", style=_DIM)
+        text.append(str(label), style=party_color("stored"))
+    return text
+
+
+def _privacy_sections(path: str, version: Version) -> list[Section]:
+    """``[(heading, hits)]`` for the selected version (empty: none found)."""
+    from .network_panel import hits_renderable
+
+    hits = privacy_hits(path, version.name)
+    if not hits:
+        return []
+    values = len({h.marker_id for h in hits})
+    heading = (
+        f"Profile values in v{version.number}: {values} "
+        f"value{'s' if values != 1 else ''}"
+    )
+    return [(heading, hits_renderable(hits))]
 
 
 # ---------------------------------------------------------------------------

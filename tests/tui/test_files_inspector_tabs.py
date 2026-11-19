@@ -592,3 +592,89 @@ def test_the_hash_line_covers_the_wal(tmp_path):
     fins.clear_caches()
     text = _sections_text(fins.versions_sections(PLACES), 100)
     assert "device sha256 ≠ local ✗ (wal)" in text
+
+
+# ---------------------------------------------------------------------------
+# identity profile values (privacy scan)
+# ---------------------------------------------------------------------------
+
+AD_ID = "38400000-8cf0-11bd-b23e-10b96e40000d"
+
+
+def _prefs_with_ad_id(tmp_path, monkeypatch):
+    import privacy_fakes
+    from privacy_fakes import file_hit
+
+    a, b = tmp_path / "a.xml", tmp_path / "b.xml"
+    a.write_text(PREFS_OLD, encoding="utf-8")
+    b.write_text(PREFS_NEW, encoding="utf-8")
+    t0 = datetime.now() - timedelta(minutes=3)
+    _add_version(PREFS, t0, {"prefs.xml": a})
+    newest = _add_version(PREFS, t0 + timedelta(minutes=1), {"prefs.xml": b}, diff="x")
+    hit = file_hit(
+        PREFS,
+        "Advertising ID",
+        "Ad ID",
+        version=newest.name,
+        snippet=('<string name="advertising_id">', AD_ID, "</string>"),
+    )
+    return privacy_fakes.install(monkeypatch, [hit])
+
+
+def _marked_texts(renderable, width: int = 70) -> list[str]:
+    """Text drawn on a background colour (the highlighted matches)."""
+    console = Console(file=StringIO(), width=width)
+    lines = console.render_lines(renderable, console.options, pad=False)
+    out = []
+    for line in lines:
+        out += [s.text for s in line if s.style is not None and s.style.bgcolor]
+    return out
+
+
+def test_versions_and_content_highlight_profile_values(tmp_path, monkeypatch):
+    import privacy_fakes
+
+    _prefs_with_ad_id(tmp_path, monkeypatch)
+    sections = fins.versions_sections(PREFS)
+    heading, body = sections[-1]
+    assert heading == "Profile values in v2: 1 value"
+    text = _sections_text([(heading, body)], 80)
+    assert "Advertising ID" in text
+    assert "file, as is" in text
+    assert "stored on the device, high confidence" in text
+    assert not set(privacy_fakes.GLYPHS) & set(text)
+    # The diff above draws the found text on a background colour.
+    diff = sections[-2][1]
+    assert isinstance(diff, fins.MatchHighlight)
+    assert AD_ID[:8] in "".join(_marked_texts(diff))
+    content = fins.content_sections(PREFS)
+    assert any(isinstance(b, fins.MatchHighlight) for _h, b in content)
+    note = _sections_text(content[-1:], 100)
+    assert "profile values found in this version (Advertising ID)" in note
+    marked = "".join(
+        t for _h, b in content if isinstance(b, fins.MatchHighlight)
+        for t in _marked_texts(b, 100)
+    )  # fmt: skip
+    assert AD_ID[:8] in marked
+    # The older version holds no profile value: nothing extra.
+    assert fins.step_version(PREFS, -1)
+    assert "Profile values" not in _sections_text(fins.versions_sections(PREFS), 80)
+
+
+async def test_files_lens_tags_and_tints_files_with_profile_values(
+    tmp_path, monkeypatch
+):
+    from sandroid.tui.app import SandroidTUI
+
+    _prefs_with_ad_id(tmp_path, monkeypatch)
+    get_forensic_service().add_spotlight_file(PREFS)
+    app = SandroidTUI()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await boot(app, pilot)
+        await pilot.press("3")
+        await settle(pilot)
+        panel = ms.lens_widget("files")
+        panel.refresh_rows()
+        await until(pilot, lambda: PREFS in panel.table.profile_keys)
+        assert "ident" in [str(c.value) for c in panel.table.columns]
+        assert str(panel.table.get_cell(PREFS, "ident")) == "Ad ID"
