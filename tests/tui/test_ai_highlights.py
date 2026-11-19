@@ -339,9 +339,6 @@ async def test_network_X_clears_after_confirm_and_the_column_follows_width(
         _ms, panel = await _network(app, pilot, flow_dir)
         table = panel.table
         store.create("network", "empty set")  # no rows: no column yet
-        # An empty set changes no row key: the store's notify carries no key,
-        # which the feed does not flush; redraw as H / X would.
-        app.call_later(panel._redraw_highlights)
         await until(pilot, lambda: _bar(panel))
         assert "hl" not in _cols(table)
         store.create("network", "facebook", reasons={"flow-2": "fb"})
