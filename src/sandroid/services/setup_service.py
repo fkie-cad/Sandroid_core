@@ -457,16 +457,51 @@ class SetupService:
         if not self._check_device_stage(result, adb, auto_start_emulator):
             return result
 
+        # Stages 3 + 4 run as the device-prepared step (core/device_prep.py)
+        # when the device is the active one, so startup, attach and reboot
+        # share one implementation; its rows are reported as before.
+        prep = self._prepare_active_device(enable_root, set_selinux_permissive)
+
         # Stage 3: Root access
-        self._check_root_stage(result, adb, enable_root)
+        self._check_root_stage(result, adb, enable_root, prep)
         if not result.success:
             return result
 
         # Stage 4: SELinux permissive mode
-        self._check_selinux_stage(result, adb, set_selinux_permissive)
+        self._check_selinux_stage(result, adb, set_selinux_permissive, prep)
 
         result.success = True
         return result
+
+    def _prepare_active_device(
+        self, enable_root: bool, set_selinux_permissive: bool
+    ) -> Any:
+        """Run (or join) the device-prepared step for the active device.
+
+        Turns the step on for the rest of the session (later attaches and
+        reboots are prepared the same way). Only with the global adb (an
+        injected one is a test double) and both stages wanted.
+
+        Returns:
+            The step's ``PrepResult`` when the device is prepared, else None
+            (then the stages run directly, as before).
+        """
+        if self._adb is not None or not (enable_root and set_selinux_permissive):
+            return None
+        try:
+            from sandroid.core import device_prep
+            from sandroid.core.device_manager import DeviceManager
+
+            manager = DeviceManager._instance
+            active = manager.active_device if manager is not None else None
+            if active is None:
+                return None
+            device_prep.set_enabled(True)
+            prep = device_prep.ensure_prepared(active.serial)
+        except Exception as e:
+            logger.warning(f"Device preparation failed: {e}")
+            return None
+        return prep if prep.prepared else None
 
     def _check_adb_stage(self, result: SetupResult, adb: AdbProtocol) -> bool:
         """Run the ADB availability check stage.
@@ -575,7 +610,11 @@ class SetupService:
         return True
 
     def _check_root_stage(
-        self, result: SetupResult, adb: AdbProtocol, enable_root: bool
+        self,
+        result: SetupResult,
+        adb: AdbProtocol,
+        enable_root: bool,
+        prep: Any = None,
     ) -> None:
         """Run the root access check stage.
 
@@ -583,6 +622,9 @@ class SetupService:
             result: SetupResult to update
             adb: ADB interface
             enable_root: If True, attempt to enable root; otherwise skip
+            prep: The device-prepared step's result: its ``adb root`` row is
+                used. When it skipped ``adb root`` (su / no-root devices) the
+                check still runs here, so startup passes or fails as before.
         """
         from sandroid.services.setup_checks import (
             check_and_enable_root,
@@ -590,7 +632,9 @@ class SetupService:
         )
 
         if enable_root:
-            root_check = check_and_enable_root(adb)
+            root_check = getattr(prep, "root_check", None)
+            if root_check is None:
+                root_check = check_and_enable_root(adb)
             result.checks.append(root_check)
             result.root_available = root_check.passed
 
@@ -603,7 +647,11 @@ class SetupService:
             result.checks.append(root_check)
 
     def _check_selinux_stage(
-        self, result: SetupResult, adb: AdbProtocol, set_selinux_permissive: bool
+        self,
+        result: SetupResult,
+        adb: AdbProtocol,
+        set_selinux_permissive: bool,
+        prep: Any = None,
     ) -> None:
         """Run the SELinux check stage.
 
@@ -611,6 +659,7 @@ class SetupService:
             result: SetupResult to update
             adb: ADB interface
             set_selinux_permissive: If True, attempt to set permissive; otherwise skip
+            prep: The device-prepared step's result (its SELinux row is used).
         """
         from sandroid.services.setup_checks import (
             check_and_set_selinux,
@@ -618,7 +667,9 @@ class SetupService:
         )
 
         if set_selinux_permissive:
-            selinux_check = check_and_set_selinux(adb)
+            selinux_check = getattr(prep, "selinux_check", None)
+            if selinux_check is None:
+                selinux_check = check_and_set_selinux(adb)
             result.checks.append(selinux_check)
             result.selinux_permissive = selinux_check.passed
 

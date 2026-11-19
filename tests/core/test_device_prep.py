@@ -40,6 +40,7 @@ class FakeDevice:
         self.listed = True
         self.selinux = "Enforcing"
         self.adbd_root = False
+        self.root_refused = False  # a user build: adbd cannot run as root
         self.events: list = []
         self.calls: list[str] = []
         self.settle_gate = threading.Event()
@@ -64,6 +65,8 @@ class FakeDevice:
         if command == device_prep.BOOT_INFO_COMMAND:
             lines = [self.boot_id or "", self.firstboot, f"{self.uptime} 50.00"]
             return "\n".join(lines) + "\n", ""
+        if command == "root" and self.root_refused:
+            return "", "adbd cannot run as root in production builds"
         if command == "root":
             self.events.append("root")
             if self.adbd_root:
@@ -643,3 +646,79 @@ def test_note_adb_server_restart_forgets_transports_and_reattaches(rig):
     assert device_prep.wait_prepared(SERIAL, 5)
     assert rig.results[-1].kind == "reattach"
     assert rig.results[-1].reason == "adb-server"
+
+
+# ------------------------------------------------------- startup / headless
+
+
+def test_check_critical_setup_joins_the_run_in_flight(rig):
+    from sandroid.services.setup_service import SetupService
+
+    device_prep.set_enabled(False)  # startup turns it on itself
+    rig.fake.settle_gate.clear()
+    box: list = []
+    thread = threading.Thread(
+        target=lambda: box.append(SetupService().check_critical_setup())
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not device_prep.is_preparing(SERIAL):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    # Meanwhile a re-attach asks again: coalesced into the same run.
+    assert device_prep.request_prepare(SERIAL, "attach")
+    rig.fake.settle_gate.set()
+    thread.join(10)
+    (result,) = box
+    assert result.success
+    assert rig.fake.calls.count("root") == 1
+    assert result.get_check("root").passed
+    assert result.get_check("selinux").details["mode"] == "Permissive"
+    assert result.selinux_permissive is True
+    assert device_prep.is_enabled()
+
+
+def test_check_critical_setup_keeps_failing_without_adb_root(rig):
+    """A su device: the step skips ``adb root``, startup still reports the
+    root stage as before (follow-up: accept su at startup).
+    """
+    from sandroid.services.setup_service import SetupService
+
+    rig.device.root_kind = "su"
+    rig.fake.root_refused = True
+    result = SetupService().check_critical_setup()
+    assert not result.success
+    assert result.message == "Device does not support adb root"
+    assert "setenforce" in rig.fake.events  # the step still ran SELinux
+    assert rig.fake.calls.count("root") == 1  # only the startup check's
+
+
+def test_initialize_core_prepare_runs_the_hooks_before_toolbox_init(rig, monkeypatch):
+    from sandroid.core import initializer
+    from sandroid.core.toolbox import Toolbox
+
+    device_prep.set_enabled(False)
+    order: list = []
+    monkeypatch.setattr(Adb, "init", classmethod(lambda cls: None))
+    monkeypatch.setattr(Toolbox, "init", classmethod(lambda cls: order.append("tb")))
+    monkeypatch.setattr(Toolbox, "config", None, raising=False)
+    # What set_active_device does when the selection picks the device.
+    monkeypatch.setattr(
+        initializer,
+        "apply_serial_selection",
+        lambda serial: order.append(
+            ("selected", device_prep.request_prepare(SERIAL, "attach"))
+        ),
+    )
+    monkeypatch.setattr(initializer, "require_device", lambda: None)
+    monkeypatch.setattr(initializer, "refuse_ambiguous_device", lambda: None)
+    device_prep.register_device_prepared_hook(lambda s, f: order.append("hook"))
+    printed: list = []
+    monkeypatch.setattr(
+        "sandroid.core.console.SandroidConsole.get",
+        classmethod(lambda cls: SimpleNamespace(print=printed.append)),
+    )
+    initializer.initialize_core(SimpleNamespace(), prepare=True)
+    assert order == [("selected", True), "hook", "tb"]
+    assert rig.fake.calls.count("root") == 1
+    assert any("SELinux permissive" in p for p in printed)

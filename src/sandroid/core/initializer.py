@@ -153,7 +153,9 @@ def prepare_device(console: Any | None = None) -> bool:
     (2147483646)`` and Frida reports ``access: jailed``. The TUI/interactive
     startup gets this via ``SetupService.check_critical_setup()``; every
     one-shot headless path must do it as well, which is what this helper is
-    for.
+    for. Both run the device-prepared step (``core/device_prep.py``) for the
+    active device -- the same step a later attach or reboot runs -- and
+    report its result; without an active device the checks run directly.
 
     Never raises and never exits: a device without root still works for
     the operations that don't need it, so failures are only reported.
@@ -175,7 +177,14 @@ def prepare_device(console: Any | None = None) -> bool:
         if console is not None:
             console.print(markup)
 
-    root = check_and_enable_root(Adb)
+    root = selinux = None
+    prep = _run_device_prep()
+    if prep is not None:
+        root, selinux = prep.root_check, prep.selinux_check
+    if root is None:
+        # Not prepared, or the step skipped ``adb root`` (su / no-root
+        # device): the check says whether root is usable, as before.
+        root = check_and_enable_root(Adb)
     if not root.passed:
         _say(
             f"[warning]Root not available: {root.message}. Operations that "
@@ -185,7 +194,8 @@ def prepare_device(console: Any | None = None) -> bool:
         )
         return False
 
-    selinux = check_and_set_selinux(Adb)
+    if selinux is None:
+        selinux = check_and_set_selinux(Adb)
     if not selinux.passed:
         _say(
             f"[warning]{selinux.message}[/warning]",
@@ -200,6 +210,26 @@ def prepare_device(console: Any | None = None) -> bool:
         logging.INFO,
     )
     return True
+
+
+def _run_device_prep() -> Any:
+    """The device-prepared step for the active device (turned on for the
+    session), or None without an active device / when it did not prepare.
+    """
+    try:
+        from sandroid.core import device_prep
+        from sandroid.core.device_manager import DeviceManager
+
+        manager = DeviceManager._instance
+        active = manager.active_device if manager is not None else None
+        if active is None:
+            return None
+        device_prep.set_enabled(True)
+        prep = device_prep.ensure_prepared(active.serial)
+    except Exception as e:
+        logger.warning(f"Device preparation failed: {e}")
+        return None
+    return prep if prep.prepared else None
 
 
 def ensure_frida_server(console: Any | None = None) -> bool:
@@ -284,6 +314,13 @@ def initialize_core(
     # IMPORTANT: Adb.init() must come before Toolbox.init() because
     # Toolbox.init() uses DeviceManager which depends on Adb being initialized
     Adb.init()
+    if prepare:
+        # The device-prepared step is on before a device is selected: the
+        # selection starts it (off this thread) and prepare_device() below
+        # joins it, so hooks (proxy restore) run before Toolbox.init().
+        from sandroid.core import device_prep
+
+        device_prep.set_enabled(True)
     apply_serial_selection(getattr(emulator_cfg, "serial", None))
     # Never guess among several devices: the next steps (adb root, SELinux
     # permissive, FridaManager / frida-server) change the device.
