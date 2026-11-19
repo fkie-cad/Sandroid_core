@@ -664,7 +664,10 @@ def test_versions_and_content_highlight_profile_values(tmp_path, monkeypatch):
 async def test_files_lens_tags_and_tints_files_with_profile_values(
     tmp_path, monkeypatch
 ):
+    from rich.style import Style
+
     from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.themes import lens_palette
 
     _prefs_with_ad_id(tmp_path, monkeypatch)
     get_forensic_service().add_spotlight_file(PREFS)
@@ -675,9 +678,15 @@ async def test_files_lens_tags_and_tints_files_with_profile_values(
         await settle(pilot)
         panel = ms.lens_widget("files")
         panel.refresh_rows()
-        await until(pilot, lambda: PREFS in panel.table.profile_keys)
-        assert "ident" in [str(c.value) for c in panel.table.columns]
-        assert str(panel.table.get_cell(PREFS, "ident")) == "Ad ID"
+        table = panel.table
+
+        def tint(key):
+            return table._get_row_style(table.get_row_index(key), Style()).bgcolor
+
+        await until(pilot, lambda: PREFS in table.rows and tint(PREFS) is not None)
+        assert "ident" in [str(c.value) for c in table.columns]
+        assert str(table.get_cell(PREFS, "ident")) == "Ad ID"
+        assert table.get_cell(PREFS, "ident").spans[0].style == lens_palette().accent
 
 
 async def test_auto_pulled_unstarred_files_show_their_versions(tmp_path, monkeypatch):

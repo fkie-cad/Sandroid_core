@@ -90,6 +90,11 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import DataTable, Input, Static
 
+from sandroid.tui.row_annotations import (
+    LENS_NETWORK,
+    AnnotationFeed,
+    AnnotationTintMixin,
+)
 from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher, in_app_context
 from sandroid.tui.widgets.follow import Follow
@@ -679,13 +684,8 @@ def body_renderable(body: Any, content_type: str | None) -> RenderableType:
 # reads the privacy scan service's in-memory records only (no file reads) and
 # speaks in plain words: no glyphs, colours from the lens theme tokens.
 
-#: Hits arriving live redraw a lens at most this often (seconds).
-PRIVACY_REFRESH_S = 1.0
 #: The Identity column is shown from this lens width on (the row tint stays).
 PRIVACY_COLUMN_MIN_WIDTH = 100
-#: A posted redraw that has not run after this long (its timer died with an
-#: unmounted lens) no longer blocks new ones (seconds).
-PRIVACY_POST_STALE_S = 5.0
 
 
 def flow_record_of(hit: Any) -> dict[str, Any]:
@@ -764,11 +764,9 @@ def where_words(part: str, source: dict | None = None, offsets: Any = ()) -> str
 
 
 def party_words(party: str | None) -> str:
-    return {
-        "third": "third party",
-        "first": "first party",
-        "stored": "stored on the device",
-    }.get(party or "", "unknown party")
+    from sandroid.services.privacy_scan import party_words as words
+
+    return words(party)
 
 
 def confidence_words(confidence: str | None) -> str:
@@ -777,39 +775,9 @@ def confidence_words(confidence: str | None) -> str:
 
 def party_color(party: str | None) -> str:
     """Theme colour of a party: third = warn, first / stored = accent."""
-    from sandroid.tui.themes import lens_palette
+    from sandroid.services.privacy_scan import party_role
 
-    pal = lens_palette()
-    if party == "third":
-        return pal.warn
-    if party in ("first", "stored"):
-        return pal.accent
-    return pal.text
-
-
-@functools.lru_cache(maxsize=32)
-def _blend(bg: str, color: str, amount: float) -> str:
-    from textual.color import Color
-
-    try:
-        return Color.parse(bg).blend(Color.parse(color), amount).hex
-    except Exception:
-        return bg
-
-
-@functools.lru_cache(maxsize=32)
-def _bg_style(color: str) -> Style:
-    return Style(bgcolor=color)
-
-
-def profile_tint(role: str = "warn", amount: float = 0.13) -> str:
-    """The lens background blended a little towards a theme token (cached
-    per palette colours, so a theme change picks up the new tint).
-    """
-    from sandroid.tui.themes import lens_palette
-
-    pal = lens_palette()
-    return _blend(pal.bg, getattr(pal, role), amount)
+    return str(getattr(lens_palette(), party_role(party)))
 
 
 def _distinct_tags(tags: Any) -> list:
@@ -939,131 +907,16 @@ def privacy_has_hits(service: Any) -> bool:
     return bool(service.hits())
 
 
-class PrivacyFeed:
-    """New privacy-scan hits for a lens, redrawn at most once a second.
-
-    The scan service calls listeners on its worker thread; this only queues
-    ``key(record)`` (a flow id, a device path ...) and posts one UI hop
-    (non-blocking, :class:`UiDispatcher`). On the UI the owner's
-    ``flush(keys)`` runs at most once per :data:`PRIVACY_REFRESH_S`. A
-    ``None`` record (the service loaded or dropped a whole session) queues
-    :attr:`ALL`: redraw everything.
+def privacy_annotations() -> Any | None:
+    """The registered privacy row-annotation provider (cached tag lookups
+    shared by the row tint, the Identity column, ``!`` and ``/``), or None.
     """
+    try:
+        from sandroid.services.privacy_scan import annotations_provider
 
-    #: The key of "everything changed" (a session switch).
-    ALL = "*"
-
-    def __init__(
-        self,
-        owner: Widget,
-        flush: Callable[[set[str]], None],
-        key: Callable[[Any], Any],
-    ) -> None:
-        self._owner = owner
-        self._flush_cb = flush
-        self._key = key
-        self._lock = threading.Lock()
-        self._pending: set[str] = set()
-        self._posted = False
-        self._posted_at = 0.0
-        self._last = 0.0
-        self._ui = UiDispatcher()
-        self._service: Any = None
-
-    def attach(self) -> None:
-        """Start listening (call on the UI thread, e.g. ``on_mount``)."""
-        self._ui = UiDispatcher.capture()
-        with self._lock:
-            self._posted = False
-        service = privacy_service()
-        if service is None:
-            return
-        try:
-            service.add_listener(self.on_hit)
-            self._service = service
-        except Exception:
-            logger.debug("privacy listener not attached", exc_info=True)
-
-    def detach(self) -> None:
-        service, self._service = self._service, None
-        if service is not None:
-            try:
-                service.remove_listener(self.on_hit)
-            except Exception:
-                pass
-
-    def on_hit(self, rec: Any) -> None:
-        """Scan worker thread: queue the record's key, post one UI hop."""
-        if rec is None:
-            key: Any = self.ALL
-        else:
-            try:
-                key = self._key(rec)
-            except Exception:
-                key = None
-        if not key:
-            return
-        now = time.monotonic()
-        with self._lock:
-            self._pending.add(str(key))
-            # A post whose redraw never ran (its timer died with the lens)
-            # must not block every later one.
-            if self._posted and now - self._posted_at < PRIVACY_POST_STALE_S:
-                return
-            self._posted = True
-            self._posted_at = now
-        if not self._ui.post(self._schedule):
-            with self._lock:
-                self._posted = False
-
-    def _schedule(self) -> None:
-        wait = self._last + PRIVACY_REFRESH_S - time.monotonic()
-        if wait > 0:
-            try:
-                self._owner.set_timer(wait, self._flush)
-                return
-            except Exception:
-                pass
-        self._flush()
-
-    def _flush(self) -> None:
-        with self._lock:
-            pending, self._pending = self._pending, set()
-            self._posted = False
-        self._last = time.monotonic()
-        if pending and self._owner.is_attached:
-            self._flush_cb(pending)
-
-
-class ProfileTintMixin:
-    """A ``DataTable`` whose rows in ``profile_keys`` get a faint warn tint.
-
-    For rows that carry identity-profile values. Uses Textual 8.2's row
-    style hook (``_get_row_style``); the cursor row keeps the cursor colour.
-    Changing ``profile_keys`` needs a cell update (``update_cell``) to
-    redraw, as any other row change.
-    """
-
-    profile_keys: set[str]
-
-    def clear(self, columns: bool = False):
-        self.profile_keys = set()
-        return super().clear(columns)  # type: ignore[misc]
-
-    def _get_row_style(self, row_index: int, base_style: Style) -> Style:
-        style = super()._get_row_style(row_index, base_style)  # type: ignore[misc]
-        keys = getattr(self, "profile_keys", None)
-        if row_index < 0 or not keys:
-            return style
-        try:
-            from textual.coordinate import Coordinate
-
-            cell = self.coordinate_to_cell_key(Coordinate(row_index, 0))  # type: ignore[attr-defined]
-        except Exception:
-            return style
-        if cell.row_key.value in keys:
-            return style + _bg_style(profile_tint())  # both cached
-        return style
+        return annotations_provider()
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -1071,15 +924,15 @@ class ProfileTintMixin:
 # --------------------------------------------------------------------------
 
 
-class FlowTable(ProfileTintMixin, DataTable):
+class FlowTable(AnnotationTintMixin, DataTable):
     """The flow table: Home / End jump to the first / last row.
 
     DataTable's own Home / End scroll sideways (the cursor is a row cursor
     here, so they did nothing visible; End never reached the newest flow).
 
-    Rows in ``profile_keys`` (flows carrying identity-profile values) get a
-    faint warn-coloured background (``_get_row_style``, Textual 8.2's row
-    style hook; the cursor row keeps the cursor colour).
+    Rows are tinted by their row annotations (``row_annotations``: flows
+    carrying identity-profile values, AI marks); the annotation key of a row
+    is its mitmproxy flow id, not the row key ``f<seq>``.
 
     Moving up (↑, PgUp, Home, a wheel up, a click above the newest row) stops
     following the newest flow; End resumes (``follow.py``).
@@ -1090,10 +943,18 @@ class FlowTable(ProfileTintMixin, DataTable):
         Binding("end", "scroll_bottom", "Newest row, live", show=False),
     ]
 
+    annotation_lens = LENS_NETWORK
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        #: Row keys of flows that carry identity-profile values.
-        self.profile_keys = set()
+        self._owner_panel: NetworkPanel | None = None
+
+    def annotation_key(self, row_key_value: Any) -> str | None:
+        """Row key ``f<seq>`` -> the flow id (flow rows only)."""
+        panel = self._owner_panel
+        if panel is None:
+            panel = self._owner_panel = self._panel()
+        return panel.annotation_flow_id(row_key_value) if panel is not None else None
 
     def _panel(self) -> NetworkPanel | None:
         for node in self.ancestors:
@@ -1287,15 +1148,10 @@ class NetworkPanel(Widget):
         self._filter_timer = None
         # identity profile values (privacy scan; see the _privacy_* methods)
         self._profile_only = False
-        self._privacy_table: DataTable | None = None
-        self._privacy_feed = PrivacyFeed(
-            self, self._privacy_flush, lambda rec: rec.flow_id
-        )
-        #: flow id -> tags, valid for one service revision (one lookup per
-        #: row: the filter, "/" and the Identity cell share it).
-        self._tags_cache: dict[str, list] = {}
-        self._tags_rev: Any = None
-        self._tags_owner: Any = None
+        #: Row annotations (privacy, AI marks) of drawn flows changed.
+        self._privacy_feed = AnnotationFeed(self, LENS_NETWORK, self._privacy_flush)
+        #: (model, its length, row key -> row): the flow id of a row key.
+        self._flow_index: tuple[Any, int, dict[str, FlowRow]] = (None, 0, {})
         #: Follow the newest flow (``follow.py``); live rows only.
         self._follow = Follow()
 
@@ -2469,11 +2325,11 @@ class NetworkPanel(Widget):
     # -- identity profile values (privacy scan) ----------------------------
     #
     # Flows carrying values of the active identity profile get a faint warn
-    # tint (FlowTable.profile_keys), an Identity column (from
-    # PRIVACY_COLUMN_MIN_WIDTH, only while a profile is set or hits are
-    # loaded) and an Identity Inspector tab. ``!`` shows only those flows.
-    # Hits found later (the scan worker) mark rows already drawn through a
-    # PrivacyFeed (UI redraw at most once per PRIVACY_REFRESH_S).
+    # tint (FlowTable, through the shared row annotations), an Identity
+    # column (from PRIVACY_COLUMN_MIN_WIDTH, only while a profile is set or
+    # hits are loaded) and an Identity Inspector tab. ``!`` shows only those
+    # flows. Hits found later (the scan worker) redraw rows already drawn
+    # through an AnnotationFeed (UI redraw at most once a second).
 
     def on_unmount(self) -> None:
         self._privacy_feed.detach()
@@ -2489,22 +2345,28 @@ class NetworkPanel(Widget):
             return False
 
     def _flow_tags(self, row: FlowRow) -> list:
-        """The row's profile tags, looked up once per service revision."""
+        """The row's profile tags (the provider caches them per revision)."""
         flow_id = row.flow_id
         if not flow_id:
             return []
-        service = privacy_service()
-        rev = getattr(service, "revision", None) if service is not None else None
-        if rev is None:  # a service without revisions: no caching
-            return _privacy_tags_for_flow(flow_id, service)
-        if rev != self._tags_rev or service is not self._tags_owner:
-            self._tags_cache = {}
-            self._tags_rev = rev
-            self._tags_owner = service
-        tags = self._tags_cache.get(flow_id)
-        if tags is None:
-            tags = self._tags_cache[flow_id] = _privacy_tags_for_flow(flow_id, service)
-        return tags
+        provider = privacy_annotations()
+        if provider is not None:
+            return provider.flow_tags(flow_id)
+        return _privacy_tags_for_flow(flow_id)
+
+    def annotation_flow_id(self, key: Any) -> str | None:
+        """The annotation key (flow id) of table row ``key``; flow rows only."""
+        if key is None:
+            return None
+        model = self._model()
+        owner, size, index = self._flow_index
+        if owner is not model or size != len(model):
+            index = {r.key: r for r in model}
+            self._flow_index = (model, len(model), index)
+        row = index.get(str(key))
+        if row is None or row.kind != "flow":
+            return None
+        return row.flow_id
 
     def _privacy_columns(self, avail: int) -> list[tuple[str, str, int]]:
         if avail < PRIVACY_COLUMN_MIN_WIDTH or not self._privacy_wanted():
@@ -2512,30 +2374,28 @@ class NetworkPanel(Widget):
         return [("ident", "Identity", 18 if avail >= 130 else 14)]
 
     def _privacy_cell(self, row: FlowRow, width: int) -> Text:
-        """The Identity cell; also (un)marks the row for the tint."""
+        """The Identity cell (the row tint comes from the row annotations)."""
         tags = self._flow_tags(row) if row.kind == "flow" else []
-        table = self._privacy_table
-        if table is None:  # one DOM query, not one per row
-            try:
-                table = self._privacy_table = self.table
-            except Exception:
-                table = None
-        if isinstance(table, FlowTable):
-            if tags:
-                table.profile_keys.add(row.key)
-            else:
-                table.profile_keys.discard(row.key)
         return tag_words(tags, width or None)
+
+    def _profile_rows(self) -> int:
+        """Drawn flows that carry profile values (the caption count)."""
+        provider = privacy_annotations()
+        if provider is None:
+            return 0
+        try:
+            keys = [k.value for k in self.table.rows]
+        except Exception:
+            return 0
+        return sum(
+            1 for key in keys if provider.flow_tags(self.annotation_flow_id(key) or "")
+        )
 
     def _privacy_caption_parts(self) -> list[str]:
         parts = []
-        try:
-            n = len(self.table.profile_keys)
-        except Exception:
-            n = 0
         if self._profile_only:
             parts.append("!: profile values only")
-        elif n:
+        elif n := self._profile_rows():
             parts.append(f"{n} carry profile values")
         return parts
 
@@ -2554,8 +2414,10 @@ class NetworkPanel(Widget):
         heading = f"{values} profile value{'s' if values != 1 else ''} in this flow"
         return [("Identity", [(heading, hits_renderable(hits))])]
 
-    def _privacy_flush(self, pending: set[str]) -> None:
-        """Redraw the rows (and the open Inspector) of flows with new hits."""
+    def _privacy_flush(self, pending: set[str] | None) -> None:
+        """Redraw the rows (and the open Inspector) of flows whose row
+        annotations changed (``pending``: flow ids; None: every flow).
+        """
         try:
             table = self.table
         except Exception:
@@ -2563,7 +2425,8 @@ class NetworkPanel(Widget):
         keys = [k for k, _, _ in self._net_layout]
         has_col = "ident" in keys
         wants_col = bool(self._privacy_columns(self.size.width or 120))
-        everything = PrivacyFeed.ALL in pending
+        everything = pending is None
+        pending = pending or set()
         if everything or self._profile_only or has_col != wants_col or not keys:
             self._rebuild()
         else:

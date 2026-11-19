@@ -53,6 +53,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Static
 
 from sandroid.core import run_history
+from sandroid.tui.row_annotations import AnnotationFeed
 
 from .files_panel import FilesSubViewBase
 
@@ -168,6 +169,15 @@ def bundle_fingerprint(run_dir) -> str:
     except OSError:
         pass
     return digest.hexdigest()
+
+
+class _AnyLensFeed(AnnotationFeed):
+    """An :class:`AnnotationFeed` of every lens's row changes (the run
+    Inspector's Privacy tab lists network and file findings alike).
+    """
+
+    def on_change(self, lens: str | None, keys: frozenset[str] | None) -> None:
+        super().on_change(None, keys)
 
 
 class RunsTable(DataTable):
@@ -291,10 +301,10 @@ class DiffsView(FilesSubViewBase):
         #: (read once, off the UI thread).
         self._privacy_other: dict[str, tuple[list, bool]] = {}
         self._privacy_other_pending: set[str] = set()
-        from .network_panel import PrivacyFeed
-
-        self._privacy_feed = PrivacyFeed(
-            self, lambda _keys: self._follow_in_inspector(), lambda _rec: "run"
+        #: Privacy findings (row annotations of any lens) changed: keep an
+        #: open run Inspector current, at most once a second.
+        self._privacy_feed = _AnyLensFeed(
+            self, "", lambda _keys: self._follow_in_inspector()
         )
 
     # -- compose / mount ---------------------------------------------------

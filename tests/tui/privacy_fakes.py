@@ -5,7 +5,8 @@
 ``folder``, ``revision``) over a list of real
 :class:`~sandroid.services.privacy_scan.HitRecord` s; ``add(hit)`` delivers a
 hit to the listeners from a worker thread, like the scan worker does.
-``install(monkeypatch, hits)`` patches ``get_privacy_scan_service``.
+``install(monkeypatch, hits)`` patches ``get_privacy_scan_service`` and
+registers the fake's row-annotation provider in a fresh registry.
 """
 
 from __future__ import annotations
@@ -96,8 +97,17 @@ class FakePrivacy:
 
 
 def install(monkeypatch, hits=(), *, active: bool = True, folder=None) -> FakePrivacy:
+    """Patch the service getter and register ``fake`` as the ``privacy``
+    row-annotation provider in a fresh registry (as ``start_privacy_scan``).
+    """
+    from sandroid.tui import row_annotations
+
     fake = FakePrivacy(hits, active=active, folder=folder)
     monkeypatch.setattr(privacy_scan, "get_privacy_scan_service", lambda: fake)
+    monkeypatch.setattr(
+        row_annotations, "_REGISTRY", row_annotations.RowAnnotationRegistry()
+    )
+    privacy_scan.register_annotations(fake)
     return fake
 
 

@@ -103,6 +103,7 @@ deadlock a publisher on a background thread).
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from dataclasses import dataclass, field
@@ -117,8 +118,9 @@ from textual.containers import Horizontal
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Static
 
-from sandroid.core.adb_utils import watch_path_problem
+from sandroid.core.adb_utils import canonical_device_path, watch_path_problem
 from sandroid.core.file_diff import is_legacy_markup_line
+from sandroid.tui.row_annotations import LENS_FILES, AnnotationFeed, AnnotationTintMixin
 from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
@@ -136,8 +138,7 @@ from .monitor_view import (
 )
 from .network_panel import (
     PRIVACY_COLUMN_MIN_WIDTH,
-    PrivacyFeed,
-    ProfileTintMixin,
+    privacy_annotations,
     privacy_has_hits,
     privacy_service,
     tag_words,
@@ -389,18 +390,28 @@ class FilesSubViewBase(Widget):
         return f"{self._LABEL} —"
 
 
-class _FilesTable(ProfileTintMixin, DataTable):
+class _FilesTable(AnnotationTintMixin, DataTable):
     """The lens table: ``Home``/``End`` move the row cursor.
 
     DataTable binds them to *horizontal* scrolling (its ``ctrl+home`` is the
     row jump); this table never scrolls sideways, so Home/End jump rows.
-    Rows of files holding identity-profile values are tinted
-    (``ProfileTintMixin``).
+    Rows are tinted by their row annotations (``row_annotations``: files
+    holding identity-profile values, AI marks), keyed by canonical path.
     """
+
+    annotation_lens = LENS_FILES
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.profile_keys = set()
+        self._owner_panel: FilesPanel | None = None
+
+    def annotation_key(self, row_key_value: Any) -> str | None:
+        """Row key -> canonical device path (file rows only)."""
+        panel = self._owner_panel
+        if panel is None:
+            panel = next((n for n in self.ancestors if isinstance(n, FilesPanel)), None)
+            self._owner_panel = panel
+        return panel.annotation_path(row_key_value) if panel is not None else None
 
     def action_scroll_home(self) -> None:
         self.action_scroll_top()
@@ -459,6 +470,11 @@ class _FilesTable(ProfileTintMixin, DataTable):
         if panel is not None and panel.expand_current(False):
             return
         super().action_cursor_left()
+
+
+@functools.lru_cache(maxsize=4096)
+def _canonical_path(path: str) -> str:
+    return canonical_device_path(path)
 
 
 def _natural_key(text: str) -> list:
@@ -668,10 +684,10 @@ class FilesPanel(Widget):
         self._new_keys: set[str] = set()
         #: The last refresh put the cursor on the newest row (following).
         self._followed_last = False
-        self._privacy_table: DataTable | None = None
-        self._privacy_feed = PrivacyFeed(
-            self, self._privacy_flush, lambda rec: rec.device_path
-        )
+        #: Row annotations (privacy, AI marks) of files changed.
+        self._privacy_feed = AnnotationFeed(self, LENS_FILES, self._privacy_flush)
+        #: (rows, row key -> row): the annotation key of a table row.
+        self._row_index: tuple[Any, dict[str, _Row]] = (None, {})
 
     # -- compose / mount -----------------------------------------------------
 
@@ -1216,32 +1232,42 @@ class FilesPanel(Widget):
     def _privacy_tags(self, row: _Row) -> list:
         if row.group is not None or row.pattern:
             return []
+        provider = privacy_annotations()
+        if provider is not None:
+            return provider.file_tags(row.key)
         return file_inspect.privacy_tags(row.key)
 
     def _privacy_cell(self, row: _Row) -> Text:
-        """The Identity cell; also (un)marks the row for the tint."""
-        tags = self._privacy_tags(row)
-        table = self._privacy_table
-        if table is None:  # one DOM query, not one per row
-            table = self._privacy_table = self.table
-        if isinstance(table, _FilesTable):
-            if tags:
-                table.profile_keys.add(row.key)
-            else:
-                table.profile_keys.discard(row.key)
-        return tag_words(tags, _W_IDENT)
+        """The Identity cell (the row tint comes from the row annotations)."""
+        return tag_words(self._privacy_tags(row), _W_IDENT)
 
-    def _privacy_flush(self, paths: set[str]) -> None:
-        """New hits for ``paths``: redraw the table (tick) and the Inspector."""
+    def annotation_path(self, key: Any) -> str | None:
+        """The annotation key (canonical path) of table row ``key``; file rows only."""
+        rows = self._rows
+        owner, index = self._row_index
+        if owner is not rows:
+            index = {r.key: r for r in rows}
+            self._row_index = (rows, index)
+        row = index.get(str(key)) if key is not None else None
+        if row is None or row.group is not None or row.pattern:
+            return None
+        return _canonical_path(row.key)
+
+    def _privacy_flush(self, paths: set[str] | None) -> None:
+        """Row annotations of ``paths`` (canonical; None: every file) changed:
+        redraw the table and the Inspector.
+        """
         self._dirty = True
         if is_shown(self):
             self.refresh_rows()
-        if PrivacyFeed.ALL in paths:  # a session switch: every file
+        if paths is None:  # a session switch: every file
             self._refresh_inspector()
             return
-        from sandroid.core.adb_utils import canonical_device_path
+        from sandroid.core.adb_utils import device_path_aliases
 
-        touched = paths | {canonical_device_path(p) for p in paths}
+        touched = set(paths)
+        for path in paths:
+            touched.update(device_path_aliases(path))
         self._refresh_inspector(touched)
 
     # -- drawing ------------------------------------------------------------------

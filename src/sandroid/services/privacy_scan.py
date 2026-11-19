@@ -2406,6 +2406,261 @@ def _prune_empty_dirs(root: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# row annotations (the lens tables, through the shared registry)
+# ---------------------------------------------------------------------------
+
+#: The provider's source name in :func:`sandroid.tui.row_annotations.registry`.
+ANNOTATION_SOURCE = "privacy"
+
+_PARTY_WORDS = {
+    "third": "third party",
+    "first": "first party",
+    "stored": "stored on the device",
+}
+
+
+def party_words(party: str | None) -> str:
+    """``third`` -> ``third party`` (``unknown party`` when not known)."""
+    return _PARTY_WORDS.get(party or "", "unknown party")
+
+
+def party_role(party: str | None) -> str:
+    """Theme role of a party: third = warn, first / stored = accent."""
+    if party == "third":
+        return "warn"
+    if party in ("first", "stored"):
+        return "accent"
+    return "text"
+
+
+def _hit_strength(rec: HitRecord) -> tuple:
+    conf = CONFIDENCES.index(rec.confidence) if rec.confidence in CONFIDENCES else 9
+    return (_DIRECTION_RANK.get(rec.direction, 9), conf)
+
+
+def _hit_reason(rec: HitRecord, party: str) -> str:
+    """``sent to Meta, third party, sha256 of the lower-case value``."""
+    how = _transform_words(rec.transform)
+    if rec.direction == "stored":
+        return f"stored on the device, {how}"
+    if rec.direction == "received":
+        return f"came back in the response, {how}"
+    recipient = rec.recipient or {}
+    to = recipient.get("label") or rec.source.get("host") or "unknown"
+    return f"sent to {to}, {party_words(party)}, {how}"
+
+
+class PrivacyAnnotations:
+    """The privacy scan as a row-annotation provider (``source="privacy"``).
+
+    Network rows are keyed by mitmproxy flow id, Files rows by canonical
+    device path. One annotation per marker found in the row: the tag word,
+    coloured by party, with a reason in words and the warn row tint.
+    Lookups are cached per service revision and shared with the lenses'
+    Identity column, ``!`` filter and ``/`` (:meth:`flow_tags`,
+    :meth:`file_tags`). New records reach ``registry().notify`` through
+    :meth:`on_record` (a service listener, on the scan worker).
+    """
+
+    source = ANNOTATION_SOURCE
+
+    def __init__(self, service: Any) -> None:
+        from sandroid.tui import row_annotations
+
+        self.service = service
+        self._ra = row_annotations
+        self._lock = threading.Lock()
+        self._rev: Any = object()
+        self._cache: dict[tuple[str, str], list] = {}
+
+    @property
+    def revision(self) -> int:
+        return getattr(self.service, "revision", 0)
+
+    def _cached(self, kind: str, key: str, compute: Callable[[str], list]) -> list:
+        rev = self.revision
+        with self._lock:
+            if rev != self._rev:
+                self._rev, self._cache = rev, {}
+            found = self._cache.get((kind, key))
+        if found is not None:
+            return found
+        value = compute(key)
+        with self._lock:
+            if rev == self._rev:
+                self._cache[(kind, key)] = value
+        return value
+
+    # -- tags (the Identity column) -----------------------------------------
+
+    def flow_tags(self, flow_id: str | None) -> list[TagInfo]:
+        """The flow's :class:`TagInfo` s, strongest first (cached)."""
+        if not flow_id:
+            return []
+        return self._cached("flow", flow_id, self._lookup_flow_tags)
+
+    def file_tags(self, device_path: str | None) -> list[TagInfo]:
+        """The file's (any alias) :class:`TagInfo` s, strongest first (cached)."""
+        if not device_path:
+            return []
+        return self._cached("file", _canonical(device_path), self._lookup_file_tags)
+
+    def _lookup_flow_tags(self, flow_id: str) -> list[TagInfo]:
+        try:
+            return list(self.service.tags_for_flow(flow_id))
+        except Exception:
+            return []
+
+    def _lookup_file_tags(self, path: str) -> list[TagInfo]:
+        try:
+            for alias in _aliases(path):
+                tags = self.service.tags_for_file(alias)
+                if tags:
+                    return list(tags)
+        except Exception:
+            pass
+        return []
+
+    # -- RowAnnotationProvider -----------------------------------------------
+
+    def annotations_for(self, lens: str, key: str) -> list:
+        if not key:
+            return []
+        if lens == self._ra.LENS_NETWORK:
+            return self._cached("flow-notes", key, self._flow_notes)
+        if lens == self._ra.LENS_FILES:
+            return self._cached("file-notes", _canonical(key), self._file_notes)
+        return []
+
+    def filter_predicate(self, lens: str) -> Callable[[str], bool] | None:
+        """No source filter: ``!`` stays inside the Network lens."""
+        return None
+
+    def _flow_notes(self, flow_id: str) -> list:
+        tags = self.flow_tags(flow_id)
+        if not tags:
+            return []
+        try:
+            hits = list(self.service.hits_for_flow(flow_id))
+        except Exception:
+            hits = []
+        return self._notes(tags, hits)
+
+    def _file_notes(self, path: str) -> list:
+        tags = self.file_tags(path)
+        if not tags:
+            return []
+        hits: list[HitRecord] = []
+        try:
+            for alias in _aliases(path):
+                hits += self.service.hits_for_file(alias)
+        except Exception:
+            pass
+        return self._notes(tags, hits)
+
+    def _notes(self, tags: list[TagInfo], hits: list[HitRecord]) -> list:
+        ra = self._ra
+        out = []
+        for tag in tags:
+            recs = [h for h in hits if h.marker_id == tag.marker_id]
+            reason = (
+                _hit_reason(min(recs, key=_hit_strength), tag.party)
+                if recs
+                else party_words(tag.party)
+            )
+            out.append(
+                ra.Annotation(
+                    source=self.source,
+                    label=str(tag.tag or tag.label),
+                    colour_role=party_role(tag.party),
+                    reason=reason,
+                    tint_role="warn",
+                    priority=ra.PRIORITY_PRIVACY,
+                    group=tag.marker_id,
+                )
+            )
+        return out
+
+    # -- change signal -------------------------------------------------------
+
+    def on_record(self, rec: HitRecord | None) -> None:
+        """Service listener (scan worker): the rows of ``rec`` changed."""
+        reg = self._ra.registry()
+        if rec is None:  # a session switch: every row of every lens
+            reg.notify(None, None)
+            return
+        if rec.flow_id:
+            reg.notify(self._ra.LENS_NETWORK, (rec.flow_id,))
+        if rec.device_path:
+            reg.notify(self._ra.LENS_FILES, (_canonical(rec.device_path),))
+
+    def attach(self) -> None:
+        self.service.add_listener(self.on_record)
+
+    def detach(self) -> None:
+        with contextlib.suppress(Exception):
+            self.service.remove_listener(self.on_record)
+
+
+def register_annotations(service: Any) -> PrivacyAnnotations | None:
+    """Register ``service`` as the ``privacy`` row-annotation provider.
+
+    Idempotent per service; a provider of another service is replaced (its
+    listener detached). Never raises.
+    """
+    try:
+        from sandroid.tui.row_annotations import registry
+
+        reg = registry()
+        old = reg.provider(ANNOTATION_SOURCE)
+        if isinstance(old, PrivacyAnnotations):
+            if old.service is service:
+                return old
+            old.detach()
+        provider = PrivacyAnnotations(service)
+        provider.attach()
+        reg.register(provider)
+        return provider
+    except Exception:
+        logger.debug("privacy scan: row annotations not registered", exc_info=True)
+        return None
+
+
+def unregister_annotations() -> None:
+    """Undo :func:`register_annotations` (never raises)."""
+    try:
+        from sandroid.tui.row_annotations import registry
+
+        reg = registry()
+        old = reg.provider(ANNOTATION_SOURCE)
+        if isinstance(old, PrivacyAnnotations):
+            old.detach()
+            reg.unregister(ANNOTATION_SOURCE)
+    except Exception:
+        logger.debug("privacy scan: row annotations not unregistered", exc_info=True)
+
+
+def annotations_provider() -> PrivacyAnnotations | None:
+    """The registered ``privacy`` provider (None: the scan is not started)."""
+    try:
+        from sandroid.tui.row_annotations import registry
+
+        provider = registry().provider(ANNOTATION_SOURCE)
+    except Exception:
+        return None
+    return provider if isinstance(provider, PrivacyAnnotations) else None
+
+
+def _aliases(device_path: str) -> list[str]:
+    try:
+        from sandroid.core.adb_utils import device_path_aliases
+
+        return list(dict.fromkeys([device_path, *device_path_aliases(device_path)]))
+    except Exception:
+        return [device_path]
+
+
+# ---------------------------------------------------------------------------
 # singleton + wiring
 # ---------------------------------------------------------------------------
 
@@ -2470,6 +2725,7 @@ def start_privacy_scan() -> PrivacyScanService:
     from sandroid.services.tracking_service import NetFlowSource
 
     service = get_privacy_scan_service()
+    register_annotations(service)  # the lens row tint / Identity column
     NetFlowSource.add_sink(_net_sink)
     _subscribe_timeline(True)
     service.attach_identity()
@@ -2484,6 +2740,7 @@ def stop_privacy_scan() -> None:
 
         NetFlowSource.remove_sink(_net_sink)
     _subscribe_timeline(False)
+    unregister_annotations()
     get_privacy_scan_service().close()
 
 
@@ -2538,16 +2795,21 @@ __all__ = [
     "AUTO_WATCH_MIN_INTERVAL_S",
     "ENGINE_VERSION",
     "HitRecord",
+    "PrivacyAnnotations",
     "PrivacyScanService",
     "PrivacySummary",
     "TagInfo",
+    "annotations_provider",
     "body_bytes",
     "classify_party",
     "current_timeline_folder",
     "get_privacy_scan_service",
     "is_approx",
     "is_encoded",
+    "party_role",
+    "party_words",
     "read_hits",
+    "register_annotations",
     "registrable_domain",
     "run_hits",
     "scan_bytes",
@@ -2556,5 +2818,6 @@ __all__ = [
     "stop_privacy_scan",
     "submit_pulled_version",
     "sweep_after_run",
+    "unregister_annotations",
     "unwrap_compressed",
 ]

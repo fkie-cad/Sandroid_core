@@ -1250,6 +1250,17 @@ def _plain(renderable, width: int = 100) -> str:
     return console.export_text()
 
 
+def _tinted(table) -> set[str]:
+    """Row keys drawn with a row tint (a background colour)."""
+    from rich.style import Style
+
+    return {
+        str(key.value)
+        for key in table.rows
+        if table._get_row_style(table.get_row_index(key), Style()).bgcolor
+    }
+
+
 def _privacy_hits():
     from privacy_fakes import flow_hit
 
@@ -1285,7 +1296,7 @@ async def test_flows_with_profile_values_are_tinted_named_and_filtered(
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         table = panel.table
         assert [str(c.value) for c in table.columns][:3] == ["time", "who", "ident"]
-        assert table.profile_keys == {"f2", "f3"}
+        assert _tinted(table) == {"f2", "f3"}
         assert str(table.get_cell("f2", "ident")) == "Ad ID"
         assert str(table.get_cell("f3", "ident")) == "Email"
         pal = lens_palette()
@@ -1362,12 +1373,15 @@ async def test_hits_found_later_mark_rows_already_drawn(flow_dir, monkeypatch):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         ms, panel = await _lens_with_flows(app, pilot, flow_dir)
-        assert panel.table.profile_keys == {"f2"}
+        assert _tinted(panel.table) == {"f2"}
         panel.table.move_cursor(row=0)
         await settle(pilot)
         fake.add(flow_hit("flow-4", "GPS", "GPS", party="third", recipient="Google"))
-        await until(pilot, lambda: "f4" in panel.table.profile_keys)
-        assert str(panel.table.get_cell("f4", "ident")) == "GPS"
+        await until(
+            pilot,
+            lambda: "f4" in _tinted(panel.table)
+            and str(panel.table.get_cell("f4", "ident")) == "GPS",
+        )
         assert panel.table.cursor_row == 0  # not yanked
         await until(
             pilot, lambda: "2 carry profile values" in ms._lens_captions["network"][1]
@@ -1384,7 +1398,7 @@ async def test_narrow_lens_drops_the_identity_column_but_keeps_the_tint(
     async with app.run_test(size=(96, 40)) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         assert "ident" not in [str(c.value) for c in panel.table.columns]
-        assert panel.table.profile_keys == {"f2", "f3"}
+        assert _tinted(panel.table) == {"f2", "f3"}
 
 
 async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
@@ -1395,7 +1409,7 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         assert len(panel.table.columns) == 5
-        assert panel.table.profile_keys == set()
+        assert _tinted(panel.table) == set()
 
 
 async def test_each_row_looks_up_its_profile_values_once(flow_dir, monkeypatch):
@@ -1419,7 +1433,7 @@ async def test_each_row_looks_up_its_profile_values_once(flow_dir, monkeypatch):
         panel._rebuild()
         assert fake.tag_calls == 0  # same revision: all cached
         fake.add(flow_hit("flow-4", "GPS", "GPS"))
-        await until(pilot, lambda: "f4" in panel.table.profile_keys)
+        await until(pilot, lambda: "f4" in _tinted(panel.table))
         assert fake.tag_calls <= len(flows)
 
 
@@ -1434,43 +1448,142 @@ async def test_a_session_switch_redraws_every_row(flow_dir, monkeypatch):
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
-        assert panel.table.profile_keys == {"f2", "f3"}
+        assert _tinted(panel.table) == {"f2", "f3"}
         fake.reset([flow_hit("flow-4", "GPS", "GPS")])
-        await until(pilot, lambda: panel.table.profile_keys == {"f4"})
+        await until(pilot, lambda: _tinted(panel.table) == {"f4"})
 
 
-def test_privacy_feed_posts_again_when_a_redraw_never_ran(monkeypatch):
-    """A posted redraw whose timer died (lens unmounted) must not block
-    every later hit.
+async def test_an_ai_highlight_wins_the_tint_over_profile_values(flow_dir, monkeypatch):
+    """A higher-priority source (AI marks) tints a row that also carries
+    profile values in its own colour; the Identity column keeps the privacy
+    words and colours, and the privacy-only row keeps the warn tint.
     """
+    import privacy_fakes
+    from rich.style import Style
 
-    class _Ui:
-        def __init__(self) -> None:
-            self.posts: list = []
+    from sandroid.tui.row_annotations import (
+        LENS_NETWORK,
+        PRIORITY_AI,
+        Annotation,
+        bg_style,
+        registry,
+        row_tint,
+    )
+    from sandroid.tui.themes import lens_palette
 
-        def post(self, fn) -> bool:
-            self.posts.append(fn)  # never runs
-            return True
+    class _Ai:
+        source = "ai"
+        revision = 0
+        keys: frozenset = frozenset()
 
-    class _Rec:
-        flow_id = "flow-1"
+        def annotations_for(self, lens, key):
+            if lens != LENS_NETWORK or key not in self.keys:
+                return []
+            return [
+                Annotation(
+                    "ai",
+                    "matches",
+                    tint_role="accent",
+                    priority=PRIORITY_AI,
+                    tint_amount=0.2,
+                )
+            ]
 
-    feed = np_mod.PrivacyFeed(object(), lambda keys: None, lambda r: r.flow_id)
-    ui = _Ui()
-    feed._ui = ui
-    feed.on_hit(_Rec())
-    feed.on_hit(_Rec())
-    assert len(ui.posts) == 1  # one hop in flight
-    feed._posted_at -= np_mod.PRIVACY_POST_STALE_S + 1
-    feed.on_hit(_Rec())
-    assert len(ui.posts) == 2
-    feed.on_hit(None)  # a session switch: everything
-    assert feed._pending == {"flow-1", np_mod.PrivacyFeed.ALL}
+        def filter_predicate(self, lens):
+            return None
+
+    privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        table = panel.table
+        assert _tinted(table) == {"f2", "f3"}
+        warn = bg_style(row_tint("warn")).bgcolor
+        ai_tint = bg_style(row_tint("accent", 0.2)).bgcolor
+        assert ai_tint != warn
+
+        def bg(key):
+            return table._get_row_style(table.get_row_index(key), Style()).bgcolor
+
+        assert bg("f2") == warn
+        cursor = table.cursor_row
+        ai = _Ai()
+        ai.keys = frozenset({"flow-2", "flow-4"})  # flow ids, not row keys
+        registry().register(ai)
+        await until(pilot, lambda: bg("f2") == ai_tint)
+        assert bg("f4") == ai_tint  # no profile values: AI tint only
+        assert bg("f3") == warn  # profile values only: the privacy tint
+        assert table.cursor_row == cursor
+        cell = table.get_cell("f2", "ident")
+        assert str(cell) == "Ad ID"
+        assert cell.spans[0].style == lens_palette().warn
+        # The AI source goes away: the privacy tint is back.
+        registry().unregister("ai")
+        await until(pilot, lambda: bg("f2") == warn)
+        assert bg("f4") is None
 
 
-def test_profile_tint_style_is_cached():
-    first = np_mod._bg_style(np_mod.profile_tint())
-    assert np_mod._bg_style(np_mod.profile_tint()) is first
+def test_privacy_annotations_provider(monkeypatch):
+    """The privacy row-annotation provider: one note per value in plain
+    words, coloured by party, the warn tint; flow ids and canonical paths as
+    keys; new records and session switches reach the registry.
+    """
+    import privacy_fakes
+    from privacy_fakes import file_hit
+
+    from sandroid.services import privacy_scan
+    from sandroid.tui.row_annotations import (
+        LENS_FILES,
+        LENS_NETWORK,
+        PRIORITY_PRIVACY,
+        registry,
+    )
+
+    prefs = "/data/data/de.fittrack.pro/shared_prefs/p.xml"
+    fake = privacy_fakes.install(monkeypatch, [*_privacy_hits(), file_hit(prefs)])
+    reg = registry()
+    provider = reg.provider("privacy")
+    assert isinstance(provider, privacy_scan.PrivacyAnnotations)
+    assert privacy_scan.register_annotations(fake) is provider  # idempotent
+    assert fake.listeners == [provider.on_record]
+
+    (meta,) = reg.annotations_for(LENS_NETWORK, "flow-2")
+    assert (meta.source, meta.label, meta.colour_role) == ("privacy", "Ad ID", "warn")
+    assert meta.reason == "sent to Meta, third party, sha256 of the lower-case value"
+    assert (meta.tint_role, meta.priority) == ("warn", PRIORITY_PRIVACY)
+    assert meta.group == "advertising_id"
+    (mail,) = reg.annotations_for(LENS_NETWORK, "flow-3")
+    assert (mail.label, mail.colour_role) == ("Email", "accent")
+    assert mail.reason == "sent to fittrack.de, first party, as is"
+    assert reg.annotations_for(LENS_NETWORK, "flow-4") == []
+    assert reg.annotations_for(LENS_NETWORK, "f2") == []  # row keys are not keys
+    # Files: the canonical path (an alias finds the same file).
+    (stored,) = reg.annotations_for(LENS_FILES, prefs)
+    assert (stored.label, stored.colour_role) == ("Email", "accent")
+    assert stored.reason == "stored on the device, as is"
+    alias = prefs.replace("/data/data/", "/data/user/0/")
+    assert reg.annotations_for(LENS_FILES, alias) == [stored]
+    assert provider.filter_predicate(LENS_NETWORK) is None
+    no_glyphs = "".join(a.label + a.reason for a in (meta, mail, stored))
+    assert not set(privacy_fakes.GLYPHS) & set(no_glyphs)
+
+    seen = []
+    reg.subscribe(lambda lens, keys: seen.append((lens, keys)))
+    fake.add(file_hit(alias, "GPS", "GPS"))
+    fake.reset([])
+    assert seen == [(LENS_FILES, frozenset({prefs})), (None, None)]
+    assert reg.annotations_for(LENS_NETWORK, "flow-2") == []  # new revision
+
+    privacy_scan.unregister_annotations()
+    assert reg.provider("privacy") is None
+    assert fake.listeners == []
+
+
+def test_privacy_row_tint_style_is_cached():
+    from sandroid.tui.row_annotations import bg_style, row_tint
+
+    first = bg_style(row_tint("warn"))
+    assert bg_style(row_tint("warn")) is first
     assert first.bgcolor is not None
 
 
