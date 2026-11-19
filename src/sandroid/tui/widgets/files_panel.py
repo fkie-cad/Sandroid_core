@@ -791,7 +791,7 @@ class FilesPanel(Widget):
         writes = self.activity.writes
         if writes:
             wl = self._watchlist_or_none()
-            if wl is not None and wl.has_watches:
+            if wl is not None and (wl.has_watches or wl.privacy_watching):
                 for key, when, _category in writes:
                     act = self.activity.paths.get(key)
                     if act is not None and (act.deleted or act.moved_to or act.is_dir):

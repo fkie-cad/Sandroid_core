@@ -543,6 +543,48 @@ def test_auto_watch_covers_and_min_interval(svc, monkeypatch):
     assert svc.auto_watch_delay(PREFS) == 0.0
 
 
+def test_watchlist_privacy_auto_pull_is_not_persisted(svc, monkeypatch):
+    """A write to an auto-watched file pulls it (no row, no membership file)
+    and the kept version reaches the scan.
+    """
+    from sandroid.services.file_extraction_service import (
+        ExtractionResult,
+        FileExtractionService,
+    )
+    from sandroid.tui.widgets.watchlist_view import WatchlistView
+
+    def pull(self, remote_path, local_path, compute_hash=False):
+        if remote_path != PREFS:
+            return ExtractionResult(remote_path, local_path, False, "missing")
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(local_path).write_text(f"<s>{AD_ID}</s>")
+        return ExtractionResult(remote_path, local_path, True)
+
+    monkeypatch.setattr(FileExtractionService, "pull_file", pull)
+    monkeypatch.setattr(WatchlistView, "_device_facts", staticmethod(lambda p: {}))
+    monkeypatch.setattr(WatchlistView, "_device_clock", staticmethod(lambda: None))
+    monkeypatch.setattr(WatchlistView, "_start_timer", lambda *a, **k: None)
+    monkeypatch.setattr(ps, "get_privacy_scan_service", lambda: svc)
+    svc.set_markers(FP, MARKERS)
+    view = WatchlistView()
+    assert not view.privacy_watching  # the monitored app is not known yet
+    view._monitored_package = "com.fittrack.app"
+    assert view.privacy_watching
+    assert view.note_write(PREFS)
+    assert view.pending_auto == [PREFS]
+    view.fire_auto_pull(PREFS)  # inline: no app, so no worker thread
+    assert svc.flush()
+    assert view.rows == {}
+    assert list(watchlist_store.watchlist_dir().glob("*.json")) == []
+    (hit,) = svc.hits_for_file(PREFS)
+    assert hit.source["version"].startswith("v001_")
+    # A second write within the minimum interval waits instead of pulling.
+    assert view.note_write(PREFS)
+    view.fire_auto_pull(PREFS)
+    assert view.pending_auto == [PREFS]
+    assert len(watchlist_store.version_dirs(PREFS)) == 1
+
+
 # ------------------------------------------------------------ NetFlowSource
 
 

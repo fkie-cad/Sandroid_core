@@ -406,6 +406,9 @@ def _pull_and_keep(path: str) -> dict:
     # Kept as a new version with diff.json + the plain diff.txt rendered from
     # it, like the Files lens's pulls.
     kept = watchlist_store.keep_version(path)
+    from sandroid.services.privacy_scan import submit_pulled_version
+
+    submit_pulled_version(path, kept.dir, None)
     if not had_previous:
         return {
             "path": path,

@@ -387,6 +387,8 @@ class WatchlistView(Widget):
         self._pulling: set[str] = set()
         #: Paths that got their ``session-start`` pull in this session.
         self._session_baselined: set[str] = set()
+        #: The monitored app (from the monitor start): its privacy auto-watch.
+        self._monitored_package: str | None = None
         #: The session's marks (``lens_shell.Mark``), kept current by the
         #: Files lens: each kept version records the mark it was pulled in.
         self.marks: list = []
@@ -426,6 +428,31 @@ class WatchlistView(Widget):
     @property
     def has_watches(self) -> bool:
         return bool(self._rows or self._watched_patterns)
+
+    @property
+    def privacy_watching(self) -> bool:
+        """An identity profile auto-watches the monitored app's data folders
+        (session only, never persisted; see ``services/privacy_scan.py``).
+        """
+        return bool(self._privacy_patterns())
+
+    def _privacy_patterns(self) -> list[str]:
+        try:
+            from sandroid.services.privacy_scan import get_privacy_scan_service
+
+            service = get_privacy_scan_service()
+            return service.auto_watch_patterns(self._monitored_package)
+        except Exception:
+            return []
+
+    def _privacy_covers(self, path: str) -> bool:
+        try:
+            from sandroid.services.privacy_scan import get_privacy_scan_service
+
+            service = get_privacy_scan_service()
+            return service.auto_watch_covers(path, self._monitored_package)
+        except Exception:
+            return False
 
     def watched_by(self, path: str) -> str | None:
         """The literal path or pattern that watches ``path``, else None."""
@@ -578,6 +605,7 @@ class WatchlistView(Widget):
         :data:`SESSION_BASELINE_CAP` files; the rest are named in a log
         warning. Runs on the pull worker. Returns how many were started.
         """
+        self._monitored_package = package
         todo = [
             p
             for p in sorted(self._rows)
@@ -650,6 +678,13 @@ class WatchlistView(Widget):
         when = when or datetime.now()
         if path not in self._rows:
             pattern = self.watched_by(path)
+            if pattern is None and self._privacy_covers(path):
+                # Privacy auto-watch: pulled like a ★ file, but no row and
+                # nothing persisted.
+                timer, first = self._auto_timers.pop(path, (None, when))
+                self._stop_timer(timer)
+                self._auto_timers[path] = (self._start_timer(path), first)
+                return True
             if pattern is None or pattern == path:
                 return False
             if not get_forensic_service().add_spotlight_file(path):
@@ -674,11 +709,9 @@ class WatchlistView(Widget):
         """Paths with an armed auto-pull (tests, caption)."""
         return sorted(self._auto_timers)
 
-    def _start_timer(self, path: str):
+    def _start_timer(self, path: str, delay: float = AUTO_PULL_QUIET):
         try:
-            return self.set_timer(
-                AUTO_PULL_QUIET, functools.partial(self.fire_auto_pull, path)
-            )
+            return self.set_timer(delay, functools.partial(self.fire_auto_pull, path))
         except Exception:
             return None  # not mounted (unit tests drive fire_auto_pull)
 
@@ -697,14 +730,24 @@ class WatchlistView(Widget):
     def fire_auto_pull(self, path: str) -> None:
         """The writes to ``path`` went quiet: pull it (``trigger: auto``)."""
         entry = self._auto_timers.pop(path, None)
-        if entry is None or path not in self._rows:
+        privacy = path not in self._rows and self._privacy_covers(path)
+        if entry is None or (path not in self._rows and not privacy):
             return
         _timer, first = entry
         if path in self._pulling:
             # A pull is still running: try again after another quiet period.
             self._auto_timers[path] = (self._start_timer(path), first)
             return
-        self._start_pull([path], trigger="auto", event_time=first)
+        if privacy:
+            from sandroid.services.privacy_scan import get_privacy_scan_service
+
+            wait = get_privacy_scan_service().auto_watch_delay(path)
+            if wait > 0:  # at most one pull per AUTO_WATCH_MIN_INTERVAL_S
+                self._auto_timers[path] = (self._start_timer(path, wait), first)
+                return
+        self._start_pull(
+            [path], trigger="privacy" if privacy else "auto", event_time=first
+        )
 
     # -- pull / diff --------------------------------------------------------
 
@@ -882,7 +925,7 @@ class WatchlistView(Widget):
                 return
 
         kept = watchlist_store.keep_version(path, record, pulled_at)
-        timeline_pull(
+        pull_seq = timeline_pull(
             path,
             trigger,
             ok=True,
@@ -890,6 +933,9 @@ class WatchlistView(Widget):
             file_set=file_set,
             changed=None if latest is None else bool(kept.changed),
         )
+        from sandroid.services.privacy_scan import submit_pulled_version
+
+        submit_pulled_version(path, kept.dir, pull_seq)
         if latest is None:
             self._post(
                 self._apply_pull_result,

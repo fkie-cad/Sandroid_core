@@ -677,6 +677,13 @@ class SandroidTUI(App):
         logger.debug(
             f"[APP MOUNT] Complete. Stack: {[type(s).__name__ for s in self.screen_stack]}"
         )
+        # Privacy scan: logged flows + the identity profile's markers.
+        try:
+            from sandroid.services.privacy_scan import start_privacy_scan
+
+            start_privacy_scan()
+        except Exception as exc:
+            logger.debug(f"Failed to start the privacy scan: {exc}")
         self.call_later(self._check_devices_on_startup)
         self.call_later(self._show_welcome_if_first_run)
         # Pre-initialize command registry and package cache in background

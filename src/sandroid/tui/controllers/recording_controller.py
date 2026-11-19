@@ -1209,6 +1209,11 @@ class RecordingController:
             if self._set_replay_phase:
                 self._ui(self._set_replay_phase, None)
         self._timeline_play_end(run_id, play_start, result, error, saved_run_id)
+        # Identity profile active: sweep the app's data folders for markers
+        # (own thread; never raises).
+        from sandroid.services.privacy_scan import sweep_after_run
+
+        sweep_after_run()
 
         if error == "Replay cancelled":
             self._ui(self._log_warning, "Replay stopped; the partial run was saved.")
