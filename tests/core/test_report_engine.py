@@ -991,6 +991,106 @@ class TestTranscript:
         assert any("Run nope was not found" in s for s in _sentences(doc))
 
 
+def _screen(tl, sec, kind, cls, title=None, via="a11y"):
+    return tl.add(
+        sec,
+        "screen",
+        kind,
+        f"→ com.android.settings/{cls}",
+        actor="app",
+        clk="dev_mono",
+        pkg="com.android.settings",
+        data={"pkg": "com.android.settings", "cls": cls, "title": title, "via": via},
+    )
+
+
+@pytest.fixture
+def gap_session(tmp_path, fake_timeline):
+    """E2E round 5 (FULL): screen lines whose screen-change shots were
+    dropped, each followed by a tap with a before-tap shot.
+    """
+    tl = TimelineFixture(tmp_path / "gap" / "dev")
+    tl.add(0, "sandroid", "open", "timeline opened",
+           data={"session_id": SESSION_ID, "serial": SERIAL, "schema": 1})  # fmt: skip
+    tl.add(0.01, "sandroid", "policy", "policy · open",
+           data={"reason": "open", **POLICY})  # fmt: skip
+    s: dict[str, int] = {}
+    home, battery = (40, 40, 160), (200, 120, 0)
+    s["tap13"] = _tap(tl, 10, _target("Battery / Charged"))
+    s["bt15"] = tl.shot(10.01, "before_tap", s["tap13"], home, "home")
+    s["act16"] = _screen(tl, 11, "activity", ".SubSettings", via="logcat")
+    s["win17"] = _screen(tl, 12, "window", ".SubSettings", "Battery")
+    s["tap18"] = _tap(tl, 14, _target(None, "com.x:id/up"))
+    s["bt20"] = tl.shot(14.01, "before_tap", s["tap18"], battery, "battery")
+    s["act19"] = _screen(tl, 14.5, "activity", ".Settings", via="logcat")
+    s["win21"] = _screen(tl, 15.4, "window", ".homepage.SettingsHomepageActivity")
+    s["tap22"] = _tap(tl, 16.5, _target("Network & internet"))
+    s["bt23"] = tl.shot(16.6, "before_tap", s["tap22"], None, dup=s["bt15"])
+    s["win25"] = _screen(tl, 18, "window", ".SubSettings", "Network & internet")
+    s["sc25"] = tl.shot(18.5, "screen_change", s["win25"], (0, 150, 90), "net")
+    s["tap26"] = _tap(tl, 19, _target("Airplane mode"))
+    s["bt27"] = tl.shot(19.01, "before_tap", s["tap26"], (0, 150, 90), "net")
+    s["win34"] = _screen(tl, 20, "window", ".homepage.SettingsHomepageActivity")
+    s["key"] = tl.add(21, "input", "key", "key BACK", actor="user",
+                      clk="dev_mono", data={"code": 158, "name": "BACK"})  # fmt: skip
+    tl.write()
+    bundle = tmp_path / "gap_results" / "runs" / RUN_ID
+    bundle.mkdir(parents=True)
+    (bundle / "sandroid.json").write_text(json.dumps(_results()), encoding="utf-8")
+    return SimpleNamespace(tl=tl, seqs=s, bundle=bundle, root=tmp_path)
+
+
+class TestScreenGapFill:
+    """R4: a screen line without a screen-change shot shows the next
+    input's before-tap shot, unless another screen line comes first.
+    """
+
+    def test_dropped_screens_show_the_next_before_tap_shot(self, gap_session):
+        s = gap_session.seqs
+        doc = _build(gap_session)
+        win17 = _step(doc, s["win17"])["shots"]
+        assert len(win17) == 1
+        fill = win17[0]
+        assert fill["source"] == "next_before_tap"
+        assert fill["caption"] == f"screen at next input #{s['tap18']}"
+        assert fill["seq"] == s["bt20"]
+        assert fill["of"] == s["tap18"]
+        assert fill["for"] == s["win17"]
+        assert fill["trigger"] == "before_tap"
+        bt20 = next(ln for ln in gap_session.tl.lines if ln["seq"] == s["bt20"])
+        assert fill["sha256"] == bt20["ref"]["sha256"]
+        assert Path(fill["path"]).is_file()  # report.json is self-contained
+        home = _step(doc, s["win21"])["shots"]
+        assert [b["seq"] for b in home] == [s["bt23"]]
+        assert home[0]["dup_of"] == s["bt15"]
+        assert home[0]["caption"] == f"screen at next input #{s['tap22']}"
+
+    def test_no_fill_when_another_screen_line_comes_first(self, gap_session):
+        s = gap_session.seqs
+        doc = _build(gap_session)
+        assert _step(doc, s["act16"])["shots"] == []  # win17 is in between
+        assert _step(doc, s["act19"])["shots"] == []  # win21 is in between
+
+    def test_no_fill_for_a_stored_shot_or_an_input_without_one(self, gap_session):
+        s = gap_session.seqs
+        doc = _build(gap_session)
+        own = _step(doc, s["win25"])["shots"]
+        assert [(b["seq"], b.get("source")) for b in own] == [(s["sc25"], None)]
+        assert _step(doc, s["win34"])["shots"] == []  # the key has no before-tap
+        md = report_render.render_markdown(doc, base_dir=gap_session.bundle)
+        assert f"screen at next input #{s['tap18']}" in md
+
+    def test_fill_follows_the_screen_change_trigger_filter(self, gap_session):
+        s = gap_session.seqs
+        only = _build(gap_session, shot_triggers=frozenset({"screen_change"}))
+        assert _step(only, s["win17"])["shots"][0]["source"] == "next_before_tap"
+        assert _step(only, s["tap18"])["shots"] == []  # before_tap hidden
+        none = _build(gap_session, shot_triggers=frozenset({"before_tap"}))
+        assert _step(none, s["win17"])["shots"] == []
+        off = _build(gap_session, include_screenshots=False)
+        assert _step(off, s["win17"])["shots"] == []
+
+
 # ---------------------------------------------------------------------------
 # Coverage, results, seal, isolation
 # ---------------------------------------------------------------------------

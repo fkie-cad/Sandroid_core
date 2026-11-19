@@ -1274,6 +1274,40 @@ class _Shots:
         return [_image_block(self.ctx, ln) for ln in self.by_of.get(seq, [])]
 
 
+def _gap_fill(
+    ctx: ReportContext,
+    step: dict[str, Any],
+    events: list[Mapping[str, Any]],
+    start: int,
+    before_tap: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """R4: a screen step without a screen-change shot shows the NEXT
+    input's before-tap shot (taken at its finger-down: the screen it acted
+    on), unless another screen line comes first (``events[start:]`` follow
+    the step). The block is marked
+    ``source: next_before_tap`` (``report.json`` stays self-contained).
+    """
+    if (
+        not ctx.options.include_screenshots
+        or "screen_change" not in ctx.options.shot_triggers
+        or any(s.get("trigger") == "screen_change" for s in step["shots"])
+    ):
+        return
+    for j in range(start, len(events)):
+        ln = events[j]
+        if ln.get("src") == "screen":
+            return
+        if ln.get("src") == "input" and ln.get("kind") in INPUT_KINDS:
+            shot = before_tap.get(ln.get("seq"))  # type: ignore[arg-type]
+            if shot is not None:
+                block = _image_block(ctx, shot)
+                block["source"] = "next_before_tap"
+                block["for"] = step.get("seq")
+                block["caption"] = f"screen at next input #{ln.get('seq')}"
+                step["shots"] = [*step["shots"], block]
+            return
+
+
 class _Effects:
     """App file events and network flows, searchable by time."""
 
@@ -1466,6 +1500,13 @@ def build_transcript(ctx: ReportContext) -> dict:
         for ln in events
         if ln.get("src") == "input" and ln.get("_ts") is not None
     ]
+    before_tap = {
+        _ref(ln).get("of"): ln
+        for ln in lines
+        if ln.get("src") == "shot"
+        and _shot_trigger(ln) == "before_tap"
+        and isinstance(_ref(ln).get("of"), int)
+    }
     by_number = {s.number: s for s in ctx.labels}
     blocks: list[dict[str, Any]] = []
     n_steps = 0
@@ -1499,7 +1540,7 @@ def build_transcript(ctx: ReportContext) -> dict:
         blocks.append(head)
         shown_heading.add(span.number)
 
-    for ln in events:
+    for i, ln in enumerate(events):
         ts, seq = ln.get("_ts") or 0.0, int(ln.get("seq") or 0)
         if ln.get("src") == "label" and ln.get("kind") == "start":
             data = _data(ln)
@@ -1521,6 +1562,8 @@ def build_transcript(ctx: ReportContext) -> dict:
             confirmed=confirmed,
             label=path,
         )
+        if ln.get("src") == "screen":
+            _gap_fill(ctx, step, events, i + 1, before_tap)
         if ln.get("src") == "input":
             nxt = bisect_left(input_ts, ts)
             while nxt < len(input_ts) and input_ts[nxt] <= ts:
