@@ -2252,12 +2252,21 @@ class SandroidTUI(App):
             from sandroid.services.app_start import AppStartError, prepare_launch
 
             try:
-                prepare_launch(package_name, "Objection")
+                may_start = prepare_launch(package_name, "Objection")
             except Exception as exc:
                 if not isinstance(exc, AppStartError):
                     logger.exception("Objection pre-start step failed")
                 self.call_from_thread(
                     self.notify, f"Objection not started: {exc}", severity="error"
+                )
+                return
+            if not may_start:
+                # It came up since the dialog: a spawn would restart it unasked.
+                self.call_from_thread(
+                    self.notify,
+                    f"Objection not started: {package_name} is running now; "
+                    "open Objection again to attach",
+                    severity="warning",
                 )
                 return
             self.call_from_thread(open_terminal)

@@ -557,6 +557,29 @@ def test_objection_spawn_runs_the_pre_start_step_first(monkeypatch, fails):
     assert len(fake.pushed) == 1
 
 
+def test_objection_spawn_does_not_restart_an_app_that_came_up(monkeypatch):
+    """prepare_launch() False: the app runs now, a spawn would restart it."""
+    from sandroid.tui.app import SandroidTUI
+    from sandroid.tui.modals import objection_modal
+
+    monkeypatch.setattr(app_start, "prepare_launch", lambda pkg, tool, **kw: False)
+    monkeypatch.setattr(
+        objection_modal, "build_objection_command", lambda pkg, cfg: ["objection"]
+    )
+    fake = _ObjectionApp()
+
+    SandroidTUI._start_objection(fake, PKG, SimpleNamespace(spawn_mode=True))
+
+    assert fake.pushed == []
+    assert fake.notes == [
+        (
+            f"Objection not started: {PKG} is running now; "
+            "open Objection again to attach",
+            "warning",
+        )
+    ]
+
+
 async def test_the_header_says_what_the_pre_start_step_does(monkeypatch):
     import threading
 

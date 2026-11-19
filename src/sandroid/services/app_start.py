@@ -864,7 +864,8 @@ class PreSpawnPlan:
 
 
 #: Gets the package about to start; returns a plan, or None (nothing to do).
-#: Called inside the lifecycle lock: decide quickly, no device writes.
+#: Decide quickly, no device writes: start paths call it inside the lifecycle
+#: lock, prepare_launch() just before taking it (no plans = no lock).
 PreSpawnHook = Callable[[str], PreSpawnPlan | None]
 
 _HOOKS_LOCK = threading.Lock()
