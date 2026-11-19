@@ -1374,6 +1374,9 @@ class TrackingService:
         #: Packages of the input method (keyboard): its windows are no
         #: screen change of the field being typed into.
         self._ime_pkgs: set[str] = set()
+        #: ``(device s, marker)`` of recent inputs (``mark_screenshots``):
+        #: a pointer input at its finger-down, typing at its last change.
+        self._marks: deque[tuple[float, dict]] = deque(maxlen=64)
         self._last_screen: tuple | None = None
         self._last_window_host = 0.0
         self._activities: list[dict] = []
@@ -1614,6 +1617,7 @@ class TrackingService:
             self._text = None
             self._rb = None
             self._last_text_host = 0.0
+            self._marks.clear()
             self._last_screen = None
             self._activities = []
             self._screen_q.clear()
@@ -2125,12 +2129,26 @@ class TrackingService:
             "ime": ime,
         }
         self._confirm_input(rec)
+        mark = None
+        if cfg.mark_screenshots and kind in ("tap", "long_press", "swipe") and known:
+            mark = {
+                "kind": kind,
+                "screen": [sw, sh],
+                "xy": [x, y],
+                "bounds": (target or {}).get("bounds"),
+                "path": data.get("path"),
+                "ime": ime,
+            }
+            with self._lock:
+                self._marks.append((g.t_down, mark))
         before = pending.shot if pending is not None else None
         if before_res is not None:
-            self._store_lane.submit(self._before_shot, before_res, seq, kind, sensitive)
+            self._store_lane.submit(
+                self._before_shot, before_res, seq, kind, sensitive, mark
+            )
         if cfg.shot_after_tap and kind in ("tap", "long_press"):
             self._shot_lane.submit(
-                self._after_tap, gen, seq, kind, before, t_up, sensitive
+                self._after_tap, gen, seq, kind, before, t_up, sensitive, mark
             )
 
     @staticmethod
@@ -2552,7 +2570,7 @@ class TrackingService:
                 data["masked_summary"] = count
         else:
             data["captured"] = False
-        _emit(
+        seq = _emit(
             "input",
             "text",
             summary=summary,
@@ -2566,6 +2584,47 @@ class TrackingService:
         )
         with self._lock:
             self._inputs += 1
+        self._note_text_mark(seq, cur, node, text)
+
+    def _note_text_mark(
+        self, seq: int | None, cur: dict, node: dict, text: str
+    ) -> None:
+        """Remember typing for the screenshot markers (``mark_screenshots``):
+        a screen change it caused shows the field and the typed text.
+        """
+        if seq is None or not _config().mark_screenshots or not node.get("bounds"):
+            return
+        mark = {
+            "kind": "text",
+            "screen": list(self.geometry.screen),
+            "bounds": node.get("bounds"),
+            "text": text,
+        }
+        t = float(cur.get("last_ms") or cur.get("first_ms") or 0.0) / 1000.0
+        with self._lock:
+            self._marks.append((t, mark))
+
+    def _screen_mark(self, req: dict) -> dict | None:
+        """The marker of a screen-change shot: its triggering input (the
+        latest finger-down or key before the event) -- typing when that was
+        a keyboard tap or a key and text was typed (at most 10 s) before.
+        """
+        if not _config().mark_screenshots:
+            return None
+        inp = self._input_before(req)
+        if inp is None:
+            return None
+        with self._lock:
+            marks = list(self._marks)
+        pointer = next(
+            (m for t, m in marks if m["kind"] != "text" and t == inp[0]), None
+        )
+        if pointer is not None and not pointer.get("ime"):
+            return pointer
+        ev = req.get("ev_dev")
+        ref = ev if ev is not None else inp[0]
+        texts = [m for t, m in marks if m["kind"] == "text" and 0 <= ref - t <= 10.0]
+        return texts[-1] if texts else pointer
 
     # read-back: fields that send no TEXT_CHANGED (Compose, address bars)
 
@@ -3448,6 +3507,7 @@ class TrackingService:
         actor: str = "sandroid",
         extra: dict | None = None,
         sensitive: bool = False,
+        mark: dict | None = None,
     ) -> int | None:
         """Capture now (helper, else screencap) and write the shot line."""
         if gen != self._gen:
@@ -3455,7 +3515,7 @@ class TrackingService:
         cap = self._capture(t)
         cap.pop("hash", None)
         return self._store(trigger, cap.pop("png"), of=of, actor=actor, extra=extra,
-                           sensitive=sensitive, **cap)  # fmt: skip
+                           sensitive=sensitive, mark=mark, **cap)  # fmt: skip
 
     def _sink_buffering(self) -> bool:
         """The timeline holds lines back (no session folder yet): a line's
@@ -3484,11 +3544,15 @@ class TrackingService:
         error: str | None = None,
         extra: dict | None = None,
         sensitive: bool = False,
+        mark: dict | None = None,
     ) -> int | None:
         """sha256-dedup the PNG into ``tracking/shots`` and emit the line.
 
         ``sensitive`` (or a focused password field) marks the line; the image
-        is still stored (masking is the readers' job).
+        is still stored (masking is the readers' job). ``mark`` (an input,
+        with ``mark_screenshots`` on): a marked copy is stored next to the
+        image (``data.marked``: its path and sha256); the image itself, and
+        its sha256 in ``ref``, stay the evidence.
         """
         sensitive = sensitive or self._pw_focus
         data: dict[str, Any] = {
@@ -3528,6 +3592,10 @@ class TrackingService:
         sha = hashlib.sha256(png).hexdigest()
         ref["sha256"] = sha
         shots = self._shots_dir()
+        if mark is not None and _config().mark_screenshots:
+            marked = self._marked_copy(shots, png, mark, trigger)
+            if marked is not None:
+                data["marked"] = marked
         with self._sha_lock:
             known_shas = self._sha.setdefault(str(shots), {})
             known = known_shas.get(sha)
@@ -3574,6 +3642,39 @@ class TrackingService:
                 return seq
             known_shas[sha] = (f"{SHOTS_DIR}/{seq}_{trigger}.png", seq)
         return seq
+
+    def _marked_copy(
+        self, shots: Path, png: bytes, mark: dict, trigger: str
+    ) -> dict | None:
+        """Draw ``mark`` onto a copy of ``png`` and store it as
+        ``tracking/shots/<sha16>_<trigger>_marked.png``: ``{path, sha256}``,
+        or None (nothing to draw, or it could not be stored).
+        """
+        from sandroid.core.frames import mark_shot
+
+        try:
+            out = mark_shot(png, mark)
+        except Exception:
+            logger.debug("Tracking: marking a screenshot failed", exc_info=True)
+            out = None
+        if not out:
+            return None
+        sha = hashlib.sha256(out).hexdigest()
+        name = f"{SHOTS_DIR}/{sha[:16]}_{trigger}_marked.png"
+        final = self._folder_path(shots, name)
+        if not final.exists():
+            try:
+                incoming = shots / ".incoming"
+                incoming.mkdir(parents=True, exist_ok=True)
+                tmp = incoming / f"{uuid.uuid4().hex}.png"
+                tmp.write_bytes(out)
+                tmp.replace(final)
+            except OSError as exc:
+                logger.warning(
+                    f"Tracking: cannot store marked screenshot {name}: {exc}"
+                )
+                return None
+        return {"path": name, "sha256": sha}
 
     @staticmethod
     def _folder_path(shots: Path, rel: str) -> Path:
@@ -3641,7 +3742,12 @@ class TrackingService:
         return res, "taken"
 
     def _before_shot(
-        self, res: Any, of: int, kind: str, sensitive: bool = False
+        self,
+        res: Any,
+        of: int,
+        kind: str,
+        sensitive: bool = False,
+        mark: dict | None = None,
     ) -> None:
         """Store the before-tap capture ``res`` (on time, see
         :meth:`_before_state`) as the shot line of input ``of``.
@@ -3649,7 +3755,7 @@ class TrackingService:
         self._store("before_tap", res.png, of=of, via="helper", w=res.w, h=res.h,
                     cap_ms=res.cap_ms, dev_mono=res.t_mono_ms / 1000.0, t=None,
                     error=res.error, extra={"input": kind},
-                    sensitive=sensitive)  # fmt: skip
+                    sensitive=sensitive, mark=mark)  # fmt: skip
 
     def _settle(self, helper: Any, cfg: Any) -> tuple[str | None, bool, float]:
         """hash_only shots until two match or ``settle_max_ms``:
@@ -3679,6 +3785,7 @@ class TrackingService:
         before: Future | None,
         t_up: float | None = None,
         sensitive: bool = False,
+        mark: dict | None = None,
     ) -> None:
         cfg = _config()
         if gen != self._gen or not cfg.shot_after_tap:
@@ -3687,7 +3794,7 @@ class TrackingService:
         if helper is None:
             time.sleep(cfg.settle_interval_ms / 1000.0)
             self._take("after_tap", of=of, gen=gen, extra={"input": kind},
-                       sensitive=sensitive)  # fmt: skip
+                       sensitive=sensitive, mark=mark)  # fmt: skip
             return
         last, stable, waited = self._settle(helper, cfg)
         before_hash = None
@@ -3700,7 +3807,7 @@ class TrackingService:
             return  # the tap changed nothing on screen
         self._take("after_tap", of=of, gen=gen,
                    extra={"input": kind, "stable": stable, "settle_ms": waited},
-                   sensitive=sensitive)  # fmt: skip
+                   sensitive=sensitive, mark=mark)  # fmt: skip
 
     def _settle_change(
         self,
@@ -3968,10 +4075,11 @@ class TrackingService:
             extra["lag_ms"] = self._lag_ms(
                 req, cap_host, dev_s * 1000.0 if dev_s is not None else None
             )
+            mark = self._screen_mark(req)
             for seq in seqs:
                 if gen != self._gen:
                     return
-                self._store("screen_change", png, of=seq, extra=extra, **cap)
+                self._store("screen_change", png, of=seq, extra=extra, mark=mark, **cap)
         finally:
             with self._lock:
                 req["open"] = False
@@ -4121,10 +4229,11 @@ class TrackingService:
         if fb.get("source"):
             data["source"] = fb["source"]
         data["lag_ms"] = self._lag_ms(req, fb["h0"], fb["dev"] * 1000.0)
+        mark = self._screen_mark(req)
         for seq in seqs:
             if gen != self._gen:
                 return
-            self._store("screen_change", png, of=seq, extra=data, **cap)
+            self._store("screen_change", png, of=seq, extra=data, mark=mark, **cap)
 
     def _late_reason(self, req: dict, *, capture: bool = True) -> str | None:
         """``"superseded"`` when a newer screen superseded ``req``, ``"late"``

@@ -106,6 +106,7 @@ _TRACKING_SWITCHES = (
     ("shot_screen_change", "Shot on screen change:"),
     ("shot_after_tap", "Shot after tap:"),
     ("shot_label", "Shot on label:"),
+    ("mark_screenshots", "Mark screenshots:"),
     ("capture_text", "Capture typed text:"),
     ("logcat_screen_backup", "Logcat screen backup:"),
 )

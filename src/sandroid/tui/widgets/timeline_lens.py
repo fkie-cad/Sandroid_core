@@ -3438,6 +3438,8 @@ class TimelineLens(Vertical):
         facts = detail.get("ref")
         if facts:
             for heading, body in facts:
+                if masked and heading == "Marked":
+                    continue  # its label can show typed text
                 sections.append((heading, Text(body)))
         elif not detail:
             sections.append(("", Text("checking…", style=lens_palette().dim)))
@@ -3566,6 +3568,22 @@ def _ref_facts(line: dict, folder: str | None) -> list[tuple[str, str]]:
                     facts.append(
                         ("Diff", json.dumps(summary, ensure_ascii=False)[:600])
                     )
+    data = line.get("data") if isinstance(line.get("data"), dict) else {}
+    marked = data.get("marked")
+    if isinstance(marked, dict) and marked.get("path") and folder:
+        # tracking.mark_screenshots: the copy with the input drawn on it
+        target = (Path(folder) / str(marked["path"])).resolve()
+        if not target.exists():
+            facts.append(("Marked", f"{marked['path']} · missing"))
+        else:
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            ok = "sha256 ok" if digest == marked.get("sha256") else "sha256 MISMATCH"
+            facts.append(
+                (
+                    "Marked",
+                    f"{marked['path']} · {target.stat().st_size:,} bytes · {ok}",
+                )
+            )
     run = ref.get("run")
     if run:
         try:

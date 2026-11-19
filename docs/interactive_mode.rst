@@ -616,8 +616,8 @@ read back once typing pauses (``data.via`` ``readback``).
 **Settings → Timeline** sets which sources are recorded, kinds that are off
 or only counted, the file-event coalescing window, the clock sampling
 interval, both mask switches and the Tracking capture settings (helper
-mode, screenshots before/after taps and on screen changes, text capture,
-gesture thresholds).
+mode, screenshots before/after taps and on screen changes, marked copies of
+those screenshots, text capture, gesture thresholds).
 
 Other Actions
 -------------

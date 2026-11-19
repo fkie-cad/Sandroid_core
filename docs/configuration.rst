@@ -493,6 +493,15 @@ Tracking (``[tracking]``)
    shot_after_tap = false
    shot_label = false
 
+   # Also store a marked copy of every screenshot of an input (before or
+   # after a tap, and the screen change after a tap or after typing): a ring
+   # at the tap with a box around the element, a double ring for a long
+   # press, a line with an arrow head for a swipe, a box with the typed text
+   # for typing. Stored next to the original as <sha>_<trigger>_marked.png
+   # (its path and sha256 in the shot line's data.marked); the original and
+   # its sha256 stay unchanged. Reports and the Inspector show the marked copy.
+   mark_screenshots = false
+
    # After a tap: re-check the screen every settle_interval_ms until it is
    # stable or settle_max_ms passed
    settle_interval_ms = 300

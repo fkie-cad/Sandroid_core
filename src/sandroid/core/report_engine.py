@@ -1661,13 +1661,30 @@ def _image_block(ctx: ReportContext, line: Mapping[str, Any]) -> dict[str, Any]:
         "caption": f"{trigger.replace('_', ' ')} · #{line.get('seq')}",
     }
     rel = ref.get("path")
-    if rel and ctx.timeline_dir is not None:
-        block["path"] = os.path.normpath(str(ctx.timeline_dir / str(rel)))
-    elif rel:
-        block["path"] = str(rel)
+    block["path"] = _shot_path(ctx, rel)
     if not rel or d.get("error"):
         block["error"] = str(d.get("error") or "no screenshot file")
+    marked = d.get("marked")
+    if (
+        rel
+        and "error" not in block
+        and isinstance(marked, dict)
+        and marked.get("path")
+        and marked.get("sha256")
+    ):
+        # tracking.mark_screenshots: show the copy with the input drawn on
+        # it; the original (and its sha256) stays the evidence.
+        block["original"] = {"path": block["path"], "sha256": block["sha256"]}
+        block["path"] = _shot_path(ctx, marked["path"])
+        block["sha256"] = marked["sha256"]
+        block["marked"] = True
     return block
+
+
+def _shot_path(ctx: ReportContext, rel: Any) -> str | None:
+    if rel and ctx.timeline_dir is not None:
+        return os.path.normpath(str(ctx.timeline_dir / str(rel)))
+    return str(rel) if rel else None
 
 
 class _Shots:
@@ -1706,7 +1723,9 @@ GAP_FILL_REFUSED = "no screenshot: the new screen had not drawn before the next 
 
 
 def _png_of(block: Mapping[str, Any]) -> bytes | None:
-    path = block.get("path")
+    """The PNG of an image block: the original, never a marked copy."""
+    original = block.get("original")
+    path = original.get("path") if isinstance(original, dict) else block.get("path")
     if not path or block.get("error"):
         return None
     try:
@@ -2816,15 +2835,21 @@ def _relativize(doc: dict, out_dir: Path) -> dict:
     out = copy.deepcopy(doc)
     base = Path(out_dir).resolve()
 
+    def rel(holder: dict) -> None:
+        path = Path(str(holder["path"]))
+        if path.is_absolute():
+            try:
+                holder["path"] = Path(os.path.relpath(path, base)).as_posix()
+            except ValueError:  # other drive (Windows)
+                holder["path"] = path.as_posix()
+
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("type") == "image" and node.get("path"):
-                path = Path(str(node["path"]))
-                if path.is_absolute():
-                    try:
-                        node["path"] = Path(os.path.relpath(path, base)).as_posix()
-                    except ValueError:  # other drive (Windows)
-                        node["path"] = path.as_posix()
+                rel(node)
+                original = node.get("original")
+                if isinstance(original, dict) and original.get("path"):
+                    rel(original)
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):

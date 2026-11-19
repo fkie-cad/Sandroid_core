@@ -1195,6 +1195,13 @@ class TrackingConfig(BaseModel):
         default=False, description="Screenshot once the screen settled after a tap"
     )
     shot_label: bool = Field(default=False, description="Screenshot at every label")
+    mark_screenshots: bool = Field(
+        default=False,
+        description=(
+            "Also store a marked copy of each screenshot of an input (the tap, "
+            "swipe or typed field drawn on it); the original stays unchanged"
+        ),
+    )
     settle_interval_ms: int = Field(default=300, ge=100, le=2_000)
     settle_max_ms: int = Field(default=2_000, ge=300, le=10_000)
     capture_text: bool = Field(default=True, description="Record typed text")

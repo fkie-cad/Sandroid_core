@@ -3749,6 +3749,128 @@ def test_an_unchanged_field_writes_no_read_back_line(env, cfg):
     assert not of(lines, "input", "text")
 
 
+def _real_png(w: int = 108, h: int = 242, colour: str = "#ffffff") -> bytes:
+    import io
+
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (w, h), colour).save(out, "PNG")
+    return out.getvalue()
+
+
+def test_marked_copies_keep_the_original_as_evidence(env, cfg):
+    svc, popen, _run, helpers, tmp = env
+    cfg.mark_screenshots = True
+    png = _real_png()
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.shots = [ShotResult(500.0, 108, 242, "h-before", 14.0, png, "/x")]
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "shot", "before_tap"))
+    shot = of(lines, "shot", "before_tap")[0]
+    assert shot["ref"]["sha256"] == hashlib.sha256(png).hexdigest()
+    assert (
+        tmp / shot["ref"]["path"].replace("{seq}", str(shot["seq"]))
+    ).read_bytes() == png
+    marked = shot["data"]["marked"]
+    assert marked["path"].startswith("tracking/shots/")
+    assert marked["path"].endswith("_before_tap_marked.png")
+    data = (tmp / marked["path"]).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == marked["sha256"]
+    assert data != png
+
+
+def test_no_marked_copy_while_the_setting_is_off(env, cfg):
+    svc, popen, _run, helpers, tmp = env
+    assert cfg.mark_screenshots is False  # the default
+    with timeline.capture() as lines:
+        ge = start(svc, popen, helpers, cfg)
+        helpers[0].shots = [ShotResult(500.0, 108, 242, "h", 14.0, _real_png(), "/x")]
+        ge.feed(*tap_lines(5.0))
+        assert wait_for(lambda: of(lines, "shot", "before_tap"))
+    assert "marked" not in of(lines, "shot", "before_tap")[0]["data"]
+    assert not list((tmp / "tracking/shots").glob("*_marked.png"))
+
+
+def test_a_screen_change_after_typing_is_marked_with_the_field(env, cfg):
+    svc, popen, _run, helpers, _tmp = env
+    cfg.mark_screenshots = True
+    cfg.shot_before_tap = False
+    with timeline.capture():
+        ge = start(svc, popen, helpers, cfg)
+        h = helpers[0]
+        h.node_reply = URL_REPLY
+        ge.feed(*tap_lines(1.0))
+        h.focus_reply = _focus("audi.de")
+        ge.feed(*_key(2.0, 30), *_key(2.5, 28))
+        assert wait_for(lambda: len(svc._marks) == 2)
+    req = {"ev_dev": 2.6, "t_evt": time.time()}
+    mark = svc._screen_mark(req)
+    assert mark["kind"] == "text"
+    assert mark["text"] == "audi.de"
+    assert mark["bounds"] == URL_BAR["bounds"]
+
+
+def test_marker_colours_are_the_lens_independent_highlight_slots():
+    from sandroid.core import frames
+    from sandroid.tui.themes import HIGHLIGHT_DARK
+
+    assert {frames.MARK_TAP, frames.MARK_LONG_PRESS, frames.MARK_SWIPE,
+            frames.MARK_TEXT} == set(HIGHLIGHT_DARK)  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("mark", "probe"),
+    [
+        ({"kind": "tap", "xy": [540, 1200], "bounds": [400, 1100, 700, 1300]},
+         (540 + 34, 1200)),  # on the ring (radius 9 units of 4 px)
+        ({"kind": "long_press", "xy": [540, 1200]}, (540 + 55, 1200)),
+        ({"kind": "swipe", "xy": [540, 2000],
+          "path": [[540, 2000, 0], [540, 1500, 50], [540, 900, 120]]},
+         (540, 1500)),
+        ({"kind": "text", "bounds": [100, 1000, 900, 1150], "text": "hunter22"},
+         (100, 1075)),
+    ],
+)  # fmt: skip
+def test_mark_shot_draws_the_input_on_a_copy(mark, probe):
+    import io
+
+    from PIL import Image
+
+    from sandroid.core import frames
+
+    png = _real_png(1080, 2424)
+    out = frames.mark_shot(png, {**mark, "screen": [1080, 2424]})
+    assert out is not None
+    assert out != png
+    with Image.open(io.BytesIO(out)) as im:
+        assert im.size == (1080, 2424)
+        px = im.convert("RGB").getpixel(probe)
+    assert px != (255, 255, 255)
+    with Image.open(io.BytesIO(png)) as im:  # the original is untouched
+        assert im.convert("RGB").getpixel(probe) == (255, 255, 255)
+
+
+def test_mark_shot_scales_to_the_image_and_refuses_nothing_to_draw():
+    import io
+
+    from PIL import Image
+
+    from sandroid.core import frames
+
+    png = _real_png(540, 1212)  # a half-size capture of a 1080 x 2424 screen
+    out = frames.mark_shot(
+        png, {"kind": "tap", "xy": [540, 1200], "bounds": [400, 1100, 700, 1300],
+              "screen": [1080, 2424]}
+    )  # fmt: skip
+    with Image.open(io.BytesIO(out)) as im:
+        assert im.convert("RGB").getpixel((200, 575)) != (255, 255, 255)  # box edge
+    assert frames.mark_shot(png, {"kind": "tap", "screen": [1080, 2424]}) is None
+    assert frames.mark_shot(b"not a png", {"kind": "tap", "xy": [1, 1]}) is None
+
+
 @pytest.mark.parametrize(
     ("cached", "live", "better"),
     [

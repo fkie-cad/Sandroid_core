@@ -2254,6 +2254,49 @@ def test_label_path_index_matches_the_scan_and_is_fast():
     assert _time.perf_counter() - start < 2.0
 
 
+def test_a_marked_copy_is_shown_and_the_original_stays_the_evidence(tmp_path):
+    """tracking.mark_screenshots: the report shows the marked copy
+    (verified against its own sha256); R1 comparisons read the original.
+    """
+    shots = tmp_path / "tracking" / "shots"
+    shots.mkdir(parents=True)
+    original, marked = b"\x89PNG original", b"\x89PNG marked"
+    (shots / "7_before_tap.png").write_bytes(original)
+    (shots / "abc_before_tap_marked.png").write_bytes(marked)
+    sha = hashlib.sha256
+    line = {
+        "seq": 8, "src": "shot", "kind": "before_tap", "t": "2026-11-19T12:00:00Z",
+        "ref": {"of": 7, "path": "tracking/shots/7_before_tap.png",
+                "sha256": sha(original).hexdigest()},
+        "data": {"trigger": "before_tap", "w": 1080, "h": 2424,
+                 "marked": {"path": "tracking/shots/abc_before_tap_marked.png",
+                            "sha256": sha(marked).hexdigest()}},
+    }  # fmt: skip
+    ctx = report_engine.ReportContext(
+        scope=report_engine.ReportScope(),
+        options=report_engine.ReportOptions(),
+        masked=False,
+        generated_at="2026-11-19T12:00:00+00:00",
+        timeline_dir=tmp_path,
+    )
+    block = report_engine._image_block(ctx, line)
+    assert block["marked"] is True
+    assert block["sha256"] == sha(marked).hexdigest()
+    assert block["path"].endswith("abc_before_tap_marked.png")
+    assert block["original"]["sha256"] == sha(original).hexdigest()
+    assert report_engine._png_of(block) == original
+    path, warning = report_render.ImageCheck(tmp_path).resolve(block)
+    assert warning is None
+    assert path.read_bytes() == marked
+    rel = report_engine._relativize({"blocks": [block]}, tmp_path)["blocks"][0]
+    assert rel["path"] == "tracking/shots/abc_before_tap_marked.png"
+    assert rel["original"]["path"] == "tracking/shots/7_before_tap.png"
+    # masked (a sensitive line): no data, the original image only
+    plain = report_engine._image_block(ctx, {**line, "data": {"_masked": True}})
+    assert "marked" not in plain
+    assert plain["sha256"] == sha(original).hexdigest()
+
+
 def test_a_web_form_control_is_named_by_its_label():
     target = {"rid": "chk", "cls": "android.widget.CheckBox",
               "web": {"field": "I agree", "role": "check box"}}  # fmt: skip
