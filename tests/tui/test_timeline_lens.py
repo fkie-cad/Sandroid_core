@@ -122,7 +122,7 @@ async def test_5_switches_and_focuses_the_lens_and_shift_arrow_reaches_it(
     install_fakes,
 ) -> None:
     install_fakes(_lines(30, NOW - 100))
-    assert LENSES[-1].id == "timeline"
+    assert LENSES[4].id == "timeline"
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
@@ -142,7 +142,7 @@ async def test_5_switches_and_focuses_the_lens_and_shift_arrow_reaches_it(
         assert ms.active_lens == "timeline"
         await pilot.press("shift+right")
         await settle(pilot)
-        assert ms.active_lens == "app"
+        assert ms.active_lens == "identity"
         await pilot.press("5", "question_mark")
         await settle(pilot)
         from textual.widgets import OptionList
@@ -867,9 +867,9 @@ async def test_B_is_global_in_every_lens_and_the_name_is_typed_into_the_prompt(
         await pilot.press("enter")
         await settle(pilot)
         assert fakes.labels.history()[-1].name == "a+b-c#B5"
-        assert ms.active_lens == "timeline"
+        assert ms.active_lens == LENSES[-1].id
         assert "mark 1 'app'" in ms.query_one("#log-ticker").last_line or (
-            "label 6" in ms.query_one("#log-ticker").last_line
+            f"label {len(LENSES) + 1}" in ms.query_one("#log-ticker").last_line
         )
 
 

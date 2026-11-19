@@ -73,10 +73,10 @@ async def test_shift_arrows_cycle_lenses() -> None:
             await pilot.press("shift+right")
             await settle(pilot)
             seen.append(ms.active_lens)
-        assert seen == ["network", "files", "runs", "timeline", "app"]
+        assert seen == ["network", "files", "runs", "timeline", "identity", "app"]
         await pilot.press("shift+left")
         await settle(pilot)
-        assert ms.active_lens == "timeline"
+        assert ms.active_lens == "identity"
 
 
 async def test_digits_do_nothing_while_a_modal_is_open() -> None:
