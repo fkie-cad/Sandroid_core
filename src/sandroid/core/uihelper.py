@@ -355,6 +355,8 @@ class UiHelper:
         self._failed_restarts = 0  # restart attempts in a row that never connected
         self._log: IO[str] | None = None
         self._supervisor: threading.Thread | None = None
+        #: A quit is in progress: a helper that dies is not restarted.
+        self._no_restart = False
 
     # -- properties -----------------------------------------------------------
 
@@ -498,6 +500,16 @@ class UiHelper:
             self._state = "idle"
         self._close_log()
         self._status("stopped", {**self._info(), "a11y_restored": restored})
+
+    def suppress_restarts(self) -> None:
+        """No supervisor restart from now on (a quit is in progress): a
+        helper that dies stays dead and writes no ``lost`` status; the
+        quit's :meth:`stop` still restores a11y and reports ``stopped``.
+        A restart already waiting in its back-off is cancelled.
+        """
+        with self._lock:
+            self._no_restart = True
+            self._cancel_evt.set()
 
     def _bump(self) -> int:
         """New lifecycle epoch (caller holds ``_lock``): cancels the old one."""
@@ -828,6 +840,8 @@ class UiHelper:
         with self._lock:
             if not current or g.epoch != self._epoch or self._state != "running":
                 return
+            if self._no_restart:
+                return  # quitting: no "lost · restarting", no supervisor
             token = g.epoch
             evt = self._cancel_evt
             if (
@@ -900,7 +914,7 @@ class UiHelper:
                 return
             else:
                 outcome = self._spawn(20.0, token)
-            if outcome == "cancelled" or evt.is_set():
+            if outcome == "cancelled" or evt.is_set() or self._no_restart:
                 return  # stop()/start() took over; _spawn killed what it made
             if outcome == "connected":
                 with self._lock:

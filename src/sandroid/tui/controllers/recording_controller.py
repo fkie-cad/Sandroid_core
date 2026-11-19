@@ -270,6 +270,9 @@ class RecordingController:
         self._tl_recording = False
         self._tl_record_stop: int | None = None
         self._tl_record_range: list[int] | None = None
+        #: A record-start was written that has no record-result yet (Esc on
+        #: the Record-settings form never started one: no result line).
+        self._tl_result_due = False
         self._set_replay_indicator = set_replay_indicator
         self._suppress_disconnect_guard = suppress_disconnect_guard
         self._set_replay_phase = set_replay_phase
@@ -1252,6 +1255,7 @@ class RecordingController:
         if active and not self._tl_recording:
             label = self._current_recording_label or ""
             self._tl_recording = True
+            self._tl_result_due = True
             self._tl_record_start = service.set_phase(
                 "record",
                 None,
@@ -1281,8 +1285,13 @@ class RecordingController:
     def _timeline_record_result(
         self, *, events: Any, duration_s: Any, completed: bool, cancelled: bool
     ) -> None:
-        """``run/record-result`` (after the recording stopped)."""
+        """``run/record-result`` (after the recording stopped); nothing when
+        no ``record-start`` was written (cancelled before Record started).
+        """
         try:
+            if not self._tl_result_due:
+                return
+            self._tl_result_due = False
             from sandroid.core.timeline import get_timeline
 
             state = "cancelled" if cancelled else f"{events} events, {duration_s} s"

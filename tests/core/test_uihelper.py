@@ -654,6 +654,22 @@ def test_eof_lost_then_restarted(adb):
     assert rec.states()[-1] == "stopped"
 
 
+def test_no_restart_once_a_quit_suppressed_it(adb):
+    """F1: a helper killed during quit is neither "lost · restarting" nor
+    restarted; the quit's stop() still reports "stopped".
+    """
+    h, popen, rec, sleeps = make_helper(adb)
+    assert h.start()
+    h.suppress_restarts()
+    popen.current.die(137)
+    time.sleep(0.3)
+    assert rec.states() == ["connected"]
+    assert len(popen.helpers) == 1
+    assert sleeps == []
+    h.stop()
+    assert rec.states() == ["connected", "stopped"]
+
+
 def test_pending_request_fails_fast_on_death(adb):
     popen = FakePopen(silent=frozenset({"dump"}))
     h, popen, rec, _ = make_helper(adb, popen=popen)

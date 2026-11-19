@@ -141,6 +141,20 @@ def _close_timeline(reason: str, timeout: float) -> None:
     close_timeline(reason, timeout)
 
 
+#: Seconds the quit waits for Tracking's stop (helper, getevent).
+TRACKING_STOP_S = 6.0
+
+
+def _stop_tracking(reason: str, timeout: float) -> None:
+    """Tracking off (``tracking/stop`` + the intervention-off line), its
+    helper and getevent stopped, no restart from now on. Only a Tracking
+    service that exists already.
+    """
+    from sandroid.services.tracking_service import shutdown_tracking
+
+    shutdown_tracking(reason, timeout)
+
+
 def emergency_cleanup() -> None:
     """Last-resort teardown before a forced exit (any thread, time-boxed)."""
     try:
@@ -149,6 +163,7 @@ def emergency_cleanup() -> None:
         UIRequestBus.get().shutdown()
     except Exception:
         pass
+    run_bounded("tracking", lambda: _stop_tracking("forced-exit", 2.0), 2.5)
     shutdown_network(timeout=5.0)
     # The session timeline: the close line, fsync and unlock (bounded).
     run_bounded("timeline close", lambda: _close_timeline("forced-exit", 1.0), 1.5)
@@ -495,6 +510,15 @@ class QuitController:
         # The session timeline first: everything recorded so far is on disk
         # before anything below can hang (bounded; the close comes last).
         run_bounded("timeline flush", lambda: _flush_timeline(1.0), 1.5)
+
+        # Tracking before anything kills adb processes: its stop and
+        # intervention-off lines are written, the helper restores a11y, the
+        # getevent is stopped by pid -- and nothing restarts meanwhile.
+        run_bounded(
+            "tracking",
+            lambda: _stop_tracking("quit", TRACKING_STOP_S - 1.0),
+            TRACKING_STOP_S,
+        )
 
         # Shutdown UIRequestBus to release any blocked threads
         try:

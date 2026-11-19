@@ -890,6 +890,24 @@ class TestTranscript:
         assert name({"cls": "android.widget.EditText"}) == "EditText"
         assert name(None) is None
 
+    def test_element_name_uses_the_rows_descendant_label(self):
+        """F3 (E2E): a tapped LinearLayout row without own text, named by its
+        child TextViews -- the report named it 'LinearLayout'.
+        """
+        row = {  # the real target of the E2E tap on Settings > Battery
+            "bounds": [0, 1703, 1080, 1934],
+            "cls": "android.widget.LinearLayout",
+            "desc": None,
+            "rid": None,
+            "source": "cached",
+            "text": None,
+            "label": "Battery / Charged",
+        }
+        assert report_engine.element_name(row) == "Battery / Charged"
+        # the node's own text/desc still wins over the descendants' label
+        assert report_engine.element_name({**row, "desc": "Battery"}) == "Battery"
+        assert report_engine.element_name({**row, "label": None}) == "LinearLayout"
+
     def test_password_clear_when_masking_off(self, session):
         doc = _build(session, mask_sensitive=False)
         step = _step(doc, session.seqs["text_pw"])
