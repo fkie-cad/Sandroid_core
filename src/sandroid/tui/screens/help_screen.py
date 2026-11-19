@@ -117,7 +117,13 @@ _LENS_EXTRA_ROWS: dict[str, list[tuple[str, str, tuple[str, ...]]]] = {
         ("⏎", "Inspect the selected row (Evidence / Raw tabs)", ("enter",)),
         ("Tab / ⇧Tab", "Next / previous section", ("tab", "shift+tab")),
     ],
-    "Network lens": [("⏎", "Inspect the selected flow", ("enter",))],
+    "Network lens": [
+        ("⏎", "Inspect the selected flow", ("enter",)),
+        ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
+    ],
+    "Files lens": [
+        ("Esc", "Clear the / filter, then leave the AI filter (H)", ()),
+    ],
     "Identity lens": [
         ("⏎", "Inspect the selected value (Found / Value tabs)", ("enter",)),
         ("{ / }", "Inspector: previous / next hit", ()),

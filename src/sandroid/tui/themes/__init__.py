@@ -71,6 +71,12 @@ PARENT_DIR = THEMES_DIR.parent
 #                      same contrast floors (without the tint)
 #   (``user`` / ``screen`` default to ``accent`` / ``title`` when a palette
 #   built elsewhere leaves them out.)
+#   highlight_1..4     Network / Files lens: the colour slots of the AI
+#                      highlight sets (the set's words, its row tint at 18 %,
+#                      the highlight bar). Not set per palette: derived from
+#                      ``bg`` in ``__post_init__`` (violet, teal, pink, lime;
+#                      darker shades on a light ``bg``), never amber/red/sky
+#                      (warn, bad, accent).
 #   cursor_keeps_colors  (bool, not a CSS variable) True: a cell keeps its
 #                      own color under the row cursor (``dangerous`` stays
 #                      amber) instead of taking the cursor text color.
@@ -86,6 +92,28 @@ PARENT_DIR = THEMES_DIR.parent
 # in Python. An App hosting lens widgets must provide the variables:
 # ``SandroidTUI`` does (``get_theme_variable_defaults`` + registered themes);
 # ``tests/conftest.py`` adds the defaults to bare test ``App``s.
+
+
+#: AI highlight colour slots (``LensPalette.highlight_1..4``): violet, teal,
+#: pink, lime -- apart from warn (amber), bad (red) and accent (sky).
+HIGHLIGHT_DARK = ("#c084fc", "#2dd4bf", "#f472b6", "#a3e635")
+HIGHLIGHT_LIGHT = ("#7c3aed", "#0f766e", "#be185d", "#4d7c0f")
+
+
+def _is_light(hex_colour: str) -> bool:
+    """True for a light background (relative luminance above 0.4)."""
+    text = (hex_colour or "").lstrip("#")
+    if len(text) == 3:
+        text = "".join(c * 2 for c in text)
+    try:
+        r, g, b = (int(text[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    except ValueError:
+        return False
+
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b) > 0.4
 
 
 @dataclass(frozen=True)
@@ -123,6 +151,11 @@ class LensPalette:
     #: built without them (another branch, an old caller) still works.
     user: str = ""
     screen: str = ""
+    #: AI highlight colour slots; "" = derived from ``bg`` (``__post_init__``).
+    highlight_1: str = ""
+    highlight_2: str = ""
+    highlight_3: str = ""
+    highlight_4: str = ""
     cursor_keeps_colors: bool = False
 
     def __post_init__(self) -> None:
@@ -130,6 +163,10 @@ class LensPalette:
             object.__setattr__(self, "user", self.accent)
         if not self.screen:
             object.__setattr__(self, "screen", self.title)
+        slots = HIGHLIGHT_LIGHT if _is_light(self.bg) else HIGHLIGHT_DARK
+        for n, colour in enumerate(slots, start=1):
+            if not getattr(self, f"highlight_{n}"):
+                object.__setattr__(self, f"highlight_{n}", colour)
 
     def css_variables(self) -> dict[str, str]:
         """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""

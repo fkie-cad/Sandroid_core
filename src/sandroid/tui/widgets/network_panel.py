@@ -99,6 +99,13 @@ from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher, in_app_context
 from sandroid.tui.widgets.follow import Follow
 from sandroid.tui.widgets.fritap_panel import FriTapPanel
+from sandroid.tui.widgets.highlight_bar import (
+    HL_WIDTH,
+    HighlightBar,
+    HighlightView,
+    RowKeyMap,
+    flow_snapshot,
+)
 from sandroid.tui.widgets.lens_shell import InspectorContent, is_shown
 from sandroid.tui.widgets.mitmproxy_panel import MitmproxyPanel
 
@@ -1015,6 +1022,8 @@ class NetworkPanel(Widget):
         Binding("T", "toggle_app_only", "App only"),
         Binding("ctrl+d", "mitm('toggle_device')", "Device proxy"),
         Binding("N", "toggle_noise", "Show OS noise", show=False),
+        Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
+        Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
         Binding("I", "status", "Capture status", show=False),
         Binding("M", "mitm('toggle_running')", "Start/stop mitm", show=False),
         Binding("ctrl+n", "mitm('inject_ca')", "Install CA", show=False),
@@ -1154,10 +1163,14 @@ class NetworkPanel(Widget):
         self._flow_index: tuple[Any, int, dict[str, FlowRow]] = (None, 0, {})
         #: Follow the newest flow (``follow.py``); live rows only.
         self._follow = Follow()
+        #: AI highlight sets (``highlight_bar``), keyed by flow id.
+        self._hl = HighlightView(LENS_NETWORK, noun="flow")
+        self._hl_keys = RowKeyMap(self._model, lambda r: r.key, lambda r: r.flow_id)
 
     # -- compose / mount -------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        yield HighlightBar("", id="net-highlights")
         yield Input(
             placeholder="filter: host · path · app · status (Esc clears)",
             id="net-filter",
@@ -1187,6 +1200,10 @@ class NetworkPanel(Widget):
         except Exception:
             pass
         self._do_refresh_status()
+        self._hl.attach(self, self._redraw_highlights, self._highlight_rows_snapshot)
+
+    def on_unmount(self) -> None:
+        self._hl.detach()
 
     # -- accessors ---------------------------------------------------------
 
@@ -1433,8 +1450,10 @@ class NetworkPanel(Widget):
             app = None
         return app[0] if app else None
 
-    def _passes(self, row: FlowRow, *, noise: bool = True) -> bool:
-        """Whether ``row`` is shown (``noise=False``: ignore the noise filter)."""
+    def _passes(self, row: FlowRow, *, noise: bool = True, ai: bool = True) -> bool:
+        """Whether ``row`` is shown (``noise=False``: ignore the noise filter;
+        ``ai=False``: ignore the AI filter, see ``highlight_bar``).
+        """
         if self.in_review and not self._show_all_phases and row.phase in HIDDEN_PHASES:
             return False
         if self._profile_only and not self._flow_tags(row):
@@ -1445,7 +1464,10 @@ class NetworkPanel(Widget):
             noise
             and not self._show_noise
             and is_noise(row.host, row.path, row.app, self._focus_app)
+            and not self._hl.bypass_noise(row.flow_id)
         ):
+            return False
+        if ai and not self._hl.passes(row.flow_id):
             return False
         if self._filter:
             needle = self._filter.lower()
@@ -1488,6 +1510,7 @@ class NetworkPanel(Widget):
             for row in rows
             if is_noise(row.host, row.path, row.app, self._focus_app)
             and self._passes(row, noise=False)
+            and not self._hl.bypass_noise(row.flow_id)
         )
 
     # -- table -------------------------------------------------------------
@@ -1508,6 +1531,8 @@ class NetworkPanel(Widget):
             cols = [c for c in cols if c[0] != "size"]
         if avail < 58:
             cols = [c for c in cols if c[0] != "time"]
+        if self._hl.show_column(avail):
+            cols.append(("hl", "Highlight", HL_WIDTH))
         # 2 cells padding per column + 1 scrollbar column
         fixed = sum(w for _, _, w in cols) + 2 * len(cols) + 1
         req = max(12, avail - fixed)
@@ -1561,6 +1586,8 @@ class NetworkPanel(Widget):
         size.justify = "right"
         cells = {"time": t, "who": who, "req": req, "status": status, "size": size}
         cells["ident"] = self._privacy_cell(row, widths.get("ident", 0))
+        if "hl" in widths:
+            cells["hl"] = self._hl.cell(row.flow_id)
         return [cells[k] for k, _, _ in layout]
 
     def _columns(self, table: DataTable) -> list[tuple[str, str, int]]:
@@ -1625,6 +1652,7 @@ class NetworkPanel(Widget):
         for row in rows:
             table.add_row(*self._cells(row, layout), key=row.key)
         self._shown = len(rows)
+        self._update_highlight_bar()
         target = None
         if keep is not None and not to_top:
             try:
@@ -1675,6 +1703,7 @@ class NetworkPanel(Widget):
             table.scroll_end(animate=False)
         else:
             self._follow.added(added)
+        self._update_highlight_bar()
         self._update_empty()
 
     def _cursor_key(self) -> str | None:
@@ -1759,6 +1788,10 @@ class NetworkPanel(Widget):
             if self._app_only and self._focus_app:
                 head = f"No flows attributed to {escape(self._focus_app)}"
                 widen.append("per-app attribution needs an App Proxy (y)")
+            ai = self._hl.empty_text(escape(self._filter))
+            if ai is not None:
+                head = ai[0]
+                widen.insert(0, ai[1])
             return head, " · ".join(widen)
         if self.in_review:
             label = escape(self._scope_label or "this run")
@@ -1869,7 +1902,10 @@ class NetworkPanel(Widget):
         if not total:
             return ""
         parts = []
-        if self._shown != total:
+        ai = self._hl.caption_count(self._shown, total)
+        if ai is not None:
+            parts.append(escape(ai))
+        elif self._shown != total:
             parts.append(f"{self._shown} of {total}")
         else:
             parts.append(f"{total} flow" + ("s" if total != 1 else ""))
@@ -2242,6 +2278,7 @@ class NetworkPanel(Widget):
             + (f" · {row.resp_type}" if row.resp_type else ""),
         )
         summary = [("", grid), ("URL", Text(row.url(), style="#cbd5e1"))]
+        summary += self._hl.sections(row.flow_id)
         if detail is None:
             missing = Text(
                 "details not stored (trimmed by retention or never captured)",
@@ -2333,6 +2370,7 @@ class NetworkPanel(Widget):
 
     def on_unmount(self) -> None:
         self._privacy_feed.detach()
+        self._hl.detach()
 
     def _privacy_wanted(self) -> bool:
         """A profile is set or hits are loaded (the Identity column has a use)."""
@@ -2455,6 +2493,67 @@ class NetworkPanel(Widget):
         self._profile_only = not self._profile_only
         self._rebuild()
         self._do_refresh_status()
+    # -- AI highlights (highlight_bar) ----------------------------------
+
+    def _update_highlight_bar(self) -> None:
+        """Count the view per highlight set and redraw the bar."""
+        try:
+            bar = self.query_one("#net-highlights", HighlightBar)
+        except Exception:
+            return
+        if self._hl.active:
+            live = not self.in_review
+            self._hl.measure(
+                (
+                    (r.flow_id, self._passes(r, ai=False), r.seq, r.ts)
+                    for r in self._model()
+                ),
+                live=live,
+            )
+        bar.show_text(self._hl.bar_text(self.size.width or 160))
+
+    def _redraw_highlights(self, _keys: set[str] | None = None) -> None:
+        """Highlights changed (AnnotationFeed, H, X): redraw, keep the cursor."""
+        self._rebuild()
+        self._do_refresh_status()
+        try:
+            self.screen.refresh_bindings()
+        except Exception:
+            pass
+        ms = self._main_screen()
+        if ms is not None and self._inspecting_flow():
+            row = self._row_by_key(ms.inspector_content.key[len("network:row:") :])
+            if row is not None:
+                ms.update_inspector(self.flow_content(row))
+
+    def _highlight_rows_snapshot(self) -> list[dict]:
+        """Every row of this view (live or the reviewed run) for the AI tools.
+
+        ``shown`` = passes the lens's current filters. Rows without a flow id
+        (stdout-only TLS failures) cannot be highlighted and are left out.
+        """
+        return [flow_snapshot(r, self._passes(r)) for r in self._model() if r.flow_id]
+
+    def _leave_highlight_filter(self) -> bool:
+        if not self._hl.leave_filter():
+            return False
+        self._redraw_highlights()
+        try:
+            self.app.notify("AI filter off — the rows stay highlighted", timeout=2)
+        except Exception:
+            pass
+        return True
+
+    def action_cycle_highlight_filter(self) -> None:
+        """``H``: AI filter off -> set 1 -> ... -> off."""
+        notice = self._hl.cycle_filter()
+        self._redraw_highlights()
+        if notice:
+            self.app.notify(notice, timeout=3)
+
+    def action_clear_highlights(self) -> None:
+        """``X``: remove this lens's highlight sets (asks first)."""
+        self._hl.confirm_clear(self.app, self._redraw_highlights)
 
     # -- actions ---------------------------------------------------------
 
@@ -2464,6 +2563,8 @@ class NetworkPanel(Widget):
             return not self.in_review and not self._model()
         if action == "toggle_phases":
             return self.in_review
+        if action in ("cycle_highlight_filter", "clear_highlights"):
+            return self._hl.active
         if action in ("filter", "toggle_app_only"):
             # Nothing to filter yet: hidden, so the footer shows ^D instead.
             return bool(self._model())
@@ -2543,10 +2644,11 @@ class NetworkPanel(Widget):
         self._do_refresh_status()
 
     def handle_escape(self) -> bool:
-        """Esc (MainScreen hook): clear an active ``/`` filter.
+        """Esc (MainScreen hook): clear an active ``/`` filter, then the AI one.
 
         Esc in the filter input clears it and returns to the table; with the
-        input closed, Esc clears a filter that is still applied. Returns True
+        input closed, Esc clears a filter that is still applied; with none,
+        it leaves the AI filter (the rows stay highlighted). Returns True
         when Esc was used here.
         """
         try:
@@ -2555,7 +2657,7 @@ class NetworkPanel(Widget):
             return False
         focused = self.screen.focused if self.is_attached else None
         if focused is not box and not self._filter:
-            return False
+            return self._leave_highlight_filter()
         if self._filter_timer is not None:
             try:
                 self._filter_timer.stop()

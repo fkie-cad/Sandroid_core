@@ -125,6 +125,14 @@ from sandroid.tui.utils.ui_thread import UiDispatcher
 
 from . import file_inspect
 from .follow import Follow
+from .highlight_bar import (
+    HL_WIDTH,
+    HighlightBar,
+    HighlightView,
+    RowKeyMap,
+    canonical_key,
+    file_snapshot,
+)
 from .lens_shell import InspectorContent, Mark, SessionMarks, ShellHeader, is_shown
 from .monitor_view import (
     OPS,
@@ -357,6 +365,13 @@ class _Row:
     fold: bool = False
 
 
+def _hl_key(row: _Row) -> str | None:
+    """A row's AI highlight key (canonical path); group/fold/pattern: None."""
+    if row.group is not None or row.pattern or row.fold:
+        return None
+    return canonical_key(row.key)
+
+
 class FilesSubViewBase(Widget):
     """Shared base of the lens sub-views that still use it (``DiffsView``).
 
@@ -567,6 +582,8 @@ class FilesPanel(Widget):
             show=False,
         ),
         Binding("N", "toggle_noise", "Show everything (raw)", show=False),
+        Binding("H", "cycle_highlight_filter", "AI filter: next set / off", show=False),
+        Binding("X", "clear_highlights", "Clear the AI highlights", show=False),
         Binding("R", "noise_rules", "Hide / group rules…", show=False),
         Binding("full_stop", "toggle_full_paths", "Full paths", show=False),
         Binding("z", "zoom", "Zoom diff", show=False),
@@ -688,10 +705,13 @@ class FilesPanel(Widget):
         self._privacy_feed = AnnotationFeed(self, LENS_FILES, self._privacy_flush)
         #: (rows, row key -> row): the annotation key of a table row.
         self._row_index: tuple[Any, dict[str, _Row]] = (None, {})
+        #: AI highlight sets (``highlight_bar``), keyed by canonical path.
+        self._hl = HighlightView(LENS_FILES, noun="file")
 
     # -- compose / mount -----------------------------------------------------
 
     def compose(self) -> ComposeResult:
+        yield HighlightBar("", id="files-highlights")
         with Horizontal(id="files-notice"):
             yield Static("", id="files-notice-text")
             yield Button("Resume monitoring", id="files-resume-btn")
@@ -713,10 +733,12 @@ class FilesPanel(Widget):
         if isinstance(marks, SessionMarks) and len(marks):
             self._set_marks(marks.marks)
         self.refresh_rows()
+        self._hl.attach(self, self._redraw_highlights, self._highlight_rows_snapshot)
 
     def on_unmount(self) -> None:
         self._unsubscribe_events()
         self._privacy_feed.detach()
+        self._hl.detach()
 
     # -- small accessors -------------------------------------------------------
 
@@ -1067,11 +1089,13 @@ class FilesPanel(Widget):
             if not self._matches(row):
                 continue
             reason = self.activity.hide_reason(act, segment)
-            if reason is not None:
+            if reason is not None and not self._hl.bypass_noise(canonical_key(key)):
                 hidden[reason] = hidden.get(reason, 0) + 1
                 continue
             folder = (
-                None if self.activity.show_all else (self.activity.rules.group_of(key))
+                None
+                if self.activity.show_all or self._hl.filter_id()
+                else self.activity.rules.group_of(key)
             )
             if folder is not None:
                 groups.setdefault(folder, []).append(row)
@@ -1145,7 +1169,10 @@ class FilesPanel(Widget):
                 total.last = stats.last
         return _Row(key=folder + "/", stats=total, group=folder, members=members)
 
-    def _matches(self, row: _Row) -> bool:
+    def _matches(self, row: _Row, *, ai: bool = True) -> bool:
+        """The ``/`` filter and (``ai``) the AI filter (``highlight_bar``)."""
+        if ai and not self._hl.passes(_hl_key(row)):
+            return False
         if not self._filter:
             return True
         needle = self._filter.lower()
@@ -1347,6 +1374,9 @@ class FilesPanel(Widget):
         if self._privacy_column(width, path_width):
             columns.append("ident")
             path_width -= _W_IDENT + 2
+        if self._hl.show_column(width) and path_width - (HL_WIDTH + 2) >= 30:
+            columns.append("hl")
+            path_width -= HL_WIDTH + 2
         path_width = max(8, path_width)
         current = [str(c.value) for c in table.columns]
         if path_width == self._path_width and current == columns:
@@ -1360,6 +1390,7 @@ class FilesPanel(Widget):
             "count": _W_COUNT,
             "last": _W_LAST,
             "ident": _W_IDENT,
+            "hl": HL_WIDTH,
         }
         for key in columns:
             label = "" if key == "mark" else key
@@ -1559,10 +1590,10 @@ class FilesPanel(Widget):
             )
         with self.app.batch_update():
             table.clear()
-            order = ("mark", "path", "ops", "count", "last", "ident")
+            order = ("mark", "path", "ops", "count", "last", "ident", "hl")
             picks = [order.index(str(c.value)) for c in table.columns]
             for row in rows:
-                cells = (*self._cells(row), self._privacy_cell(row))
+                cells = (*self._cells(row), self._privacy_cell(row), self._hl_cell(row))
                 table.add_row(*(cells[i] for i in picks), key=row.key)
             if rows and follow:
                 table.move_cursor(row=len(rows) - 1, animate=False)
@@ -1596,9 +1627,13 @@ class FilesPanel(Widget):
                 super().focus()
         elif focused is self:
             table.focus()
+        self._update_highlight_bar()
         self._update_caption()
 
     def _empty_text(self) -> Text:
+        ai = self._hl.empty_text(self._filter)
+        if ai is not None:
+            return Text(f"{ai[0]} — {ai[1]}", style=_DIM)
         if self._filter:
             return Text(f"Nothing matches “{self._filter}”", style=_DIM)
         if self.review:
@@ -1685,6 +1720,9 @@ class FilesPanel(Widget):
                 title = f"{self._follow.text} · {title}"
         if self._filter:
             parts.insert(0, f"/{self._filter}")
+        ai = self._hl.caption_count(self._hl.view_shown, self._hl.view_total)
+        if ai is not None:
+            parts.insert(0, ai)
         return title, " · ".join(parts)
 
     def hidden_summary(self) -> str:
@@ -1978,7 +2016,7 @@ class FilesPanel(Widget):
         click = lambda tab, y: self._inspect_click(row, tab, y)  # noqa: E731
         if row.review_kind is not None:
             tabs = [
-                ("Summary", self._review_summary(row)),
+                ("Summary", self._review_summary(row) + self._hl_sections(row)),
                 ("Diff", [("", self._review_diff(row))]),
             ]
             content = file_inspect.review_content_sections(
@@ -1999,7 +2037,7 @@ class FilesPanel(Widget):
             title=title,
             subtitle=row.key,
             tabs=[
-                ("Summary", self._live_summary(row)),
+                ("Summary", self._live_summary(row) + self._hl_sections(row)),
                 ("Versions", self._versions_tab(row)),
                 ("Content", self._content_tab(row)),
                 ("Events", [("", self._events_text(row))]),
@@ -2389,6 +2427,132 @@ class FilesPanel(Widget):
             style=_DIM,
         )
 
+    # -- AI highlights (highlight_bar) --------------------------------------------
+
+    def _hl_cell(self, row: _Row) -> Text:
+        if row.group is not None:
+            return self._hl.inside_cell(_hl_key(m) for m in row.members)
+        return self._hl.cell(_hl_key(row))
+
+    def _hl_sections(self, row: _Row) -> list:
+        last = row.activity.last if row.activity is not None else None
+        return self._hl.sections(
+            _hl_key(row), last_change=last.timestamp() if last else None
+        )
+
+    def _update_highlight_bar(self) -> None:
+        """Count the view per highlight set and redraw the bar."""
+        try:
+            bar = self.query_one("#files-highlights", HighlightBar)
+        except Exception:
+            return
+        if self._hl.active:
+            if self.review:
+                items: Any = (
+                    (_hl_key(r), self._matches(r, ai=False), None, None)
+                    for r in self._review_rows
+                )
+            else:
+                items = self._hl_live_items()
+            self._hl.measure(items, live=not self.review, changes=True)
+        bar.show_text(self._hl.bar_text(self.size.width or 160, self._scope))
+
+    def _hl_live_items(self):
+        """``(key, passes the other filters, None, last change)`` per live path."""
+        segment = self._segment
+        for key, act in self.activity.paths.items():
+            canon = canonical_key(key)
+            ok = (
+                act.stats(segment) is not None
+                and (
+                    self.activity.hide_reason(act, segment) is None
+                    or self._hl.bypass_noise(canon)
+                )
+                and self._matches(_Row(key=key, activity=act), ai=False)
+            )
+            last = act.last.timestamp() if act.last else None
+            yield canon, ok, None, last
+
+    def _redraw_highlights(self, _keys: set[str] | None = None) -> None:
+        """Highlights changed (AnnotationFeed, H, X): redraw, keep the cursor."""
+        self._dirty = True
+        self.refresh_rows()
+        self.refresh_bindings()
+        self._refresh_inspector()
+
+    def _highlight_rows_snapshot(self) -> list[dict]:
+        """Every file row of this view for the AI tools (one per canonical path).
+
+        Live: every path with activity plus the watched files; REVIEW: the
+        run's changed / new / deleted files. ``shown`` = passes the lens's
+        current filters (a member of a folded group counts as shown).
+        """
+        wl = self._watchlist_or_none()
+        if self.review:
+            out = [
+                file_snapshot(
+                    r.key,
+                    shown=self._matches(r),
+                    watched=r.watched is not None,
+                    review_kind=r.review_kind,
+                    scope=self._scope,
+                )
+                for r in self._review_rows
+            ]
+        else:
+            shown: set[str] = set()
+            for r in self._live_rows():
+                if r.group is None and not r.pattern:
+                    shown.add(r.key)
+                shown.update(m.key for m in r.members)
+            paths = dict.fromkeys([*self.activity.paths, *(wl.rows if wl else ())])
+            out = [
+                file_snapshot(
+                    path,
+                    shown=path in shown,
+                    act=self.activity.paths.get(path),
+                    watched=wl is not None and wl.watched_by(path) is not None,
+                )
+                for path in paths
+            ]
+        unique: dict[str, dict] = {}
+        for row in out:
+            unique.setdefault(row["key"], row)
+        return list(unique.values())
+
+    def handle_escape(self) -> bool:
+        """Esc (MainScreen hook, input closed): clear an applied ``/`` filter,
+        else leave the AI filter (the rows stay highlighted).
+        """
+        try:
+            field = self.query_one("#files-input", _LensInput)
+        except Exception:
+            field = None
+        if field is not None and self.screen.focused is field:
+            self.close_input(cancel=True)
+            return True
+        if self._filter:
+            self._filter = ""
+            self.refresh_rows()
+            self.app.notify("Filter cleared", timeout=2)
+            return True
+        if not self._hl.leave_filter():
+            return False
+        self._redraw_highlights()
+        self.app.notify("AI filter off — the rows stay highlighted", timeout=2)
+        return True
+
+    def action_cycle_highlight_filter(self) -> None:
+        """``H``: AI filter off -> set 1 -> ... -> off."""
+        notice = self._hl.cycle_filter()
+        self._redraw_highlights()
+        if notice:
+            self.app.notify(notice, timeout=3)
+
+    def action_clear_highlights(self) -> None:
+        """``X``: remove this lens's highlight sets (asks first)."""
+        self._hl.confirm_clear(self.app, self._redraw_highlights)
+
     # -- actions ----------------------------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -2396,6 +2560,8 @@ class FilesPanel(Widget):
             return False
         if action in ("toggle_since_mark", "step_mark") and self.review:
             return False
+        if action in ("cycle_highlight_filter", "clear_highlights"):
+            return self._hl.active
         return True
 
     def _group_row_hint(self, row: _Row) -> bool:
