@@ -106,7 +106,7 @@ class FakeIdentity:
         if mode is not None:
             self.cfg.mode = mode
 
-    def active_markers(self):
+    def active_markers(self, *, load=True):
         return None
 
     def install_pre_spawn_hook(self):
@@ -369,8 +369,12 @@ async def test_key_6_shows_the_table_with_status_words_and_no_glyphs(fakes) -> N
         assert [s[len(il.SECTION_PREFIX) :] for s in sections] == list(il.SECTIONS)
         # The badge counts failed values (plain number).
         assert ms.query_one("#lens-bar").badge("identity") == "1"
-        # Caption: name, revision, mode.
-        assert "rev 3" in ms.query_one("#lens-host").border_title
+        # Caption: name, revision, mode; plain words, no separator glyphs.
+        host = ms.query_one("#lens-host")
+        assert "rev 3, mode on" in host.border_title
+        # (the lens shell's own "Identity · " prefix is shared by every lens)
+        assert "·" not in host.border_title.partition(" · ")[2]
+        assert "·" not in str(host.border_subtitle or "")
         await settle(pilot)
         text = _region_text(app, ms.query_one("#lens-host"))
         assert "verified" in text
@@ -444,7 +448,9 @@ async def test_inspector_found_tab_selection_and_jump(fakes, monkeypatch) -> Non
         assert "graph.facebook.com" in body
         assert "third party" in body
         assert "sha256 of the lower-case value" in body
-        assert "POST t.appsflyer.com/api/v1/track · request body" in body
+        assert "POST t.appsflyer.com/api/v1/track, request body" in body
+        assert "·" not in body
+        assert "·" not in content.subtitle
         assert lens._hit_sel.get("gaid", 0) == 0
         await pilot.press("right_curly_bracket")
         await settle(pilot)
@@ -615,6 +621,8 @@ async def test_empty_state_explains_and_offers_P(fakes) -> None:
         await pilot.press("6")
         await settle(pilot)
         lens = ms.lens_widget()
+        await until(pilot, lambda: not lens._loading)
+        await settle(pilot)
         assert lens.has_class("-empty")
         text = _region_text(app, ms.query_one("#lens-host"))
         assert "No identity profile yet" in text
@@ -639,3 +647,81 @@ async def test_help_lists_the_identity_lens_keys_first(fakes) -> None:
         for words in ("Apply", "Regenerate", "Jump to the selected hit"):
             assert words in text
         await pilot.press("escape")
+
+
+async def test_reload_reads_the_library_off_the_ui_thread(fakes) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        ui_thread = threading.get_ident()
+        threads: list[int] = []
+        gate = threading.Event()
+        real_load = fakes.ident.load
+
+        def load(profile_id):
+            threads.append(threading.get_ident())
+            gate.wait(10)
+            return real_load(profile_id)
+
+        fakes.ident.load = load
+        try:
+            await pilot.press("1")
+            await settle(pilot)
+            await pilot.press("6")
+            await until(pilot, lambda: threads)
+            assert threads[0] != ui_thread
+            # The read blocks; the lens keeps its rows and the UI answers.
+            assert lens._loading
+            assert lens.rows
+            lens.select_value("timezone")
+            await pilot.press("down")
+            await settle(pilot)
+            assert lens.table.current_key() != "timezone"
+        finally:
+            gate.set()
+        await until(pilot, lambda: not lens._loading)
+        assert lens.profile is fakes.ident.profile
+
+
+async def test_statuses_of_another_profile_are_ignored(fakes) -> None:
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        assert _cell(lens, "timezone", "status") == "pending"
+        il.REFRESH_MIN_S = 0.0
+        try:
+            for owner, word in (("other-profile", "pending"), ("mara-de", "failed")):
+                infos = fakes.ident._infos({"timezone": "failed"})
+                for info in infos.values():
+                    info.profile_id = owner
+                threading.Thread(
+                    target=fakes.ident.listeners[0], args=(list(infos.values()),)
+                ).start()
+                await until(
+                    pilot, lambda o=owner: lens._statuses["timezone"].profile_id == o
+                )
+                await until(
+                    pilot, lambda w=word: _cell(lens, "timezone", "status") == w
+                )
+        finally:
+            il.REFRESH_MIN_S = 1.0
+
+
+async def test_caption_uses_the_service_times(fakes) -> None:
+    applied_at = 1_700_000_000.0
+    real_plan = fakes.ident._plan
+
+    def stamped(over=None):
+        plan = real_plan(over)
+        for info in plan.infos.values():
+            info.profile_id, info.at = plan.profile_id, applied_at
+        return plan
+
+    fakes.ident._plan = stamped
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        lens = await _open_lens(app, pilot)
+        await pilot.press("space")
+        await until(pilot, lambda: lens.applied_at)
+        assert lens.applied_at == applied_at
+        assert lens.verified_at == applied_at

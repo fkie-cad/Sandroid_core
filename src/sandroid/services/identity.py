@@ -1341,7 +1341,7 @@ def generate_profile(
     pid = profile_id or f"{first.lower()}-{preset}"
     profile = Profile(
         id=pid,
-        name=name or f"{first} {last} · {preset.upper()}",
+        name=name or f"{first} {last} ({preset.upper()})",
         token=token,
         seed="hex:" + secrets.token_hex(32),
         revision=0,
