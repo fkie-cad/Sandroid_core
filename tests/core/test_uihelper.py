@@ -11,6 +11,7 @@ adb or touches a device.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
@@ -780,3 +781,233 @@ def test_stop_before_start_is_noop(adb):
 def test_requires_serial():
     with pytest.raises(ValueError):
         UiHelper("")
+
+
+# ------------------------------------------- lifecycle races (review 2 H1/M7/M8)
+
+
+class _A11yPopen(FakePopen):
+    """Each helper spawn flips accessibility_enabled to 1 (FULL connect)."""
+
+    def __init__(self, adb: FakeAdb, delay: float = 0.0, **kw) -> None:
+        super().__init__(**kw)
+        self.adb = adb
+        self.delay = delay
+
+    def __call__(self, argv, **kw):
+        if "exec-out" not in argv:
+            if self.delay:
+                time.sleep(self.delay)  # adb shell takes a moment to come up
+            self.adb.settings["accessibility_enabled"] = "1"
+        return super().__call__(argv, **kw)
+
+
+def test_stop_during_start_kills_inflight_helper_and_restores_a11y(adb):
+    popen = _A11yPopen(adb, delay=0.3)
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    res = {}
+    t = threading.Thread(target=lambda: res.setdefault("ok", h.start()))
+    t.start()
+    time.sleep(0.1)
+    h.stop()  # e.g. the app quits while tracking is starting
+    t.join(3)
+    assert res["ok"] is False
+    assert h.last_error == "cancelled"
+    helper = popen.helpers[0]
+    assert helper.stdin.closed
+    assert helper.returncode is not None
+    assert adb.settings["accessibility_enabled"] == "0"
+    assert rec.states() == ["stopped"]
+    assert rec.statuses[-1][1]["a11y_restored"] is True
+    assert not h.alive
+    h.stop()  # idempotent
+    assert rec.states() == ["stopped"]
+
+
+def test_stop_while_start_waits_for_connect_returns_promptly(adb):
+    popen = _A11yPopen(adb, connect="")  # never says connected
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    res = {}
+    t = threading.Thread(target=lambda: res.setdefault("ok", h.start(timeout=20)))
+    t.start()
+    assert wait_for(lambda: popen.helpers)
+    t0 = time.monotonic()
+    h.stop(timeout=1)
+    t.join(3)
+    assert time.monotonic() - t0 < 5
+    assert res["ok"] is False
+    assert popen.helpers[0].returncode is not None
+    assert adb.settings["accessibility_enabled"] == "0"
+    assert rec.states() == ["stopped"]
+
+
+def test_start_during_backoff_has_one_spawner(adb):
+    gate = threading.Event()
+    h, popen, rec, _ = make_helper(adb, sleep=lambda s: gate.wait(5))
+    assert h.start()
+    popen.current.die()
+    assert wait_for(lambda: "lost" in rec.states())
+    assert h.start() is True  # the caller reacts to "lost"
+    gen2 = popen.helpers[-1]
+    gate.set()  # the supervisor's back-off ends: it must not spawn again
+    time.sleep(0.2)
+    assert len(popen.helpers) == 2
+    assert h._gen.proc is gen2
+    assert "restarted" not in rec.states()
+    assert h.alive
+    h.stop()
+    assert gen2.stdin.closed
+    assert gen2.returncode is not None
+    assert rec.states()[-1] == "stopped"
+
+
+def test_restarts_that_keep_timing_out_go_down(adb):
+    now = [0.0]
+
+    def sleep(s):
+        now[0] += s
+
+    h, popen, rec, _ = make_helper(adb, sleep=sleep, clock=lambda: now[0])
+    assert h.start()
+    n = [0]
+
+    def spawn(timeout, token):  # every restart hangs until its connect timeout
+        n[0] += 1
+        now[0] += timeout
+        return "timeout"
+
+    h._spawn = spawn
+    popen.current.die()
+    assert wait_for(lambda: rec.states()[-1:] == ["down"])
+    assert n[0] == uihelper.MAX_FAILED_RESTARTS
+    assert rec.statuses[-1][1]["failed_restarts"] == uihelper.MAX_FAILED_RESTARTS
+    h.stop()
+    assert rec.states()[-1] == "stopped"
+
+
+# ------------------------------------------------------- buffered reading (M9)
+
+
+def test_buffered_wraps_raw_pipe_only():
+    r, w = os.pipe()
+    raw = os.fdopen(r, "rb", buffering=0)
+    try:
+        assert isinstance(uihelper._buffered(raw), io.BufferedReader)
+        buf = os.fdopen(w, "wb")
+        assert uihelper._buffered(buf) is buf
+        buf.close()
+    finally:
+        raw.close()
+
+
+def test_big_reply_on_unbuffered_pipe_is_fast(adb):
+    big = "x" * 3_000_000
+
+    class RawHelper(FakeHelper):
+        def __init__(self, argv, **kw):
+            super().__init__(argv, **kw)
+            # what Popen(bufsize=0) hands the reader: a raw FileIO
+            self.stdout = os.fdopen(os.dup(self.stdout.fileno()), "rb", buffering=0)
+
+        def on_command(self, line):
+            rid = line.split("id=")[1]
+            self.emit({"type": "dump", "id": rid, "windows": [], "blob": big})
+
+    class RawPopen(FakePopen):
+        def __call__(self, argv, **kw):
+            h = RawHelper(argv, **self.helper_kw)
+            self.helpers.append(h)
+            return h
+
+    h, popen, rec, _ = make_helper(adb, popen=RawPopen())
+    assert h.start()
+    t0 = time.monotonic()
+    d = h.dump(timeout=20)
+    elapsed = time.monotonic() - t0
+    assert d is not None
+    assert len(d["blob"]) == len(big)
+    assert elapsed < 1.5  # byte-by-byte readline took ~1.6 s for 3 MB
+    h.stop()
+
+
+# ---------------------------------------------------- a11y restore (R1#8, L18)
+
+
+@pytest.mark.parametrize("connect", ["busy", ""])
+def test_failed_start_restores_a11y(adb, connect):
+    popen = _A11yPopen(adb, connect=connect)
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start(timeout=0.2) is False
+    assert adb.settings["accessibility_enabled"] == "0"
+    assert adb.commands("shell settings put") == [
+        "shell settings put secure accessibility_enabled 0"
+    ]
+    assert popen.helpers[0].returncode is not None
+    assert not h.alive
+    h.stop()  # nothing left to stop
+    assert "stopped" not in rec.states()
+
+
+def test_failed_before_read_is_not_treated_as_unset(adb):
+    real = adb.__call__
+
+    def flaky(command, serial=None, timeout=30):
+        if command == "shell settings get secure accessibility_enabled" and not (
+            adb.settings.get("_read_once")
+        ):
+            adb.settings["_read_once"] = "1"
+            adb.calls.append((command, serial))
+            return "", "error: closed"
+        return real(command, serial, timeout)
+
+    Adb.send_adb_command = flaky
+    adb.settings["accessibility_enabled"] = "1"  # e.g. TalkBack was on
+    h, popen, rec, _ = make_helper(adb)
+    assert h.start()
+    assert "accessibility_enabled" not in h.a11y_before
+    h.stop()
+    assert adb.commands("shell settings put") == []
+    assert adb.settings["accessibility_enabled"] == "1"
+    assert rec.statuses[-1][1]["a11y_restored"] is False
+
+
+def test_stop_kills_supervisor_spawn_before_restoring_a11y(adb):
+    popen = _A11yPopen(adb)
+    h, popen, rec, _ = make_helper(adb, popen=popen)
+    assert h.start()
+    popen.next_kw = [{"connect": ""}]  # the restart hangs waiting for connect
+    popen.current.die()
+    assert wait_for(lambda: len(popen.helpers) == 2)
+    inflight = popen.helpers[1]
+    seen = {}
+    real = Adb.send_adb_command
+
+    def spy(command, serial=None, timeout=30):
+        if command.startswith("shell settings put"):
+            seen["helper_rc_at_restore"] = inflight.returncode
+        return real(command, serial, timeout)
+
+    Adb.send_adb_command = spy
+    t0 = time.monotonic()
+    h.stop(timeout=1)
+    assert time.monotonic() - t0 < 5  # not the 20 s restart connect timeout
+    assert seen["helper_rc_at_restore"] is not None
+    assert inflight.stdin.closed
+    assert "restarted" not in rec.states()
+    assert rec.states()[-1] == "stopped"
+    assert adb.settings["accessibility_enabled"] == "0"
+
+
+def test_stop_from_connected_callback_does_not_wait_for_start(adb):
+    h, popen, rec, _ = make_helper(adb)
+
+    def on_status(state, info):
+        rec.on_status(state, info)
+        if state == "connected":
+            h.stop()
+
+    h._on_status = on_status
+    t0 = time.monotonic()
+    assert h.start() is True
+    assert time.monotonic() - t0 < 3
+    assert rec.states() == ["connected", "stopped"]
