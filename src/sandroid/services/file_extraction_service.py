@@ -868,7 +868,8 @@ class FileExtractionService:
     ) -> bool:
         """Export a snapshot and recording as an action archive.
 
-        Creates a .action archive containing the snapshot and recording.txt file.
+        Creates a .action archive containing the snapshot and the recording
+        (``recording.getevent.txt``, or a legacy ``recording.txt``).
         This allows actions to be exported and replayed on other emulators.
 
         Args:
@@ -882,8 +883,10 @@ class FileExtractionService:
         """
         import shutil
 
+        from sandroid.core.run_bundle import recording_path as _recording
+
         raw_results_path = os.getenv("RAW_RESULTS_PATH", "")
-        recording_path = os.path.join(raw_results_path, "recording.txt")
+        recording_path = str(_recording(raw_results_path))
         snapshot_path = os.path.join(
             os.path.expanduser("~"),
             ".android",

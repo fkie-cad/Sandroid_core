@@ -688,7 +688,8 @@ def phase_of(ts: float | None, phases: Any) -> str:
 
 
 def recording_digest(run_dir: str | os.PathLike[str] | None) -> str | None:
-    """SHA-256 of the run's recording (``recording.txt``), or ``None``.
+    """SHA-256 of the run's recording (``recording.getevent.txt``, or a
+    legacy ``recording.txt``), or ``None``.
 
     Runs with the same digest replayed the same recording, so their results
     should agree (see the Runs lens's replay-consistency signal).
@@ -697,7 +698,9 @@ def recording_digest(run_dir: str | os.PathLike[str] | None) -> str | None:
         return None
     import hashlib
 
-    path = Path(run_dir) / "recording.txt"
+    from sandroid.core.run_bundle import recording_path
+
+    path = recording_path(run_dir)
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:

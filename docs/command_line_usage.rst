@@ -124,15 +124,15 @@ Perform full filesystem checks to reveal deleted files:
 - Detect file deletion patterns
 - Higher resource usage but comprehensive coverage
 
-**Screenshot Capture**::
+**Screenshots**
 
-   sandroid --screenshot 5
-
-Take screenshots every N seconds:
-
-- Visual documentation of analysis
-- Capture UI changes and behaviors
-- Useful for malware analysis and app testing
+There is no periodic screenshot option (``--screenshot`` was removed).
+Screenshots are taken by Tracking in the TUI (``Ctrl+T``): before a tap, on a
+screen change, after a tap or at a label, as set by the ``[tracking]`` options
+``shot_before_tap``, ``shot_screen_change``, ``shot_after_tap`` and
+``shot_label``; ``s`` adds one by hand while Tracking is on. They are stored
+under ``tracking/shots/`` in the session device folder and shown in the
+report.
 
 Specialized Analysis
 --------------------
@@ -251,13 +251,14 @@ Install an APK on the device in headless mode.
 
 **Action Import (headless replay)**::
 
-   sandroid --import-action results/runs/<run_id>/recording.txt -n 2 --report
-   sandroid --import-action results/runs/<run_id>/
+   sandroid --import-action results/runs/<run_id>/recording.getevent.txt -n 2 --report
 
 Replay a recording made in the TUI without the TUI: a forensic analysis runs
 and the recording is replayed via the Player in every run (``-n``, ``--report``,
 ``--network``, ``--hash``, ``--show-deleted`` and ``-f`` apply). Pass the run
-bundle's ``recording.txt`` or the bundle folder. The replay starts from the
+bundle's ``recording.getevent.txt`` (the raw ``getevent -t`` slice written by
+Record) or the bundle folder; a legacy ``recording.txt`` from an older bundle is
+still accepted. The replay starts from the
 device's current state, so bring the device to the state the recording expects
 (e.g. load the snapshot used when recording). JSON action files cannot be
 replayed and are rejected.
@@ -344,25 +345,25 @@ Common Usage Patterns
 **Comprehensive Analysis**::
 
    # Full feature analysis
-   sandroid --network --sockets --screenshot 3 --hash --apk --report
+   sandroid --network --sockets --hash --apk --report
 
 **Malware Analysis**::
 
    # Automated malware analysis
    sandroid --trigdroid com.malware.sample \
-            --network --screenshot 2 \
+            --network \
             --show-deleted --hash \
             --report
 
    # Manual malware analysis
-   sandroid --network --sockets --screenshot 3 \
+   sandroid --network --sockets \
             --avoid-strong-noise-filter \
             --show-deleted --hash
 
 **App Development Testing**::
 
    # Performance testing
-   sandroid -n 2 --screenshot 5 --degrade-network
+   sandroid -n 2 --degrade-network
 
    # Feature testing
    sandroid --network --sockets --apk
@@ -406,7 +407,7 @@ Output and Results
 
 - **Primary Output**: JSON file with complete analysis results
 - **Raw Data**: ``results/`` directory with detailed artifacts
-- **Screenshots**: Captured device screenshots (if enabled)
+- **Screenshots**: Tracking screenshots under ``tracking/shots/`` (TUI, Tracking on)
 - **Network Capture**: PCAP files (if network monitoring enabled)
 - **Logs**: Detailed execution logs in ``~/.cache/sandroid/logs/``
 
@@ -482,7 +483,7 @@ Error Handling
    sandroid --headless --mode forensic --network || echo "Analysis failed - check device connection"
 
    # Timeout protection
-   timeout 1800 sandroid --headless --mode forensic --network --screenshot 5
+   timeout 1800 sandroid --headless --mode forensic --network
 
    # Resource cleanup
    trap 'kill $(jobs -p)' EXIT
@@ -502,7 +503,7 @@ Performance Optimization
 **Storage Optimization**::
 
    # Minimal storage usage
-   sandroid --number 2  # No screenshots, no network capture
+   sandroid --number 2  # No network capture
 
    # Custom output location
    SANDROID_PATHS__RESULTS_PATH=/tmp/analysis sandroid

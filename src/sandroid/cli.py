@@ -231,8 +231,8 @@ def __getattr__(name: str):
     metavar="PATH",
     default=None,
     help=(
-        "Replay a TUI recording headless: PATH is a run bundle's recording.txt "
-        "(or the bundle folder). Runs a forensic analysis that replays it in "
+        "Replay a TUI recording headless: PATH is a run bundle's "
+        "recording.getevent.txt (or legacy recording.txt, or the bundle folder). Runs a forensic analysis that replays it in "
         "every run (-n, --report, --network, ... apply)."
     ),
 )
@@ -640,9 +640,9 @@ def _run_install_apk(sandroid_config, apk_path: str) -> None:
 def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
     """Validate an ``--import-action`` argument.
 
-    Accepts a ``recording.txt`` (``<timestamp> <device> <type> <code> <value>``
-    lines as written by the TUI recorder) or a run bundle folder containing
-    one.
+    Accepts a ``recording.getevent.txt`` (raw ``getevent -t`` lines, written
+    by Record), a legacy ``recording.txt`` (``<timestamp> <device> <type>
+    <code> <value>`` lines) or a run bundle folder containing one.
 
     Returns:
         ``(absolute recording path, None)`` or ``(None, error message)``.
@@ -653,7 +653,9 @@ def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
 
     path = Path(action_path)
     if path.is_dir():
-        path = path / "recording.txt"
+        from .core.run_bundle import recording_path
+
+        path = recording_path(path)
     if not path.is_file():
         return None, f"No recording found: {path}"
     try:
@@ -666,7 +668,7 @@ def resolve_recording(action_path: str) -> tuple[str | None, str | None]:
         return None, f"Cannot read {path}: {e}"
     if not lines:
         return None, f"Recording is empty: {path}"
-    if lines[0].startswith(("{", "[")):
+    if lines[0].startswith(("{", "[")) and not Player.STORE_LINE_RE.match(lines[0]):
         return None, (
             f"{path} is a JSON file. JSON action files cannot be replayed; pass "
             "a recording.txt from a run bundle (or the bundle folder) instead."

@@ -172,8 +172,6 @@ def _show_config_rich(config: SandroidConfig) -> None:
     table.add_row("Show Deleted Files", str(config.analysis.show_deleted_files))
     table.add_row("Hash Files", str(config.analysis.hash_files))
     table.add_row("List APKs", str(config.analysis.list_apks))
-    if config.analysis.screenshot_interval:
-        table.add_row("Screenshot Interval", f"{config.analysis.screenshot_interval}s")
 
     console.print(table)
 

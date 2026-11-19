@@ -174,11 +174,10 @@ class ExportModal(ExtractionModal[ExportResult]):
         return os.getcwd()
 
     def _check_recording_exists(self) -> bool:
-        """Check if recording.txt exists."""
-        recording_path = os.path.join(
-            os.getenv("RAW_RESULTS_PATH", "./"), "recording.txt"
-        )
-        return os.path.exists(recording_path)
+        """Check if a recording (``recording.getevent.txt`` or legacy) exists."""
+        from sandroid.core.run_bundle import recording_path
+
+        return recording_path(os.getenv("RAW_RESULTS_PATH", "./")).is_file()
 
     def _check_snapshot_exists(self) -> bool:
         """Check if tmp snapshot exists."""
@@ -207,7 +206,7 @@ class ExportModal(ExtractionModal[ExportResult]):
                 for chk_id, label, exists in [
                     (
                         "chk-recording",
-                        "Recording (recording.txt)",
+                        "Recording (recording.getevent.txt)",
                         self._recording_exists,
                     ),
                     (
@@ -435,9 +434,9 @@ class ExportModal(ExtractionModal[ExportResult]):
             Tuple of (success, export_path, error_message)
         """
         try:
-            recording_path = os.path.join(
-                os.getenv("RAW_RESULTS_PATH", "./"), "recording.txt"
-            )
+            from sandroid.core.run_bundle import recording_path as _recording
+
+            recording_path = str(_recording(os.getenv("RAW_RESULTS_PATH", "./")))
             device_name = Toolbox.device_name
             snapshot_path = os.path.join(
                 os.path.expanduser("~"),

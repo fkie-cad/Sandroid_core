@@ -1,53 +1,79 @@
-"""Recording process wrapper for TUI integration.
+"""Recording (Record) on top of Tracking's shared getevent reader.
 
-Non-blocking wrapper around `adb shell getevent` for recording input events
-in the TUI without blocking the main thread.
+Record does not spawn its own ``getevent`` any more: it leases the device's
+ONE ``getevent -t`` stream from :mod:`sandroid.services.tracking_service`
+(and starts Tracking first when ``tracking.auto_on_record`` is on). At stop it
+copies the raw event lines it saw verbatim to the output file
+(``recording.getevent.txt``): ``[   s.us] /dev/input/eventN: tttt cccc vvvvvvvv``
+lines, the format :class:`sandroid.features.player.Player` replays.
 """
+
+from __future__ import annotations
 
 import logging
 import os
-import re
 import threading
 import time
-from collections.abc import Callable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from sandroid.core.adb import Adb
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
 
+def _serial() -> str | None:
+    try:
+        from sandroid.core import timeline
+
+        serial = timeline.get_timeline().active_serial
+        if serial:
+            return serial
+    except Exception:
+        pass
+    try:
+        from sandroid.core.adb import Adb
+
+        return Adb.get_target_device()
+    except Exception:
+        return None
+
+
 class RecordingWrapper:
-    """Non-blocking wrapper for ADB getevent recording.
+    """Non-blocking Record: a lease on the shared getevent stream.
 
     Provides:
-    - Non-blocking event capture via background thread
     - Event counting and elapsed time tracking
-    - Callbacks for live event display
-    - Clean termination support
+    - Callbacks for live event display (``/dev/input/eventN: tttt cccc vvvvvvvv``)
+    - Clean termination support (writes the raw slice at :meth:`stop`)
     """
-
-    EVENT_LINE_RE = re.compile(r"(\S+): (\S+) (\S+) (\S+)$")
 
     def __init__(
         self,
         output_file: str,
         on_event: Callable[[str], None] | None = None,
         on_count_update: Callable[[int], None] | None = None,
+        *,
+        serial: str | None = None,
     ):
         """Initialize the recording wrapper.
 
         Args:
-            output_file: Path to save recording.txt
-            on_event: Optional callback for each event line (for live display)
-            on_count_update: Optional callback when event count changes
+            output_file: Path of the ``recording.getevent.txt`` to write.
+            on_event: Optional callback for each event line (for live display).
+            on_count_update: Optional callback when the event count changes.
+            serial: Device serial (default: the timeline's / ADB's device).
         """
         self.output_file_path = output_file
         self.on_event = on_event
         self.on_count_update = on_count_update
+        self._serial = serial
 
-        self._process: object | None = None
-        self._output_file: object | None = None
-        self._reader_thread: threading.Thread | None = None
+        self._stream: Any = None
+        self._unsubscribe: Callable[[], None] | None = None
+        self._started_tracking = False
+        self._line_start = 0
         self._stopped = False
         self._event_count = 0
         self._start_time: float | None = None
@@ -72,67 +98,49 @@ class RecordingWrapper:
     @property
     def is_running(self) -> bool:
         """Check if recording is active."""
-        return (
-            self._process is not None
-            and self._process.poll() is None
-            and not self._stopped
-        )
+        stream = self._stream
+        return stream is not None and not self._stopped and bool(stream.alive)
 
     def start(self) -> bool:
-        """Start recording in background thread.
+        """Lease the shared getevent stream (Tracking first, if configured).
 
         Returns:
             True if recording started successfully, False otherwise.
         """
-        if self._process is not None:
+        if self._stream is not None:
             logger.warning("Recording already in progress")
             return False
-
-        # Ensure the directory exists before opening the file
+        serial = self._serial or _serial()
+        if not serial:
+            logger.error("Failed to start recording: no device")
+            return False
         output_dir = os.path.dirname(self.output_file_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-
-        # Open output file
         try:
-            self._output_file = open(self.output_file_path, "w", encoding="utf-8")
-        except OSError as e:
-            logger.error(f"Failed to open output file '{self.output_file_path}': {e}")
-            return False
+            from sandroid.config import get_config
+            from sandroid.services.tracking_service import get_tracking
 
-        try:
-            # Start ADB getevent process
-            self._process = Adb.send_adb_command_popen("shell getevent")
-
-            if self._process is None:
-                logger.error("Failed to start ADB getevent")
-                self._output_file.close()
-                return False
-
-            self._start_time = time.time()
-            self._stopped = False
-            self._event_count = 0
-
-            # Write initial dummy event
-            self._write_dummy_event()
-
-            # Start reader thread
-            self._reader_thread = threading.Thread(
-                target=self._read_events, daemon=True
-            )
-            self._reader_thread.start()
-
-            logger.info("Recording started")
-            return True
-
+            tracking = get_tracking()
+            if get_config().tracking.auto_on_record and not tracking.is_active():
+                self._started_tracking = tracking.start(serial, reason="record")
+            stream = tracking.getevent(serial)
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
-            if self._output_file and not self._output_file.closed:
-                self._output_file.close()
+            self._stop_own_tracking()
             return False
+        self._serial = serial
+        self._stream = stream
+        self._line_start = stream.line_no() + 1
+        self._unsubscribe = stream.subscribe(self._on_line)
+        self._start_time = time.time()
+        self._stopped = False
+        self._event_count = 0
+        logger.info("Recording started")
+        return True
 
     def stop(self) -> int:
-        """Stop recording and return duration.
+        """Stop recording, write the raw slice, and return the duration.
 
         Returns:
             Duration of recording in seconds.
@@ -146,113 +154,85 @@ class RecordingWrapper:
         self._duration = self.elapsed_seconds
         self._stopped = True
 
+        stream, self._stream = self._stream, None
+        if stream is None:
+            return self._duration
         try:
-            # Write final dummy event
-            if self._output_file and not self._output_file.closed:
-                self._write_dummy_event()
-
-            # Terminate ADB process
-            if self._process and self._process.poll() is None:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=2)
-                except Exception:
-                    self._process.kill()
-                    self._process.wait(timeout=1)
-
-            # Close output file
-            if self._output_file and not self._output_file.closed:
-                self._output_file.close()
-
-            # Wait for reader thread
-            if self._reader_thread and self._reader_thread.is_alive():
-                self._reader_thread.join(timeout=1)
-
-            # debug: the caller reports "Recording saved: N events, Ns" itself.
+            line_end = stream.line_no()
+            if self._unsubscribe is not None:
+                self._unsubscribe()
+                self._unsubscribe = None
+            write_slice(
+                stream.raw_path, self._line_start, line_end, self.output_file_path
+            )
             logger.debug(
                 f"Recording stopped: {self._event_count} events, {self._duration}s"
             )
-
         except Exception as e:
             logger.error(f"Error stopping recording: {e}")
-
+        finally:
+            stream.release()
+            self._stop_own_tracking()
         return self._duration
 
-    def _read_events(self) -> None:
-        """Background thread to read events from ADB process."""
-        try:
-            while not self._stopped and self._process.poll() is None:
-                try:
-                    line = (
-                        self._process.stdout.readline()
-                        .decode("utf-8", "replace")
-                        .strip()
-                    )
-
-                    if not line:
-                        continue
-
-                    match = self.EVENT_LINE_RE.match(line)
-                    if match is not None:
-                        dev, etype, ecode, data = match.groups()
-                        self._write_event(dev, etype, ecode, data)
-
-                        # Call live event callback if provided
-                        if self.on_event:
-                            try:
-                                self.on_event(line)
-                            except Exception:
-                                pass
-
-                except Exception as e:
-                    if not self._stopped:
-                        logger.debug(f"Error reading event: {e}")
-                    break
-
-        except Exception as e:
-            logger.error(f"Reader thread error: {e}")
-
-    def _write_event(self, dev: str, etype: str, ecode: str, data: str) -> None:
-        """Write an input event to the output file.
-
-        Args:
-            dev: Device identifier (e.g., /dev/input/event1)
-            etype: Event type (hex string)
-            ecode: Event code (hex string)
-            data: Event data (hex string)
-        """
-        if self._output_file is None or self._output_file.closed:
+    def _stop_own_tracking(self) -> None:
+        if not self._started_tracking:
             return
-
+        self._started_tracking = False
         try:
-            millis = int(round(time.time() * 1000))
-            etype_int = int(etype, 16)
-            ecode_int = int(ecode, 16)
-            data_int = int(data, 16)
+            from sandroid.services.tracking_service import get_tracking
 
-            rline = f"{millis} {dev} {etype_int} {ecode_int} {data_int}\n"
-            self._output_file.write(rline)
-            self._output_file.flush()
+            get_tracking().stop(reason="record")
+        except Exception:
+            logger.debug("Stopping Record's Tracking failed", exc_info=True)
 
-            with self._lock:
-                self._event_count += 1
-                count = self._event_count
+    def _on_line(self, line: str, line_no: int, host_recv: float) -> None:
+        """Reader thread: count event lines, feed the live display."""
+        from sandroid.services.tracking_service import GE_LINE
 
-            # Call count update callback if provided
-            if self.on_count_update:
-                try:
-                    self.on_count_update(count)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            logger.debug(f"Error writing event: {e}")
-
-    def _write_dummy_event(self) -> None:
-        """Write a dummy event to mark recording boundaries."""
-        self._write_event("/dev/input/event1", "0", "0", "0")
+        if line_no < self._line_start or self._stopped:
+            return
+        if GE_LINE.match(line.strip()) is None:
+            return
+        with self._lock:
+            self._event_count += 1
+            count = self._event_count
+        if self.on_count_update:
+            try:
+                self.on_count_update(count)
+            except Exception:
+                pass
+        if self.on_event:
+            try:
+                self.on_event(line.split("]", 1)[-1].strip())
+            except Exception:
+                pass
 
     def __del__(self):
         """Ensure recording is stopped on garbage collection."""
-        if not self._stopped:
+        if not self._stopped and self._stream is not None:
             self.stop()
+
+
+def write_slice(raw_path: Any, first: int, last: int, output: str) -> int:
+    """Copy the event lines ``first..last`` (1-based, inclusive) of the raw
+    getevent file verbatim to ``output``; device-listing lines that getevent
+    prints when it (re)starts are dropped. Returns the number of lines.
+    """
+    from sandroid.services.tracking_service import GE_LINE
+
+    out: list[str] = []
+    if last >= first:
+        with open(raw_path, encoding="utf-8", errors="replace") as fh:
+            for n, line in enumerate(fh, 1):
+                if n < first:
+                    continue
+                if n > last:
+                    break
+                if GE_LINE.match(line.strip()):
+                    out.append(line if line.endswith("\n") else line + "\n")
+    tmp = Path(f"{output}.part")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(out)
+    tmp.replace(output)
+    return len(out)

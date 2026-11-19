@@ -79,8 +79,7 @@ class EngineContext:
 
     Carries the resolved services/toolbox/config and the 1-based
     ``run_number`` of the step currently executing (updated by the engine as it
-    iterates the plan). ``screenshot`` holds the active automated-screenshot
-    instance between :class:`StartScreenshotStep` and :class:`StopScreenshotStep`.
+    iterates the plan).
 
     Attributes:
         config: The run configuration.
@@ -89,7 +88,6 @@ class EngineContext:
         forensic_service: Forensic service for baseline/whitelist state.
         action_window_service: Action-window service for timing/dry-run state.
         run_number: 1-based index of the run currently executing.
-        screenshot: The active screenshot capturer, if any.
     """
 
     def __init__(
@@ -105,7 +103,6 @@ class EngineContext:
         self.forensic_service = forensic_service
         self.action_window_service = action_window_service
         self.run_number: int = 0
-        self.screenshot: Any = None
         #: Optional ``callable(phase: str)`` the engine sets to report a phase
         #: change from inside a step (e.g. the replay's settle wait).
         self.on_phase: Any = None
@@ -531,50 +528,6 @@ class DryRunEndStep(Step):
         logger.info("Dry run finished (noise baseline captured)")
 
 
-class StartScreenshotStep(Step):
-    """Start automated periodic screenshots (best-effort, guarded).
-
-    Restores the automated-screenshot parity the legacy ``update_photographer``
-    provided. Kept deliberately simple: any failure (headless environment, no
-    emulator screenshot support, import error) is logged and swallowed so it
-    never aborts the analysis.
-    """
-
-    kind = "start_screenshot"
-    path_sensitive = False
-
-    def run(self, ctx: EngineContext) -> None:
-        try:
-            from sandroid.features.screenshot import Screenshot
-
-            shot = Screenshot()
-            interval = ctx.config.screenshot_interval
-            if interval:
-                shot.interval = int(interval)
-            shot.perform()
-            ctx.screenshot = shot
-        except Exception as exc:
-            logger.warning("Automated screenshots unavailable: %s", exc)
-
-
-class StopScreenshotStep(Step):
-    """Stop automated periodic screenshots started by :class:`StartScreenshotStep`."""
-
-    kind = "stop_screenshot"
-    path_sensitive = False
-
-    def run(self, ctx: EngineContext) -> None:
-        shot = ctx.screenshot
-        if shot is None:
-            return
-        try:
-            shot.stop()
-        except Exception as exc:
-            logger.warning("Failed to stop automated screenshots: %s", exc)
-        finally:
-            ctx.screenshot = None
-
-
 # ===========================================================================
 # Plan builder (pure)
 # ===========================================================================
@@ -664,8 +617,6 @@ class AnalysisPlan:
         # fair; the mode itself is read at run time.
         steps.append(LoadSnapshotStep(run_number=0, reset_network=True))
         steps.append(BaselineStep(run_number=0))
-        if config.screenshot_interval:
-            steps.append(StartScreenshotStep(run_number=0))
 
         if total <= 1:
             # ---- N=1 special case: single run yields both pulls ----
@@ -723,9 +674,6 @@ class AnalysisPlan:
                 steps.append(GatherStep(df, run_number=rn))
             steps.append(PullStep("noise", cf, run_number=rn))
             steps.append(DryRunEndStep(run_number=rn))
-
-        if config.screenshot_interval:
-            steps.append(StopScreenshotStep(run_number=total + 2))
 
         return steps
 
@@ -1443,9 +1391,9 @@ class AnalysisEngine:
         """Run the ``wrap_up``-equivalent finalize, inside the env pin.
 
         Populates the list-wrapped ``Other Data`` mapping via the existing
-        toolbox helpers (so the ``[0]``-indexed ``pdf_report``/
-        ``timeline_generator`` key contract keeps holding), then copies the
-        collector into ``result.other_data``.
+        toolbox helpers (the shape the report engine,
+        :mod:`sandroid.core.report_engine`, unwraps into ``report.json``),
+        then copies the collector into ``result.other_data``.
         """
         if self.config.hash_files:
             try:
@@ -1509,8 +1457,6 @@ __all__ = [
     "LoadSnapshotStep",
     "PullStep",
     "StartCaptureStep",
-    "StartScreenshotStep",
     "Step",
     "StopCaptureStep",
-    "StopScreenshotStep",
 ]

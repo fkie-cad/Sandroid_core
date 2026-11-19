@@ -62,7 +62,6 @@ network_reset_after_snapshot = "airplane"
 hash_files = false
 list_apks = false
 degrade_network = false
-# screenshot_interval = 5  # Optional: take screenshots every N seconds
 
 [trigdroid]
 enabled = false

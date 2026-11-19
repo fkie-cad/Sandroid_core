@@ -21,7 +21,7 @@ Two independent things are exercised:
    wrapped around that pipeline, not the pipeline itself (already covered
    elsewhere). ``_run_playback_analysis()`` now drives the unified
    ``AnalysisEngine``, so the fakes are injected into the engine and a real
-   ``recording.txt`` is written under a tmp ``RAW_RESULTS_PATH`` (the engine
+   ``recording.getevent.txt`` is written under a tmp ``RAW_RESULTS_PATH`` (the engine
    imports it into the run bundle up-front). ``get_config`` is pointed at
    ``tmp_path`` too so the config-first run-bundle root never leaks into the
    repo's ``./results/``.
@@ -154,9 +154,11 @@ def _make_controller(
     # isolate it to tmp_path (else the run bundle leaks into ./results/).
     fake_cfg = SimpleNamespace(paths=SimpleNamespace(results_path=tmp_path))
     monkeypatch.setattr("sandroid.config.get_config", lambda: fake_cfg)
-    # A real recording.txt so run_bundle.import_recording (which the engine
+    # A real recording so run_bundle.import_recording (which the engine
     # path performs up-front) succeeds and the engine actually runs.
-    (tmp_path / "recording.txt").write_text("0.0 /dev/input/event0 1 2 3\n")
+    (tmp_path / "recording.getevent.txt").write_text(
+        "[    0.000000] /dev/input/event0: 0001 0002 00000003\n"
+    )
 
     toolbox = _FakeToolbox()
     forensic = _FakeForensicService()
@@ -623,9 +625,9 @@ def test_stop_recording_chat_success_marshals_via_call_from_thread_off_main_thre
 
 def test_start_playback_chat_no_recording_does_not_stash_owner(monkeypatch, tmp_path):
     controller, _toolbox, _forensic = _make_controller(monkeypatch, tmp_path)
-    # _make_controller writes a real recording.txt for the common case --
+    # _make_controller writes a real recording for the common case --
     # remove it so has_recording() is False for this one test.
-    (tmp_path / "recording.txt").unlink()
+    (tmp_path / "recording.getevent.txt").unlink()
 
     result = controller.start_playback_chat(owner_id="owner-A")
 

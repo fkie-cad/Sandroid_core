@@ -102,9 +102,6 @@ def _apply_network_degradation(degrade: bool) -> None:
         Adb.send_telnet_command("network speed full")
 
 
-_UNSET = object()
-
-
 def _analysis_section(toolbox: Any) -> tuple[Any, Any]:
     """``(config, config.analysis)`` of the run (Toolbox config, else global)."""
     cfg = getattr(toolbox, "config", None)
@@ -139,8 +136,8 @@ def resolve_analysis_config(
     while the run metadata (a dump of the config) claimed they were on.
 
     Keyword options: ``monitor_processes``, ``monitor_sockets``, ``dry_run``
-    (or the inverse ``skip_noise_filter``), ``pull_apk``,
-    ``screenshot_interval``, ``whitelist``, ``capture_window``.
+    (or the inverse ``skip_noise_filter``), ``pull_apk``, ``whitelist``,
+    ``capture_window``.
     """
     from sandroid.api.interfaces import AnalysisConfig
 
@@ -156,9 +153,6 @@ def resolve_analysis_config(
         dry_run = not kwargs["skip_noise_filter"]
     if dry_run is None:
         dry_run = not pick(None, "avoid_strong_noise_filter", False)
-    interval = kwargs.get("screenshot_interval", _UNSET)
-    if interval is _UNSET or interval is None:
-        interval = getattr(analysis, "screenshot_interval", None) if analysis else None
     whitelist = kwargs.get("whitelist")
     if whitelist is None:
         wl_file = getattr(cfg, "whitelist_file", None)
@@ -171,8 +165,6 @@ def resolve_analysis_config(
         ),
         capture_sockets=pick(kwargs.get("monitor_sockets"), "capture_sockets", False),
         show_deleted=pick(track_deleted, "show_deleted_files", False),
-        take_screenshots=bool(interval),
-        screenshot_interval=interval or 3,
         hash_files=pick(compute_hashes, "hash_files", False),
         pull_apk=pick(kwargs.get("pull_apk"), "list_apks", False),
         dry_run=bool(dry_run),
@@ -242,6 +234,9 @@ def _finalize_headless_run(
             ),
         )
         logger.info(f"Run documentation written: {outcome.results_json}")
+        report_json = getattr(outcome, "report_json", None)
+        if report_json is not None:
+            logger.info(f"Report JSON: {report_json}")
         if outcome.pdf is not None:
             logger.info(f"PDF report: {outcome.pdf}")
         for err in outcome.errors:
@@ -323,9 +318,8 @@ async def run_malware_analysis(
         compute_hashes: Compute file hashes.
         current_run_setter: Optional callback to update current run number.
         **kwargs: Additional mode-specific options (``track_deleted``,
-            ``monitor_processes``, ``monitor_sockets``, ``screenshot_interval``,
-            ``skip_noise_filter``, ``degrade_network``, ``pull_apk``,
-            ``whitelist``, ``trigdroid_ccf``).
+            ``monitor_processes``, ``monitor_sockets``, ``skip_noise_filter``,
+            ``degrade_network``, ``pull_apk``, ``whitelist``, ``trigdroid_ccf``).
 
     Returns:
         Dictionary with malware analysis results.

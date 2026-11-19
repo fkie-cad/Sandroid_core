@@ -992,3 +992,23 @@ def test_recording_seconds_reads_the_event_stamps(tmp_path):
     )
     assert RecordingController.recording_seconds(str(rec)) == 85.0
     assert RecordingController.recording_seconds(str(tmp_path / "none")) is None
+    # Record's raw getevent slice (device seconds)
+    new = tmp_path / "recording.getevent.txt"
+    new.write_text(
+        "[   26404.737324] /dev/input/event1: 0003 0039 00000000\n"
+        "[   26404.737324] /dev/input/event1: 0000 0000 00000000\n"
+        "[   26489.737324] /dev/input/event1: 0003 0039 ffffffff\n"
+    )
+    assert RecordingController.recording_seconds(str(new)) == pytest.approx(85.0)
+
+
+def test_recorder_writes_recording_getevent_txt(monkeypatch, tmp_path):
+    """Record (modal + chat) writes recording.getevent.txt, never recording.txt."""
+    from sandroid.tui.controllers.recording_controller import RecordingController
+
+    monkeypatch.setenv("RAW_RESULTS_PATH", str(tmp_path) + "/")
+    controller = RecordingController()
+    assert controller.get_recording_path().endswith("/recording.getevent.txt")
+    assert controller.has_recording() is False
+    (tmp_path / "recording.getevent.txt").write_text("")
+    assert controller.has_recording() is True

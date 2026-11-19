@@ -115,8 +115,6 @@ class AnalysisConfig:
         capture_processes: Whether to capture processes
         capture_sockets: Whether to capture sockets
         show_deleted: Whether to show deleted files
-        take_screenshots: Whether to take screenshots
-        screenshot_interval: Interval between screenshots (seconds)
         hash_files: Whether to compute file hashes
         pull_apk: Whether to pull APK files
         dry_run: Whether this is a dry run (noise detection)
@@ -135,8 +133,6 @@ class AnalysisConfig:
     capture_processes: bool = True
     capture_sockets: bool = False
     show_deleted: bool = False
-    take_screenshots: bool = False
-    screenshot_interval: int = 3
     hash_files: bool = False
     pull_apk: bool = False
     dry_run: bool = False

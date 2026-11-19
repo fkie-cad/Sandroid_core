@@ -173,10 +173,11 @@ Configuration Structure
            "template": "default"
        },
 
-       "features": {
-           "screenshot_interval": 0,
-           "recording_enabled": False,
-           "max_screenshot_size": "1920x1080"
+       "tracking": {
+           "shot_before_tap": True,
+           "shot_screen_change": True,
+           "shot_after_tap": False,
+           "shot_label": False
        },
 
        "custom": {}  # For user extensions
@@ -427,8 +428,8 @@ Dynamic Configuration
        config.analysis.calculate_hashes = True
        config.analysis.avoid_noise_filter = True
 
-       # Enhanced monitoring
-       config.features.screenshot_interval = 5
+       # Enhanced monitoring (Tracking screenshots after taps as well)
+       config.tracking.shot_after_tap = True
        config.trigdroid.enabled = True
        config.trigdroid.timeout = 600
 
@@ -445,7 +446,6 @@ Dynamic Configuration
        config.log_level = "INFO"
        config.analysis.number_of_runs = 1
        config.analysis.capture_processes = False
-       config.features.screenshot_interval = 10
 
        # Faster analysis
        config.analysis.avoid_noise_filter = False
@@ -467,7 +467,6 @@ Configuration Integration
    from sandroid.config.loader import load_config
    from sandroid.core.toolbox import Toolbox
    from sandroid.analysis.network import Network
-   from sandroid.features.screenshot import Screenshot
 
    def run_configured_analysis():
        """Run analysis using configuration settings"""
@@ -483,12 +482,6 @@ Configuration Integration
            network_monitor = Network()
            network_monitor.configure(config.network)
            network_monitor.gather()
-
-       # Configure screenshots
-       if config.features.screenshot_interval > 0:
-           screenshot = Screenshot()
-           screenshot.set_interval(config.features.screenshot_interval)
-           screenshot.run()
 
        # Run analysis with configured parameters
        return Toolbox.run_analysis(

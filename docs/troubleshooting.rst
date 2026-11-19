@@ -223,7 +223,7 @@ Device Not Rooted
 
 4. **Alternative**: Use features that don't require root::
 
-   sandroid --number 2 --screenshot 5  # Basic analysis
+   sandroid --number 2  # Basic analysis
 
 Frida Issues
 ------------
@@ -371,7 +371,6 @@ High System Resource Usage
 
 3. **Use targeted analysis**:
    - Monitor specific apps only
-   - Shorter screenshot intervals
 
 Analysis Stuck or Hanging
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -615,10 +614,9 @@ Disk Space Issues
    tar -czf results_$(date +%Y%m%d).tar.gz results/
    rm -rf results/
 
-4. **Limit screenshot capture**::
-
-   # Reduce screenshot frequency or disable
-   sandroid --screenshot 30  # Every 30 seconds instead of 5
+4. **Limit Tracking screenshots**: turn off the ``[tracking]`` triggers
+   you do not need (``shot_screen_change``, ``shot_after_tap``,
+   ``shot_label``) in Settings -> Timeline or with ``sandroid-config set``.
 
 Performance Issues
 ------------------
@@ -638,7 +636,7 @@ Slow Analysis Performance
    sandroid -n 2
 
    # Disable resource-intensive features
-   sandroid --no-processes --screenshot 30
+   sandroid --no-processes
 
 2. **System optimization**:
    - Use SSD storage
@@ -652,7 +650,8 @@ Slow Analysis Performance
 Screenshot Capture Issues
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Symptoms**: Screenshots not captured or corrupted.
+**Symptoms**: Tracking screenshots (``tracking/shots/``) or ``s``
+screenshots not captured or corrupted.
 
 **Root Cause**: Device screen issues or permissions.
 
@@ -668,10 +667,10 @@ Screenshot Capture Issues
    - Disable screen lock
    - Verify device is responsive
 
-3. **Adjust screenshot interval**::
-
-   # Reduce frequency to avoid overload
-   sandroid --screenshot 10
+3. **Check the Tracking triggers**: screenshots are taken only while
+   Tracking is on (``Ctrl+T``) and only for the enabled ``[tracking]``
+   triggers (``shot_before_tap``, ``shot_screen_change``,
+   ``shot_after_tap``, ``shot_label``).
 
 Getting Help
 ------------
