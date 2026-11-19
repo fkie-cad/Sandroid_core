@@ -3,11 +3,18 @@
 The App lens (:class:`~sandroid.tui.widgets.spotlight_panel.SpotlightPanel`)
 keeps its live state, bypass row and lifecycle actions on top; below them
 :class:`AppLensSections` holds seven sections, each one
-:class:`LensSection` (a ``DataTable`` whose top border carries the title and
-a one-line summary):
+:class:`LensSection` (a ``DataTable`` under a tinted header band -- its
+``panel`` top border -- that carries the title and a one-line summary):
 
 IDENTITY · PERMISSIONS · EXPOSURE · MANIFEST & NETWORK · TRACKERS & SDKs ·
 DATA · SUSPECTED DEFENCES (static)
+
+Layout: a blank line between sections; the key/value sections share one
+right-aligned label gutter (:data:`LABEL_WIDTH`) with the status rows above;
+long tables carry group sub-header rows (``Row.group``: dangerous / custom &
+unknown / signature / normal permissions, component kinds) and zebra stripes
+that restart per group; only the section that has (or last had) focus shows
+its row cursor.
 
 Every row is inspectable (Enter → Inspector with Evidence / Raw tabs); the
 sections take part in the normal focus order (Tab / Shift+Tab), ``z`` folds
@@ -50,6 +57,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -93,6 +101,14 @@ COMPACT_WIDTH = 80
 #: Keys of the "+N more" / "hide" toggle rows (``SectionData.hidden_rows``).
 MORE_KEY = "_more"
 LESS_KEY = "_less"
+#: Key prefix of the group sub-header rows (``Row.group``; not selectable).
+GROUP_PREFIX = "_grp:"
+
+#: Width of the label column of the key/value sections (identity, manifest,
+#: data) and of the status rows above them: one shared, right-aligned gutter.
+LABEL_WIDTH = 14
+#: Longest permission / component name shown before a middle cut.
+NAME_WIDTH = 48
 
 #: (section id, title) in display order.
 SECTIONS: tuple[tuple[str, str], ...] = (
@@ -273,13 +289,15 @@ class Row:
     inspectable: bool = True
     #: Cells for ``SectionData.compact_columns`` (narrow lens), if any.
     compact: tuple[Any, ...] | None = None
+    #: Group of consecutive rows: a sub-header row precedes each group
+    #: (``LensSection``); also matched by the filter.
+    group: str | None = None
 
     @property
     def text(self) -> str:
-        """Plain text of all cells (filter + change detection)."""
-        return " ".join(
-            c.plain if isinstance(c, Text) else str(c) for c in self.cells
-        ).strip()
+        """Plain text of all cells and the group (filter + change detection)."""
+        cells = " ".join(c.plain if isinstance(c, Text) else str(c) for c in self.cells)
+        return f"{cells} {self.group or ''}".strip()
 
 
 @dataclass
@@ -297,6 +315,10 @@ class SectionData:
     #: A narrower column set used below :data:`COMPACT_WIDTH` (rows provide
     #: ``Row.compact``); the Inspector keeps the full details.
     compact_columns: tuple[str, ...] | None = None
+    #: Fixed content widths of ``columns`` (``None`` = fit the content).
+    widths: tuple[int | None, ...] | None = None
+    #: Zebra-stripe the rows (restarting in every group).
+    zebra: bool = False
 
 
 def _plain(cells: tuple[Any, ...]) -> str:
@@ -310,6 +332,22 @@ def _t(text: Any, style: str = "") -> Text:
 def _cut(text: str, width: int) -> str:
     text = str(text or "")
     return text if len(text) <= width else text[: max(1, width - 1)] + "…"
+
+
+def _cut_mid(text: str, width: int = NAME_WIDTH) -> str:
+    """Cut a dotted name in the middle, keeping its telling last part.
+
+    ``com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE``
+    -> ``com.google.and…BIND_GET_INSTALL_REFERRER_SERVICE``.
+    """
+    text = str(text or "")
+    if len(text) <= width:
+        return text
+    last = text.rsplit(".", 1)[-1]
+    head = width - len(last) - 1
+    if head < 6:
+        return _cut(text, width)
+    return text[:head] + "…" + last
 
 
 def ago(seconds: float | None) -> str:
@@ -362,12 +400,16 @@ def _grid(pairs: Iterable[tuple[str, Any]]) -> Table:
     return grid
 
 
+#: Column widths of the key/value sections.
+_KV_WIDTHS = (LABEL_WIDTH, None)
+
+
 def _kv(key: str, label: str, value: Any, *, style: str = "", **extra: Any) -> Row:
     """A two-column key/value row (identity, manifest, data)."""
     value_text = value if isinstance(value, Text) else _t(value, style)
     return Row(
         key=key,
-        cells=(_t(label, _c().label), value_text),
+        cells=(Text(label, style=_c().label, justify="right"), value_text),
         title=label,
         evidence=extra.pop("evidence", None) or [("", _grid([(label, value_text)]))],
         raw=extra.pop("raw", None),
@@ -573,7 +615,9 @@ def build_identity(f: AppFacts) -> SectionData:
         summary += " · loading…"
     elif reason:
         summary += f" · {reason}"
-    return SectionData(("field", "value"), rows, summary, show_header=False)
+    return SectionData(
+        ("field", "value"), rows, summary, show_header=False, widths=_KV_WIDTHS
+    )
 
 
 # -- PERMISSIONS -----------------------------------------------------------
@@ -765,6 +809,7 @@ def build_permissions(f: AppFacts) -> SectionData:
     grants = list(getattr(state, "permissions", None) or [])
     names = {g.name for g in grants}
     order = {"dangerous": 0, "signature": 2, "normal": 3}
+    groups = {0: "dangerous", 1: "custom & unknown", 2: "signature", 3: "normal"}
 
     def sort_key(g: Any) -> tuple:
         return (order.get(g.protection or "", 1), not g.granted, g.name)
@@ -821,8 +866,9 @@ def build_permissions(f: AppFacts) -> SectionData:
         rows.append(
             Row(
                 key=f"perm:{g.name}",
+                group=groups[order.get(g.protection or "", 1)],
                 cells=(
-                    _t(_cut(_short_perm(g.name), 30)),
+                    _t(_cut_mid(_short_perm(g.name))),
                     _t(prot, prot_style),
                     _grant_cell(g, g_ops),
                     _op_cell(g_ops),
@@ -864,8 +910,9 @@ def build_permissions(f: AppFacts) -> SectionData:
         (rows if op_is_notable(op) else hidden).append(
             Row(
                 key=f"op:{op.op}",
+                group="AppOps only",
                 cells=(
-                    _t(_cut(op.op, 30)),
+                    _t(_cut_mid(op.op)),
                     _t("op", _c().dim),
                     _t("—", _c().dim),
                     _op_cell([op]),
@@ -894,6 +941,11 @@ def build_permissions(f: AppFacts) -> SectionData:
                 _c().dim,
             )
         )
+    if rows and not any(_plain(r.cells[4:5]).strip() for r in [*rows, *hidden]):
+        # No row has a note: drop the empty column.
+        cols = cols[:4]
+        for row in [*rows, *hidden]:
+            row.cells = row.cells[:4]
     requested = sum(1 for g in grants if g.requested)
     summary = (
         f"{requested} requested · {dangerous} dangerous ({granted_dangerous} "
@@ -907,6 +959,7 @@ def build_permissions(f: AppFacts) -> SectionData:
         hidden_label="other ops (no recorded use)",
         hidden_short="other ops",
         compact_columns=("permission", "✓·use", "last use"),
+        zebra=True,
     )
 
 
@@ -970,12 +1023,15 @@ def _component_xml(kind: str, comp: dict[str, Any]) -> str:
 
 
 def build_exposure(f: AppFacts) -> SectionData:
-    cols = ("kind", "component / link", "guard", "filters")
+    # The kind is the rows' group (a sub-header per kind), not a column.
+    cols = ("component / link", "guard", "filters")
     ov = _overview(f)
     note = static_note(f)
     if note:
         style = _c().warn if f.static_state == "analysing" else _c().dim
-        return SectionData(cols, [_placeholder("static", note, 4, style)], note)
+        return SectionData(
+            cols, [_placeholder("static", note, 3, style)], note, show_header=False
+        )
     comps = ov.get("components") if isinstance(ov.get("components"), dict) else {}
     rows: list[Row] = []
     exported = unguarded = 0
@@ -994,7 +1050,7 @@ def build_exposure(f: AppFacts) -> SectionData:
             else:
                 perms = [comp["permission"]] if comp.get("permission") else []
             if perms:
-                guard = _t(_cut(_short_perm(perms[0]), 26))
+                guard = _t(_cut_mid(_short_perm(perms[0]), 34))
             else:
                 unguarded += 1
                 guard = _t("no permission", _c().warn)
@@ -1013,11 +1069,11 @@ def build_exposure(f: AppFacts) -> SectionData:
             rows.append(
                 Row(
                     key=f"comp:{kind}:{name}",
+                    group=kind,
                     cells=(
-                        _t(_KIND_SINGULAR[kind], _c().dim),
-                        _t(_cut(_short_component(name, f.package), 40)),
+                        _t(_cut_mid(_short_component(name, f.package))),
                         guard,
-                        _t(_cut(filt_text, 30), _c().dim),
+                        _t(_cut(filt_text, 40), _c().dim),
                     ),
                     title=_short_component(name, f.package),
                     subtitle=escape(name),
@@ -1060,14 +1116,14 @@ def build_exposure(f: AppFacts) -> SectionData:
         rows.append(
             Row(
                 key=f"link:{i}:{url}",
+                group="deep links",
                 cells=(
-                    _t("deep link", _c().dim),
-                    _t(_cut(url, 40)),
+                    _t(_cut(url, NAME_WIDTH)),
                     _t(
                         "exported" if link.get("exported") else "not exported",
                         "" if link.get("exported") else _c().dim,
                     ),
-                    _t(_cut(_short_component(comp, f.package), 30), _c().dim),
+                    _t(_cut_mid(_short_component(comp, f.package), 40), _c().dim),
                 ),
                 title=url,
                 subtitle=escape(comp),
@@ -1076,7 +1132,7 @@ def build_exposure(f: AppFacts) -> SectionData:
             )
         )
     if not rows:
-        rows.append(_placeholder("none", "nothing exported", 4))
+        rows.append(_placeholder("none", "nothing exported", 3))
     hosts = {str(lk.get("host")) for lk in links if lk.get("host")}
     summary = (
         f"{exported} exported ({unguarded} without permission) · "
@@ -1086,7 +1142,7 @@ def build_exposure(f: AppFacts) -> SectionData:
         summary += f" ({', '.join(sorted(schemes))[:30]})"
     if hosts:
         summary += f" · {len(hosts)} host" + ("s" if len(hosts) != 1 else "")
-    return SectionData(cols, rows, summary)
+    return SectionData(cols, rows, summary, zebra=True)
 
 
 def _short_action(action: str) -> str:
@@ -1113,7 +1169,11 @@ def build_manifest(f: AppFacts) -> SectionData:
     if note:
         style = _c().warn if f.static_state == "analysing" else _c().dim
         return SectionData(
-            cols, [_placeholder("static", note, 2, style)], note, show_header=False
+            cols,
+            [_placeholder("static", note, 2, style)],
+            note,
+            show_header=False,
+            widths=_KV_WIDTHS,
         )
     nsc = ov.get("nsc") if isinstance(ov.get("nsc"), dict) else {}
     rows: list[Row] = []
@@ -1280,7 +1340,7 @@ def build_manifest(f: AppFacts) -> SectionData:
     if tls:
         flags.append(f"{len(tls)} TLS lib(s)")
     summary = " · ".join(flags) if flags else "nothing notable"
-    return SectionData(cols, rows, summary, show_header=False)
+    return SectionData(cols, rows, summary, show_header=False, widths=_KV_WIDTHS)
 
 
 # -- TRACKERS & SDKs -------------------------------------------------------
@@ -1298,6 +1358,7 @@ def build_trackers(f: AppFacts) -> SectionData:
             cols,
             [_placeholder("hint", text, 4, _c().warn if note else _c().dim)],
             note or "no Insight result",
+            show_header=False,
         )
     libs_block = insight.get("library_detection")
     libs = libs_block.get("detected_libraries") if isinstance(libs_block, dict) else []
@@ -1377,7 +1438,7 @@ def build_trackers(f: AppFacts) -> SectionData:
     if cats:
         top = sorted(cats.items(), key=lambda kv: -kv[1])[:3]
         summary += " · " + ", ".join(f"{n} {c}" for c, n in top)
-    return SectionData(cols, rows, summary + " (Insight, cached)")
+    return SectionData(cols, rows, summary + " (Insight, cached)", zebra=True)
 
 
 # -- DATA ------------------------------------------------------------------
@@ -1388,7 +1449,11 @@ def build_data(f: AppFacts) -> SectionData:
     fp = f.footprint
     if fp is None:
         return SectionData(
-            cols, [_placeholder("loading", "measuring…", 2)], "measuring…", False
+            cols,
+            [_placeholder("loading", "measuring…", 2)],
+            "measuring…",
+            False,
+            widths=_KV_WIDTHS,
         )
     raw = _to_dict(fp)
 
@@ -1476,7 +1541,7 @@ def build_data(f: AppFacts) -> SectionData:
     )
     if fp.reason:
         summary += f" · {fp.reason}"
-    return SectionData(cols, rows, summary, show_header=False)
+    return SectionData(cols, rows, summary, show_header=False, widths=_KV_WIDTHS)
 
 
 def _size_text(kb: int | None, reason: str | None) -> str:
@@ -1523,7 +1588,9 @@ def build_defences(f: AppFacts) -> SectionData:
     note = static_note(f)
     if note:
         style = _c().warn if f.static_state == "analysing" else _c().dim
-        return SectionData(cols, [_placeholder("static", note, 4, style)], note)
+        return SectionData(
+            cols, [_placeholder("static", note, 4, style)], note, show_header=False
+        )
     rows: list[Row] = []
     defences = [d for d in f.defences if getattr(d, "category", "") != "tls_stack"]
     weak = 0
@@ -1543,8 +1610,8 @@ def build_defences(f: AppFacts) -> SectionData:
                         _CONF.get(d.confidence, "?"),
                         _c().ok if d.weakness else conf_style,
                     ),
-                    _t(_cut(title, 30), _c().ok if d.weakness else ""),
-                    _t(_cut(first, 34) + more, _c().dim),
+                    _t(_cut(title, NAME_WIDTH), _c().ok if d.weakness else ""),
+                    _t(_cut(first, 44) + more, _c().dim),
                     _t(_cut(route_text(d.routes), 24)),
                 ),
                 title=d.title,
@@ -1618,24 +1685,67 @@ def row_content(section: str, row: Row) -> InspectorContent:
 # ---------------------------------------------------------------------------
 
 
+def _band_title(
+    arrow: str,
+    title: str,
+    summary: str,
+    *,
+    focused: bool,
+    c: LensPalette,
+    width: int = 0,
+) -> Text:
+    """A section's header band: ``▾ TITLE  12 requested · 3 dangerous``.
+
+    The band is the ``panel`` top border; the title paints its own
+    background so the text sits on the band. Numbers in the summary are
+    emphasised, the rest muted, so the counts scan like chips.
+    """
+    band = c.band_focus if focused else c.band
+    text = Text(style=f"on {band}")
+    text.append("▌" if focused else " ", style=f"{c.accent} on {band}")
+    text.append(f"{arrow} {title}", style=f"bold {c.title} on {band}")
+    if summary:
+        text.append("   ", style=f"on {band}")
+        start = len(text)
+        text.append(summary, style=f"{c.muted} on {band}")
+        for match in re.finditer(r"(?<![\w.])\d[\d.,]*(?: ?[KMG]B)?", summary):
+            text.stylize(
+                f"bold {c.text} on {band}", start + match.start(), start + match.end()
+            )
+        for match in re.finditer(" · ", summary):
+            text.stylize(
+                f"{c.dim} on {band}", start + match.start(), start + match.end()
+            )
+    text.append(" ", style=f"on {band}")
+    if len(text) < width:
+        # Spaces to the end: a solid band (the border's block glyphs show
+        # seams in some renderers).
+        text.append(" " * (width - len(text)), style=f"on {band}")
+    return text
+
+
 class LensSection(DataTable):
-    """One foldable section: a row-cursor table titled on its top border."""
+    """One foldable section: a row-cursor table under a tinted header band.
+
+    Only the section that has (or last had) focus shows its row cursor;
+    group sub-header rows (``Row.group``) are skipped by the cursor keys.
+    """
+
+    COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"lens--group"}
 
     DEFAULT_CSS = """
     LensSection {
         height: auto;
         max-height: 60vh;
-        margin: 0;
+        margin: 1 0 0 0;
         border: none;
-        border-top: solid $lens-rule;
-        border-title-color: $lens-title;
-        border-title-style: bold;
+        border-top: panel $lens-band;
         background: $lens-bg;
         color: $lens-text;
         scrollbar-size-vertical: 1;
     }
     LensSection:focus {
-        border-top: heavy $lens-rule-focus;
+        border-top: panel $lens-band-focus;
     }
     LensSection.-folded {
         height: 1;
@@ -1646,6 +1756,15 @@ class LensSection(DataTable):
         background: $lens-bg;
         color: $lens-header;
         text-style: none;
+    }
+    LensSection > .datatable--odd-row {
+        background: $lens-bg;
+    }
+    LensSection > .datatable--even-row {
+        background: $lens-stripe;
+    }
+    LensSection > .lens--group {
+        background: $lens-bg;
     }
     LensSection > .datatable--cursor {
         background: $lens-cursor;
@@ -1661,6 +1780,7 @@ class LensSection(DataTable):
             id=f"app-sec-{section_id}",
             cursor_type="row",
             zebra_stripes=False,
+            show_cursor=False,  # shown while this section owns the cursor
             classes="app-section",
         )
         self.section_id = section_id
@@ -1677,7 +1797,63 @@ class LensSection(DataTable):
         #: Narrow column set (``SectionData.compact_columns``) in use.
         self.compact = False
         self._shown_cells: list[tuple[Any, ...]] = []
+        #: Per shown row: its index within its group (zebra), -1 = no stripe.
+        self._stripe_index: list[int] = []
+        #: Natural column widths of the shown rows and the fitted last
+        #: column width (``_last_column_width``; ``None`` = not cut).
+        self._natural: list[int] = []
+        self._fit_last: int | None = None
         self.cell_padding = 1
+
+    # -- cursor ownership + group rows -------------------------------------
+
+    def on_focus(self) -> None:
+        """Take the cursor: siblings hide theirs, so one row looks selected."""
+        parent = self.parent
+        for sibling in parent.query(LensSection) if parent is not None else ():
+            if sibling is not self and sibling.show_cursor:
+                sibling.show_cursor = False
+                sibling._update_title()
+        self.show_cursor = True
+        self._skip_group_row(1)
+        self._update_title()
+
+    def on_blur(self) -> None:
+        self._update_title()
+
+    def _skip_group_row(self, step: int) -> None:
+        """Move the cursor off a group sub-header row (``step`` = direction)."""
+        rows = self.rows_shown
+        index = self.cursor_row
+        if not (0 <= index < len(rows)) or not rows[index].key.startswith(GROUP_PREFIX):
+            return
+        for target in (index + step, index - step):
+            if 0 <= target < len(rows) and not rows[target].key.startswith(
+                GROUP_PREFIX
+            ):
+                self.move_cursor(row=target, animate=False)
+                return
+
+    def action_cursor_down(self) -> None:
+        super().action_cursor_down()
+        self._skip_group_row(1)
+
+    def action_cursor_up(self) -> None:
+        super().action_cursor_up()
+        self._skip_group_row(-1)
+
+    def _get_row_style(self, row_index: int, base_style: Any) -> Any:
+        """Zebra stripes restart in every group; group rows are never striped."""
+        stripes = self._stripe_index
+        if row_index < 0 or row_index >= len(stripes):
+            return super()._get_row_style(row_index, base_style)
+        index = stripes[row_index]
+        if index < 0:
+            return self.get_component_styles("lens--group").rich_style
+        if not self.zebra_stripes:
+            return base_style
+        name = "datatable--even-row" if index % 2 else "datatable--odd-row"
+        return self.get_component_styles(name).rich_style
 
     def toggle_expanded(self) -> None:
         """Show / hide the section's hidden rows (the "+N" row).
@@ -1705,8 +1881,14 @@ class LensSection(DataTable):
     def _update_title(self) -> None:
         arrow = "▸" if self.folded else "▾"
         title = SECTION_TITLES.get(self.section_id, self.section_id)
-        summary = f" · {self._summary}" if self._summary else ""
-        self.border_title = Text(f"{arrow} {title}{summary}")
+        self.border_title = _band_title(
+            arrow,
+            title,
+            self._summary,
+            focused=self.has_focus,
+            c=_c(),
+            width=self.outer_size.width - 2,  # Textual keeps 2 cells free
+        )
 
     def _visible_rows(self, data: SectionData, filter_text: str) -> list[Row]:
         """Rows to show: matching ones while filtering (hidden rows too),
@@ -1729,27 +1911,35 @@ class LensSection(DataTable):
             self._summary = f"{shown} of {total} · {data.summary}"
             return rows
         self._summary = data.summary
-        if not hidden:
-            return list(data.rows)
-        width = len(data.columns)
-        # Short in compact mode: the text sits in the first (name) column
-        # and would push the narrow columns out of view.
-        label = data.hidden_short if self.compact else data.hidden_label
-        if self.expanded:
+        rows = list(data.rows)
+        if hidden:
+            toggle = self._toggle_row(data)
+            rows += [*hidden, toggle] if self.expanded else [toggle]
+        return _with_group_rows(rows)
+
+    def _toggle_row(self, data: SectionData) -> Row:
+        """The "+N" / "hide" row. Its label stays as short as a name (the
+        first column is sized by it); the key hint sits in the last column.
+        """
+        hidden = len(data.hidden_rows)
+        width = len(self._columns_for(data))
+        key = LESS_KEY if self.expanded else MORE_KEY
+        if self.compact:
             text = (
-                f"− hide {len(hidden)} (z)"
-                if self.compact
-                else (f"− hide the {len(hidden)} {label} (z)")
+                f"− hide {hidden} (z)"
+                if self.expanded
+                else (f"+{hidden} {data.hidden_short} · z")
             )
-            toggle = _placeholder(LESS_KEY[1:], text, width)
-            return [*data.rows, *hidden, toggle]
-        text = (
-            f"+{len(hidden)} {label} · z"
-            if self.compact
-            else (f"+{len(hidden)} {label} — z shows them, / filters")
-        )
-        toggle = _placeholder(MORE_KEY[1:], text, width)
-        return [*data.rows, toggle]
+            return _placeholder(key[1:], text, width)
+        if self.expanded:
+            text, hint = f"− hide the {hidden} {data.hidden_short}", "z hides them"
+        else:
+            text = f"+{hidden} {data.hidden_label}"
+            hint = "z shows them · / filters"
+        row = _placeholder(key[1:], text, width)
+        if width > 1:
+            row.cells = (*row.cells[:-1], _t(hint, _c().dim))
+        return row
 
     def _columns_for(self, data: SectionData) -> tuple[str, ...]:
         if self.compact and data.compact_columns:
@@ -1776,8 +1966,18 @@ class LensSection(DataTable):
         self._update_title()
         columns = self._columns_for(data)
         cells = [self._cells_for(r, columns) for r in rows]
+        self.zebra_stripes = data.zebra and not self.compact
+        self._stripe_index = _stripe_indexes(rows)
+        widths = list(data.widths if columns is data.columns and data.widths else ())
+        widths += [None] * (len(columns) - len(widths))
+        self._natural = _natural_widths(columns, cells, widths)
+        last = self._fit_last = self._last_column_width(self.size.width)
+        if last is not None:
+            widths[-1] = last
+            cells = [(*c[:-1], _crop(c[-1], last)) for c in cells]
         signature = (
             columns,
+            tuple(widths),
             data.show_header,
             tuple((r.key, _plain(c)) for r, c in zip(rows, cells, strict=True)),
         )
@@ -1785,7 +1985,7 @@ class LensSection(DataTable):
             # Same text; refresh the renderables (styles) only via rows_shown.
             self.rows_shown = rows
             return
-        shape = (columns, data.show_header, tuple(r.key for r in rows))
+        shape = (columns, tuple(widths), data.show_header, tuple(r.key for r in rows))
         old_cells = self._shown_cells
         self._signature = signature
         if shape == self._shape and len(old_cells) == len(rows):
@@ -1799,7 +1999,10 @@ class LensSection(DataTable):
         scroll_x, scroll_y = self.scroll_x, self.scroll_y
         self.show_header = data.show_header
         self.clear(columns=True)
-        self._column_keys = list(self.add_columns(*columns))
+        self._column_keys = [
+            self.add_column(label, width=width)
+            for label, width in zip(columns, widths, strict=True)
+        ]
         for row, row_cells in zip(rows, cells, strict=True):
             self.add_row(*row_cells, key=row.key)
         self.rows_shown, self._shown_cells = rows, cells
@@ -1812,6 +2015,30 @@ class LensSection(DataTable):
             # clear() scrolled home; put the view back once the new virtual
             # size is known (rows added or removed: clamped to the new end).
             self.call_after_refresh(self._restore_scroll, scroll_x, scroll_y)
+
+    def _last_column_width(self, avail: int) -> int | None:
+        """A width for the last column that keeps the table inside ``avail``
+        cells (no horizontal scrollbar), or ``None`` when it fits anyway.
+
+        The last column holds the least important detail (filters, note,
+        vendor...); it is cut with "…" instead (the Inspector has it all).
+        Not in the compact layout (next to the Inspector), which keeps its
+        horizontal scroll.
+        """
+        natural = self._natural
+        if avail <= 0 or len(natural) < 2 or self.compact:
+            return None
+        pad = 2 * self.cell_padding
+        if sum(natural) + pad * len(natural) <= avail:
+            return None
+        last = avail - sum(natural[:-1]) - pad * len(natural)
+        return last if last >= 8 else None
+
+    def on_resize(self, event: Any) -> None:
+        self._update_title()  # the band is padded to the width
+        width = getattr(getattr(event, "size", None), "width", self.size.width)
+        if self.data is not None and self._last_column_width(width) != (self._fit_last):
+            self.show(self.data, self._filter_text)  # refit the last column
 
     def forget_render(self) -> None:
         """Make the next :meth:`show` rebuild every cell.
@@ -1871,6 +2098,80 @@ class LensSection(DataTable):
         if data is None:
             return None
         return next((r for r in [*data.rows, *data.hidden_rows] if r.key == key), None)
+
+
+def _natural_widths(
+    columns: tuple[str, ...], cells: list[tuple[Any, ...]], widths: list[int | None]
+) -> list[int]:
+    """Each column's content width: its fixed width, else its widest cell."""
+    return [
+        (
+            fixed
+            if fixed is not None
+            else max(
+                [len(label), *(_cell_len(c[index]) for c in cells if len(c) > index)]
+            )
+        )
+        for index, (label, fixed) in enumerate(zip(columns, widths, strict=True))
+    ]
+
+
+def _cell_len(cell: Any) -> int:
+    return cell.cell_len if isinstance(cell, Text) else len(str(cell))
+
+
+def _crop(cell: Any, width: int) -> Any:
+    """``cell`` cut to ``width`` cells with "…" (a copy; styles kept)."""
+    if _cell_len(cell) <= width:
+        return cell
+    text = cell.copy() if isinstance(cell, Text) else Text(str(cell))
+    text.truncate(width, overflow="ellipsis")
+    return text
+
+
+def _with_group_rows(rows: list[Row]) -> list[Row]:
+    """``rows`` with a sub-header row before each group (``Row.group``)."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row.group and row.inspectable:
+            counts[row.group] = counts.get(row.group, 0) + 1
+    if not counts:
+        return rows
+    c = _c()
+    out: list[Row] = []
+    current: str | None = None
+    for row in rows:
+        if row.group and row.group != current:
+            label = Text(row.group.upper(), style=f"bold {c.muted}")
+            if row.group == "dangerous":
+                label.stylize(f"bold {c.warn}")
+            label.append(f"  {counts.get(row.group, 0)}", style=c.dim)
+            width = len(row.cells)
+            out.append(
+                Row(
+                    key=f"{GROUP_PREFIX}{row.group}",
+                    cells=(label, *(_t("") for _ in range(width - 1))),
+                    compact=(label, *(_t("") for _ in range(2))),
+                    inspectable=False,
+                )
+            )
+        current = row.group or current
+        out.append(row)
+    return out
+
+
+def _stripe_indexes(rows: list[Row]) -> list[int]:
+    """Each row's index within its group (zebra parity); -1 for group rows."""
+    out: list[int] = []
+    index = 0
+    for row in rows:
+        if row.key.startswith(GROUP_PREFIX):
+            out.append(-1)
+            index = 0
+        else:
+            out.append(index)
+            index += 1
+    return out
 
 
 class AppLensSections(Vertical):

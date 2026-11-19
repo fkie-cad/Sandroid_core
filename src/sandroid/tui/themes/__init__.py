@@ -41,21 +41,25 @@ PARENT_DIR = THEMES_DIR.parent
 #   bg                 lens background: section tables, spotlight scroll area
 #   panel              panel background: spotlight header line behind the scroll
 #   text               primary text: section cells without their own color
-#   label              row-label text: key column of key/value rows (identity...)
+#   label              row-label text: the right-aligned key column of key/value
+#                      rows (identity...) and of the spotlight status rows
 #   dim                dim text: placeholders, "none", secondary cell values
 #   muted              muted text: Inspector subtitle, tab strip, headings
-#   title              section titles + spotlight row headings ("App", "Bypass")
+#   title              section titles on the header bands
 #   accent             accent: spotlight header line, active Inspector tab
 #   accent_text        text drawn on ``accent`` (active Inspector tab)
 #   ok / warn / bad    status colors (granted / dangerous / denied ...)
-#   rule               section separator line (top border of each section)
-#   rule_focus         top border of the focused section
+#   rule               spare (the section separator line before header bands)
+#   rule_focus         spare (the focused section's line before header bands)
 #   header             table column header text
 #   cursor             row cursor background, section not focused
 #   cursor_focus       row cursor background, section focused
 #   action_bg/_text    spotlight action row ("Start  R restart ...")
 #   action_hover_bg/_text   an action cell under the mouse
 #   input_bg/_focus_bg/_text  the row filter input ("/")
+#   band               section header band (top border of each section)
+#   band_focus         header band of the focused section
+#   stripe             zebra stripe of the longer tables (permissions, ...)
 #
 # Add a theme: give its ``Theme(...)`` a ``lens=LensPalette(...)``; it is
 # registered automatically (``THEMES``). Retune: change the value here.
@@ -94,6 +98,9 @@ class LensPalette:
     input_bg: str
     input_focus_bg: str
     input_text: str
+    band: str
+    band_focus: str
+    stripe: str
 
     def css_variables(self) -> dict[str, str]:
         """The tokens as Textual CSS variables (``{"lens-bg": "#050811", ...}``)."""
@@ -105,11 +112,13 @@ class LensPalette:
 
 # Midnight Cyan: the exact colors the lens hardcoded before tokens existed
 # (``text`` is textual-dark's ``$foreground``, which the tables inherited).
+# Since the header bands: ``label`` is lighter (a readable key column) and
+# ``band`` / ``band_focus`` / ``stripe`` are new.
 DEFAULT_LENS = LensPalette(
     bg="#050811",
     panel="#080c18",
     text="#e0e0e0",
-    label="#5b6479",
+    label="#8796b8",
     dim="#5b6479",
     muted="#8f9bb3",
     title="#7dd3fc",
@@ -130,6 +139,9 @@ DEFAULT_LENS = LensPalette(
     input_bg="#0b1628",
     input_focus_bg="#11203a",
     input_text="#e5e9f0",
+    band="#0f1c33",
+    band_focus="#173560",
+    stripe="#0a1121",
 )
 
 
@@ -300,6 +312,9 @@ DARK_THEME = Theme(
         input_bg="#1E1E1E",
         input_focus_bg="#2A2A2A",
         input_text="#E0E0E0",
+        band="#1A1A1A",
+        band_focus="#2E2540",
+        stripe="#111111",
     ),
 )
 
@@ -360,6 +375,9 @@ LIGHT_THEME = Theme(
         input_bg="#F5F5F5",
         input_focus_bg="#E3F2FD",
         input_text="#212121",
+        band="#EDF2F8",
+        band_focus="#D3E5FA",
+        stripe="#F6F8FB",
     ),
 )
 
@@ -420,6 +438,9 @@ HIGH_CONTRAST_THEME = Theme(
         input_bg="#1A1A1A",
         input_focus_bg="#333333",
         input_text="#FFFFFF",
+        band="#1A1A1A",
+        band_focus="#00006E",
+        stripe="#0E0E0E",
     ),
 )
 
@@ -479,6 +500,9 @@ CYBERPUNK_THEME = Theme(
         input_bg="#1A0A2E",
         input_focus_bg="#2A1040",
         input_text="#F0F0F0",
+        band="#1E0B3A",
+        band_focus="#3A1660",
+        stripe="#130630",
     ),
 )
 
@@ -538,6 +562,9 @@ NORD_THEME = Theme(
         input_bg="#3B4252",
         input_focus_bg="#434C5E",
         input_text="#ECEFF4",
+        band="#3B4252",
+        band_focus="#4C566A",
+        stripe="#323845",
     ),
 )
 
@@ -597,6 +624,9 @@ DRACULA_THEME = Theme(
         input_bg="#343746",
         input_focus_bg="#44475A",
         input_text="#F8F8F2",
+        band="#323444",
+        band_focus="#44475A",
+        stripe="#2C2E3B",
     ),
 )
 
@@ -658,6 +688,9 @@ SOLARIZED_THEME = Theme(
         input_bg="#073642",
         input_focus_bg="#174E5C",
         input_text="#93A1A1",
+        band="#063440",
+        band_focus="#0E4A58",
+        stripe="#03303B",
     ),
 )
 
