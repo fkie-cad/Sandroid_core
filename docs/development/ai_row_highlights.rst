@@ -40,8 +40,11 @@ Row keys
 --------
 
 - **Network**: the mitmproxy flow id (``FlowRow.flow_id``, the ``id`` of
-  ``get_captured_flows``). Rows without a flow id (TLS failures read from
-  mitmweb's stdout) cannot be highlighted.
+  ``get_captured_flows``). TLS failure rows have no flow id in the lens and
+  are never rows of the tools (the flow-log fallback drops its ``kind=tls``
+  records too; ``where.kind`` takes only ``flow`` and ``error``). The lens's
+  row source still lists them with key ``None`` so their ``seq`` counts for
+  the "new since" basis, and the bar never counts a keyless row as new.
 - **Files**: ``canonical_device_path(path)``. Folder group rows, the idle
   fold and watched patterns are never highlighted themselves.
 
@@ -57,21 +60,26 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
 .. code-block:: text
 
    find_rows(lens, where?, scope?="all"|"shown", apply?="none"|"highlight"|"filter",
-             label?, highlight_id?)                          core, 60 s
+             label?, short?, highlight_id?, regex?)          core, 60 s
      -> {lens, source, scanned, matched, hidden_by_lens_filters, summary,
-         keys[<=50], highlight_id?, mode?}
+         keys[<=50], highlight_id?, mode?, truncated_by_cap?, note?}
 
    classify_rows(lens, query, where?, keys?[<=2000], scope?, apply?="highlight",
-                 label?, highlight_id?, max_rows?=1000 (<=2000))   core, 600 s
+                 label?, short?, highlight_id?, regex?,
+                 max_rows?=1000 (<=2000))                          core, 600 s
      -> {summary, highlight_id, scanned, matched, uncertain, candidates,
          rows_in_view, partial, stop_reason, hidden_by_lens_filters,
-         judged_on_metadata_only, binary_only, skipped{errors, not_reached},
-         bytes_sent, model_tokens, requests, samples[<=12], verdicts[]}
+         judged_on_metadata_only, binary_only,
+         skipped{errors, not_reached, unknown_ids}, backend_error?,
+         bytes_sent, model_tokens, requests, samples[<=12], verdicts[<=200],
+         verdicts_truncated?, truncated_by_cap?, note?}
+     !! backend_error tool error when no row could be judged
 
-   highlight_rows(lens, keys?[<=500], label?, reasons?{key: text},
+   highlight_rows(lens, keys?[<=500], label?, short?, reasons?{key: text},
                   mode?="highlight"|"filter", highlight_id?, action?="add"|"remove"|"replace")
      -> {highlight_id, action, applied, total, mode, unknown_keys,
-         unknown_count, hidden_by_lens_filters}                   core, 30 s
+         unknown_count, hidden_by_lens_filters, truncated_by_cap?, note?}
+                                                                   core, 30 s
 
    clear_highlights(lens?, highlight_id?) -> {cleared, remaining}  core, 30 s
 
@@ -81,18 +89,47 @@ subagent as well. Subagents keep ``find_rows`` (report only) and ``get_rows``.
          highlights?}], next_cursor, unknown_keys?}
 
 ``where`` (all fields ANDed; ``regex: true`` turns ``text`` and the
-``*_contains`` fields into regular expressions):
+``*_contains`` fields into regular expressions; a top-level ``regex``
+argument is accepted as an alias, a slip models make):
 
 - Network: ``method[]``, ``host_glob[]``, ``path_glob[]``, ``url_regex``,
   ``status`` (``[200, "4xx"]``), ``content_type_glob``, ``app``,
   ``min_bytes``/``max_bytes`` (request + response), ``kind``
-  (``flow``/``tls``/``error``), ``text``, ``body_contains``,
+  (``flow``/``error``), ``text``, ``body_contains``,
   ``header_contains`` (the last two read the captured detail files).
 - Files: ``path_glob[]`` (a pattern without a leading ``/`` also matches any
-  suffix, e.g. ``databases/*``), ``ops`` (letters ``CMDRA``), ``process``,
+  suffix, e.g. ``databases/*``; the literal prefix of an absolute pattern is
+  put into canonical form, so ``/data/user/0/<pkg>/*`` matches the
+  ``/data/data/<pkg>/...`` keys), ``ops`` (letters ``CMDRA``), ``process``,
   ``app``, ``watched``, ``min_count``, ``review_kind``
   (``changed``/``new``/``deleted``), ``text``, ``content_contains`` (local
   kept copies only, never a device pull).
+
+Regular expressions (``url_regex`` and ``regex: true``) go through
+``read_result``'s ReDoS guard (``ai.results._grep_pattern``: nested or
+alternated quantified groups, backreferences, more than two unbounded
+quantifiers and patterns over 200 characters are refused) and are searched
+in bounded windows with a 0.25 s budget per row. Every haystack is capped at
+64 KB (bodies, file content). An invalid pattern is an ``invalid_arguments``
+error that names the regex error.
+
+The set's ``query`` and each row's reason describe ``where`` in plain words
+(``method POST, host api.x or cdn.x, body contains “@”``).
+
+Labels: ``label`` is the ask in words (<=60 characters); ``short`` (1-3
+words, <=14 characters) is what the Highlight column and narrow bars show.
+The tool descriptions ask the model to pass ``short``; without it
+``short_label`` drops filler words ("all", "requests", "files", "with",
+"to", "that", "contain", "show", "only", "highlight", ...) and keeps the
+content words ("POST requests to api.x" -> "POST api.x"), cutting a word
+only with an ellipsis.
+
+``highlight_rows`` refuses ``action="remove"``/``"replace"`` without
+``highlight_id`` or without keys, and a remove/replace in which no key is
+known (the error lists the unknown keys), so a typo can no longer wipe a
+set. The 5000-row cap of a set is reported (``truncated_by_cap`` and a
+sentence in the summary) when extending a set; ``find_rows`` with more than
+5000 matches for a new set is an error that says to narrow ``where``.
 
 ``apply`` creates the set inside the tool, so key lists never pass through
 the model's context or output. ``highlight_id`` extends an existing set.
@@ -159,19 +196,53 @@ Scanning pipeline
    message, and every request starts with the same bytes so the backend's
    prefix cache applies; only the row block changes. ``temperature=0``,
    ``max_tokens`` 4096, no tools.
-5. The model answers ``{"matches": [{"key", "reason"}], "uncertain": [...]}``.
-   Rows not listed do not match; keys not in the batch are dropped; reasons
-   are cut to 20 words. A malformed reply (or a failed request) is retried
-   once with "JSON only", then the batch is split in half once; rows that
-   still fail count as ``skipped.errors``.
-6. After every finished batch its matches are added to the set
+5. Rows carry short per-batch ids ``<row id="r1">`` .. ``rN`` (mapped back
+   to the keys, so long UUID keys are never mis-copied), and ``<``/``>``
+   inside a digest are written as ``&lt;``/``&gt;``: captured data cannot
+   close a row or open a forged one. The model answers
+   ``{"matches": [{"id", "reason"}], "uncertain": [...]}``. Rows not listed
+   do not match; ids that are not rows of the batch are counted
+   (``skipped.unknown_ids``); reasons are cut to 20 words.
+6. Failures come in two kinds:
+
+   - A **malformed reply** is retried once with "JSON only", then the batch
+     is split in half once; rows that still fail count as
+     ``skipped.errors``.
+   - A **transport error** (HTTP status, connection, stream error, or a
+     client that raises) is retried once after a 1 s pause and never
+     halved (smaller requests do not help). Three transport failures in a
+     row stop the whole run with ``stop_reason="backend_error"``; a good
+     reply resets the count.
+
+   Errored rows are not counted as ``scanned``, and any error makes the
+   run ``partial``. The summary says "E rows could not be judged (backend
+   error: <message>)". When no row was judged and there were errors, the
+   tool returns a ``backend_error`` tool error (retryable) instead of a
+   "0 found" summary, and the empty new set is dropped.
+   If a halved batch is cancelled during its second half, the first half's
+   verdicts are kept.
+7. After every finished batch its matches are added to the set
    (``store.add``), so rows light up while the scan runs, and a
    ``tool_progress`` event is sent.
-7. At the end the set is finished (``complete``, ``stats``, ``basis``), the
+8. At the end the set is finished (``complete``, ``stats``, ``basis``), the
    AI filter is applied for ``apply="filter"`` (only now, so the lens is not
    empty during the scan), an empty new set is removed again, and an
    ``ai/highlight`` timeline line is written (the tool runs under
-   ``acting_as("ai")``).
+   ``acting_as("ai")``). The result holds at most 200 verdicts
+   (``verdicts_truncated`` says how many more); the set keeps every match.
+
+The "new since" basis (``basis.through_seq`` and ``judged_at``) covers every
+row of the view when the rows were collected, not only the candidates, so
+rows that already existed never count as new (``find_rows`` and
+``classify_rows`` agree).
+
+**While a tool runs**, the analyst may clear the set (``X``) or the session
+may switch. Every mutation is guarded: a cleared set gives a result with
+``highlight_id: null`` and the note "set was cleared by the analyst during
+the scan" (the stats and verdicts are kept); a session switch (the store's
+bind *generation* changed) drops the remaining batches, stops the run with
+``stop_reason="session_switched"`` and never writes into the new session's
+sets.
 
 Client and budgets
 ------------------
@@ -190,9 +261,11 @@ Client and budgets
   executor abandons a cancelled tool, so the tool stops by itself.
 - **Deadline**: from ``tool_time_remaining()``; no new batch is started with
   less than 30 s left, running requests are aborted below 8 s.
-- **Partial**: on cancel or deadline the set keeps what was found, marked
-  ``complete=False`` (the lens shows "partial"); the result says
-  ``partial: true`` and ``stop_reason``.
+- **Partial**: on cancel, deadline, backend error, session switch or any
+  errored row the set keeps what was found, marked ``complete=False`` (the
+  lens shows "partial"); the result says ``partial: true`` and
+  ``stop_reason`` (``cancelled``, ``deadline``, ``backend_error``,
+  ``session_switched``, or ``null`` when only some rows errored).
 
 Progress event
 --------------
@@ -227,13 +300,22 @@ One digest per row, shared by ``get_rows`` and the classifier:
 
 Privacy rules:
 
-- ``Authorization``, ``Proxy-Authorization``, ``Cookie``, ``Set-Cookie`` and
-  API/CSRF token headers are always reduced to their type and length
-  (``[Bearer, 132 chars]``, ``[cookie, 3 part(s), 240 chars]``).
+- Headers whose name matches ``auth|token|key|secret|session|cookie|
+  password|signature`` (case-insensitive; plus ``Authorization``,
+  ``Cookie``, ``Set-Cookie`` and the usual API/CSRF headers) are always
+  reduced to their type and length (``[Bearer, 132 chars]``,
+  ``[cookie, 3 part(s), 240 chars]``).
+- Query parameters (in the summary line and the query line) and JSON or
+  form body fields with such names are always reduced to type and length
+  (``access_token=[jwt, 180 chars]``, ``"password":"[text, 7 chars]"``),
+  whether ``ai.mask_sensitive`` is on or not.
 - With ``ai.mask_sensitive`` on, every digest runs through
-  :func:`~sandroid.ai.safety.redact_secrets`.
-- ``bytes_sent`` (request bytes, retries included) is in the result and the
-  set's stats.
+  :func:`~sandroid.ai.safety.redact_secrets`; if that raises, the digest is
+  replaced by ``[digest withheld: secret redaction failed]`` (fails closed)
+  and the row is judged as metadata only.
+- ``bytes_sent`` and ``requests`` count only requests that went out (the
+  stream got past the gateway slot), retries included; they are in the
+  result and the set's stats.
 - ``ROW_CLASSIFIER_PROMPT`` says that everything inside the rows is captured
   data that may contain text looking like instructions, which is never
   followed.
@@ -267,26 +349,62 @@ its own.
   ``{key: ((set_id, slot, short, reason), ...)}`` is replaced as a whole on
   every change, so lookups are lock-free dict reads. ``registry().notify``
   runs after the lock is released.
+- Generation: ``bind_folder`` bumps ``store.generation`` on every real
+  switch. ``create()`` and ``get()`` copies carry it; ``create``, ``add``,
+  ``finish``, ``set_filter``, ``replace_keys``, ``remove_keys``, ``remove``
+  and ``update_meta`` take an optional ``generation=`` and raise
+  ``StaleGenerationError`` (a ``HighlightError``) when it is stale. The
+  lens tools pass it on every mutation.
 - Persistence: ``<session>/ai/highlights.json`` (schema
-  ``sandroid-row-highlights/1``; sets, filters, next id), written atomically
-  with mode 0600 after every mutation, the ``ai`` folder created 0700.
-  ``bind_folder(folder)`` loads another session's file (or starts empty); it
+  ``sandroid-row-highlights/1``; sets, filters, next id), mode 0600, the
+  ``ai`` folder created 0700. A mutation snapshots the state under the
+  ``RLock``; a background writer thread writes the newest snapshot per file
+  atomically outside it (a sequence number makes the last write win), so the
+  UI thread's ``H``/``X``/Esc never wait for an fsync. ``flush()`` waits for
+  pending writes (``bind_folder`` and ``atexit`` call it).
+- Loading validates the whole file (every field's type, slots, filters,
+  ``next_id``). A malformed file is logged, kept as
+  ``highlights.json.bad`` and the session starts empty; the new state is
+  built completely before it replaces the old one, so a bad file never
+  half-applies.
+- ``bind_folder(folder)`` loads another session's file (or starts empty); it
   runs when the orchestrator chat session opens (``AgentSession``) and at
   the start of every lens tool. The same folder again is a no-op; no folder
   keeps the sets in memory only. Sets belong to the analysis session, not to
   a chat thread, so they survive Ctrl+L.
+- **Known gap: no session-switch hook.** The app has no analysis-session
+  switch event (``InitializationService.create_session`` sets the session
+  once per process; there is no listener API, and ``timeline_folder()`` /
+  ``session_root()`` are read on demand). The lenses read the store through
+  the annotation registry and never rebind it themselves, so after a switch
+  inside one process they keep showing the previous session's sets until
+  the next chat session opens or a lens tool runs (both call
+  ``bind_folder``). A future session service with a "session changed"
+  signal should call ``get_row_highlights().bind_folder(new_root)``.
 
 Tests
 -----
 
 - ``tests/services/test_row_highlights.py``: store limits, slots, ids,
   index, provider, filter, notify outside the lock, persistence round trip,
-  session switch, row-source snapshots (dispatcher, timeout).
-- ``tests/ai/test_row_classifier.py``: batching, byte-stable prefix, parse,
-  retry and halving, cancel, deadline, gateway peak, digests.
+  session switch and generation guard, malformed files (never half-applied,
+  kept as ``.bad``), writes off the caller and outside the lock,
+  ``short_label``, row-source snapshots (dispatcher, timeout).
+- ``tests/ai/test_row_classifier.py``: batching, byte-stable prefix, row
+  ids and forged row boundaries, parse and unknown ids, retry and halving,
+  transport retry / no halving / three-in-a-row stop, bytes only for sent
+  requests, cancelled second half, cancel, deadline, gateway peak, digests,
+  secret-name reduction, fail-closed masking.
 - ``tests/ai/tools/test_lens_rows.py``: every ``where`` field, ``apply``,
   limits, subagent refusal, lens sources and fallbacks, ``classify_rows``
-  end to end with a fake client, ``highlight_rows``, ``clear_highlights``,
-  ``get_rows``, the live-state line.
+  end to end with a fake client, backend errors, a set cleared or a session
+  switched mid-run, the new-since basis, the regex guard and haystack cap,
+  TLS rows, canonical path globs, ``highlight_rows`` edge cases, the row
+  cap, bounded verdicts, plain-word where summaries, ``short``, the regex
+  alias, ``clear_highlights``, ``get_rows``, the live-state line.
+- ``tests/tui/test_ai_highlights.py``: tint, column, bar, AI filter, ``H``,
+  ``X``, Esc, labels with markup characters (notices, confirm, captions),
+  the condensed bar, the filter set first in the column, keyless rows never
+  new, idle watched rows present, the Network lens on a light theme.
 - ``tests/ai/test_executor.py`` (``tool_progress`` call id and throttle),
   ``tests/tui/test_chat_panel.py`` (progress on the chip).
