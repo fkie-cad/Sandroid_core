@@ -574,7 +574,7 @@ def test_read_only_tool_runs_and_approve_is_never_called(
     assert approve_calls == []
 
 
-def test_ask_policy_tool_refuses_on_decline_and_persists_never(
+def test_ask_policy_tool_refuses_on_decline_without_persisting_never(
     test_registry, permission_store
 ):
     func_calls = []
@@ -608,7 +608,8 @@ def test_ask_policy_tool_refuses_on_decline_and_persists_never(
     tool_message = next(m for m in messages if m.get("role") == "tool")
     payload = json.loads(tool_message["content"])
     assert "error" in payload
-    assert permission_store.is_never("reversible_tool")
+    # A decline is call-scoped (design 3.8): nothing is persisted.
+    assert not permission_store.is_never("reversible_tool")
     assert not permission_store.is_allowed("reversible_tool")
 
 
