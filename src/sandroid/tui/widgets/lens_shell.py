@@ -756,7 +756,7 @@ class LensBar(Horizontal):
         text.append(f" {spec.label}")
         badge = self._badges.get(spec.id)
         if badge:
-            text.append(f" {badge}", style="bold #fbbf24")
+            text.append(f" {badge}", style=f"bold {lens_palette().warn}")
         return text
 
     def _repaint(self, lens_id: str) -> None:

@@ -965,6 +965,45 @@ def test_dense_dark_themes_meet_their_contrast_floors():
         assert ratio(p.accent_text, p.accent) >= 4.5, name
 
 
+async def test_light_themes_recolor_the_shell_chrome_and_status_glyphs(fake):
+    """Paper / Daylight load (their .tcss parses), re-color the header and the
+    status strip's "running"-style colors, and the default comes back intact.
+    """
+    from sandroid.tui.themes import (
+        DEFAULT_THEME,
+        FIXED_COLORS,
+        THEME_ORDER,
+        THEMES,
+        fixed_color,
+        get_theme_css_path,
+    )
+
+    for name in ("paper", "daylight"):
+        assert name in THEME_ORDER
+        assert get_theme_css_path(name).name == f"{name}.tcss"
+        assert set(THEMES[name].status_colors) <= set(FIXED_COLORS)
+
+    app = _app()
+    async with app.run_test(size=(160, 45)) as pilot:
+        ms = await _boot(app, pilot)
+        header = ms.query_one("#shell-header")
+        for name in ("paper", "daylight"):
+            theme = THEMES[name]
+            app._apply_theme(theme, get_theme_css_path(name))
+            await _settle(pilot)
+            assert app.theme == f"sandroid-{name}"
+            assert fixed_color("running") == theme.status_colors["running"]
+            assert app.get_css_variables()["footer-key-foreground"] == (
+                theme.textual_variables["footer-key-foreground"]
+            )
+            assert header.styles.background.hex.upper() != "#0B1628"
+
+        app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
+        await _settle(pilot)
+        assert fixed_color("running") == FIXED_COLORS["running"]
+        assert header.styles.background.hex.lower() == "#0b1628"
+
+
 async def test_trackers_re_read_the_cache_when_static_analysis_ends(fake):
     """'press a' must go away once ``a`` recorded an Insight result."""
     from sandroid.core.events.events import AnalysisCompleted

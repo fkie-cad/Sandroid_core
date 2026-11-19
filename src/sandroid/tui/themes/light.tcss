@@ -91,9 +91,33 @@ ActivityLog {
     background: #FFFFFF;
 }
 
-/* Header scope pill (LIVE) */
+/* Header scope pill (LIVE) and the other header pieces: their
+   DEFAULT_CSS (lens_shell.py ShellHeader) colors are for a dark band. */
 #scope-pill.-live {
     color: #388E3C;
+}
+
+ShellHeader #scope-pill.-review {
+    color: #FFFFFF;
+    background: #B45309;
+}
+
+ShellHeader #scope-pill.-rec {
+    color: #C62828;
+}
+
+ShellHeader #scope-pill.-blind,
+ShellHeader #timeline-banner {
+    color: #C2410C;
+}
+
+ShellHeader #device-clock,
+ShellHeader #label-note {
+    color: #B45309;
+}
+
+ShellHeader #tracking-dot {
+    color: #2E7D32;
 }
 
 /* Help screen overlay */

@@ -65,8 +65,8 @@ def theme_list():
 def theme_set(theme_name: str):
     """Set the TUI theme.
 
-    THEME_NAME: One of: default, dark, light, high_contrast, cyberpunk, nord,
-    dracula, solarized, graphite, deep_sea, evergreen
+    THEME_NAME: One of: default, dark, light, paper, daylight, high_contrast,
+    cyberpunk, nord, dracula, solarized, graphite, deep_sea, evergreen
     """
     theme_name = theme_name.lower()
     if theme_name not in VALID_THEME_IDS:

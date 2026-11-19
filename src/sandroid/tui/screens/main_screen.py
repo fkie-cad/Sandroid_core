@@ -1382,8 +1382,11 @@ class MainScreen(Screen):
         try:
             from rich.markup import escape
 
+            from sandroid.tui.themes import fixed_color
+
+            color = fixed_color("notice")
             self.query_one("#activity-log", ActivityLog).write(
-                f"[bold #facc15]── {icon}{escape(text)} · {when:%H:%M:%S} ──[/]"
+                f"[bold {color}]── {icon}{escape(text)} · {when:%H:%M:%S} ──[/]"
             )
         except Exception:
             pass

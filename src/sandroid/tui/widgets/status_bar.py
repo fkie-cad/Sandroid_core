@@ -17,7 +17,7 @@ from sandroid.services import (
     get_task_service,
     get_ui_service,
 )
-from sandroid.tui.themes import FIXED_COLORS
+from sandroid.tui.themes import fixed_color
 
 
 class StatusBar(Static):
@@ -224,6 +224,7 @@ class StatusBar(Static):
             "error": "#fb7185",
             "warning": "#facc15",
             "text_muted": "#8f9bb3",
+            "header_muted": "#8f9bb3",
             ViewMode.FORENSIC: "#2dd4bf",
             ViewMode.MALWARE: "#fb7185",
             ViewMode.SECURITY: "#facc15",
@@ -237,6 +238,7 @@ class StatusBar(Static):
                 colors["error"] = theme.error
                 colors["warning"] = theme.warning
                 colors["text_muted"] = theme.text_muted
+                colors["header_muted"] = theme.header_muted or theme.text_muted
                 colors[ViewMode.FORENSIC] = theme.forensic_color
                 colors[ViewMode.MALWARE] = theme.malware_color
                 colors[ViewMode.SECURITY] = theme.security_color
@@ -248,7 +250,7 @@ class StatusBar(Static):
     def breadcrumb_markup(self) -> str:
         """Device ▸ app breadcrumb for the shell header (markup, no I/O)."""
         colors = self._get_theme_colors()
-        muted = colors["text_muted"]
+        muted = colors["header_muted"]
         parts = []
         if self.active_device:
             device = f"{self.device_type} {self.active_device}".strip()
@@ -276,19 +278,20 @@ class StatusBar(Static):
         muted = colors["text_muted"]
         primary = colors["primary"]
         warn = colors["warning"]
-        run = FIXED_COLORS["running"]
-        stop = FIXED_COLORS["stopped"]
+        run = fixed_color("running")
+        stop = fixed_color("stopped")
+        paused = fixed_color("paused")
         segs: list[str] = []
 
         # App state (package itself is in the header breadcrumb).
         if self.spotlight_app and self.spotlight_app != "None":
             mode = "spawn" if self.spawn_mode else "attach"
             if self.spotlight_pid and self.spotlight_paused:
-                state = f"[#fbbf24]◐ paused[/] [{muted}]pid {self.spotlight_pid}[/]"
+                state = f"[{paused}]◐ paused[/] [{muted}]pid {self.spotlight_pid}[/]"
             elif self.spotlight_pid:
                 state = f"[{run}]● running[/] [{muted}]pid {self.spotlight_pid}[/]"
             elif self.spotlight_restarting:
-                state = "[#fbbf24]◌ restarting…[/]"
+                state = f"[{paused}]◌ restarting…[/]"
             else:
                 state = f"[{stop}]○ not running[/]"
             segs.append(f"[{muted}]App[/] {state} [{muted}]· {mode}[/]")
@@ -300,7 +303,7 @@ class StatusBar(Static):
             frida = f"[{stop}]✕ connection lost[/] [{muted}]· ⇧R restarts[/]"
         elif self.frida_status == "Running":
             if self._frida_version_mismatch:
-                frida = "[#facc15]● running ⚠ version mismatch[/]"
+                frida = f"[{fixed_color('notice')}]● running ⚠ version mismatch[/]"
             else:
                 frida = f"[{run}]● running[/]"
         elif self.frida_status == "Checking...":
@@ -359,7 +362,7 @@ class StatusBar(Static):
             segs.append(f"[{stop} bold]● RECORDING[/]")
         elif self.replay_active:
             phase = f" · {escape(self.replay_phase)}" if self.replay_phase else ""
-            segs.append(f"[{FIXED_COLORS['spawn_mode']} bold]● REPLAYING{phase}[/]")
+            segs.append(f"[{fixed_color('spawn_mode')} bold]● REPLAYING{phase}[/]")
 
         if self.show_theme_indicator:
             segs.append(f"[{muted}]Theme[/] [{primary}]{self.current_theme}[/]")
@@ -382,8 +385,8 @@ class StatusBar(Static):
         """Render the status strip: segments packed into at most two rows.
 
         Segments are never split across rows; whatever does not fit in
-        ``MAX_ROWS`` is dropped (lowest priority last). FIXED_COLORS drive the
-        status glyphs so they read identically across themes.
+        ``MAX_ROWS`` is dropped (lowest priority last). ``fixed_color`` drives the
+        status glyphs so they read the same across themes.
         """
         width = self.content_size.width or 160
         gap = "    "
@@ -538,18 +541,18 @@ class StatusBar(Static):
             if running_tasks:
                 # Build display string with task names and PIDs
                 # Use warning color for PIDs (consistent with filenames in menus)
-                warn_color = FIXED_COLORS.get("warning_status", "#facc15")
+                warn_color = fixed_color("warning_status")
                 task_parts = []
                 for task_name in running_tasks:
                     task = get_task_service().get_task(task_name)
                     if task:
                         if task.target_pid:
                             task_parts.append(
-                                f"[{FIXED_COLORS['running']}]●[/] {task.display_name} ([{warn_color}]{task.target_pid}[/])"
+                                f"[{fixed_color('running')}]●[/] {task.display_name} ([{warn_color}]{task.target_pid}[/])"
                             )
                         else:
                             task_parts.append(
-                                f"[{FIXED_COLORS['running']}]●[/] {task.display_name}"
+                                f"[{fixed_color('running')}]●[/] {task.display_name}"
                             )
                 self.background_tasks_display = " ".join(task_parts)
             else:

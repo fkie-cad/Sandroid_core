@@ -1,7 +1,8 @@
 """Theme definitions and CSS files for Sandroid TUI.
 
-This module provides 11 color themes for the TUI interface:
+This module provides 13 color themes for the TUI interface:
 - 4 standard themes: default, dark, light, high_contrast
+- 2 tuned light themes: paper (warm, print-like), daylight (crisp, projector)
 - 4 new themes: cyberpunk, nord, dracula, solarized
 - 3 dark themes tuned for reading dense tables: graphite, deep_sea, evergreen
 
@@ -67,6 +68,10 @@ PARENT_DIR = THEMES_DIR.parent
 #
 # Add a theme: give its ``Theme(...)`` a ``lens=LensPalette(...)``; it is
 # registered automatically (``THEMES``). Retune: change the value here.
+# A light theme also needs ``status_colors`` (dark shades of FIXED_COLORS),
+# ``textual_variables`` (footer/scrollbar/cursor of Textual's widgets), a
+# ``<name>.tcss`` whose last section re-colors the shell chrome (see
+# paper.tcss), and its id in config/schema.py + config/cli/helpers.py.
 # New token: add a field to ``LensPalette`` AND a value in every palette
 # below, then use ``$lens-<name>`` in a DEFAULT_CSS or ``lens_palette().<name>``
 # in Python. An App hosting lens widgets must provide the variables:
@@ -205,20 +210,30 @@ class Theme:
     waiting_color: str = "#fbbf24"  # "waiting on you" amber (distinct from warning)
     muted_status_color: str = "#5b6479"  # Idle/muted chat status text
 
+    # Muted text in the shell header's breadcrumb ("no device", "A14 · root");
+    # None = text_muted. Set when the theme's header band is not the
+    # background text_muted was picked for (daylight: dark bar, light page).
+    header_muted: str | None = None
+
     # App lens color tokens (see LensPalette above).
     lens: LensPalette = field(default_factory=lambda: DEFAULT_LENS)
 
-    # Overrides of Textual's own design variables (``footer-key-foreground``,
-    # ``block-cursor-foreground``, ``scrollbar``, ...) on top of the
-    # textual-dark/-light base; empty = the base values (see
-    # :func:`build_textual_theme`).
+    # Replacements for FIXED_COLORS entries (see :func:`fixed_color`). Empty
+    # for the dark themes; a light theme swaps the bright "running" green and
+    # friends, which are unreadable on a white background.
+    status_colors: dict[str, str] = field(default_factory=dict)
+
+    # Extra Textual CSS variables for this theme's registered Textual theme
+    # (see :func:`build_textual_theme`): footer, scrollbar and cursor colors of
+    # Textual's own widgets, which the .tcss file cannot reach.
     textual_variables: dict[str, str] = field(default_factory=dict)
 
 
 # ========== Fixed Semantic Colors ==========
-# These colors do NOT change with theme - they provide consistent status recognition
-# across all themes, like traffic lights (green=go, red=stop).
-# This ensures users can instantly recognize states regardless of active theme.
+# These colors do NOT change between the dark themes - they provide consistent
+# status recognition, like traffic lights (green=go, red=stop). A light theme
+# keeps the same hues but darker shades (``Theme.status_colors``): read them
+# with :func:`fixed_color`, never ``FIXED_COLORS[...]`` directly.
 
 FIXED_COLORS = {
     # Status indicators - universally recognizable
@@ -231,6 +246,9 @@ FIXED_COLORS = {
     # ATTACH = green (connected/live - attached to running process)
     "spawn_mode": "#00ffff",  # Bright cyan - spawn mode
     "attach_mode": "#00ff00",  # Bright green - attach mode (same as running)
+    # Transitional states and notes
+    "paused": "#fbbf24",  # Amber - paused / restarting app
+    "notice": "#facc15",  # Yellow - version mismatch, label marks in the log
 }
 
 
@@ -391,6 +409,205 @@ LIGHT_THEME = Theme(
         band_focus="#D3E5FA",
         stripe="#F6F8FB",
     ),
+    status_colors={
+        "running": "#2E7D32",
+        "stopped": "#C62828",
+        "error": "#C62828",
+        "warning_status": "#B45309",
+        "spawn_mode": "#00838F",
+        "attach_mode": "#2E7D32",
+        "paused": "#B45309",
+        "notice": "#B45309",
+    },
+)
+
+# Paper: warm off-white, ink-like near-black text, one restrained petrol-blue
+# accent; quiet like a printed report. Contrast (WCAG) on the lens bg #FBF8F1:
+# text 16.0, label 6.0, dim/header 5.5, title 9.0, ok 6.2, warn 5.7, bad 6.6
+# (all >= 5.0 on the panel and the focused-section tint). Labels are a
+# petrol grey, not a lighter ink, so the key column reads as labels.
+PAPER_INK = "#1F1C17"
+PAPER_PETROL = "#1C5D7C"
+PAPER_OK = "#2D6A2F"
+PAPER_WARN = "#8F5600"
+PAPER_BAD = "#A3302A"
+
+PAPER_THEME = Theme(
+    name="paper",
+    display_name="Paper",
+    is_dark=False,
+    primary=PAPER_PETROL,  # petrol blue
+    secondary="#174A63",  # deep petrol
+    accent="#2A6F6B",  # deep teal
+    background="#F3EEE2",  # chrome: kraft paper
+    surface="#FBF8F1",  # lens: off-white sheet
+    error=PAPER_BAD,  # brick red
+    warning=PAPER_WARN,  # ochre (never yellow on paper)
+    success=PAPER_OK,  # forest green
+    text=PAPER_INK,  # warm ink
+    text_muted="#6B6459",  # pencil grey
+    key_color="#174A63",
+    border_color="#DCD3C0",
+    forensic_color=PAPER_OK,
+    malware_color=PAPER_BAD,
+    security_color=PAPER_WARN,
+    logo_color=PAPER_PETROL,
+    logo_text_color=PAPER_INK,
+    tool_color="#6A4A86",  # muted plum
+    user_highlight_background="#ECE5D6",
+    assistant_reply_color=PAPER_OK,
+    waiting_color="#9C4A00",  # burnt orange, distinct from the ochre warning
+    muted_status_color="#6B6459",
+    header_muted="#5F584D",  # on the kraft header bar (5.4:1)
+    lens=LensPalette(
+        bg="#FBF8F1",
+        panel="#F3EEE2",
+        text=PAPER_INK,
+        label="#3F6475",
+        dim="#6B6459",
+        muted="#5F584D",
+        title="#174A63",
+        accent=PAPER_PETROL,
+        accent_text="#FFFFFF",
+        ok=PAPER_OK,
+        warn=PAPER_WARN,
+        bad=PAPER_BAD,
+        rule="#D6CCB6",
+        rule_focus=PAPER_PETROL,
+        header="#6B6459",
+        cursor="#F2ECE0",
+        cursor_focus="#D3E2E9",
+        action_bg="#ECE5D6",
+        action_text="#3D382F",
+        action_hover_bg="#D3E2E9",
+        action_hover_text="#174A63",
+        input_bg="#F3EEE2",
+        input_focus_bg="#E4EDF1",
+        input_text=PAPER_INK,
+        band="#EEE7D7",
+        band_focus="#DDE8EB",
+        stripe="#F7F3EA",
+    ),
+    status_colors={
+        "running": PAPER_OK,
+        "stopped": PAPER_BAD,
+        "error": PAPER_BAD,
+        "warning_status": PAPER_WARN,
+        "spawn_mode": PAPER_PETROL,
+        "attach_mode": PAPER_OK,
+        "paused": PAPER_WARN,
+        "notice": PAPER_WARN,
+    },
+    textual_variables={
+        "footer-background": "#ECE5D6",
+        "footer-foreground": PAPER_INK,
+        "footer-description-foreground": "#3D382F",
+        "footer-key-foreground": PAPER_PETROL,
+        "scrollbar": "#C9BFAA",
+        "scrollbar-hover": "#A89C84",
+        "scrollbar-active": PAPER_PETROL,
+        "scrollbar-background": "#F3EEE2",
+        "scrollbar-background-hover": "#F3EEE2",
+        "scrollbar-background-active": "#F3EEE2",
+        "scrollbar-corner-color": "#F3EEE2",
+        "block-cursor-foreground": PAPER_INK,
+        "block-cursor-blurred-foreground": PAPER_INK,
+    },
+)
+
+# Daylight: crisp cool white, near-black text, one vivid indigo accent; built
+# for a bright office or a projector. Contrast (WCAG) on the lens bg #FFFFFF:
+# text 18.7, label 7.9, dim/header 5.9, title 10.9, ok 5.4, warn 5.6, bad 6.0
+# (all >= 4.9 on the panel and the focused-section tint). Header and footer
+# are deep indigo bars (daylight.tcss) that hold their weight on a projector.
+DAYLIGHT_INK = "#0A1222"
+DAYLIGHT_INDIGO = "#4338E0"
+DAYLIGHT_OK = "#0B7A3B"
+DAYLIGHT_WARN = "#A05300"
+DAYLIGHT_BAD = "#C21A30"
+
+DAYLIGHT_THEME = Theme(
+    name="daylight",
+    display_name="Daylight",
+    is_dark=False,
+    primary=DAYLIGHT_INDIGO,  # vivid indigo
+    secondary="#2B2A9E",  # deep indigo
+    accent="#0F766E",  # teal
+    background="#F2F5FA",  # chrome: cool light grey
+    surface="#FFFFFF",  # lens: white
+    error=DAYLIGHT_BAD,  # crimson
+    warning=DAYLIGHT_WARN,  # burnt amber (never yellow on white)
+    success=DAYLIGHT_OK,  # green
+    text=DAYLIGHT_INK,  # blue-black
+    text_muted="#5B6576",  # slate
+    key_color="#2B2A9E",
+    border_color="#D3DAE6",
+    forensic_color=DAYLIGHT_OK,
+    malware_color=DAYLIGHT_BAD,
+    security_color=DAYLIGHT_WARN,
+    logo_color=DAYLIGHT_INDIGO,
+    logo_text_color=DAYLIGHT_INK,
+    tool_color="#8A2BB8",  # violet
+    user_highlight_background="#E8ECFF",
+    assistant_reply_color=DAYLIGHT_OK,
+    waiting_color="#B84A00",  # orange, distinct from the amber warning
+    muted_status_color="#5B6576",
+    header_muted="#B9C2FF",  # on the deep indigo header bar (9.4:1)
+    lens=LensPalette(
+        bg="#FFFFFF",
+        panel="#F2F5FA",
+        text=DAYLIGHT_INK,
+        label="#3D4F86",
+        dim="#5B6576",
+        muted="#46557F",
+        title="#2B2A9E",
+        accent=DAYLIGHT_INDIGO,
+        accent_text="#FFFFFF",
+        ok=DAYLIGHT_OK,
+        warn=DAYLIGHT_WARN,
+        bad=DAYLIGHT_BAD,
+        rule="#D3DAE6",
+        rule_focus=DAYLIGHT_INDIGO,
+        header="#5B6576",
+        cursor="#F1F4F9",
+        cursor_focus="#D3D8FF",
+        action_bg="#E8EDF7",
+        action_text="#1F2A44",
+        action_hover_bg="#D3D8FF",
+        action_hover_text="#2B2A9E",
+        input_bg="#F2F5FA",
+        input_focus_bg="#ECEEFF",
+        input_text=DAYLIGHT_INK,
+        band="#EDF0F8",
+        band_focus="#E0E4FF",
+        stripe="#F7F9FC",
+    ),
+    status_colors={
+        "running": DAYLIGHT_OK,
+        "stopped": DAYLIGHT_BAD,
+        "error": DAYLIGHT_BAD,
+        "warning_status": DAYLIGHT_WARN,
+        "spawn_mode": "#0F766E",
+        "attach_mode": DAYLIGHT_OK,
+        "paused": DAYLIGHT_WARN,
+        "notice": DAYLIGHT_WARN,
+    },
+    textual_variables={
+        # The footer is the dark indigo bar of daylight.tcss (header too).
+        "footer-background": "#1A1D45",
+        "footer-foreground": "#E4E7FF",
+        "footer-description-foreground": "#E4E7FF",
+        "footer-key-foreground": "#B9C2FF",
+        "scrollbar": "#B8C2D6",
+        "scrollbar-hover": "#8E9AB3",
+        "scrollbar-active": DAYLIGHT_INDIGO,
+        "scrollbar-background": "#F2F5FA",
+        "scrollbar-background-hover": "#F2F5FA",
+        "scrollbar-background-active": "#F2F5FA",
+        "scrollbar-corner-color": "#F2F5FA",
+        "block-cursor-foreground": DAYLIGHT_INK,
+        "block-cursor-blurred-foreground": DAYLIGHT_INK,
+    },
 )
 
 HIGH_CONTRAST_THEME = Theme(
@@ -938,6 +1155,8 @@ THEMES: dict[str, Theme] = {
     "default": DEFAULT_THEME,
     "dark": DARK_THEME,
     "light": LIGHT_THEME,
+    "paper": PAPER_THEME,
+    "daylight": DAYLIGHT_THEME,
     "high_contrast": HIGH_CONTRAST_THEME,
     "cyberpunk": CYBERPUNK_THEME,
     "nord": NORD_THEME,
@@ -953,6 +1172,8 @@ THEME_ORDER = [
     "default",
     "dark",
     "light",
+    "paper",
+    "daylight",
     "high_contrast",
     "cyberpunk",
     "nord",
@@ -1091,6 +1312,17 @@ def lens_css_defaults() -> dict[str, str]:
     return DEFAULT_LENS.css_variables()
 
 
+def _active_theme() -> Theme | None:
+    """The Sandroid theme of the running app (``None`` outside one of ours)."""
+    try:
+        name = active_app.get().theme
+    except Exception:
+        return None
+    if not name.startswith(TEXTUAL_THEME_PREFIX):
+        return None
+    return THEMES.get(name[len(TEXTUAL_THEME_PREFIX) :])
+
+
 def lens_palette() -> LensPalette:
     """The lens palette of the running app's current theme.
 
@@ -1099,14 +1331,21 @@ def lens_palette() -> LensPalette:
     under a Textual theme that is not one of ours (a bare test ``App``), it
     is :data:`DEFAULT_LENS`.
     """
-    try:
-        name = active_app.get().theme
-    except Exception:
-        return DEFAULT_LENS
-    if not name.startswith(TEXTUAL_THEME_PREFIX):
-        return DEFAULT_LENS
-    theme = THEMES.get(name[len(TEXTUAL_THEME_PREFIX) :])
+    theme = _active_theme()
     return theme.lens if theme is not None else DEFAULT_LENS
+
+
+def fixed_color(name: str) -> str:
+    """A :data:`FIXED_COLORS` entry as the running app's theme shows it.
+
+    The dark themes all use :data:`FIXED_COLORS`; a light theme replaces
+    entries with darker shades of the same hue (``Theme.status_colors``).
+    Read at render time, like :func:`lens_palette`.
+    """
+    theme = _active_theme()
+    if theme is not None and name in theme.status_colors:
+        return theme.status_colors[name]
+    return FIXED_COLORS[name]
 
 
 # ========== CSS Path Functions ==========
@@ -1156,6 +1395,7 @@ __all__ = [
     "CYBERPUNK_THEME",
     "DARK_THEME",
     "DEEP_SEA_THEME",
+    "DAYLIGHT_THEME",
     "DEFAULT_LENS",
     "DEFAULT_THEME",
     "DRACULA_THEME",
@@ -1165,6 +1405,7 @@ __all__ = [
     "HIGH_CONTRAST_THEME",
     "LIGHT_THEME",
     "NORD_THEME",
+    "PAPER_THEME",
     "PARENT_DIR",
     "SOLARIZED_THEME",
     "TEXTUAL_THEME_PREFIX",
@@ -1174,6 +1415,7 @@ __all__ = [
     "LensPalette",
     "Theme",
     "build_textual_theme",
+    "fixed_color",
     "get_all_themes",
     "get_available_theme_css_files",
     "get_next_theme",

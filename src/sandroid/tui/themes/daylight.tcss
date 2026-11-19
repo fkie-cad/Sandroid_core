@@ -1,0 +1,647 @@
+/* Sandroid TUI Styles - Daylight Theme */
+/* Crisp cool white, strong contrast, vivid indigo accent (bright rooms, projectors). */
+
+/* Color roles (Python side: DAYLIGHT_THEME in __init__.py):
+   screen: #F2F5FA
+   surface: #FFFFFF
+   band: #E6EBF5
+   tint: #D3D8FF
+   accent: #4338E0
+   title: #2B2A9E
+   ink: #0A1222
+   label: #3D4F86
+   dim: #5B6576
+   rule: #D3DAE6
+   ok: #0B7A3B
+   warn: #A05300
+   bad: #C21A30
+*/
+
+/* Main screen layout */
+Screen {
+    background: #F2F5FA;
+}
+
+MainScreen {
+    layout: vertical;
+    background: #F2F5FA;
+}
+
+/* Status strip under the header (1-2 rows, full width) */
+#status-bar {
+    height: auto;
+    max-height: 2;
+    background: #E6EBF5;
+    color: #4338E0;
+    padding: 0 1;
+}
+
+/* Lens frame: the active lens gets the full width */
+#lens-host {
+    background: #FFFFFF;
+    border: round #D3DAE6;
+    border-title-color: #4338E0;
+    border-subtitle-color: #5B6576;
+}
+
+#lens-host:focus-within {
+    border: round #D3DAE6;
+}
+
+/* Right-hand side slot: Inspector or AI chat (one at a time) */
+Inspector {
+    background: #FFFFFF;
+    border: round #D3DAE6;
+    border-title-color: #2B2A9E;
+    border-subtitle-color: #5B6576;
+}
+
+Inspector:focus-within {
+    border: round #4338E0;
+}
+
+#chat-dock {
+    background: #FFFFFF;
+    border: round #D3DAE6;
+    border-title-color: #2B2A9E;
+}
+
+/* Log ticker (newest line) + bottom drawer (` toggles) */
+LogTicker {
+    background: #FFFFFF;
+    color: #5B6576;
+}
+
+#log-ticker-hint {
+    color: #5B6576;
+}
+
+LogDrawer {
+    background: #FFFFFF;
+    border-top: solid #D3DAE6;
+}
+
+/* Activity log styling (inside the drawer) */
+ActivityLog {
+    height: 1fr;
+    min-height: 3;
+    scrollbar-size: 1 1;
+    background: #FFFFFF;
+}
+
+/* Header scope pill (LIVE) */
+#scope-pill.-live {
+    color: #0B7A3B;
+}
+
+/* Help screen overlay */
+HelpScreen {
+    align: center middle;
+    background: #FFFFFF 60%;
+}
+
+#help-container {
+    width: 80%;
+    height: 80%;
+    background: #FFFFFF;
+    border: solid #D3DAE6;
+    border-title-color: #4338E0;
+    padding: 1 2;
+}
+
+#help-title {
+    text-align: center;
+    text-style: bold;
+    color: #4338E0;
+    padding: 1 0;
+}
+
+#help-content {
+    height: 100%;
+    scrollbar-size: 1 1;
+    background: #FFFFFF;
+}
+
+.help-category {
+    margin-top: 1;
+    color: #4338E0;
+    text-style: bold;
+}
+
+.help-item {
+    padding-left: 2;
+    color: #0A1222;
+}
+
+.help-footer {
+    dock: bottom;
+    height: 1;
+    text-align: center;
+    color: #5B6576;
+}
+
+/* Command palette screen */
+CommandPalette {
+    align: center top;
+    padding-top: 5;
+}
+
+#palette-container {
+    width: 60%;
+    max-height: 60%;
+    background: #FFFFFF;
+    border: solid #D3DAE6;
+    padding: 1;
+}
+
+#palette-input {
+    dock: top;
+    width: 100%;
+    background: #F2F5FA;
+    border: solid #4338E0;
+    color: #0A1222;
+    padding: 0 1;
+}
+
+#palette-results {
+    height: auto;
+    max-height: 20;
+    background: #FFFFFF;
+}
+
+.palette-item {
+    padding: 0 1;
+    color: #0A1222;
+}
+
+.palette-item:hover {
+    background: #D3D8FF;
+}
+
+.palette-item-selected {
+    background: #D3D8FF;
+    color: #0A1222;
+}
+
+.palette-item-key {
+    color: #2B2A9E;
+    text-style: bold;
+}
+
+.palette-item-name {
+    color: #0A1222;
+}
+
+.palette-item-description {
+    color: #5B6576;
+}
+
+/* Footer bindings */
+SandroidFooter {
+    background: #E6EBF5;
+    color: #4338E0;
+}
+
+/* Header */
+Header {
+    background: #E6EBF5;
+    color: #4338E0;
+}
+
+/* Scrollbar styling */
+ScrollableContainer > .scrollbar {
+    background: #F2F5FA;
+}
+
+ScrollableContainer > .scrollbar--bar {
+    background: #4338E0;
+}
+
+/* View indicator colors */
+.view-forensic {
+    color: #0B7A3B;
+}
+
+.view-malware {
+    color: #C21A30;
+}
+
+.view-security {
+    color: #A05300;
+}
+
+/* Status indicators */
+.status-running {
+    color: #0B7A3B;
+    text-style: bold;
+}
+
+.status-stopped {
+    color: #C21A30;
+}
+
+.status-warning {
+    color: #A05300;
+}
+
+/* ========== Modal Styles ========== */
+
+ModalScreen {
+    align: center middle;
+    background: rgba(242, 245, 250, 0.9);
+}
+
+#input-modal-container,
+#selection-modal-container,
+#toggle-modal-container,
+#confirm-modal-container,
+#message-modal-container {
+    background: #FFFFFF;
+    border: thick #D3DAE6;
+    padding: 1 2;
+    width: 60;
+    max-width: 80%;
+    max-height: 80%;
+}
+
+#input-title,
+#selection-title,
+#toggle-title,
+#confirm-title,
+#message-title {
+    text-style: bold;
+    color: #4338E0;
+    margin-bottom: 1;
+    text-align: center;
+}
+
+#input-message,
+#selection-message,
+#toggle-message,
+#confirm-message {
+    color: #5B6576;
+    margin-bottom: 1;
+}
+
+#input-field {
+    margin: 1 0;
+    background: #F2F5FA;
+    border: solid #4338E0;
+    color: #0A1222;
+}
+
+#input-field:focus {
+    border: solid #2B2A9E;
+}
+
+#input-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#filter-input {
+    margin-bottom: 1;
+    background: #F2F5FA;
+    border: solid #4338E0;
+    color: #0A1222;
+}
+
+#filter-input:focus {
+    border: solid #2B2A9E;
+}
+
+/* Compact inputs (the modal sweep's `compact=True`) stay borderless. This
+   app stylesheet outranks every widget DEFAULT_CSS -- even Textual's own
+   `border: none !important` for compact inputs -- so an ID rule above that
+   adds a border (#filter-input) left a 1-row box with no text row: typed
+   text was invisible. */
+Input.-textual-compact {
+    border: none !important;
+}
+
+#option-list {
+    height: auto;
+    max-height: 15;
+    background: #F2F5FA;
+    border: solid #D3DAE6;
+    margin-bottom: 1;
+}
+
+OptionList > .option-list--option-highlighted {
+    background: #D3D8FF;
+    color: #0A1222;
+}
+
+OptionList > .option-list--option-hover {
+    background: #D3D8FF;
+}
+
+#toggle-options {
+    max-height: 15;
+    margin-bottom: 1;
+}
+
+.toggle-row {
+    height: 3;
+    align: left middle;
+    padding: 0 1;
+}
+
+.toggle-row Switch {
+    margin-right: 2;
+}
+
+.toggle-label-container {
+    height: auto;
+}
+
+.toggle-label {
+    text-style: bold;
+    color: #0A1222;
+}
+
+.toggle-description {
+    color: #5B6576;
+}
+
+#toggle-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#confirm-modal-container {
+    width: 40;
+}
+
+#confirm-buttons {
+    margin-top: 2;
+    align: center middle;
+}
+
+#message-content {
+    margin: 1 0;
+    max-height: 10;
+    color: #0A1222;
+}
+
+.message-info #message-title {
+    color: #4338E0;
+}
+
+.message-warning #message-title {
+    color: #A05300;
+}
+
+.message-error #message-title {
+    color: #C21A30;
+}
+
+.message-info {
+    border: thick #4338E0;
+}
+
+.message-warning {
+    border: thick #A05300;
+}
+
+.message-error {
+    border: thick #C21A30;
+}
+
+#input-buttons Button,
+#toggle-buttons Button,
+#confirm-buttons Button {
+    margin: 0 1;
+    min-width: 10;
+}
+
+Button.-success {
+    background: #0B7A3B;
+    color: #FFFFFF;
+}
+
+Button.-error {
+    background: #C21A30;
+    color: #FFFFFF;
+}
+
+Button {
+    background: #4338E0;
+    color: #FFFFFF;
+}
+
+Button:hover {
+    background: #2B2A9E;
+}
+
+Button.-primary {
+    background: #4338E0;
+    color: #FFFFFF;
+}
+
+/* Logo styling */
+.logo-container {
+    color: #4338E0;
+    text-style: bold;
+}
+
+.logo-text {
+    color: #2B2A9E;
+    text-style: bold;
+}
+
+.logo-version {
+    color: #4338E0;
+    text-style: bold;
+}
+
+.logo-subtitle {
+    color: #5B6576;
+}
+
+/* ========== Lens Bar & Chat Panel Theming ========== */
+/* Overrides MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
+   there) so the lens bar and AI chat panel follow this theme instead
+   of staying frozen on the default Midnight Cyan hardcoded values. */
+
+#lens-bar {
+    background: #F2F5FA;
+    border-left: heavy #F2F5FA;
+}
+
+#lens-bar.-level-active {
+    border-left: heavy #4338E0;
+}
+
+.lens-tab {
+    color: #5B6576;
+    background: #F2F5FA;
+}
+
+.lens-tab:hover {
+    color: #0A1222;
+    background: #D3D8FF;
+}
+
+.lens-tab.-active {
+    color: #FFFFFF;
+    background: #4338E0;
+}
+
+ChatPanel {
+    background: #FFFFFF;
+}
+
+ChatPanel > #chat-header {
+    color: #4338E0;
+}
+
+ChatPanel > #chat-log {
+    background: #F2F5FA;
+}
+
+ChatPanel > #chat-input-bar > #chat-input {
+    border: solid #D3DAE6;
+    background: #F2F5FA;
+}
+
+ChatPanel > #chat-mascot {
+    /* MUST equal #chat-log's background above -- see the comment on
+       ChatPanel > #chat-mascot in chat_panel.py for why. */
+    background: #F2F5FA;
+    color: #4338E0;
+}
+
+/* runs lens */
+/* Runs lens (DiffsView, #runs-panel): run table cursor, header, empty state. */
+#runs-table > .datatable--cursor {
+    background: #D3D8FF;
+    color: #0A1222;
+    text-style: none;
+}
+
+#runs-table > .datatable--header {
+    background: transparent;
+    color: #5B6576;
+}
+
+#runs-empty {
+    color: #5B6576;
+}
+/* end runs lens */
+
+/* files lens */
+#files-panel, #files-panel > #files-table {
+    background: #FFFFFF;
+}
+#files-panel > #files-table > .datatable--cursor {
+    background: #D3D8FF;
+    color: #0A1222;
+}
+#files-panel > #files-empty {
+    color: #5B6576;
+}
+#files-panel > #files-input {
+    background: #F2F5FA;
+}
+#files-panel #files-notice-text {
+    color: #A05300;
+}
+/* end files lens */
+
+/* ========== Chrome tuned for a light background ========== */
+/* The shell widgets' DEFAULT_CSS (lens_shell.py: ShellHeader, LensBar,
+   LogTicker, LogDrawer) hardcode colors for a dark background; this file
+   outranks DEFAULT_CSS, so these rules re-color them for this theme.
+   Daylight frames the white page with deep indigo header and footer bars,
+   which keep their weight on a washed-out projector. */
+
+ShellHeader {
+    background: #1A1D45;
+    color: #FFFFFF;
+}
+
+ShellHeader #scope-pill,
+#scope-pill.-live {
+    color: #86EFAC;
+}
+
+ShellHeader #scope-pill.-review {
+    color: #1A1D45;
+    background: #FFD27A;
+}
+
+ShellHeader #scope-pill.-rec {
+    color: #FDA4AF;
+}
+
+ShellHeader #scope-pill.-blind,
+ShellHeader #timeline-banner {
+    color: #FDBA74;
+}
+
+ShellHeader #device-clock,
+ShellHeader #label-note {
+    color: #FFD27A;
+}
+
+ShellHeader #tracking-dot {
+    color: #86EFAC;
+}
+
+ShellHeader HeaderClock {
+    background: #2A2F66;
+    color: #FFFFFF;
+}
+
+#status-bar {
+    background: #F2F5FA;
+}
+
+#lens-bar,
+LensBar {
+    background: #F2F5FA;
+    border-left: heavy #F2F5FA;
+}
+
+#lens-bar.-level-active {
+    border-left: heavy #4338E0;
+}
+
+LensBar .lens-tab {
+    color: #5B6576;
+    background: #F2F5FA;
+}
+
+LensBar .lens-tab:hover {
+    color: #0A1222;
+    background: #D3D8FF;
+}
+
+LensBar .lens-tab.-active {
+    color: #FFFFFF;
+    background: #4338E0;
+}
+
+#lens-host:focus-within {
+    border: round #A9B4C8;
+}
+
+LogTicker {
+    background: #F2F5FA;
+    color: #3D4F86;
+}
+
+LogTicker #log-ticker-hint {
+    color: #5B6576;
+}
+
+LogDrawer {
+    background: #FFFFFF;
+    border-top: solid #D3DAE6;
+}
+
+SandroidFooter {
+    background: #1A1D45;
+    color: #E4E7FF;
+}
