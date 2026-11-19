@@ -2640,7 +2640,9 @@ class FilesPanel(Widget):
             what = (
                 "a directory"
                 if act.is_dir
-                else "renamed away" if act.moved_to else "deleted on the device"
+                else "renamed away"
+                if act.moved_to
+                else "deleted on the device"
             )
             self.app.notify(f"Nothing to pull: {what}.", severity="warning")
             return

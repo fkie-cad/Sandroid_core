@@ -761,8 +761,9 @@ def test_classify_rows_reports_rows_it_could_not_judge(
     assert result["skipped"] == {"errors": 1, "not_reached": 0, "unknown_ids": 0}
     assert result["partial"] is True
     assert result["backend_error"] == "HTTP 500 boom"
-    assert "1 rows could not be judged (backend error: HTTP 500 boom)" in (
-        result["summary"]
+    assert (
+        "1 rows could not be judged (backend error: HTTP 500 boom)"
+        in (result["summary"])
     )
     hs = store.get(result["highlight_id"])
     assert hs.complete is False

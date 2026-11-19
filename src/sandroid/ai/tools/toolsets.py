@@ -73,8 +73,7 @@ TOOLSET_DESCRIPTIONS: dict[str, str] = {
     "monitor": "file-system monitor: live changes and per-file diffs",
     "recording": "record and replay device input, past runs and their diffs",
     "lenses": (
-        "find, AI-classify, highlight and filter rows in the Network and Files "
-        "lenses"
+        "find, AI-classify, highlight and filter rows in the Network and Files lenses"
     ),
     "agents": "subagents (orchestrator only)",
 }
