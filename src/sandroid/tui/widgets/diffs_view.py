@@ -25,7 +25,10 @@ highlighted, and only after a confirm; anywhere else it falls through
 unbound globally. Record ``r`` / Play ``p`` are global app keys.
 
 Privacy tab: the identity-profile values the privacy scan found during the
-run (``hits_between(run start, run end)``), grouped by recipient, in words.
+run (its time window, plus the end-of-run sweep's records that carry the run
+id), grouped by recipient, in words. A run of another session (its record
+names its timeline folder) reads that session's ``privacy/hits.jsonl`` off
+the UI thread, once.
 ``{``/``}`` (Inspector keys) or a click picks a finding and ``J`` jumps to
 its flow (Network), file (Files) or timeline line.
 """
@@ -71,6 +74,21 @@ _GOOD = "#22c55e"
 
 #: Rows listed per category in the Inspector before "… N more".
 _LIST_LIMIT = 12
+
+#: What an empty Privacy tab means (plain words).
+_PRIVACY_NONE = "No profile values found in this run."
+_PRIVACY_NOT_ACTIVE = "No identity profile was active."
+_PRIVACY_LOADING = "Reading the findings of this run's session."
+#: Runs saved before the run record named its session: only the loaded
+#: session's findings can be matched.
+_PRIVACY_NONE_HERE = (
+    "No profile values found for this run in this session's findings. "
+    "Findings for runs of other sessions are not loaded."
+)
+_PRIVACY_NOT_ACTIVE_HERE = (
+    "No identity profile was active in this session. "
+    "Findings for runs of other sessions are not loaded."
+)
 
 _COLUMNS = (
     ("num", "#"),
@@ -269,6 +287,10 @@ class DiffsView(FilesSubViewBase):
         self._compact = False
         #: run_id -> index of the picked finding on the Privacy tab.
         self._privacy_pick: dict[str, int] = {}
+        #: timeline folder -> (records, scanned) of other sessions' findings
+        #: (read once, off the UI thread).
+        self._privacy_other: dict[str, tuple[list, bool]] = {}
+        self._privacy_other_pending: set[str] = set()
         from .network_panel import PrivacyFeed
 
         self._privacy_feed = PrivacyFeed(
@@ -1295,24 +1317,91 @@ class DiffsView(FilesSubViewBase):
             return None
         return (dt if dt.tzinfo else dt.astimezone()).timestamp()
 
-    def _privacy_findings(self, s: dict[str, Any]) -> tuple[list, bool]:
-        """``(findings, profile known)`` of the run: the first hit per
-        recipient x value x encoding (stored: per file x value x encoding),
-        grouped by recipient. ``profile known``: a profile is set now or the
-        session has hits (so "nothing found" means something).
+    def _privacy_hits(self, s: dict[str, Any]) -> tuple[list | None, str]:
+        """``(hits of the run, what an empty list means)``; hits are None
+        while another session's findings are still being read.
+
+        The live session's hits come from the scan service; a run that
+        names another session's timeline folder reads that folder's
+        findings (cached). A run without one (saved before runs stored it)
+        can only be matched against the loaded session.
         """
+        from sandroid.services.privacy_scan import run_hits
+
         from .network_panel import privacy_service
 
-        service = privacy_service()
         start = self._epoch(s.get("recorded_at"))
         end = self._epoch(s.get("completed_at")) or start
-        if service is None or start is None or end is None:
-            return [], False
+        if start is None or end is None:
+            return [], _PRIVACY_NOT_ACTIVE
+        end = max(start, end)
+        run_id = s.get("run_id")
+        folder = str(s.get("timeline_folder") or "")
+        service = privacy_service()
+        live = getattr(service, "folder", None) if service is not None else None
+        if folder and (live is None or Path(folder) != Path(live)):
+            cached = self._privacy_other.get(folder)
+            if cached is None:
+                self._load_privacy_other(folder)
+                cached = self._privacy_other.get(folder)  # inline without an app
+            if cached is None:
+                return None, _PRIVACY_LOADING
+            records, scanned = cached
+            why = _PRIVACY_NONE if scanned else _PRIVACY_NOT_ACTIVE
+            return run_hits(records, run_id, start, end), why
+        if service is None:
+            return [], _PRIVACY_NOT_ACTIVE
         try:
-            hits = list(service.hits_between(start, max(start, end)))
-            known = bool(service.is_active or hits or service.hits())
+            by_run = getattr(service, "hits_for_run", None)
+            if by_run is not None:
+                hits = list(by_run(run_id, start, end))
+            else:
+                hits = list(service.hits_between(start, end))
+            has_hits = getattr(service, "has_hits", None)
+            known = bool(
+                service.is_active
+                or hits
+                or (has_hits() if has_hits is not None else service.hits())
+            )
         except Exception:
-            return [], False
+            return [], _PRIVACY_NOT_ACTIVE
+        if folder:
+            return hits, _PRIVACY_NONE if known else _PRIVACY_NOT_ACTIVE
+        return hits, _PRIVACY_NONE_HERE if known else _PRIVACY_NOT_ACTIVE_HERE
+
+    def _load_privacy_other(self, folder: str) -> None:
+        """Read another session's findings off the UI thread (once)."""
+        if folder in self._privacy_other_pending:
+            return
+        self._privacy_other_pending.add(folder)
+        self._run_bg(
+            functools.partial(self._privacy_other_worker, folder),
+            f"diffs_privacy_{abs(hash(folder))}",
+        )
+
+    def _privacy_other_worker(self, folder: str) -> None:
+        from sandroid.services.privacy_scan import read_hits
+
+        try:
+            result = read_hits(folder)
+        except Exception:
+            logger.debug("DiffsView: cannot read %s", folder, exc_info=True)
+            result = ([], False)
+        self._post(self._apply_privacy_other, folder, result)
+
+    def _apply_privacy_other(self, folder: str, result: tuple[list, bool]) -> None:
+        self._privacy_other_pending.discard(folder)
+        self._privacy_other[folder] = result
+        self._follow_in_inspector()
+
+    def _privacy_findings(self, s: dict[str, Any]) -> tuple[list, str]:
+        """``(findings, what no findings means)`` of the run: the first hit
+        per recipient x value x encoding (stored: per file x value x
+        encoding), grouped by recipient.
+        """
+        hits, why = self._privacy_hits(s)
+        if not hits:
+            return [], why
         first: dict[tuple, Any] = {}
         for hit in sorted(hits, key=lambda h: (h.t or 0.0, h.at)):
             if hit.direction == "received":
@@ -1333,7 +1422,7 @@ class DiffsView(FilesSubViewBase):
         for where, group in ordered:
             for hit in sorted(group, key=lambda h: (str(h.label).lower(), h.t or 0)):
                 findings.append((where, hit))
-        return findings, known
+        return findings, why
 
     def _privacy_render(self, run_id: str, findings: list) -> tuple[Text, list]:
         """The finding list (one line each, no wrap) and ``line -> index``."""
@@ -1387,13 +1476,8 @@ class DiffsView(FilesSubViewBase):
         return text, lines
 
     def _privacy_sections(self, run_id: str, s: dict[str, Any]) -> list:
-        findings, known = self._privacy_findings(s)
+        findings, why = self._privacy_findings(s)
         if not findings:
-            why = (
-                "No profile values found in this run."
-                if known
-                else "No identity profile was active."
-            )
             return [("", Text(why, style=_DIM))]
         values = len({hit.marker_id for _w, hit in findings})
         recipients = len({w for w, _h in findings if w[0] != "stored"})
@@ -1428,7 +1512,7 @@ class DiffsView(FilesSubViewBase):
         s = self._summary(run_id)
         if s is None:
             return False
-        findings, _known = self._privacy_findings(s)
+        findings, _why = self._privacy_findings(s)
         if not findings:
             return False
         _text, lines = self._privacy_render(run_id, findings)

@@ -116,6 +116,10 @@ class RunRecord:
     #: "dry_run", "run": n, "start": epoch, "end": epoch}``. Empty for runs
     #: recorded before phases were stored.
     phases: list[dict[str, Any]] = field(default_factory=list)
+    #: The session timeline folder the run was recorded in (where its
+    #: privacy findings are, ``<folder>/privacy/hits.jsonl``). Empty for
+    #: runs saved before it was stored.
+    timeline_folder: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -265,6 +269,7 @@ def _summary_from_record(record: RunRecord) -> dict[str, Any]:
         "duration": record.duration,
         "error": record.error,
         "counts": dict(record.counts),
+        "timeline_folder": record.timeline_folder,
     }
 
 

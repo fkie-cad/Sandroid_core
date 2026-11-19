@@ -991,11 +991,14 @@ async def test_privacy_tab_empty_states_and_jump(monkeypatch) -> None:
     async with app.run_test(size=(140, 30)) as pilot:
         view = app.query_one(DiffsView)
         await until(pilot, lambda: view._summary(run_id) is not None)
+        # The run does not name its session: say what was (not) looked at.
         text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
-        assert "No identity profile was active." in text
+        assert "No identity profile was active in this session." in text
+        assert "Findings for runs of other sessions are not loaded." in text
         fake.is_active = True
         text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
-        assert "No profile values found in this run." in text
+        assert "No profile values found for this run in this session" in text
+        assert "Findings for runs of other sessions are not loaded." in text
         # J: flow -> Network, file -> Files, else the timeline line.
         calls: list = []
 
@@ -1032,3 +1035,69 @@ async def test_privacy_tab_empty_states_and_jump(monkeypatch) -> None:
             ("switch", "timeline"),
             ("timeline", 7),
         ]
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_reads_a_past_sessions_findings(
+    monkeypatch, tmp_path
+) -> None:
+    """A run of another session (its record names that session's timeline
+    folder) shows that session's findings, read off the UI thread, instead
+    of a false "nothing found"; a run of the live session with nothing
+    found says so plainly.
+    """
+    import json
+
+    import privacy_fakes
+    from privacy_fakes import flow_hit
+
+    from sandroid.services.privacy_scan import FOLDER_NAME, HITS_FILE
+
+    past = tmp_path / "session-old" / "device"
+    (past / FOLDER_NAME).mkdir(parents=True)
+    old_hit = flow_hit("flow-old", t=_at(2))
+    (past / FOLDER_NAME / HITS_FILE).write_text(json.dumps(old_hit.to_json()) + "\n")
+    live = tmp_path / "session-new" / "device"
+    fake = privacy_fakes.install(monkeypatch, [], active=True, folder=live)
+    old_run, new_run = "20260101_000000_dddddd", "20260101_000001_eeeeee"
+    _save(old_run, timeline_folder=str(past))
+    _save(new_run, timeline_folder=str(live))
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(old_run) is not None)
+        assert view._summary(old_run)["timeline_folder"] == str(past)
+
+        def privacy_text(run_id: str) -> str:
+            return _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+
+        privacy_text(old_run)  # starts the read (a worker thread)
+        await until(pilot, lambda: str(past) in view._privacy_other)
+        text = privacy_text(old_run)
+        assert "1 profile value sent to 1 recipient" in text
+        assert "Advertising ID" in text
+        assert "No profile values" not in text
+        assert "No profile values found in this run." in privacy_text(new_run)
+        assert fake.hits() == []  # the live session's records are untouched
+
+
+@pytest.mark.asyncio
+async def test_privacy_tab_includes_the_end_of_run_sweep(monkeypatch) -> None:
+    """The sweep runs after the run's end; its records carry the run id."""
+    import privacy_fakes
+    from privacy_fakes import file_hit
+
+    run_id = "20260101_000000_ffffff"
+    hits = [
+        file_hit("/data/data/app/shared_prefs/s.xml", t=_at(20), run_id=run_id),
+        file_hit("/data/data/app/shared_prefs/o.xml", t=_at(21), run_id="other"),
+    ]
+    privacy_fakes.install(monkeypatch, hits)
+    _save(run_id)
+    app = _DiffsHarness()
+    async with app.run_test(size=(140, 30)) as pilot:
+        view = app.query_one(DiffsView)
+        await until(pilot, lambda: view._summary(run_id) is not None)
+        text = _text_of(dict(view._run_content(run_id).tabs)["Privacy"])
+        assert "s.xml" in text
+        assert "o.xml" not in text

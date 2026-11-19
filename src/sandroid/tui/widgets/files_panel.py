@@ -127,6 +127,7 @@ from .network_panel import (
     PRIVACY_COLUMN_MIN_WIDTH,
     PrivacyFeed,
     ProfileTintMixin,
+    privacy_has_hits,
     privacy_service,
     tag_words,
 )
@@ -1130,7 +1131,9 @@ class FilesPanel(Widget):
             return False
         service = privacy_service()
         try:
-            return bool(service is not None and (service.is_active or service.hits()))
+            return bool(
+                service is not None and (service.is_active or privacy_has_hits(service))
+            )
         except Exception:
             return False
 
@@ -1157,6 +1160,9 @@ class FilesPanel(Widget):
         self._dirty = True
         if is_shown(self):
             self.refresh_rows()
+        if PrivacyFeed.ALL in paths:  # a session switch: every file
+            self._refresh_inspector()
+            return
         from sandroid.core.adb_utils import canonical_device_path
 
         touched = paths | {canonical_device_path(p) for p in paths}

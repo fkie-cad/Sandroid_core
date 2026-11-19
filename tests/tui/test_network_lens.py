@@ -1326,3 +1326,79 @@ async def test_no_identity_column_without_a_profile(flow_dir, monkeypatch):
         _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
         assert len(panel.table.columns) == 5
         assert panel.table.profile_keys == set()
+
+
+async def test_each_row_looks_up_its_profile_values_once(flow_dir, monkeypatch):
+    """The "!" filter, "/" and the Identity cell share one lookup per row and
+    service revision; a new hit (new revision) looks up again.
+    """
+    import privacy_fakes
+    from privacy_fakes import flow_hit
+
+    fake = privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        flows = {r.flow_id for r in panel._model() if r.flow_id}
+        panel._profile_only = True
+        panel._filter = "a"
+        fake.tag_calls = 0
+        panel._rebuild()
+        assert 0 < fake.tag_calls <= len(flows)
+        fake.tag_calls = 0
+        panel._rebuild()
+        assert fake.tag_calls == 0  # same revision: all cached
+        fake.add(flow_hit("flow-4", "GPS", "GPS"))
+        await until(pilot, lambda: "f4" in panel.table.profile_keys)
+        assert fake.tag_calls <= len(flows)
+
+
+async def test_a_session_switch_redraws_every_row(flow_dir, monkeypatch):
+    """The service's ``None`` notification (records of another session
+    loaded) re-marks every row, not only the ones of new hits.
+    """
+    import privacy_fakes
+    from privacy_fakes import flow_hit
+
+    fake = privacy_fakes.install(monkeypatch, _privacy_hits())
+    app = _app()
+    async with app.run_test(size=SIZE) as pilot:
+        _ms, panel = await _lens_with_flows(app, pilot, flow_dir)
+        assert panel.table.profile_keys == {"f2", "f3"}
+        fake.reset([flow_hit("flow-4", "GPS", "GPS")])
+        await until(pilot, lambda: panel.table.profile_keys == {"f4"})
+
+
+def test_privacy_feed_posts_again_when_a_redraw_never_ran(monkeypatch):
+    """A posted redraw whose timer died (lens unmounted) must not block
+    every later hit.
+    """
+
+    class _Ui:
+        def __init__(self) -> None:
+            self.posts: list = []
+
+        def post(self, fn) -> bool:
+            self.posts.append(fn)  # never runs
+            return True
+
+    class _Rec:
+        flow_id = "flow-1"
+
+    feed = np_mod.PrivacyFeed(object(), lambda keys: None, lambda r: r.flow_id)
+    ui = _Ui()
+    feed._ui = ui
+    feed.on_hit(_Rec())
+    feed.on_hit(_Rec())
+    assert len(ui.posts) == 1  # one hop in flight
+    feed._posted_at -= np_mod.PRIVACY_POST_STALE_S + 1
+    feed.on_hit(_Rec())
+    assert len(ui.posts) == 2
+    feed.on_hit(None)  # a session switch: everything
+    assert feed._pending == {"flow-1", np_mod.PrivacyFeed.ALL}
+
+
+def test_profile_tint_style_is_cached():
+    first = np_mod._bg_style(np_mod.profile_tint())
+    assert np_mod._bg_style(np_mod.profile_tint()) is first
+    assert first.bgcolor is not None
