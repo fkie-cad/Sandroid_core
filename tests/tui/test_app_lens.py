@@ -362,6 +362,14 @@ def _texts(section: LensSection) -> list[str]:
     return [r.text for r in section.rows_shown]
 
 
+def _band(section: LensSection) -> str:
+    """The plain text of a section's header band (focus marker stripped)."""
+    from textual.content import Content
+
+    plain = Content.from_markup(str(section.border_title or "")).plain
+    return plain.strip().lstrip("▌")
+
+
 def _screen_text(app) -> str:
     strips = app.screen._compositor.render_strips()
     return "\n".join("".join(seg.text for seg in strip) for strip in strips)
@@ -513,12 +521,13 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         sections = _sections(ms)
         await _wait(pilot, lambda: _loaded(sections))
         await _settle(pilot)
-        titles = [str(s.border_title) for s in sections.sections()]
-        assert [t.split(" · ")[0][2:] for t in titles] == [
+        titles = [_band(s) for s in sections.sections()]
+        # " ▾ TITLE   summary" on the header band
+        assert [t.split("   ")[0][2:] for t in titles] == [
             t for _id, t in app_lens.SECTIONS
         ]
         perms = sections.section("permissions")
-        assert "4 requested · 3 dangerous (2 granted)" in str(perms.border_title)
+        assert "4 requested · 3 dangerous (2 granted)" in _band(perms)
         assert any("READ_CLIPBOARD" in t for t in _texts(perms))
         exposure = _texts(sections.section("exposure"))
         assert any(".Files" in t and "no permission" in t for t in exposure)
@@ -534,7 +543,7 @@ async def test_sections_render_inspect_and_space_starts(fake, monkeypatch, size)
         assert "3 shared_prefs" in data
         assert "Files lens" in data
         defences = sections.section("defences")
-        assert "not observed" in str(defences.border_title)
+        assert "not observed" in _band(defences)
         assert any("RootBeer" in t and "b2 root" in t for t in _texts(defences))
         # every device call ran off the UI thread
         main = threading.main_thread().name
@@ -607,7 +616,7 @@ async def test_tab_moves_between_sections_and_z_folds(fake):
         perms = sections.section("permissions")
         assert perms.folded
         assert perms.size.height == 0
-        assert str(perms.border_title).startswith("▸ PERMISSIONS")
+        assert _band(perms).startswith("▸ PERMISSIONS")
         # still in the focus order while folded
         await pilot.press("tab")
         await pilot.press("shift+tab")
@@ -635,7 +644,7 @@ async def test_slash_filters_rows_across_sections_and_esc_clears(fake):
         assert len(perms) == 1
         assert "CAMERA" in perms[0]
         assert "no rows match" in _texts(sections.section("exposure"))[0]
-        assert "1 of" in str(sections.section("permissions").border_title)
+        assert "1 of" in _band(sections.section("permissions"))
         await pilot.press("escape")
         await _settle(pilot)
         assert sections.filter_text == ""
@@ -673,7 +682,7 @@ async def test_uncached_apk_shows_analysing_then_pulls(fake):
         sections = _sections(ms)
         await _wait(pilot, lambda: sections.facts and sections.facts.footprint)
         assert sections.facts.static_state == "analysing"
-        assert "analysing manifest" in str(sections.section("exposure").border_title)
+        assert "analysing manifest" in _band(sections.section("exposure"))
         gate.set()
         await _wait(pilot, lambda: sections.facts.static_state == "ready")
         await _settle(pilot)
@@ -889,8 +898,8 @@ async def test_theme_switch_recolors_the_lens_css_and_rich_text(fake):
         assert app.theme == "sandroid-light"
         assert perms.styles.background.hex.upper() == light.bg
         assert dangerous_style(perms) == light.warn
-        assert light.title in str(body.content)
-        assert DEFAULT_LENS.title not in str(body.content)
+        assert light.label in str(body.content)
+        assert DEFAULT_LENS.label not in str(body.content)
 
         app._apply_theme(DEFAULT_THEME, get_theme_css_path("default"))
         await _settle(pilot)

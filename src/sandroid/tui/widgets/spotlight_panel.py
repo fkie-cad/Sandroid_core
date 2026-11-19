@@ -40,7 +40,7 @@ from sandroid.tui.modals.base import FridaModal as _FridaModalBase
 from sandroid.tui.modals.objection_modal import BYPASS_KEYS
 from sandroid.tui.themes import lens_palette
 from sandroid.tui.utils.ui_thread import UiDispatcher
-from sandroid.tui.widgets.app_lens import LENS_ID, AppLensSections
+from sandroid.tui.widgets.app_lens import LABEL_WIDTH, LENS_ID, AppLensSections
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
@@ -160,7 +160,7 @@ class SpotlightPanel(Widget):
     }
     SpotlightPanel #spotlight-body {
         height: auto;
-        margin: 0 0 1 0;
+        margin: 0;
         background: $lens-bg;
         color: $lens-text;
     }
@@ -275,6 +275,11 @@ class SpotlightPanel(Widget):
         width = event.size.width
         compact, narrow = width < _COMPACT_WIDTH, width < _NARROW_WIDTH
         if (compact, narrow) == (self._compact, self._narrow):
+            # The bypass key hint comes and goes with the width.
+            try:
+                self.query_one("#spotlight-body", Static).update(self._render_body())
+            except Exception:
+                pass
             return
         self._compact, self._narrow = compact, narrow
         for cell_id, (wide, short) in _ACTION_LABELS.items():
@@ -452,50 +457,73 @@ class SpotlightPanel(Widget):
                 "pick an app to spawn with hooks from the start.[/]"
             )
 
-        lines: list[str] = []
+        # Three rows on the gutter the sections below use (right-aligned
+        # labels, values in one column): activity, hooks, bypass toggles.
+        # Package, PID and counts are on the header line above.
+        width = 9 if self._compact else LABEL_WIDTH
 
-        # 1. App info (package + PID are in the header line above; the
-        # IDENTITY section below has the rest). One line keeps the sections
-        # on screen at 100x30.
+        def row(label: str, value: str, sep: str = "  ") -> str:
+            return f" [{c.label}]{label.rjust(width)}[/]{sep}{value}"
+
+        lines: list[str] = []
         try:
             activity = spotlight.get_activity_name() or "—"
         except Exception:
             activity = "—"
-        lines.append(f"[{c.title} bold]App[/]  activity {escape(str(activity))}")
+        lines.append(row("activity", escape(str(activity))))
 
-        # 2. Active hooks (filtered to this app)
         hooks = self._hooks_for_app(package)
         names = [
             escape(str(getattr(t, "display_name", getattr(t, "name", "task"))))
             for t in hooks
         ]
         lines.append(
-            f"[{c.title} bold]Active hooks[/] ([b]{len(hooks)}[/])  "
-            + ("  ".join(f"[{c.ok}]●[/] {n}" for n in names) or f"[{c.dim}]none[/]")
+            row(
+                "hooks",
+                "  ".join(f"[{c.ok}]●[/] {n}" for n in names) or f"[{c.dim}]none[/]",
+            )
         )
 
-        # 3. Immediate bypass toggles (armed | active)
+        # Immediate bypass toggles (armed | active)
         on = set(self._on_categories())
         if self._compact:
             # Narrow lens (e.g. 100x30 with the Inspector open): one line.
             names = [c for _k, c, _l in _BYPASS_TOGGLES if c in on]
             state = f"[{c.ok}]{','.join(names)}[/]" if names else f"[{c.dim}]none[/]"
             lines.append(
-                f"[{c.title} bold]b bypass:[/] {state} "
-                f"[{c.dim}](b then 1-{len(_BYPASS_TOGGLES)})[/]"
+                row(
+                    "b bypass:",
+                    f"{state} [{c.dim}](b then 1-{len(_BYPASS_TOGGLES)})[/]",
+                    " ",
+                )
             )
             return "\n".join(lines)
-        lines.append(
-            f"[{c.title} bold]Bypass[/] [{c.dim}](b then 1-6 · armed applies on Start)[/]"
-        )
-        toggle_cells = []
+        # Toggles wrap onto continuation lines aligned with the values; the
+        # key hint follows when there is room for it.
+        room = self.size.width - 2 - (width + 3)
+        gap = "   "
+        cells = []
         for key, category, label in _BYPASS_TOGGLES:
             is_on = category in on
             color = c.ok if is_on else c.dim
             mark = "●" if is_on else "○"
-            toggle_cells.append(f"[{color}][b]{key}[/] {mark} {label}[/]")
-        lines.append("  " + "   ".join(toggle_cells))
-
+            plain = f"{key} {mark} {label}"
+            cells.append((len(plain), f"[{color}][b]{key}[/] {mark} {label}[/]"))
+        hint = f"b then 1-{len(_BYPASS_TOGGLES)} · armed applies on Start"
+        cells.append((len(hint), f"[{c.dim}]{hint}[/]"))
+        rows: list[list[str]] = [[]]
+        used = 0
+        for index, (length, markup) in enumerate(cells):
+            extra = length + (len(gap) if rows[-1] else 0)
+            if rows[-1] and used + extra > room:
+                if index == len(cells) - 1:
+                    break  # the hint only goes where it fits
+                rows.append([])
+                used, extra = 0, length
+            rows[-1].append(markup)
+            used += extra
+        lines.append(row("bypass", gap.join(rows[0])))
+        lines += [" " * (width + 3) + gap.join(r) for r in rows[1:]]
         return "\n".join(lines)
 
     def _primary_label(self) -> str:
