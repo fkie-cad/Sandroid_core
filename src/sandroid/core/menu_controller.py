@@ -444,7 +444,7 @@ class MenuController:
         )
 
         # ===== Lenses (TUI) =====
-        # Digits 1-5 switch the full-width analysis view; Shift+Left/Right
+        # Digits 1-6 switch the full-width analysis view; Shift+Left/Right
         # cycles. TUI-only: the palette dispatches these directly (app.py).
         for key, lens, label in (
             ("1", "app", "App"),
@@ -452,6 +452,7 @@ class MenuController:
             ("3", "files", "Files"),
             ("4", "runs", "Sessions"),
             ("5", "timeline", "Timeline"),
+            ("6", "identity", "Identity"),
         ):
             self._register(
                 f"lens_{lens}",
