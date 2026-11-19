@@ -115,6 +115,15 @@ def test_coordinates_rounded_truncated_and_pair_boost():
     assert {h.marker_id: h.confidence for h in pair} == {"lat": "high", "lon": "high"}
 
 
+def test_trailing_zero_rounding_is_named_by_its_real_decimals():
+    # round(52.514499, 5) = 52.51450: sent as "52.5145", that is 4 places.
+    needles = build_needles([Marker("lat", "52.514499", kind="latitude")])
+    hits = needles.scan(b'{"lat": 52.5145}')
+    assert [(h.transform, h.confidence) for h in hits] == [
+        ("round(value, 4)", "medium")
+    ]
+
+
 def test_weaker_form_inside_stronger_one_is_reported_once():
     needles = build_needles([Marker("lat", "50.734170", kind="latitude")])
     hits = needles.scan(b"lat=50.73417000000001")

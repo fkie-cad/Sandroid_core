@@ -389,15 +389,20 @@ def _coordinate_needles(marker: Marker) -> list[Needle]:
         if text not in texts:
             texts[text] = (transform, confidence)
 
+    def confidence_of(places: int) -> str:
+        return "high" if places >= 5 else ("medium" if places == 4 else "low")
+
     for places in (6, 5, 4, 3):
         quantum = Decimal(1).scaleb(-places)
-        confidence = "high" if places >= 5 else ("medium" if places == 4 else "low")
         for mode, verb in ((ROUND_HALF_UP, "round"), (ROUND_DOWN, "truncate")):
             text = format(number.quantize(quantum, rounding=mode), "f")
-            add(text, f"{verb}(value, {places})", confidence)
+            add(text, f"{verb}(value, {places})", confidence_of(places))
             stripped = text.rstrip("0").rstrip(".")
-            if "." in stripped and len(stripped.split(".")[1]) >= 3:
-                add(stripped, f"{verb}(value, {places})", confidence)
+            # Named and weighed by the decimals it really has: "52.5145" from
+            # round(52.514499, 5) = 52.51450 is a 4-place spelling.
+            shown = len(stripped.split(".")[1]) if "." in stripped else 0
+            if shown >= 3:
+                add(stripped, f"{verb}(value, {shown})", confidence_of(shown))
     e7 = str(int(number.scaleb(7).to_integral_value(rounding=ROUND_HALF_UP)))
     add(e7, "e7(value)", "medium")
 
