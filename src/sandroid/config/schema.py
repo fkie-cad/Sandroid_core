@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator, validator
 
@@ -354,6 +354,117 @@ class TrigDroidConfig(BaseModel):
     )
 
 
+class AIBudgetsConfig(BaseModel):
+    """Per-turn budgets of the AI runtime (``ai.budgets``).
+
+    A token budget counts prompt plus completion tokens summed over all
+    requests of one turn; ``0`` disables a token or wall-clock budget. When a
+    budget is exhausted the runtime makes one wrap-up request without tools
+    and offers "Continue".
+    """
+
+    chat_max_rounds: int = Field(
+        default=25, ge=1, le=500, description="Model rounds per chat turn"
+    )
+    chat_max_tokens: int = Field(
+        default=3_000_000, ge=0, description="Tokens per chat turn (0 = off)"
+    )
+    chat_max_wall_s: int = Field(
+        default=1800, ge=0, description="Seconds per chat turn (0 = off)"
+    )
+    agent_max_rounds: int = Field(
+        default=20, ge=1, le=500, description="Model rounds per subagent run"
+    )
+    agent_max_tokens: int = Field(
+        default=1_500_000, ge=0, description="Tokens per subagent run (0 = off)"
+    )
+    agent_max_wall_s: int = Field(
+        default=900, ge=0, description="Seconds per subagent run (0 = off)"
+    )
+
+
+class AIContextConfig(BaseModel):
+    """Context management of the AI runtime (``ai.context``).
+
+    Fractions are of the model's context window.
+    """
+
+    result_cap_tokens: int = Field(
+        default=8000,
+        ge=500,
+        description=(
+            "Tool results above this many tokens reach the model as a "
+            "preview; the full result is kept on disk (read_result)"
+        ),
+    )
+    turn_result_budget_tokens: int = Field(
+        default=25_000,
+        ge=1000,
+        description=(
+            "Tool-result tokens per assistant message; further results "
+            "come back preview-only"
+        ),
+    )
+    mask_at: float = Field(
+        default=0.50,
+        gt=0.0,
+        lt=1.0,
+        description="Context use at which old tool results are masked",
+    )
+    keep_recent_results: int = Field(
+        default=10, ge=0, description="Most recent tool results never masked"
+    )
+    summarize_at: float = Field(
+        default=0.85,
+        gt=0.0,
+        le=1.0,
+        description="Context use at which older history is summarised",
+    )
+    summary_keep_tokens: int = Field(
+        default=40_000,
+        ge=0,
+        description="Most recent history tokens kept verbatim by a summary",
+    )
+    output_reserve_tokens: int = Field(
+        default=32_000,
+        ge=1000,
+        description="Tokens of the window reserved for the model's output",
+    )
+
+    @model_validator(mode="after")
+    def _mask_before_summary(self) -> "AIContextConfig":
+        """Masking must start below the summary threshold."""
+        if self.mask_at >= self.summarize_at:
+            raise ValueError("ai.context.mask_at must be below summarize_at")
+        return self
+
+
+class AIAgentsConfig(BaseModel):
+    """Subagent scheduling (``ai.agents``)."""
+
+    gateway_concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description=(
+            "Concurrent LLM requests across the chat and all subagents (one "
+            "slot is reserved for the chat)"
+        ),
+    )
+    researcher_max: int = Field(
+        default=3, ge=0, le=16, description="Concurrent researcher subagents"
+    )
+    operator_max: int = Field(
+        default=1, ge=0, le=4, description="Concurrent operator subagents"
+    )
+    max_auto_wakes: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="Automatic chat wake-ups by subagent results per message",
+    )
+
+
 class AIConfig(BaseModel):
     """Chat/agent LLM connection config (EXPERIMENTAL feature, off by default).
 
@@ -404,7 +515,17 @@ class AIConfig(BaseModel):
     )
     show_chat_mascot: bool = Field(
         default=True,
-        description="Show the small animated ASCII mascot in the Chat panel.",
+        description=(
+            "Show the small animated mascot in the Chat panel. Legacy on/off "
+            "alias: false hides it whatever chat_mascot says."
+        ),
+    )
+    chat_mascot: Literal["auto", "blocks", "ascii", "off"] = Field(
+        default="auto",
+        description=(
+            "Chat mascot style: auto (blocks when the terminal can draw "
+            "them, else ascii), blocks, ascii or off"
+        ),
     )
     data_share_path: Path = Field(
         default=Path("~/Sandroid/ai_share/").expanduser(),
@@ -432,6 +553,86 @@ class AIConfig(BaseModel):
             "text, TLS keys) in what the AI reads."
         ),
     )
+
+    # -- model profile and request parameters ---------------------------------
+    profile: str | None = Field(
+        default=None,
+        description=(
+            "Built-in model profile to use instead of matching the model "
+            'name (e.g. "deepseek-v4", "default"). Unset = match by name.'
+        ),
+    )
+    profile_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Per-field profile overrides, e.g. {stream_usage = true, "
+            'system_mode = "multi"} (see sandroid.ai.client.ModelProfile)'
+        ),
+    )
+    context_window: int | None = Field(
+        default=None,
+        ge=1024,
+        description="Context window in tokens (unset = the profile's)",
+    )
+    max_tokens: int | None = Field(
+        default=None, ge=1, description="max_tokens per request (unset = server)"
+    )
+    temperature: float | None = Field(
+        default=None, ge=0.0, le=2.0, description="Sampling temperature"
+    )
+    top_p: float | None = Field(
+        default=None, gt=0.0, le=1.0, description="Nucleus sampling top_p"
+    )
+    tool_choice: Literal["auto", "none", "required"] | None = Field(
+        default=None,
+        description=(
+            "tool_choice sent with tools (unset = server default). Values the "
+            "model profile does not support are not sent."
+        ),
+    )
+    extra_body: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra keys merged into every request body",
+    )
+    request_timeout: tuple[float, float] = Field(
+        default=(10.0, 120.0),
+        description=(
+            "(connect, read) timeouts in seconds; read is the longest silence "
+            "allowed between stream chunks"
+        ),
+    )
+    retry_max: int = Field(
+        default=4,
+        ge=0,
+        le=10,
+        description=(
+            "Retries of a request that failed before any content arrived "
+            "(connect error, HTTP 408/429/5xx); backoff 1/2/4/8 s"
+        ),
+    )
+
+    # -- runtime --------------------------------------------------------------
+    budgets: AIBudgetsConfig = Field(default_factory=AIBudgetsConfig)
+    context: AIContextConfig = Field(default_factory=AIContextConfig)
+    agents: AIAgentsConfig = Field(default_factory=AIAgentsConfig)
+
+    @property
+    def mascot_style(self) -> str:
+        """Effective mascot style: ``off`` when either setting says off.
+
+        ``show_chat_mascot`` is the legacy on/off alias; ``chat_mascot``
+        picks the style. Neither field is rewritten from the other, so the
+        Settings switch can turn the mascot back on.
+        """
+        return self.chat_mascot if self.show_chat_mascot else "off"
+
+    @field_validator("request_timeout")
+    @classmethod
+    def _positive_timeouts(cls, v: tuple[float, float]) -> tuple[float, float]:
+        """Both timeouts must be positive."""
+        if v[0] <= 0 or v[1] <= 0:
+            raise ValueError("ai.request_timeout values must be > 0")
+        return v
 
     @validator("data_share_path", pre=True)
     def expand_data_share_path(cls, v):
@@ -841,6 +1042,7 @@ class TimelineConfig(BaseModel):
             "input": True,
             "screen": True,
             "shot": True,
+            "ai": True,
         },
         description=(
             "Per-source switch (off = not written). label, sandroid, clock, "
