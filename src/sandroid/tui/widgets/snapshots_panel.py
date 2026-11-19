@@ -38,15 +38,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _forget_device_handles() -> None:
-    """After a snapshot load: drop the dead frida handle and Spotlight PID."""
-    from sandroid.tui.controllers.recording_controller import (
-        reset_device_handles_after_snapshot_load,
-    )
-
-    reset_device_handles_after_snapshot_load()
-
-
 # Clickable action-cell id -> panel action method (see on_click).
 _ACTION_CELLS = {
     "snap-create": "action_create",
@@ -662,8 +653,6 @@ class SnapshotsPanel(Widget):
             def _work() -> tuple[bool, str]:
                 if self._toolbox().load_snapshot(tag) is False:
                     return False, f"Could not load '{tag}' (see the log)"
-                _forget_device_handles()
-                self._restart_frida_after_load()
                 self._post(self._note_loaded, tag, None)
                 return True, f"Loaded '{tag}'"
 
@@ -778,8 +767,6 @@ class SnapshotsPanel(Widget):
         def _work() -> tuple[bool, str]:
             if self._toolbox().load_snapshot(tag) is False:
                 return False, f"Could not load slot {slot} ('{tag}', see the log)"
-            _forget_device_handles()
-            self._restart_frida_after_load()
             self._post(self._note_loaded, tag, slot)
             return True, f"Loaded slot {slot} ('{tag}')"
 
@@ -885,22 +872,6 @@ class SnapshotsPanel(Widget):
         if wid in _ACTION_CELLS:
             event.stop()
             self.dispatch_action_cell(wid)
-
-    def _restart_frida_after_load(self) -> None:
-        """Honour ``frida.server_auto_start`` again after a snapshot load.
-
-        The load reverts the device's processes to the snapshot, so a
-        frida-server started this session is gone (Frida showed "○ off").
-        Runs the app's startup auto-start on its own daemon thread, so the
-        "Loaded" toast does not wait for frida-server. Safe off the UI thread.
-        """
-        app = getattr(self, "_app_ref", None)
-        start = getattr(app, "_auto_start_frida_server", None)
-        if start is None:
-            return
-        threading.Thread(
-            target=start, name="sandroid-frida-after-load", daemon=True
-        ).start()
 
     def _note_loaded(self, tag: str, slot: str | None) -> None:
         """Tell the main screen which snapshot is loaded (header indicator)."""

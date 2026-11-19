@@ -39,52 +39,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def reset_device_handles_after_snapshot_load() -> None:
-    """Forget device state that an emulator snapshot load has invalidated.
-
-    Loading a snapshot kills every app process and the emulator's frida
-    device object. Afterwards the cached ``JobManager.device`` raised
-    "device is gone" on every spawn until the TUI was restarted, and
-    Spotlight kept showing the dead PID. Drops the job manager's session
-    and device handle (it re-creates the handle lazily on the next spawn),
-    the frida device cache and the Spotlight PID, then publishes
-    ``STATE_CHANGED`` so the panels refresh. Never raises; call it from a
-    worker thread (the session reset may wait on frida for a few seconds).
-    """
-    from sandroid import services
-
-    try:
-        frida_svc = services.get_frida_session_service()
-        jm = getattr(frida_svc, "_job_manager", None)
-        if jm is not None:
-            try:
-                jm.reset_session(timeout_per_job=1.0, detach_timeout=1.0)
-            except Exception:
-                logger.debug(
-                    "JobManager reset after snapshot load failed", exc_info=True
-                )
-            jm.device = None
-        frida_svc.invalidate_frida_device_cache()
-    except Exception:
-        logger.debug("Could not reset frida state after snapshot load", exc_info=True)
-    try:
-        services.get_spotlight_service().set_pid(None)
-    except Exception:
-        logger.debug("Could not clear the Spotlight PID", exc_info=True)
-    try:
-        from sandroid.core.events import Event, EventBus, EventType
-
-        EventBus.get().publish(
-            Event(
-                type=EventType.STATE_CHANGED,
-                data={"change_type": "snapshot_loaded"},
-                source="recording_controller",
-            )
-        )
-    except Exception:
-        logger.debug("Could not publish the snapshot-load refresh", exc_info=True)
-
-
 def drop_stale_frida_device() -> bool:
     """Drop the job manager's frida device handle if it can no longer work.
 
@@ -1154,10 +1108,8 @@ class RecordingController:
                     # run's error.
                     error = result.error
                 finally:
-                    # The engine's snapshot loads killed every app process
-                    # and the frida device handle; drop both so the next
-                    # spawn and the Spotlight PID start fresh.
-                    reset_device_handles_after_snapshot_load()
+                    # (Every engine snapshot load already dropped the frida
+                    # handles and the Spotlight PID in EmulatorService.)
                     if self._suppress_disconnect_guard:
                         self._guarded(self._suppress_disconnect_guard, False)
                     if self._set_replay_indicator:

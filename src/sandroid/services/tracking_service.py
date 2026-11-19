@@ -3281,6 +3281,31 @@ class TrackingService:
             daemon=True,
         ).start()
 
+    def restart_logcat_after_load(self, serial: str | None) -> bool:
+        """Restart the activity logcat follower a snapshot load cut off.
+
+        A load drops the adb transport, which ends the ``logcat`` stream;
+        nothing restarted it, so activity labels were silently lost for the
+        rest of the session. Only acts while a session runs on *serial* (None
+        = any) with a follower started. Never raises.
+
+        Returns:
+            True when a new follower was started.
+        """
+        with self._lock:
+            if not self._active or self._logcat is None:
+                return False
+            if serial is not None and self._serial != serial:
+                return False
+            old, gen, session_serial = self._logcat, self._gen, self._serial
+            self._logcat = None
+        with contextlib.suppress(Exception):
+            old.terminate()
+        if session_serial is None:
+            return False
+        self._start_logcat(gen, session_serial)
+        return True
+
     def _read_logcat(self, gen: int, proc: Any) -> None:
         stdout = getattr(proc, "stdout", None)
         if stdout is None:
@@ -4646,7 +4671,24 @@ def get_tracking() -> TrackingService:
         if _SERVICE is None:
             _SERVICE = TrackingService()
             atexit.register(_atexit_stop)
+            _register_after_load()
         return _SERVICE
+
+
+def _after_snapshot_load(serial: str | None) -> None:
+    """EmulatorService after-load hook: revive the logcat follower."""
+    service = _SERVICE
+    if service is not None:
+        service.restart_logcat_after_load(serial)
+
+
+def _register_after_load() -> None:
+    try:
+        from sandroid.services.emulator_service import register_after_load_hook
+
+        register_after_load_hook(_after_snapshot_load)
+    except Exception:
+        logger.debug("tracking: after-load hook not registered", exc_info=True)
 
 
 def is_active(serial: str | None = None) -> bool:

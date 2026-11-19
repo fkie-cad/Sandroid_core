@@ -29,6 +29,7 @@ import logging
 import re
 import threading
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -1892,6 +1893,51 @@ class MonitorWatch:
         return title, parts
 
 
+def _load_generation() -> int | None:
+    try:
+        from sandroid.services.emulator_service import snapshot_load_generation
+
+        return snapshot_load_generation()
+    except Exception:
+        return None
+
+
+def _load_running() -> bool:
+    try:
+        from sandroid.services.emulator_service import snapshot_load_active
+
+        return snapshot_load_active()
+    except Exception:
+        return False
+
+
+#: Live controllers that restart a monitor a snapshot load ended.
+_LOAD_WATCHERS: "weakref.WeakSet[MonitorController]" = weakref.WeakSet()
+_AFTER_LOAD_REGISTERED = False
+
+
+def _after_snapshot_load(_serial: str | None) -> None:
+    """EmulatorService after-load hook (loader worker thread)."""
+    for controller in list(_LOAD_WATCHERS):
+        try:
+            controller._call_from_thread(controller._resume_monitor_after_load)
+        except Exception:
+            logger.debug("monitor resume after load not scheduled", exc_info=True)
+
+
+def _register_after_load() -> None:
+    global _AFTER_LOAD_REGISTERED
+    if _AFTER_LOAD_REGISTERED:
+        return
+    try:
+        from sandroid.services.emulator_service import register_after_load_hook
+
+        register_after_load_hook(_after_snapshot_load)
+        _AFTER_LOAD_REGISTERED = True
+    except Exception:
+        logger.debug("monitor after-load hook not registered", exc_info=True)
+
+
 class MonitorController:
     """Controller for Monitor filesystem monitoring.
 
@@ -2002,6 +2048,12 @@ class MonitorController:
         #: A stop is running off the UI thread (see :meth:`stop`): no new
         #: start until the device is cleaned up.
         self._stop_pending = False
+        #: Snapshot-load generation when the monitor last started, and the
+        #: config to restart with once a load that ended it has finished.
+        self._load_gen_at_start: int | None = None
+        self._resume_after_load: MonitorConfig | None = None
+        _LOAD_WATCHERS.add(self)
+        _register_after_load()
 
     @staticmethod
     def _default_run_off_thread(target: Callable[[], None]) -> None:
@@ -2344,6 +2396,8 @@ class MonitorController:
         if self.is_running() or self._start_pending:
             self._log_warning("Monitor is already starting — please wait.")
             return False
+        self._load_gen_at_start = _load_generation()
+        self._resume_after_load = None
         self._start_pending = True
 
         pref = self._resolve_backend_pref(config)
@@ -3071,6 +3125,16 @@ class MonitorController:
         except Exception:
             exit_code = None
         intentional = getattr(inst, "stop_requested", False) is True
+        # A snapshot load (not Play's own safety stop, which is intentional)
+        # cut the monitor's adb stream: restart it with the same config once
+        # the load has finished.
+        resume_config = None
+        if (
+            not intentional
+            and self._load_gen_at_start is not None
+            and _load_generation() != self._load_gen_at_start
+        ):
+            resume_config = getattr(inst, "config", None)
         _timeline_monitor(
             "end",
             "monitor ended" if intentional else "monitor ended unexpectedly",
@@ -3113,6 +3177,24 @@ class MonitorController:
         # Update UI
         if self._force_ui_refresh:
             self._force_ui_refresh()
+
+        if resume_config is not None:
+            self._resume_after_load = resume_config
+            if _load_running():
+                self._log_info(
+                    "Monitor ended by the snapshot load: it restarts when the "
+                    "load is done"
+                )
+            else:
+                self._resume_monitor_after_load()
+
+    def _resume_monitor_after_load(self) -> None:
+        """Restart a monitor a snapshot load ended (UI thread; at most once)."""
+        config, self._resume_after_load = self._resume_after_load, None
+        if config is None or self.is_running() or self._start_pending:
+            return
+        self._log_info("Restarting the monitor after the snapshot load")
+        self.resume_after_playback(config)
 
     def stop(self) -> bool:
         """Stop Monitor if running.
