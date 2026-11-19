@@ -12,7 +12,7 @@ from textual.widgets import RichLog
 from sandroid._version import __version__
 from sandroid.core.console import SANDROID_LOGO
 from sandroid.core.enums import ViewMode
-from sandroid.tui.themes import FIXED_COLORS
+from sandroid.tui.themes import fixed_color
 
 
 class _LogHighlighter(ReprHighlighter):
@@ -357,7 +357,7 @@ class ActivityLog(RichLog):
     def log_task_started(self, task_name: str, app_name: str = None) -> None:
         """Log a task started event.
 
-        Uses FIXED_COLORS for consistent "running" recognition across themes.
+        Uses ``fixed_color`` for consistent "running" recognition across themes.
 
         Args:
             task_name: Name of the task
@@ -365,14 +365,14 @@ class ActivityLog(RichLog):
         """
         if app_name:
             self.write(
-                f"[{FIXED_COLORS['running']} bold]>>> Started: {task_name} on {app_name}[/]"
+                f"[{fixed_color('running')} bold]>>> Started: {task_name} on {app_name}[/]"
             )
         else:
-            self.write(f"[{FIXED_COLORS['running']} bold]>>> Started: {task_name}[/]")
+            self.write(f"[{fixed_color('running')} bold]>>> Started: {task_name}[/]")
 
     def log_task_updated(self, task_name: str) -> None:
         """Log a task display-name change (not a restart)."""
-        self.write(f"[{FIXED_COLORS['running']}][~] {task_name}[/]")
+        self.write(f"[{fixed_color('running')}][~] {task_name}[/]")
 
     def log_task_stopped(self, task_name: str) -> None:
         """Log a task stopped event.
@@ -458,7 +458,7 @@ class ActivityLog(RichLog):
         """
         colors = self._get_theme_colors()
         timestamp = datetime.now().strftime("%H:%M:%S")
-        forensic_color = FIXED_COLORS.get("warning_status", "#ffaa00")
+        forensic_color = fixed_color("warning_status")
         self.write(
             f"[{colors['text_muted']}]{timestamp}[/] [{forensic_color}]INFO:[/] {message}"
         )

@@ -551,7 +551,7 @@ class TUIConfig(BaseModel):
     )
     theme: str = Field(
         default="default",
-        description="TUI theme: default, dark, light, high_contrast, cyberpunk, nord, dracula, solarized",
+        description="TUI theme: default, dark, light, paper, daylight, high_contrast, cyberpunk, nord, dracula, solarized",
     )
     show_theme_indicator: bool = Field(
         default=False,
@@ -755,6 +755,8 @@ class TUIConfig(BaseModel):
             "default",
             "dark",
             "light",
+            "paper",
+            "daylight",
             "high_contrast",
             "cyberpunk",
             "nord",

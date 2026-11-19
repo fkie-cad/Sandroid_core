@@ -27,6 +27,8 @@ THEME_REGISTRY: list[tuple[str, str, str]] = [
     ("default", "Midnight Cyan", "Dark blue/cyan theme (default)"),
     ("dark", "Dark", "Material Design dark theme"),
     ("light", "Light", "Clean light theme"),
+    ("paper", "Paper", "Warm off-white, ink text, petrol-blue accent"),
+    ("daylight", "Daylight", "Crisp white, strong contrast, for bright rooms"),
     ("high_contrast", "High Contrast", "Maximum contrast for accessibility"),
     ("cyberpunk", "Cyberpunk/Neon", "Neon colors on dark purple"),
     ("nord", "Nord/Arctic", "Arctic, north-bluish colors"),
