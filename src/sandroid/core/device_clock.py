@@ -45,10 +45,11 @@ shows host now - ``off_wall`` as the device time, no adb call) and
 :func:`to_host_time` (device monotonic seconds -> host epoch, through the
 clock epoch that covers them).
 
-**clock.jsonl** (``<results>/<session>/<device>/clock.jsonl``, next to
-``marks.jsonl``): one line per recorded sample (:func:`record`) -- the
-sample plus ``reason`` (``device-connect``, ``monitor-start``, ``periodic``,
-``pull``, ``snapshot-load``, ``sync``) and ``jump``. ``jump`` (a clock
+**The session timeline** (``core/timeline.py``): one ``clock`` line per
+recorded sample (:func:`record`; kind ``sample`` / ``jump`` / ``sync``) --
+its ``data`` is the sample (minus ``serial`` and ``host_at``) plus
+``reason`` (``device-connect``, ``monitor-start``, ``periodic``, ``pull``,
+``snapshot-load``, ``sync``) and ``jump``. ``jump`` (a clock
 epoch change) is true for every ``snapshot-load`` and ``sync`` line and
 whenever ``off_wall`` or ``off_mono`` moved more than :data:`JUMP_S`
 seconds since the previous line of that serial; ``jump_wall_s`` /
@@ -58,6 +59,14 @@ whatever took it. ``snapshot`` names the snapshot of a ``snapshot-load`` /
 ``after_off_wall``, ``ok`` and ``command``. Times are ISO 8601 with
 milliseconds and the UTC offset (:func:`watchlist_store.iso_tz`); the format
 grows additively and readers ignore fields they do not know.
+
+**World changes** (a snapshot load, a cold boot): the timeline calls
+:func:`begin_epoch` (a barrier: the newest epoch ends now, so fresh
+monotonic times are not mapped with the old offset until the next sample)
+and :func:`to_host_time` takes ``near`` (the time the event was received)
+to pick, among the epochs that cover a time, the one whose result lies in
+``[near - 30 s, near + 1 s]``. On a resume :func:`seed` restores the last
+recorded offsets so the first new sample detects a jump.
 """
 
 from __future__ import annotations
@@ -71,15 +80,9 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-#: ``clock.jsonl`` in the session's device results folder.
-CLOCK_FILE = "clock.jsonl"
 #: An offset move above this (seconds) is a clock jump.
 JUMP_S = 2.0
 #: Wall-clock offsets above this (seconds) are shown and warned about.
@@ -95,6 +98,12 @@ SAMPLES_QUICK = 5
 WARMUP = 3
 #: Seconds to wait for a query's answer before the shell counts as dead.
 QUERY_TIMEOUT = 2.0
+#: Drift allowance of a monotonic conversion: ms of error per second away
+#: from the epoch's last sample (0.01 ms/s, about 3 ms per 5 min).
+DRIFT_MS_PER_S = 0.01
+#: The ``near`` window of :func:`to_host_time` (seconds before / after).
+NEAR_BEFORE_S = 30.0
+NEAR_AFTER_S = 1.0
 
 _END = "__sandroid_clock__"
 #: One query: CLOCK_MONOTONIC (root), the wall epoch, an end marker.
@@ -106,7 +115,7 @@ _TIMER_LIST = re.compile(r"now at (\d+) nsecs")
 _LOCK = threading.Lock()
 #: serial -> the newest sample (any source).
 _LAST: dict[str, dict] = {}
-#: serial -> (off_wall, off_mono) of the newest clock.jsonl line.
+#: serial -> (off_wall, off_mono) of the newest recorded timeline line.
 _LOGGED: dict[str, tuple[float, float | None]] = {}
 #: serial -> host time.time() of the last failed measurement.
 _FAILED: dict[str, float] = {}
@@ -351,6 +360,13 @@ def measure(
     query instead. The sample becomes :func:`last_sample` of ``serial``
     (default: the adb target) and feeds the clock epochs. Never raises.
     """
+    return _public(_measure(serial, send, samples))
+
+
+def _measure(
+    serial: str | None = None, send: Send | None = None, samples: int = SAMPLES
+) -> dict | None:
+    """:func:`measure` keeping the internal ``_host`` (the line's time)."""
     serial = _target(serial)
     key = _key(serial)
     queries, method = None, "shell"
@@ -373,7 +389,7 @@ def measure(
         _LAST[key] = best
         _FAILED.pop(key, None)
         _add_to_epochs(key, best)
-    return _public(best)
+    return dict(best)
 
 
 def _public(sample: dict | None) -> dict | None:
@@ -407,13 +423,19 @@ def _add_to_epochs(key: str, sample: dict) -> None:
     epochs = _EPOCHS.setdefault(key, [])
     entry = {"off_mono": off, "err_ms": sample["err_ms"], "mono": mono,
              "host": sample["_host"]}  # fmt: skip
-    if epochs and abs(epochs[-1]["off_mono"] - off) <= JUMP_S:
+    if (
+        epochs
+        and "closed_host" not in epochs[-1]
+        and abs(epochs[-1]["off_mono"] - off) <= JUMP_S
+    ):
         epochs[-1].update(entry)  # the latest sample tracks the drift
         return
     epochs.append({**entry, "first_mono": mono, "first_host": sample["_host"]})
 
 
-def to_host_time(serial: str | None, dev_mono_s: float) -> tuple[float, float] | None:
+def to_host_time(
+    serial: str | None, dev_mono_s: float, near: float | None = None
+) -> tuple[float, float] | None:
     """``(host epoch, error ms)`` of a device CLOCK_MONOTONIC time (seconds):
     ``dev_mono_s + off_mono`` of the clock epoch that covers it.
 
@@ -422,9 +444,22 @@ def to_host_time(serial: str | None, dev_mono_s: float) -> tuple[float, float] |
     the clock jumped in between is unknown); the first epoch is open to the
     past, the newest ends now (a snapshot load can rewind CLOCK_MONOTONIC,
     so a later time of the newest epoch is not ambiguous with an earlier
-    epoch's). The newest covering epoch wins. ``None`` without a monotonic
-    sample or when no epoch covers the time (e.g. in the future).
+    epoch's) or where :func:`begin_epoch` closed it. The newest covering
+    epoch wins. ``None`` without a monotonic sample or when no epoch covers
+    the time (e.g. in the future).
+
+    With ``near`` (host epoch the event was received at), the newest
+    covering epoch whose result lies in ``[near - 30 s, near + 1 s]`` wins
+    and ``None`` is returned when there is none.
     """
+    hit = _to_host_detail(serial, dev_mono_s, near)
+    return None if hit is None else (hit[0], hit[1])
+
+
+def _to_host_detail(
+    serial: str | None, dev_mono_s: float, near: float | None = None
+) -> tuple[float, float, float] | None:
+    """:func:`to_host_time` plus the monotonic time of the epoch's sample."""
     with _LOCK:
         epochs = [dict(e) for e in _EPOCHS.get(_key(_target(serial)), [])]
     for i in range(len(epochs) - 1, -1, -1):
@@ -436,30 +471,113 @@ def to_host_time(serial: str | None, dev_mono_s: float) -> tuple[float, float] |
             high = epoch["mono"] + (epochs[i + 1]["first_host"] - epoch["host"])
         else:
             high = _now() - epoch["off_mono"] + 1.0
-        if low <= dev_mono_s <= high:
-            return dev_mono_s + epoch["off_mono"], epoch["err_ms"]
+        closed = epoch.get("closed_host")
+        if closed is not None:
+            high = min(high, closed - epoch["off_mono"])
+        if not low <= dev_mono_s <= high:
+            continue
+        host = dev_mono_s + epoch["off_mono"]
+        if near is not None and not (
+            near - NEAR_BEFORE_S <= host <= near + NEAR_AFTER_S
+        ):
+            continue
+        return host, epoch["err_ms"], epoch["mono"]
     return None
 
 
+def begin_epoch(serial: str | None) -> None:
+    """A world change (snapshot load, cold boot) starts now: close the
+    newest monotonic epoch at host now. Until the next sample, fresh
+    monotonic times are not mapped with the old offset.
+    """
+    with _LOCK:
+        epochs = _EPOCHS.get(_key(_target(serial)))
+        if epochs and "closed_host" not in epochs[-1]:
+            epochs[-1]["closed_host"] = _now()
+
+
+def seed(
+    serial: str, *, off_wall: float, off_mono: float | None, host_t: float
+) -> None:
+    """After a resume: the last recorded offsets (``host_t`` is when they
+    were sampled), so the first new sample is checked for a jump.
+    """
+    del host_t  # recorded in the line; only the offsets are compared
+    with _LOCK:
+        _LOGGED[_key(serial)] = (off_wall, off_mono)
+
+
+def _current_epoch_sample(serial: str | None) -> dict | None:
+    """The newest sample if no world change began since it (dev_wall)."""
+    key = _key(_target(serial))
+    with _LOCK:
+        sample = _LAST.get(key)
+        epochs = _EPOCHS.get(key)
+        if sample is None:
+            return None
+        if epochs and "closed_host" in epochs[-1]:
+            return None
+        return dict(sample)
+
+
 # ---------------------------------------------------------------------------
-# clock.jsonl
+# the session timeline's clock lines
 # ---------------------------------------------------------------------------
 
 
-def clock_file() -> Path:
-    """``<session results>/clock.jsonl`` (next to ``marks.jsonl``)."""
-    from sandroid.core import watchlist_store
+def _summary(kind: str, entry: dict) -> str:
+    offset = device_minus_host(entry)
+    shown = format_offset(offset) if offset is not None else "?"
+    if kind == "sync":
+        before = entry.get("before_off_wall")
+        after = entry.get("after_off_wall")
+        if isinstance(before, (int, float)) and isinstance(after, (int, float)):
+            return (
+                f"⏱ clock synced · {format_offset(-before)} → {format_offset(-after)}"
+            )
+        return f"⏱ clock synced · device {shown}"
+    if kind == "jump":
+        moved = entry.get("jump_wall_s")
+        if isinstance(moved, (int, float)):
+            return f"⏱ clock jump · wall {format_offset(-moved)}"
+        return f"⏱ clock jump · device {shown} ({entry.get('reason')})"
+    err = entry.get("err_ms")
+    err_text = f" ±{round(err)} ms" if isinstance(err, (int, float)) else ""
+    return f"clock · device {shown}{err_text} ({entry.get('reason')})"
 
-    return watchlist_store.files_root().parent / CLOCK_FILE
 
-
-def _append(entry: dict) -> None:
-    from sandroid.core import watchlist_store
-
+def _append(entry: dict, host: float | None = None) -> None:
+    """One ``clock`` line on the session timeline (``t`` = the sample's
+    host midpoint). Never raises.
+    """
+    if entry.get("reason") == "sync":
+        kind = "sync"
+    elif entry.get("jump"):
+        kind = "jump"
+    else:
+        kind = "sample"
+    data = {k: v for k, v in entry.items() if k not in ("serial", "host_at")}
+    when = host
+    if when is None:
+        try:
+            when = datetime.fromisoformat(str(entry.get("host_at"))).timestamp()
+        except ValueError:
+            when = None
     try:
-        watchlist_store.append_jsonl(clock_file(), [entry])
-    except OSError:
-        logger.debug("device clock: clock.jsonl not writable", exc_info=True)
+        from sandroid.core import timeline
+
+        timeline.get_timeline().emit(
+            "clock",
+            kind,
+            summary=_summary(kind, entry),
+            data=data,
+            t=when,
+            t_err_ms=entry.get("err_ms"),
+            dev=entry.get("serial"),
+            actor="sandroid",
+        )
+    except Exception:
+        logger.debug("device clock: timeline line failed", exc_info=True)
 
 
 def _moved(new: float | None, old: float | None) -> float | None:
@@ -467,9 +585,12 @@ def _moved(new: float | None, old: float | None) -> float | None:
 
 
 def _note(sample: dict, reason: str, always: bool, **extra) -> dict | None:
-    """Write ``sample`` to clock.jsonl when ``always``, when it is the first
-    of its serial, or when it jumped. Returns the line (``None``: skipped).
+    """Write ``sample`` to the session timeline when ``always``, when it is
+    the first of its serial, or when it jumped. Returns the entry (public
+    keys; ``None``: skipped). ``sample["_host"]`` (if present) is its time.
     """
+    host = sample.get("_host")
+    sample = _public(sample)
     key = _key(sample.get("serial"))
     with _LOCK:
         previous = _LOGGED.get(key)
@@ -485,7 +606,7 @@ def _note(sample: dict, reason: str, always: bool, **extra) -> dict | None:
         entry["jump_wall_s"] = wall
         entry["jump_mono_s"] = mono
     entry.update(extra)
-    _append(entry)
+    _append(entry, host)
     return entry
 
 
@@ -494,8 +615,8 @@ def current(serial: str | None = None, max_age: float = REUSE_S) -> dict | None:
 
     Reuses the last sample when younger than ``max_age`` seconds (and does
     not retry a failed measurement within that time), else measures
-    (:data:`SAMPLES_QUICK`). A fresh sample that jumped is written to
-    clock.jsonl (``reason: "pull"``).
+    (:data:`SAMPLES_QUICK`). A fresh sample that jumped is written to the
+    session timeline (``reason: "pull"``).
     """
     serial = _target(serial)
     now = _now()
@@ -506,10 +627,10 @@ def current(serial: str | None = None, max_age: float = REUSE_S) -> dict | None:
         return _public(last)
     if failed is not None and now - failed < max_age:
         return None
-    sample = measure(serial, samples=SAMPLES_QUICK)
+    sample = _measure(serial, samples=SAMPLES_QUICK)
     if sample is not None:
         _note(sample, "pull", always=False)
-    return sample
+    return _public(sample)
 
 
 def record(
@@ -519,12 +640,12 @@ def record(
     samples: int = SAMPLES,
     **extra,
 ) -> dict | None:
-    """Measure now and write the sample to clock.jsonl with ``reason``.
+    """Measure now and write the sample to the session timeline with ``reason``.
 
     ``extra`` (e.g. ``snapshot="clean"``) is added to the line. Returns the
     line, ``None`` when the device did not answer.
     """
-    sample = measure(serial, send, samples)
+    sample = _measure(serial, send, samples)
     if sample is None:
         return None
     return _note(sample, reason, always=True, **extra)
@@ -592,8 +713,9 @@ def notable(sample: dict | None) -> bool:
 _SET_FORMS: tuple[Callable[[float], str], ...] = (
     lambda epoch: f"date -u @{epoch:.3f}",
     lambda epoch: f"date -u @{round(epoch)}",
-    lambda epoch: "date -u "
-    + datetime.fromtimestamp(round(epoch), UTC).strftime("%m%d%H%M%Y.%S"),
+    lambda epoch: (
+        "date -u " + datetime.fromtimestamp(round(epoch), UTC).strftime("%m%d%H%M%Y.%S")
+    ),
 )
 #: As the adb shell user (root on the analysis AVDs), then through ``su 0``.
 _SET_PREFIXES = ("", "su 0 ")
@@ -631,6 +753,11 @@ def sync(serial: str | None = None, send: Send | None = None) -> dict | None:
     ``command`` that worked, ``None`` if the device never answered. Writes
     nothing; see :func:`after_snapshot_load`. CLOCK_MONOTONIC is untouched.
     """
+    return _public(_sync(serial, send))
+
+
+def _sync(serial: str | None = None, send: Send | None = None) -> dict | None:
+    """:func:`sync` keeping the internal ``_host`` of the last sample."""
     serial = _target(serial)
     after = None
     for prefix in _SET_PREFIXES:
@@ -638,7 +765,7 @@ def sync(serial: str | None = None, send: Send | None = None) -> dict | None:
             lead = ((last_sample(serial) or {}).get("err_ms") or 0) / 1000
             command = prefix + form(_now() + lead)
             _run_set(serial, command, send)
-            after = measure(serial, samples=SAMPLES_QUICK)
+            after = _measure(serial, samples=SAMPLES_QUICK)
             if after is None:
                 return None
             if abs(after["off_wall"]) <= NOTABLE_S:
@@ -678,7 +805,7 @@ def after_snapshot_load(
     if loaded is None:
         return None
     if sync_enabled() and notable(loaded):
-        synced = sync(serial, send)
+        synced = _sync(serial, send)
         if synced is not None:
             ok = bool(synced.pop("ok"))
             command = synced.pop("command", None)
@@ -691,14 +818,14 @@ def after_snapshot_load(
                 ok=ok,
                 command=command,
                 snapshot=name,
-            ) or {**synced, "ok": ok}
+            ) or {**_public(synced), "ok": ok}
         if synced is None or not final.get("ok"):
             warn_once(
                 "sync",
                 serial,
                 f"Could not set the device clock to host time after loading "
                 f"snapshot '{name}' (needs root `date`); recording the offset "
-                f"in {CLOCK_FILE} instead.",
+                f"in the session timeline instead.",
             )
     if notable(final):
         warn_once(
@@ -707,7 +834,7 @@ def after_snapshot_load(
             f"Device clock is {format_offset(device_minus_host(final))} off the "
             f"host after loading snapshot '{name}'. Device times (file mtimes, "
             f"database values) are on the device clock; the offset is "
-            f"recorded in {CLOCK_FILE}.",
+            f"recorded in the session timeline.",
         )
     return final
 
@@ -725,7 +852,7 @@ def reset() -> None:
 
 
 __all__ = [
-    "CLOCK_FILE",
+    "DRIFT_MS_PER_S",
     "EPOCH_REASONS",
     "JUMP_S",
     "NOTABLE_S",
@@ -738,7 +865,7 @@ __all__ = [
     "Shell",
     "ShellDeadError",
     "after_snapshot_load",
-    "clock_file",
+    "begin_epoch",
     "close_shells",
     "current",
     "device_minus_host",
@@ -750,6 +877,7 @@ __all__ = [
     "record",
     "record_async",
     "reset",
+    "seed",
     "sync",
     "sync_enabled",
     "to_host_time",

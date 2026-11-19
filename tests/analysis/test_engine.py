@@ -801,3 +801,48 @@ def test_network_reset_default_is_in_schema_and_default_toml():
     default = Path(__file__).resolve().parents[2] / "src/sandroid/config/default.toml"
     data = tomllib.loads(default.read_text())
     assert data["analysis"]["network_reset_after_snapshot"] == "airplane"
+
+
+# ===========================================================================
+# Session timeline: phases
+# ===========================================================================
+
+
+def test_the_engine_writes_its_phases_and_restores_the_one_it_found():
+    """Each step's window maps to a phase (replay / dry-run / setup), one
+    ``run/phase`` line per change, stamped with the run id; afterwards the
+    phase the run found is back.
+    """
+    import itertools
+
+    from sandroid.core import timeline
+
+    config = RunConfig(number_of_runs=2, noise_filter=True, action=FakeAction())
+    config.run_id = "run-7"
+    with timeline.capture() as lines:
+        service = timeline.get_timeline()
+        service.set_phase("live", "run-7", kind="play-start")
+        _make_engine(config).run()
+        assert service.current_phase() == ("live", "run-7")
+    phases = [x for x in lines if x["kind"] == "phase"]
+    order = [x["data"]["to"] for x in phases]
+    assert order[0] == "setup"
+    assert "replay" in order
+    assert "dry-run" in order
+    assert order[-1] == "live"  # restored
+    for previous, line in itertools.pairwise(phases):
+        assert line["data"]["from"] == previous["data"]["to"]  # only changes
+    replay = next(x for x in phases if x["data"]["to"] == "replay")
+    assert (replay["phase"], replay["run"], replay["actor"]) == (
+        "replay",
+        "run-7",
+        "sandroid",
+    )
+    assert replay["data"]["of"] == 2
+    assert replay["data"]["replay"] in (1, 2)
+    assert replay["data"]["step"]
+
+
+def test_run_config_carries_an_optional_run_id():
+    assert RunConfig().run_id is None
+    assert RunConfig(run_id="r1").run_id == "r1"

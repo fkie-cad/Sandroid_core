@@ -63,11 +63,43 @@ ai:
   # base_url: https://api.openai.com/v1
   # api_key: your-api-key-here  # Better to use SANDROID_AI__API_KEY env var
   # model: gpt-4o
+  mask_sensitive: false  # mask sensitive timeline lines in what the AI reads
 
 report:
   generate_pdf: false
   include_screenshots: true
   # template_path: /path/to/custom/template.html  # Optional: custom report template
+  effects_window_s: 2.0
+  shot_triggers: [before_tap, after_tap, screen_change, label, manual]
+  formats: [pdf, md]
+
+# The session timeline (<results>/<session>/<device>/timeline.jsonl).
+timeline:
+  sources: {files: true, monitor: true, net: true, input: true, screen: true, shot: true}
+  kinds_off: []
+  count_only: [files.open, files.close]
+  files_attrs: app_dirs  # app_dirs | lines | counts
+  files_modify_coalesce_ms: 1000  # 0 = off
+  count_window_s: 5.0
+  queue_max: 10000
+  clock_every_s: 60  # 0 = off
+  mask_sensitive: false
+
+# Tracking: the interaction transcript.
+tracking:
+  helper_mode: full  # full | invisible | off
+  auto_on_record: true
+  shot_before_tap: true
+  shot_screen_change: true
+  shot_after_tap: false
+  shot_label: false
+  settle_interval_ms: 300
+  settle_max_ms: 2000
+  capture_text: true
+  text_idle_ms: 1500
+  long_press_ms: 500
+  swipe_slop_px: 24
+  logcat_screen_backup: true
 
 # MCP (Model Context Protocol) client — lets Sandroid's Chat feature call tools
 # hosted by external MCP servers. A bundled dummy server (proving the MCP

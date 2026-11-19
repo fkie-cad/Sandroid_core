@@ -185,8 +185,11 @@ class SnapshotListCommand(CommandHandler):
         """
         try:
             if ctx.toolbox:
-                # Toolbox expects bytes for the name
-                ctx.toolbox.load_snapshot(snapshot_tag.encode())
+                from sandroid.core.timeline import acting_as
+
+                # Toolbox expects bytes for the name; a user command.
+                with acting_as("user"):
+                    ctx.toolbox.load_snapshot(snapshot_tag.encode())
                 logger.info(f"Loaded snapshot: {snapshot_tag}")
                 return CommandResult(
                     success=True,

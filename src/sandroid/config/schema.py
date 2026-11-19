@@ -1,12 +1,18 @@
 """Configuration schema for Sandroid using Pydantic."""
 
+import re
 import shutil
 import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator, validator
+from pydantic import BaseModel, Field, field_validator, model_validator, validator
+
+#: Default of ``ai.mask_sensitive``: whether the AI's timeline reads see the
+#: content of sensitive lines (typed text, TLS keys) masked. One constant:
+#: flip it here to change the default.
+AI_MASK_SENSITIVE_DEFAULT = False
 
 
 def get_secure_temp_dir() -> Path:
@@ -85,8 +91,8 @@ class EmulatorConfig(BaseModel):
         description=(
             "After every snapshot load, set the device wall clock to host "
             "time (root `date`) when it is more than 1 s off. The offset "
-            "before and after is recorded in clock.jsonl either way; off "
-            "keeps the snapshot's frozen clock."
+            "before and after is recorded in the session timeline either "
+            "way; off keeps the snapshot's frozen clock."
         ),
     )
 
@@ -402,6 +408,14 @@ class AIConfig(BaseModel):
         ),
     )
 
+    mask_sensitive: bool = Field(
+        default=AI_MASK_SENSITIVE_DEFAULT,
+        description=(
+            "Mask the content of sensitive session-timeline lines (typed "
+            "text, TLS keys) in what the AI reads."
+        ),
+    )
+
     @validator("data_share_path", pre=True)
     def expand_data_share_path(cls, v):
         """Expand user path for the AI data-share directory."""
@@ -452,6 +466,29 @@ class ReportConfig(BaseModel):
     )
     template_path: Path | None = Field(
         default=None, description="Custom report template path"
+    )
+    effects_window_s: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=60.0,
+        description=(
+            "Seconds after an input in which file/network lines count as its "
+            "effects in the report transcript"
+        ),
+    )
+    shot_triggers: list[str] = Field(
+        default_factory=lambda: [
+            "before_tap",
+            "after_tap",
+            "screen_change",
+            "label",
+            "manual",
+        ],
+        description="Screenshot triggers shown in the report",
+    )
+    formats: list[str] = Field(
+        default_factory=lambda: ["pdf", "md"],
+        description="Report formats written besides report.json (pdf, md)",
     )
 
 
@@ -759,6 +796,131 @@ class TUIConfig(BaseModel):
                 ) from None
             return v
         return v
+
+
+#: Timeline sources the policy can never turn off (mirrors
+#: ``sandroid.core.timeline.ALWAYS_ON``).
+TIMELINE_ALWAYS_ON = frozenset(
+    {"label", "sandroid", "clock", "snapshot", "device", "run"}
+)
+_SRC_KIND_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}\.([a-z][a-z0-9_-]{0,23}|\*)$")
+
+
+class TimelineConfig(BaseModel):
+    """The session timeline (``timeline.jsonl`` per device folder): what is
+    written, counted or left out, and how readers mask sensitive lines.
+    """
+
+    sources: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "files": True,
+            "monitor": True,
+            "net": True,
+            "input": True,
+            "screen": True,
+            "shot": True,
+        },
+        description=(
+            "Per-source switch (off = not written). label, sandroid, clock, "
+            "snapshot, device and run are always on."
+        ),
+    )
+    kinds_off: list[str] = Field(
+        default_factory=list,
+        description='Line kinds not written: "src.kind" or "src.*"',
+    )
+    count_only: list[str] = Field(
+        default_factory=lambda: ["files.open", "files.close"],
+        description='Line kinds only counted ("<src>/count" lines): "src.kind"',
+    )
+    files_attrs: Literal["app_dirs", "lines", "counts"] = Field(
+        default="app_dirs",
+        description=(
+            "files.attrs: a line inside the analysed app's data dirs and a "
+            "count elsewhere (app_dirs), always a line, or always a count"
+        ),
+    )
+    files_modify_coalesce_ms: int = Field(
+        default=1000,
+        ge=0,
+        le=60_000,
+        description="files.modify lines per (path, pid) within this window are "
+        "merged into one (0 = off)",
+    )
+    count_window_s: float = Field(
+        default=5.0, ge=1.0, le=60.0, description="Seconds per count line"
+    )
+    queue_max: int = Field(
+        default=10_000,
+        ge=1_000,
+        le=1_000_000,
+        description="Bulk lines queued per device before they are dropped",
+    )
+    clock_every_s: int = Field(
+        default=60,
+        ge=0,
+        le=3_600,
+        description="Seconds between periodic device-clock samples (0 = off)",
+    )
+    mask_sensitive: bool = Field(
+        default=False,
+        description=(
+            "Mask sensitive lines (typed text, TLS keys) in the lens, the "
+            "Inspector, exports and reports"
+        ),
+    )
+
+    @field_validator("sources")
+    @classmethod
+    def _sources_keep_always_on(cls, v: dict[str, bool]) -> dict[str, bool]:
+        """Always-on sources cannot be switched off (dropped from the map)."""
+        return {k: bool(on) for k, on in v.items() if k not in TIMELINE_ALWAYS_ON}
+
+    @field_validator("kinds_off", "count_only")
+    @classmethod
+    def _src_kinds(cls, v: list[str]) -> list[str]:
+        """``src.kind`` / ``src.*`` entries; always-on sources are ignored."""
+        out = []
+        for entry in v:
+            entry = str(entry).strip()
+            if not _SRC_KIND_RE.match(entry):
+                raise ValueError(f'"{entry}" is not "src.kind" or "src.*"')
+            if entry.split(".", 1)[0] in TIMELINE_ALWAYS_ON or entry in out:
+                continue
+            out.append(entry)
+        return out
+
+
+class TrackingConfig(BaseModel):
+    """Tracking: the interaction transcript (taps, text, screens, shots)."""
+
+    helper_mode: Literal["full", "invisible", "off"] = Field(
+        default="full",
+        description=(
+            "UI helper: full (accessibility events, element lookup; "
+            "detectable), invisible (screenshots only), off"
+        ),
+    )
+    auto_on_record: bool = Field(
+        default=True, description="Start Tracking with a recording"
+    )
+    shot_before_tap: bool = Field(default=True, description="Screenshot at touch-down")
+    shot_screen_change: bool = Field(
+        default=True, description="Screenshot when the screen changes"
+    )
+    shot_after_tap: bool = Field(
+        default=False, description="Screenshot once the screen settled after a tap"
+    )
+    shot_label: bool = Field(default=False, description="Screenshot at every label")
+    settle_interval_ms: int = Field(default=300, ge=100, le=2_000)
+    settle_max_ms: int = Field(default=2_000, ge=300, le=10_000)
+    capture_text: bool = Field(default=True, description="Record typed text")
+    text_idle_ms: int = Field(default=1_500, ge=200, le=10_000)
+    long_press_ms: int = Field(default=500, ge=200, le=3_000)
+    swipe_slop_px: int = Field(default=24, ge=4, le=200)
+    logcat_screen_backup: bool = Field(
+        default=True, description="Activity changes from logcat as a backup"
+    )
 
 
 class MVTConfig(BaseModel):
@@ -1369,6 +1531,8 @@ class SandroidConfig(BaseModel):
     credentials: CredentialsConfig = Field(default_factory=CredentialsConfig)
     theme: ThemeConfig = Field(default_factory=ThemeConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
+    timeline: TimelineConfig = Field(default_factory=TimelineConfig)
+    tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     mvt: MVTConfig = Field(default_factory=MVTConfig)
     mitmproxy: MitmproxyConfig = Field(default_factory=MitmproxyConfig)
     focus: FocusConfig = Field(default_factory=FocusConfig)

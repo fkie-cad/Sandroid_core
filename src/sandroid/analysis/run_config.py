@@ -128,6 +128,9 @@ class RunConfig:
         noise_patterns: Extra noise globs (``None`` -> ``analysis.noise_patterns``).
         protected_packages: Packages never filtered as noise, in addition to
             the spotlight app (``None`` -> ``analysis.protected_packages``).
+        run_id: The run's id (the TUI Play sets it to its bundle's id); the
+            engine stamps it on the session timeline's phase lines
+            (``None`` -> a fresh :func:`run_history.new_run_id`).
     """
 
     number_of_runs: int = 2
@@ -149,6 +152,7 @@ class RunConfig:
     system_noise_filter: bool | None = None
     noise_patterns: list[str] | None = None
     protected_packages: list[str] | None = None
+    run_id: str | None = None
 
     def noise_settings(self) -> tuple[bool, list[str], list[str]]:
         """Resolve ``(enabled, extra_patterns, protected_packages)``.

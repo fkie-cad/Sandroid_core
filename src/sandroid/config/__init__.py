@@ -1,5 +1,7 @@
 """Configuration management for Sandroid."""
 
+import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,26 @@ from .schema import SandroidConfig
 _config_instance: SandroidConfig | None = None
 # Explicit file the live config was loaded from (``sandroid --config FILE``).
 _config_source: Path | None = None
+#: Called by update_config() with the applied "section.field" keys.
+_update_listeners: list[Callable[[frozenset[str]], None]] = []
+
+logger = logging.getLogger(__name__)
+
+
+def add_update_listener(fn: Callable[[frozenset[str]], None]) -> None:
+    """Call ``fn(keys)`` after every successful :func:`update_config`.
+
+    ``keys`` are the applied ``"section.field"`` (or top-level ``"field"``)
+    keys. Adding the same function twice registers it once.
+    """
+    if fn not in _update_listeners:
+        _update_listeners.append(fn)
+
+
+def remove_update_listener(fn: Callable[[frozenset[str]], None]) -> None:
+    """Stop calling ``fn`` (no-op when it is not registered)."""
+    if fn in _update_listeners:
+        _update_listeners.remove(fn)
 
 
 def get_config() -> SandroidConfig:
@@ -152,6 +174,13 @@ def update_config(
             parts[-1],
             getattr(_owner(candidate, parts), parts[-1]),
         )
+    if applied:
+        keys = frozenset(".".join(parts) for parts in applied)
+        for listener in list(_update_listeners):
+            try:
+                listener(keys)
+            except Exception:
+                logger.debug("config update listener failed", exc_info=True)
     return live, saved_path
 
 
@@ -159,8 +188,10 @@ __all__ = [
     "ConfigLoader",
     "ConfigUpdateError",
     "SandroidConfig",
+    "add_update_listener",
     "get_config",
     "get_config_source",
+    "remove_update_listener",
     "reset_config_cache",
     "set_config",
     "update_config",

@@ -49,6 +49,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -280,6 +281,10 @@ def pytest_configure(config):
         _saved_env.setdefault(key, os.environ.get(key))
         os.environ[key] = value
     config._sandroid_test_base = base  # type: ignore[attr-defined]
+    global _real_tl
+    from sandroid.core import timeline
+
+    _real_tl = timeline
 
 
 def pytest_unconfigure(config):
@@ -346,6 +351,35 @@ def _isolated_watchlist_dir(tmp_path, monkeypatch):
     )
     # Pulled versions go to <session results>/files; keep them per test too.
     monkeypatch.setenv("SDROID_FILES_DIR", str(tmp_path / "session" / "files"))
+
+
+#: The real session-timeline module, captured once in ``pytest_configure``
+#: (importing sandroid any earlier would read the real HOME): WP2/WP5 tests
+#: may install fakes in ``sys.modules`` for a while; the reset always hits
+#: this module object, never a ``sys.modules`` lookup.
+_real_tl: Any = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_timeline():
+    """Close and drop the session-timeline singleton after every test."""
+    yield
+    _real_tl.reset_for_tests()
+
+
+@pytest.fixture
+def timeline_sink(tmp_path):
+    """A bound session timeline: ``(service, path of timeline.jsonl)``.
+
+    ``"emulator-test"`` writes to ``tmp_path/session/dev`` (``files_root()``
+    is ``tmp_path/session/files``, so :func:`timeline_folder` is
+    ``tmp_path/session``).
+    """
+    service = _real_tl.get_timeline()
+    folder = tmp_path / "session" / "dev"
+    status = service.bind("emulator-test", folder)
+    assert status.state == "open", status
+    return service, folder / _real_tl.FILE_NAME
 
 
 def pytest_collection_modifyitems(config, items):

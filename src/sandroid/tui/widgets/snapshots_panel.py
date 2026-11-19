@@ -62,6 +62,14 @@ _ACTION_CELLS = {
 _POLL_INTERVAL = 9.0
 
 
+def _as_user(work):
+    """Run ``work()`` with the session-timeline actor ``user``."""
+    from sandroid.core.timeline import acting_as
+
+    with acting_as("user"):
+        return work()
+
+
 class SnapshotsPanel(Widget):
     """Snapshot list + create/load/delete/assign actions (hosted by the picker).
 
@@ -930,7 +938,9 @@ class SnapshotsPanel(Widget):
         def _job() -> None:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             try:
-                future = executor.submit(work)
+                # The panel's actions are the user's (session-timeline actor);
+                # entered on the thread that runs ``work``.
+                future = executor.submit(_as_user, work)
                 try:
                     ok, msg = future.result(timeout=self._ACTION_TIMEOUT)
                 except concurrent.futures.TimeoutError:

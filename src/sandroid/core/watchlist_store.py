@@ -19,9 +19,10 @@ Two different lifetimes, two places:
 2. **Pulled versions** are evidence of *this* session and live in the
    session results folder, readable, and are never pruned::
 
-       <session results>/marks.jsonl          every mark (B), append-only
+       <session results>/timeline.jsonl       the session timeline (labels, file-
+                                              monitor events, pulls, clock...; see
+                                              core/timeline.py), append-only
        <session results>/files/
-           timeline.jsonl                     every file-monitor event, append-only
            <package>/<app-relative path>/
                checks.jsonl                   pulls that found no change (no copy)
                v001_10-42-07/
@@ -33,7 +34,7 @@ Two different lifetimes, two places:
                    acquisition.json           device path; per member (db, -wal,
                                               -journal) device mtime/size/sha256 and
                                               local sha256; the combined set hash;
-                                              pull time, trigger, active mark,
+                                              pull time, trigger, active label,
                                               device_clock (host - device
                                               clock offsets, see
                                               core/device_clock.py)
@@ -100,15 +101,11 @@ _DIFF_JSON = "diff.json"
 _RECORD_FILE = "acquisition.json"
 _CHECKS_FILE = "checks.jsonl"
 _STAGING = ".current"
-#: Session-wide logs in the files root (append-only JSON Lines).
-MARKS_FILE = "marks.jsonl"
-TIMELINE_FILE = "timeline.jsonl"
 #: Files of a version folder that are not part of the pulled copy.
 META_FILES = frozenset({_DIFF_FILE, _DIFF_JSON, _RECORD_FILE})
 #: SQLite files kept with a database (``-shm`` changes on every read).
 SQLITE_COMPANIONS = ("-wal", "-journal")
 _APPEND_LOCK = threading.Lock()
-_SEQ_LOCK = threading.Lock()
 _VERSION_RE = re.compile(r"^v(\d+)_(\d{2})-(\d{2})-(\d{2})$")
 
 #: ``(regex, marker)``: app data roots and the marker kept for the
@@ -131,8 +128,8 @@ _APP_ROOTS: tuple[tuple[re.Pattern[str], str], ...] = (
 def iso_tz(when: datetime | float | None = None, timespec: str = "seconds") -> str:
     """``when`` (a naive local / aware datetime or an epoch, default now) as
     ISO 8601 with the UTC offset: ``2026-11-18T12:33:13+01:00``.
-    ``timespec="milliseconds"`` (the event logs ``timeline.jsonl`` /
-    ``marks.jsonl``) gives ``2026-11-18T12:33:13.042+01:00``.
+    ``timespec="milliseconds"`` (the session timeline) gives
+    ``2026-11-18T12:33:13.042+01:00``.
     """
     if when is None:
         when = datetime.now()
@@ -583,7 +580,7 @@ def append_check(path: str, entry: dict) -> dict:
     return entry
 
 
-# -- session-wide logs: marks and the file-monitor timeline -----------------
+# -- JSON Lines ---------------------------------------------------------------
 
 
 def append_jsonl(file: Path, entries: list[dict]) -> None:
@@ -599,78 +596,27 @@ def append_jsonl(file: Path, entries: list[dict]) -> None:
             handle.write(text)
 
 
-#: ``timeline.jsonl``: the last ``seq`` written, per file (continues an
-#: existing file after a restart within the same session folder).
-_TIMELINE_SEQ: dict[Path, int] = {}
-
-
-def marks_file() -> Path:
-    """``<session results>/marks.jsonl`` -- the session root, next to
-    ``files/``: marks are the session's, not only the Files lens's.
+def mark_entry(
+    number: int,
+    name: str,
+    when: datetime,
+    kind: str | None = None,
+    seq: int | None = None,
+) -> dict:
+    """A label as written into acquisition records (``mark``): ``number``,
+    ``name``, ``at`` and, when known, its ``kind`` (start / point) and the
+    ``seq`` of its session-timeline line.
     """
-    return files_root().parent / MARKS_FILE
-
-
-def timeline_file() -> Path:
-    """``<session results>/files/timeline.jsonl``."""
-    return files_root() / TIMELINE_FILE
-
-
-def mark_entry(number: int, name: str, when: datetime) -> dict:
-    """A mark as written to ``marks.jsonl`` and into acquisition records."""
-    return {
+    entry: dict[str, Any] = {
         "number": number,
         "name": name or "",
         "at": iso_tz(when, "milliseconds"),
     }
-
-
-def append_mark(number: int, name: str, when: datetime) -> dict:
-    """Record a dropped mark in ``marks.jsonl``.
-
-    One JSON object per line: ``number``, ``name`` (``""`` = unnamed), ``at``
-    (when the mark was dropped) and ``recorded_at`` (when it was written),
-    ISO 8601 with milliseconds and UTC offset. The format grows additively:
-    readers (:func:`read_jsonl`) ignore fields they do not know.
-    """
-    entry = {
-        **mark_entry(number, name, when),
-        "recorded_at": iso_tz(None, "milliseconds"),
-    }
-    append_jsonl(marks_file(), [entry])
+    if kind is not None:
+        entry["kind"] = kind
+    if seq is not None:
+        entry["seq"] = seq
     return entry
-
-
-def _last_seq(file: Path) -> int:
-    """The highest ``seq`` already in ``file`` (0 if none)."""
-    last = 0
-    for item in read_jsonl(file):
-        seq = item.get("seq")
-        if isinstance(seq, int) and seq > last:
-            last = seq
-    return last
-
-
-def append_timeline(entries: list[dict]) -> None:
-    """Record file-monitor events in ``timeline.jsonl``.
-
-    Each entry gets ``seq`` first: an integer that increases by one per
-    event over the whole file (continued after a restart). Readers ignore
-    fields they do not know, so the format can grow additively.
-    """
-    if not entries:
-        return
-    file = timeline_file()
-    with _SEQ_LOCK:
-        last = _TIMELINE_SEQ.get(file)
-        if last is None:
-            last = _last_seq(file)
-        numbered = []
-        for entry in entries:
-            last += 1
-            numbered.append({"seq": last, **entry})
-        _TIMELINE_SEQ[file] = last
-        append_jsonl(file, numbered)
 
 
 # ---------------------------------------------------------------------------
@@ -780,17 +726,13 @@ def load_patterns() -> list[str]:
 __all__ = [
     "DEVICE_OWNER",
     "FILES_DIR_ENV",
-    "MARKS_FILE",
     "META_FILES",
     "SCHEMA_VERSION",
     "SQLITE_COMPANIONS",
-    "TIMELINE_FILE",
     "WATCHLIST_DIR_ENV",
     "KeptVersion",
     "append_check",
     "append_jsonl",
-    "append_mark",
-    "append_timeline",
     "discard_current",
     "files_root",
     "has_baseline",
@@ -801,7 +743,6 @@ __all__ = [
     "local_members",
     "local_naive",
     "mark_entry",
-    "marks_file",
     "membership_file",
     "next_version_name",
     "owner_and_relative",
@@ -817,7 +758,6 @@ __all__ = [
     "session_results_dir",
     "set_sha256",
     "sha256_file",
-    "timeline_file",
     "version_checks",
     "version_diff",
     "version_diff_doc",

@@ -292,6 +292,14 @@ class SandroidHeadlessAPI(SandroidAPI):
             if self._toolbox:
                 self._toolbox.wrap_up()
 
+            # The session timeline: close line, fsync, unlock (bounded).
+            try:
+                from sandroid.core.timeline import close_timeline
+
+                close_timeline("quit", 2.0)
+            except Exception:
+                logger.debug("Headless API: timeline close failed", exc_info=True)
+
             self._initialized = False
             self._state = AnalysisStateEnum.IDLE
 

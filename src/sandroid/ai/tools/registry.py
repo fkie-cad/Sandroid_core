@@ -181,7 +181,11 @@ class ToolRegistry:
         if spec is None:
             raise ToolExecutionError(f"Unknown tool: {name!r}")
         _check_argument_types(spec, arguments)
-        return spec.func(**arguments)
+        from sandroid.core.timeline import acting_as
+
+        # Session-timeline lines a tool causes on this thread are the AI's.
+        with acting_as("ai"):
+            return spec.func(**arguments)
 
     def get_spec(self, name: str) -> ToolSpec | None:
         """Look up a tool's spec without executing it.

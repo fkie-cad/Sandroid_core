@@ -2347,7 +2347,7 @@ def test_spawn_hands_the_paused_pid_over_before_resume():
             order.append(f"resume (scope {sorted(watch.procs)})")
             return True
 
-    svc = SpotlightService(job_manager_factory=lambda: _JM())
+    svc = SpotlightService(job_manager_factory=_JM)
     watch.start()
     try:
         _jm, pid = svc.spawn_app_paused(_PKG)
@@ -3084,3 +3084,176 @@ def test_follow_notes_of_one_burst_are_one_events_line():
         "+ tab_5 (PID 7800) followed · gap ≈0.1 s",
     ]
     assert out[1][0] == t0 + _td(seconds=1)
+
+
+# =============================================================================
+# The session timeline: files lines from the reader thread, monitor notes
+# (moved here from the Files lens's former files/timeline.jsonl export tests)
+# =============================================================================
+
+
+def test_the_reader_writes_files_lines_at_the_capture_time(monkeypatch):
+    """Every monitor event becomes a ``files/<kind>`` line from the reader
+    thread (before the lossy deque), at the time the reader captured it.
+    """
+    from sandroid.core import timeline
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+    wrapper = MonitorProcessWrapper(
+        _LinesProc(
+            [
+                _fse("FSE_CONTENT_MODIFIED", "/data/data/com.x/databases/a.db", 4242)
+                + "\n",
+                _fse("FSE_OPEN", "/proc/self/stat", 7, "logd") + "\n",
+                _fse("FSE_CREATE_DIR", "/sdcard/Download/new", 4242) + "\n",
+            ]
+        ),
+        MonitorConfig(mode="pid", app_name="com.x", target_pid=4242),
+    )
+    wrapper.timeline_serial = "emulator-5554"
+    with timeline.capture() as lines:
+        items = _read_items(controller, wrapper)
+        timeline.get_timeline().labels.point("boundary")  # flushes the counts
+    by_kind = {line["kind"]: line for line in lines if line["src"] == "files"}
+    assert sorted(by_kind) == ["count", "create", "modify"]
+    modify = by_kind["modify"]
+    assert modify["t"] == timeline._iso(items[0].timestamp)
+    assert modify["clk"] == "host"
+    assert "t_err_ms" not in modify
+    assert modify["pkg"] == "com.x"
+    assert modify["pid"] == 4242
+    assert modify["actor"] == "app"
+    assert modify["dev"] == "emulator-5554"
+    assert modify["data"]["op"] == "MODIFY"
+    assert modify["data"]["path"] == "/data/data/com.x/databases/a.db"
+    assert modify["data"]["backend"] == "fsmon"
+    assert modify["data"]["process"] == "com.example.app"
+    assert modify["data"]["n"] == 1
+    assert modify["summary"] == "MODIFY databases/a.db · com.example.app"
+    create = by_kind["create"]
+    assert create["data"]["dir"] is True
+    assert "pkg" not in create
+    assert create["actor"] == "app"  # pid 4242 is the monitored app's
+    count = by_kind["count"]
+    assert count["data"]["counts"] == {"open": 1}
+
+
+def test_files_lines_carry_the_thread_next_to_the_process(monkeypatch):
+    from sandroid.core import timeline
+    from sandroid.tui.utils import MonitorProcessWrapper
+
+    device = _FakeDevice(_procs(main=12000, tab_17=12262))
+    watch = _watch(device)
+    watch.seed({12000: [12000], 12262: [12262, 12263]}, watch.initial_processes())
+    translator = KprobeStreamTranslator()
+    translator.reset(MonitorConfig(mode="pid", target_pid=12000, target_path=_FF))
+    translator.set_write_scope(
+        build_write_scope(scope_aliases(_FF), parse_mounts(_RECORDED_MOUNTS), {})
+    )
+    translator.set_process_labels(watch.label_for_tid, watch.pid_for_tid)
+    other_thread = _REC_WAL.replace("PlacesStorageWr-12262", "PlacesStorageWr-12263")
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_get_buffer_interval", lambda: 0.0)
+    wrapper = MonitorProcessWrapper(
+        _LinesProc([other_thread + "\n"]),
+        MonitorConfig(mode="pid", target_pid=12000, target_path=_FF),
+        translator=translator,
+    )
+    wrapper.watch = watch
+    with timeline.capture() as lines:
+        (item,) = _read_items(controller, wrapper)
+    (line,) = lines
+    assert (line["pid"], line["tid"]) == (12262, 12263)
+    assert line["data"]["backend"] == "kprobe"
+    assert line["data"]["process"] == item.process
+    assert line["data"]["path"] == item.path
+    assert line["actor"] == "app"  # a followed process of the app
+    assert line["pkg"] == _PKG
+    assert line["summary"].startswith("MODIFY files/places.sqlite-wal · ")
+
+
+def test_monitor_notes_are_timeline_lines_and_on_note_is_unchanged():
+    from sandroid.core import timeline
+
+    device = _FakeDevice(_procs(main=21118))
+    notes: list = []
+    watch, clock = _clocked_watch(device, notes)
+    watch.serial = "emulator-5554"
+    watch.seed({21118: [21118]}, watch.initial_processes())
+    with timeline.capture() as lines:
+        clock["now"] = _T + _td(seconds=1)
+        watch.on_rename_line(_exit_line(21118))
+        clock["now"] = _T + _td(seconds=5)
+        device.table = _procs(main=21418)
+        device.started = {21418: device.uptime - 4.5}
+        watch.poll_once()
+        device.lost_value = 12
+        watch.check_lost()
+    # on_note keeps its (text, level, when) signature.
+    assert [level for _w, level, _t in notes] == ["warning", "warning", "warning"]
+    kinds = [line["kind"] for line in lines]
+    assert kinds == ["proc-exit", "proc-restart", "lost"]
+    exit_line, restart, lost = lines
+    assert exit_line["src"] == "monitor"
+    assert exit_line["data"] == {
+        "pid": 21118,
+        "exact": True,
+        "noticed": timeline._iso((_T + _td(seconds=1)).timestamp()),
+    }
+    assert exit_line["t"] == timeline._iso((_T + _td(seconds=1)).timestamp())
+    assert exit_line["level"] == "warn"
+    assert exit_line["dev"] == "emulator-5554"
+    assert exit_line["pkg"] == _PKG
+    assert exit_line["summary"] == notes[0][2]
+    assert restart["data"]["new_pid"] == 21418
+    assert restart["data"]["via"] == "poll"
+    assert restart["t_err_ms"] == pytest.approx(
+        restart["data"]["gap_s"] * 1000, abs=0.1
+    )
+    assert lost["data"] == {"new": 12, "total": 12}
+
+
+def test_monitor_start_and_end_lines(monkeypatch):
+    from types import SimpleNamespace
+
+    from sandroid.core import timeline
+    from sandroid.core.adb import Adb
+
+    monkeypatch.setattr(Adb, "get_target_device", classmethod(lambda cls: "emu-9"))
+    controller = _make_controller()
+    monkeypatch.setattr(controller, "_start_output_reader", lambda wrapper: None)
+    tasks = SimpleNamespace(
+        register=lambda **kw: None,
+        get_task=lambda name: SimpleNamespace(instance=wrapper),
+        is_running=lambda name: False,
+        unregister=lambda name: None,
+    )
+    monkeypatch.setattr(controller, "_get_task_service", lambda: tasks)
+    wrapper = SimpleNamespace(
+        stop=lambda: None,
+        stop_requested=False,
+        process=SimpleNamespace(poll=lambda: 1),
+    )
+    config = MonitorConfig(
+        mode="pid", app_name="com.x", target_path="/data/data/com.x", backend="kprobe"
+    )
+    with timeline.capture() as lines:
+        assert controller._register_and_start(config, wrapper, "App com.x") is True
+        controller._monitor_ended()
+    start, end = lines
+    assert start["kind"] == "start"
+    assert start["dev"] == "emu-9"
+    assert start["data"] == {
+        "backend": "kprobe",
+        "mode": "pid",
+        "app": "com.x",
+        "paths": ["/data/data/com.x"],
+        "follow": False,
+    }
+    assert wrapper.timeline_serial == "emu-9"
+    assert end["kind"] == "end"
+    assert end["data"] == {"exit_code": 1, "intentional": False}
+    assert end["level"] == "warn"
+    assert end["dev"] == "emu-9"

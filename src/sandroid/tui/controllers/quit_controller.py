@@ -129,6 +129,18 @@ def shutdown_network(timeout: float = 4.0) -> None:
     run_bounded("mitmproxy", lambda: svc.shutdown(timeout=min(2.0, timeout)), timeout)
 
 
+def _flush_timeline(timeout: float) -> None:
+    from sandroid.core.timeline import flush_timeline
+
+    flush_timeline(timeout)
+
+
+def _close_timeline(reason: str, timeout: float) -> None:
+    from sandroid.core.timeline import close_timeline
+
+    close_timeline(reason, timeout)
+
+
 def emergency_cleanup() -> None:
     """Last-resort teardown before a forced exit (any thread, time-boxed)."""
     try:
@@ -138,6 +150,8 @@ def emergency_cleanup() -> None:
     except Exception:
         pass
     shutdown_network(timeout=5.0)
+    # The session timeline: the close line, fsync and unlock (bounded).
+    run_bounded("timeline close", lambda: _close_timeline("forced-exit", 1.0), 1.5)
 
 
 def enable_hard_exit(enabled: bool = True) -> None:
@@ -478,7 +492,11 @@ class QuitController:
         """
         from sandroid.services import get_task_service
 
-        # Shutdown UIRequestBus first to release any blocked threads
+        # The session timeline first: everything recorded so far is on disk
+        # before anything below can hang (bounded; the close comes last).
+        run_bounded("timeline flush", lambda: _flush_timeline(1.0), 1.5)
+
+        # Shutdown UIRequestBus to release any blocked threads
         try:
             from sandroid.core.ui_request_bus import UIRequestBus
 
@@ -508,6 +526,11 @@ class QuitController:
         from sandroid.services.setup_checks import restore_selinux_on_quit
 
         run_bounded("SELinux restore", restore_selinux_on_quit, 5.0)
+
+        # Really last: the session timeline's close line (open labels end
+        # with "close"), fsync and unlock -- after every step that may still
+        # write lines.
+        run_bounded("timeline close", lambda: _close_timeline("quit", 2.0), 2.5)
 
     @staticmethod
     def _stop_frida_sessions() -> None:

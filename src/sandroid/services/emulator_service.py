@@ -123,6 +123,64 @@ def _snapshot_command(verb: str, name: str | bytes) -> str:
     return f"avd snapshot {verb} {validate_snapshot_name(name)}"
 
 
+def _name_text(name: str | bytes) -> str:
+    if isinstance(name, bytes):
+        return name.decode("utf-8", "replace")
+    return str(name)
+
+
+def _snapshot_line(
+    verb: str,
+    name: str | bytes,
+    ok: bool,
+    serial: str | None,
+    error: str | None = None,
+) -> None:
+    """A ``snapshot/<save|load|delete>`` session-timeline line (never raises).
+
+    A successful load is a world change and is written by
+    :func:`_world_change` instead.
+    """
+    text = _name_text(name)
+    data: dict = {"name": text, "ok": ok}
+    if error:
+        data["error"] = error.strip()[:500]
+    done = {"save": "saved", "load": "loaded", "delete": "deleted"}.get(verb, verb)
+    summary = f"snapshot '{text}' {done}" if ok else f"snapshot '{text}' {verb} failed"
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        get_timeline().emit(
+            "snapshot",
+            verb,
+            summary=summary,
+            data=data,
+            dev=serial if isinstance(serial, str) else None,
+            level="info" if ok else "warn",
+        )
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "timeline: snapshot line failed", exc_info=True
+        )
+
+
+def _world_change(cause: str, **kwargs) -> None:
+    """:meth:`TimelineService.on_world_change` (never raises)."""
+    if not isinstance(kwargs.get("dev"), str):
+        kwargs["dev"] = None
+    data = kwargs.get("data")
+    if isinstance(data, dict) and isinstance(data.get("name"), bytes):
+        data["name"] = _name_text(data["name"])
+    try:
+        from sandroid.core.timeline import get_timeline
+
+        get_timeline().on_world_change(cause, **kwargs)
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "timeline: world change failed", exc_info=True
+        )
+
+
 class EmulatorService:
     """Service for managing Android emulator operations.
 
@@ -594,13 +652,16 @@ class EmulatorService:
             # The console reports failures as "KO: ..." on stdout (adb exit 0).
             if stderr or "KO:" in str(stdout or ""):
                 self._logger.error(f"Failed to create snapshot: {stderr or stdout}")
+                _snapshot_line("save", name, False, serial, str(stderr or stdout))
                 return False
 
             self._logger.info(f"Snapshot '{name}' created successfully")
+            _snapshot_line("save", name, True, serial)
             return True
 
         except Exception as e:
             self._logger.error(f"Failed to create snapshot: {e}")
+            _snapshot_line("save", name, False, serial, str(e))
             return False
 
     def load_snapshot(self, name: str, serial: str | None = None) -> bool:
@@ -621,13 +682,35 @@ class EmulatorService:
         try:
             command = _snapshot_command("load", name)
 
+            t_sent = time.time()
             stdout, stderr = adb.send_telnet_command(command, serial=serial)
+            t_ret = time.time()
 
             # The console reports failures (e.g. unknown snapshot) as
             # "KO: ..." on stdout while adb itself exits 0.
             if stderr or "KO:" in str(stdout or ""):
                 self._logger.error(f"Failed to load snapshot: {stderr or stdout}")
+                _snapshot_line("load", name, False, serial, str(stderr or stdout))
                 return False
+
+            # The device's state was replaced: a new world on the session
+            # timeline, BEFORE anything samples the restored clocks (the
+            # device-clock barrier keeps fresh monotonic times off the old
+            # offset).
+            _world_change(
+                "snapshot-load",
+                src="snapshot",
+                kind="load",
+                summary=f"⟲ snapshot '{_name_text(name)}' loaded",
+                t=t_ret,
+                t_err_ms=(t_ret - t_sent) * 500,
+                dev=serial,
+                data={
+                    "name": name,
+                    "ok": True,
+                    "console_ms": round((t_ret - t_sent) * 1000, 1),
+                },
+            )
 
             # Reverting VM state disrupts the ADB transport for a variable
             # window (offline -> unauthorized -> device); poll get-state for
@@ -638,7 +721,7 @@ class EmulatorService:
             # A snapshot restores the guest clock to the moment it was saved,
             # so every revert rewinds device time (minutes after a few
             # replays), skewing file timestamps / the timeline against the
-            # host. Record the offset in clock.jsonl and, with
+            # host. Record the offset in the session timeline and, with
             # ``emulator.sync_clock_after_snapshot`` on, set it to host time.
             self._record_device_clock(adb, name, serial)
             # The snapshot also restores the kernel's SELinux mode. One saved
@@ -656,6 +739,7 @@ class EmulatorService:
 
         except Exception as e:
             self._logger.error(f"Failed to load snapshot: {e}")
+            _snapshot_line("load", name, False, serial, str(e))
             return False
 
     def _record_device_clock(
@@ -813,13 +897,16 @@ class EmulatorService:
             # bad sub-command) as "KO: ..." on stdout while adb exits 0.
             if stderr or "KO:" in str(stdout or ""):
                 self._logger.error(f"Failed to delete snapshot: {stderr or stdout}")
+                _snapshot_line("delete", name, False, None, str(stderr or stdout))
                 return False
 
             self._logger.info(f"Snapshot '{name}' deleted successfully")
+            _snapshot_line("delete", name, True, None)
             return True
 
         except Exception as e:
             self._logger.error(f"Failed to delete snapshot: {e}")
+            _snapshot_line("delete", name, False, None, str(e))
             return False
 
     def list_snapshots(self) -> list[SnapshotInfo]:
@@ -934,6 +1021,14 @@ class EmulatorService:
             return False
 
         self._logger.info(f"Emulator {avd_name} restarted")
+        _world_change(
+            "cold-boot",
+            src="device",
+            kind="boot",
+            summary=f"⟲ emulator {avd_name} cold-booted",
+            dev=serial,
+            data={"avd": avd_name, "ok": True},
+        )
         return True
 
     @staticmethod

@@ -603,14 +603,25 @@ def test_snapshot_load_records_and_syncs_the_device_clock(monkeypatch) -> None:
         ("device\n", "") if command == "get-state" else ("", "")
     )
     seen: list[tuple] = []
+    from sandroid.core import timeline
 
     def after_load(name, serial=None, send=None):
-        seen.append((name, serial))
+        # The world change is already on the session timeline when the
+        # restored clocks are sampled.
+        seen.append((name, serial, [(x["src"], x["kind"]) for x in lines]))
         send("shell true")  # the service's own adb runs the date commands
 
     monkeypatch.setattr(device_clock, "after_snapshot_load", after_load)
-    assert EmulatorService(adb=adb).load_snapshot("tmp", serial="emu-1") is True
-    assert seen == [("tmp", "emu-1")]
+    with timeline.capture() as lines:
+        assert EmulatorService(adb=adb).load_snapshot("tmp", serial="emu-1") is True
+    assert seen == [("tmp", "emu-1", [("snapshot", "load")])]
+    (world,) = lines
+    assert world["world"] == 1
+    assert world["epoch"] == 1
+    assert world["dev"] == "emu-1"
+    assert world["data"]["name"] == "tmp"
+    assert world["data"]["ok"] is True
+    assert world["data"]["world_before"] == 0
     adb.send_adb_command.assert_any_call("shell true", serial="emu-1")
 
 

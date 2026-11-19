@@ -370,44 +370,20 @@ class TestEvidenceRecords:
         # No version folder for a check.
         assert watchlist_store.version_dirs(self.PATH) == []
 
-    def test_marks_and_timeline_are_json_lines_in_the_files_root(self):
+    def test_mark_entry_names_the_label_kind_and_seq(self):
         when = datetime(2026, 11, 18, 12, 30, 0)
-        watchlist_store.append_mark(1, "open wikipedia", when)
-        watchlist_store.append_mark(2, "", when)
-        watchlist_store.append_timeline(
-            [{"at": watchlist_store.iso_tz(when), "op": "MODIFY", "path": self.PATH}]
-        )
-        marks = watchlist_store.read_jsonl(watchlist_store.marks_file())
-        assert [m["number"] for m in marks] == [1, 2]
-        assert marks[0]["name"] == "open wikipedia"
-        assert set(marks[0]) == {"number", "name", "at", "recorded_at"}
-        assert all(_offset(m["at"]) and _offset(m["recorded_at"]) for m in marks)
-        assert marks[0]["at"].startswith("2026-11-18T12:30:00.000")  # milliseconds
-        # Marks belong to the session (its root), the timeline to files/.
-        root = watchlist_store.files_root()
-        assert watchlist_store.marks_file() == root.parent / "marks.jsonl"
-        assert watchlist_store.timeline_file() == root / "timeline.jsonl"
-        (event,) = watchlist_store.read_jsonl(watchlist_store.timeline_file())
-        assert event["op"] == "MODIFY"
-        assert event["seq"] == 1
+        plain = watchlist_store.mark_entry(1, "open wikipedia", when)
+        assert set(plain) == {"number", "name", "at"}
+        assert plain["at"].startswith("2026-11-18T12:30:00.000")  # milliseconds
+        assert _offset(plain["at"])
+        label = watchlist_store.mark_entry(7, "", when, kind="start", seq=42)
+        assert (label["kind"], label["seq"], label["name"]) == ("start", 42, "")
+        # The old per-topic logs are gone (the session timeline replaces them).
+        for name in ("append_mark", "append_timeline", "marks_file", "timeline_file"):
+            assert not hasattr(watchlist_store, name)
 
-    def test_timeline_seq_increases_and_continues_after_a_restart(self):
-        watchlist_store.append_timeline([{"op": "A"}, {"op": "B"}])
-        watchlist_store.append_timeline([{"op": "C"}])
-        # A new process (same session folder) continues the numbering.
-        watchlist_store._TIMELINE_SEQ.clear()
-        watchlist_store.append_timeline([{"op": "D", "extra": {"future": 1}}])
-        events = watchlist_store.read_jsonl(watchlist_store.timeline_file())
-        assert [(e["seq"], e["op"]) for e in events] == [
-            (1, "A"),
-            (2, "B"),
-            (3, "C"),
-            (4, "D"),
-        ]
-        assert next(iter(events[0])) == "seq"  # first key of every line
-
-    def test_readers_tolerate_unknown_fields_and_bad_lines(self):
-        file = watchlist_store.marks_file()
+    def test_readers_tolerate_unknown_fields_and_bad_lines(self, tmp_path):
+        file = tmp_path / "evidence.jsonl"
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(
             '{"number": 1, "name": "a", "at": "x", "recorded_at": "x", "new": 1}\n'
