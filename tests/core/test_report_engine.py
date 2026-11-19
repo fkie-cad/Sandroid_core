@@ -201,6 +201,8 @@ class TimelineFixture:
         self.phase = "live"
         self.run = None
         folder.mkdir(parents=True, exist_ok=True)
+        # The real writer's lock file marks the folder as a live sink.
+        (folder / ".timeline.lock").write_text("{}")
 
     def add(self, sec: float, src: str, kind: str, summary: str = "", **kw) -> int:
         seq = len(self.lines) + 1
@@ -1408,6 +1410,50 @@ class TestReportFromFolder:
         assert not _steps(doc)
         assert any("no sealed session timeline" in s for s in _sentences(doc))
 
+    def test_fallback_masks_and_does_not_claim_a_verified_chain(self, session):
+        root = self._sealed(session)  # masking off: the password is in clear
+        assert PASSWORD in (root / "report.json").read_text()
+        session.tl.path.unlink()
+        FAKE_STATE["mask"] = True  # the user turned masking on since
+        out = run_report.report_from_folder(root)
+        assert "is missing" in out.timeline_note
+        text = out.report_json.read_text()
+        assert PASSWORD not in text
+        assert PASSWORD not in out.markdown.read_text()
+        doc = json.loads(text)
+        assert doc["masking"]["sensitive_masked"] is True
+        pw = next(s for s in _steps(doc) if s.get("kind") == "text" and s["password"])
+        assert (pw["text"], pw["text_masked"], pw["masked"]) == (None, True, True)
+        assert doc["seal"]["verified"] is None
+        assert doc["seal"]["verified_originally"] is True
+        rows = {
+            r[0]: r[1]
+            for b in _section(doc, "seal")["blocks"]
+            if b.get("type") == "kv"
+            for r in b["rows"]
+        }
+        assert rows["Chain verified"].startswith("not re-checked")
+        assert not any(
+            s.startswith("The hash chain verified") and "not re-checked" not in s
+            for s in _sentences(doc)
+        )
+        assert "Chain verified | yes" not in out.markdown.read_text()
+
+    def test_a_failed_render_leaves_no_regenerated_files(self, session, monkeypatch):
+        from sandroid.core import report_render
+
+        root = self._sealed(session)
+        before = self._snapshot(root)
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("renderer broke")
+
+        monkeypatch.setattr(report_render, "render_markdown", broken)
+        with pytest.raises(RuntimeError):
+            run_report.report_from_folder(root)
+        assert self._snapshot(root) == before
+        assert not list(root.glob("report_regenerated_*"))
+
 
 class TestManifest:
     def test_live_timeline_excluded_and_sealed(self, tmp_path, fake_timeline):
@@ -1438,6 +1484,7 @@ class TestManifest:
         path = tmp_path / "dev" / "timeline.jsonl"
         path.parent.mkdir()
         path.write_bytes(b'{"seq":1}\n')
+        (path.parent / ".timeline.lock").write_text("{}")
         manifest = json.loads(
             run_report.write_hash_manifest(tmp_path).manifest_path.read_text()
         )
@@ -1449,6 +1496,73 @@ class TestManifest:
                 "sha256": hashlib.sha256(b'{"seq":1}\n').hexdigest(),
             }
         ]
+
+    def test_only_the_real_sink_locations_are_live(self, tmp_path):
+        dev = tmp_path / "dev"
+        tl, _ = build_fixture(dev)  # dev/timeline.jsonl + dev/.timeline.lock
+        files = {
+            # The legacy Files-lens timeline and an app file of that name.
+            "dev/files/timeline.jsonl": b"legacy\n",
+            "dev/files/com.app/cache/timeline.jsonl": b"forged by the app\n",
+            "dev/files/com.app/tracking/raw/x.bin": b"app data\n",
+            "dev/files/com.app/.timeline.lock": b"{}",
+            "dev/tracking/raw/getevent.txt": b"[ 1.0] event\n",
+        }
+        for rel, data in files.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_bytes(data)
+        for root, prefix in ((tmp_path, "dev/"), (dev, "")):
+            manifest = json.loads(
+                run_report.write_hash_manifest(root).manifest_path.read_text()
+            )
+            hashed = {f["path"] for f in manifest["files"]}
+            excluded = {e["path"] for e in manifest["excluded"]}
+            assert {f"{prefix}timeline.jsonl", f"{prefix}.timeline.lock",
+                    f"{prefix}tracking/raw/getevent.txt"} <= excluded  # fmt: skip
+            assert {
+                f"{prefix}files/timeline.jsonl",
+                f"{prefix}files/com.app/cache/timeline.jsonl",
+                f"{prefix}files/com.app/tracking/raw/x.bin",
+                f"{prefix}files/com.app/.timeline.lock",
+            } <= hashed
+            assert [s["rel"] for s in manifest["timeline_seals"]] == [
+                f"{prefix}timeline.jsonl"
+            ]
+            assert [r["rel"] for r in manifest["raw_prefixes"]] == [
+                f"{prefix}tracking/raw/getevent.txt"
+            ]
+            for name in ("manifest.json", "SHA256SUMS"):
+                (root / name).unlink()
+
+    def test_sealed_prefixes_of_live_files_are_verified(self, tmp_path):
+        dev = tmp_path / "dev"
+        dev.mkdir()
+        (dev / ".timeline.lock").write_text("{}")
+        path = dev / "timeline.jsonl"
+        path.write_bytes(b'{"seq":1,"summary":"tap OK"}\n')
+        raw = dev / "tracking" / "raw" / "getevent.txt"
+        raw.parent.mkdir(parents=True)
+        raw.write_bytes(b"original raw\n")
+        run_report.write_hash_manifest(tmp_path)
+        # Appending is fine (both files are append-only).
+        with open(path, "ab") as fh:
+            fh.write(b'{"seq":2}\n')
+        with open(raw, "ab") as fh:
+            fh.write(b"more\n")
+        assert run_report.verify_hash_manifest(tmp_path).ok
+        # Changing the sealed prefix is not.
+        path.write_bytes(path.read_bytes().replace(b"tap OK", b"tap NO"))
+        raw.write_bytes(b"forged raw!!\nmore\n")
+        check = run_report.verify_hash_manifest(tmp_path)
+        assert not check.ok
+        assert check.mismatched == [
+            "dev/timeline.jsonl",
+            "dev/tracking/raw/getevent.txt",
+        ]
+        raw.unlink()
+        assert "dev/tracking/raw/getevent.txt" in (
+            run_report.verify_hash_manifest(tmp_path).missing
+        )
 
 
 class TestRemovedApi:
@@ -1545,3 +1659,64 @@ def test_real_timeline_report_from_closed_file(tmp_path):
         assert any(s["src"] == "label" for s in _steps(doc))
     finally:
         tl.reset_for_tests()
+
+
+def _label_path_brute(labels, ts, seq):
+    """The former O(spans) scan of ``_label_path`` (reference)."""
+    open_spans = [
+        s
+        for s in labels
+        if s.kind == "span"
+        and (s.ts, s.seq) <= (ts, seq)
+        and (s.end_ts is None or (ts, seq) < (s.end_ts, s.end_seq or 0))
+    ]
+    if not open_spans:
+        return []
+    inner = max(open_spans, key=lambda s: (s.depth, s.ts, s.seq))
+    by_number = {s.number: s for s in labels}
+    path = [inner.number]
+    parent = inner.parent
+    while parent is not None and parent in by_number and len(path) < 32:
+        path.insert(0, parent)
+        parent = by_number[parent].parent
+    return path
+
+
+def test_label_path_index_matches_the_scan_and_is_fast():
+    import random
+    import time as _time
+
+    rng = random.Random(7)  # noqa: S311 - test data
+    labels = []
+    for number in range(1, 301):
+        ts = rng.uniform(0, 1000)
+        kind = rng.choice(["span", "span", "point"])
+        end = ts + rng.uniform(0, 80) if kind == "span" and rng.random() < 0.9 else None
+        if rng.random() < 0.05 and end is not None:
+            end = ts  # starts and ends at the same instant
+        parent = rng.choice([None, *range(1, number)]) if number > 1 else None
+        labels.append(
+            report_engine.LabelSpan(
+                number=number, name="", kind=kind, parent=parent,
+                depth=rng.randint(0, 3), seq=number * 10, t="", ts=ts,
+                end_t="" if end is not None else None, end_ts=end,
+                end_seq=number * 10 + 5 if end is not None else None,
+            )
+        )  # fmt: skip
+    ctx = SimpleNamespace(labels=labels, label_index=None)
+    queries = [(rng.uniform(-10, 1100), rng.randint(0, 3100)) for _ in range(3000)]
+    queries += [(s.ts, s.seq) for s in labels]
+    queries += [(s.end_ts, s.end_seq) for s in labels if s.end_ts is not None]
+    for ts, seq in queries:
+        assert report_engine._label_path(ctx, ts, seq) == _label_path_brute(
+            labels, ts, seq
+        ), (ts, seq)
+    # 20k lookups over 1k spans: one bisect each, not a scan.
+    many = labels * 4
+    for i, s in enumerate(many):
+        s.number = i + 1
+    ctx = SimpleNamespace(labels=many, label_index=None)
+    start = _time.perf_counter()
+    for i in range(20_000):
+        report_engine._label_path(ctx, i * 0.05, i)
+    assert _time.perf_counter() - start < 2.0
