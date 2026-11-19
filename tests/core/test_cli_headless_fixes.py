@@ -1085,3 +1085,38 @@ def test_batch_reports_documentation_errors_and_exits_nonzero(monkeypatch, tmp_p
             output_file=None,
         )
     assert info.value.code == cli_headless.EXIT_DOCUMENTATION_FAILED
+
+
+# ---------------------------------------------------------------------------
+# subscribe_events (EventBus has no subscribe_all / unsubscribe_all)
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_events_uses_real_eventbus_api():
+    from sandroid.api import headless
+    from sandroid.core.events import Event, EventBus, EventType
+
+    EventBus.reset()
+    try:
+        api = headless.SandroidHeadlessAPI(config=SimpleNamespace())
+        seen: list = []
+
+        unsubscribe = api.subscribe_events(seen.append)  # must not raise
+
+        bus = EventBus.get()
+        for event_type in EventType:
+            assert bus.has_subscribers(event_type)
+        bus.publish(Event(type=EventType.NOTIFICATION, data={"m": 1}))
+        bus.publish(Event(type=EventType.TIMELINE_EVENT, data={}))
+        assert [e.type for e in seen] == [
+            EventType.NOTIFICATION,
+            EventType.TIMELINE_EVENT,
+        ]
+
+        unsubscribe()  # must not raise either
+        assert not any(bus.has_subscribers(t) for t in EventType)
+        bus.publish(Event(type=EventType.NOTIFICATION, data={}))
+        assert len(seen) == 2
+        unsubscribe()  # idempotent
+    finally:
+        EventBus.reset()
