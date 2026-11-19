@@ -161,7 +161,7 @@ Configuration Structure
            "api_key": None,  # prefer SANDROID_AI__API_KEY
            "model": None,
            "show_verbose_thinking": False,
-           "show_chat_mascot": True,
+           "chat_mascot": "auto",  # auto | blocks | ascii | off
            "data_share_path": "~/Sandroid/ai_share/",
            "extra_host_paths": []
        },

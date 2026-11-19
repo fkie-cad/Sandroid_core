@@ -344,38 +344,44 @@ def test_start_spotlight_app_without_an_app_raises(lifecycle):
 
 
 @pytest.mark.parametrize("fresh", [True, False])
-def test_start_spotlight_app_inside_a_subtask_refuses(lifecycle, monkeypatch, fresh):
+def test_start_spotlight_app_inside_a_subagent_refuses(lifecycle, fresh):
     """Orchestrator-only: closes kill_process + start_spotlight_app."""
-    from sandroid.ai import subtasks
-
     lifecycle.live["value"] = (lifecycle.app_start.Liveness.NOT_RUNNING, None)
-    monkeypatch.setattr(
-        subtasks,
-        "get_subtask_manager",
-        lambda: SimpleNamespace(active_owner_ids=lambda: {"sub-1"}),
-    )
-    token = ai_loop._current_owner_id.set("sub-1")
+    ctx = SimpleNamespace(agent_id="a-op-abcdef")
+    token = ai_loop._current_run_context.set(ctx)
     try:
         with pytest.raises(ToolExecutionError, match="subtask"):
             session_control.start_spotlight_app(fresh=fresh)
     finally:
-        ai_loop._current_owner_id.reset(token)
+        ai_loop._current_run_context.reset(token)
     assert lifecycle.calls == []
 
 
+def test_start_spotlight_app_runs_in_the_orchestrator_turn(lifecycle):
+    lifecycle.live["value"] = (lifecycle.app_start.Liveness.NOT_RUNNING, None)
+    ctx = SimpleNamespace(agent_id=ai_loop.ORCHESTRATOR_ID)
+    token = ai_loop._current_run_context.set(ctx)
+    try:
+        session_control.start_spotlight_app()
+    finally:
+        ai_loop._current_run_context.reset(token)
+    assert lifecycle.calls == [("start", False)]
+
+
 def test_in_subtask_fails_closed(monkeypatch):
-    from sandroid.ai import subtasks
-
-    def _broken():
-        raise RuntimeError("no manager")
-
-    monkeypatch.setattr(subtasks, "get_subtask_manager", _broken)
+    # An owner other than the orchestrator, without a run context: refused.
     token = ai_loop._current_owner_id.set("someone")
     try:
         assert session_control._in_subtask() is True
     finally:
         ai_loop._current_owner_id.reset(token)
-    assert session_control._in_subtask() is False  # no chat turn at all
+    assert session_control._in_subtask() is False  # no AI turn at all
+
+    def _broken():
+        raise RuntimeError("no run context")
+
+    monkeypatch.setattr(ai_loop, "current_run_context", _broken)
+    assert session_control._in_subtask() is True
 
 
 def test_start_spotlight_app_says_it_stops_the_running_tools():
@@ -884,7 +890,7 @@ def _as_owner(owner_id: str | None):
     inside each tool as ``from sandroid.ai.loop import _current_owner_id`` --
     the same singleton object as ``ai_loop._current_owner_id`` here), then
     restores the previous value on exit via the token, mirroring
-    ``sandroid.ai.loop.run_agent_turn``'s own set/reset pairing.
+    ``sandroid.ai.loop.run_turn``'s own set/reset pairing.
     """
 
     class _OwnerContext:

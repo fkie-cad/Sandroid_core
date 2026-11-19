@@ -1222,8 +1222,7 @@ class MainScreen(Screen):
             if not self._chat_opened_once:
                 self._chat_opened_once = True
                 # The egress banner sits at the top of the transcript: show
-                # it on the first open (the log scrolled to its end while
-                # the dock was still hidden).
+                # it on the first open.
                 self.call_after_refresh(self._scroll_chat_home)
         if focus:
             self._focus_chat_input()
@@ -1287,18 +1286,12 @@ class MainScreen(Screen):
             except Exception:
                 pass
 
-    def _scroll_chat_home(self, tries: int = 4) -> None:
-        """Scroll the transcript to its top (the egress banner).
-
-        Repeated a few times, 50 ms apart: the panel re-wraps (and its log
-        auto-scrolls to the end) once it learns its first real width.
-        """
+    def _scroll_chat_home(self) -> None:
+        """Scroll the transcript to its top (the egress banner)."""
         try:
             self.query_one("#chat-log").scroll_home(animate=False, immediate=True)
         except Exception:
-            return
-        if tries > 1:
-            self.set_timer(0.05, lambda: self._scroll_chat_home(tries - 1))
+            pass
 
     def action_chat_size(self, delta: int) -> None:
         """Shift+Up (+1) / Shift+Down (-1): step 0.3 -> 0.5 -> 0.7 -> max."""

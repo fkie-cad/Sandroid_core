@@ -1,7 +1,7 @@
 """Safety defaults for Sandroid's EXPERIMENTAL AI Chat feature.
 
 One small module owning every "is it safe to talk to the model?" decision, so
-the TUI chat panel, background subtasks, and the MCP startup path all apply
+the TUI chat panel, its subagents, and the MCP startup path all apply
 the same rules:
 
 - **Off unless explicitly configured.** :func:`get_ai_settings` reads
@@ -304,11 +304,9 @@ def redact_secrets(
 
 
 def build_client(settings: AISettings | None = None, ai_cfg: Any = _SENTINEL):
-    """Build an :class:`~sandroid.ai.client.OpenAIClient` if policy allows it.
+    """Build an :class:`~sandroid.ai.client.OpenAICompatClient` if policy allows it.
 
-    The client is an :class:`~sandroid.ai.client.OpenAICompatClient` (typed
-    ``stream()``) that also keeps the legacy dict-event ``chat()``. Request
-    options, retries and the model profile come from ``config.ai``.
+    Request options, retries and the model profile come from ``config.ai``.
 
     Args:
         settings: Resolved connection settings (default: from ``config.ai``).
@@ -319,7 +317,7 @@ def build_client(settings: AISettings | None = None, ai_cfg: Any = _SENTINEL):
         AIClientError: With :attr:`AISettings.problem` as the message when
             the feature is unconfigured or the endpoint is refused.
     """
-    from sandroid.ai.client import OpenAIClient
+    from sandroid.ai.client import OpenAICompatClient
     from sandroid.ai.errors import AIClientError
 
     settings = settings if settings is not None else get_ai_settings()
@@ -333,4 +331,4 @@ def build_client(settings: AISettings | None = None, ai_cfg: Any = _SENTINEL):
             ai_cfg = getattr(getattr(Toolbox, "config", None), "ai", None)
         except Exception:
             ai_cfg = None
-    return OpenAIClient.from_config(settings, ai_cfg)
+    return OpenAICompatClient.from_config(settings, ai_cfg)

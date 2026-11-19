@@ -1,91 +1,86 @@
 """Sandroid AI package.
 
-An OpenAI-compatible streaming chat client, a hand-rolled tool-calling loop,
-and a merged native + MCP tool registry -- the building blocks behind
-Sandroid's Chat tab.
+The building blocks behind Sandroid's AI chat (see
+``docs/development/ai_foundations.rst``)::
 
-Public surface (the contract downstream code -- including the TUI chat
-panel -- should build against)::
+    transport   client.py        OpenAICompatClient (typed stream()), ModelProfile
+    runtime     loop.py          AgentEvent, RunContext, run_turn(), ToolExecutor
+                session.py       AgentSession (one thread), ConversationStore
+                compaction.py    TokenMeter, masking, summary compaction
+                results.py       ResultStore (R-ids), preview shaping
+    tools       tools/           registry, toolsets, tool_search/call_tool/read_result
+    policy      tool_permissions.py  rules, modes, ApprovalBroker
+    agents      agents.py        AgentProfile, AgentManager, spawn_agent & co.
+
+Public surface::
 
     from sandroid.ai import (
-        run_agent_turn,          # loop.run_agent_turn(messages, tools, client,
-                                  #     cancel_event, on_event=None, max_iterations=8) -> str
-                                  # Drives one full streaming + tool-calling turn to
-                                  # completion. Mutates `messages` in place (appends
-                                  # assistant/tool messages). Streams ChatEvent dicts to
-                                  # `on_event` as they arrive; returns the final text.
-
-        OpenAIClient,             # client.OpenAIClient(base_url, api_key, model)
-                                  # .chat(messages, tools=None, stream=True) -> Iterator[dict]
-                                  # Streaming client for any OpenAI-compatible endpoint.
-
-        AIClientError,            # errors.AIClientError -- backend connection/protocol failures
-        ToolExecutionError,       # errors.ToolExecutionError -- unknown tool / tool dispatch failure
-
+        AgentSession,             # session.AgentSession.open_new(...) / .resume(...)
+        get_agent_manager,        # agents.get_agent_manager() -> AgentManager
+        OpenAICompatClient,       # client.OpenAICompatClient(base_url, api_key, model)
+        AIClientError,            # errors.AIClientError -- backend/policy failures
+        ToolExecutionError,       # errors.ToolExecutionError -- tool dispatch failure
         get_tool_registry,        # tools.registry.get_tool_registry() -> ToolRegistry
-                                  # The ToolRegistry singleton. .openai_tools_schema() for the
-                                  # full tools=[...] param; .subset(names) for a narrower view;
-                                  # .dispatch(name, arguments) to invoke one; .register(spec) to
-                                  # add a new ToolSpec (or use the @sandroid_tool decorator, see
-                                  # sandroid.ai.tools).
-
         get_mcp_client_manager,   # mcp_client.get_mcp_client_manager() -> MCPClientManager
-                                  # The MCP manager singleton. Call .start() once (app startup,
-                                  # e.g. TUI on_mount) to connect every enabled config.mcp.servers
-                                  # entry; call .stop() once on shutdown (e.g. TUI on_unmount).
-                                  # NOT started automatically by importing this package.
-
-        MCPClientManager,         # mcp_client.MCPClientManager -- the class itself, if a caller
-                                  # needs the type (e.g. for a test double).
-
-        bridge_mcp_tools,         # tools.bridge_mcp_tools() -> None
-                                  # Registers every tool from every connected MCP server into
-                                  # the ToolRegistry as "mcp:<server>:<tool>". Call once, after
-                                  # get_mcp_client_manager().start() has connected. NOT called
-                                  # automatically by importing this package.
+        MCPClientManager,
+        bridge_mcp_tools,         # registers mcp:<server>:<tool> tools (call once,
+                                  # after get_mcp_client_manager().start())
     )
 
-Import-time side effects (deliberate, see each module's own docstring for
-why): importing this package eagerly registers every native tool (via
-:mod:`sandroid.ai.tools.app_query` and :mod:`sandroid.ai.tools.device_query`)
-into the :class:`~sandroid.ai.tools.registry.ToolRegistry` singleton. So a
-bare ``import sandroid.ai`` is enough to populate the native tools, and never
-touches config or spawns a subprocess.
+``AgentSession``, ``get_agent_manager`` and ``OpenAICompatClient`` are loaded
+on first access, so ``import sandroid.ai`` stays cheap.
 
-MCP tools are the one thing NOT populated at import time: they require a
-connected :class:`~sandroid.ai.mcp_client.MCPClientManager`, which needs
-``config.mcp.servers`` (an app-lifecycle concern, not an import-time one).
-The caller must explicitly::
+Import-time side effects (deliberate): importing this package registers every
+native tool into the :class:`~sandroid.ai.tools.registry.ToolRegistry`
+singleton. The agent tools (``spawn_agent`` & co.) are registered lazily by
+:func:`sandroid.ai.agents.orchestrator_extra_tools`. MCP tools need a
+connected :class:`~sandroid.ai.mcp_client.MCPClientManager` (an app-lifecycle
+concern), so the caller explicitly runs::
 
     sandroid.ai.get_mcp_client_manager().start()
     sandroid.ai.bridge_mcp_tools()
 
-before ``mcp:<server>:*``-style tools appear in the registry. ``start()`` is a
-no-op unless the AI Chat is configured and permitted (see
-:mod:`sandroid.ai.safety`) and at least one MCP server is enabled -- none is
-by default. The ``mcp`` package is imported lazily, so ``import sandroid.ai``
-(and the TUI Chat panel) works without it.
+``start()`` is a no-op unless the AI chat is configured and permitted (see
+:mod:`sandroid.ai.safety`) and at least one MCP server is enabled. The ``mcp``
+package is imported lazily, so ``import sandroid.ai`` works without it.
 """
 
-from sandroid.ai import subtasks  # side-effect: registers the two spawn tools
-from sandroid.ai.client import OpenAIClient
+from typing import Any
+
 from sandroid.ai.errors import AIClientError, ToolExecutionError
-from sandroid.ai.loop import run_agent_turn
 from sandroid.ai.mcp_client import MCPClientManager, get_mcp_client_manager
-from sandroid.ai.subtasks import get_subtask_manager
-from sandroid.ai.tools import (  # also imports app_query, device_query
+from sandroid.ai.tools import (  # also imports every native tool module
     bridge_mcp_tools,
     get_tool_registry,
 )
 
+_LAZY = {
+    "AgentSession": ("sandroid.ai.session", "AgentSession"),
+    "get_agent_manager": ("sandroid.ai.agents", "get_agent_manager"),
+    "OpenAICompatClient": ("sandroid.ai.client", "OpenAICompatClient"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load the heavier public names on first access."""
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module 'sandroid.ai' has no attribute {name!r}")
+    import importlib
+
+    value = getattr(importlib.import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
+
+
 __all__ = [
     "AIClientError",
+    "AgentSession",
     "MCPClientManager",
-    "OpenAIClient",
+    "OpenAICompatClient",
     "ToolExecutionError",
     "bridge_mcp_tools",
+    "get_agent_manager",
     "get_mcp_client_manager",
-    "get_subtask_manager",
     "get_tool_registry",
-    "run_agent_turn",
 ]

@@ -451,9 +451,9 @@ Button.-primary {
     color: #A0B3C5;
 }
 
-/* ========== Lens Bar & Chat Panel Theming ========== */
-/* Overrides MainScreen/ChatPanel's Python DEFAULT_CSS (see the comments
-   there) so the lens bar and AI chat panel follow this theme instead
+/* ========== Lens Bar Theming ========== */
+/* Overrides MainScreen's Python DEFAULT_CSS (see the comments
+   there) so the lens bar follows this theme instead
    of staying frozen on the default Midnight Cyan hardcoded values. */
 
 #lens-bar {
@@ -478,30 +478,6 @@ Button.-primary {
 .lens-tab.-active {
     color: #0D1820;
     background: #3FBCC8;
-}
-
-ChatPanel {
-    background: #192631;
-}
-
-ChatPanel > #chat-header {
-    color: #5CD0DA;
-}
-
-ChatPanel > #chat-log {
-    background: #14202A;
-}
-
-ChatPanel > #chat-input-bar > #chat-input {
-    border: solid #2B3D4E;
-    background: #14202A;
-}
-
-ChatPanel > #chat-mascot {
-    /* MUST equal #chat-log's background above -- see the comment on
-       ChatPanel > #chat-mascot in chat_panel.py for why. */
-    background: #14202A;
-    color: #5CD0DA;
 }
 
 /* runs lens */

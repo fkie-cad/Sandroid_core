@@ -103,9 +103,16 @@ def test_permission_keys_name_real_parameters():
             assert key in spec.parameters.get("properties", {}), spec.name
 
 
+#: Tools whose every call is approved on purpose (no rule can remember them).
+_NEVER_REMEMBERED = frozenset({"start_spotlight_app"})
+
+
 def test_argument_dependent_tools_have_a_permission_key_where_possible():
     for spec in _native_specs():
         if spec.can_remember_choice or spec.toolset == AGENTS_TOOLSET:
+            continue
+        if spec.name in _NEVER_REMEMBERED:
+            assert spec.permission_key is None, spec.name
             continue
         if spec.parameters.get("properties"):
             assert spec.permission_key is not None, spec.name

@@ -617,10 +617,14 @@ AI Chat (EXPERIMENTAL)
 then closes it; ``Esc`` goes back to the lens), backed by any OpenAI-compatible
 chat-completions endpoint. ``Shift+Up`` / ``Shift+Down`` step its size through
 30%, 50%, 70% and max; dragging its top border resizes it and a double-click
-there toggles max. The size is remembered in ``tui.chat_dock``. The assistant can query the device and drive ~76 Sandroid tools
+there toggles max. The size is remembered in ``tui.chat_dock``. The assistant can query the device and drive ~80 Sandroid tools
 (app lifecycle, flows, certificates, file transfer, monitor, record/replay),
-spawn background subtasks, and use tools from configured MCP servers. Each
-state-changing tool call asks for approval (once / always / never).
+start ``researcher`` / ``operator`` subagents (cards in the chat, the agents
+bar opens their transcripts), and use tools from configured MCP servers. Each
+state-changing tool call asks for approval (Yes / Yes, don't ask again / No
+with a note). ``Ctrl+L`` starts a new thread, ``Ctrl+X`` stops a reply and its
+subagents, and ``/`` lists the slash commands (``/threads``, ``/compact``,
+``/context``, ``/permissions``, ``/agents``, ``/doctor``).
 
 .. warning::
 

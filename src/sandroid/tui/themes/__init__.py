@@ -220,9 +220,8 @@ class Theme:
     logo_color: str = "#00ff00"  # Main logo color (bright green by default)
     logo_text_color: str = "#ffffff"  # "Sandroid" text in logo (white by default)
 
-    # AI Chat panel colors (see tui/widgets/chat_panel.py) -- these back
-    # inline Rich-markup colors built in Python (NOT CSS chrome, which is
-    # themed separately via the .tcss files' ChatPanel/#chat-* selectors).
+    # AI chat colors -- exposed to the chat widgets as the ``$chat-*`` CSS
+    # variables (see :func:`chat_css_variables`; the chat has no .tcss rules).
     # No existing field above was a good semantic fit for any of these, so
     # they're their own fields; every theme below sets its own value.
     tool_color: str = "#a78bfa"  # Tool-call bullet/label (purple by default)

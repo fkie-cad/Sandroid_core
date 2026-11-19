@@ -340,8 +340,7 @@ def test_profile_tool_sets_on_the_real_registry():
     }
     forbidden = agents.AGENT_TOOL_NAMES | {
         "start_replay",
-        "spawn_subtask",
-        "spawn_privileged_subtask",
+        "start_spotlight_app",
     }
     assert not research & forbidden
     assert not operator & forbidden

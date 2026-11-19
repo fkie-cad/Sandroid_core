@@ -1,4 +1,4 @@
-"""Unit tests for sandroid.ai.client (OpenAICompatClient + legacy OpenAIClient).
+"""Unit tests for sandroid.ai.client (OpenAICompatClient).
 
 Builds real requests.Response objects backed by a real urllib3.HTTPResponse
 (requests.post is monkeypatched to return one, never touching the network) so
@@ -21,7 +21,6 @@ import urllib3
 from sandroid.ai.client import (
     ClientOptions,
     ModelProfile,
-    OpenAIClient,
     OpenAICompatClient,
     Usage,
     match_profile,
@@ -50,6 +49,13 @@ def _sse_response(
     return response
 
 
+def _plain_client(key: str) -> OpenAICompatClient:
+    """A client without retries (one request per call)."""
+    return OpenAICompatClient(
+        "https://example.invalid/v1", key, "model", options=ClientOptions(retry_max=0)
+    )
+
+
 def test_utf8_content_survives_a_charset_less_content_type(monkeypatch):
     """Regression test for a real bug found via a live backend: a server
     that sends `Content-Type: text/event-stream` with no charset param
@@ -65,12 +71,11 @@ def test_utf8_content_survives_a_charset_less_content_type(monkeypatch):
 
     monkeypatch.setattr(requests, "post", lambda *a, **kw: response)
 
-    client = OpenAIClient("https://example.invalid/v1", "key", "model")
-    events = list(client.chat([{"role": "user", "content": "hi"}]))
+    client = _plain_client("key")
+    chunks = list(client.stream([{"role": "user", "content": "hi"}]))
 
-    text_deltas = [e["content"] for e in events if e["type"] == "text_delta"]
-    assert text_deltas == ["⚠️ done"]
-    assert events[-1] == {"type": "done"}
+    assert [c.text for c in chunks if c.kind == "text"] == ["⚠️ done"]
+    assert chunks[-1].kind == "done"
 
 
 def test_tool_call_delta_fragments_forwarded_unmodified(monkeypatch):
@@ -111,12 +116,12 @@ def test_tool_call_delta_fragments_forwarded_unmodified(monkeypatch):
     response = _sse_response(body)
     monkeypatch.setattr(requests, "post", lambda *a, **kw: response)
 
-    client = OpenAIClient("https://example.invalid/v1", "key", "model")
-    events = list(client.chat([{"role": "user", "content": "hi"}]))
+    client = _plain_client("key")
+    chunks = list(client.stream([{"role": "user", "content": "hi"}]))
 
-    deltas = [e for e in events if e["type"] == "tool_call_delta"]
-    assert deltas[0]["arguments_fragment"] == '{"l'
-    assert deltas[1]["arguments_fragment"] == 'imit": 3}'
+    deltas = [c.tool_call for c in chunks if c.kind == "tool_call"]
+    assert deltas[0].arguments_fragment == '{"l'
+    assert deltas[1].arguments_fragment == 'imit": 3}'
 
 
 def test_non_2xx_response_yields_error_event(monkeypatch):
@@ -128,11 +133,11 @@ def test_non_2xx_response_yields_error_event(monkeypatch):
 
     monkeypatch.setattr(requests, "post", raise_401)
 
-    client = OpenAIClient("https://example.invalid/v1", "bad-key", "model")
-    events = list(client.chat([{"role": "user", "content": "hi"}]))
+    client = _plain_client("bad-key")
+    chunks = list(client.stream([{"role": "user", "content": "hi"}]))
 
-    assert len(events) == 1
-    assert events[0]["type"] == "error"
+    assert len(chunks) == 1
+    assert chunks[0].kind == "error"
 
 
 # =============================================================================
@@ -602,7 +607,6 @@ def test_build_client_uses_config_options(monkeypatch):
         base_url="http://localhost:8000/v1", api_key="k", model=DEEPSEEK
     )
     client = build_client(settings, AIConfig(retry_max=1, context_window=200_000))
-    assert isinstance(client, OpenAIClient)
     assert isinstance(client, OpenAICompatClient)
     assert client.options.retry_max == 1
     assert client.profile.name == "deepseek-v4"
@@ -621,39 +625,6 @@ def test_usage_from_dict_tolerates_missing_and_cached():
     )
     assert usage.cached_tokens == 8
     assert usage.as_dict()["total_tokens"] == 12
-
-
-# -- legacy adapter ---------------------------------------------------------------
-
-
-def test_legacy_chat_adapter_maps_typed_chunks(monkeypatch):
-    resp = FakeResponse(
-        lines=[
-            _delta(reasoning_content="r"),
-            _delta(content="t"),
-            _delta(finish="stop"),
-            _data({"choices": [], "usage": {"prompt_tokens": 5}}),
-            "data: [DONE]",
-        ]
-    )
-    monkeypatch.setattr(requests, "post", lambda *a, **kw: resp)
-    events = list(OpenAIClient(BASE, "k", DEEPSEEK).chat(HI))
-    assert [e["type"] for e in events] == [
-        "reasoning_delta",
-        "text_delta",
-        "usage",
-        "done",
-    ]
-    assert events[2]["usage"]["prompt_tokens"] == 5
-    assert events[-1] == {"type": "done"}
-
-
-def test_legacy_client_does_not_retry_by_default(monkeypatch):
-    poster = _Poster(requests.exceptions.ConnectionError("down"))
-    monkeypatch.setattr(requests, "post", poster)
-    events = list(OpenAIClient(BASE, "k", "m").chat(HI))
-    assert [e["type"] for e in events] == ["error"]
-    assert len(poster.calls) == 1
 
 
 # -- health -------------------------------------------------------------------------

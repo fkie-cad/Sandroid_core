@@ -1001,17 +1001,20 @@ async def test_chat_banner_wraps_to_the_panel_width() -> None:
     """M5: the privacy warning was wrapped at the hidden panel's width and
     clipped at the visible panel's edge.
     """
-    from textual.widgets import RichLog
-
     app = _app()
     async with app.run_test(size=SIZE) as pilot:
         await boot(app, pilot)
         await pilot.press("ctrl+y")
         await settle(pilot)
-        log = app.screen.query_one("#chat-log", RichLog)
+        log = app.screen.query_one("#chat-log")
+        banner = app.screen.query_one(".chat-banner")
         width = log.scrollable_content_region.width
-        assert log.lines
-        assert max(line.cell_length for line in log.lines) <= width
+        assert 0 < banner.size.width <= width
+        # Wrapped, not clipped: every line of the notice fits the width.
+        lines = banner.render().plain.splitlines()
+        assert lines
+        assert banner.size.height >= len(lines)
+        assert banner.content_region.right <= log.scrollable_content_region.right
 
 
 async def test_ui_callbacks_from_threads_can_start_timers() -> None:

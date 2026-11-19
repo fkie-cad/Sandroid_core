@@ -4,8 +4,6 @@ Works against any OpenAI-compatible endpoint (OpenAI, vLLM, Ollama, LM Studio,
 an internal gateway). Uses ``requests`` with ``stream=True`` and parses
 Server-Sent Events by hand, so no extra HTTP dependency is needed.
 
-Two layers live here:
-
 - :class:`OpenAICompatClient` -- the transport used by the runtime. It sends
   one request per :meth:`~OpenAICompatClient.stream` call and yields typed
   :class:`StreamChunk` objects (``reasoning``, ``text``, ``tool_call``,
@@ -24,11 +22,6 @@ Two layers live here:
   - Messages are passed through untouched except for per-profile
     normalisation (``system_mode="first_only"`` merges all system messages
     into the first one). Echoing ``reasoning_content`` is the caller's job.
-
-- :class:`OpenAIClient` -- the legacy adapter with the first-generation
-  dict-event API (``chat()`` yielding ``text_delta`` / ``reasoning_delta`` /
-  ``tool_call_delta`` / ``done`` / ``error`` dicts) still used by
-  :mod:`sandroid.ai.loop`. It is an :class:`OpenAICompatClient` subclass.
 """
 
 from __future__ import annotations
@@ -1033,84 +1026,6 @@ def _interruptible_sleep(delay: float, cancel_event: threading.Event | None) -> 
     return cancel_event.wait(delay)
 
 
-# =============================================================================
-# Legacy adapter (first-generation dict events)
-# =============================================================================
-
-
-class OpenAIClient(OpenAICompatClient):
-    """Legacy dict-event API over :class:`OpenAICompatClient`.
-
-    Kept until the runtime cut-over: :mod:`sandroid.ai.loop` consumes
-    :meth:`chat`. Unless ``options`` are given, retries are off, matching
-    the first-generation behaviour.
-    """
-
-    def __init__(
-        self,
-        base_url: str,
-        api_key: str,
-        model: str,
-        *,
-        options: ClientOptions | None = None,
-        profile: ModelProfile | None = None,
-    ):
-        """See :class:`OpenAICompatClient`; default ``options`` retry 0 times."""
-        super().__init__(
-            base_url,
-            api_key,
-            model,
-            options=options if options is not None else ClientOptions(retry_max=0),
-            profile=profile,
-        )
-
-    def chat(
-        self,
-        messages: list[dict],
-        tools: list[dict] | None = None,
-        stream: bool = True,
-    ) -> Iterator[dict]:
-        """Stream a chat completion as first-generation ChatEvent dicts.
-
-        Yields ``reasoning_delta``/``text_delta`` (``content``),
-        ``tool_call_delta`` (``index``, ``id``, ``name``,
-        ``arguments_fragment``), informational ``usage``/``retry`` dicts, and
-        ends in exactly one ``{"type": "done"}`` or
-        ``{"type": "error", "message": str}``.
-
-        Args:
-            messages: Chat-completions message list.
-            tools: Optional tools schema.
-            stream: Ignored (always streams); kept for compatibility.
-        """
-        del stream
-        for chunk in self.stream(messages, tools):
-            kind = chunk.kind
-            if kind == "reasoning":
-                yield {"type": "reasoning_delta", "content": chunk.text}
-            elif kind == "text":
-                yield {"type": "text_delta", "content": chunk.text}
-            elif kind == "tool_call" and chunk.tool_call is not None:
-                call = chunk.tool_call
-                yield {
-                    "type": "tool_call_delta",
-                    "index": call.index,
-                    "id": call.id,
-                    "name": call.name,
-                    "arguments_fragment": call.arguments_fragment,
-                }
-            elif kind == "usage" and chunk.usage is not None:
-                yield {"type": "usage", "usage": chunk.usage.as_dict()}
-            elif kind == "retry" and chunk.retry is not None:
-                yield {"type": "retry", **asdict(chunk.retry)}
-            elif kind == "done":
-                yield {"type": "done"}
-            elif kind == "error" and chunk.error is not None:
-                yield {"type": "error", "message": chunk.error.message}
-            elif kind == "cancelled":
-                yield {"type": "error", "message": "AI request cancelled"}
-
-
 __all__ = [
     "BUILTIN_PROFILES",
     "DEFAULT_PROFILE",
@@ -1118,7 +1033,6 @@ __all__ = [
     "ClientOptions",
     "HealthReport",
     "ModelProfile",
-    "OpenAIClient",
     "OpenAICompatClient",
     "RetryInfo",
     "StreamChunk",

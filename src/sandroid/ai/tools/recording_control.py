@@ -34,19 +34,14 @@ code -- the LLM decides when to call ``start_replay`` after being told
   for the other half of this deferred-release pattern.
 
   This deferred-release pattern is only airtight when ``start_replay`` is
-  called by the ORCHESTRATOR's own turn, whose owner id is never subject to
-  ``sandroid.ai.subtasks.SubtaskManager._run``'s ``finally``, which calls
-  ``get_arbiter().forget_subtask(subtask_id)`` the moment a *subtask's* own
-  (synchronous) ``run_agent_turn`` call returns and unconditionally releases
-  EVERY lease that subtask still holds via ``_release_all_locked``,
-  immediately (not merely as a periodic ``reconcile()`` backstop). A
-  privileged subtask that called ``start_replay`` and then ended its own turn
-  shortly after (e.g. reporting "replay kicked off, done") would have its
-  ``WORLD`` lease force-released while the detached replay worker was very
-  likely still mid-flight. Closed by excluding ``start_replay`` from
-  ``SubtaskManager._privileged_tool_names()`` (see
-  ``sandroid.ai.subtasks._ASYNC_LEASE_TOOL_NAMES``) rather than leaving the
-  race live -- only the orchestrator can call this tool.
+  called by the ORCHESTRATOR's own turn. A subagent's owner id is
+  forgotten (``get_arbiter().forget_subtask``) the moment its run ends,
+  which releases EVERY lease it still holds, so a subagent that started a
+  replay and finished shortly after would have its ``WORLD`` lease
+  force-released while the detached replay worker was still mid-flight.
+  Closed by excluding ``start_replay`` from every subagent profile
+  (``sandroid.ai.agents.ASYNC_LEASE_TOOL_NAMES``) -- only the orchestrator
+  can call this tool.
 - ``get_recording_status``, ``get_replay_status``, ``list_recent_runs``,
   ``get_run_detail`` -- all ``RiskTier.READ_ONLY``, no resource claimed.
 """

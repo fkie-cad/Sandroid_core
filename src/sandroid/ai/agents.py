@@ -11,8 +11,9 @@ A *subagent* is a separate :class:`~sandroid.ai.session.AgentSession`
   tier, ``ai.agents.operator_max`` at once; its device changes go through the
   normal permission rules and the approval broker under the agent's own
   label, never auto-approved). Every profile excludes ``NOT_EXPOSED`` tools,
-  the agent tools (no nesting), the legacy spawn tools and tools that hold a
-  lease across an asynchronous completion (``start_replay``).
+  the agent tools (no nesting), orchestrator-only tools
+  (``start_spotlight_app``) and tools that hold a lease across an
+  asynchronous completion (``start_replay``).
 - **Scheduler** (:class:`AgentManager`): per-profile caps; spawns over the cap
   are queued, not refused. A process-wide :class:`Gateway` limits concurrent
   HTTP requests (``ai.agents.gateway_concurrency``, one slot reserved for the
@@ -42,7 +43,7 @@ agent's thread) and ``<root>/ai/agents/<id>/meta.json`` (profile, parent
 thread and tool-call id, task, status, usage, result).
 
 Only :mod:`sandroid.ai.session`, :mod:`sandroid.ai.loop` and the tool layer are
-used; nothing here depends on the legacy ``ai/subtasks.py``.
+used.
 """
 
 from __future__ import annotations
@@ -111,8 +112,9 @@ ORCHESTRATOR_AGENT_TOOLS: tuple[str, ...] = (
 #: Every agent tool name (never visible to a subagent: depth 1).
 AGENT_TOOL_NAMES = frozenset(ORCHESTRATOR_AGENT_TOOLS)
 
-#: First-generation spawn tools (``ai/subtasks.py``, removed in the cut-over).
-LEGACY_SPAWN_TOOL_NAMES = frozenset({"spawn_subtask", "spawn_privileged_subtask"})
+#: Tools that refuse to run outside the orchestrator's own turn (they could
+#: restart the app the analyst is watching); hidden from subagents.
+ORCHESTRATOR_ONLY_TOOL_NAMES = frozenset({"start_spotlight_app"})
 
 #: Tools that hold a device lease across an asynchronous completion (released
 #: by a detached worker, not when the dispatch returns). A subagent's
@@ -120,7 +122,9 @@ LEGACY_SPAWN_TOOL_NAMES = frozenset({"spawn_subtask", "spawn_privileged_subtask"
 ASYNC_LEASE_TOOL_NAMES = frozenset({"start_replay"})
 
 #: Excluded from every profile regardless of its selector.
-ALWAYS_EXCLUDED = AGENT_TOOL_NAMES | LEGACY_SPAWN_TOOL_NAMES | ASYNC_LEASE_TOOL_NAMES
+ALWAYS_EXCLUDED = (
+    AGENT_TOOL_NAMES | ORCHESTRATOR_ONLY_TOOL_NAMES | ASYNC_LEASE_TOOL_NAMES
+)
 
 #: Agent states. ``queued``/``running`` are live; the rest are final and equal
 #: :attr:`AgentResult.status`.

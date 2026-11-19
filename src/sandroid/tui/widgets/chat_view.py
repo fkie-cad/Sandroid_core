@@ -581,6 +581,15 @@ class ChatMascot(Static):
         self._frame = 0
         self._apply()
 
+    def set_style(self, style: str | None = None) -> None:
+        """Switch to ``style`` (``None``: re-read the configured one)."""
+        resolved = resolve_mascot_style(style) if style else configured_mascot_style()
+        if resolved == self.style_name:
+            return
+        self.style_name = resolved
+        self._frame = 0
+        self._apply()
+
     def fit_width(self, width: int) -> None:
         """Hide the mascot when the row it sits in is narrower than 50 cells."""
         self._fits = width >= MASCOT_MIN_WIDTH

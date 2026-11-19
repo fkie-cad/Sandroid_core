@@ -13,6 +13,7 @@ Extracted modules:
 import collections
 import concurrent.futures
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -688,9 +689,10 @@ class SandroidTUI(App):
         self.run_worker(self._pre_fetch_packages, exclusive=False)
         # Connect every enabled config.mcp.servers entry (the bundled
         # ``mcp_demo_server`` fixture is off by default) and bridge their
-        # tools into the shared ToolRegistry,
-        # so the Chat tab's tool-calling loop can see them immediately. A
-        # broken/unreachable MCP server must never break app startup.
+        # tools into the shared ToolRegistry. They arrive late (worker
+        # thread); the chat's tool_search reads the registry live and the
+        # ambient block lists the MCP toolsets, so no re-indexing is needed.
+        # A broken/unreachable MCP server must never break app startup.
         self.run_worker(self._start_mcp_tools, exclusive=False, thread=True)
 
     async def _pre_init_commands(self) -> None:
@@ -1306,6 +1308,15 @@ class SandroidTUI(App):
             get_mcp_client_manager().stop()
         except Exception:
             pass
+
+        # Cancel every AI subagent still running (bounded wait); only if the
+        # AI runtime was ever loaded.
+        agents = sys.modules.get("sandroid.ai.agents")
+        if agents is not None:
+            try:
+                agents.get_agent_manager().shutdown(timeout=1.0)
+            except Exception:
+                pass
 
     def get_key_display(self, binding: Binding) -> str:
         """Footer key label: keep Shift visible (``R`` -> ``⇧R``, ``r`` -> ``r``)."""

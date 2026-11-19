@@ -1,19 +1,14 @@
 """Agent runtime: the tool-calling loop, its events and the tool executor.
 
-Two generations live here until the panel cut-over (WP6a):
-
-- **Runtime v2** (used by :class:`sandroid.ai.session.AgentSession` and the
-  subagents): :func:`run_turn` drives one turn on a message list with an
-  :class:`~sandroid.ai.client.OpenAICompatClient`, reports everything as
-  :class:`AgentEvent` objects to an :data:`EventSink`, runs tools through the
-  :class:`ToolExecutor` (resolve -> permission/approval -> arbiter leases ->
-  dispatch on a helper thread -> result store and shaping) and returns a
-  :class:`TurnResult`. It enforces round, token and wall-clock budgets with
-  one wrap-up request at the end. It never imports Toolbox; the session does
-  the Toolbox and timeline integration.
-- **Legacy shims** (:func:`run_agent_turn`, :func:`_dispatch_one`,
-  :func:`get_current_turn_context`): the first-generation loop the current
-  chat panel and ``ai/subtasks.py`` still call. They are deleted in WP6a.
+Used by :class:`sandroid.ai.session.AgentSession` (the main chat and the
+subagents): :func:`run_turn` drives one turn on a message list with an
+:class:`~sandroid.ai.client.OpenAICompatClient`, reports everything as
+:class:`AgentEvent` objects to an :data:`EventSink`, runs tools through the
+:class:`ToolExecutor` (resolve -> permission/approval -> arbiter leases ->
+dispatch on a helper thread -> result store and shaping) and returns a
+:class:`TurnResult`. It enforces round, token and wall-clock budgets with one
+wrap-up request at the end. It never imports Toolbox; the session does the
+Toolbox and timeline integration.
 
 ``_current_owner_id`` keeps its name and module because tools read the
 resource-arbiter owner from it; :func:`run_turn` sets it together with the
@@ -43,7 +38,6 @@ from sandroid.ai.results import (
     get_result_store,
     shape_result,
 )
-from sandroid.ai.tool_permissions import get_tool_permission_store, resolve_tool_policy
 from sandroid.ai.tools.meta import (
     LoadedTools,
     MetaContext,
@@ -62,7 +56,6 @@ from sandroid.ai.tools.registry import (
 if TYPE_CHECKING:
     from sandroid.ai.client import (
         ModelProfile,
-        OpenAIClient,
         OpenAICompatClient,
         Usage,
     )
@@ -1291,342 +1284,6 @@ def install_permission_resolver() -> None:
     _perms.set_argument_dependency_resolver(resolver)
 
 
-# =============================================================================
-# Legacy shims (first-generation loop; deleted in WP6a)
-# =============================================================================
-
-#: Default cap on tool-calling round-trips within a single legacy turn.
-MAX_ITERATIONS_DEFAULT = 8
-
-#: A pending tool call's approval callback: given the tool's ToolSpec and its
-#: parsed arguments, blocks until the user (or caller) decides, returning
-#: "once" | "always" | "decline" | "cancelled". See _dispatch_one.
-ApproveCallback = Callable[[ToolSpec, dict], str]
-
-#: (client, cancel_event, approve) for the legacy turn executing on this
-#: thread (see get_current_turn_context()).
-_current_turn_context: ContextVar[
-    tuple[OpenAIClient, threading.Event, ApproveCallback | None] | None
-] = ContextVar("_current_turn_context", default=None)
-
-
-def get_current_turn_context() -> (
-    tuple[OpenAIClient, threading.Event, ApproveCallback | None] | None
-):
-    """Return the ``(client, cancel_event, approve)`` of the legacy turn here.
-
-    Returns:
-        The active legacy turn's context, or ``None`` if no
-        :func:`run_agent_turn` call is on the stack in this context.
-    """
-    return _current_turn_context.get()
-
-
-def run_agent_turn(
-    messages: list[dict],
-    tools: list[dict],
-    client: OpenAIClient,
-    cancel_event: threading.Event,
-    on_event: Callable[[dict], None] | None = None,
-    max_iterations: int = MAX_ITERATIONS_DEFAULT,
-    approve: ApproveCallback | None = None,
-    owner_id: str | None = None,
-) -> str:
-    """Legacy: drive one agent turn with the first-generation dict events.
-
-    Kept for the current chat panel and ``ai/subtasks.py`` until WP6a.
-
-    Args:
-        messages: Chat history so far (mutated in place: assistant and tool
-            messages are appended as the loop progresses).
-        tools: The ``tools=[...]`` schema offered this turn; dispatch refuses
-            names outside it (``call_tool`` may reach any of them).
-        client: The backend client (legacy ``chat()`` API).
-        cancel_event: Stops the turn early when set.
-        on_event: Callback for every ChatEvent dict as it's produced.
-        max_iterations: Cap on tool-calling round-trips within this turn.
-        approve: Approval callback for ``ask`` tools (``None``: refuse them).
-        owner_id: Resource-arbiter owner id (``None``: no arbitration).
-
-    Returns:
-        The final reply text not yet reflected in ``messages`` (``""`` when the
-        turn ended already fully persisted). Callers append it only when
-        non-empty.
-    """
-
-    def emit(event: dict) -> None:
-        if on_event is not None:
-            on_event(event)
-
-    allowed_names = {
-        t["function"]["name"] for t in tools if t.get("type") == "function"
-    }
-
-    token = _current_turn_context.set((client, cancel_event, approve))
-    owner_token = _current_owner_id.set(owner_id)
-    try:
-        return _run_iterations(
-            messages,
-            tools,
-            client,
-            cancel_event,
-            emit,
-            max_iterations,
-            allowed_names,
-            approve,
-        )
-    finally:
-        _current_owner_id.reset(owner_token)
-        _current_turn_context.reset(token)
-
-
-def _run_iterations(
-    messages: list[dict],
-    tools: list[dict],
-    client: OpenAIClient,
-    cancel_event: threading.Event,
-    emit: Callable[[dict], None],
-    max_iterations: int,
-    allowed_names: set[str],
-    approve: ApproveCallback | None = None,
-) -> str:
-    for _ in range(max_iterations):
-        if cancel_event.is_set():
-            return ""
-
-        text_accum, tool_calls, stopped_early = _stream_one_response(
-            messages, tools, client, cancel_event, emit
-        )
-        if stopped_early:
-            return text_accum
-
-        if not tool_calls:
-            return text_accum
-
-        # _dispatch_tool_calls persists this round's text into `messages`.
-        _dispatch_tool_calls(
-            messages, tool_calls, text_accum, emit, cancel_event, allowed_names, approve
-        )
-        if cancel_event.is_set():
-            return ""
-
-    return ""
-
-
-def _stream_one_response(
-    messages: list[dict],
-    tools: list[dict],
-    client: OpenAIClient,
-    cancel_event: threading.Event,
-    emit: Callable[[dict], None],
-) -> tuple[str, dict[int, dict], bool]:
-    """Stream one legacy ``client.chat(...)`` response.
-
-    Returns:
-        ``(accumulated_text, tool_calls_by_index, stopped_early)``.
-    """
-    text_accum = ""
-    tool_calls: dict[int, dict] = {}
-
-    for event in client.chat(messages, tools=tools, stream=True):
-        if cancel_event.is_set():
-            return text_accum, tool_calls, True
-
-        etype = event.get("type")
-        if etype == "text_delta":
-            text_accum += event.get("content", "")
-            emit(event)
-        elif etype == "reasoning_delta":
-            emit(event)
-        elif etype == "tool_call_delta":
-            _accumulate_tool_call_delta(tool_calls, event)
-        elif etype == "error":
-            emit(event)
-            return text_accum, tool_calls, True
-        elif etype == "done":
-            break
-
-    return text_accum, tool_calls, False
-
-
-def _accumulate_tool_call_delta(tool_calls: dict[int, dict], event: dict) -> None:
-    index = event["index"]
-    slot = tool_calls.setdefault(index, {"id": None, "name": None, "arguments": ""})
-    if event.get("id"):
-        slot["id"] = event["id"]
-    if event.get("name"):
-        slot["name"] = event["name"]
-    slot["arguments"] += event.get("arguments_fragment", "")
-
-
-def _dispatch_tool_calls(
-    messages: list[dict],
-    tool_calls: dict[int, dict],
-    text_accum: str,
-    emit: Callable[[dict], None],
-    cancel_event: threading.Event,
-    allowed_names: set[str] | None = None,
-    approve: ApproveCallback | None = None,
-) -> None:
-    """Assemble, announce, append, and execute every tool call from one turn.
-
-    Every declared ``tool_call_id`` gets a matching ``role="tool"`` response,
-    even on cancel.
-    """
-    registry = get_tool_registry()
-    assistant_tool_calls = []
-    parsed_by_index: dict[int, dict] = {}
-
-    for index in sorted(tool_calls):
-        call = tool_calls[index]
-        parsed_args = _parse_arguments(call["arguments"])
-        parsed_by_index[index] = parsed_args
-        call_id = call["id"] or f"call_{index}"
-        assistant_tool_calls.append(
-            {
-                "id": call_id,
-                "type": "function",
-                "function": {"name": call["name"], "arguments": call["arguments"]},
-            }
-        )
-        emit(
-            {
-                "type": "tool_call_done",
-                "index": index,
-                "id": call_id,
-                "name": call["name"],
-                "arguments": parsed_args,
-            }
-        )
-
-    messages.append(
-        {
-            "role": "assistant",
-            "content": text_accum or None,
-            "tool_calls": assistant_tool_calls,
-        }
-    )
-
-    cancelled = False
-    for index in sorted(tool_calls):
-        call = tool_calls[index]
-        call_id = call["id"] or f"call_{index}"
-        if cancelled or cancel_event.is_set():
-            cancelled = True
-            content = json.dumps({"error": "cancelled before this tool call ran"})
-        else:
-            content = _dispatch_one(
-                registry, call["name"], parsed_by_index[index], allowed_names, approve
-            )
-        messages.append({"role": "tool", "tool_call_id": call_id, "content": content})
-
-
-def _legacy_error(err: ToolError) -> str:
-    payload: dict[str, Any] = {"error": err.message, "code": err.code}
-    if err.hint:
-        payload["hint"] = err.hint
-    return json.dumps(payload, default=str)
-
-
-def _dispatch_one(
-    registry,
-    name: str | None,
-    arguments: dict,
-    allowed_names: set[str] | None = None,
-    approve: ApproveCallback | None = None,
-) -> str:
-    """Legacy: dispatch one tool call, converting any failure into an error.
-
-    ``call_tool`` is unwrapped through :func:`~sandroid.ai.tools.meta.resolve_call`
-    (restricted to *allowed_names*), so the inner tool's permission gate and
-    leases apply. A decline is call-scoped: nothing is persisted.
-    """
-    if allowed_names is not None and name not in allowed_names:
-        logger.debug("Tool %r not in this turn's allowed set; refusing", name)
-        return json.dumps({"error": f"tool {name!r} is not available this turn"})
-
-    if name == "call_tool":
-        allowed_pred = (
-            None if allowed_names is None else (lambda spec: spec.name in allowed_names)
-        )
-        try:
-            call = resolve_call(
-                name,
-                arguments,
-                loaded=LoadedTools(),
-                allowed=allowed_pred,
-                registry=registry,
-            )
-        except ToolError as err:
-            return _legacy_error(err)
-        name, arguments = call.spec.name, call.arguments
-
-    spec = registry.get_spec(name)
-    if spec is not None:
-        policy = resolve_tool_policy(spec.name, spec.risk, spec.can_remember_choice)
-        if policy == "never":
-            return json.dumps({"error": f"{name!r} is blocked by saved policy"})
-        if policy == "ask":
-            if approve is None:
-                return json.dumps(
-                    {"error": f"{name!r} needs confirmation but no UI is available"}
-                )
-            try:
-                choice = approve(spec, arguments)
-            except Exception as exc:
-                logger.debug("approve() raised for %r: %s", name, exc)
-                return json.dumps(
-                    {"error": f"could not obtain confirmation for {name!r}: {exc}"}
-                )
-            if choice in ("decline", "cancelled"):
-                # Call-scoped: a decline is never persisted as "never".
-                return json.dumps({"error": f"{name!r} was not approved ({choice})"})
-            if choice == "always" and spec.can_remember_choice:
-                get_tool_permission_store().mark_allowed(spec.name)
-
-    owner = _current_owner_id.get()
-    newly: frozenset = frozenset()
-    if spec is not None and spec.resources and owner is not None:
-        claimed = get_arbiter().claim(owner, spec.resources)
-        if isinstance(claimed, Conflict):
-            return json.dumps(
-                {
-                    "error": (
-                        f"resource {claimed.resource.value!r} is in use by "
-                        "another task; it must be released before this tool "
-                        "can run"
-                    )
-                }
-            )
-        newly = claimed
-
-    try:
-        result = registry.dispatch(name, arguments)
-    except Exception as exc:
-        if newly and owner is not None:
-            get_arbiter().release_resources(owner, newly)
-        logger.debug("Tool %r raised during dispatch: %s", name, exc)
-        return json.dumps({"error": str(exc)})
-
-    if owner is not None and spec is not None:
-        _settle_leases(owner, spec, newly, result=result)
-
-    try:
-        return json.dumps(result, default=str)
-    except (TypeError, ValueError):
-        return json.dumps({"result": str(result)})
-
-
-def _parse_arguments(raw_arguments: str) -> dict:
-    if not raw_arguments:
-        return {}
-    try:
-        return json.loads(raw_arguments)
-    except json.JSONDecodeError:
-        logger.debug("Failed to parse tool-call arguments as JSON: %r", raw_arguments)
-        return {}
-
-
 __all__ = [
     "EVENT_TYPES",
     "ORCHESTRATOR_ID",
@@ -1639,9 +1296,7 @@ __all__ = [
     "TurnResult",
     "build_request_messages",
     "current_run_context",
-    "get_current_turn_context",
     "install_permission_resolver",
-    "run_agent_turn",
     "run_turn",
     "summarize_result",
 ]

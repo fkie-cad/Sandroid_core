@@ -744,8 +744,25 @@ AI Chat (``[ai]``) -- EXPERIMENTAL
    # reasoning phase ends.
    show_verbose_thinking = false
 
-   # Show the small animated ASCII mascot in the Chat panel.
-   show_chat_mascot = true
+   # Chat mascot beside the input: auto | blocks | ascii | off. "auto" picks
+   # ASCII on non-UTF-8 terminals. show_chat_mascot = false (the old switch)
+   # still hides it.
+   chat_mascot = "auto"
+
+   # Model profile (context window, reasoning echo, system-message handling),
+   # matched by model name; unknown models get a conservative 32k profile.
+   # profile = "deepseek-v4"
+   # context_window = 131072
+   # Request parameters (unset = server default) and transport policy:
+   # max_tokens = 8192, temperature = 0.6, top_p = 0.95, extra_body = {...}
+   # request_timeout = [10, 120], retry_max = 4
+
+   # [ai.budgets]  per turn: chat_max_rounds = 25, chat_max_tokens,
+   #               chat_max_wall_s, agent_max_rounds = 20, ... (0 = off)
+   # [ai.context]  result_cap_tokens = 8000 (larger results: preview + R-id),
+   #               mask_at = 0.50, summarize_at = 0.85, output_reserve_tokens
+   # [ai.agents]   gateway_concurrency = 4, researcher_max = 3,
+   #               operator_max = 1, max_auto_wakes = 3
 
    # Always-available host directory for the AI's file tools. Bare relative
    # paths given to list_host_dir/read_host_file/push_path/install_apk are
@@ -762,6 +779,21 @@ AI Chat (``[ai]``) -- EXPERIMENTAL
    # Mask the content of sensitive session-timeline lines (typed text, TLS
    # keys) in what the AI reads
    mask_sensitive = false
+
+Approval rules for the AI's tools live in their own file,
+``~/.config/sandroid/ai_tool_permissions.toml``:
+
+.. code-block:: toml
+
+   mode = "ask"            # "ask" (default) | "allow_all"
+   allow = ["launch_app", "kill_process(package_name=com.example.*)"]
+   deny  = []
+
+A matching ``deny`` rule always wins; ``allow_all`` runs device-changing tools
+without asking. Tools whose risk depends on an argument only accept rules that
+constrain it. ``/permissions`` in the chat shows the rules and switches the
+current session to ``allow_all`` or back. Conversation threads, stored tool
+results (``R<n>``) and subagent transcripts are written to ``<session>/ai/``.
 
 MCP servers (``[mcp]``) -- EXPERIMENTAL
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

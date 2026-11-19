@@ -108,6 +108,7 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "get_package_details": _e("apps", core=True),
     "get_package_pid": _e("apps", core=True),
     "launch_app": _e("apps", core=True),
+    "start_spotlight_app": _e("apps", timeout_s=180),
     "is_package_installed": _e("apps"),
     "list_exported_components": _e("apps"),
     "install_apk": _e("apps", timeout_s=_LONG, permission_key="apk_path"),
@@ -183,14 +184,11 @@ TOOLSET_TABLE: dict[str, ToolsetEntry] = {
     "get_replay_status": _e("recording"),
     "list_recent_runs": _e("recording"),
     "get_run_detail": _e("recording"),
-    # agents (legacy subtask tools until the panel cut-over, then WP5's tools
-    # from ai/agents.py; registered by their own modules, so they may be
-    # absent). spawn_agent's risk depends on its profile (operator spawns ask,
+    # agents (ai/agents.py; registered lazily by orchestrator_extra_tools, so
+    # they may be absent). spawn_agent's risk depends on its profile (operator spawns ask,
     # researcher spawns do not), so remembered rules are keyed by profile; with
     # wait=true it blocks until the agent's result (the agent wall budget plus
     # queueing), hence the long timeout.
-    "spawn_subtask": _e("agents"),
-    "spawn_privileged_subtask": _e("agents"),
     "spawn_agent": _e("agents", timeout_s=1800, permission_key="profile"),
     "wait_agent": _e("agents", timeout_s=90),
     "get_agent_result": _e("agents"),

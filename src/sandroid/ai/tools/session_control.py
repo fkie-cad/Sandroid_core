@@ -186,25 +186,29 @@ def get_spotlight_app() -> dict[str, Any]:
 
 
 def _in_subtask() -> bool:
-    """True when the current tool call runs inside an AI subtask.
+    """True unless the current tool call runs in the orchestrator's turn.
 
-    Fails closed: when the owner or the subtask set cannot be read, the call
-    counts as a subtask's.
+    A subagent (``spawn_agent``) runs with its own run context, whose agent
+    id is not the orchestrator's. Fails closed: when the run context or the
+    owner cannot be read, the call counts as a subagent's. A call outside
+    any AI turn (direct call, test) is allowed.
     """
     try:
-        from sandroid.ai.loop import _current_owner_id
+        from sandroid.ai.loop import (
+            ORCHESTRATOR_ID,
+            _current_owner_id,
+            current_run_context,
+        )
 
+        ctx = current_run_context()
         owner = _current_owner_id.get()
     except Exception:
         return True
+    if ctx is not None:
+        return getattr(ctx, "agent_id", None) != ORCHESTRATOR_ID
     if owner is None:
-        return False  # not a chat turn (direct call, test)
-    try:
-        from sandroid.ai.subtasks import get_subtask_manager
-
-        return owner in get_subtask_manager().active_owner_ids()
-    except Exception:
-        return True
+        return False  # not an AI turn (direct call, test)
+    return owner != ORCHESTRATOR_ID
 
 
 @sandroid_tool(
@@ -251,8 +255,8 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
     :func:`~sandroid.services.app_start.restart_app` and
     :func:`~sandroid.services.app_start.resume_app` -- the same code the App
     lens keys run. The approval gate is the consent for ``fresh``. The tool
-    is refused inside a subtask (a privileged subtask is blanket approved,
-    so it could restart the app without a per-call prompt).
+    is orchestrator-only: a subagent is refused, so an operator agent cannot
+    restart the app in two steps (``kill_process``, then this).
 
     Args:
         fresh: Restart a running app.
@@ -264,12 +268,12 @@ def start_spotlight_app(fresh: bool = False, paused: bool = False) -> dict[str, 
 
     Raises:
         ToolExecutionError: No spotlight app is selected, or the call runs
-            inside a subtask.
+            inside a subagent.
     """
     from sandroid.services import app_start, get_spotlight_service
 
     if _in_subtask():
-        # Orchestrator-only (like start_replay): a subtask could otherwise
+        # Orchestrator-only (like start_replay): a subagent could otherwise
         # restart the app in two steps (kill_process, then this).
         raise ToolExecutionError(
             "start_spotlight_app is not allowed inside a subtask; ask the "
@@ -733,7 +737,7 @@ def get_device_proxy_status() -> dict[str, Any]:
 # =============================================================================
 
 #: AI-tools-layer-only bookkeeping: which owner (the orchestrator, or a
-#: subtask id -- see ``sandroid.ai.loop._current_owner_id``) enabled each
+#: subagent id -- see ``sandroid.ai.loop._current_owner_id``) enabled each
 #: app-proxy lane via :func:`enable_app_proxy`. ``FocusManager`` itself has no
 #: ownership concept and gains none for this -- a lane created via the TUI
 #: (not through this tool) correctly has no entry here, so it is never
@@ -819,7 +823,7 @@ def enable_app_proxy(
       the spotlight app afterward for this function's own return value).
       Two independent resolutions could observe two different spotlight
       apps if the spotlight changed in between -- a real race in this
-      codebase's concurrent-subtask architecture -- which would attribute
+      codebase's concurrent-subagent architecture -- which would attribute
       ownership to the wrong package below.
     - Whether the package already had a live lane is checked *before*
       calling ``enable_focus``, so ownership is only ever recorded for a
@@ -827,7 +831,7 @@ def enable_app_proxy(
       (a re-call for an already-proxied package is a harmless
       ``(True, "... already proxied")`` no-op) -- recording ownership
       unconditionally on any ``ok=True`` would let this call silently
-      "adopt" a lane a *different* owner (another subtask, or the TUI)
+      "adopt" a lane a *different* owner (another subagent, or the TUI)
       created earlier, letting this owner's later unscoped
       :func:`disable_app_proxy` tear it down. That is exactly the failure
       the ownership map exists to prevent, just reached via a different
@@ -937,7 +941,7 @@ def disable_app_proxy(
     behaviors -- this scoping exists because ``ResourceId.FOCUS`` is one
     coarse lease covering ALL lanes, so an unscoped blanket disable could
     otherwise tear down a lane a *different* concurrent owner (another
-    subtask, or the TUI) is still using:
+    subagent, or the TUI) is still using:
 
     - ``package`` given: unchanged, always allowed -- calls
       ``disable_focus(package)`` and clears that package's ownership entry
