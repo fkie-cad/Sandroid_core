@@ -501,7 +501,7 @@ async def run_security_analysis(
 
     Args:
         adb: ADB interface for device communication.
-        toolbox: The Toolbox class reference (needed for device APK mode).
+        toolbox: Unused; kept for the runners' uniform signature.
         apk_path: Path to local APK file or package name of installed app.
         **kwargs: Additional mode-specific options.
 
@@ -530,12 +530,9 @@ async def run_security_analysis(
         logger.info(f"Running security analysis on installed package: {apk_path}")
         from sandroid.services import get_spotlight_service
 
-        spotlight = get_spotlight_service()
-        spotlight.set_app(apk_path)
-
-        # Also set on Toolbox for StaticAnalysis compatibility
-        if toolbox:
-            toolbox.set_spotlight_application(apk_path)
+        # set_app() also leaves spawn mode, so a spawn target left behind by
+        # an earlier run (e.g. malware analysis) is not analysed instead.
+        get_spotlight_service().set_app(apk_path)
 
         analyzer = StaticAnalysis(
             forensic_service=forensic,

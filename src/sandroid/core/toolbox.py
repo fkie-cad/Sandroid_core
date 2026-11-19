@@ -54,50 +54,6 @@ _SERVICE_PROPERTY_TABLE: list[tuple[str, str, str | None, str | None]] = [
         "malware_monitor_running",
         None,
     ),
-    # ---- SpotlightService (method-based) ----
-    (
-        "_spotlight_application",
-        "get_spotlight_service",
-        "get_application",
-        "set_application",
-    ),
-    (
-        "_spotlight_application_pid",
-        "get_spotlight_service",
-        "get_application_pid",
-        "set_application_pid",
-    ),
-    ("_spawn_mode", "get_spotlight_service", "is_spawn_mode", "_spawn_mode"),
-    (
-        "_spotlight_spawn_application",
-        "get_spotlight_service",
-        "get_spawn_application",
-        "_spotlight_spawn_application",
-    ),
-    (
-        "_auto_resume_after_spawn",
-        "get_spotlight_service",
-        "get_auto_resume_after_spawn",
-        "set_auto_resume_after_spawn",
-    ),
-    (
-        "_spotlight_files",
-        "get_spotlight_service",
-        "get_spotlight_files",
-        "set_spotlight_files",
-    ),
-    (
-        "_spotlight_pull_one",
-        "get_spotlight_service",
-        "get_spotlight_pull_one",
-        "set_spotlight_pull_one",
-    ),
-    (
-        "_spotlight_pull_two",
-        "get_spotlight_service",
-        "get_spotlight_pull_two",
-        "set_spotlight_pull_two",
-    ),
     # ---- ForensicService ----
     (
         "_timestamps_shadow_dict_list",
@@ -177,9 +133,6 @@ class Toolbox(metaclass=_ToolboxMeta):
     - args, logger, frida_manager, scan_directories, device_name,
       android_emulator_path -> SessionStateService
     - malware_monitor_running -> FridaSessionService
-    - _spotlight_application, _spotlight_application_pid, _spawn_mode,
-      _spotlight_spawn_application, _auto_resume_after_spawn,
-      _spotlight_files, _spotlight_pull_one, _spotlight_pull_two -> SpotlightService
     - baseline, noise_files, _timestamps_shadow_dict_list, noise_processes,
       other_output_data_collector, file_paths_whitelist -> ForensicService
     - changed_files_cache -> ActionWindowService
@@ -658,34 +611,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         """
         _service("get_action_window_service").increase_run_counter()
 
-    # ==================== Spotlight / App Management ====================
-
-    @classmethod
-    def get_spotlight_application(cls):
-        """Returns the spotlight application. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_application()
-
-    @classmethod
-    def set_spotlight_application(cls, spotlight_application):
-        """Sets the spotlight application. Delegates to SpotlightService."""
-        _service("get_spotlight_service").set_application(spotlight_application)
-
-    @classmethod
-    def get_spotlight_application_pid(cls):
-        """Returns the PID of the spotlight application. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_application_pid()
-
-    @classmethod
-    def set_spotlight_application_pid(cls, spotlight_application_pid):
-        """Sets the PID of the spotlight application. Delegates to SpotlightService."""
-        _service("get_spotlight_service").set_application_pid(spotlight_application_pid)
-
-    @classmethod
-    def reset_spotlight_application(cls):
-        """Resets the spotlight application. Delegates to SpotlightService."""
-        _service("get_spotlight_service").reset_application()
-        cls.logger.debug("Spotlight application information has been reset.")
-
     # ==================== Device Management ====================
 
     @classmethod
@@ -719,28 +644,6 @@ class Toolbox(metaclass=_ToolboxMeta):
     def is_spawn_mode(cls):
         """Returns whether spawn mode is enabled. Delegates to SpotlightService."""
         return _service("get_spotlight_service").is_spawn_mode()
-
-    @classmethod
-    def set_spotlight_spawn_application(cls, package_name):
-        """Sets the spawn application. Delegates to SpotlightService."""
-        _service("get_spotlight_service").set_spawn_application(package_name)
-        cls.logger.debug(f"Spotlight spawn application set to: {package_name}")
-
-    @classmethod
-    def get_spotlight_spawn_application(cls):
-        """Returns the spawn package name. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_spawn_application()
-
-    @classmethod
-    def set_auto_resume_after_spawn(cls, enabled):
-        """Sets auto-resume after spawn. Delegates to SpotlightService."""
-        _service("get_spotlight_service").set_auto_resume_after_spawn(enabled)
-        cls.logger.debug(f"Auto-resume after spawn: {enabled}")
-
-    @classmethod
-    def get_auto_resume_after_spawn(cls):
-        """Returns auto-resume setting. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_auto_resume_after_spawn()
 
     @classmethod
     def resume_spawned_process_after_hooks(cls, device, pid):
@@ -786,11 +689,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         )
 
     @classmethod
-    def get_spotlighted_app_data_path(cls):
-        """Returns the app data path. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_spotlighted_app_data_path()
-
-    @classmethod
     def set_network_capture_path(cls, path):
         """Delegates to NetworkCaptureService to set the capture file path."""
         _service("get_network_capture_service").start_capture(output_file=path)
@@ -802,8 +700,8 @@ class Toolbox(metaclass=_ToolboxMeta):
 
     @classmethod
     def get_spotlight_files(cls):
-        """Returns the spotlight files list. Delegates to SpotlightService."""
-        return _service("get_spotlight_service").get_spotlight_files()
+        """Returns the spotlight files list. Delegates to ForensicService."""
+        return _service("get_forensic_service").get_spotlight_files()
 
     @classmethod
     def add_spotlight_file(cls, file_path):
@@ -817,11 +715,6 @@ class Toolbox(metaclass=_ToolboxMeta):
         :rtype: bool
         """
         return _service("get_forensic_service").add_spotlight_file(file_path, adb=Adb)
-
-    @classmethod
-    def remove_spotlight_file(cls, file_path=None):
-        """Removes a file from the spotlight files list. Delegates to SpotlightService."""
-        _service("get_spotlight_service").remove_spotlight_file(file_path)
 
     # ==================== File Operations ====================
 
@@ -1167,63 +1060,6 @@ class Toolbox(metaclass=_ToolboxMeta):
     def unregister_frida_hooks(cls, job_id: str) -> None:
         """Delegates to FridaSessionService.unregister_hooks()."""
         return _service("get_frida_session_service").unregister_hooks(job_id)
-
-    # ==================== Spawn Mode Helpers ====================
-
-    @classmethod
-    def spawn_app_paused(cls, package_name: str) -> tuple:
-        """Delegates to SpotlightService. Returns (JobManager, pid) or (None, -1)."""
-        service = _service("get_spotlight_service")
-        result = service.spawn_app_paused(package_name)
-        cls._spawn_mode = service.is_spawn_mode()
-        cls._auto_resume_after_spawn = service.get_auto_resume()
-        cls._spotlight_spawn_application = service.get_spawn_package()
-        return result
-
-    @classmethod
-    def resume_paused_app(cls) -> bool:
-        """Resume a paused app after tools have been loaded.
-
-        Delegates to SpotlightService for the implementation.
-
-        Returns:
-            True if app was resumed successfully, False otherwise.
-        """
-        service = _service("get_spotlight_service")
-        result = service.resume_paused_app()
-        # Keep local state in sync
-        cls._auto_resume_after_spawn = service.get_auto_resume()
-        return result
-
-    @classmethod
-    def is_app_paused(cls) -> bool:
-        """Check if there's a paused app waiting to be resumed.
-
-        Delegates to SpotlightService for the implementation.
-
-        Returns:
-            True if an app is paused, False otherwise.
-        """
-        return _service("get_spotlight_service").is_app_paused()
-
-    @classmethod
-    def get_spawn_mode(cls) -> str:
-        """Get the current spawn mode setting.
-
-        Delegates to SpotlightService for the implementation.
-
-        Returns:
-            One of: 'multi_tool', 'single_tool', 'late_attach'
-        """
-        return _service("get_spotlight_service").get_spawn_mode_string()
-
-    @classmethod
-    def set_spawn_mode(cls, mode) -> None:
-        """Delegates to SpotlightService.set_spawn_mode()."""
-        service = _service("get_spotlight_service")
-        service.set_spawn_mode(mode)
-        cls._spawn_mode = service.is_spawn_mode()
-        cls._auto_resume_after_spawn = service.get_auto_resume()
 
     @classmethod
     def reset_frida_session(cls) -> None:

@@ -21,7 +21,7 @@ Usage:
         pkg = spotlight.get_package_name()
 
     # Spawn mode
-    spotlight.set_spawn_mode(package_name="com.example.app", auto_resume=True)
+    spotlight.set_spawn_app("com.example.app", auto_resume=True)
 """
 
 import logging
@@ -34,12 +34,6 @@ from typing import Any, Protocol
 from sandroid.core.adb_utils import validate_package_name
 from sandroid.core.enums import SpawnMode
 from sandroid.services.protocols import EventBusProtocol
-
-# Import config with fallback for standalone usage
-try:
-    from sandroid.config import get_config
-except ImportError:
-    get_config = None
 
 logger = logging.getLogger(__name__)
 
@@ -86,15 +80,16 @@ class SpotlightService:
     This service tracks which app is selected, supports both SpawnMode.ATTACH
     (connecting to a running app) and SpawnMode.SPAWN (launching app with hooks).
 
-    State Variables (migrated from Toolbox):
-        - _spotlight_application: tuple or None -- the selected app
-        - _spotlight_application_pid: int or None -- PID of attached process
+    State Variables:
+        - _current_app: SpotlightApp or None -- the attach-selected app
+        - _spawn_package: str or None -- the spawn target
+        - _spawn_pid: int or None -- PID of a spawn-selected app
         - _spawn_mode: bool -- whether in spawn mode
-        - _spotlight_spawn_application: str or None -- spawn target
-        - _auto_resume_after_spawn: bool -- auto-resume flag
-        - _spotlight_files: list -- file watchlist for forensics
-        - _spotlight_pull_one: dict or None -- first pull state
-        - _spotlight_pull_two: dict or None -- second pull state
+        - _auto_resume: bool -- auto-resume after a spawn
+
+    This service is the single source of truth for the spotlight app;
+    read it with :meth:`get_effective_package`. The file watchlist lives in
+    ``ForensicService``.
 
     Thread Safety:
         Operations are thread-safe for basic get/set operations.
@@ -151,15 +146,6 @@ class SpotlightService:
         self._job_manager_factory = job_manager_factory
         self._logger = logger
 
-        # Toolbox-migrated state variables
-        self._spotlight_application: tuple | None = None
-        self._spotlight_application_pid: int | None = None
-        self._spotlight_spawn_application: str | None = None
-        self._auto_resume_after_spawn: bool = True
-        self._spotlight_files: list = []
-        self._spotlight_pull_one: dict | None = None
-        self._spotlight_pull_two: dict | None = None
-
     # =========================================================================
     # App State (Attach Mode)
     # =========================================================================
@@ -172,6 +158,9 @@ class SpotlightService:
         mode: SpawnMode | str = SpawnMode.ATTACH,
     ) -> None:
         """Set the spotlight application.
+
+        Leaves spawn mode: the spawn target, its PID and the auto-resume flag
+        are reset, so the effective package is *package_name* afterwards.
 
         Args:
             package_name: Android package name
@@ -196,6 +185,10 @@ class SpotlightService:
                 pid=pid,
                 mode=mode,
             )
+            self._spawn_package = None
+            self._spawn_pid = None
+            self._spawn_mode = False
+            self._auto_resume = True
             previous_package = previous.package_name if previous else None
         self._logger.debug(
             f"Set spotlight app: {package_name}"
@@ -240,31 +233,52 @@ class SpotlightService:
     def get_activity_name(self) -> str | None:
         """Get the current spotlight activity name.
 
+        Ignores an attach record that is not the effective package (spawn
+        mode on another app).
+
         Returns:
             Activity name string or None
         """
-        return self._current_app.activity_name if self._current_app else None
+        with self._lock:
+            app = self._effective_current_app()
+            return app.activity_name if app else None
 
     def get_pid(self) -> int | None:
         """Get the current spotlight process ID.
 
         Works for both attach-selected apps (``_current_app``) and
-        spawn-selected apps (only ``_spawn_package`` set).
+        spawn-selected apps (only ``_spawn_package`` set). An attach record
+        that is not the effective package is ignored.
 
         Returns:
             PID integer or None
         """
         with self._lock:
-            if self._current_app:
-                return self._current_app.pid
+            app = self._effective_current_app()
+            if app:
+                return app.pid
             return self._spawn_pid
+
+    def _effective_current_app(self) -> SpotlightApp | None:
+        """The attach record, if it belongs to the effective package.
+
+        Returns:
+            ``_current_app``, or None when it is unset or describes another
+            app than :meth:`get_effective_package`.
+        """
+        with self._lock:
+            app = self._current_app
+            if app and app.package_name == self.get_effective_package():
+                return app
+            return None
 
     def set_pid(self, pid: int | None) -> None:
         """Update the PID of the current spotlight app.
 
         Works whether the app was attach-selected (``_current_app``) or
         spawn-selected (only ``_spawn_package`` set). Pass ``None`` to clear
-        the PID (e.g. after the app is killed).
+        the PID (e.g. after the app is killed). An attach record that is not
+        the effective package is left alone.
 
         Deliberately **non-publishing** (A5): it does not emit
         ``STATE_CHANGED``. The panel's running-state poll calls this from a
@@ -275,8 +289,9 @@ class SpotlightService:
             pid: New process ID, or None to clear it.
         """
         with self._lock:
-            if self._current_app:
-                self._current_app.pid = pid
+            app = self._effective_current_app()
+            if app:
+                app.pid = pid
             self._spawn_pid = pid
         if pid:
             self._logger.debug(f"Updated spotlight PID to {pid}")
@@ -411,12 +426,7 @@ class SpotlightService:
             ValueError: *package_name* is not a valid Android package name.
         """
         validate_package_name(package_name)
-        with self._lock:
-            previous = self._spawn_package
-            self._spawn_package = package_name
-            self._spawn_pid = None  # New spawn target -> any prior PID is stale
-            self._spawn_mode = True
-            self._auto_resume = auto_resume
+        previous = self._select_spawn_package(package_name, auto_resume)
 
         self._logger.info(f"Set spawn app: {package_name} (auto_resume: {auto_resume})")
 
@@ -426,6 +436,33 @@ class SpotlightService:
             mode=SpawnMode.SPAWN.value,
             pid=None,
         )
+
+    def _select_spawn_package(self, package_name: str, auto_resume: bool) -> str | None:
+        """Make *package_name* the spawn target (spawn mode on).
+
+        Shared by :meth:`set_spawn_app` and :meth:`spawn_app_paused`. A new
+        spawn target means any prior PID is stale: the spawn PID is reset, an
+        attach record of another package is dropped, and one of the same
+        package keeps its activity but loses its PID.
+
+        Args:
+            package_name: Package name to spawn.
+            auto_resume: Whether to auto-resume after hooks load.
+
+        Returns:
+            The previous spawn package, or None.
+        """
+        with self._lock:
+            previous = self._spawn_package
+            if self._current_app and self._current_app.package_name != package_name:
+                self._current_app = None
+            elif self._current_app:
+                self._current_app.pid = None
+            self._spawn_package = package_name
+            self._spawn_pid = None
+            self._spawn_mode = True
+            self._auto_resume = auto_resume
+        return previous
 
     def get_spawn_package(self) -> str | None:
         """Get the package name configured for spawn mode.
@@ -561,9 +598,7 @@ class SpotlightService:
 
             pid = job_manager.spawn_paused(package_name)
             self.last_spawn_error = None
-            self._spawn_mode = True
-            self._auto_resume = False
-            self._spawn_package = package_name
+            self._select_spawn_package(package_name, auto_resume=False)
             # Still paused: a running file monitor follows the new process
             # before its first instruction (gap-free).
             self.notify_spawned(pid, package_name)
@@ -636,188 +671,6 @@ class SpotlightService:
         return job_manager.is_paused()
 
     # =========================================================================
-    # Toolbox-Compatible State Accessors (migrated from Toolbox class vars)
-    # =========================================================================
-
-    def get_application(self) -> tuple | None:
-        """Get the spotlight application tuple.
-
-        Returns:
-            A tuple (package_name, activity_name) or None.
-        """
-        return self._spotlight_application
-
-    def set_application(self, spotlight_application: tuple | None) -> None:
-        """Set the spotlight application tuple.
-
-        Args:
-            spotlight_application: Tuple from Adb.get_focused_app() or None.
-        """
-        self._spotlight_application = spotlight_application
-
-    def get_application_pid(self) -> int | None:
-        """Get the PID of the spotlight application.
-
-        Returns:
-            The PID as int or None.
-        """
-        return self._spotlight_application_pid
-
-    def set_application_pid(self, pid: int | None) -> None:
-        """Set the PID of the spotlight application.
-
-        Args:
-            pid: The PID of the spotlight application.
-        """
-        self._spotlight_application_pid = pid
-
-    def reset_application(self) -> None:
-        """Reset the spotlight application and its PID to None.
-
-        Also resets spawn mode and spawn application.
-        """
-        with self._lock:
-            self._spotlight_application = None
-            self._spotlight_application_pid = None
-            self._spawn_mode = False
-            self._spawn_pid = None
-            self._spotlight_spawn_application = None
-
-    def set_spawn_application(self, package_name: str) -> None:
-        """Set the application to be spawned when using Frida-based tools.
-
-        Enables spawn mode automatically.
-
-        Args:
-            package_name: The package name of the app to spawn.
-
-        Raises:
-            ValueError: *package_name* is not a valid Android package name.
-        """
-        validate_package_name(package_name)
-        self._spotlight_spawn_application = package_name
-        self._spawn_mode = True
-
-    def get_spawn_application(self) -> str | None:
-        """Get the package name of the app to be spawned.
-
-        Returns:
-            The package name or None.
-        """
-        return self._spotlight_spawn_application
-
-    def set_auto_resume_after_spawn(self, enabled: bool) -> None:
-        """Set whether spawned apps should be auto-resumed.
-
-        Args:
-            enabled: True to auto-resume, False to leave paused.
-        """
-        self._auto_resume_after_spawn = enabled
-
-    def get_auto_resume_after_spawn(self) -> bool:
-        """Get whether auto-resume after spawn is enabled.
-
-        Returns:
-            True if auto-resume is enabled.
-        """
-        return self._auto_resume_after_spawn
-
-    def get_spotlight_files(self) -> list:
-        """Get the list of spotlight files for monitoring.
-
-        Returns:
-            List of file paths.
-        """
-        return self._spotlight_files
-
-    def set_spotlight_files(self, files: list) -> None:
-        """Set the spotlight files list.
-
-        Args:
-            files: List of file paths.
-        """
-        self._spotlight_files = files
-
-    def remove_spotlight_file(self, file_path: str | None = None) -> None:
-        """Remove a file from the spotlight files list.
-
-        Args:
-            file_path: Path to remove, or None to remove the only file.
-        """
-        if len(self._spotlight_files) == 1 and file_path is None:
-            removed = self._spotlight_files.pop()
-            self._logger.debug(f"Removed the only spotlight file: {removed}")
-        elif file_path and file_path in self._spotlight_files:
-            self._spotlight_files.remove(file_path)
-            self._logger.debug(f"Removed spotlight file: {file_path}")
-        else:
-            self._logger.warning(
-                "File not found in spotlight files or no file specified."
-            )
-
-    def get_spotlight_pull_one(self) -> dict | None:
-        """Get the first pull state.
-
-        Returns:
-            Dict or None.
-        """
-        return self._spotlight_pull_one
-
-    def set_spotlight_pull_one(self, value: dict | None) -> None:
-        """Set the first pull state.
-
-        Args:
-            value: Dict or None.
-        """
-        self._spotlight_pull_one = value
-
-    def get_spotlight_pull_two(self) -> dict | None:
-        """Get the second pull state.
-
-        Returns:
-            Dict or None.
-        """
-        return self._spotlight_pull_two
-
-    def set_spotlight_pull_two(self, value: dict | None) -> None:
-        """Set the second pull state.
-
-        Args:
-            value: Dict or None.
-        """
-        self._spotlight_pull_two = value
-
-    @staticmethod
-    def _get_spotlight_data_path_template() -> str:
-        """Get the spotlight data path template from config with fallback.
-
-        Returns:
-            Path template string with {app} placeholder.
-        """
-        try:
-            if get_config is not None:
-                return get_config().device_paths.spotlight_data_path
-        except Exception:
-            pass
-        return "/data/data/{app}"
-
-    def get_spotlighted_app_data_path(self) -> str | None:
-        """Get the /data/data/<package> path for the spotlight application.
-
-        Handles both spawn mode and attach mode.
-
-        Returns:
-            The data path string, or None if no app is set.
-        """
-        template = self._get_spotlight_data_path_template()
-        if self._spawn_mode and self._spotlight_spawn_application:
-            return template.format(app=self._spotlight_spawn_application)
-        if not self._spotlight_application:
-            self._logger.warning("No spotlight application is set.")
-            return None
-        return template.format(app=self._spotlight_application[0])
-
-    # =========================================================================
     # Reset
     # =========================================================================
 
@@ -833,15 +686,6 @@ class SpotlightService:
             self._spawn_pid = None
             self._spawn_mode = False
             self._auto_resume = True
-
-            # Reset Toolbox-migrated state
-            self._spotlight_application = None
-            self._spotlight_application_pid = None
-            self._spotlight_spawn_application = None
-            self._auto_resume_after_spawn = True
-            self._spotlight_files = []
-            self._spotlight_pull_one = None
-            self._spotlight_pull_two = None
 
         self._logger.info("Reset spotlight application")
 
@@ -901,14 +745,6 @@ class SpotlightService:
                 "set_at": (
                     self._current_app.set_at.isoformat() if self._current_app else None
                 ),
-                # Toolbox-migrated state
-                "spotlight_application": self._spotlight_application,
-                "spotlight_application_pid": self._spotlight_application_pid,
-                "spotlight_spawn_application": self._spotlight_spawn_application,
-                "auto_resume_after_spawn": self._auto_resume_after_spawn,
-                "spotlight_files": self._spotlight_files.copy(),
-                "spotlight_pull_one": self._spotlight_pull_one,
-                "spotlight_pull_two": self._spotlight_pull_two,
             }
 
     # =========================================================================
