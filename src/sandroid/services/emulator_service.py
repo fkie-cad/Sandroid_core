@@ -926,52 +926,59 @@ class EmulatorService:
                 _snapshot_line("load", name, False, serial, str(stderr or stdout))
                 return False
 
-            # The device's state was replaced: a new world on the session
-            # timeline, BEFORE anything samples the restored clocks (the
-            # device-clock barrier keeps fresh monotonic times off the old
-            # offset).
-            _world_change(
-                "snapshot-load",
-                src="snapshot",
-                kind="load",
-                summary=f"snapshot '{_name_text(name)}' loaded",
-                t=t_ret,
-                t_err_ms=(t_ret - t_sent) * 500,
-                dev=serial,
-                data={
-                    "name": name,
-                    "ok": True,
-                    "console_ms": round((t_ret - t_sent) * 1000, 1),
-                },
-            )
+            # No device-prepared step while the restored device re-attaches:
+            # the load restores SELinux / clock / proxy itself, and the boot
+            # it restored is recorded on exit (no second preparation, no
+            # device_prepared hooks).
+            from sandroid.core import device_prep
 
-            # Reverting VM state disrupts the ADB transport for a variable
-            # window (offline -> unauthorized -> device); poll get-state for
-            # real readiness instead of blindly sleeping a fixed 2s, which
-            # was sometimes too short (a race) and often too long (needless
-            # latency on a device that recovers quickly).
-            self._wait_for_device_ready(adb, serial)
-            # The snapshot also restores the kernel's SELinux mode. One saved
-            # before startup's ``setenforce 0`` comes back Enforcing, and then
-            # root binder calls (settings, dumpsys, screencap, frida) fail with
-            # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it
-            # first: the clock step's root reads of /proc/timer_list and its
-            # ``date`` may be denied under Enforcing.
-            self._restore_selinux_permissive(adb, serial)
-            # A snapshot restores the guest clock to the moment it was saved,
-            # so every revert rewinds device time (minutes after a few
-            # replays), skewing file timestamps / the timeline against the
-            # host. Record the offset in the session timeline and, with
-            # ``emulator.sync_device_clock`` on, set it to host time.
-            self._record_device_clock(adb, name, serial)
-            # ...and the device settings, including ``http_proxy``: a
-            # snapshot saved without the proxy drops mitmproxy's device
-            # proxy, so the replays were never intercepted. Re-apply it.
-            self._restore_device_proxy(serial)
-            # Then everything else the load invalidated, for every caller
-            # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
-            # the CA, frida-server, long-lived streams.
-            self._after_snapshot_load(adb, serial)
+            with device_prep.hold(serial, "snapshot-load"):
+                # The device's state was replaced: a new world on the session
+                # timeline, BEFORE anything samples the restored clocks (the
+                # device-clock barrier keeps fresh monotonic times off the old
+                # offset).
+                _world_change(
+                    "snapshot-load",
+                    src="snapshot",
+                    kind="load",
+                    summary=f"snapshot '{_name_text(name)}' loaded",
+                    t=t_ret,
+                    t_err_ms=(t_ret - t_sent) * 500,
+                    dev=serial,
+                    data={
+                        "name": name,
+                        "ok": True,
+                        "console_ms": round((t_ret - t_sent) * 1000, 1),
+                    },
+                )
+
+                # Reverting VM state disrupts the ADB transport for a variable
+                # window (offline -> unauthorized -> device); poll get-state for
+                # real readiness instead of blindly sleeping a fixed 2s, which
+                # was sometimes too short (a race) and often too long (needless
+                # latency on a device that recovers quickly).
+                self._wait_for_device_ready(adb, serial)
+                # The snapshot also restores the kernel's SELinux mode. One saved
+                # before startup's ``setenforce 0`` comes back Enforcing, and then
+                # root binder calls (settings, dumpsys, screencap, frida) fail with
+                # FAILED_TRANSACTION until Sandroid is restarted. Re-apply it
+                # first: the clock step's root reads of /proc/timer_list and its
+                # ``date`` may be denied under Enforcing.
+                self._restore_selinux_permissive(adb, serial)
+                # A snapshot restores the guest clock to the moment it was saved,
+                # so every revert rewinds device time (minutes after a few
+                # replays), skewing file timestamps / the timeline against the
+                # host. Record the offset in the session timeline and, with
+                # ``emulator.sync_device_clock`` on, set it to host time.
+                self._record_device_clock(adb, name, serial)
+                # ...and the device settings, including ``http_proxy``: a
+                # snapshot saved without the proxy drops mitmproxy's device
+                # proxy, so the replays were never intercepted. Re-apply it.
+                self._restore_device_proxy(serial)
+                # Then everything else the load invalidated, for every caller
+                # (TUI, Play, AI, headless): Frida handles, App Proxy lanes and
+                # the CA, frida-server, long-lived streams.
+                self._after_snapshot_load(adb, serial)
 
             self._logger.info(f"Snapshot '{name}' loaded successfully")
             return True
@@ -1249,14 +1256,18 @@ class EmulatorService:
             return False
 
         self._logger.info(f"Emulator {launch.avd} restarted")
-        _world_change(
-            "cold-boot",
-            src="device",
-            kind="boot",
-            summary=f"⟲ emulator {launch.avd} cold-booted",
-            dev=serial,
-            data={"avd": launch.avd, "ok": True},
-        )
+        # The device-prepared step records the reboot (world change "reboot")
+        # and re-prepares the device; only while it is off is the cold boot
+        # recorded here.
+        if not self._prepare_after_restart(serial):
+            _world_change(
+                "cold-boot",
+                src="device",
+                kind="boot",
+                summary=f"⟲ emulator {launch.avd} cold-booted",
+                dev=serial,
+                data={"avd": launch.avd, "ok": True},
+            )
         # A cold boot wiped the CA mounts, gost, the lane rules and adb
         # reverse. DeviceManager's device-prepared hook (fresh_boot=True)
         # restores them when it exists, device preparation is enabled
@@ -1274,6 +1285,40 @@ class EmulatorService:
         except Exception as exc:
             self._logger.warning(f"Proxy restore after the restart failed: {exc}")
         return True
+
+    #: Seconds :meth:`restart` waits for the device-prepared step.
+    RESTART_PREP_TIMEOUT = 180.0
+
+    def _prepare_after_restart(self, serial: str) -> bool:
+        """Re-attach the restarted device and wait for the device-prepared
+        step (reboot world change, root + SELinux, hooks).
+
+        Returns:
+            False when the step is off or does not prepare ``serial`` (not
+            the active device); the caller then records the cold boot.
+        """
+        try:
+            from sandroid.core import device_prep
+            from sandroid.core.device_manager import DeviceManager
+
+            if not device_prep.is_enabled():
+                return False
+            manager = DeviceManager.get()
+            manager.refresh_devices()  # re-attaches the previous device
+            if not (
+                device_prep.is_preparing(serial)
+                or device_prep.request_prepare(serial, "restart", manager=manager)
+            ):
+                return False
+            if not device_prep.wait_prepared(serial, self.RESTART_PREP_TIMEOUT):
+                self._logger.warning(
+                    f"{serial} is still being prepared after "
+                    f"{self.RESTART_PREP_TIMEOUT:g} s"
+                )
+            return True
+        except Exception as exc:
+            self._logger.debug(f"Device preparation after restart failed: {exc}")
+            return False
 
     @staticmethod
     def _target_serial(adb: Any) -> str | None:

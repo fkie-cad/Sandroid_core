@@ -722,3 +722,119 @@ def test_initialize_core_prepare_runs_the_hooks_before_toolbox_init(rig, monkeyp
     assert order == [("selected", True), "hook", "tb"]
     assert rig.fake.calls.count("root") == 1
     assert any("SELinux permissive" in p for p in printed)
+
+
+# ------------------------------------------------------- emulator service
+
+
+def _service(fake: FakeDevice, monkeypatch):
+    from sandroid.services.emulator_service import EmulatorService
+
+    service = EmulatorService()
+    adb = SimpleNamespace(
+        send_telnet_command=lambda command, serial=None: ("OK\n", ""),
+        send_adb_command=lambda command, serial=None: (
+            ("device\n", "") if command == "get-state" else fake.send(command)
+        ),
+        get_target_device=lambda: SERIAL,
+    )
+    service._get_adb = lambda: adb
+    monkeypatch.setattr(service, "_restore_device_proxy", lambda serial: "skipped")
+    monkeypatch.setattr(
+        service, "_restore_selinux_permissive", lambda adb, serial: True
+    )
+    monkeypatch.setattr(service, "_record_device_clock", lambda *a: None)
+    return service
+
+
+def test_load_snapshot_then_the_poll_re_attach_prepare_nothing(rig, monkeypatch):
+    """Owner requirement: a snapshot load (another boot_id / uptime in RAM,
+    a new transport) and the device poll's re-attach run no second
+    preparation and no device_prepared hooks.
+    """
+    from sandroid.services import emulator_service
+
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()
+    start = len(rig.fake.events)
+    service = _service(rig.fake, monkeypatch)
+    worlds: list = []
+    monkeypatch.setattr(
+        emulator_service, "_world_change", lambda cause, **kw: worlds.append(cause)
+    )
+
+    def wait_ready(adb, serial, timeout=10.0, interval=0.4):
+        # The VM state is replaced while the load runs; the poll sees the
+        # device drop out and come back and re-attaches it.
+        rig.fake.boot_id = BOOT_B
+        rig.fake.uptime = 12.0
+        rig.fake.transport += 1
+        assert device_prep.request_prepare(SERIAL, "attach")  # dropped
+        return True
+
+    monkeypatch.setattr(service, "_wait_for_device_ready", wait_ready)
+    assert service.load_snapshot("clean", serial=SERIAL) is True
+    rig.manager.refresh_devices()  # the poll after the load: same transport
+    _run("attach")  # and a later re-attach of the same device
+    assert worlds == ["snapshot-load"]
+    assert _since(rig.fake.events, start) == [
+        ("listener", "held"),
+        ("listener", "unchanged"),
+    ]
+    assert rig.fake.events.count("root") == 1
+
+
+def test_restart_waits_for_the_step_with_a_single_world_change(rig, monkeypatch):
+    import sandroid.core.emulator as emulator_mod
+    from sandroid.services import emulator_service
+
+    device_prep.register_device_prepared_hook(_hook(rig.fake))
+    _run()
+    start = len(rig.fake.events)
+    service = _service(rig.fake, monkeypatch)
+    worlds: list = []
+    monkeypatch.setattr(
+        emulator_service, "_world_change", lambda cause, **kw: worlds.append(cause)
+    )
+    monkeypatch.setattr(emulator_mod, "emulator_binary", lambda: "/bin/emulator")
+
+    def restart_emulator(serial, adb=None):
+        rig.fake.boot_id = BOOT_B
+        rig.fake.uptime = 15.0
+        rig.fake.transport += 1
+        rig.fake.adbd_root = False
+        rig.fake.selinux = "Enforcing"
+        return SimpleNamespace(avd="Pixel", log_path=None)
+
+    monkeypatch.setattr(emulator_mod, "restart_emulator", restart_emulator)
+    monkeypatch.setattr(emulator_mod, "wait_until_ready", lambda *a, **kw: True)
+    assert service.restart(boot_timeout=1) is True
+    # Returned only after the step: the hooks already ran.
+    events = _since(rig.fake.events, start)
+    assert ("hook", SERIAL, True) in events
+    assert [e for e in events if isinstance(e, tuple) and e[0] == "world"] == [
+        ("world", "reboot", SERIAL, "device", "boot")
+    ]
+    assert worlds == []  # no "cold-boot" line of its own
+    assert not device_prep.is_preparing(SERIAL)
+
+
+def test_restart_records_the_cold_boot_itself_while_the_step_is_off(rig, monkeypatch):
+    import sandroid.core.emulator as emulator_mod
+    from sandroid.services import emulator_service
+
+    device_prep.set_enabled(False)
+    service = _service(rig.fake, monkeypatch)
+    worlds: list = []
+    monkeypatch.setattr(
+        emulator_service, "_world_change", lambda cause, **kw: worlds.append(cause)
+    )
+    monkeypatch.setattr(emulator_mod, "emulator_binary", lambda: "/bin/emulator")
+    monkeypatch.setattr(
+        emulator_mod,
+        "restart_emulator",
+        lambda serial, adb=None: SimpleNamespace(avd="Pixel", log_path=None),
+    )
+    monkeypatch.setattr(emulator_mod, "wait_until_ready", lambda *a, **kw: True)
+    assert service.restart(boot_timeout=1) is True
+    assert worlds == ["cold-boot"]
