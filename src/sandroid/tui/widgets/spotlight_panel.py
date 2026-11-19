@@ -809,37 +809,42 @@ class SpotlightPanel(Widget):
             self._post(self.refresh_panel)
 
     @staticmethod
-    def _parse_proc_status_resumed(status_text: str) -> bool:
-        """True if a ``/proc/<pid>/status`` dump shows a live, untraced process.
+    def _parse_am_process_attached(dump: str, pid: int) -> bool:
+        """True if ``dumpsys activity processes`` shows *pid* bound to the system.
 
-        A spawn held at the Frida gate is stopped/traced (``State`` ``T``/``t``
-        and/or a nonzero ``TracerPid``); a resumed one is ``S``/``R``/``D`` with
-        ``TracerPid 0``. Conservative — any parse doubt returns False so a
-        genuinely paused app is never mislabeled as running.
+        ``/proc/<pid>/status`` cannot tell a held spawn from a running app:
+        frida 17 holds it without ptrace, so it reads ``State S`` and
+        ``TracerPid 0`` either way (verified on API 35). ActivityManager can:
+        a held spawn never ran ``attachApplication``, so its ProcessRecord has
+        ``thread=null``; a resumed app has an ``IApplicationThread`` proxy.
+        Conservative — no matching record or any doubt returns False, so a
+        held app is never mislabeled as running.
         """
-        if not status_text:
+        if not dump:
             return False
-        state: str | None = None
-        tracer: int | None = None
-        for line in status_text.splitlines():
-            if line.startswith("State:"):
-                state = line.split(":", 1)[1].strip()[:1]
-            elif line.startswith("TracerPid:"):
-                try:
-                    tracer = int(line.split(":", 1)[1].strip())
-                except ValueError:
-                    tracer = None
-        return state in ("S", "R", "D") and tracer == 0
+        marker = "ProcessRecord{"
+        in_record = False
+        for line in dump.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("*APP*") or stripped.startswith(marker):
+                in_record = f" {pid}:" in stripped
+                continue
+            if in_record and stripped.startswith("thread="):
+                return stripped != "thread=null"
+        return False
 
     def _proc_resumed(self, pid: int) -> bool:
-        """Worker-thread: read ``/proc/<pid>/status`` and classify. Blocking ADB."""
+        """Worker-thread: is *pid* attached to ActivityManager? Blocking ADB."""
         try:
             from sandroid.core.adb import Adb
 
-            out, _ = Adb.send_adb_command(f"shell cat /proc/{pid}/status")
-            return self._parse_proc_status_resumed(out)
+            package = self._current_package()
+            if not package:
+                return False
+            out, _ = Adb.send_adb_command(f"shell dumpsys activity processes {package}")
+            return self._parse_am_process_attached(out, pid)
         except Exception:
-            logger.debug("proc-status read failed", exc_info=True)
+            logger.debug("activity-process read failed", exc_info=True)
             return False
 
     def _reconcile_paused_flag(self, pid: int | None) -> None:
@@ -848,8 +853,8 @@ class SpotlightPanel(Widget):
         Some AFM resume paths (e.g. ``JobManager.run_last_created_job``) resume
         the spawned process without clearing the in-memory ``_paused`` flag, so
         the header would show "◐ paused" forever though the app runs. When the
-        flag says paused but ``/proc`` says the process is live and untraced,
-        clear it at the source (``mark_resumed``) so every reader — header,
+        flag says paused but ActivityManager shows the process attached (a
+        held spawn never is), clear it at the source (``mark_resumed``) so every reader — header,
         status bar, primary label — self-corrects. Worker-thread only (does a
         blocking ADB read); never call from the UI thread.
         """

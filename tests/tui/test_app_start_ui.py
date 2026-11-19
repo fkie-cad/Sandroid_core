@@ -134,3 +134,37 @@ async def test_objection_warns_while_spawn_would_restart_the_app() -> None:
         assert modal.config.spawn_mode is True
         assert "restarts the running app (pid 77)" in modal._warning_text()
         assert "Enter confirms" in modal._warning_text()
+
+
+_AM_HELD = """\
+ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)
+  *APP* UID 10219 ProcessRecord{9075a3 8735:org.mozilla.firefox/u0a219}
+    user #0 uid=10219 gids={50219, 20219, 9997}
+    pid=8735 starting=true lastPss=0.00
+    thread=null
+  PID mappings:
+    PID #8735: ProcessRecord{9075a3 8735:org.mozilla.firefox/u0a219}
+"""
+
+_AM_RESUMED = """\
+  *APP* UID 10219 ProcessRecord{1a2b3c 9001:org.mozilla.firefox:tab/u0a219}
+    thread=android.app.IApplicationThread$Stub$Proxy@6f1be70
+  *APP* UID 10219 ProcessRecord{9075a3 8735:org.mozilla.firefox/u0a219}
+    pid=8735
+    thread=android.app.IApplicationThread$Stub$Proxy@c72926e
+"""
+
+
+def test_a_held_spawn_is_not_taken_for_a_resumed_app() -> None:
+    """Device fact (API 35, frida 17): a held spawn reads ``State S`` and
+    ``TracerPid 0`` in /proc like a running app; only ActivityManager's
+    ``thread=null`` tells them apart. The old /proc self-heal cleared the
+    paused flag ~2 s after ⇧P, so Space said "already running" and Android
+    killed the app at its 10 s start timeout.
+    """
+    parse = SpotlightPanel._parse_am_process_attached
+    assert parse(_AM_HELD, 8735) is False
+    assert parse(_AM_RESUMED, 8735) is True
+    # Another process of the same package being attached says nothing about ours.
+    assert parse(_AM_RESUMED.replace(" 8735:", " 8800:"), 8735) is False
+    assert parse("", 8735) is False
