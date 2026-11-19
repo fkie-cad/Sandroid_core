@@ -40,7 +40,7 @@ def foreground_app_hint() -> str | None:
 
         if get_config().analysis.network_reset_after_snapshot != "off":
             return None
-        package = get_spotlight_service().get_package_name()
+        package = get_spotlight_service().get_effective_package()
         if not package:
             return None
         focused, _activity = Adb.get_focused_app(max_retries=1)

@@ -372,7 +372,8 @@ class StaticAnalysis(DataGatherBase):
     def _analyze_device_apk(self, start_time: float) -> bool:
         """Pull and analyze an APK from the connected device.
 
-        Uses the spotlight app from Toolbox to determine which app to analyze.
+        Uses the spotlight app (SpotlightService) to determine which app to
+        analyze.
 
         Args:
             start_time: Analysis start time for duration tracking
@@ -384,24 +385,15 @@ class StaticAnalysis(DataGatherBase):
         insight_dir = f"{os.getenv('RESULTS_PATH', '')}dexray_insight/"
         os.makedirs(insight_dir, exist_ok=True)
 
-        # The spotlight service knows the app in both attach and spawn mode
-        # (an app picked with ⇧C but not started is spawn mode); the legacy
-        # Toolbox getter only knows attach mode and returns None otherwise.
-        spotlight_app = None
+        # The effective package covers attach and spawn mode (an app picked
+        # with ⇧C but not started is spawn mode).
+        apk_name = None
         try:
             from sandroid.services import get_spotlight_service
 
-            spotlight_app = get_spotlight_service().get_app_tuple()
+            apk_name = get_spotlight_service().get_effective_package()
         except Exception:
             logger.debug("spotlight service lookup failed", exc_info=True)
-        if not spotlight_app:
-            spotlight_app = self._get_toolbox().get_spotlight_application()
-        # Handle both string and tuple returns for backwards compatibility
-        apk_name = (
-            spotlight_app[0]
-            if isinstance(spotlight_app, (list, tuple))
-            else spotlight_app
-        )
         if not apk_name:
             logger.error("No spotlight app selected; static analysis skipped.")
             self.last_results = {"error": "no spotlight app selected"}

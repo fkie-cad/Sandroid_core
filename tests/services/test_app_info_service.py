@@ -1628,12 +1628,13 @@ def test_device_mode_parses_split_pm_path(monkeypatch, tmp_path, cache_root):
 
     monkeypatch.setattr(analyzer, "_send_adb_command", send)
     monkeypatch.setattr(
+        "sandroid.services.get_spotlight_service",
+        lambda: SimpleNamespace(get_effective_package=lambda: PKG),
+    )
+    monkeypatch.setattr(
         analyzer,
         "_get_toolbox",
-        lambda: SimpleNamespace(
-            get_spotlight_application=lambda: PKG,
-            mark_tool_used=lambda *a, **k: None,
-        ),
+        lambda: SimpleNamespace(mark_tool_used=lambda *a, **k: None),
     )
 
     assert analyzer._analyze_device_apk(time.time())
@@ -2090,19 +2091,16 @@ def test_real_settings_footprint_counts_de_storage(fake_adb):
 def test_static_analysis_uses_spawn_mode_spotlight(monkeypatch, tmp_path):
     """An app picked with ⇧C but not started (spawn mode) is analysed.
 
-    The legacy Toolbox getter returns None there; it used to crash with
-    "can only concatenate str (not NoneType)" building `pm path`.
+    A real service in spawn mode: the attach-only legacy getter returned
+    None there and `pm path` crashed with "can only concatenate str".
     """
     from sandroid import services
+    from sandroid.services.spotlight_service import SpotlightService
 
-    fake_service = SimpleNamespace(get_app_tuple=lambda: ("org.mozilla.firefox", ""))
-    monkeypatch.setattr(services, "get_spotlight_service", lambda: fake_service)
+    spotlight = SpotlightService()
+    spotlight.set_spawn_app("org.mozilla.firefox")
+    monkeypatch.setattr(services, "get_spotlight_service", lambda: spotlight)
     analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
-    monkeypatch.setattr(
-        analyzer,
-        "_get_toolbox",
-        lambda: SimpleNamespace(get_spotlight_application=lambda: None),
-    )
     seen = []
 
     def fake_adb(cmd):
@@ -2120,14 +2118,9 @@ def test_static_analysis_uses_spawn_mode_spotlight(monkeypatch, tmp_path):
 def test_static_analysis_without_spotlight_fails_cleanly(monkeypatch, tmp_path):
     from sandroid import services
 
-    fake_service = SimpleNamespace(get_app_tuple=lambda: None)
+    fake_service = SimpleNamespace(get_effective_package=lambda: None)
     monkeypatch.setattr(services, "get_spotlight_service", lambda: fake_service)
     analyzer = static_analysis.StaticAnalysis(adb=SimpleNamespace())
-    monkeypatch.setattr(
-        analyzer,
-        "_get_toolbox",
-        lambda: SimpleNamespace(get_spotlight_application=lambda: None),
-    )
     monkeypatch.setattr(
         analyzer, "_send_adb_command", lambda c: pytest.fail("adb called")
     )

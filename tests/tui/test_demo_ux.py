@@ -972,7 +972,7 @@ def test_foreground_app_hint(monkeypatch, mode, focused, hinted):
     )
     monkeypatch.setattr(
         "sandroid.services.get_spotlight_service",
-        lambda: SimpleNamespace(get_package_name=lambda: "org.wikipedia"),
+        lambda: SimpleNamespace(get_effective_package=lambda: "org.wikipedia"),
     )
     monkeypatch.setattr(
         recording_modal.Adb,

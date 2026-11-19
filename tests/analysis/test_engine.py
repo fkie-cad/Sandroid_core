@@ -20,6 +20,7 @@ from sandroid.analysis.run_config import RunConfig
 from sandroid.core.events import EventBus, EventType
 from sandroid.services.action_window_service import ActionWindowService
 from sandroid.services.forensic_service import ForensicService
+from sandroid.services.spotlight_service import SpotlightService
 
 # ===========================================================================
 # Fakes
@@ -181,8 +182,13 @@ def _make_engine(
     classes: dict[str, type] | None = None,
     progress: Any = None,
     forensic: Any = None,
+    spotlight: SpotlightService | None = None,
 ) -> AnalysisEngine:
-    """Construct an engine wired to injected fakes + a real ActionWindowService."""
+    """Construct an engine wired to injected fakes + a real ActionWindowService.
+
+    A fresh ``SpotlightService`` keeps the process-wide singleton (and any
+    app another test left in it) out of the noise filter's protected list.
+    """
     return AnalysisEngine(
         config,
         progress=progress,
@@ -190,6 +196,7 @@ def _make_engine(
         action_window_service=ActionWindowService(adb=MagicMock()),
         toolbox=toolbox or FakeToolbox(),
         gatherer_classes=classes or _classes(),
+        spotlight_service=spotlight or SpotlightService(),
     )
 
 

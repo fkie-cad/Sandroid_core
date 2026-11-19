@@ -1362,65 +1362,20 @@ class FriTap(DataGatherBase):
                 logger.warning(f"Error finalizing friTap output ({name}): {e}")
         logger.info("FriTap output finalized")
 
-    def gather(self):
-        """Gather data from the monitored application.
+    def gather(self) -> None:
+        """Not supported: friTap is driven by :meth:`start` and :meth:`stop`.
 
-        .. warning::
-            Context dependent behavior: Calling this method acts as a toggle, it starts or stops the monitoring process based on the current state.
+        ``gather`` is abstract on the base class, so it stays, but the old
+        start/stop toggle is gone: it read a spotlight getter that no longer
+        exists and never took the spawn-mode path.
+
+        Raises:
+            NotImplementedError: Always; call :meth:`start` / :meth:`stop`.
         """
-        toolbox = self._get_toolbox()
-        if self.running:
-            # Stop Frida jobs and detach WITH TIMEOUT to prevent hanging
-            try:
-                self.job_manager.stop_jobs(timeout_per_job=3.0)
-                self.job_manager.detach_from_app(timeout=2.0)
-            except Exception as e:
-                logger.warning(f"Error stopping FriTap jobs: {e}")
-            self.last_output = self.profiler.get_profiling_log_as_JSON()
-            self.running = False
-            toolbox.malware_monitor_running = False
-            self._new_results_available = True
-        elif not self.running:
-            self.app_package, _ = toolbox.get_spotlight_application()
-            # self.logger.warning("Next: Setup Frida Session")
-            self.job_manager.setup_frida_session(
-                self.app_package, self.profiler.on_appProfiling_message
-            )
-            # Check for hook conflicts
-            conflicts = toolbox.check_frida_hook_conflicts(FRITAP_SSL_HOOKS)
-            if conflicts:
-                logger.warning(
-                    f"FriTap may conflict with existing hooks: {list(conflicts.keys())}"
-                )
-
-            # Start job with metadata for coordination
-            job = self.job_manager.start_job(
-                self.frida_script_path,
-                custom_hooking_handler_name=self.profiler.on_appProfiling_message,
-                job_type="fritap",
-                display_name="FriTap SSL Logger",
-                hooks_registry=FRITAP_SSL_HOOKS,
-                priority=10,
-            )
-
-            # Register hooks if job started
-            if job:
-                self.job_id = job.get_id()
-                toolbox.register_frida_hooks(self.job_id, FRITAP_SSL_HOOKS)
-
-            # Resume spawned process now that hooks are installed (if in spawn mode)
-            if (
-                hasattr(self, "mode")
-                and (self.mode == SpawnMode.SPAWN or self.mode == SpawnMode.SPAWN.value)
-                and hasattr(self, "frida_device")
-                and hasattr(self, "process_id")
-            ):
-                toolbox.resume_spawned_process_after_hooks(
-                    self.frida_device, self.process_id
-                )
-
-            self.running = True
-            toolbox.malware_monitor_running = True
+        raise NotImplementedError(
+            "FriTap.gather() is not supported; use FriTap.start() to begin "
+            "capturing and FriTap.stop() to end it."
+        )
 
     def has_new_results(self):
         """Check if there are new results available.

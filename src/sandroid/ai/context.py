@@ -177,9 +177,9 @@ def _describe_spotlight_files() -> str | None:
     here -- it is only read/joined, never mutated.
     """
     try:
-        from sandroid.services import get_spotlight_service
+        from sandroid.services import get_forensic_service
 
-        files = get_spotlight_service().get_spotlight_files()
+        files = get_forensic_service().get_spotlight_files()
         if not files:
             return None
         return "Spotlight files being watched: " + ", ".join(str(f) for f in files)

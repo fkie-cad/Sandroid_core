@@ -64,11 +64,8 @@ def _curated_spotlight_state(service: Any) -> dict[str, Any]:
 
     Shared by :func:`set_spotlight_app` and :func:`get_spotlight_app` so the
     field curation + ``SpawnMode`` -> ``str`` normalization lives in one
-    place. Excludes every legacy/internal field the raw dict also carries
-    (``spotlight_application``, ``spotlight_application_pid``,
-    ``spotlight_spawn_application``, ``auto_resume_after_spawn``,
-    ``spotlight_files``, ``spotlight_pull_one``, ``spotlight_pull_two``,
-    ``spawn_package``).
+    place. Excludes the internal ``spawn_package`` field the raw dict also
+    carries.
 
     Args:
         service: A :class:`~sandroid.services.spotlight_service.SpotlightService`
@@ -169,10 +166,10 @@ def set_spotlight_app(
     internal spawn-target state ``get_effective_package()``/
     ``get_effective_mode()`` actually read. ``mode="attach"`` calls
     ``set_app(package_name, activity_name=activity_name,
-    mode=SpawnMode.ATTACH)`` **and then** ``set_spawn_mode(False)`` -- the
-    second call is required to clear any stale prior spawn-mode state
-    (``set_app`` never touches it on its own), mirroring every real caller in
-    this codebase (e.g. ``spotlight_selection_ui.py``'s attach handlers).
+    mode=SpawnMode.ATTACH)`` and then ``set_spawn_mode(False)``. ``set_app``
+    already leaves spawn mode on its own (it clears the spawn target, its PID
+    and the auto-resume flag); the second call is kept to mirror the other
+    attach callers (e.g. ``spotlight_selection_ui.py``'s attach handlers).
 
     Args:
         package_name: Fully qualified package name to spotlight.
